@@ -1,0 +1,27 @@
+<svg width="1180" height="430" viewBox="0 0 1180 430" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">visloc-rs demo preview</title>
+  <desc id="desc">A terminal-style demo preview showing localize_dummy estimating a pose with inliers.</desc>
+  <rect width="1180" height="430" rx="18" fill="#08111F"/>
+  <rect x="36" y="34" width="1108" height="362" rx="14" fill="#0D1628" stroke="#26364F"/>
+  <circle cx="68" cy="66" r="7" fill="#FF5F57"/>
+  <circle cx="92" cy="66" r="7" fill="#FFBD2E"/>
+  <circle cx="116" cy="66" r="7" fill="#28C840"/>
+  <text x="148" y="72" fill="#8EA3B8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15">examples/localize_dummy.rs</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="24">
+    <text x="68" y="124" fill="#35D0BA">$ cargo run --example localize_dummy</text>
+    <text x="68" y="170" fill="#B6C7D6">loaded synthetic VisualMap: landmarks=12 descriptors=12</text>
+    <text x="68" y="214" fill="#B6C7D6">built 2D-3D correspondences: matches=12</text>
+    <text x="68" y="258" fill="#B6C7D6">PnP RANSAC: inliers=12 mean_reprojection_error=0.000 px</text>
+    <text x="68" y="302" fill="#F9C74F">pose world_T_camera:</text>
+    <text x="68" y="346" fill="#F6F7FB">rotation = identity, translation = [0.000, 0.000, 0.000]</text>
+  </g>
+  <g transform="translate(892 126)">
+    <rect x="0" y="0" width="176" height="176" rx="12" fill="#102A43" stroke="#35D0BA"/>
+    <path d="M26 132C58 86 92 98 130 46" stroke="#35D0BA" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="42" cy="112" r="6" fill="#F6F7FB"/>
+    <circle cx="72" cy="93" r="6" fill="#70A5FF"/>
+    <circle cx="103" cy="80" r="6" fill="#F9C74F"/>
+    <circle cx="130" cy="48" r="6" fill="#F6F7FB"/>
+    <path d="M72 138L112 116L148 138L112 157L72 138Z" stroke="#F9C74F" stroke-width="3"/>
+  </g>
+</svg>

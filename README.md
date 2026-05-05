@@ -1,8 +1,31 @@
 # visloc-rs
 
+<p align="center">
+  <img src="docs/assets/visloc-hero.svg" alt="visloc-rs visual localization overview" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/rsasaki0109/visloc-rs/actions/workflows/ci.yml"><img src="https://github.com/rsasaki0109/visloc-rs/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
+  <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
+  <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
+</p>
+
 `visloc-rs` is a Rust foundation library for visual localization with existing SfM / visual maps.
 
 The initial scope is intentionally narrow: load or build a visual map, connect query-image 2D features to map 3D landmarks, and estimate a camera pose with PnP + RANSAC. This gives a working vertical slice before adding heavier SLAM machinery.
+
+<p align="center">
+  <img src="docs/assets/localization-flow.svg" alt="visloc-rs localization pipeline" width="92%">
+</p>
+
+## Demo Preview
+
+<p align="center">
+  <img src="docs/assets/demo-preview.svg" alt="Terminal preview of running the localize_dummy example" width="92%">
+</p>
+
+The preview above is README-safe SVG. A real screen recording or benchmark clip can be added later under `docs/assets/` and linked from this section.
 
 ## Scope
 
@@ -121,6 +144,7 @@ pipelines/localization/   visual localization composition
 examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
+docs/assets/              README images and visual explainers
 CHANGELOG.md             unreleased changes and release notes
 LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
