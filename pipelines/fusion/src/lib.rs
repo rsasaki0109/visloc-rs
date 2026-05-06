@@ -6,8 +6,11 @@
 //! visual localization, tracking, and SLAM pipelines can use external sensors
 //! without depending on a specific robotics stack.
 
+use std::collections::HashMap;
+
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
+use visloc_core::types::{Frame, FrameId};
 use visloc_localization::LocalizationPrior;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -71,8 +74,67 @@ impl<T> Timed<T> {
     }
 }
 
+impl<T> TimedMeasurement for Timed<T> {
+    fn timestamp(&self) -> Timestamp {
+        self.timestamp
+    }
+}
+
+pub type TimedFrame = Timed<Frame>;
+pub type TimedPose = Timed<Pose>;
+
 pub trait TimedMeasurement {
     fn timestamp(&self) -> Timestamp;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrameTimestampIndex {
+    timestamps: HashMap<FrameId, Timestamp>,
+}
+
+impl FrameTimestampIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_timed_frames<I>(frames: I) -> Self
+    where
+        I: IntoIterator<Item = TimedFrame>,
+    {
+        let mut index = Self::new();
+        for frame in frames {
+            index.insert_frame_id(frame.value.id, frame.timestamp);
+        }
+        index
+    }
+
+    pub fn insert_frame(&mut self, frame: &Frame, timestamp: Timestamp) -> Option<Timestamp> {
+        self.insert_frame_id(frame.id, timestamp)
+    }
+
+    pub fn insert_frame_id(
+        &mut self,
+        frame_id: FrameId,
+        timestamp: Timestamp,
+    ) -> Option<Timestamp> {
+        self.timestamps.insert(frame_id, timestamp)
+    }
+
+    pub fn timestamp_for_frame(&self, frame: &Frame) -> Option<Timestamp> {
+        self.timestamp_for_frame_id(frame.id)
+    }
+
+    pub fn timestamp_for_frame_id(&self, frame_id: FrameId) -> Option<Timestamp> {
+        self.timestamps.get(&frame_id).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.timestamps.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.timestamps.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
