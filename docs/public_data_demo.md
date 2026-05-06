@@ -25,7 +25,7 @@ The generated model registered 9 cameras and reconstructed 1,428 sparse 3D point
 ## README Assets
 
 - `docs/assets/south-building-query.jpg`: real query image from the public dataset subset.
-- `docs/assets/south-building-localization.png`: final frame of the public-data explainer, with the real query image, reliable 2D-3D matches, sparse SfM map, and recovered camera frustum.
-- `docs/assets/south-building-localization.gif`: animated README explainer showing the localization flow: query photo, 2D-3D matching, outlier rejection, and final camera pose.
+- `docs/assets/south-building-localization.png`: final frame of the public-data sequence demo, with the current real image, reliable 2D-3D matches, sparse SfM map, and localized camera path.
+- `docs/assets/south-building-localization.gif`: animated README sequence demo showing 9 real images localized frame by frame against the same reusable visual map.
 
-The visualization is intentionally a lightweight README artifact. It is not a benchmark and does not claim full SLAM; it demonstrates the library direction in a readable way: Visual Localization first, using a reusable visual map and a query image pose.
+The visualization is intentionally a lightweight README artifact. It is not a benchmark and does not claim full SLAM; it demonstrates the library direction in a readable way: Visual Localization first, using a reusable visual map and per-frame camera poses for a short image sequence.
