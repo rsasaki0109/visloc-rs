@@ -53,10 +53,17 @@ fn main() {
     );
     let mut image_tracker = ImageTracker::with_tracker(extractor, tracker);
 
-    for (frame_id, camera_id) in [(100, camera.id), (101, camera.id), (102, 999), (103, 999)] {
-        let tracking = image_tracker
-            .track_frame_image(frame_id, camera_id, &DummyImage, &map)
-            .expect("dummy extractor is infallible");
+    let images = [DummyImage, DummyImage, DummyImage, DummyImage];
+    let frames = [
+        (100, camera.id, &images[0]),
+        (101, camera.id, &images[1]),
+        (102, 999, &images[2]),
+        (103, 999, &images[3]),
+    ];
+    for tracking in image_tracker
+        .track_frame_images(frames, &map)
+        .expect("dummy extractor is infallible")
+    {
         println!(
             "frame={} state={:?} event={:?} success={} prior={} reason={:?} map_landmarks={} descriptors={} inliers={}",
             tracking.frame_id,

@@ -640,6 +640,19 @@ where
         )
     }
 
+    pub fn track_frame_images<'a, I>(
+        &mut self,
+        frames: I,
+        map: &VisualMap,
+    ) -> Result<Vec<TrackingResult>, X::Error>
+    where
+        X::Image: 'a,
+        I: IntoIterator<Item = (FrameId, CameraId, &'a X::Image)>,
+    {
+        let descriptor_store = LandmarkDescriptorStore::from_visual_map(map);
+        self.track_frame_images_with_descriptor_store(frames, map, &descriptor_store)
+    }
+
     pub fn track_frame_image_with_descriptor_store(
         &mut self,
         frame_id: FrameId,
@@ -655,6 +668,29 @@ where
             .track_frame_with_descriptor_store(&frame, map, descriptor_store))
     }
 
+    pub fn track_frame_images_with_descriptor_store<'a, I>(
+        &mut self,
+        frames: I,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+    ) -> Result<Vec<TrackingResult>, X::Error>
+    where
+        X::Image: 'a,
+        I: IntoIterator<Item = (FrameId, CameraId, &'a X::Image)>,
+    {
+        let mut results = Vec::new();
+        for (frame_id, camera_id, image) in frames {
+            results.push(self.track_frame_image_with_descriptor_store(
+                frame_id,
+                camera_id,
+                image,
+                map,
+                descriptor_store,
+            )?);
+        }
+        Ok(results)
+    }
+
     pub fn track_frame_image_with_provider<P2>(
         &mut self,
         frame_id: FrameId,
@@ -668,6 +704,24 @@ where
         let features = self.extractor.extract(image)?;
         let frame = frame_from_features(frame_id, camera_id, features);
         Ok(self.tracker.track_frame_with_provider(&frame, provider))
+    }
+
+    pub fn track_frame_images_with_provider<'a, I, P2>(
+        &mut self,
+        frames: I,
+        provider: &P2,
+    ) -> Result<Vec<TrackingResult>, X::Error>
+    where
+        X::Image: 'a,
+        I: IntoIterator<Item = (FrameId, CameraId, &'a X::Image)>,
+        P2: MapProvider + DescriptorProvider,
+    {
+        let mut results = Vec::new();
+        for (frame_id, camera_id, image) in frames {
+            results
+                .push(self.track_frame_image_with_provider(frame_id, camera_id, image, provider)?);
+        }
+        Ok(results)
     }
 
     pub fn track_frame_image_with_prior_submap_provider<P2>(
@@ -686,6 +740,26 @@ where
         Ok(self
             .tracker
             .track_frame_with_prior_submap_provider(&frame, provider, radius))
+    }
+
+    pub fn track_frame_images_with_prior_submap_provider<'a, I, P2>(
+        &mut self,
+        frames: I,
+        provider: &P2,
+        radius: f64,
+    ) -> Result<Vec<TrackingResult>, X::Error>
+    where
+        X::Image: 'a,
+        I: IntoIterator<Item = (FrameId, CameraId, &'a X::Image)>,
+        P2: MapProvider + DescriptorProvider,
+    {
+        let mut results = Vec::new();
+        for (frame_id, camera_id, image) in frames {
+            results.push(self.track_frame_image_with_prior_submap_provider(
+                frame_id, camera_id, image, provider, radius,
+            )?);
+        }
+        Ok(results)
     }
 }
 

@@ -325,6 +325,32 @@ fn image_tracker_tracks_extracted_frame_image() {
 }
 
 #[test]
+fn image_tracker_tracks_image_sequence_with_convenience_api() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let extractor = extractor_from_frame(&frame);
+    let mut image_tracker = ImageTracker::new(extractor, TrackingConfig::default());
+    let images = [(), ()];
+
+    let results = image_tracker
+        .track_frame_images(
+            [
+                (10, frame.camera_id, &images[0]),
+                (11, frame.camera_id, &images[1]),
+            ],
+            &map,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].event, TrackingEvent::Initialized);
+    assert_eq!(results[1].event, TrackingEvent::Tracked);
+    assert!(results.iter().all(|result| result.localization.success));
+    assert_eq!(image_tracker.tracker().stats().first_frame_id, Some(10));
+    assert_eq!(image_tracker.tracker().stats().last_frame_id, Some(11));
+    assert_eq!(image_tracker.tracker().stats().successful_frame_count, 2);
+}
+
+#[test]
 fn image_tracker_tracks_with_motion_prior_submap_provider() {
     let (mut map, frame) = build_map_and_frame(10, 1);
     for index in 0..6 {
@@ -400,6 +426,31 @@ fn image_tracker_tracks_frame_image_with_map_provider() {
     assert_eq!(result.map_stats.landmark_count, 6);
     assert_eq!(result.map_stats.descriptor_count, 6);
     assert_eq!(image_tracker.tracker().stats().successful_frame_count, 1);
+}
+
+#[test]
+fn image_tracker_tracks_provider_image_sequence_with_convenience_api() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let provider = InMemoryMapProvider::new(map);
+    let extractor = extractor_from_frame(&frame);
+    let mut image_tracker = ImageTracker::new(extractor, TrackingConfig::default());
+    let images = [(), ()];
+
+    let results = image_tracker
+        .track_frame_images_with_provider(
+            [
+                (10, frame.camera_id, &images[0]),
+                (11, frame.camera_id, &images[1]),
+            ],
+            &provider,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.localization.success));
+    assert_eq!(results[0].map_stats.landmark_count, 6);
+    assert_eq!(results[1].map_stats.descriptor_count, 6);
+    assert_eq!(image_tracker.tracker().stats().successful_frame_count, 2);
 }
 
 #[test]
