@@ -27,22 +27,22 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
 
 The preview above is README-safe SVG. A real screen recording or benchmark clip can be added later under `docs/assets/` and linked from this section.
 
-## Image-backed Demo
+## Image Processing Demo
 
 <p align="center">
-  <img src="docs/assets/image-data-demo.svg" alt="Image-backed localization demo using examples/data/query_frame.svg" width="92%">
+  <img src="docs/assets/image-processing-demo.gif" alt="Image processing visual localization demo: raw image, detected features, and estimated pose overlay" width="86%">
 </p>
 
-The demo below reads an actual image asset from `examples/data/query_frame.svg` and passes its bytes through the image-localization API. The bundled extractor is intentionally tiny and deterministic; production users are expected to plug in their own extractor, such as SuperPoint, SIFT, ORB, or a learned local-feature model.
+This demo uses real raster image data. The example renders and reads `examples/data/query_frame.png`, segments colored feature blobs from pixels, builds descriptors from the detected blobs, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC.
 
 ```bash
-cargo run --example localize_image_file_demo
+cargo run --example localize_image_processing_demo
 ```
 
-Query image used by the demo:
+Processed localization overlay:
 
 <p align="center">
-  <img src="examples/data/query_frame.svg" alt="Visual localization query image with 2D feature observations" width="72%">
+  <img src="docs/assets/image-processing-demo.png" alt="Detected image features and estimated visual localization pose overlay" width="72%">
 </p>
 
 ## Scope
@@ -61,7 +61,7 @@ Implemented now:
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Query feature text parser and file-based localization example
-- Image-backed localization example that reads a checked-in query image asset
+- Image processing localization example that reads PNG pixels, detects feature blobs, and writes README demo overlays
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 
 Not implemented yet:
@@ -141,10 +141,10 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
-Run the image-backed demo, which reads `examples/data/query_frame.svg` and localizes through `ImageLocalizer`:
+Run the image processing demo, which reads PNG pixels, detects feature blobs, localizes through `ImageLocalizer`, and writes README demo assets:
 
 ```bash
-cargo run --example localize_image_file_demo
+cargo run --example localize_image_processing_demo
 ```
 
 Run the tracking skeleton example:
@@ -170,7 +170,9 @@ examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
-examples/data/query_frame.svg image asset used by the image-backed demo
+examples/data/query_frame.png image asset used by the image processing demo
+docs/assets/image-processing-demo.png processed localization overlay
+docs/assets/image-processing-demo.gif animated processing demo
 CHANGELOG.md             unreleased changes and release notes
 LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
