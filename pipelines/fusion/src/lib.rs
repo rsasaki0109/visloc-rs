@@ -376,6 +376,86 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FramePriorSource<T> {
+    pub frame_timestamps: FrameTimestampIndex,
+    pub measurements: MeasurementBuffer<T>,
+    pub tolerance: TimeDelta,
+    pub prior_config: PriorConfig,
+}
+
+impl<T> FramePriorSource<T>
+where
+    T: TimedMeasurement,
+{
+    pub fn new(
+        frame_timestamps: FrameTimestampIndex,
+        measurements: MeasurementBuffer<T>,
+        tolerance: TimeDelta,
+    ) -> Self {
+        Self {
+            frame_timestamps,
+            measurements,
+            tolerance,
+            prior_config: PriorConfig::default(),
+        }
+    }
+
+    pub fn with_prior_config(mut self, prior_config: PriorConfig) -> Self {
+        self.prior_config = prior_config;
+        self
+    }
+
+    pub fn timestamp_for_frame(&self, frame: &Frame) -> Option<Timestamp> {
+        self.frame_timestamps.timestamp_for_frame(frame)
+    }
+
+    pub fn timestamp_for_frame_id(&self, frame_id: FrameId) -> Option<Timestamp> {
+        self.frame_timestamps.timestamp_for_frame_id(frame_id)
+    }
+
+    pub fn nearest_measurement_for_frame(&self, frame: &Frame) -> Option<&T> {
+        self.measurements
+            .nearest_for_frame(frame, &self.frame_timestamps, self.tolerance)
+    }
+
+    pub fn nearest_measurement_for_frame_id(&self, frame_id: FrameId) -> Option<&T> {
+        self.measurements
+            .nearest_for_frame_id(frame_id, &self.frame_timestamps, self.tolerance)
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.frame_timestamps.len()
+    }
+
+    pub fn measurement_count(&self) -> usize {
+        self.measurements.len()
+    }
+}
+
+impl<T> FramePriorSource<T>
+where
+    T: LocalizationPriorProvider,
+{
+    pub fn localization_prior_for_frame(&self, frame: &Frame) -> Option<LocalizationPrior> {
+        self.measurements.nearest_localization_prior_for_frame(
+            frame,
+            &self.frame_timestamps,
+            self.tolerance,
+            &self.prior_config,
+        )
+    }
+
+    pub fn localization_prior_for_frame_id(&self, frame_id: FrameId) -> Option<LocalizationPrior> {
+        self.measurements.nearest_localization_prior_for_frame_id(
+            frame_id,
+            &self.frame_timestamps,
+            self.tolerance,
+            &self.prior_config,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct GnssMeasurement {
     pub timestamp: Timestamp,
     pub position_world: Point3<f64>,
