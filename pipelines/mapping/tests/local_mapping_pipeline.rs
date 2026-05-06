@@ -5,7 +5,8 @@ use visloc_core::types::{
 };
 use visloc_mapping::{
     LandmarkCandidate, LandmarkCandidateMappingFailureReason, LandmarkCandidateObservation,
-    LocalMappingPipeline,
+    LinearTriangulator, LocalMapWindow, LocalMappingPipeline, LocalRefinementReason,
+    LocalRefinementResult, LocalRefiner, NoopLocalRefiner, SimpleKeyframePolicy, StagedMapUpdate,
 };
 use visloc_tracking::{TrackingEvent, TrackingResult, TrackingState};
 
@@ -86,6 +87,25 @@ fn map_keyframe_candidate() -> (VisualMap, Keyframe, TrackingResult, LandmarkCan
     (map, selected_keyframe, tracking, candidate)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CountingRefiner;
+
+impl LocalRefiner for CountingRefiner {
+    fn refine(
+        &self,
+        _map: &VisualMap,
+        _local_window: &LocalMapWindow,
+        staged_update: &mut StagedMapUpdate,
+    ) -> LocalRefinementResult {
+        LocalRefinementResult {
+            refined: true,
+            reason: LocalRefinementReason::Refined,
+            keyframe_count: staged_update.keyframes.len(),
+            landmark_count: staged_update.landmarks.len(),
+        }
+    }
+}
+
 #[test]
 fn local_mapping_pipeline_stages_selected_keyframe_and_triangulated_landmark() {
     let (mut map, selected_keyframe, tracking, candidate) = map_keyframe_candidate();
@@ -98,6 +118,7 @@ fn local_mapping_pipeline_stages_selected_keyframe_and_triangulated_landmark() {
     assert_eq!(result.triangulated_landmarks.len(), 1);
     assert!(result.candidate_failures.is_empty());
     assert!(result.staged_update_validation.is_valid());
+    assert_eq!(result.refinement.reason, LocalRefinementReason::Noop);
     assert!(result.is_ready_to_apply());
     assert_eq!(result.staged_update.keyframes.len(), 1);
     assert_eq!(result.staged_update.landmarks.len(), 1);
@@ -123,6 +144,10 @@ fn local_mapping_pipeline_does_not_stage_when_keyframe_is_rejected() {
     assert!(result.staged_update.is_empty());
     assert!(result.triangulated_landmarks.is_empty());
     assert!(result.candidate_failures.is_empty());
+    assert_eq!(
+        result.refinement.reason,
+        LocalRefinementReason::NoSelectedKeyframe
+    );
     assert!(!result.is_ready_to_apply());
 }
 
@@ -153,4 +178,35 @@ fn local_mapping_pipeline_reports_candidate_failures_without_blocking_keyframe_s
         LandmarkCandidateMappingFailureReason::CandidateValidationFailed(_)
     ));
     assert!(!result.is_ready_to_apply());
+}
+
+#[test]
+fn local_mapping_pipeline_runs_custom_local_refiner_before_validation() {
+    let (map, selected_keyframe, tracking, candidate) = map_keyframe_candidate();
+    let mut pipeline = LocalMappingPipeline::with_refiner(
+        SimpleKeyframePolicy::default(),
+        LinearTriangulator::default(),
+        CountingRefiner,
+        Default::default(),
+        Default::default(),
+    );
+
+    let result = pipeline.process_keyframe(&map, &tracking, selected_keyframe, [candidate]);
+
+    assert!(result.refinement.refined);
+    assert_eq!(result.refinement.reason, LocalRefinementReason::Refined);
+    assert_eq!(result.refinement.keyframe_count, 1);
+    assert_eq!(result.refinement.landmark_count, 1);
+}
+
+#[test]
+fn local_mapping_pipeline_new_uses_noop_refiner() {
+    let pipeline = LocalMappingPipeline::new(
+        SimpleKeyframePolicy::default(),
+        LinearTriangulator::default(),
+        Default::default(),
+        Default::default(),
+    );
+
+    assert_eq!(pipeline.local_refiner, NoopLocalRefiner);
 }

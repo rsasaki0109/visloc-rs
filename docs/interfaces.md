@@ -99,6 +99,7 @@ This is not SLAM: it does not create keyframes, update maps, run bundle adjustme
 - `Triangulator`: converts a valid landmark candidate into a triangulated landmark through a swappable backend
 - `LinearTriangulator`: minimal normalized DLT triangulator for bootstrapping local mapping experiments
 - `LocalMappingPipeline`: composes keyframe selection, local window construction, candidate validation, triangulation, and staged map updates without applying mutations itself
+- `LocalRefiner`: optional local optimization hook that can adjust staged keyframes/landmarks before validation; `NoopLocalRefiner` is the default
 
 This is the first v0.3 extension point. Future landmark candidates, triangulation, and local refinement should consume these decisions and staged updates instead of being baked into tracking.
 
