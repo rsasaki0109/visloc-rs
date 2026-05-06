@@ -13,6 +13,7 @@
 - Confirm `docs/migration.md` records any known pre-1.0 API migrations.
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
+- Confirm `docs/publishing.md` matches workspace dependencies and publish order.
 - Check package metadata and crate contents with `scripts/package_check.sh` when package details are changed independently of the full local gate.
 - For crates that depend on other `visloc-*` crates, run `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` in publish order after their internal dependencies are available from the target registry.
 
