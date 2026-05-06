@@ -325,6 +325,54 @@ where
         self.nearest(timestamp, tolerance)?
             .localization_prior(config)
     }
+
+    pub fn nearest_for_frame(
+        &self,
+        frame: &Frame,
+        frame_timestamps: &FrameTimestampIndex,
+        tolerance: TimeDelta,
+    ) -> Option<&T> {
+        let timestamp = frame_timestamps.timestamp_for_frame(frame)?;
+        self.nearest(timestamp, tolerance)
+    }
+
+    pub fn nearest_for_frame_id(
+        &self,
+        frame_id: FrameId,
+        frame_timestamps: &FrameTimestampIndex,
+        tolerance: TimeDelta,
+    ) -> Option<&T> {
+        let timestamp = frame_timestamps.timestamp_for_frame_id(frame_id)?;
+        self.nearest(timestamp, tolerance)
+    }
+
+    pub fn nearest_localization_prior_for_frame(
+        &self,
+        frame: &Frame,
+        frame_timestamps: &FrameTimestampIndex,
+        tolerance: TimeDelta,
+        config: &PriorConfig,
+    ) -> Option<LocalizationPrior>
+    where
+        T: LocalizationPriorProvider,
+    {
+        self.nearest_for_frame(frame, frame_timestamps, tolerance)?
+            .localization_prior(config)
+    }
+
+    pub fn nearest_localization_prior_for_frame_id(
+        &self,
+        frame_id: FrameId,
+        frame_timestamps: &FrameTimestampIndex,
+        tolerance: TimeDelta,
+        config: &PriorConfig,
+    ) -> Option<LocalizationPrior>
+    where
+        T: LocalizationPriorProvider,
+    {
+        self.nearest_for_frame_id(frame_id, frame_timestamps, tolerance)?
+            .localization_prior(config)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

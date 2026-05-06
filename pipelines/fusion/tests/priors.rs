@@ -288,3 +288,78 @@ fn measurement_buffer_builds_nearest_localization_prior() {
     assert_eq!(prior.position_world, Some(Point3::new(2.0, 0.0, 0.0)));
     assert_eq!(prior.radius, Some(10.0));
 }
+
+#[test]
+fn measurement_buffer_finds_nearest_measurement_for_frame_timestamp() {
+    let frame = Frame::new(42, 1);
+    let mut frame_timestamps = FrameTimestampIndex::new();
+    frame_timestamps.insert_frame(&frame, Timestamp::from_nanoseconds(1_020));
+    let buffer = MeasurementBuffer::from_measurements([
+        ImuMeasurement::new(
+            Timestamp::from_nanoseconds(1_000),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::zeros(),
+        ),
+        ImuMeasurement::new(
+            Timestamp::from_nanoseconds(1_025),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::zeros(),
+        ),
+    ]);
+
+    let nearest = buffer
+        .nearest_for_frame(&frame, &frame_timestamps, TimeDelta::from_nanoseconds(10))
+        .unwrap();
+
+    assert_eq!(nearest.timestamp(), Timestamp::from_nanoseconds(1_025));
+    assert!(buffer
+        .nearest_for_frame_id(99, &frame_timestamps, TimeDelta::from_nanoseconds(10))
+        .is_none());
+}
+
+#[test]
+fn measurement_buffer_builds_localization_prior_for_frame_timestamp() {
+    let frame = Frame::new(5, 1);
+    let frame_timestamps = FrameTimestampIndex::from_timed_frames([Timed::new(
+        Timestamp::from_nanoseconds(2_005),
+        frame.clone(),
+    )]);
+    let config = PriorConfig {
+        default_radius: 100.0,
+        min_radius: 1.0,
+        confidence_multiplier: 3.0,
+    };
+    let gnss_buffer = MeasurementBuffer::from_measurements([
+        GnssMeasurement::new(
+            Timestamp::from_nanoseconds(1_000),
+            Point3::new(1.0, 0.0, 0.0),
+        )
+        .with_accuracy(Some(2.0), None),
+        GnssMeasurement::new(
+            Timestamp::from_nanoseconds(2_000),
+            Point3::new(2.0, 0.0, 0.0),
+        )
+        .with_accuracy(Some(4.0), None),
+    ]);
+
+    let prior = gnss_buffer
+        .nearest_localization_prior_for_frame(
+            &frame,
+            &frame_timestamps,
+            TimeDelta::from_nanoseconds(10),
+            &config,
+        )
+        .unwrap();
+    let prior_by_id = gnss_buffer
+        .nearest_localization_prior_for_frame_id(
+            frame.id,
+            &frame_timestamps,
+            TimeDelta::from_nanoseconds(10),
+            &config,
+        )
+        .unwrap();
+
+    assert_eq!(prior.position_world, Some(Point3::new(2.0, 0.0, 0.0)));
+    assert_eq!(prior.radius, Some(12.0));
+    assert_eq!(prior_by_id, prior);
+}
