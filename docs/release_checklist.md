@@ -4,7 +4,7 @@
 
 ## Before Tagging
 
-- Run `scripts/check.sh`.
+- Run `scripts/check.sh`, including package metadata and crate-content checks.
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
@@ -13,7 +13,7 @@
 - Confirm `docs/migration.md` records any known pre-1.0 API migrations.
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
-- Check package metadata and crate contents with `scripts/package_check.sh`.
+- Check package metadata and crate contents with `scripts/package_check.sh` when package details are changed independently of the full local gate.
 - For crates that depend on other `visloc-*` crates, run `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` in publish order after their internal dependencies are available from the target registry.
 
 ## API Stability

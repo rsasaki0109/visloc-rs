@@ -34,3 +34,6 @@ jobs:
 
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Package
+        run: scripts/package_check.sh
