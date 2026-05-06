@@ -29,5 +29,8 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: Examples
+        run: scripts/run_examples.sh
+
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

@@ -171,6 +171,12 @@ Run the full local quality gate:
 scripts/check.sh
 ```
 
+Run only the user-facing examples:
+
+```bash
+scripts/run_examples.sh
+```
+
 ## Layout
 
 ```text
@@ -197,5 +203,6 @@ LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
 docs/release_checklist.md pre-release quality checklist
 scripts/check.sh          local fmt/clippy/test/doc gate
+scripts/run_examples.sh   runs all user-facing examples
 .github/workflows/ci.yml  GitHub Actions CI gate
 ```
