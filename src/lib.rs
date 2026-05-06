@@ -41,6 +41,7 @@
 pub use visloc_core as core;
 pub use visloc_io as io;
 pub use visloc_localization as localization;
+pub use visloc_mapping as mapping;
 pub use visloc_tracking as tracking;
 pub use visloc_vision as vision;
 
@@ -58,6 +59,10 @@ pub use visloc_localization::{
     IntersectCandidateSelector, LocalizationConfig, LocalizationPipeline, LocalizationPrior,
     MapProvider, MapProviderStats, PriorSubmapSelector, RadiusLandmarkSelector,
     RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
+};
+pub use visloc_mapping::{
+    KeyframeDecision, KeyframeDecisionReason, KeyframePolicy, KeyframePolicyConfig,
+    SimpleKeyframePolicy,
 };
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
