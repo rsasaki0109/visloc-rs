@@ -156,6 +156,8 @@ pub trait MotionModel {
     ) -> Option<Pose>;
 
     fn observe(&mut self, _result: &TrackingResult) {}
+
+    fn reset(&mut self) {}
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -215,6 +217,11 @@ impl MotionModel for ConstantVelocityMotionModel {
         };
         self.previous_successful_pose = self.latest_successful_pose.take();
         self.latest_successful_pose = Some(pose.clone());
+    }
+
+    fn reset(&mut self) {
+        self.previous_successful_pose = None;
+        self.latest_successful_pose = None;
     }
 }
 
@@ -324,6 +331,16 @@ where
 
     pub fn stats(&self) -> &TrackingStats {
         &self.stats
+    }
+
+    pub fn reset(&mut self) {
+        self.state = TrackingState::Uninitialized;
+        self.successive_failures = 0;
+        self.last_result = None;
+        self.last_successful_frame_id = None;
+        self.last_successful_pose = None;
+        self.stats = TrackingStats::default();
+        self.motion_model.reset();
     }
 
     pub fn pose_prior_for_frame(&self, frame: &Frame) -> Option<Pose> {
@@ -623,6 +640,10 @@ where
     P: FrameLocalizer,
     M: MotionModel,
 {
+    pub fn reset(&mut self) {
+        self.tracker.reset();
+    }
+
     pub fn track_frame_image(
         &mut self,
         frame_id: FrameId,
