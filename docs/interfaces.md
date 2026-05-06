@@ -92,6 +92,8 @@ This is not SLAM: it does not create keyframes, update maps, run bundle adjustme
 - `StagedMapUpdate`: collects keyframes, landmarks, and observations before mutating a `VisualMap`
 - `MapUpdateValidationReport`: reports duplicate staged entities, existing-map conflicts, missing references, and keypoint bounds errors
 - `AppliedMapUpdate`: counts how many staged entities were applied after validation
+- `LocalMapWindow`: selects a recent keyframe window and the landmarks observed inside it
+- `LocalMapWindowConfig`: controls local window size
 
 This is the first v0.3 extension point. Future landmark candidates, triangulation, and local refinement should consume these decisions and staged updates instead of being baked into tracking.
 
