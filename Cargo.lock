@@ -310,8 +310,20 @@ dependencies = [
  "visloc-io",
  "visloc-localization",
  "visloc-mapping",
+ "visloc-slam",
  "visloc-tracking",
  "visloc-vision",
+]
+
+[[package]]
+name = "visloc-slam"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "visloc-core",
+ "visloc-localization",
+ "visloc-mapping",
+ "visloc-tracking",
 ]
 
 [[package]]

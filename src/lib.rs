@@ -42,6 +42,7 @@ pub use visloc_core as core;
 pub use visloc_io as io;
 pub use visloc_localization as localization;
 pub use visloc_mapping as mapping;
+pub use visloc_slam as slam;
 pub use visloc_tracking as tracking;
 pub use visloc_vision as vision;
 
@@ -70,6 +71,7 @@ pub use visloc_mapping::{
     SimpleKeyframePolicy, StagedMapUpdate, TriangulatedLandmark, TriangulationConfig,
     TriangulationFailureReason, Triangulator,
 };
+pub use visloc_slam::{OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult};
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
     MotionModel, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult,
