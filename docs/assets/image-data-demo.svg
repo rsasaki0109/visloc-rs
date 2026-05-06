@@ -1,0 +1,55 @@
+<svg width="1180" height="520" viewBox="0 0 1180 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">visloc-rs image-backed demo</title>
+  <desc id="desc">A real query image asset is loaded, features are extracted, and PnP RANSAC estimates a camera pose.</desc>
+  <rect width="1180" height="520" rx="18" fill="#08111F"/>
+  <text x="42" y="54" fill="#F6F7FB" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="32" font-weight="800">Image-backed localization demo</text>
+  <text x="42" y="84" fill="#B6C7D6" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="17">The example reads examples/data/query_frame.svg as image bytes, validates marker data, and localizes through ImageLocalizer.</text>
+  <g transform="translate(42 118)">
+    <rect width="520" height="390" rx="14" fill="#0D1628" stroke="#26364F"/>
+    <svg x="24" y="24" width="472" height="354" viewBox="0 0 640 480" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="640" height="480" fill="#0B1220"/>
+      <rect width="640" height="250" fill="#15324A"/>
+      <path d="M0 480L238 205H402L640 480H0Z" fill="#111D2D"/>
+      <path d="M238 205H402" stroke="#5D728C" stroke-width="3"/>
+      <path d="M320 218L320 480" stroke="#F9C74F" stroke-width="4" stroke-dasharray="20 18" opacity="0.8"/>
+      <path d="M78 480L255 205" stroke="#8EA3B8" stroke-width="3" opacity="0.55"/>
+      <path d="M562 480L385 205" stroke="#8EA3B8" stroke-width="3" opacity="0.55"/>
+      <rect x="76" y="176" width="88" height="86" rx="6" fill="#17263A" stroke="#31465F"/>
+      <rect x="474" y="150" width="94" height="116" rx="6" fill="#17263A" stroke="#31465F"/>
+      <rect x="188" y="138" width="54" height="68" rx="5" fill="#20354B" stroke="#3B5875"/>
+      <rect x="420" y="116" width="42" height="90" rx="5" fill="#20354B" stroke="#3B5875"/>
+      <g stroke="#35D0BA" stroke-width="2" opacity="0.5">
+        <path d="M195 115L220 340L281.5 270.8L320 240L195 115Z"/>
+        <path d="M431.1 128.9L410.9 330.9L355.7 222.1L320 240L431.1 128.9Z"/>
+        <path d="M220 340L410.9 330.9L335.6 286.9L281.5 270.8"/>
+      </g>
+      <g font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" font-weight="700">
+        <circle cx="195" cy="115" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+        <circle cx="431.1" cy="128.9" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+        <circle cx="220" cy="340" r="7" fill="#F9C74F" stroke="#0B1220" stroke-width="2"/>
+        <circle cx="410.9" cy="330.9" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+        <circle cx="320" cy="240" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+        <circle cx="355.7" cy="222.1" r="7" fill="#F9C74F" stroke="#0B1220" stroke-width="2"/>
+        <circle cx="281.5" cy="270.8" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+        <circle cx="335.6" cy="286.9" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+      </g>
+    </svg>
+  </g>
+  <g transform="translate(594 118)">
+    <rect width="544" height="390" rx="14" fill="#0D1628" stroke="#26364F"/>
+    <circle cx="32" cy="33" r="7" fill="#FF5F57"/>
+    <circle cx="56" cy="33" r="7" fill="#FFBD2E"/>
+    <circle cx="80" cy="33" r="7" fill="#28C840"/>
+    <text x="106" y="39" fill="#8EA3B8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15">cargo run --example localize_image_file_demo</text>
+    <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="20">
+      <text x="32" y="91" fill="#35D0BA">$ cargo run --example localize_image_file_demo</text>
+      <text x="32" y="136" fill="#B6C7D6">image: examples/data/query_frame.svg</text>
+      <text x="32" y="172" fill="#B6C7D6">image bytes: 3471</text>
+      <text x="32" y="208" fill="#B6C7D6">detected demo markers: 8</text>
+      <text x="32" y="244" fill="#B6C7D6">matches: 8</text>
+      <text x="32" y="280" fill="#B6C7D6">inliers: 8</text>
+      <text x="32" y="316" fill="#F9C74F">mean reprojection error: ~0 px</text>
+      <text x="32" y="352" fill="#F6F7FB">pose estimated: SE3 world-to-camera</text>
+    </g>
+  </g>
+</svg>

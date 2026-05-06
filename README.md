@@ -27,6 +27,24 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
 
 The preview above is README-safe SVG. A real screen recording or benchmark clip can be added later under `docs/assets/` and linked from this section.
 
+## Image-backed Demo
+
+<p align="center">
+  <img src="docs/assets/image-data-demo.svg" alt="Image-backed localization demo using examples/data/query_frame.svg" width="92%">
+</p>
+
+The demo below reads an actual image asset from `examples/data/query_frame.svg` and passes its bytes through the image-localization API. The bundled extractor is intentionally tiny and deterministic; production users are expected to plug in their own extractor, such as SuperPoint, SIFT, ORB, or a learned local-feature model.
+
+```bash
+cargo run --example localize_image_file_demo
+```
+
+Query image used by the demo:
+
+<p align="center">
+  <img src="examples/data/query_frame.svg" alt="Synthetic query image used by the image-backed localization demo" width="72%">
+</p>
+
 ## Scope
 
 Implemented now:
@@ -43,6 +61,7 @@ Implemented now:
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Query feature text parser and file-based localization example
+- Image-backed localization example that reads a checked-in query image asset
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 
 Not implemented yet:
@@ -122,6 +141,12 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
+Run the image-backed demo, which reads `examples/data/query_frame.svg` and localizes through `ImageLocalizer`:
+
+```bash
+cargo run --example localize_image_file_demo
+```
+
 Run the tracking skeleton example:
 
 ```bash
@@ -145,6 +170,7 @@ examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
+examples/data/query_frame.svg image asset used by the image-backed demo
 CHANGELOG.md             unreleased changes and release notes
 LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text

@@ -1,0 +1,52 @@
+<svg width="640" height="480" viewBox="0 0 640 480" fill="none" xmlns="http://www.w3.org/2000/svg" data-visloc-demo="query">
+  <title>visloc-rs demo query image</title>
+  <rect width="640" height="480" fill="#0B1220"/>
+  <defs>
+    <linearGradient id="road" x1="320" y1="210" x2="320" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B2A3E"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="640" y2="240" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#15324A"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="250" fill="url(#sky)"/>
+  <path d="M0 480L238 205H402L640 480H0Z" fill="url(#road)"/>
+  <path d="M238 205H402" stroke="#5D728C" stroke-width="3"/>
+  <path d="M320 218L320 480" stroke="#F9C74F" stroke-width="4" stroke-dasharray="20 18" opacity="0.8"/>
+  <path d="M78 480L255 205" stroke="#8EA3B8" stroke-width="3" opacity="0.55"/>
+  <path d="M562 480L385 205" stroke="#8EA3B8" stroke-width="3" opacity="0.55"/>
+  <g opacity="0.7">
+    <rect x="76" y="176" width="88" height="86" rx="6" fill="#17263A" stroke="#31465F"/>
+    <rect x="474" y="150" width="94" height="116" rx="6" fill="#17263A" stroke="#31465F"/>
+    <rect x="188" y="138" width="54" height="68" rx="5" fill="#20354B" stroke="#3B5875"/>
+    <rect x="420" y="116" width="42" height="90" rx="5" fill="#20354B" stroke="#3B5875"/>
+  </g>
+  <g stroke="#35D0BA" stroke-width="2" opacity="0.5">
+    <path d="M195 115L220 340L281.5 270.8L320 240L195 115Z"/>
+    <path d="M431.1 128.9L410.9 330.9L355.7 222.1L320 240L431.1 128.9Z"/>
+    <path d="M220 340L410.9 330.9L335.6 286.9L281.5 270.8"/>
+  </g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" font-weight="700">
+    <circle data-landmark-id="1" cx="195" cy="115" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="208" y="119" fill="#F6F7FB">L1</text>
+    <circle data-landmark-id="2" cx="431.1" cy="128.9" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="444" y="133" fill="#F6F7FB">L2</text>
+    <circle data-landmark-id="3" cx="220" cy="340" r="7" fill="#F9C74F" stroke="#0B1220" stroke-width="2"/>
+    <text x="233" y="344" fill="#F6F7FB">L3</text>
+    <circle data-landmark-id="4" cx="410.9" cy="330.9" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="424" y="335" fill="#F6F7FB">L4</text>
+    <circle data-landmark-id="5" cx="320" cy="240" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="333" y="244" fill="#F6F7FB">L5</text>
+    <circle data-landmark-id="6" cx="355.7" cy="222.1" r="7" fill="#F9C74F" stroke="#0B1220" stroke-width="2"/>
+    <text x="369" y="226" fill="#F6F7FB">L6</text>
+    <circle data-landmark-id="7" cx="281.5" cy="270.8" r="7" fill="#35D0BA" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="240" y="275" fill="#F6F7FB">L7</text>
+    <circle data-landmark-id="8" cx="335.6" cy="286.9" r="7" fill="#70A5FF" stroke="#F6F7FB" stroke-width="2"/>
+    <text x="349" y="291" fill="#F6F7FB">L8</text>
+  </g>
+  <rect x="22" y="22" width="240" height="58" rx="8" fill="#0F172A" stroke="#31465F"/>
+  <text x="40" y="47" fill="#F6F7FB" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="18" font-weight="800">query_frame.svg</text>
+  <text x="40" y="68" fill="#B6C7D6" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14">image-backed localization demo</text>
+</svg>
