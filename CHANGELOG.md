@@ -25,6 +25,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Root crate prelude and top-level re-exports for common application-facing localization APIs.
 - Pre-1.0 to v1.0 migration guide covering recommended imports, localization boundaries, COLMAP descriptor handling, tracking priors, and experimental layers.
 - Package metadata and crate-content checks in the local quality gate and CI.
+- crates.io package metadata now includes project homepage and repository URLs.
 - Examples, integration tests, design docs, local check script, and GitHub Actions CI.
 
 ### Not Yet Implemented
