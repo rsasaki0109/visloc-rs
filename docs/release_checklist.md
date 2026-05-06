@@ -8,6 +8,7 @@
 - Run every example that is expected to stay user-facing.
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
+- Confirm `docs/api_stability.md` reflects the intended stable and experimental API tiers.
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
 - Check package metadata with `cargo package -p visloc-core --allow-dirty --no-verify` first.

@@ -58,15 +58,18 @@ Implemented now:
 - Public-data README demo built from COLMAP South Building images and a `pycolmap` sparse reconstruction
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 - Localization-based tracking scaffold with motion priors, lost/relocalized events, and a pose-prior translation quality gate
+- Local mapping skeleton with keyframe policy, local map windows, staged map updates, landmark candidates, linear triangulation, and local refinement hooks
+- Online SLAM MVP composition over tracking and local mapping, without loop closure or global optimization
+- Loose-coupling fusion foundation with timestamped frames/poses, GNSS/pose/IMU measurements, covariance types, and external localization-prior tracking hooks
 
 Not implemented yet:
 
 - Full Visual SLAM
 - Full SfM
 - Loop closure
-- Keyframe management beyond core data types
 - Dense mapping
 - Full bundle adjustment
+- Full tightly-coupled visual-inertial or GNSS/INS fusion
 
 ## Why not start with full SLAM?
 
@@ -175,10 +178,15 @@ crates/core/              geometry, map types, pose types
 crates/vision/            features, matching, PnP, RANSAC
 crates/io/                COLMAP text model parser
 pipelines/localization/   visual localization composition
+pipelines/tracking/       sequence tracking over localization
+pipelines/mapping/        local mapping skeleton and staged map updates
+pipelines/slam/           online SLAM MVP composition
+pipelines/fusion/         loose-coupling sensor prior foundations
 examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
+docs/api_stability.md     public API stability policy toward v1.0
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building
