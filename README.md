@@ -73,7 +73,7 @@ The design keeps the path open for Visual SLAM, SfM map reuse, visual-inertial f
 
 The current public release focuses on map-based Visual Localization. Online Visual SLAM is planned, but it will build on this localization core instead of replacing it.
 
-Planned next layers:
+See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 
 - Sequential localization and tracking quality improvements
 - Local mapping and lightweight keyframe policies
