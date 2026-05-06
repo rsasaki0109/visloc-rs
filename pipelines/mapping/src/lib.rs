@@ -5,6 +5,7 @@
 //! defining keyframe-selection interfaces that can consume tracking results and
 //! later feed staged map updates, triangulation, and local refinement.
 
+use nalgebra::Point2;
 use visloc_core::geometry::Pose;
 use visloc_core::types::{
     CameraId, FrameId, Keyframe, Landmark, LandmarkId, Observation, VisualMap,
@@ -543,4 +544,180 @@ impl LocalMapWindow {
     pub fn is_empty(&self) -> bool {
         self.keyframe_ids.is_empty()
     }
+}
+
+pub type LandmarkCandidateId = u64;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandmarkCandidate {
+    pub id: LandmarkCandidateId,
+    pub observations: Vec<LandmarkCandidateObservation>,
+    pub descriptor: Option<Vec<f32>>,
+}
+
+impl LandmarkCandidate {
+    pub fn new(id: LandmarkCandidateId) -> Self {
+        Self {
+            id,
+            observations: Vec::new(),
+            descriptor: None,
+        }
+    }
+
+    pub fn with_observation(mut self, observation: LandmarkCandidateObservation) -> Self {
+        self.observations.push(observation);
+        self
+    }
+
+    pub fn with_descriptor(mut self, descriptor: Vec<f32>) -> Self {
+        self.descriptor = Some(descriptor);
+        self
+    }
+
+    pub fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
+    pub fn is_triangulatable(&self, min_observations: usize) -> bool {
+        self.observations.len() >= min_observations.max(2)
+    }
+
+    pub fn validate_against(
+        &self,
+        map: &VisualMap,
+        window: Option<&LocalMapWindow>,
+        config: &LandmarkCandidateValidationConfig,
+    ) -> LandmarkCandidateValidationReport {
+        let mut report = LandmarkCandidateValidationReport::default();
+        let min_observations = config.min_observations.max(2);
+        if self.observations.len() < min_observations {
+            report.push(LandmarkCandidateValidationIssue::TooFewObservations {
+                observation_count: self.observations.len(),
+                min_observations,
+            });
+        }
+
+        let mut seen = Vec::new();
+        for observation in &self.observations {
+            let key = candidate_observation_key(observation);
+            if seen.contains(&key) {
+                report.push(LandmarkCandidateValidationIssue::DuplicateObservation {
+                    frame_id: observation.frame_id,
+                    keypoint_index: observation.keypoint_index,
+                });
+            }
+            seen.push(key);
+
+            let Some(keyframe) = map.keyframes.get(&observation.frame_id) else {
+                report.push(LandmarkCandidateValidationIssue::MissingKeyframe {
+                    frame_id: observation.frame_id,
+                });
+                continue;
+            };
+
+            if observation.keypoint_index >= keyframe.frame.keypoints.len() {
+                report.push(LandmarkCandidateValidationIssue::KeypointOutOfBounds {
+                    frame_id: observation.frame_id,
+                    keypoint_index: observation.keypoint_index,
+                    keypoint_count: keyframe.frame.keypoints.len(),
+                });
+            }
+
+            if let Some(window) = window {
+                if !window.keyframe_ids.contains(&observation.frame_id) {
+                    report.push(
+                        LandmarkCandidateValidationIssue::ObservationOutsideLocalWindow {
+                            frame_id: observation.frame_id,
+                        },
+                    );
+                }
+            }
+        }
+
+        report
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandmarkCandidateObservation {
+    pub frame_id: FrameId,
+    pub keypoint_index: usize,
+    pub xy: Point2<f64>,
+}
+
+impl LandmarkCandidateObservation {
+    pub fn new(frame_id: FrameId, keypoint_index: usize, xy: Point2<f64>) -> Self {
+        Self {
+            frame_id,
+            keypoint_index,
+            xy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandmarkCandidateValidationConfig {
+    pub min_observations: usize,
+}
+
+impl Default for LandmarkCandidateValidationConfig {
+    fn default() -> Self {
+        Self {
+            min_observations: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LandmarkCandidateValidationReport {
+    pub issues: Vec<LandmarkCandidateValidationIssue>,
+}
+
+impl LandmarkCandidateValidationReport {
+    pub fn is_valid(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    pub fn issue_count(&self) -> usize {
+        self.issues.len()
+    }
+
+    pub fn push(&mut self, issue: LandmarkCandidateValidationIssue) {
+        self.issues.push(issue);
+    }
+
+    pub fn into_result(self) -> Result<(), Self> {
+        if self.is_valid() {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LandmarkCandidateValidationIssue {
+    TooFewObservations {
+        observation_count: usize,
+        min_observations: usize,
+    },
+    MissingKeyframe {
+        frame_id: FrameId,
+    },
+    KeypointOutOfBounds {
+        frame_id: FrameId,
+        keypoint_index: usize,
+        keypoint_count: usize,
+    },
+    DuplicateObservation {
+        frame_id: FrameId,
+        keypoint_index: usize,
+    },
+    ObservationOutsideLocalWindow {
+        frame_id: FrameId,
+    },
+}
+
+fn candidate_observation_key(observation: &LandmarkCandidateObservation) -> (FrameId, usize) {
+    (observation.frame_id, observation.keypoint_index)
 }
