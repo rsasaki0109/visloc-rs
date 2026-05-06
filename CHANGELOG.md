@@ -21,6 +21,7 @@ All notable changes to `visloc-rs` will be documented here.
 - COLMAP text model writer for saving reusable sparse maps.
 - Sensor-fusion foundation crate with timestamped frames/poses, GNSS/pose/IMU measurements, covariance types, measurement buffers, frame prior sources, and external localization-prior tracking hooks.
 - GNSS-prior tracking example showing radius-submap narrowing before localization.
+- COLMAP compatibility notes covering supported sparse model inputs, descriptor handling, writer behavior, and current limitations.
 - Examples, integration tests, design docs, local check script, and GitHub Actions CI.
 
 ### Not Yet Implemented
