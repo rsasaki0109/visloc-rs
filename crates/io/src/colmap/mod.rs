@@ -173,6 +173,111 @@ pub fn read_colmap_binary_model(path: impl AsRef<Path>) -> Result<VisualMap, Col
     Ok(map)
 }
 
+pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Result<(), ColmapError> {
+    let path = path.as_ref();
+    fs::create_dir_all(path)?;
+    fs::write(path.join("cameras.txt"), format_cameras_txt(map))?;
+    fs::write(path.join("images.txt"), format_images_txt(map))?;
+    fs::write(path.join("points3D.txt"), format_points3d_txt(map))?;
+    Ok(())
+}
+
+pub fn format_cameras_txt(map: &VisualMap) -> String {
+    let mut output = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
+    let mut cameras = map.cameras.values().collect::<Vec<_>>();
+    cameras.sort_by_key(|camera| camera.id);
+    for camera in cameras {
+        output.push_str(&format!(
+            "{} {} {} {}",
+            camera.id,
+            camera_model_to_colmap_name(&camera.model),
+            camera.width,
+            camera.height
+        ));
+        for param in &camera.params {
+            output.push_str(&format!(" {}", format_f64(*param)));
+        }
+        output.push('\n');
+    }
+    output
+}
+
+pub fn format_images_txt(map: &VisualMap) -> String {
+    let mut output = String::from(
+        "# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n# POINTS2D[] as X Y POINT3D_ID\n",
+    );
+    let mut keyframes = map.keyframes.values().collect::<Vec<_>>();
+    keyframes.sort_by_key(|keyframe| keyframe.frame.id);
+    for keyframe in keyframes {
+        let pose = keyframe.frame.pose.clone().unwrap_or_default();
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        output.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} image_{}.jpg\n",
+            keyframe.frame.id,
+            format_f64(q.w),
+            format_f64(q.i),
+            format_f64(q.j),
+            format_f64(q.k),
+            format_f64(t.x),
+            format_f64(t.y),
+            format_f64(t.z),
+            keyframe.frame.camera_id,
+            keyframe.frame.id,
+        ));
+
+        let mut observation_by_keypoint = keyframe
+            .observations
+            .iter()
+            .map(|observation| (observation.keypoint_index, observation.landmark_id))
+            .collect::<Vec<_>>();
+        observation_by_keypoint.sort_by_key(|(keypoint_index, _)| *keypoint_index);
+        let point_tokens = keyframe
+            .frame
+            .keypoints
+            .iter()
+            .enumerate()
+            .map(|(keypoint_index, xy)| {
+                let landmark_id = observation_by_keypoint
+                    .iter()
+                    .find(|(observed_index, _)| *observed_index == keypoint_index)
+                    .map(|(_, landmark_id)| landmark_id.to_string())
+                    .unwrap_or_else(|| "-1".to_owned());
+                format!("{} {} {}", format_f64(xy.x), format_f64(xy.y), landmark_id)
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&point_tokens.join(" "));
+        output.push('\n');
+    }
+    output
+}
+
+pub fn format_points3d_txt(map: &VisualMap) -> String {
+    let mut output =
+        String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
+    let mut landmarks = map.landmarks.values().collect::<Vec<_>>();
+    landmarks.sort_by_key(|landmark| landmark.id);
+    for landmark in landmarks {
+        output.push_str(&format!(
+            "{} {} {} {} 255 255 255 0",
+            landmark.id,
+            format_f64(landmark.position.x),
+            format_f64(landmark.position.y),
+            format_f64(landmark.position.z),
+        ));
+        let mut observations = landmark.observations.iter().collect::<Vec<_>>();
+        observations.sort_by_key(|observation| (observation.frame_id, observation.keypoint_index));
+        for observation in observations {
+            output.push_str(&format!(
+                " {} {}",
+                observation.frame_id, observation.keypoint_index
+            ));
+        }
+        output.push('\n');
+    }
+    output
+}
+
 pub fn parse_cameras_txt(contents: &str) -> Result<Vec<Camera>, ColmapError> {
     let mut cameras = Vec::new();
     for line in contents.lines().map(str::trim) {
@@ -400,6 +505,25 @@ pub fn parse_points3d_bin(contents: &[u8]) -> Result<Vec<Landmark>, ColmapError>
 
     reader.finish()?;
     Ok(landmarks)
+}
+
+fn camera_model_to_colmap_name(model: &CameraModel) -> &str {
+    match model {
+        CameraModel::Pinhole => "PINHOLE",
+        CameraModel::SimplePinhole => "SIMPLE_PINHOLE",
+        CameraModel::SimpleRadial => "SIMPLE_RADIAL",
+        CameraModel::Radial => "RADIAL",
+        CameraModel::OpenCv => "OPENCV",
+        CameraModel::Unknown(name) => name.as_str(),
+    }
+}
+
+fn format_f64(value: f64) -> String {
+    let formatted = format!("{value:.12}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
 }
 
 fn camera_model_from_colmap_id(model_id: i32) -> Result<(CameraModel, usize), ColmapError> {
