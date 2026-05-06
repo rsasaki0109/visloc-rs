@@ -19,30 +19,20 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
   <img src="docs/assets/localization-flow.svg" alt="visloc-rs localization pipeline" width="92%">
 </p>
 
-## Demo Preview
+## Public Data Localization Demo
 
 <p align="center">
-  <img src="docs/assets/demo-preview.svg" alt="Terminal preview of running the localize_dummy example" width="92%">
+  <img src="docs/assets/south-building-localization.gif" alt="COLMAP South Building public dataset visual localization demo with real query image and sparse SfM map" width="92%">
 </p>
 
-The preview above is README-safe SVG. A real screen recording or benchmark clip can be added later under `docs/assets/` and linked from this section.
+This README demo uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The visualization shows a real query image, its 2D observations linked to reconstructed 3D points, and the recovered camera pose/frustum.
 
-## Sparse Map Localization Demo
+Data source: the COLMAP official South Building dataset, distributed as [`south-building.zip`](https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip) from the COLMAP example datasets.
 
-<p align="center">
-  <img src="docs/assets/image-processing-demo.gif" alt="Sparse visual map localization demo with query features, 3D map points, and estimated camera pose" width="92%">
-</p>
-
-This demo uses real raster image data and an actual `VisualMap`. The example renders and reads `examples/data/query_frame.png`, detects high-contrast local patch windows from grayscale pixels, builds patch descriptors from image crops, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC. The README asset shows the query features beside the sparse 3D map points and estimated camera frustum.
-
-```bash
-cargo run --example localize_image_processing_demo
-```
-
-Sparse map localization overlay:
+Static view:
 
 <p align="center">
-  <img src="docs/assets/image-processing-demo.png" alt="Query feature detections beside sparse visual map points and estimated camera pose" width="92%">
+  <img src="docs/assets/south-building-localization.png" alt="Real South Building query image beside sparse SfM map points and estimated camera pose" width="92%">
 </p>
 
 ## Scope
@@ -61,7 +51,7 @@ Implemented now:
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Query feature text parser and file-based localization example
-- Image processing localization example that reads PNG pixels, detects local patch features, and writes README demo overlays
+- Public-data README demo built from COLMAP South Building images and a `pycolmap` sparse reconstruction
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 
 Not implemented yet:
@@ -141,12 +131,6 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
-Run the image processing demo, which reads PNG pixels, detects local patch features, localizes through `ImageLocalizer`, and writes README demo assets:
-
-```bash
-cargo run --example localize_image_processing_demo
-```
-
 Run the tracking skeleton example:
 
 ```bash
@@ -170,9 +154,10 @@ examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
-examples/data/query_frame.png image asset used by the image processing demo
-docs/assets/image-processing-demo.png processed localization overlay
-docs/assets/image-processing-demo.gif animated processing demo
+docs/public_data_demo.md  public-data demo provenance and reproduction notes
+docs/assets/south-building-query.jpg real query image from COLMAP South Building
+docs/assets/south-building-localization.png public-data localization visualization
+docs/assets/south-building-localization.gif animated public-data localization demo
 CHANGELOG.md             unreleased changes and release notes
 LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
