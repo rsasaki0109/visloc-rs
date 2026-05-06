@@ -48,6 +48,7 @@ fn main() {
         TrackingConfig {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: None,
         },
     );
     let mut image_tracker = ImageTracker::with_tracker(extractor, tracker);
@@ -57,12 +58,13 @@ fn main() {
             .track_frame_image(frame_id, camera_id, &DummyImage, &map)
             .expect("dummy extractor is infallible");
         println!(
-            "frame={} state={:?} event={:?} success={} prior={} map_landmarks={} descriptors={} inliers={}",
+            "frame={} state={:?} event={:?} success={} prior={} reason={:?} map_landmarks={} descriptors={} inliers={}",
             tracking.frame_id,
             tracking.state,
             tracking.event,
             tracking.localization.success,
             tracking.used_pose_prior,
+            tracking.tracking_failure_reason,
             tracking.map_landmark_count,
             tracking.map_stats.descriptor_count,
             tracking.localization.inlier_count,

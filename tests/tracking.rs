@@ -8,7 +8,8 @@ use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
     ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, ImageTracker, InMemoryMapProvider,
     LocalizationPipeline, MapProviderStats, MotionModel, PriorSubmapSelector,
-    SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent, TrackingResult, TrackingState,
+    SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
+    TrackingResult, TrackingState,
 };
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
         successive_failures: 0,
         pose_prior: None,
         used_pose_prior: false,
+        tracking_failure_reason: None,
         map_landmark_count: 0,
         map_stats: MapProviderStats::default(),
         localization: visloc_rs::core::types::LocalizationResult::success(
@@ -280,6 +282,7 @@ fn tracking_result_exposes_pose_prior_as_localization_prior() {
         TrackingConfig {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: None,
         },
     );
 
@@ -412,6 +415,7 @@ fn tracker_uses_last_pose_prior_to_limit_landmark_candidates() {
         TrackingConfig {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: None,
         },
     );
 
@@ -429,6 +433,58 @@ fn tracker_uses_last_pose_prior_to_limit_landmark_candidates() {
     assert!(second.used_pose_prior);
     assert_eq!(second.localization.candidate_landmark_count, 6);
     assert_eq!(tracker.last_successful_frame_id(), Some(10));
+}
+
+#[test]
+fn tracker_quality_gate_rejects_large_jump_from_pose_prior() {
+    let (map, first_frame) = build_map_and_frame(10, 1);
+    let camera = map.cameras.get(&first_frame.camera_id).unwrap();
+    let shifted_pose = pose_with_identity_rotation_at_center(Vector3::new(0.5, 0.0, 0.0));
+    let mut shifted_frame = Frame::new(11, camera.id);
+    let mut landmarks = map.landmarks.values().collect::<Vec<_>>();
+    landmarks.sort_by_key(|landmark| landmark.id);
+
+    for landmark in landmarks {
+        shifted_frame.keypoints.push(
+            camera
+                .project(&shifted_pose.transform_world_point(&landmark.position))
+                .unwrap(),
+        );
+        shifted_frame
+            .descriptors
+            .push(landmark.descriptor.clone().unwrap());
+    }
+
+    let mut tracker = Tracker::new(
+        LocalizationPipeline::default(),
+        TrackingConfig {
+            min_successive_failures_to_lost: 2,
+            last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: Some(0.1),
+        },
+    );
+
+    let first = tracker.track_frame(&first_frame, &map);
+    let second = tracker.track_frame(&shifted_frame, &map);
+
+    assert!(first.localization.success);
+    assert_eq!(first.event, TrackingEvent::Initialized);
+    assert!(second.pose_prior.is_some());
+    assert!(second.used_pose_prior);
+    assert!(!second.localization.success);
+    assert_eq!(second.event, TrackingEvent::TrackingFailed);
+    assert_eq!(second.state, TrackingState::Tracking);
+    assert_eq!(second.successive_failures, 1);
+    assert!(matches!(
+        second.tracking_failure_reason,
+        Some(TrackingFailureReason::PosePriorTranslationErrorExceeded {
+            translation_error,
+            max_translation_error: 0.1,
+        }) if translation_error > 0.1
+    ));
+    assert_eq!(tracker.last_successful_frame_id(), Some(10));
+    assert_eq!(tracker.stats().successful_frame_count, 1);
+    assert_eq!(tracker.stats().failed_frame_count, 1);
 }
 
 #[test]
@@ -457,6 +513,7 @@ fn tracker_accepts_custom_motion_model_for_pose_prior() {
         TrackingConfig {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: None,
         },
     );
 

@@ -48,6 +48,7 @@ fn main() {
         TrackingConfig {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
+            max_pose_prior_translation_error: None,
         },
     );
 
@@ -60,13 +61,14 @@ fn main() {
     ] {
         let tracking = tracker.track_frame(&frame, &map);
         println!(
-            "frame={} state={:?} event={:?} success={} failures={} prior={} map_landmarks={} descriptors={} inliers={} ratio={:.3}",
+            "frame={} state={:?} event={:?} success={} failures={} prior={} reason={:?} map_landmarks={} descriptors={} inliers={} ratio={:.3}",
             tracking.frame_id,
             tracking.state,
             tracking.event,
             tracking.localization.success,
             tracking.successive_failures,
             tracking.used_pose_prior,
+            tracking.tracking_failure_reason,
             tracking.map_landmark_count,
             tracking.map_stats.descriptor_count,
             tracking.localization.inlier_count,

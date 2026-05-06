@@ -53,6 +53,7 @@ Implemented now:
 - Query feature text parser and file-based localization example
 - Public-data README demo built from COLMAP South Building images and a `pycolmap` sparse reconstruction
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
+- Localization-based tracking scaffold with motion priors, lost/relocalized events, and a pose-prior translation quality gate
 
 Not implemented yet:
 

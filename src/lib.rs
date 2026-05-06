@@ -61,8 +61,8 @@ pub use visloc_localization::{
 };
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
-    MotionModel, Tracker, TrackingConfig, TrackingEvent, TrackingResult, TrackingState,
-    TrackingStats,
+    MotionModel, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult,
+    TrackingState, TrackingStats,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
