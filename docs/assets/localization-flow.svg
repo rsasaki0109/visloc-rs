@@ -1,0 +1,67 @@
+<svg width="1180" height="360" viewBox="0 0 1180 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">visloc-rs localization pipeline</title>
+  <desc id="desc">COLMAP map and query features become 2D-3D matches, then PnP RANSAC estimates an SE3 pose.</desc>
+  <rect width="1180" height="360" rx="18" fill="#0B1220"/>
+  <defs>
+    <linearGradient id="edge" x1="68" y1="177" x2="1109" y2="177" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#35D0BA"/>
+      <stop offset="0.5" stop-color="#70A5FF"/>
+      <stop offset="1" stop-color="#F9C74F"/>
+    </linearGradient>
+  </defs>
+  <path d="M210 180H315M430 180H535M650 180H755M870 180H970" stroke="url(#edge)" stroke-width="5" stroke-linecap="round"/>
+  <g fill="#F9C74F">
+    <path d="M315 180L299 170V190L315 180Z"/>
+    <path d="M535 180L519 170V190L535 180Z"/>
+    <path d="M755 180L739 170V190L755 180Z"/>
+    <path d="M970 180L954 170V190L970 180Z"/>
+  </g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <g transform="translate(54 94)">
+      <rect width="158" height="172" rx="12" fill="#102A43" stroke="#35D0BA" stroke-width="2"/>
+      <text x="26" y="42" fill="#F6F7FB" font-size="23" font-weight="800">VisualMap</text>
+      <text x="26" y="78" fill="#B6C7D6" font-size="16">COLMAP text/bin</text>
+      <text x="26" y="105" fill="#B6C7D6" font-size="16">landmarks</text>
+      <text x="26" y="132" fill="#B6C7D6" font-size="16">descriptors</text>
+      <circle cx="34" cy="150" r="4" fill="#35D0BA"/>
+      <circle cx="58" cy="148" r="5" fill="#F9C74F"/>
+      <circle cx="84" cy="152" r="4" fill="#70A5FF"/>
+    </g>
+    <g transform="translate(320 94)">
+      <rect width="158" height="172" rx="12" fill="#111C2F" stroke="#70A5FF" stroke-width="2"/>
+      <text x="25" y="42" fill="#F6F7FB" font-size="23" font-weight="800">QueryImage</text>
+      <text x="25" y="78" fill="#B6C7D6" font-size="16">keypoints</text>
+      <text x="25" y="105" fill="#B6C7D6" font-size="16">descriptors</text>
+      <text x="25" y="132" fill="#B6C7D6" font-size="16">camera model</text>
+      <path d="M42 150L78 130L114 150L78 166L42 150Z" stroke="#70A5FF" stroke-width="3"/>
+    </g>
+    <g transform="translate(540 94)">
+      <rect width="158" height="172" rx="12" fill="#102A43" stroke="#35D0BA" stroke-width="2"/>
+      <text x="25" y="42" fill="#F6F7FB" font-size="23" font-weight="800">Matching</text>
+      <text x="25" y="78" fill="#B6C7D6" font-size="16">brute force L2</text>
+      <text x="25" y="105" fill="#B6C7D6" font-size="16">ratio test</text>
+      <text x="25" y="132" fill="#B6C7D6" font-size="16">cross-check</text>
+      <path d="M38 152C56 130 81 171 100 148C110 137 118 135 130 143" stroke="#35D0BA" stroke-width="3" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(760 94)">
+      <rect width="158" height="172" rx="12" fill="#111C2F" stroke="#70A5FF" stroke-width="2"/>
+      <text x="25" y="42" fill="#F6F7FB" font-size="23" font-weight="800">RANSAC</text>
+      <text x="25" y="78" fill="#B6C7D6" font-size="16">minimal PnP</text>
+      <text x="25" y="105" fill="#B6C7D6" font-size="16">inlier mask</text>
+      <text x="25" y="132" fill="#B6C7D6" font-size="16">reprojection err</text>
+      <circle cx="47" cy="151" r="5" fill="#70A5FF"/>
+      <circle cx="75" cy="151" r="5" fill="#70A5FF"/>
+      <circle cx="103" cy="151" r="5" fill="#F9C74F"/>
+    </g>
+    <g transform="translate(984 94)">
+      <rect width="142" height="172" rx="12" fill="#1A1B24" stroke="#F9C74F" stroke-width="2"/>
+      <text x="32" y="42" fill="#F6F7FB" font-size="23" font-weight="800">Pose</text>
+      <text x="28" y="78" fill="#B6C7D6" font-size="16">SE3 output</text>
+      <text x="28" y="105" fill="#B6C7D6" font-size="16">diagnostics</text>
+      <text x="28" y="132" fill="#B6C7D6" font-size="16">inliers</text>
+      <path d="M42 154H96M69 127V181" stroke="#F9C74F" stroke-width="4" stroke-linecap="round"/>
+    </g>
+    <text x="54" y="48" fill="#F6F7FB" font-size="30" font-weight="800">Localization vertical slice</text>
+    <text x="54" y="76" fill="#B6C7D6" font-size="17">Stateless core parts composed by the pipeline layer</text>
+  </g>
+</svg>
