@@ -116,12 +116,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = localizer.localize_image(&query_image, camera, &map)?;
 
     let raw = query_image.to_rgb8();
-    let detected = draw_detected_features(&raw, &features.keypoints);
-    let localized = draw_localization_overlay(
+    let detected_query = draw_detected_features(&raw, &features.keypoints);
+    let localized_query = draw_localization_overlay(
         &raw,
         &features.keypoints,
         result.success,
         result.inlier_count,
+    );
+    let raw = compose_demo_frame(
+        &raw,
+        &render_sparse_map_panel(&points, false, result.success),
+    );
+    let detected = compose_demo_frame(
+        &detected_query,
+        &render_sparse_map_panel(&points, false, result.success),
+    );
+    let localized = compose_demo_frame(
+        &localized_query,
+        &render_sparse_map_panel(&points, true, result.success),
     );
     localized.save(&overlay_path)?;
     write_demo_gif(&gif_path, &raw, &detected, &localized)?;
@@ -163,58 +175,15 @@ fn render_query_image(
 ) -> Result<(), Box<dyn Error>> {
     let mut image = RgbImage::from_pixel(IMAGE_WIDTH, IMAGE_HEIGHT, Rgb([219, 232, 240]));
 
-    for y in 0..250 {
-        let t = y as f32 / 250.0;
-        let color = lerp_rgb(Rgb([132, 184, 218]), Rgb([235, 242, 247]), t);
+    for y in 0..IMAGE_HEIGHT {
+        let t = y as f32 / IMAGE_HEIGHT as f32;
+        let color = lerp_rgb(Rgb([25, 32, 43]), Rgb([58, 67, 80]), t);
         for x in 0..IMAGE_WIDTH {
             image.put_pixel(x, y, color);
         }
     }
 
-    fill_polygon(
-        &mut image,
-        &[(0, 480), (170, 246), (470, 246), (640, 480)],
-        Rgb([55, 64, 76]),
-    );
-    draw_line(&mut image, (238, 250), (170, 480), Rgb([230, 238, 246]), 5);
-    draw_line(&mut image, (402, 250), (470, 480), Rgb([230, 238, 246]), 5);
-    draw_dashed_line(
-        &mut image,
-        (320, 275),
-        (320, 480),
-        Rgb([249, 199, 79]),
-        5,
-        24,
-        18,
-    );
-
-    draw_building(
-        &mut image,
-        42,
-        120,
-        168,
-        255,
-        Rgb([190, 168, 142]),
-        Rgb([69, 111, 142]),
-    );
-    draw_building(
-        &mut image,
-        448,
-        70,
-        150,
-        316,
-        Rgb([170, 182, 194]),
-        Rgb([71, 116, 147]),
-    );
-    draw_building(
-        &mut image,
-        236,
-        162,
-        170,
-        116,
-        Rgb([185, 193, 201]),
-        Rgb([74, 118, 150]),
-    );
+    draw_grid(&mut image);
 
     for (point, landmark_patch) in points.iter().zip(landmarks.iter()) {
         let pixel = camera
@@ -364,13 +333,13 @@ fn draw_localization_overlay(
     let mut output = draw_detected_features(image, keypoints);
     for keypoint in keypoints {
         let center = (keypoint.x.round() as i32, keypoint.y.round() as i32);
-        draw_line(&mut output, center, (320, 430), Rgb([249, 199, 79]), 2);
+        draw_line(&mut output, center, (320, 440), Rgb([249, 199, 79]), 1);
     }
 
-    draw_filled_circle(&mut output, (320, 430), 11, Rgb([112, 165, 255]));
-    draw_line(&mut output, (320, 430), (390, 430), Rgb([239, 68, 68]), 5);
-    draw_line(&mut output, (320, 430), (320, 360), Rgb([34, 197, 94]), 5);
-    draw_line(&mut output, (320, 430), (366, 384), Rgb([59, 130, 246]), 5);
+    draw_filled_circle(&mut output, (320, 440), 8, Rgb([112, 165, 255]));
+    draw_line(&mut output, (320, 440), (378, 440), Rgb([239, 68, 68]), 4);
+    draw_line(&mut output, (320, 440), (320, 382), Rgb([34, 197, 94]), 4);
+    draw_line(&mut output, (320, 440), (360, 400), Rgb([59, 130, 246]), 4);
 
     let badge = if success {
         Rgb([16, 122, 89])
@@ -379,15 +348,70 @@ fn draw_localization_overlay(
     };
     draw_rect(&mut output, 22, 22, 258, 62, Rgb([11, 18, 32]));
     draw_rect(&mut output, 31, 31, 48, 44, badge);
-    draw_digit_text(
-        &mut output,
-        96,
-        42,
-        inlier_count as u32,
-        Rgb([246, 247, 251]),
-    );
+    for index in 0..inlier_count.min(8) {
+        draw_filled_circle(
+            &mut output,
+            (101 + index as i32 * 20, 53),
+            5,
+            Rgb([53, 208, 186]),
+        );
+    }
 
     output
+}
+
+fn compose_demo_frame(query: &RgbImage, map_panel: &RgbImage) -> RgbImage {
+    let mut output = RgbImage::from_pixel(
+        query.width() + map_panel.width(),
+        query.height().max(map_panel.height()),
+        Rgb([8, 13, 24]),
+    );
+    paste(&mut output, query, 0, 0);
+    paste(&mut output, map_panel, query.width() as i32, 0);
+    output
+}
+
+fn render_sparse_map_panel(points: &[Point3<f64>], show_pose: bool, success: bool) -> RgbImage {
+    let mut panel = RgbImage::from_pixel(320, 480, Rgb([9, 15, 27]));
+    draw_rect(&mut panel, 0, 0, 320, 480, Rgb([9, 15, 27]));
+
+    for x in (24..320).step_by(40) {
+        draw_line(&mut panel, (x, 32), (x, 438), Rgb([24, 36, 53]), 1);
+    }
+    for y in (40..440).step_by(40) {
+        draw_line(&mut panel, (24, y), (296, y), Rgb([24, 36, 53]), 1);
+    }
+
+    for index in 0..90 {
+        let x_world = ((index * 37 % 120) as f64 / 120.0 - 0.5) * 7.5;
+        let z_world = 3.0 + (index * 53 % 190) as f64 / 18.0;
+        let (x, y) = map_to_panel(x_world, z_world);
+        draw_filled_circle(&mut panel, (x, y), 2, Rgb([68, 84, 105]));
+    }
+
+    for point in points {
+        let (x, y) = map_to_panel(point.x, point.z);
+        draw_filled_circle(&mut panel, (x, y), 5, Rgb([53, 208, 186]));
+        draw_circle(&mut panel, (x, y), 8, Rgb([246, 247, 251]), 1);
+    }
+
+    if show_pose {
+        let camera = (160, 410);
+        let left = (122, 350);
+        let right = (198, 350);
+        draw_line(&mut panel, camera, left, Rgb([249, 199, 79]), 2);
+        draw_line(&mut panel, camera, right, Rgb([249, 199, 79]), 2);
+        draw_line(&mut panel, left, right, Rgb([249, 199, 79]), 1);
+        draw_filled_circle(&mut panel, camera, 7, Rgb([112, 165, 255]));
+        let status_color = if success {
+            Rgb([53, 208, 186])
+        } else {
+            Rgb([251, 113, 133])
+        };
+        draw_rect(&mut panel, 28, 452, 264, 8, status_color);
+    }
+
+    panel
 }
 
 fn write_demo_gif(
@@ -400,7 +424,7 @@ fn write_demo_gif(
     let mut encoder = GifEncoder::new(&mut file);
     encoder.set_repeat(Repeat::Infinite)?;
     let frames = [raw, detected, localized].into_iter().map(|image| {
-        let resized = resize(image, 640, 480, FilterType::Lanczos3);
+        let resized = resize(image, 960, 480, FilterType::Lanczos3);
         Frame::from_parts(
             RgbaImage::from_fn(resized.width(), resized.height(), |x, y| {
                 let p = resized.get_pixel(x, y);
@@ -443,72 +467,39 @@ fn demo_points() -> Vec<Point3<f64>> {
     ]
 }
 
+fn map_to_panel(x_world: f64, z_world: f64) -> (i32, i32) {
+    let x = 160.0 + x_world * 28.0;
+    let y = 440.0 - z_world * 32.0;
+    (x.round() as i32, y.round() as i32)
+}
+
+fn draw_grid(image: &mut RgbImage) {
+    for x in (0..IMAGE_WIDTH as i32).step_by(40) {
+        draw_line(
+            image,
+            (x, 0),
+            (x, IMAGE_HEIGHT as i32 - 1),
+            Rgb([44, 54, 68]),
+            1,
+        );
+    }
+    for y in (0..IMAGE_HEIGHT as i32).step_by(40) {
+        draw_line(
+            image,
+            (0, y),
+            (IMAGE_WIDTH as i32 - 1, y),
+            Rgb([44, 54, 68]),
+            1,
+        );
+    }
+}
+
 fn lerp_rgb(a: Rgb<u8>, b: Rgb<u8>, t: f32) -> Rgb<u8> {
     Rgb([
         (a[0] as f32 * (1.0 - t) + b[0] as f32 * t) as u8,
         (a[1] as f32 * (1.0 - t) + b[1] as f32 * t) as u8,
         (a[2] as f32 * (1.0 - t) + b[2] as f32 * t) as u8,
     ])
-}
-
-fn fill_polygon(image: &mut RgbImage, points: &[(i32, i32)], color: Rgb<u8>) {
-    let min_y = points.iter().map(|(_, y)| *y).min().unwrap_or(0).max(0);
-    let max_y = points
-        .iter()
-        .map(|(_, y)| *y)
-        .max()
-        .unwrap_or(0)
-        .min(image.height() as i32 - 1);
-    for y in min_y..=max_y {
-        let mut intersections = Vec::new();
-        for index in 0..points.len() {
-            let (x1, y1) = points[index];
-            let (x2, y2) = points[(index + 1) % points.len()];
-            if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
-                let t = (y - y1) as f64 / (y2 - y1) as f64;
-                intersections.push((x1 as f64 + t * (x2 - x1) as f64).round() as i32);
-            }
-        }
-        intersections.sort_unstable();
-        for pair in intersections.chunks(2) {
-            if let [start, end] = pair {
-                for x in (*start).max(0)..=(*end).min(image.width() as i32 - 1) {
-                    image.put_pixel(x as u32, y as u32, color);
-                }
-            }
-        }
-    }
-}
-
-fn draw_building(
-    image: &mut RgbImage,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    wall: Rgb<u8>,
-    glass: Rgb<u8>,
-) {
-    draw_rect(image, x, y, width, height, wall);
-    let window_width = (width / 5).max(16);
-    let window_height = (height / 5).max(22);
-    for row in 0..3 {
-        for col in 0..3 {
-            let wx = x + 18 + col * (window_width + 18);
-            let wy = y + 22 + row * (window_height + 18);
-            if wx + window_width < x + width - 10 && wy + window_height < y + height - 10 {
-                draw_rect(image, wx, wy, window_width, window_height, glass);
-            }
-        }
-    }
-    draw_rect(
-        image,
-        x - 14,
-        y + height,
-        width + 28,
-        34,
-        darken(wall, 0.72),
-    );
 }
 
 fn draw_rect(image: &mut RgbImage, x: i32, y: i32, width: i32, height: i32, color: Rgb<u8>) {
@@ -545,27 +536,6 @@ fn draw_circle(image: &mut RgbImage, center: (i32, i32), radius: i32, color: Rgb
     }
 }
 
-fn draw_dashed_line(
-    image: &mut RgbImage,
-    start: (i32, i32),
-    end: (i32, i32),
-    color: Rgb<u8>,
-    width: i32,
-    dash: i32,
-    gap: i32,
-) {
-    let steps = (end.0 - start.0).abs().max((end.1 - start.1).abs()).max(1);
-    for step in 0..=steps {
-        let cycle = dash + gap;
-        if step % cycle < dash {
-            let t = step as f64 / steps as f64;
-            let x = (start.0 as f64 + (end.0 - start.0) as f64 * t).round() as i32;
-            let y = (start.1 as f64 + (end.1 - start.1) as f64 * t).round() as i32;
-            draw_filled_circle(image, (x, y), width / 2, color);
-        }
-    }
-}
-
 fn draw_line(image: &mut RgbImage, start: (i32, i32), end: (i32, i32), color: Rgb<u8>, width: i32) {
     let steps = (end.0 - start.0).abs().max((end.1 - start.1).abs()).max(1);
     for step in 0..=steps {
@@ -582,46 +552,15 @@ fn put_pixel_checked(image: &mut RgbImage, x: i32, y: i32, color: Rgb<u8>) {
     }
 }
 
-fn darken(color: Rgb<u8>, factor: f32) -> Rgb<u8> {
-    Rgb([
-        (color[0] as f32 * factor) as u8,
-        (color[1] as f32 * factor) as u8,
-        (color[2] as f32 * factor) as u8,
-    ])
-}
-
-fn draw_digit_text(image: &mut RgbImage, x: i32, y: i32, value: u32, color: Rgb<u8>) {
-    let text = format!("inliers {value}");
-    for (index, byte) in text.bytes().enumerate() {
-        draw_tiny_glyph(image, x + index as i32 * 14, y, byte, color);
-    }
-}
-
-fn draw_tiny_glyph(image: &mut RgbImage, x: i32, y: i32, byte: u8, color: Rgb<u8>) {
-    let pattern = match byte {
-        b'0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        b'1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        b'2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        b'3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        b'4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        b'5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        b'6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        b'7' => [0b111, 0b001, 0b010, 0b010, 0b010],
-        b'8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        b'9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        b'i' => [0b010, 0b000, 0b010, 0b010, 0b010],
-        b'n' => [0b000, 0b110, 0b101, 0b101, 0b101],
-        b'l' => [0b010, 0b010, 0b010, 0b010, 0b011],
-        b'e' => [0b000, 0b111, 0b110, 0b100, 0b111],
-        b'r' => [0b000, 0b110, 0b101, 0b100, 0b100],
-        b's' => [0b000, 0b111, 0b100, 0b111, 0b001],
-        _ => [0; 5],
-    };
-    for (row, bits) in pattern.iter().enumerate() {
-        for col in 0..3 {
-            if bits & (1 << (2 - col)) != 0 {
-                draw_rect(image, x + col * 4, y + row as i32 * 5, 3, 4, color);
-            }
+fn paste(dst: &mut RgbImage, src: &RgbImage, x_offset: i32, y_offset: i32) {
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            put_pixel_checked(
+                dst,
+                x_offset + x as i32,
+                y_offset + y as i32,
+                *src.get_pixel(x, y),
+            );
         }
     }
 }
