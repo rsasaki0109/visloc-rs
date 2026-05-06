@@ -4,6 +4,8 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+## 0.1.0 - 2026-05-07
+
 ### Added
 
 - Workspace split into core, vision, IO, localization pipeline, and tracking pipeline crates.
