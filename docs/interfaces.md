@@ -2,6 +2,8 @@
 
 ## Core Types
 
+Use `visloc_rs::prelude::*` for the common application-facing imports. The prelude includes the core map/query/pose types, the default localization pipeline, provider traits, default matching/PnP/RANSAC pieces, tracking/mapping/SLAM/fusion handles, and small IO helpers. Explicit crate modules remain available when applications want narrower imports.
+
 - `Camera`: intrinsic model and projection helpers
 - `Pose`: world-to-camera pose backed by `SE3`
 - `Frame`: query or temporal image data
