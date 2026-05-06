@@ -40,7 +40,7 @@ impl Timestamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimeDelta {
     nanoseconds: i128,
 }
@@ -94,6 +94,103 @@ impl Default for PriorConfig {
 
 pub trait LocalizationPriorProvider: TimedMeasurement {
     fn localization_prior(&self, config: &PriorConfig) -> Option<LocalizationPrior>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasurementBuffer<T> {
+    measurements: Vec<T>,
+}
+
+impl<T> Default for MeasurementBuffer<T> {
+    fn default() -> Self {
+        Self {
+            measurements: Vec::new(),
+        }
+    }
+}
+
+impl<T> MeasurementBuffer<T>
+where
+    T: TimedMeasurement,
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_measurements<I>(measurements: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut buffer = Self::new();
+        for measurement in measurements {
+            buffer.push(measurement);
+        }
+        buffer
+    }
+
+    pub fn push(&mut self, measurement: T) {
+        let timestamp = measurement.timestamp();
+        let index = self
+            .measurements
+            .partition_point(|existing| existing.timestamp() <= timestamp);
+        self.measurements.insert(index, measurement);
+    }
+
+    pub fn len(&self) -> usize {
+        self.measurements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.measurements.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.measurements.iter()
+    }
+
+    pub fn latest_before_or_at(&self, timestamp: Timestamp) -> Option<&T> {
+        let index = self
+            .measurements
+            .partition_point(|measurement| measurement.timestamp() <= timestamp);
+        index
+            .checked_sub(1)
+            .and_then(|latest_index| self.measurements.get(latest_index))
+    }
+
+    pub fn nearest(&self, timestamp: Timestamp, tolerance: TimeDelta) -> Option<&T> {
+        let index = self
+            .measurements
+            .partition_point(|measurement| measurement.timestamp() < timestamp);
+
+        let before = index
+            .checked_sub(1)
+            .and_then(|before_index| self.measurements.get(before_index));
+        let after = self.measurements.get(index);
+
+        [before, after]
+            .into_iter()
+            .flatten()
+            .filter_map(|measurement| {
+                timestamp_distance(measurement.timestamp(), timestamp)
+                    .filter(|distance| *distance <= tolerance)
+                    .map(|distance| (distance, measurement))
+            })
+            .min_by_key(|(distance, _)| distance.as_nanoseconds())
+            .map(|(_, measurement)| measurement)
+    }
+
+    pub fn nearest_localization_prior(
+        &self,
+        timestamp: Timestamp,
+        tolerance: TimeDelta,
+        config: &PriorConfig,
+    ) -> Option<LocalizationPrior>
+    where
+        T: LocalizationPriorProvider,
+    {
+        self.nearest(timestamp, tolerance)?
+            .localization_prior(config)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -222,5 +319,13 @@ impl ImuMeasurement {
 impl TimedMeasurement for ImuMeasurement {
     fn timestamp(&self) -> Timestamp {
         self.timestamp
+    }
+}
+
+fn timestamp_distance(left: Timestamp, right: Timestamp) -> Option<TimeDelta> {
+    if left >= right {
+        left.duration_since(right)
+    } else {
+        right.duration_since(left)
     }
 }

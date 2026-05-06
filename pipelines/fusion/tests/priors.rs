@@ -1,8 +1,8 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_fusion::{
-    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, PosePriorMeasurement, PriorConfig,
-    Timed, TimedMeasurement, Timestamp,
+    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, MeasurementBuffer,
+    PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedMeasurement, Timestamp,
 };
 
 #[test]
@@ -86,4 +86,97 @@ fn imu_measurement_keeps_optional_orientation() {
 
     assert_eq!(imu.timestamp(), Timestamp::from_nanoseconds(3));
     assert!(imu.orientation.is_some());
+}
+
+#[test]
+fn measurement_buffer_orders_measurements_and_finds_latest_before_timestamp() {
+    let mut buffer = MeasurementBuffer::new();
+    buffer.push(GnssMeasurement::new(
+        Timestamp::from_nanoseconds(30),
+        Point3::new(30.0, 0.0, 0.0),
+    ));
+    buffer.push(GnssMeasurement::new(
+        Timestamp::from_nanoseconds(10),
+        Point3::new(10.0, 0.0, 0.0),
+    ));
+    buffer.push(GnssMeasurement::new(
+        Timestamp::from_nanoseconds(20),
+        Point3::new(20.0, 0.0, 0.0),
+    ));
+
+    let ordered_timestamps = buffer
+        .iter()
+        .map(TimedMeasurement::timestamp)
+        .collect::<Vec<_>>();
+    let latest = buffer
+        .latest_before_or_at(Timestamp::from_nanoseconds(25))
+        .unwrap();
+
+    assert_eq!(
+        ordered_timestamps,
+        vec![
+            Timestamp::from_nanoseconds(10),
+            Timestamp::from_nanoseconds(20),
+            Timestamp::from_nanoseconds(30)
+        ]
+    );
+    assert_eq!(buffer.len(), 3);
+    assert_eq!(latest.position_world, Point3::new(20.0, 0.0, 0.0));
+}
+
+#[test]
+fn measurement_buffer_finds_nearest_measurement_with_tolerance() {
+    let buffer = MeasurementBuffer::from_measurements([
+        ImuMeasurement::new(
+            Timestamp::from_nanoseconds(100),
+            Vector3::zeros(),
+            Vector3::zeros(),
+        ),
+        ImuMeasurement::new(
+            Timestamp::from_nanoseconds(130),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::zeros(),
+        ),
+    ]);
+
+    let nearest = buffer
+        .nearest(
+            Timestamp::from_nanoseconds(121),
+            TimeDelta::from_nanoseconds(10),
+        )
+        .unwrap();
+
+    assert_eq!(nearest.timestamp(), Timestamp::from_nanoseconds(130));
+    assert!(buffer
+        .nearest(
+            Timestamp::from_nanoseconds(121),
+            TimeDelta::from_nanoseconds(8)
+        )
+        .is_none());
+}
+
+#[test]
+fn measurement_buffer_builds_nearest_localization_prior() {
+    let config = PriorConfig {
+        default_radius: 50.0,
+        min_radius: 1.0,
+        confidence_multiplier: 2.0,
+    };
+    let buffer = MeasurementBuffer::from_measurements([
+        GnssMeasurement::new(Timestamp::from_nanoseconds(100), Point3::new(1.0, 0.0, 0.0))
+            .with_accuracy(Some(3.0), None),
+        GnssMeasurement::new(Timestamp::from_nanoseconds(150), Point3::new(2.0, 0.0, 0.0))
+            .with_accuracy(Some(5.0), None),
+    ]);
+
+    let prior = buffer
+        .nearest_localization_prior(
+            Timestamp::from_nanoseconds(148),
+            TimeDelta::from_nanoseconds(5),
+            &config,
+        )
+        .unwrap();
+
+    assert_eq!(prior.position_world, Some(Point3::new(2.0, 0.0, 0.0)));
+    assert_eq!(prior.radius, Some(10.0));
 }
