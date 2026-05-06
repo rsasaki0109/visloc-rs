@@ -156,6 +156,12 @@ Run the tracking skeleton example:
 cargo run --example track_sequence_dummy
 ```
 
+Run a GNSS-prior tracking example that narrows the visual map before localization:
+
+```bash
+cargo run --example track_sequence_with_gnss_prior
+```
+
 Run the full local quality gate:
 
 ```bash

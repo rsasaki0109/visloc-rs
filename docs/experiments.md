@@ -8,5 +8,6 @@ Initial experiments should stay focused on map-based localization:
 - PnP RANSAC sensitivity to reprojection threshold and outlier ratio
 - IO-backed localization with `cargo run --example localize_colmap_text`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
+- GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior`
 
-Future experiments can add image feature extraction, tracking, online Visual SLAM, inertial priors, and GNSS priors after the visual localization slice is stable.
+Future experiments can add image feature extraction, online Visual SLAM, inertial priors, and public automotive or UAV sequence data after the visual localization slice is stable.
