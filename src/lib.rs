@@ -39,6 +39,7 @@
 //! the exposed traits.
 
 pub use visloc_core as core;
+pub use visloc_fusion as fusion;
 pub use visloc_io as io;
 pub use visloc_localization as localization;
 pub use visloc_mapping as mapping;
@@ -50,6 +51,10 @@ pub use visloc_core::geometry;
 pub use visloc_core::types;
 pub use visloc_core::types::{
     PoseEstimationFailureDiagnostics, PoseEstimationFailureReason, PoseEstimatorDiagnostics,
+};
+pub use visloc_fusion::{
+    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, PosePriorMeasurement, PriorConfig,
+    TimeDelta, Timed, TimedMeasurement, Timestamp,
 };
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,

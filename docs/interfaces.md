@@ -113,6 +113,19 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
 
+## Sensor Fusion Foundation
+
+`visloc-fusion` provides loose-coupling inputs for automotive and UAV localization without implementing a full GNSS/INS backend:
+
+- `Timestamp`, `TimeDelta`, and `Timed<T>` represent timestamped measurements and frame metadata.
+- `GnssMeasurement` stores a world-position prior plus optional horizontal/vertical accuracy.
+- `PosePriorMeasurement` stores an external pose prior, such as odometry, VIO, or a previous fused estimate.
+- `ImuMeasurement` stores angular velocity, linear acceleration, and optional orientation.
+- `LocalizationPriorProvider` converts GNSS or pose-prior measurements into `LocalizationPrior`, which can drive radius submap selection in localization/tracking.
+- `PriorConfig` controls default radius, minimum radius, and confidence multiplier.
+
+This is intentionally loose coupling: visual-only users do not need fusion types, and robotics users can plug in their own GNSS/INS/VIO stack while still guiding visual localization.
+
 ## Descriptor Store Text Format
 
 ```text
