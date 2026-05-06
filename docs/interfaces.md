@@ -83,14 +83,17 @@ This is not SLAM: it does not create keyframes, update maps, run bundle adjustme
 
 ## Local Mapping Skeleton
 
-`visloc-mapping` starts the local-mapping layer without mutating maps yet:
+`visloc-mapping` starts the local-mapping layer with explicit keyframe decisions and staged map edits:
 
 - `KeyframePolicy`: evaluates a `TrackingResult` and returns a keyframe-selection decision
 - `SimpleKeyframePolicy`: selects the first successful frame, optional relocalized frames, and later frames that pass frame-id gap and camera-translation thresholds
 - `KeyframePolicyConfig`: controls minimum frame-id gap, minimum translation, and relocalized-frame selection
 - `KeyframeDecision`: reports whether the frame was selected, why it was selected or rejected, and the current keyframe-policy counters
+- `StagedMapUpdate`: collects keyframes, landmarks, and observations before mutating a `VisualMap`
+- `MapUpdateValidationReport`: reports duplicate staged entities, existing-map conflicts, missing references, and keypoint bounds errors
+- `AppliedMapUpdate`: counts how many staged entities were applied after validation
 
-This is the first v0.3 extension point. Future map update transactions, landmark candidates, triangulation, and local refinement should consume these decisions instead of being baked into tracking.
+This is the first v0.3 extension point. Future landmark candidates, triangulation, and local refinement should consume these decisions and staged updates instead of being baked into tracking.
 
 ## Descriptor Store Text Format
 

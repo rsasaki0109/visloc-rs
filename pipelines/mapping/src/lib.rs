@@ -6,7 +6,9 @@
 //! later feed staged map updates, triangulation, and local refinement.
 
 use visloc_core::geometry::Pose;
-use visloc_core::types::FrameId;
+use visloc_core::types::{
+    CameraId, FrameId, Keyframe, Landmark, LandmarkId, Observation, VisualMap,
+};
 use visloc_tracking::{TrackingEvent, TrackingResult};
 
 pub trait KeyframePolicy {
@@ -190,4 +192,262 @@ impl KeyframePolicy for SimpleKeyframePolicy {
         self.last_keyframe_pose = None;
         self.selected_keyframe_count = 0;
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StagedMapUpdate {
+    pub keyframes: Vec<Keyframe>,
+    pub landmarks: Vec<Landmark>,
+    pub observations: Vec<Observation>,
+}
+
+impl StagedMapUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stage_keyframe(&mut self, keyframe: Keyframe) {
+        self.keyframes.push(keyframe);
+    }
+
+    pub fn stage_landmark(&mut self, landmark: Landmark) {
+        self.landmarks.push(landmark);
+    }
+
+    pub fn stage_observation(&mut self, observation: Observation) {
+        self.observations.push(observation);
+    }
+
+    pub fn with_keyframe(mut self, keyframe: Keyframe) -> Self {
+        self.stage_keyframe(keyframe);
+        self
+    }
+
+    pub fn with_landmark(mut self, landmark: Landmark) -> Self {
+        self.stage_landmark(landmark);
+        self
+    }
+
+    pub fn with_observation(mut self, observation: Observation) -> Self {
+        self.stage_observation(observation);
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keyframes.is_empty() && self.landmarks.is_empty() && self.observations.is_empty()
+    }
+
+    pub fn validate_against(&self, map: &VisualMap) -> MapUpdateValidationReport {
+        let mut report = MapUpdateValidationReport::default();
+        self.validate_keyframes(map, &mut report);
+        self.validate_landmarks(map, &mut report);
+        self.validate_observations(map, &mut report);
+        report
+    }
+
+    pub fn apply_to(
+        self,
+        map: &mut VisualMap,
+    ) -> Result<AppliedMapUpdate, MapUpdateValidationReport> {
+        let report = self.validate_against(map);
+        if !report.is_valid() {
+            return Err(report);
+        }
+
+        let applied = AppliedMapUpdate {
+            keyframe_count: self.keyframes.len(),
+            landmark_count: self.landmarks.len(),
+            observation_count: self.observations.len(),
+        };
+
+        for keyframe in self.keyframes {
+            map.keyframes.insert(keyframe.frame.id, keyframe);
+        }
+        for landmark in self.landmarks {
+            map.landmarks.insert(landmark.id, landmark);
+        }
+        for observation in self.observations {
+            if let Some(keyframe) = map.keyframes.get_mut(&observation.frame_id) {
+                keyframe.observations.push(observation.clone());
+            }
+            if let Some(landmark) = map.landmarks.get_mut(&observation.landmark_id) {
+                landmark.observations.push(observation);
+            }
+        }
+
+        Ok(applied)
+    }
+
+    fn validate_keyframes(&self, map: &VisualMap, report: &mut MapUpdateValidationReport) {
+        let mut staged_frame_ids = Vec::new();
+        for keyframe in &self.keyframes {
+            let frame_id = keyframe.frame.id;
+            if map.keyframes.contains_key(&frame_id) {
+                report.push(MapUpdateValidationIssue::KeyframeAlreadyExists { frame_id });
+            }
+            if staged_frame_ids.contains(&frame_id) {
+                report.push(MapUpdateValidationIssue::DuplicateStagedKeyframe { frame_id });
+            }
+            staged_frame_ids.push(frame_id);
+
+            if !map.cameras.contains_key(&keyframe.frame.camera_id) {
+                report.push(MapUpdateValidationIssue::MissingCameraForKeyframe {
+                    frame_id,
+                    camera_id: keyframe.frame.camera_id,
+                });
+            }
+        }
+    }
+
+    fn validate_landmarks(&self, map: &VisualMap, report: &mut MapUpdateValidationReport) {
+        let mut staged_landmark_ids = Vec::new();
+        for landmark in &self.landmarks {
+            if map.landmarks.contains_key(&landmark.id) {
+                report.push(MapUpdateValidationIssue::LandmarkAlreadyExists {
+                    landmark_id: landmark.id,
+                });
+            }
+            if staged_landmark_ids.contains(&landmark.id) {
+                report.push(MapUpdateValidationIssue::DuplicateStagedLandmark {
+                    landmark_id: landmark.id,
+                });
+            }
+            staged_landmark_ids.push(landmark.id);
+        }
+    }
+
+    fn validate_observations(&self, map: &VisualMap, report: &mut MapUpdateValidationReport) {
+        let mut staged_observations = Vec::new();
+        for observation in &self.observations {
+            if staged_observations.contains(&observation_key(observation)) {
+                report.push(MapUpdateValidationIssue::DuplicateStagedObservation {
+                    frame_id: observation.frame_id,
+                    landmark_id: observation.landmark_id,
+                    keypoint_index: observation.keypoint_index,
+                });
+            }
+            staged_observations.push(observation_key(observation));
+
+            let keyframe = self
+                .keyframes
+                .iter()
+                .find(|keyframe| keyframe.frame.id == observation.frame_id)
+                .or_else(|| map.keyframes.get(&observation.frame_id));
+            if keyframe.is_none() {
+                report.push(MapUpdateValidationIssue::ObservationMissingKeyframe {
+                    frame_id: observation.frame_id,
+                    landmark_id: observation.landmark_id,
+                    keypoint_index: observation.keypoint_index,
+                });
+            }
+
+            let landmark_exists = self
+                .landmarks
+                .iter()
+                .any(|landmark| landmark.id == observation.landmark_id)
+                || map.landmarks.contains_key(&observation.landmark_id);
+            if !landmark_exists {
+                report.push(MapUpdateValidationIssue::ObservationMissingLandmark {
+                    frame_id: observation.frame_id,
+                    landmark_id: observation.landmark_id,
+                    keypoint_index: observation.keypoint_index,
+                });
+            }
+
+            let Some(keyframe) = keyframe else {
+                continue;
+            };
+            if observation.keypoint_index >= keyframe.frame.keypoints.len() {
+                report.push(MapUpdateValidationIssue::ObservationKeypointOutOfBounds {
+                    frame_id: observation.frame_id,
+                    landmark_id: observation.landmark_id,
+                    keypoint_index: observation.keypoint_index,
+                    keypoint_count: keyframe.frame.keypoints.len(),
+                });
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AppliedMapUpdate {
+    pub keyframe_count: usize,
+    pub landmark_count: usize,
+    pub observation_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MapUpdateValidationReport {
+    pub issues: Vec<MapUpdateValidationIssue>,
+}
+
+impl MapUpdateValidationReport {
+    pub fn is_valid(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    pub fn issue_count(&self) -> usize {
+        self.issues.len()
+    }
+
+    pub fn push(&mut self, issue: MapUpdateValidationIssue) {
+        self.issues.push(issue);
+    }
+
+    pub fn into_result(self) -> Result<(), Self> {
+        if self.is_valid() {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapUpdateValidationIssue {
+    KeyframeAlreadyExists {
+        frame_id: FrameId,
+    },
+    DuplicateStagedKeyframe {
+        frame_id: FrameId,
+    },
+    MissingCameraForKeyframe {
+        frame_id: FrameId,
+        camera_id: CameraId,
+    },
+    LandmarkAlreadyExists {
+        landmark_id: LandmarkId,
+    },
+    DuplicateStagedLandmark {
+        landmark_id: LandmarkId,
+    },
+    ObservationMissingKeyframe {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        keypoint_index: usize,
+    },
+    ObservationMissingLandmark {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        keypoint_index: usize,
+    },
+    ObservationKeypointOutOfBounds {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        keypoint_index: usize,
+        keypoint_count: usize,
+    },
+    DuplicateStagedObservation {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        keypoint_index: usize,
+    },
+}
+
+fn observation_key(observation: &Observation) -> (FrameId, LandmarkId, usize) {
+    (
+        observation.frame_id,
+        observation.landmark_id,
+        observation.keypoint_index,
+    )
 }

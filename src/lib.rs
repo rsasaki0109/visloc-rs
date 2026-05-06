@@ -61,8 +61,9 @@ pub use visloc_localization::{
     RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
 };
 pub use visloc_mapping::{
-    KeyframeDecision, KeyframeDecisionReason, KeyframePolicy, KeyframePolicyConfig,
-    SimpleKeyframePolicy,
+    AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason, KeyframePolicy,
+    KeyframePolicyConfig, MapUpdateValidationIssue, MapUpdateValidationReport,
+    SimpleKeyframePolicy, StagedMapUpdate,
 };
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
