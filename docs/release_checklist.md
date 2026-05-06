@@ -11,8 +11,8 @@
 - Confirm `docs/api_stability.md` reflects the intended stable and experimental API tiers.
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
-- Check package metadata with `cargo package -p visloc-core --allow-dirty --no-verify` first.
-- For crates that depend on other `visloc-*` crates, run `cargo package` in publish order after their internal dependencies are available from the target registry.
+- Check package metadata and crate contents with `scripts/package_check.sh`.
+- For crates that depend on other `visloc-*` crates, run `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` in publish order after their internal dependencies are available from the target registry.
 
 ## API Stability
 

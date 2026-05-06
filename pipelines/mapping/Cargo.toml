@@ -5,10 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description.workspace = true
+readme.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 nalgebra = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-tracking = { path = "../tracking", version = "0.1.0" }
-
-[dev-dependencies]

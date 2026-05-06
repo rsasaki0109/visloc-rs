@@ -204,5 +204,6 @@ LICENSE-MIT              MIT license text
 docs/release_checklist.md pre-release quality checklist
 scripts/check.sh          local fmt/clippy/test/doc gate
 scripts/run_examples.sh   runs all user-facing examples
+scripts/package_check.sh  checks package metadata and crate contents
 .github/workflows/ci.yml  GitHub Actions CI gate
 ```
