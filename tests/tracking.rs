@@ -150,9 +150,15 @@ fn tracker_enters_tracking_after_successful_localization() {
     assert_eq!(tracker.last_result().unwrap().frame_id, 10);
     assert_eq!(tracker.last_successful_frame_id(), Some(10));
     assert!(tracker.last_successful_pose().is_some());
+    assert_eq!(tracker.stats().first_frame_id, Some(10));
+    assert_eq!(tracker.stats().last_frame_id, Some(10));
     assert_eq!(tracker.stats().frame_count, 1);
     assert_eq!(tracker.stats().successful_frame_count, 1);
     assert_eq!(tracker.stats().failed_frame_count, 0);
+    assert_eq!(tracker.stats().success_rate(), 1.0);
+    assert_eq!(tracker.stats().failure_rate(), 0.0);
+    assert_eq!(tracker.stats().overall_inlier_ratio(), 1.0);
+    assert_eq!(tracker.stats().mean_inliers_per_successful_frame(), 6.0);
 }
 
 #[test]
@@ -356,6 +362,8 @@ fn tracker_becomes_lost_after_successive_failures() {
     assert_eq!(tracker.stats().successful_frame_count, 0);
     assert_eq!(tracker.stats().failed_frame_count, 2);
     assert_eq!(tracker.stats().lost_count, 1);
+    assert_eq!(tracker.stats().success_rate(), 0.0);
+    assert_eq!(tracker.stats().failure_rate(), 1.0);
 }
 
 #[test]
@@ -390,6 +398,10 @@ fn tracker_reports_relocalized_after_lost_success() {
     assert_eq!(tracker.stats().failed_frame_count, 1);
     assert_eq!(tracker.stats().lost_count, 1);
     assert_eq!(tracker.stats().relocalization_count, 1);
+    assert_eq!(tracker.stats().first_frame_id, Some(10));
+    assert_eq!(tracker.stats().last_frame_id, Some(10));
+    assert_eq!(tracker.stats().success_rate(), 0.5);
+    assert_eq!(tracker.stats().failure_rate(), 0.5);
 }
 
 #[test]
@@ -485,6 +497,12 @@ fn tracker_quality_gate_rejects_large_jump_from_pose_prior() {
     assert_eq!(tracker.last_successful_frame_id(), Some(10));
     assert_eq!(tracker.stats().successful_frame_count, 1);
     assert_eq!(tracker.stats().failed_frame_count, 1);
+    assert_eq!(tracker.stats().pose_prior_used_count, 1);
+    assert_eq!(tracker.stats().pose_prior_usage_rate(), 0.5);
+    assert_eq!(tracker.stats().tracking_quality_gate_failure_count, 1);
+    assert_eq!(tracker.stats().total_inlier_count, 12);
+    assert_eq!(tracker.stats().total_correspondence_count, 12);
+    assert_eq!(tracker.stats().overall_inlier_ratio(), 1.0);
 }
 
 #[test]

@@ -86,11 +86,47 @@ impl TrackingResult {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackingStats {
+    pub first_frame_id: Option<FrameId>,
+    pub last_frame_id: Option<FrameId>,
     pub frame_count: usize,
     pub successful_frame_count: usize,
     pub failed_frame_count: usize,
     pub lost_count: usize,
     pub relocalization_count: usize,
+    pub pose_prior_used_count: usize,
+    pub tracking_quality_gate_failure_count: usize,
+    pub total_inlier_count: usize,
+    pub total_correspondence_count: usize,
+}
+
+impl TrackingStats {
+    pub fn success_rate(&self) -> f64 {
+        ratio(self.successful_frame_count, self.frame_count)
+    }
+
+    pub fn failure_rate(&self) -> f64 {
+        ratio(self.failed_frame_count, self.frame_count)
+    }
+
+    pub fn pose_prior_usage_rate(&self) -> f64 {
+        ratio(self.pose_prior_used_count, self.frame_count)
+    }
+
+    pub fn overall_inlier_ratio(&self) -> f64 {
+        ratio(self.total_inlier_count, self.total_correspondence_count)
+    }
+
+    pub fn mean_inliers_per_successful_frame(&self) -> f64 {
+        ratio(self.total_inlier_count, self.successful_frame_count)
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
 }
 
 pub trait MotionModel {
@@ -430,6 +466,10 @@ where
     }
 
     fn update_history(&mut self, result: &TrackingResult) {
+        if self.stats.first_frame_id.is_none() {
+            self.stats.first_frame_id = Some(result.frame_id);
+        }
+        self.stats.last_frame_id = Some(result.frame_id);
         self.stats.frame_count += 1;
         if result.localization.success {
             self.stats.successful_frame_count += 1;
@@ -445,6 +485,14 @@ where
         if result.event == TrackingEvent::Relocalized {
             self.stats.relocalization_count += 1;
         }
+        if result.used_pose_prior {
+            self.stats.pose_prior_used_count += 1;
+        }
+        if result.tracking_failure_reason.is_some() {
+            self.stats.tracking_quality_gate_failure_count += 1;
+        }
+        self.stats.total_inlier_count += result.localization.inlier_count;
+        self.stats.total_correspondence_count += result.localization.correspondence_count;
 
         self.last_result = Some(result.clone());
     }
