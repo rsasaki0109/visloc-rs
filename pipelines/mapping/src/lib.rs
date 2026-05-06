@@ -5,7 +5,7 @@
 //! defining keyframe-selection interfaces that can consume tracking results and
 //! later feed staged map updates, triangulation, and local refinement.
 
-use nalgebra::Point2;
+use nalgebra::{DMatrix, Point2, Point3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::{
     CameraId, FrameId, Keyframe, Landmark, LandmarkId, Observation, VisualMap,
@@ -720,4 +720,222 @@ pub enum LandmarkCandidateValidationIssue {
 
 fn candidate_observation_key(observation: &LandmarkCandidateObservation) -> (FrameId, usize) {
     (observation.frame_id, observation.keypoint_index)
+}
+
+pub trait Triangulator {
+    fn triangulate(
+        &self,
+        candidate: &LandmarkCandidate,
+        map: &VisualMap,
+    ) -> Result<TriangulatedLandmark, TriangulationFailureReason>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearTriangulator {
+    pub config: TriangulationConfig,
+}
+
+impl Default for LinearTriangulator {
+    fn default() -> Self {
+        Self::new(TriangulationConfig::default())
+    }
+}
+
+impl LinearTriangulator {
+    pub fn new(config: TriangulationConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Triangulator for LinearTriangulator {
+    fn triangulate(
+        &self,
+        candidate: &LandmarkCandidate,
+        map: &VisualMap,
+    ) -> Result<TriangulatedLandmark, TriangulationFailureReason> {
+        let validation_config = LandmarkCandidateValidationConfig {
+            min_observations: self.config.min_observations,
+        };
+        let validation = candidate.validate_against(map, None, &validation_config);
+        if !validation.is_valid() {
+            return Err(TriangulationFailureReason::CandidateValidationFailed(
+                validation,
+            ));
+        }
+
+        let mut a = DMatrix::<f64>::zeros(candidate.observations.len() * 2, 4);
+        for (observation_index, observation) in candidate.observations.iter().enumerate() {
+            let keyframe = map
+                .keyframes
+                .get(&observation.frame_id)
+                .expect("candidate validation ensures keyframe exists");
+            let camera = map.cameras.get(&keyframe.frame.camera_id).ok_or(
+                TriangulationFailureReason::MissingCamera {
+                    frame_id: keyframe.frame.id,
+                    camera_id: keyframe.frame.camera_id,
+                },
+            )?;
+            let pose =
+                keyframe
+                    .frame
+                    .pose
+                    .as_ref()
+                    .ok_or(TriangulationFailureReason::MissingPose {
+                        frame_id: keyframe.frame.id,
+                    })?;
+            let normalized = camera.normalize_pixel(&observation.xy).ok_or(
+                TriangulationFailureReason::UnsupportedCameraModel {
+                    frame_id: keyframe.frame.id,
+                    camera_id: keyframe.frame.camera_id,
+                },
+            )?;
+            let matrix = pose.matrix();
+            let row0 = matrix.row(0);
+            let row1 = matrix.row(1);
+            let row2 = matrix.row(2);
+            let row_x = observation_index * 2;
+            let row_y = row_x + 1;
+            for column in 0..4 {
+                a[(row_x, column)] = normalized.x * row2[column] - row0[column];
+                a[(row_y, column)] = normalized.y * row2[column] - row1[column];
+            }
+        }
+
+        let svd = a.svd(false, true);
+        let Some(v_t) = svd.v_t else {
+            return Err(TriangulationFailureReason::DegenerateGeometry);
+        };
+        let homogeneous = v_t.row(v_t.nrows() - 1);
+        let w = homogeneous[3];
+        if w.abs() <= self.config.min_homogeneous_scale {
+            return Err(TriangulationFailureReason::DegenerateGeometry);
+        }
+        let position = Point3::new(homogeneous[0] / w, homogeneous[1] / w, homogeneous[2] / w);
+
+        let mut reprojection_errors = Vec::new();
+        for observation in &candidate.observations {
+            let keyframe = map
+                .keyframes
+                .get(&observation.frame_id)
+                .expect("candidate validation ensures keyframe exists");
+            let camera = map
+                .cameras
+                .get(&keyframe.frame.camera_id)
+                .expect("camera was checked before solving");
+            let pose = keyframe
+                .frame
+                .pose
+                .as_ref()
+                .expect("pose was checked before solving");
+            let point_camera = pose.transform_world_point(&position);
+            if self.config.require_positive_depth && point_camera.z <= 0.0 {
+                return Err(TriangulationFailureReason::PointBehindCamera {
+                    frame_id: keyframe.frame.id,
+                });
+            }
+            let projected = camera.project(&point_camera).ok_or(
+                TriangulationFailureReason::ProjectionFailed {
+                    frame_id: keyframe.frame.id,
+                    camera_id: keyframe.frame.camera_id,
+                },
+            )?;
+            reprojection_errors.push((projected - observation.xy).norm());
+        }
+
+        let mean_reprojection_error = mean(&reprojection_errors);
+        let max_reprojection_error = reprojection_errors.iter().copied().fold(0.0_f64, f64::max);
+        if let Some(max_mean_reprojection_error) = self.config.max_mean_reprojection_error {
+            if mean_reprojection_error > max_mean_reprojection_error {
+                return Err(TriangulationFailureReason::ReprojectionErrorTooHigh {
+                    mean_reprojection_error,
+                    max_mean_reprojection_error,
+                });
+            }
+        }
+
+        let mut landmark = Landmark::new(candidate.id, position);
+        landmark.descriptor = candidate.descriptor.clone();
+        landmark.observations = candidate
+            .observations
+            .iter()
+            .map(|observation| Observation {
+                frame_id: observation.frame_id,
+                landmark_id: candidate.id,
+                keypoint_index: observation.keypoint_index,
+                xy: observation.xy,
+            })
+            .collect();
+
+        Ok(TriangulatedLandmark {
+            landmark,
+            observation_count: candidate.observations.len(),
+            mean_reprojection_error,
+            max_reprojection_error,
+            reprojection_errors,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangulationConfig {
+    pub min_observations: usize,
+    pub min_homogeneous_scale: f64,
+    pub require_positive_depth: bool,
+    pub max_mean_reprojection_error: Option<f64>,
+}
+
+impl Default for TriangulationConfig {
+    fn default() -> Self {
+        Self {
+            min_observations: 2,
+            min_homogeneous_scale: 1.0e-12,
+            require_positive_depth: true,
+            max_mean_reprojection_error: Some(2.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangulatedLandmark {
+    pub landmark: Landmark,
+    pub observation_count: usize,
+    pub mean_reprojection_error: f64,
+    pub max_reprojection_error: f64,
+    pub reprojection_errors: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriangulationFailureReason {
+    CandidateValidationFailed(LandmarkCandidateValidationReport),
+    MissingCamera {
+        frame_id: FrameId,
+        camera_id: CameraId,
+    },
+    UnsupportedCameraModel {
+        frame_id: FrameId,
+        camera_id: CameraId,
+    },
+    MissingPose {
+        frame_id: FrameId,
+    },
+    DegenerateGeometry,
+    PointBehindCamera {
+        frame_id: FrameId,
+    },
+    ProjectionFailed {
+        frame_id: FrameId,
+        camera_id: CameraId,
+    },
+    ReprojectionErrorTooHigh {
+        mean_reprojection_error: f64,
+        max_mean_reprojection_error: f64,
+    },
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
 }
