@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point3, SMatrix, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::{Frame, FrameId};
 use visloc_localization::LocalizationPrior;
@@ -158,6 +158,78 @@ pub trait LocalizationPriorProvider: TimedMeasurement {
     fn localization_prior(&self, config: &PriorConfig) -> Option<LocalizationPrior>;
 }
 
+pub type PoseCovarianceMatrix = SMatrix<f64, 6, 6>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionCovariance {
+    pub matrix: Matrix3<f64>,
+}
+
+impl PositionCovariance {
+    pub fn new(matrix: Matrix3<f64>) -> Self {
+        Self { matrix }
+    }
+
+    pub fn from_standard_deviations(standard_deviations: Vector3<f64>) -> Self {
+        Self {
+            matrix: Matrix3::from_diagonal(&standard_deviations.map(|sigma| sigma * sigma)),
+        }
+    }
+
+    pub fn max_standard_deviation(&self) -> Option<f64> {
+        max_diagonal_standard_deviation(self.matrix.diagonal().iter().copied())
+    }
+
+    pub fn horizontal_standard_deviation(&self) -> Option<f64> {
+        max_diagonal_standard_deviation([self.matrix[(0, 0)], self.matrix[(1, 1)]])
+    }
+
+    pub fn vertical_standard_deviation(&self) -> Option<f64> {
+        standard_deviation_from_variance(self.matrix[(2, 2)])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseCovariance {
+    pub matrix: PoseCovarianceMatrix,
+}
+
+impl PoseCovariance {
+    pub fn new(matrix: PoseCovarianceMatrix) -> Self {
+        Self { matrix }
+    }
+
+    pub fn from_translation_rotation_standard_deviations(
+        translation_standard_deviations: Vector3<f64>,
+        rotation_standard_deviations: Vector3<f64>,
+    ) -> Self {
+        let mut matrix = PoseCovarianceMatrix::zeros();
+        for axis in 0..3 {
+            matrix[(axis, axis)] =
+                translation_standard_deviations[axis] * translation_standard_deviations[axis];
+            matrix[(axis + 3, axis + 3)] =
+                rotation_standard_deviations[axis] * rotation_standard_deviations[axis];
+        }
+        Self { matrix }
+    }
+
+    pub fn max_translation_standard_deviation(&self) -> Option<f64> {
+        max_diagonal_standard_deviation([
+            self.matrix[(0, 0)],
+            self.matrix[(1, 1)],
+            self.matrix[(2, 2)],
+        ])
+    }
+
+    pub fn max_rotation_standard_deviation(&self) -> Option<f64> {
+        max_diagonal_standard_deviation([
+            self.matrix[(3, 3)],
+            self.matrix[(4, 4)],
+            self.matrix[(5, 5)],
+        ])
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasurementBuffer<T> {
     measurements: Vec<T>,
@@ -261,6 +333,7 @@ pub struct GnssMeasurement {
     pub position_world: Point3<f64>,
     pub horizontal_accuracy: Option<f64>,
     pub vertical_accuracy: Option<f64>,
+    pub position_covariance: Option<PositionCovariance>,
 }
 
 impl GnssMeasurement {
@@ -270,6 +343,7 @@ impl GnssMeasurement {
             position_world,
             horizontal_accuracy: None,
             vertical_accuracy: None,
+            position_covariance: None,
         }
     }
 
@@ -283,6 +357,11 @@ impl GnssMeasurement {
         self
     }
 
+    pub fn with_position_covariance(mut self, position_covariance: PositionCovariance) -> Self {
+        self.position_covariance = Some(position_covariance);
+        self
+    }
+
     pub fn search_radius(&self, config: &PriorConfig) -> f64 {
         let accuracy_radius = [self.horizontal_accuracy, self.vertical_accuracy]
             .into_iter()
@@ -290,7 +369,12 @@ impl GnssMeasurement {
             .fold(None, |max_value: Option<f64>, value| {
                 Some(max_value.map_or(value, |current| current.max(value)))
             })
-            .map(|accuracy| accuracy * config.confidence_multiplier)
+            .or_else(|| {
+                self.position_covariance
+                    .as_ref()
+                    .and_then(PositionCovariance::max_standard_deviation)
+            })
+            .map(|sigma| sigma * config.confidence_multiplier)
             .unwrap_or(config.default_radius);
         accuracy_radius.max(config.min_radius)
     }
@@ -316,6 +400,7 @@ pub struct PosePriorMeasurement {
     pub timestamp: Timestamp,
     pub pose: Pose,
     pub translation_sigma: Option<f64>,
+    pub pose_covariance: Option<PoseCovariance>,
 }
 
 impl PosePriorMeasurement {
@@ -324,12 +409,30 @@ impl PosePriorMeasurement {
             timestamp,
             pose,
             translation_sigma: None,
+            pose_covariance: None,
         }
     }
 
     pub fn with_translation_sigma(mut self, translation_sigma: f64) -> Self {
         self.translation_sigma = Some(translation_sigma);
         self
+    }
+
+    pub fn with_pose_covariance(mut self, pose_covariance: PoseCovariance) -> Self {
+        self.pose_covariance = Some(pose_covariance);
+        self
+    }
+
+    pub fn search_radius(&self, config: &PriorConfig) -> f64 {
+        self.translation_sigma
+            .or_else(|| {
+                self.pose_covariance
+                    .as_ref()
+                    .and_then(PoseCovariance::max_translation_standard_deviation)
+            })
+            .map(|sigma| sigma * config.confidence_multiplier)
+            .unwrap_or(config.default_radius)
+            .max(config.min_radius)
     }
 }
 
@@ -341,12 +444,10 @@ impl TimedMeasurement for PosePriorMeasurement {
 
 impl LocalizationPriorProvider for PosePriorMeasurement {
     fn localization_prior(&self, config: &PriorConfig) -> Option<LocalizationPrior> {
-        let radius = self
-            .translation_sigma
-            .map(|sigma| sigma * config.confidence_multiplier)
-            .unwrap_or(config.default_radius)
-            .max(config.min_radius);
-        Some(LocalizationPrior::from_pose(self.pose.clone(), radius))
+        Some(LocalizationPrior::from_pose(
+            self.pose.clone(),
+            self.search_radius(config),
+        ))
     }
 }
 
@@ -389,5 +490,23 @@ fn timestamp_distance(left: Timestamp, right: Timestamp) -> Option<TimeDelta> {
         left.duration_since(right)
     } else {
         right.duration_since(left)
+    }
+}
+
+fn max_diagonal_standard_deviation<I>(variances: I) -> Option<f64>
+where
+    I: IntoIterator<Item = f64>,
+{
+    variances
+        .into_iter()
+        .filter_map(standard_deviation_from_variance)
+        .max_by(f64::total_cmp)
+}
+
+fn standard_deviation_from_variance(variance: f64) -> Option<f64> {
+    if variance.is_finite() && variance >= 0.0 {
+        Some(variance.sqrt())
+    } else {
+        None
     }
 }

@@ -120,8 +120,9 @@ Each frame is localized/tracked first. If tracking succeeds, the pipeline create
 - `Timestamp`, `TimeDelta`, and `Timed<T>` represent timestamped measurements and frame metadata.
 - `TimedFrame`, `TimedPose`, and `FrameTimestampIndex` attach sensor time to existing core frames and poses without changing the core `Frame` or `Pose` structs.
 - `MeasurementBuffer<T>` keeps timestamped measurements ordered and finds the latest or nearest measurement for a frame timestamp.
-- `GnssMeasurement` stores a world-position prior plus optional horizontal/vertical accuracy.
-- `PosePriorMeasurement` stores an external pose prior, such as odometry, VIO, or a previous fused estimate.
+- `PositionCovariance`, `PoseCovariance`, and `PoseCovarianceMatrix` preserve uncertainty for future fusion backends while still supporting simple radius-based localization priors.
+- `GnssMeasurement` stores a world-position prior plus optional horizontal/vertical accuracy or 3D position covariance.
+- `PosePriorMeasurement` stores an external pose prior, such as odometry, VIO, or a previous fused estimate, plus optional translation sigma or 6D pose covariance.
 - `ImuMeasurement` stores angular velocity, linear acceleration, and optional orientation.
 - `LocalizationPriorProvider` converts GNSS or pose-prior measurements into `LocalizationPrior`; with `MeasurementBuffer`, the nearest external prior can drive radius submap selection in localization/tracking.
 - `PriorConfig` controls default radius, minimum radius, and confidence multiplier.

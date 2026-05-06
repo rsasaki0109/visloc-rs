@@ -3,8 +3,8 @@ use visloc_core::geometry::Pose;
 use visloc_core::types::Frame;
 use visloc_fusion::{
     FrameTimestampIndex, GnssMeasurement, ImuMeasurement, LocalizationPriorProvider,
-    MeasurementBuffer, PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedFrame,
-    TimedMeasurement, TimedPose, Timestamp,
+    MeasurementBuffer, PoseCovariance, PosePriorMeasurement, PositionCovariance, PriorConfig,
+    TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp,
 };
 
 #[test]
@@ -116,6 +116,30 @@ fn gnss_measurement_uses_default_and_min_radius() {
 }
 
 #[test]
+fn position_covariance_reports_axis_standard_deviations() {
+    let covariance = PositionCovariance::from_standard_deviations(Vector3::new(2.0, 3.0, 4.0));
+
+    assert_eq!(covariance.horizontal_standard_deviation(), Some(3.0));
+    assert_eq!(covariance.vertical_standard_deviation(), Some(4.0));
+    assert_eq!(covariance.max_standard_deviation(), Some(4.0));
+}
+
+#[test]
+fn gnss_measurement_can_derive_radius_from_position_covariance() {
+    let config = PriorConfig {
+        default_radius: 100.0,
+        min_radius: 1.0,
+        confidence_multiplier: 2.0,
+    };
+    let gnss = GnssMeasurement::new(Timestamp::from_nanoseconds(1), Point3::origin())
+        .with_position_covariance(PositionCovariance::from_standard_deviations(Vector3::new(
+            1.0, 4.0, 2.0,
+        )));
+
+    assert_eq!(gnss.search_radius(&config), 8.0);
+}
+
+#[test]
 fn pose_prior_measurement_builds_pose_localization_prior() {
     let config = PriorConfig::default();
     let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-1.0, 0.0, 0.0));
@@ -128,6 +152,35 @@ fn pose_prior_measurement_builds_pose_localization_prior() {
     assert!(prior.pose.is_some());
     assert_eq!(prior.radius, Some(6.0));
     assert_eq!(prior.center_world(), Some(Point3::new(1.0, 0.0, 0.0)));
+}
+
+#[test]
+fn pose_covariance_reports_translation_and_rotation_uncertainty() {
+    let covariance = PoseCovariance::from_translation_rotation_standard_deviations(
+        Vector3::new(1.0, 2.0, 3.0),
+        Vector3::new(0.01, 0.02, 0.03),
+    );
+
+    assert_eq!(covariance.max_translation_standard_deviation(), Some(3.0));
+    assert_eq!(covariance.max_rotation_standard_deviation(), Some(0.03));
+}
+
+#[test]
+fn pose_prior_measurement_can_derive_radius_from_pose_covariance() {
+    let config = PriorConfig {
+        default_radius: 50.0,
+        min_radius: 1.0,
+        confidence_multiplier: 3.0,
+    };
+    let measurement = PosePriorMeasurement::new(Timestamp::from_nanoseconds(2), Pose::identity())
+        .with_pose_covariance(
+            PoseCovariance::from_translation_rotation_standard_deviations(
+                Vector3::new(1.0, 2.0, 4.0),
+                Vector3::zeros(),
+            ),
+        );
+
+    assert_eq!(measurement.search_radius(&config), 12.0);
 }
 
 #[test]
