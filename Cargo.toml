@@ -1,0 +1,45 @@
+[package]
+name = "visloc-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+description = "Visual localization foundation library using SfM / visual maps."
+readme = "README.md"
+documentation = "https://docs.rs/visloc-rs"
+keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
+categories = ["computer-vision", "science::robotics"]
+
+[workspace]
+members = [
+    "crates/core",
+    "crates/vision",
+    "crates/io",
+    "pipelines/localization",
+    "pipelines/tracking",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+description = "Visual localization foundation library using SfM / visual maps."
+readme = "README.md"
+documentation = "https://docs.rs/visloc-rs"
+keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
+categories = ["computer-vision", "science::robotics"]
+
+[workspace.dependencies]
+nalgebra = "0.33"
+rand = { version = "0.8", features = ["small_rng"] }
+thiserror = "1"
+
+[dependencies]
+nalgebra = { workspace = true }
+visloc-core = { path = "crates/core", version = "0.1.0" }
+visloc-vision = { path = "crates/vision", version = "0.1.0" }
+visloc-io = { path = "crates/io", version = "0.1.0" }
+visloc-localization = { path = "pipelines/localization", version = "0.1.0" }
+visloc-tracking = { path = "pipelines/tracking", version = "0.1.0" }

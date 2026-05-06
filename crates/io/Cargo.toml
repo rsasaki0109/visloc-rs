@@ -1,0 +1,18 @@
+[package]
+name = "visloc-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+readme.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+nalgebra = { workspace = true }
+thiserror = { workspace = true }
+visloc-core = { path = "../core", version = "0.1.0" }
+visloc-vision = { path = "../vision", version = "0.1.0" }
+visloc-localization = { path = "../../pipelines/localization", version = "0.1.0" }
