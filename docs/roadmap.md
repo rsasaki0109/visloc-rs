@@ -156,6 +156,7 @@ Focus:
 - Stable core type semantics
 - Stable map-provider and feature/matcher/pose-estimator traits
 - Clear crate boundaries
+- API stability tiers for core types, replaceable algorithm traits, and experimental composition layers
 - Public benchmark scripts
 - Compatibility notes for COLMAP/SfM map formats
 - Migration guides for earlier versions

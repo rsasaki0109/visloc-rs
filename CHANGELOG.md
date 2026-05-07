@@ -16,6 +16,11 @@ All notable changes to `visloc-rs` will be documented here.
 - Localization pipeline over query descriptors and visual-map landmarks.
 - Map providers, submap selectors, priors, localization quality gates, and map validation reports.
 - Tracking skeleton with motion models, state transitions, and sequence examples.
+- Local mapping skeleton with keyframe policy, local map windows, landmark candidates, linear triangulation, staged map updates, and local refinement hooks.
+- Online SLAM MVP composition that combines tracking and local mapping without loop closure or global optimization.
+- COLMAP text model writer for saving reusable sparse maps.
+- Sensor-fusion foundation crate with timestamped frames/poses, GNSS/pose/IMU measurements, covariance types, measurement buffers, frame prior sources, and external localization-prior tracking hooks.
+- GNSS-prior tracking example showing radius-submap narrowing before localization.
 - Examples, integration tests, design docs, local check script, and GitHub Actions CI.
 
 ### Not Yet Implemented
@@ -25,4 +30,4 @@ All notable changes to `visloc-rs` will be documented here.
 - Loop closure.
 - Dense mapping.
 - Full bundle adjustment.
-- Visual-inertial or GNSS fusion.
+- Full tightly-coupled visual-inertial or GNSS/INS fusion.
