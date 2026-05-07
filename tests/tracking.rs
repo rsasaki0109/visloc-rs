@@ -234,6 +234,19 @@ fn pose_trajectory_keeps_successful_tracking_poses() {
 }
 
 #[test]
+fn pose_trajectory_exports_csv() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
+    let trajectory = PoseTrajectory::from_tracking_results(&[successful_tracking_result(42, pose)]);
+
+    let csv = trajectory.to_csv();
+
+    assert!(csv.starts_with(
+        "frame_id,camera_center_x,camera_center_y,camera_center_z,qw,qx,qy,qz,tx,ty,tz,state,event,inlier_count,inlier_ratio,reprojection_error\n"
+    ));
+    assert!(csv.contains("42,1,2,3,1,0,0,0,-1,-2,-3,Tracking,Tracked,0,0,0\n"));
+}
+
+#[test]
 fn tracker_enters_tracking_after_successful_localization() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());

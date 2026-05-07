@@ -1,7 +1,7 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
-use visloc_rs::{LocalizationPipeline, Tracker, TrackingConfig};
+use visloc_rs::{LocalizationPipeline, PoseTrajectory, Tracker, TrackingConfig};
 
 fn main() {
     let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
@@ -60,7 +60,8 @@ fn main() {
         relocalize_frame,
     ];
 
-    for tracking in tracker.track_frames(&frames, &map) {
+    let results = tracker.track_frames(&frames, &map);
+    for tracking in &results {
         println!(
             "frame={} state={:?} event={:?} success={} failures={} prior={} reason={:?} map_landmarks={} descriptors={} inliers={} ratio={:.3}",
             tracking.frame_id,
@@ -76,6 +77,15 @@ fn main() {
             tracking.localization.inlier_ratio,
         );
     }
+
+    let trajectory = PoseTrajectory::from_tracking_results(&results);
+    println!(
+        "trajectory poses={} path_length={:.3} mean_reprojection_error={:?}",
+        trajectory.len(),
+        trajectory.total_path_length(),
+        trajectory.mean_reprojection_error(),
+    );
+    println!("trajectory_csv:\n{}", trajectory.to_csv());
 
     let stats = tracker.stats();
     println!(
