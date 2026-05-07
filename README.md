@@ -183,7 +183,10 @@ Run the tracking skeleton example:
 
 ```bash
 cargo run --example track_sequence_dummy
+cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo
 ```
+
+With `--out-dir`, the tracking example writes `tracking_report.html` for frame-by-frame state transitions and `trajectory_report.html` for the estimated pose path.
 
 Run a GNSS-prior tracking example that narrows the visual map before localization:
 

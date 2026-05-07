@@ -9,10 +9,12 @@ use visloc_rs::core::types::{
     LocalizationResult, LocalizationSuccess, VisualMap,
 };
 use visloc_rs::{
+    tracking_results_to_html_report, write_tracking_results_html_report,
     ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
     InMemoryMapProvider, LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel,
     PoseTrajectory, PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig,
-    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrajectoryAlignment,
+    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
+    TrajectoryAlignment,
 };
 
 #[derive(Debug, Clone)]
@@ -619,6 +621,66 @@ fn pose_trajectory_error_summary_handles_no_matching_frames() {
     assert_eq!(summary.mean_translation_error, None);
     assert_eq!(summary.rmse_translation_error, None);
     assert_eq!(summary.max_translation_error, None);
+}
+
+#[test]
+fn tracking_stats_can_be_rebuilt_from_results() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let mut success = successful_tracking_result(10, pose);
+    success.event = TrackingEvent::Initialized;
+    success.used_pose_prior = true;
+    let mut lost = failed_tracking_result(11);
+    lost.state = TrackingState::Lost;
+    lost.event = TrackingEvent::Lost;
+
+    let stats = TrackingStats::from_results(&[success, lost]);
+
+    assert_eq!(stats.first_frame_id, Some(10));
+    assert_eq!(stats.last_frame_id, Some(11));
+    assert_eq!(stats.frame_count, 2);
+    assert_eq!(stats.successful_frame_count, 1);
+    assert_eq!(stats.failed_frame_count, 1);
+    assert_eq!(stats.lost_count, 1);
+    assert_eq!(stats.pose_prior_used_count, 1);
+    assert_eq!(stats.success_rate(), 0.5);
+}
+
+#[test]
+fn tracking_results_export_html_report() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let mut initialized = successful_tracking_result(10, pose);
+    initialized.event = TrackingEvent::Initialized;
+    initialized.used_pose_prior = true;
+    let mut lost = failed_tracking_result(11);
+    lost.state = TrackingState::Lost;
+    lost.event = TrackingEvent::Lost;
+
+    let html = tracking_results_to_html_report(&[initialized, lost]);
+
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("visloc-rs tracking report"));
+    assert!(html.contains("<span class=\"label\">Frames</span><span class=\"value\">2</span>"));
+    assert!(html
+        .contains("<span class=\"label\">Success rate</span><span class=\"value\">50.0%</span>"));
+    assert!(html.contains("NoDescriptorMatches"));
+    assert!(html.contains("Lost"));
+    assert!(html.contains("<svg viewBox=\"0 0 900 190\""));
+}
+
+#[test]
+fn tracking_results_write_html_report() {
+    let path = std::env::temp_dir().join(format!(
+        "visloc-rs-tracking-report-{}.html",
+        std::process::id()
+    ));
+    let result = failed_tracking_result(12);
+
+    write_tracking_results_html_report(&[result], &path).unwrap();
+    let html = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+
+    assert!(html.contains("Frame-by-frame sequence-localization state"));
+    assert!(html.contains("failed"));
 }
 
 #[test]

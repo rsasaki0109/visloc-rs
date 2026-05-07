@@ -1,9 +1,23 @@
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
-use visloc_rs::{LocalizationPipeline, PoseTrajectory, Tracker, TrackingConfig};
+use visloc_rs::{
+    write_tracking_results_html_report, LocalizationPipeline, PoseTrajectory, Tracker,
+    TrackingConfig,
+};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let output_dir = parse_output_dir(&mut args);
+    if !args.is_empty() {
+        eprintln!("usage: cargo run --example track_sequence_dummy -- [--out-dir <dir>]");
+        std::process::exit(2);
+    }
+
     let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
     let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
     let points = [
@@ -104,4 +118,31 @@ fn main() {
         stats.relocalization_count,
         stats.tracking_quality_gate_failure_count,
     );
+
+    if let Some(output_dir) = output_dir {
+        fs::create_dir_all(&output_dir)?;
+        let report_path = output_dir.join("tracking_report.html");
+        let trajectory_report_path = output_dir.join("trajectory_report.html");
+        write_tracking_results_html_report(&results, &report_path)?;
+        trajectory.write_html_report(&trajectory_report_path)?;
+        println!(
+            "wrote tracking exports: report={} trajectory_report={}",
+            report_path.display(),
+            trajectory_report_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
+    let output_flag_index = args.iter().position(|arg| arg == "--out-dir")?;
+    if output_flag_index + 1 >= args.len() {
+        eprintln!("--out-dir requires a directory path");
+        std::process::exit(2);
+    }
+
+    let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
+    args.remove(output_flag_index);
+    Some(output_dir)
 }
