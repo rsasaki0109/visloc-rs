@@ -54,8 +54,9 @@ pub use visloc_core::types::{
 };
 pub use visloc_fusion::{
     FrameTimestampIndex, GnssMeasurement, ImuMeasurement, LocalizationPriorProvider,
-    MeasurementBuffer, PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedFrame,
-    TimedMeasurement, TimedPose, Timestamp,
+    MeasurementBuffer, PoseCovariance, PoseCovarianceMatrix, PosePriorMeasurement,
+    PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose,
+    Timestamp,
 };
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
