@@ -78,11 +78,18 @@ fn main() {
 
     let stats = tracker.stats();
     println!(
-        "stats frames={} ok={} failed={} lost={} relocalized={}",
+        "stats first={:?} last={:?} frames={} ok={} failed={} success_rate={:.3} prior_rate={:.3} inlier_ratio={:.3} mean_inliers={:.1} lost={} relocalized={} quality_gate_failures={}",
+        stats.first_frame_id,
+        stats.last_frame_id,
         stats.frame_count,
         stats.successful_frame_count,
         stats.failed_frame_count,
+        stats.success_rate(),
+        stats.pose_prior_usage_rate(),
+        stats.overall_inlier_ratio(),
+        stats.mean_inliers_per_successful_frame(),
         stats.lost_count,
         stats.relocalization_count,
+        stats.tracking_quality_gate_failure_count,
     );
 }

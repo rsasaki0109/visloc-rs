@@ -70,7 +70,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `TrackingResult`: localization result plus state transition, pose prior, map provider stats, map landmark count convenience field, prior-use diagnostics, and optional tracking failure reason
 - `TrackingConfig`: controls `min_successive_failures_to_lost`, optional `last_pose_candidate_radius`, and optional `max_pose_prior_translation_error`
 - `TrackingFailureReason`: records tracking-layer quality gate failures such as pose jumps that exceed the motion-prior translation threshold
-- `TrackingStats`: frame, success/failure, lost, and relocalization counters
+- `TrackingStats`: sequence diagnostics including first/last frame id, success/failure counts, lost/relocalization counts, pose-prior usage, tracking quality-gate failures, and aggregate inlier/correspondence totals with rate helpers
 - `MotionModel`: predicts an optional pose prior for the next frame
 - `ConstantPoseMotionModel`: default motion model that reuses the last successful pose
 - `ConstantVelocityMotionModel`: extrapolates the next camera center from the two latest successful poses
