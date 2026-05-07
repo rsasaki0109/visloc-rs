@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use visloc_core::types::{Frame, Keyframe, Observation, VisualMap};
+use nalgebra::Point2;
+use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::{
     AppliedMapUpdate, KeyframePolicy, LandmarkCandidate, LinearTriangulator, LocalMappingPipeline,
@@ -18,6 +19,9 @@ use visloc_mapping::{
 };
 use visloc_tracking::{
     ConstantPoseMotionModel, FrameLocalizer, MotionModel, Tracker, TrackingConfig, TrackingResult,
+};
+use visloc_vision::two_view::{
+    EightPointEssentialMatrixEstimator, RelativePoseEstimator, TwoViewCorrespondence,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +69,234 @@ pub struct LoopClosureCandidate {
     pub keyframe_observation_count: usize,
     pub shared_landmark_ratio: f64,
     pub score: f64,
+    /// `true` while the candidate has not been rejected by an explicit
+    /// verifier. When [`verify_loop_closure_candidates`] runs, this becomes
+    /// `LoopClosureVerification::verified`.
     pub geometrically_verified: bool,
+    /// Optional verifier output. `Some` when [`verify_loop_closure_candidates`]
+    /// (or another caller) has explicitly run a [`LoopClosureVerifier`] over
+    /// the candidate; `None` when only the shared-landmark heuristic has
+    /// produced the candidate.
+    pub verification: Option<LoopClosureVerification>,
+}
+
+/// Configuration thresholds for [`EssentialMatrixLoopClosureVerifier`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoopClosureVerifierConfig {
+    /// Minimum number of inliers an essential-matrix RANSAC fit must produce
+    /// for the candidate to be accepted.
+    pub min_inliers: usize,
+    /// Minimum inlier ratio (inliers / supplied correspondences) for
+    /// acceptance.
+    pub min_inlier_ratio: f64,
+    /// Maximum allowed mean Sampson distance, in normalized image-plane units
+    /// (multiply by focal length to convert to pixels).
+    pub max_mean_sampson_error: f64,
+}
+
+impl Default for LoopClosureVerifierConfig {
+    fn default() -> Self {
+        Self {
+            min_inliers: 8,
+            min_inlier_ratio: 0.5,
+            max_mean_sampson_error: 5.0e-3,
+        }
+    }
+}
+
+/// Reason a [`LoopClosureVerification`] rejected a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopClosureVerificationFailureReason {
+    /// Fewer correspondences than the verifier's minimum requirement.
+    InsufficientCorrespondences,
+    /// The essential-matrix RANSAC failed to find a consensus.
+    EssentialEstimationFailed,
+    /// The RANSAC produced fewer inliers than `min_inliers`.
+    TooFewInliers,
+    /// The inlier ratio fell below `min_inlier_ratio`.
+    LowInlierRatio,
+    /// Mean Sampson error exceeded `max_mean_sampson_error`.
+    HighSampsonError,
+}
+
+/// Output of running a [`LoopClosureVerifier`] on a candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopClosureVerification {
+    pub verified: bool,
+    pub correspondence_count: usize,
+    pub inlier_count: usize,
+    pub inlier_ratio: f64,
+    pub mean_sampson_error: f64,
+    pub score: f64,
+    pub failure_reason: Option<LoopClosureVerificationFailureReason>,
+}
+
+/// Trait for a loop-closure candidate verifier. Concrete implementations
+/// receive 2D-2D correspondences in pixel coordinates between the older
+/// keyframe (`previous_xy`) and the current/query frame (`current_xy`) plus
+/// the shared camera intrinsics.
+pub trait LoopClosureVerifier {
+    fn verify(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+    ) -> LoopClosureVerification;
+}
+
+/// Geometric verifier that runs the classical essential-matrix RANSAC from
+/// `visloc-vision::two_view` on the supplied correspondences and reports
+/// inlier statistics, mean Sampson error, and a combined score.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EssentialMatrixLoopClosureVerifier {
+    pub estimator: RelativePoseEstimator<EightPointEssentialMatrixEstimator>,
+    pub config: LoopClosureVerifierConfig,
+}
+
+impl EssentialMatrixLoopClosureVerifier {
+    pub fn new(
+        estimator: RelativePoseEstimator<EightPointEssentialMatrixEstimator>,
+        config: LoopClosureVerifierConfig,
+    ) -> Self {
+        Self { estimator, config }
+    }
+}
+
+impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
+    fn verify(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+    ) -> LoopClosureVerification {
+        let correspondence_count = correspondences.len();
+        let minimum = self
+            .estimator
+            .ransac
+            .estimator
+            .min_correspondences
+            .max(self.config.min_inliers);
+        if correspondence_count < minimum {
+            return LoopClosureVerification {
+                verified: false,
+                correspondence_count,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                mean_sampson_error: f64::INFINITY,
+                score: 0.0,
+                failure_reason: Some(
+                    LoopClosureVerificationFailureReason::InsufficientCorrespondences,
+                ),
+            };
+        }
+
+        let Some(report) = self.estimator.ransac.estimate(correspondences, camera) else {
+            return LoopClosureVerification {
+                verified: false,
+                correspondence_count,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                mean_sampson_error: f64::INFINITY,
+                score: 0.0,
+                failure_reason: Some(
+                    LoopClosureVerificationFailureReason::EssentialEstimationFailed,
+                ),
+            };
+        };
+
+        let inlier_count = report.inliers.len();
+        let inlier_ratio = inlier_count as f64 / correspondence_count as f64;
+        let mean_sampson = report.mean_sampson_error;
+
+        let mut failure_reason = None;
+        if inlier_count < self.config.min_inliers {
+            failure_reason = Some(LoopClosureVerificationFailureReason::TooFewInliers);
+        } else if inlier_ratio < self.config.min_inlier_ratio {
+            failure_reason = Some(LoopClosureVerificationFailureReason::LowInlierRatio);
+        } else if mean_sampson > self.config.max_mean_sampson_error {
+            failure_reason = Some(LoopClosureVerificationFailureReason::HighSampsonError);
+        }
+        let verified = failure_reason.is_none();
+        let inlier_volume = inlier_ratio * inlier_count as f64;
+        let denominator = mean_sampson.max(1.0e-6);
+        let score = if denominator.is_finite() {
+            inlier_volume / denominator
+        } else {
+            inlier_volume
+        };
+        LoopClosureVerification {
+            verified,
+            correspondence_count,
+            inlier_count,
+            inlier_ratio,
+            mean_sampson_error: mean_sampson,
+            score,
+            failure_reason,
+        }
+    }
+}
+
+/// Build pixel-space two-view correspondences for a loop-closure candidate
+/// from the current frame's tracking inliers and an older keyframe's
+/// observations. Each shared landmark id contributes one correspondence
+/// `(keyframe_xy, current_xy)`.
+pub fn correspondences_for_loop_candidate(
+    current_frame: &Frame,
+    current_inlier_query_indices: &[usize],
+    current_inlier_landmark_ids: &[u64],
+    keyframe: &Keyframe,
+) -> Vec<TwoViewCorrespondence> {
+    let keyframe_lookup: HashMap<u64, Point2<f64>> = keyframe
+        .observations
+        .iter()
+        .map(|observation| (observation.landmark_id, observation.xy))
+        .collect();
+    let mut correspondences = Vec::new();
+    for (query_index, landmark_id) in current_inlier_query_indices
+        .iter()
+        .zip(current_inlier_landmark_ids.iter())
+    {
+        let Some(keyframe_xy) = keyframe_lookup.get(landmark_id) else {
+            continue;
+        };
+        let Some(query_xy) = current_frame.keypoints.get(*query_index) else {
+            continue;
+        };
+        correspondences.push(TwoViewCorrespondence {
+            previous_xy: *keyframe_xy,
+            current_xy: *query_xy,
+        });
+    }
+    correspondences
+}
+
+/// Run `verifier` on every supplied candidate, mutating each
+/// [`LoopClosureCandidate`] in place: `verification` is set to the verifier
+/// output and `geometrically_verified` is replaced with
+/// `LoopClosureVerification::verified`. Candidates whose matched keyframe is
+/// no longer in `map` are left untouched.
+pub fn verify_loop_closure_candidates<V>(
+    candidates: &mut [LoopClosureCandidate],
+    current_frame: &Frame,
+    tracking: &TrackingResult,
+    map: &VisualMap,
+    camera: &Camera,
+    verifier: &V,
+) where
+    V: LoopClosureVerifier,
+{
+    for candidate in candidates.iter_mut() {
+        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
+            continue;
+        };
+        let correspondences = correspondences_for_loop_candidate(
+            current_frame,
+            &tracking.localization.inlier_query_indices,
+            &tracking.localization.inlier_landmark_ids,
+            keyframe,
+        );
+        let verification = verifier.verify(&correspondences, camera);
+        candidate.geometrically_verified = verification.verified;
+        candidate.verification = Some(verification);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,9 +472,9 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
     output.push_str(&online_slam_loop_svg(&samples, &loop_candidates));
     output.push_str("</section>\n");
     output.push_str("<section class=\"panel\">\n<h2>Loop Closure Candidates</h2>\n");
-    output.push_str("<table><thead><tr><th>query frame</th><th>matched keyframe</th><th>shared landmarks</th><th>ratio</th><th>score</th><th>verified</th></tr></thead><tbody>\n");
+    output.push_str("<table><thead><tr><th>query frame</th><th>matched keyframe</th><th>shared landmarks</th><th>ratio</th><th>score</th><th>verified</th><th>verifier inliers</th><th>verifier inlier ratio</th><th>mean Sampson</th><th>verifier score</th><th>failure</th></tr></thead><tbody>\n");
     if loop_candidates.is_empty() {
-        output.push_str("<tr><td colspan=\"6\">no loop candidates reported</td></tr>\n");
+        output.push_str("<tr><td colspan=\"11\">no loop candidates reported</td></tr>\n");
     }
     for candidate in &loop_candidates {
         let verified_class = if candidate.geometrically_verified {
@@ -251,14 +482,40 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
         } else {
             "warn"
         };
-        let verified_text = if candidate.geometrically_verified {
-            "yes"
-        } else {
-            "candidate"
+        let verified_text = match candidate.verification.as_ref() {
+            Some(verification) if verification.verified => "yes",
+            Some(_) => "rejected",
+            None => "candidate",
         };
+        let (inlier_count_text, inlier_ratio_text, mean_text, verifier_score_text, failure_text) =
+            if let Some(verification) = candidate.verification.as_ref() {
+                (
+                    verification.inlier_count.to_string(),
+                    format!("{:.3}", verification.inlier_ratio),
+                    if verification.mean_sampson_error.is_finite() {
+                        format!("{:.4}", verification.mean_sampson_error)
+                    } else {
+                        "n/a".to_string()
+                    },
+                    format!("{:.3}", verification.score),
+                    verification
+                        .failure_reason
+                        .as_ref()
+                        .map(format_loop_closure_failure_reason)
+                        .unwrap_or_else(|| "&mdash;".to_string()),
+                )
+            } else {
+                (
+                    "&mdash;".to_string(),
+                    "&mdash;".to_string(),
+                    "&mdash;".to_string(),
+                    "&mdash;".to_string(),
+                    "&mdash;".to_string(),
+                )
+            };
         let _ = writeln!(
             output,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td class=\"{}\">{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td class=\"{}\">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             candidate.query_frame_id,
             candidate.matched_keyframe_id,
             candidate.shared_landmark_count,
@@ -266,10 +523,29 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
             candidate.score,
             verified_class,
             verified_text,
+            inlier_count_text,
+            inlier_ratio_text,
+            mean_text,
+            verifier_score_text,
+            failure_text,
         );
     }
     output.push_str("</tbody></table>\n</section>\n</main>\n</body>\n</html>\n");
     output
+}
+
+fn format_loop_closure_failure_reason(reason: &LoopClosureVerificationFailureReason) -> String {
+    match reason {
+        LoopClosureVerificationFailureReason::InsufficientCorrespondences => {
+            "insufficient correspondences".to_string()
+        }
+        LoopClosureVerificationFailureReason::EssentialEstimationFailed => {
+            "essential RANSAC failed".to_string()
+        }
+        LoopClosureVerificationFailureReason::TooFewInliers => "too few inliers".to_string(),
+        LoopClosureVerificationFailureReason::LowInlierRatio => "low inlier ratio".to_string(),
+        LoopClosureVerificationFailureReason::HighSampsonError => "high Sampson error".to_string(),
+    }
 }
 
 pub fn write_online_slam_results_html_report(
@@ -556,6 +832,7 @@ fn detect_loop_closure_candidates(
                 shared_landmark_ratio,
                 score,
                 geometrically_verified: true,
+                verification: None,
             })
         })
         .collect::<Vec<_>>();

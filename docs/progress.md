@@ -4,13 +4,15 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 60%**
+**Deep VO / Loop Close completion: 65%**
 
 This score means the file-backed two-view match VO path drives a short tracking
-sequence end-to-end and a classical essential-matrix RANSAC frontend recovers
+sequence end-to-end, a classical essential-matrix RANSAC frontend recovers
 metric relative pose (rotation + translation direction) from the same external
-correspondences, but the project has not yet reached a real learned-frontend
-sequence demo or full loop-closure backend.
+correspondences, and loop-closure candidates can now be geometrically verified
+through that classical frontend with explicit inlier / inlier-ratio /
+Sampson-error diagnostics. The project has not yet reached a real
+learned-frontend sequence demo or pose-graph optimization.
 
 Completed pieces:
 
@@ -31,6 +33,17 @@ Completed pieces:
   caller-supplied translation scale; `two_view_vo_compare` runs the new
   frontend alongside the flow-only adapter on the same synthetic three-frame
   sequence to make the difference visible.
+- A classical-geometry `EssentialMatrixLoopClosureVerifier` consumes the
+  same essential-matrix RANSAC and reports `LoopClosureVerification` with
+  inlier count, inlier ratio, mean Sampson error, score, and an enumerated
+  failure reason. `verify_loop_closure_candidates` plus
+  `correspondences_for_loop_candidate` plumb shared landmarks from the
+  current frame's tracking inliers and an older keyframe's observations into
+  the verifier without requiring `OnlineSlamPipeline` callers to change.
+- `online_slam_loop_candidate_with_verifier_dummy` example demonstrates the
+  end-to-end candidate detection plus geometric verification path on a
+  12-landmark synthetic sequence; the loop HTML/SVG report now surfaces the
+  verifier's inlier counts, mean Sampson error, score, and failure reasons.
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
@@ -50,7 +63,7 @@ Remaining pieces before this milestone is considered complete:
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 60%
+Deep VO / Loop Close completion: 65%
 ```
 
 Increase the number only when a runnable example, test, or documented API

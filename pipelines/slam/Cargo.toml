@@ -16,10 +16,12 @@ categories.workspace = true
 all-features = true
 
 [dependencies]
+nalgebra = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-localization = { path = "../localization", version = "0.1.0" }
 visloc-mapping = { path = "../mapping", version = "0.1.0" }
 visloc-tracking = { path = "../tracking", version = "0.1.0" }
+visloc-vision = { path = "../../crates/vision", version = "0.1.0" }
 
 [dev-dependencies]
 nalgebra = { workspace = true }
