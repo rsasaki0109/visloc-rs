@@ -139,7 +139,10 @@ pub use visloc_vision::pnp::{
 pub use visloc_vision::ransac::{PnPRansac, RansacReport, RobustPoseEstimator};
 
 mod two_view_vo;
-pub use two_view_vo::{TwoViewMatchVisualOdometryConfig, TwoViewMatchVisualOdometryFrontend};
+pub use two_view_vo::{
+    EssentialMatrixVisualOdometryConfig, EssentialMatrixVisualOdometryFrontend,
+    TwoViewMatchVisualOdometryConfig, TwoViewMatchVisualOdometryFrontend,
+};
 
 /// Common imports for applications using the default visual-localization stack.
 ///
@@ -160,7 +163,8 @@ pub mod prelude {
         ConstantPoseMotionModel, ConstantVelocityMotionModel, CornerFeatureConfig,
         CornerFeatureError, CornerFeatureExtractor, Correspondence2D3D, CorrespondenceBuildError,
         CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher, DescriptorMatch,
-        DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
+        DescriptorProvider, DltPnP, EssentialMatrixVisualOdometryConfig,
+        EssentialMatrixVisualOdometryFrontend, FeatureExtractor, FeatureSet, FeatureSetError,
         FixedLandmarkSelector, FixedLandmarkSubmapSelector, FnFeatureExtractor, Frame, FrameId,
         FrameLocalizationResult, FrameLocalizer, FramePriorSource, FramePriorSyncEvaluationConfig,
         FramePriorSyncEvaluationFailure, FramePriorSyncEvaluationResult, FramePriorSyncSummary,

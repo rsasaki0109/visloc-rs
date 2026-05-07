@@ -6,6 +6,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `visloc-vision::two_view` module with `TwoViewCorrespondence`, a Hartley-normalized 8-point `EightPointEssentialMatrixEstimator`, Sampson-distance-scored `EssentialRansac`, 4-fold `recover_relative_pose` cheirality decomposition, and a composing `RelativePoseEstimator` that applies a caller-supplied translation scale.
+- `EssentialMatrixVisualOdometryFrontend` and `EssentialMatrixVisualOdometryConfig` expose the classical-geometry pipeline as a `VisualOdometryFrontend`, returning a full SE3 relative pose plus inlier/Sampson diagnostics and supporting per-pair translation-scale overrides.
+- `two_view_vo_compare` example runs the classical essential-matrix frontend alongside the flow-only `TwoViewMatchVisualOdometryFrontend` on the same synthetic three-frame sequence to make the structural difference visible; with `--out-dir` it writes a per-frame text report.
+- Deep VO / loop-close milestone completion increased to 60% to reflect the classical two-view geometry pipeline and demo.
 - `track_sequence_with_two_view_match_vo_prior` example reads per-pair two-view match text files with `read_two_view_matches_txt`, populates `TwoViewMatchVisualOdometryFrontend`, and feeds the resulting VO priors through `track_frame_with_localization_prior_submap_provider` for a short three-frame sequence; with `--out-dir` it writes the generated input match files plus a per-frame text report.
 - `tests/two_view_vo.rs` now covers the file-backed two-view match VO path across consecutive frame pairs to guard the `read_two_view_matches_txt` → `TwoViewMatchVisualOdometryFrontend` → `VisualOdometryPriorProvider` chain.
 - Documentation now clarifies that `VisualOdometryEstimate::mean_reprojection_error` stores the mean inlier two-view flow residual in pixels when produced by `TwoViewMatchVisualOdometryFrontend`, and recommends labeling the field as `mean_flow_residual_px` in user-facing logs/reports for that case.
