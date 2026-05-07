@@ -10,6 +10,7 @@ localize_colmap_text
 localize_colmap_provider
 localize_from_files
 localize_sequence_from_files
+localize_with_corner_extractor
 localize_with_extractor_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
