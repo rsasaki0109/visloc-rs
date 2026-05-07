@@ -281,6 +281,7 @@ scripts/check.sh          local fmt/clippy/test/doc gate
 scripts/run_examples.sh   runs all user-facing examples
 scripts/check_trajectory_evaluation.sh checks trajectory metric thresholds and exports
 scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
+scripts/check_timestamped_gnss_image_demo_outputs.sh checks timestamped image GNSS sync outputs
 scripts/package_check.sh  checks package metadata and crate contents
 .github/ISSUE_TEMPLATE/   bug report and feature request templates
 .github/pull_request_template.md PR checklist
