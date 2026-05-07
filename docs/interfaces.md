@@ -118,10 +118,11 @@ Each frame is localized/tracked first. If tracking succeeds, the pipeline create
 `visloc-fusion` provides loose-coupling inputs for automotive and UAV localization without implementing a full GNSS/INS backend:
 
 - `Timestamp`, `TimeDelta`, and `Timed<T>` represent timestamped measurements and frame metadata.
+- `MeasurementBuffer<T>` keeps timestamped measurements ordered and finds the latest or nearest measurement for a frame timestamp.
 - `GnssMeasurement` stores a world-position prior plus optional horizontal/vertical accuracy.
 - `PosePriorMeasurement` stores an external pose prior, such as odometry, VIO, or a previous fused estimate.
 - `ImuMeasurement` stores angular velocity, linear acceleration, and optional orientation.
-- `LocalizationPriorProvider` converts GNSS or pose-prior measurements into `LocalizationPrior`, which can drive radius submap selection in localization/tracking.
+- `LocalizationPriorProvider` converts GNSS or pose-prior measurements into `LocalizationPrior`; with `MeasurementBuffer`, the nearest external prior can drive radius submap selection in localization/tracking.
 - `PriorConfig` controls default radius, minimum radius, and confidence multiplier.
 
 This is intentionally loose coupling: visual-only users do not need fusion types, and robotics users can plug in their own GNSS/INS/VIO stack while still guiding visual localization.

@@ -53,8 +53,8 @@ pub use visloc_core::types::{
     PoseEstimationFailureDiagnostics, PoseEstimationFailureReason, PoseEstimatorDiagnostics,
 };
 pub use visloc_fusion::{
-    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, PosePriorMeasurement, PriorConfig,
-    TimeDelta, Timed, TimedMeasurement, Timestamp,
+    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, MeasurementBuffer,
+    PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedMeasurement, Timestamp,
 };
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
