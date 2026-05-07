@@ -143,10 +143,12 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 - `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, loop-closure candidates, and current map sizes
 - `online_slam_results_to_html_report`: creates a self-contained HTML/SVG report showing tracked camera centers and loop-candidate edges, including verifier inlier/Sampson columns when `LoopClosureCandidate::verification` is populated
 - `LoopClosureVerifier`: trait for swappable loop-closure verifiers operating on pixel-space `TwoViewCorrespondence`s plus camera intrinsics
-- `EssentialMatrixLoopClosureVerifier`: classical-geometry verifier built on `visloc-vision::two_view`'s essential-matrix RANSAC, with `LoopClosureVerifierConfig` thresholds for `min_inliers`, `min_inlier_ratio`, and `max_mean_sampson_error`
-- `LoopClosureVerification` and `LoopClosureVerificationFailureReason`: verifier outputs covering inlier count, inlier ratio, mean Sampson error, combined score, and an enumerated failure reason
+- `EssentialMatrixLoopClosureVerifier`: classical-geometry verifier built on `visloc-vision::two_view`'s essential-matrix RANSAC, with `LoopClosureVerifierConfig` thresholds for `min_inliers`, `min_inlier_ratio`, `max_mean_sampson_error`, and a `default_translation_scale` applied when recovering the relative pose
+- `LoopClosureVerification` and `LoopClosureVerificationFailureReason`: verifier outputs covering inlier count, inlier ratio, mean Sampson error, combined score, recovered relative pose (`Option<SE3>`), and an enumerated failure reason
+- `LoopClosureConstraint`: pose-graph-style constraint built from a verified candidate (`from_keyframe_id`, `to_keyframe_id`, `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`, `score`); intentionally a data type without a solver so downstream optimization layers can adopt it incrementally
 - `correspondences_for_loop_candidate`: helper that builds two-view correspondences for a candidate from the current frame's tracking inliers and the older keyframe's observations
 - `verify_loop_closure_candidates`: convenience helper that runs a `LoopClosureVerifier` over a slice of `LoopClosureCandidate`s in place, updating each `verification` and `geometrically_verified` field
+- `loop_closure_constraints_from_candidates`: builds `LoopClosureConstraint`s from a slice of candidates, silently dropping unverified candidates and those without a recovered relative pose
 
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
 

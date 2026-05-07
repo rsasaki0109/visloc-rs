@@ -6,6 +6,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `LoopClosureConstraint` plus `LoopClosureConstraint::from_verified_candidate` and `loop_closure_constraints_from_candidates` lift a verified `LoopClosureCandidate` into a stand-alone constraint (`from_keyframe_id`, `to_keyframe_id`, `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`, `score`) ready for a future pose-graph backend; no solver lives in the crate yet.
+- `LoopClosureVerification` now carries the recovered `relative_pose: Option<SE3>` so callers can build constraints (or apply their own scale) without re-running the essential-matrix RANSAC, and `LoopClosureVerifierConfig` adds `default_translation_scale` for caller-controlled translation scale.
+- `online_slam_loop_candidate_with_verifier_dummy` example now also builds and prints `LoopClosureConstraint`s; the loop HTML/SVG report renders a separate Loop Closure Constraints table next to the candidate diagnostics.
+- Deep VO / loop-close milestone completion increased to 70% to reflect the constraint type and verifier-output enrichment.
 - `LoopClosureVerifier` trait, `EssentialMatrixLoopClosureVerifier`, `LoopClosureVerifierConfig`, `LoopClosureVerification`, and `LoopClosureVerificationFailureReason` give loop-closure candidates a classical-geometry verifier built on `visloc-vision::two_view`'s essential-matrix RANSAC, with explicit inlier count, inlier ratio, mean Sampson error, score, and enumerated failure reasons.
 - `correspondences_for_loop_candidate` and `verify_loop_closure_candidates` plumb the current frame's tracking inliers and an older keyframe's observations into the verifier without forcing `OnlineSlamPipeline` callers to change their constructors.
 - `LoopClosureCandidate.verification` now optionally carries the verifier's output; `geometrically_verified` is updated in place when the verifier rejects a candidate.

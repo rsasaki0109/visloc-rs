@@ -6,10 +6,10 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
-    verify_loop_closure_candidates, write_online_slam_results_html_report,
-    EssentialMatrixLoopClosureVerifier, LocalMappingPipeline, LocalizationPipeline,
-    LoopClosureConfig, LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline, Tracker,
-    TrackingConfig,
+    loop_closure_constraints_from_candidates, verify_loop_closure_candidates,
+    write_online_slam_results_html_report, EssentialMatrixLoopClosureVerifier,
+    LocalMappingPipeline, LocalizationPipeline, LoopClosureConfig, LoopClosureConstraint,
+    LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline, Tracker, TrackingConfig,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,16 +48,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    // Frame 30 sits at world center (0.2, 0, 0.1) while keyframe 10 is at the
+    // origin. The two-view geometry recovers translation up to scale; use the
+    // truth magnitude here so the constraint's translation is metric.
+    let translation_scale = 0.2_f64.hypot(0.1);
     let verifier = EssentialMatrixLoopClosureVerifier {
         config: LoopClosureVerifierConfig {
             min_inliers: 8,
             min_inlier_ratio: 0.6,
             max_mean_sampson_error: 5.0e-3,
+            default_translation_scale: translation_scale,
         },
         ..Default::default()
     };
 
     let mut results = Vec::new();
+    let mut constraints: Vec<LoopClosureConstraint> = Vec::new();
     for frame in [&first_frame, &outbound_frame, &return_frame] {
         let mut result = slam.process_frame(frame, []);
         if !result.loop_closure_candidates.is_empty() {
@@ -70,18 +76,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &verifier,
             );
         }
+        let frame_constraints =
+            loop_closure_constraints_from_candidates(&result.loop_closure_candidates);
         println!(
-            "frame={} tracking={} keyframes={} loop_candidates={}",
+            "frame={} tracking={} keyframes={} loop_candidates={} loop_constraints={}",
             result.tracking.frame_id,
             result.tracking_succeeded(),
             result.map_keyframe_count,
-            result.loop_closure_candidates.len()
+            result.loop_closure_candidates.len(),
+            frame_constraints.len(),
         );
         for candidate in &result.loop_closure_candidates {
             print_candidate(candidate);
         }
+        for constraint in &frame_constraints {
+            print_constraint(constraint);
+        }
+        constraints.extend(frame_constraints);
         results.push(result);
     }
+
+    println!("total_loop_constraints={}", constraints.len());
 
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
@@ -180,6 +195,26 @@ fn print_candidate(candidate: &visloc_rs::LoopClosureCandidate) {
         mean_sampson,
         verifier_score,
         failure,
+    );
+}
+
+fn print_constraint(constraint: &LoopClosureConstraint) {
+    let translation = constraint.relative_pose.translation;
+    let rotation_axis_angle = constraint.relative_pose.rotation.scaled_axis();
+    println!(
+        "loop_constraint from_keyframe={} to_keyframe={} inliers={} inlier_ratio={:.3} mean_sampson={:.4} score={:.3} relative_translation=[{:.3}, {:.3}, {:.3}] relative_rotation_axis_angle=[{:.3}, {:.3}, {:.3}]",
+        constraint.from_keyframe_id,
+        constraint.to_keyframe_id,
+        constraint.inlier_count,
+        constraint.inlier_ratio,
+        constraint.mean_sampson_error,
+        constraint.score,
+        translation.x,
+        translation.y,
+        translation.z,
+        rotation_axis_angle.x,
+        rotation_axis_angle.y,
+        rotation_axis_angle.z,
     );
 }
 
