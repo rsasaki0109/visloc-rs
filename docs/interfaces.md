@@ -146,6 +146,8 @@ Each frame is localized/tracked first. If tracking succeeds, the pipeline create
 - `LocalizationPriorProvider` converts GNSS or pose-prior measurements into `LocalizationPrior`; with `MeasurementBuffer`, the nearest external prior can drive radius submap selection in localization/tracking.
 - `PriorConfig` controls default radius, minimum radius, and confidence multiplier.
 
+`visloc_io::sensors::read_gnss_measurements_txt` loads simple whitespace- or comma-separated GNSS prior logs in the form `timestamp_ns x y z [horizontal_accuracy] [vertical_accuracy]`. This keeps public automotive/UAV demos file-backed without choosing a full GNSS/INS format yet.
+
 This is intentionally loose coupling: visual-only users do not need fusion types, and robotics users can plug in their own GNSS/INS/VIO stack while still guiding visual localization.
 
 ## Descriptor Store Text Format

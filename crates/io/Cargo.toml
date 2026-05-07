@@ -23,3 +23,4 @@ thiserror = { workspace = true }
 visloc-core = { path = "../core", version = "0.1.0" }
 visloc-vision = { path = "../vision", version = "0.1.0" }
 visloc-localization = { path = "../../pipelines/localization", version = "0.1.0" }
+visloc-fusion = { path = "../../pipelines/fusion", version = "0.1.0" }

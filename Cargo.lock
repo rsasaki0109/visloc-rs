@@ -378,6 +378,7 @@ dependencies = [
  "nalgebra",
  "thiserror",
  "visloc-core",
+ "visloc-fusion",
  "visloc-localization",
  "visloc-vision",
 ]
