@@ -111,14 +111,16 @@ pub use visloc_mapping::{
     TriangulationFailureReason, Triangulator,
 };
 pub use visloc_slam::{
-    correspondences_for_loop_candidate, loop_closure_constraints_from_candidates,
-    online_slam_results_to_html_report, relative_world_to_camera, verify_loop_closure_candidates,
+    correspondences_2d3d_for_loop_candidate, correspondences_for_loop_candidate,
+    loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
+    relative_world_to_camera, verify_loop_closure_candidates, verify_loop_closure_candidates_pnp,
     write_online_slam_results_html_report, EssentialMatrixLoopClosureVerifier,
     LoopClosureCandidate, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerification,
     LoopClosureVerificationFailureReason, LoopClosureVerifier, LoopClosureVerifierConfig,
-    OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphEdge,
-    PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep, PoseGraphSe3Config,
-    PoseGraphSe3IterationStats, PoseGraphSe3Result, RobustKernel,
+    OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PnPLoopClosureVerifier,
+    PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError,
+    PoseGraphOptimizationStep, PoseGraphSe3Config, PoseGraphSe3IterationStats, PoseGraphSe3Result,
+    RobustKernel,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,

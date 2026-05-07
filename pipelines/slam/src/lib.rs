@@ -21,6 +21,8 @@ use visloc_mapping::{
 use visloc_tracking::{
     ConstantPoseMotionModel, FrameLocalizer, MotionModel, Tracker, TrackingConfig, TrackingResult,
 };
+use visloc_vision::pnp::Correspondence2D3D;
+use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 use visloc_vision::two_view::{
     EightPointEssentialMatrixEstimator, RelativePoseEstimator, TwoViewCorrespondence,
 };
@@ -133,15 +135,24 @@ pub struct LoopClosureVerification {
     pub correspondence_count: usize,
     pub inlier_count: usize,
     pub inlier_ratio: f64,
+    /// Mean Sampson distance reported by an essential-matrix verifier (in
+    /// normalized image-plane units). `0.0` and uninformative for
+    /// PnP-based verifiers; check [`Self::mean_reprojection_error_px`] in
+    /// that case.
     pub mean_sampson_error: f64,
     pub score: f64,
     pub failure_reason: Option<LoopClosureVerificationFailureReason>,
     /// Recovered relative pose (older keyframe → current frame) when the
     /// underlying RANSAC converged. `Some` even for non-`verified` cases as
     /// long as a pose was recovered; consult `verified` and `failure_reason`
-    /// before consuming. Translation is scaled by
-    /// [`LoopClosureVerifierConfig::default_translation_scale`].
+    /// before consuming. For essential-matrix verifiers the translation is
+    /// scaled by [`LoopClosureVerifierConfig::default_translation_scale`];
+    /// for PnP verifiers it is in metric units (the keyframe pose carries
+    /// the world scale).
     pub relative_pose: Option<SE3>,
+    /// Mean reprojection error (in pixels) reported by a PnP-based verifier.
+    /// `None` for essential-matrix verifiers.
+    pub mean_reprojection_error_px: Option<f64>,
 }
 
 /// Trait for a loop-closure candidate verifier. Concrete implementations
@@ -199,6 +210,7 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
                     LoopClosureVerificationFailureReason::InsufficientCorrespondences,
                 ),
                 relative_pose: None,
+                mean_reprojection_error_px: None,
             };
         }
 
@@ -218,6 +230,7 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
                     LoopClosureVerificationFailureReason::EssentialEstimationFailed,
                 ),
                 relative_pose: None,
+                mean_reprojection_error_px: None,
             };
         };
 
@@ -250,8 +263,181 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
             score,
             failure_reason,
             relative_pose: Some(relative_pose.previous_to_current),
+            mean_reprojection_error_px: None,
         }
     }
+}
+
+/// Configuration thresholds for [`PnPLoopClosureVerifier`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PnPLoopClosureVerifierConfig {
+    /// Minimum number of PnP RANSAC inliers an accepted candidate must
+    /// produce.
+    pub min_inliers: usize,
+    /// Minimum inlier ratio (inliers / supplied 2D-3D correspondences).
+    pub min_inlier_ratio: f64,
+    /// Maximum allowed mean reprojection error (in pixels) for inliers.
+    pub max_mean_reprojection_error_px: f64,
+}
+
+impl Default for PnPLoopClosureVerifierConfig {
+    fn default() -> Self {
+        Self {
+            min_inliers: 8,
+            min_inlier_ratio: 0.5,
+            max_mean_reprojection_error_px: 4.0,
+        }
+    }
+}
+
+/// PnP-based loop-closure verifier. Reuses the project's [`PnPRansac`] to
+/// re-localize the current frame against landmarks observed by the candidate
+/// keyframe; if the recovered absolute pose has enough inliers and a small
+/// reprojection error, the candidate is accepted and the relative pose
+/// (older keyframe → current frame) is filled into
+/// [`LoopClosureVerification::relative_pose`].
+///
+/// Compared with [`EssentialMatrixLoopClosureVerifier`], this verifier:
+///
+/// - operates on 2D-3D correspondences instead of 2D-2D, so it checks the
+///   candidate against the actual 3D map structure rather than two-view
+///   geometry alone;
+/// - returns metric translations (the keyframe pose carries the world scale),
+///   so callers do not need to plug in a separate `default_translation_scale`;
+/// - is preferable when the older keyframe has sufficient triangulated
+///   landmarks visible from the current frame, which is the common case for
+///   in-map loop closures.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PnPLoopClosureVerifier<R = PnPRansac> {
+    pub ransac: R,
+    pub config: PnPLoopClosureVerifierConfig,
+}
+
+impl<R> PnPLoopClosureVerifier<R>
+where
+    R: RobustPoseEstimator,
+{
+    pub fn new(ransac: R, config: PnPLoopClosureVerifierConfig) -> Self {
+        Self { ransac, config }
+    }
+
+    /// Run PnP RANSAC on `correspondences` and turn the report into a
+    /// [`LoopClosureVerification`]. `keyframe_pose` is the older keyframe's
+    /// stored `world_to_camera` SE3; the recovered current-frame pose is
+    /// composed with its inverse to populate `relative_pose`.
+    pub fn verify(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        keyframe_pose: &Pose,
+        camera: &Camera,
+    ) -> LoopClosureVerification {
+        let correspondence_count = correspondences.len();
+        if correspondence_count < self.config.min_inliers {
+            return LoopClosureVerification {
+                verified: false,
+                correspondence_count,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                mean_sampson_error: 0.0,
+                score: 0.0,
+                failure_reason: Some(
+                    LoopClosureVerificationFailureReason::InsufficientCorrespondences,
+                ),
+                relative_pose: None,
+                mean_reprojection_error_px: None,
+            };
+        }
+
+        let Some(report) = self.ransac.estimate(correspondences, camera) else {
+            return LoopClosureVerification {
+                verified: false,
+                correspondence_count,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                mean_sampson_error: 0.0,
+                score: 0.0,
+                failure_reason: Some(
+                    LoopClosureVerificationFailureReason::EssentialEstimationFailed,
+                ),
+                relative_pose: None,
+                mean_reprojection_error_px: None,
+            };
+        };
+
+        let inlier_count = report.inliers.len();
+        let inlier_ratio = inlier_count as f64 / correspondence_count as f64;
+        let mean_reprojection_error_px = report.mean_reprojection_error;
+
+        let mut failure_reason = None;
+        if inlier_count < self.config.min_inliers {
+            failure_reason = Some(LoopClosureVerificationFailureReason::TooFewInliers);
+        } else if inlier_ratio < self.config.min_inlier_ratio {
+            failure_reason = Some(LoopClosureVerificationFailureReason::LowInlierRatio);
+        } else if mean_reprojection_error_px > self.config.max_mean_reprojection_error_px {
+            failure_reason = Some(LoopClosureVerificationFailureReason::HighSampsonError);
+        }
+        let verified = failure_reason.is_none();
+        let inlier_volume = inlier_ratio * inlier_count as f64;
+        let denominator = mean_reprojection_error_px.max(1.0e-6);
+        let score = if denominator.is_finite() {
+            inlier_volume / denominator
+        } else {
+            inlier_volume
+        };
+        let relative_pose = report
+            .pose
+            .world_to_camera
+            .compose(&keyframe_pose.world_to_camera.inverse());
+        LoopClosureVerification {
+            verified,
+            correspondence_count,
+            inlier_count,
+            inlier_ratio,
+            mean_sampson_error: 0.0,
+            score,
+            failure_reason,
+            relative_pose: Some(relative_pose),
+            mean_reprojection_error_px: Some(mean_reprojection_error_px),
+        }
+    }
+}
+
+/// Build 2D-3D correspondences for a loop-closure candidate by intersecting
+/// the current frame's tracking inliers with the older keyframe's observed
+/// landmarks. Each shared landmark contributes one entry pairing the current
+/// frame's pixel observation with the landmark's world position.
+pub fn correspondences_2d3d_for_loop_candidate(
+    current_frame: &Frame,
+    current_inlier_query_indices: &[usize],
+    current_inlier_landmark_ids: &[u64],
+    keyframe: &Keyframe,
+    map: &VisualMap,
+) -> Vec<Correspondence2D3D> {
+    let keyframe_landmark_ids: HashSet<u64> = keyframe
+        .observations
+        .iter()
+        .map(|observation| observation.landmark_id)
+        .collect();
+    let mut correspondences = Vec::new();
+    for (query_index, landmark_id) in current_inlier_query_indices
+        .iter()
+        .zip(current_inlier_landmark_ids.iter())
+    {
+        if !keyframe_landmark_ids.contains(landmark_id) {
+            continue;
+        }
+        let Some(landmark) = map.landmarks.get(landmark_id) else {
+            continue;
+        };
+        let Some(query_xy) = current_frame.keypoints.get(*query_index) else {
+            continue;
+        };
+        correspondences.push(Correspondence2D3D {
+            point2d: *query_xy,
+            point3d: landmark.position,
+        });
+    }
+    correspondences
 }
 
 /// Build pixel-space two-view correspondences for a loop-closure candidate
@@ -371,6 +557,42 @@ pub fn verify_loop_closure_candidates<V>(
             keyframe,
         );
         let verification = verifier.verify(&correspondences, camera);
+        candidate.geometrically_verified = verification.verified;
+        candidate.verification = Some(verification);
+    }
+}
+
+/// Run a PnP-based [`PnPLoopClosureVerifier`] on every supplied candidate.
+/// For each candidate this builds 2D-3D correspondences via
+/// [`correspondences_2d3d_for_loop_candidate`], runs PnP RANSAC on them, and
+/// updates `verification` and `geometrically_verified` in place.
+/// Candidates whose matched keyframe is no longer in `map`, or whose stored
+/// keyframe pose is missing, are left untouched.
+pub fn verify_loop_closure_candidates_pnp<R>(
+    candidates: &mut [LoopClosureCandidate],
+    current_frame: &Frame,
+    tracking: &TrackingResult,
+    map: &VisualMap,
+    camera: &Camera,
+    verifier: &PnPLoopClosureVerifier<R>,
+) where
+    R: RobustPoseEstimator,
+{
+    for candidate in candidates.iter_mut() {
+        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
+            continue;
+        };
+        let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
+            continue;
+        };
+        let correspondences = correspondences_2d3d_for_loop_candidate(
+            current_frame,
+            &tracking.localization.inlier_query_indices,
+            &tracking.localization.inlier_landmark_ids,
+            keyframe,
+            map,
+        );
+        let verification = verifier.verify(&correspondences, keyframe_pose, camera);
         candidate.geometrically_verified = verification.verified;
         candidate.verification = Some(verification);
     }
@@ -549,7 +771,7 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
     output.push_str(&online_slam_loop_svg(&samples, &loop_candidates));
     output.push_str("</section>\n");
     output.push_str("<section class=\"panel\">\n<h2>Loop Closure Candidates</h2>\n");
-    output.push_str("<table><thead><tr><th>query frame</th><th>matched keyframe</th><th>shared landmarks</th><th>ratio</th><th>score</th><th>verified</th><th>verifier inliers</th><th>verifier inlier ratio</th><th>mean Sampson</th><th>verifier score</th><th>failure</th></tr></thead><tbody>\n");
+    output.push_str("<table><thead><tr><th>query frame</th><th>matched keyframe</th><th>shared landmarks</th><th>ratio</th><th>score</th><th>verified</th><th>verifier inliers</th><th>verifier inlier ratio</th><th>mean error</th><th>verifier score</th><th>failure</th></tr></thead><tbody>\n");
     if loop_candidates.is_empty() {
         output.push_str("<tr><td colspan=\"11\">no loop candidates reported</td></tr>\n");
     }
@@ -569,7 +791,9 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
                 (
                     verification.inlier_count.to_string(),
                     format!("{:.3}", verification.inlier_ratio),
-                    if verification.mean_sampson_error.is_finite() {
+                    if let Some(px) = verification.mean_reprojection_error_px {
+                        format!("{px:.4} px")
+                    } else if verification.mean_sampson_error.is_finite() {
                         format!("{:.4}", verification.mean_sampson_error)
                     } else {
                         "n/a".to_string()
