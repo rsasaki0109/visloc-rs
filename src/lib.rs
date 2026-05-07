@@ -62,11 +62,13 @@ pub use visloc_localization::{
 };
 pub use visloc_mapping::{
     AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason, KeyframePolicy,
-    KeyframePolicyConfig, LandmarkCandidate, LandmarkCandidateId, LandmarkCandidateObservation,
+    KeyframePolicyConfig, LandmarkCandidate, LandmarkCandidateId, LandmarkCandidateMappingFailure,
+    LandmarkCandidateMappingFailureReason, LandmarkCandidateObservation,
     LandmarkCandidateValidationConfig, LandmarkCandidateValidationIssue,
     LandmarkCandidateValidationReport, LinearTriangulator, LocalMapWindow, LocalMapWindowConfig,
-    MapUpdateValidationIssue, MapUpdateValidationReport, SimpleKeyframePolicy, StagedMapUpdate,
-    TriangulatedLandmark, TriangulationConfig, TriangulationFailureReason, Triangulator,
+    LocalMappingPipeline, LocalMappingResult, MapUpdateValidationIssue, MapUpdateValidationReport,
+    SimpleKeyframePolicy, StagedMapUpdate, TriangulatedLandmark, TriangulationConfig,
+    TriangulationFailureReason, Triangulator,
 };
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,

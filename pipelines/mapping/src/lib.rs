@@ -234,6 +234,15 @@ impl StagedMapUpdate {
         self
     }
 
+    pub fn stage_triangulated_landmark(&mut self, triangulated: TriangulatedLandmark) {
+        let mut landmark = triangulated.landmark;
+        let observations = std::mem::take(&mut landmark.observations);
+        self.stage_landmark(landmark);
+        for observation in observations {
+            self.stage_observation(observation);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.keyframes.is_empty() && self.landmarks.is_empty() && self.observations.is_empty()
     }
@@ -938,4 +947,156 @@ fn mean(values: &[f64]) -> f64 {
     } else {
         values.iter().sum::<f64>() / values.len() as f64
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMappingPipeline<K = SimpleKeyframePolicy, T = LinearTriangulator> {
+    pub keyframe_policy: K,
+    pub triangulator: T,
+    pub local_window_config: LocalMapWindowConfig,
+    pub candidate_validation_config: LandmarkCandidateValidationConfig,
+}
+
+impl Default for LocalMappingPipeline<SimpleKeyframePolicy, LinearTriangulator> {
+    fn default() -> Self {
+        Self {
+            keyframe_policy: SimpleKeyframePolicy::default(),
+            triangulator: LinearTriangulator::default(),
+            local_window_config: LocalMapWindowConfig::default(),
+            candidate_validation_config: LandmarkCandidateValidationConfig::default(),
+        }
+    }
+}
+
+impl<K, T> LocalMappingPipeline<K, T>
+where
+    K: KeyframePolicy,
+    T: Triangulator,
+{
+    pub fn new(
+        keyframe_policy: K,
+        triangulator: T,
+        local_window_config: LocalMapWindowConfig,
+        candidate_validation_config: LandmarkCandidateValidationConfig,
+    ) -> Self {
+        Self {
+            keyframe_policy,
+            triangulator,
+            local_window_config,
+            candidate_validation_config,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.keyframe_policy.reset();
+    }
+
+    pub fn process_keyframe<I>(
+        &mut self,
+        map: &VisualMap,
+        tracking_result: &TrackingResult,
+        keyframe: Keyframe,
+        candidates: I,
+    ) -> LocalMappingResult
+    where
+        I: IntoIterator<Item = LandmarkCandidate>,
+    {
+        let keyframe_decision = self.keyframe_policy.evaluate(tracking_result);
+        let mut staged_update = StagedMapUpdate::new();
+        let mut triangulated_landmarks = Vec::new();
+        let mut candidate_failures = Vec::new();
+
+        if !keyframe_decision.selected {
+            let local_window = LocalMapWindow::from_recent(map, &self.local_window_config);
+            let staged_update_validation = staged_update.validate_against(map);
+            return LocalMappingResult {
+                keyframe_decision,
+                local_window,
+                staged_update,
+                triangulated_landmarks,
+                candidate_failures,
+                staged_update_validation,
+            };
+        }
+
+        staged_update.stage_keyframe(keyframe.clone());
+
+        let mut working_map = map.clone();
+        working_map.keyframes.insert(keyframe.frame.id, keyframe);
+        let local_window = LocalMapWindow::from_anchor(
+            &working_map,
+            tracking_result.frame_id,
+            &self.local_window_config,
+        );
+
+        for candidate in candidates {
+            let validation = candidate.validate_against(
+                &working_map,
+                Some(&local_window),
+                &self.candidate_validation_config,
+            );
+            if !validation.is_valid() {
+                candidate_failures.push(LandmarkCandidateMappingFailure {
+                    candidate_id: candidate.id,
+                    reason: LandmarkCandidateMappingFailureReason::CandidateValidationFailed(
+                        validation,
+                    ),
+                });
+                continue;
+            }
+
+            match self.triangulator.triangulate(&candidate, &working_map) {
+                Ok(triangulated) => {
+                    staged_update.stage_triangulated_landmark(triangulated.clone());
+                    triangulated_landmarks.push(triangulated);
+                }
+                Err(reason) => {
+                    candidate_failures.push(LandmarkCandidateMappingFailure {
+                        candidate_id: candidate.id,
+                        reason: LandmarkCandidateMappingFailureReason::TriangulationFailed(reason),
+                    });
+                }
+            }
+        }
+
+        let staged_update_validation = staged_update.validate_against(map);
+        LocalMappingResult {
+            keyframe_decision,
+            local_window,
+            staged_update,
+            triangulated_landmarks,
+            candidate_failures,
+            staged_update_validation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMappingResult {
+    pub keyframe_decision: KeyframeDecision,
+    pub local_window: LocalMapWindow,
+    pub staged_update: StagedMapUpdate,
+    pub triangulated_landmarks: Vec<TriangulatedLandmark>,
+    pub candidate_failures: Vec<LandmarkCandidateMappingFailure>,
+    pub staged_update_validation: MapUpdateValidationReport,
+}
+
+impl LocalMappingResult {
+    pub fn is_ready_to_apply(&self) -> bool {
+        self.keyframe_decision.selected
+            && self.staged_update_validation.is_valid()
+            && self.candidate_failures.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandmarkCandidateMappingFailure {
+    pub candidate_id: LandmarkCandidateId,
+    pub reason: LandmarkCandidateMappingFailureReason,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LandmarkCandidateMappingFailureReason {
+    CandidateValidationFailed(LandmarkCandidateValidationReport),
+    TriangulationFailed(TriangulationFailureReason),
 }
