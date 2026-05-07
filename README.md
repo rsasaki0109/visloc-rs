@@ -27,22 +27,22 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
 
 The preview above is README-safe SVG. A real screen recording or benchmark clip can be added later under `docs/assets/` and linked from this section.
 
-## Image Processing Demo
+## Sparse Map Localization Demo
 
 <p align="center">
-  <img src="docs/assets/image-processing-demo.gif" alt="Image processing visual localization demo: raw image, detected features, and estimated pose overlay" width="86%">
+  <img src="docs/assets/image-processing-demo.gif" alt="Sparse visual map localization demo with query features, 3D map points, and estimated camera pose" width="92%">
 </p>
 
-This demo uses real raster image data. The example renders and reads `examples/data/query_frame.png`, detects high-contrast local patch windows from grayscale pixels, builds patch descriptors from image crops, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC.
+This demo uses real raster image data and an actual `VisualMap`. The example renders and reads `examples/data/query_frame.png`, detects high-contrast local patch windows from grayscale pixels, builds patch descriptors from image crops, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC. The README asset shows the query features beside the sparse 3D map points and estimated camera frustum.
 
 ```bash
 cargo run --example localize_image_processing_demo
 ```
 
-Processed localization overlay:
+Sparse map localization overlay:
 
 <p align="center">
-  <img src="docs/assets/image-processing-demo.png" alt="Detected image features and estimated visual localization pose overlay" width="72%">
+  <img src="docs/assets/image-processing-demo.png" alt="Query feature detections beside sparse visual map points and estimated camera pose" width="92%">
 </p>
 
 ## Scope
