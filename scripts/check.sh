@@ -2,6 +2,7 @@
 set -eu
 
 cargo fmt --all -- --check
+sh scripts/check_msrv.sh
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 sh scripts/check_docs_links.sh
