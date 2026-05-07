@@ -192,6 +192,7 @@ Run a GNSS-prior tracking example that narrows the visual map before localizatio
 
 ```bash
 cargo run --example track_sequence_with_gnss_prior
+cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo
 ```
 
 Run the full local quality gate:
