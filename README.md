@@ -92,6 +92,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 See [docs/demo_strategy.md](docs/demo_strategy.md) for the automotive/UAV demo plan.
 See [docs/colmap_compatibility.md](docs/colmap_compatibility.md) for supported COLMAP/SfM map formats and current limitations.
 See [docs/migration.md](docs/migration.md) for the pre-1.0 to v1.0 API migration guidance.
+See [docs/publishing.md](docs/publishing.md) for workspace publish order and package checks.
 
 ## Minimal Example
 
@@ -198,6 +199,7 @@ docs/api_stability.md     public API stability policy toward v1.0
 docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/migration.md         pre-1.0 to v1.0 API migration guidance
+docs/publishing.md        workspace publish order and package checks
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building
 docs/assets/south-building-localization.png public-data localization visualization
