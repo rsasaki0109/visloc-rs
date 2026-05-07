@@ -42,7 +42,7 @@ cargo run --example localize_image_file_demo
 Query image used by the demo:
 
 <p align="center">
-  <img src="examples/data/query_frame.svg" alt="Synthetic query image used by the image-backed localization demo" width="72%">
+  <img src="examples/data/query_frame.svg" alt="Visual localization query image with 2D feature observations" width="72%">
 </p>
 
 ## Scope
