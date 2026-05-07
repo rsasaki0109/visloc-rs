@@ -9,6 +9,7 @@ Initial experiments should stay focused on map-based localization:
 - IO-backed localization with `cargo run --example localize_colmap_text`
 - File-based sequence localization with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
+- Tracking report export with `cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo`
 - Trajectory evaluation with `cargo run --example evaluate_trajectory_dummy`
 - KITTI file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti`
 - TUM file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval`

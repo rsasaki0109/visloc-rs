@@ -1384,6 +1384,37 @@ pub struct TrackingStats {
 }
 
 impl TrackingStats {
+    pub fn from_results(results: &[TrackingResult]) -> Self {
+        let mut stats = Self::default();
+        for result in results {
+            if stats.first_frame_id.is_none() {
+                stats.first_frame_id = Some(result.frame_id);
+            }
+            stats.last_frame_id = Some(result.frame_id);
+            stats.frame_count += 1;
+            if result.localization.success {
+                stats.successful_frame_count += 1;
+            } else {
+                stats.failed_frame_count += 1;
+            }
+            if result.event == TrackingEvent::Lost {
+                stats.lost_count += 1;
+            }
+            if result.event == TrackingEvent::Relocalized {
+                stats.relocalization_count += 1;
+            }
+            if result.used_pose_prior {
+                stats.pose_prior_used_count += 1;
+            }
+            if result.tracking_failure_reason.is_some() {
+                stats.tracking_quality_gate_failure_count += 1;
+            }
+            stats.total_inlier_count += result.localization.inlier_count;
+            stats.total_correspondence_count += result.localization.correspondence_count;
+        }
+        stats
+    }
+
     pub fn success_rate(&self) -> f64 {
         ratio(self.successful_frame_count, self.frame_count)
     }
@@ -1403,6 +1434,195 @@ impl TrackingStats {
     pub fn mean_inliers_per_successful_frame(&self) -> f64 {
         ratio(self.total_inlier_count, self.successful_frame_count)
     }
+}
+
+pub fn tracking_results_to_html_report(results: &[TrackingResult]) -> String {
+    let stats = TrackingStats::from_results(results);
+    let mut output = String::new();
+    output.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    output.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    output.push_str("<title>visloc-rs tracking report</title>\n");
+    output.push_str("<style>");
+    output.push_str(
+        "body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f7f9;color:#182026}\
+         main{max-width:1120px;margin:0 auto;padding:28px}\
+         h1{font-size:24px;margin:0 0 8px}\
+         h2{font-size:18px;margin:0 0 10px}\
+         .sub{margin:0 0 22px;color:#52616b}\
+         .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}\
+         .metric{background:white;border:1px solid #dde3ea;border-radius:8px;padding:12px}\
+         .label{display:block;font-size:12px;color:#65727e}\
+         .value{display:block;font-size:22px;font-weight:700;margin-top:4px}\
+         .panel{background:white;border:1px solid #dde3ea;border-radius:8px;padding:16px;margin-top:14px}\
+         table{width:100%;border-collapse:collapse;font-size:13px}\
+         th,td{text-align:right;border-bottom:1px solid #e7ecf0;padding:6px 8px;vertical-align:top}\
+         th:first-child,td:first-child,th:nth-child(3),td:nth-child(3),th:nth-child(4),td:nth-child(4),th:last-child,td:last-child{text-align:left}\
+         .ok{color:#198754;font-weight:700}.fail{color:#c23b3b;font-weight:700}\
+         svg{width:100%;height:auto;display:block}",
+    );
+    output.push_str("</style>\n</head>\n<body>\n<main>\n");
+    output.push_str("<h1>visloc-rs tracking report</h1>\n");
+    output.push_str("<p class=\"sub\">Frame-by-frame sequence-localization state, failures, priors, and inlier diagnostics.</p>\n");
+    output.push_str("<section class=\"grid\">\n");
+    push_metric_card(&mut output, "Frames", &stats.frame_count.to_string());
+    push_metric_card(
+        &mut output,
+        "Success rate",
+        &format!("{:.1}%", stats.success_rate() * 100.0),
+    );
+    push_metric_card(
+        &mut output,
+        "Failed frames",
+        &stats.failed_frame_count.to_string(),
+    );
+    push_metric_card(&mut output, "Lost events", &stats.lost_count.to_string());
+    push_metric_card(
+        &mut output,
+        "Relocalized",
+        &stats.relocalization_count.to_string(),
+    );
+    push_metric_card(
+        &mut output,
+        "Mean inliers",
+        &format!("{:.1}", stats.mean_inliers_per_successful_frame()),
+    );
+    output.push_str("</section>\n");
+    output.push_str("<section class=\"panel\">\n");
+    output.push_str(&tracking_timeline_svg(results));
+    output.push_str("</section>\n");
+    output.push_str("<section class=\"panel\">\n<h2>Frames</h2>\n");
+    output.push_str("<table><thead><tr><th>frame</th><th>success</th><th>state</th><th>event</th><th>inliers</th><th>ratio</th><th>reprojection</th><th>prior</th><th>reason</th></tr></thead><tbody>\n");
+    for result in results.iter().take(160) {
+        let success_class = if result.localization.success {
+            "ok"
+        } else {
+            "fail"
+        };
+        let success_text = if result.localization.success {
+            "ok"
+        } else {
+            "failed"
+        };
+        let reason = tracking_result_reason(result);
+        let _ = writeln!(
+            output,
+            "<tr><td>{}</td><td class=\"{}\">{}</td><td>{:?}</td><td>{:?}</td><td>{}</td><td>{:.3}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            result.frame_id,
+            success_class,
+            success_text,
+            result.state,
+            result.event,
+            result.localization.inlier_count,
+            result.localization.inlier_ratio,
+            format_optional_metric(result.localization.reprojection_error, "px"),
+            if result.used_pose_prior { "yes" } else { "no" },
+            html_escape(&reason),
+        );
+    }
+    if results.len() > 160 {
+        let _ = writeln!(
+            output,
+            "<tr><td colspan=\"9\">{} more rows omitted</td></tr>",
+            results.len() - 160
+        );
+    }
+    output.push_str("</tbody></table>\n</section>\n</main>\n</body>\n</html>\n");
+    output
+}
+
+pub fn write_tracking_results_html_report(
+    results: &[TrackingResult],
+    path: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    std::fs::write(path, tracking_results_to_html_report(results))
+}
+
+fn tracking_timeline_svg(results: &[TrackingResult]) -> String {
+    let mut output = String::new();
+    output
+        .push_str("<svg viewBox=\"0 0 900 190\" role=\"img\" aria-label=\"tracking timeline\">\n");
+    output.push_str("<rect x=\"0\" y=\"0\" width=\"900\" height=\"190\" fill=\"#fbfcfd\"/>\n");
+    output.push_str(
+        "<line x1=\"70\" y1=\"92\" x2=\"830\" y2=\"92\" stroke=\"#d8e0e7\" stroke-width=\"2\"/>\n",
+    );
+    if results.is_empty() {
+        output.push_str(
+            "<text x=\"70\" y=\"102\" fill=\"#65727e\" font-size=\"14\">no frames</text>\n",
+        );
+        output.push_str("</svg>\n");
+        return output;
+    }
+
+    let denom = results.len().saturating_sub(1).max(1) as f64;
+    for (index, result) in results.iter().enumerate() {
+        let x = 70.0 + (index as f64 / denom) * 760.0;
+        let radius = if result.localization.success {
+            8.0
+        } else {
+            9.0
+        };
+        let color = tracking_event_color(result);
+        let y = if result.localization.success {
+            78.0
+        } else {
+            108.0
+        };
+        let _ = writeln!(
+            output,
+            "<line x1=\"{x:.2}\" y1=\"92\" x2=\"{x:.2}\" y2=\"{y:.2}\" stroke=\"{color}\" stroke-width=\"2\"/>"
+        );
+        let _ = writeln!(
+            output,
+            "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"{radius}\" fill=\"{color}\"/>"
+        );
+        if index == 0 || index + 1 == results.len() || result.event != TrackingEvent::Tracked {
+            let _ = writeln!(
+                output,
+                "<text x=\"{:.2}\" y=\"142\" fill=\"#52616b\" font-size=\"12\" text-anchor=\"middle\">{}</text>",
+                x, result.frame_id
+            );
+            let _ = writeln!(
+                output,
+                "<text x=\"{:.2}\" y=\"158\" fill=\"#52616b\" font-size=\"11\" text-anchor=\"middle\">{:?}</text>",
+                x, result.event
+            );
+        }
+    }
+    output.push_str(
+        "<text x=\"70\" y=\"32\" fill=\"#52616b\" font-size=\"13\">success/relocalization</text>\n",
+    );
+    output.push_str(
+        "<text x=\"70\" y=\"176\" fill=\"#52616b\" font-size=\"13\">failure/lost</text>\n",
+    );
+    output.push_str("</svg>\n");
+    output
+}
+
+fn tracking_event_color(result: &TrackingResult) -> &'static str {
+    match result.event {
+        TrackingEvent::Initialized => "#2676c9",
+        TrackingEvent::Tracked => "#198754",
+        TrackingEvent::TrackingFailed => "#d9822b",
+        TrackingEvent::Lost => "#c23b3b",
+        TrackingEvent::Relocalized => "#7b4ab8",
+    }
+}
+
+fn tracking_result_reason(result: &TrackingResult) -> String {
+    if let Some(reason) = &result.tracking_failure_reason {
+        format!("{reason:?}")
+    } else if let Some(reason) = &result.localization.failure_reason {
+        format!("{reason:?}")
+    } else {
+        String::new()
+    }
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn ratio(numerator: usize, denominator: usize) -> f64 {
