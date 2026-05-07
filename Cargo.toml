@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "Visual localization foundation library using SfM / visual maps."
 readme = "README.md"
 documentation = "https://docs.rs/visloc-rs"
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
 keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
 categories = ["computer-vision", "science::robotics"]
 
@@ -31,6 +33,8 @@ license = "MIT OR Apache-2.0"
 description = "Visual localization foundation library using SfM / visual maps."
 readme = "README.md"
 documentation = "https://docs.rs/visloc-rs"
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/rsasaki0109/visloc-rs"
 keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
 categories = ["computer-vision", "science::robotics"]
 
