@@ -10,6 +10,7 @@ All notable changes to `visloc-rs` will be documented here.
 - KITTI- and TUM-style trajectory parsers and file readers for reading pose rows back into `PoseTrajectory`.
 - `TrajectorySummary` helper and JSON summary export for sequence-localization demos and downstream visualization scripts.
 - `TrajectoryErrorSummary` and per-frame translation-error helpers for comparing estimated trajectories against reference poses.
+- Optional first-matched-frame translation alignment for trajectory-error reports.
 - Trajectory-evaluation example showing frame-id matched translation errors, CSV output, and JSON summary output.
 - File-based TUM trajectory evaluation example with optional CSV / JSON output directory.
 - File-based KITTI trajectory evaluation example with optional CSV / JSON output directory.

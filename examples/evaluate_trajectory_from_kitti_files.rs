@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use visloc_rs::PoseTrajectory;
+use visloc_rs::{PoseTrajectory, TrajectoryAlignment};
 
 const DEFAULT_ESTIMATED_KITTI: &str = "\
 1 0 0 0.00 0 1 0 0.00 0 0 1 0.00
@@ -21,6 +21,7 @@ const DEFAULT_REFERENCE_KITTI: &str = "\
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let output_dir = parse_output_dir(&mut args);
+    let alignment = parse_alignment(&mut args);
     let (estimated, reference) = match args.as_slice() {
         [] => (
             PoseTrajectory::from_kitti_poses_str(DEFAULT_ESTIMATED_KITTI)?,
@@ -33,19 +34,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "usage: cargo run --example evaluate_trajectory_from_kitti_files -- [--out-dir <dir>] [estimated_poses.txt reference_poses.txt]"
+                "usage: cargo run --example evaluate_trajectory_from_kitti_files -- [--out-dir <dir>] [--align-origin] [estimated_poses.txt reference_poses.txt]"
             );
             std::process::exit(2);
         }
     };
 
-    let summary = estimated.translation_error_summary_against(&reference);
-    let errors_csv = estimated.translation_errors_csv_against(&reference);
+    let summary = estimated.translation_error_summary_against_with_alignment(&reference, alignment);
+    let errors_csv = estimated.translation_errors_csv_against_with_alignment(&reference, alignment);
 
     println!(
-        "loaded trajectories: estimated={} reference={}",
+        "loaded trajectories: estimated={} reference={} alignment={:?}",
         estimated.len(),
-        reference.len()
+        reference.len(),
+        alignment
     );
     println!(
         "matched={} missing_reference={} missing_estimate={} mean={:?} rmse={:?} max={:?}",
@@ -63,7 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(&output_dir)?;
         let errors_path = output_dir.join("translation_errors.csv");
         let summary_path = output_dir.join("error_summary.json");
-        estimated.write_translation_errors_csv_against(&reference, &errors_path)?;
+        estimated.write_translation_errors_csv_against_with_alignment(
+            &reference,
+            alignment,
+            &errors_path,
+        )?;
         summary.write_json(&summary_path)?;
         println!(
             "wrote evaluation exports: errors={} summary={}",
@@ -85,4 +91,12 @@ fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
     let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
     args.remove(output_flag_index);
     Some(output_dir)
+}
+
+fn parse_alignment(args: &mut Vec<String>) -> TrajectoryAlignment {
+    let Some(flag_index) = args.iter().position(|arg| arg == "--align-origin") else {
+        return TrajectoryAlignment::None;
+    };
+    args.remove(flag_index);
+    TrajectoryAlignment::FirstMatchedTranslation
 }

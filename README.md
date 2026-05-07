@@ -144,8 +144,10 @@ Run the trajectory-evaluation example:
 cargo run --example evaluate_trajectory_dummy
 cargo run --example evaluate_trajectory_from_kitti_files
 cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti
+cargo run --example evaluate_trajectory_from_kitti_files -- --align-origin
 cargo run --example evaluate_trajectory_from_tum_files
 cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval
+cargo run --example evaluate_trajectory_from_tum_files -- --align-origin
 ```
 
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
@@ -173,7 +175,7 @@ cargo run --example localize_sequence_from_files
 cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo
 ```
 
-When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
+When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. `TrajectoryAlignment::FirstMatchedTranslation` can remove a simple origin offset before computing errors. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
 
 Run the tracking skeleton example:
 

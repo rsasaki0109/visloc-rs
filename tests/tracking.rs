@@ -12,7 +12,7 @@ use visloc_rs::{
     ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
     InMemoryMapProvider, LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel,
     PoseTrajectory, PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig,
-    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
+    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrajectoryAlignment,
 };
 
 #[derive(Debug, Clone)]
@@ -448,6 +448,52 @@ fn pose_trajectory_reports_translation_errors_against_reference() {
     assert_eq!(csv, "frame_id,translation_error\n1,1\n2,2\n");
     assert!(json.contains("\"matched_pose_count\": 2"));
     assert!(json.contains("\"mean_translation_error\": 1.5"));
+}
+
+#[test]
+fn pose_trajectory_can_align_first_matching_translation_before_error_summary() {
+    let estimated = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(10.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(11.0, 1.0, 0.0)),
+        ),
+    ]);
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    ]);
+
+    let unaligned = estimated.translation_error_summary_against(&reference);
+    let aligned = estimated.translation_error_summary_against_with_alignment(
+        &reference,
+        TrajectoryAlignment::FirstMatchedTranslation,
+    );
+    let aligned_errors = estimated.translation_errors_against_with_alignment(
+        &reference,
+        TrajectoryAlignment::FirstMatchedTranslation,
+    );
+    let aligned_csv = estimated.translation_errors_csv_against_with_alignment(
+        &reference,
+        TrajectoryAlignment::FirstMatchedTranslation,
+    );
+
+    assert!((unaligned.mean_translation_error.unwrap() - 10.024937810560445).abs() < 1.0e-9);
+    assert_eq!(aligned.mean_translation_error, Some(0.5));
+    assert_eq!(aligned.rmse_translation_error, Some((0.5_f64).sqrt()));
+    assert_eq!(aligned.max_translation_error, Some(1.0));
+    assert_eq!(aligned_errors[0].translation_error, 0.0);
+    assert_eq!(aligned_errors[1].translation_error, 1.0);
+    assert_eq!(aligned_csv, "frame_id,translation_error\n1,0\n2,1\n");
 }
 
 #[test]
