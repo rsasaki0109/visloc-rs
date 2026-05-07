@@ -1,8 +1,10 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
+use visloc_core::types::Frame;
 use visloc_fusion::{
-    GnssMeasurement, ImuMeasurement, LocalizationPriorProvider, MeasurementBuffer,
-    PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedMeasurement, Timestamp,
+    FrameTimestampIndex, GnssMeasurement, ImuMeasurement, LocalizationPriorProvider,
+    MeasurementBuffer, PosePriorMeasurement, PriorConfig, TimeDelta, Timed, TimedFrame,
+    TimedMeasurement, TimedPose, Timestamp,
 };
 
 #[test]
@@ -24,7 +26,60 @@ fn timed_wraps_measurements() {
     let timed = Timed::new(timestamp, "frame_42");
 
     assert_eq!(timed.timestamp, timestamp);
+    assert_eq!(timed.timestamp(), timestamp);
     assert_eq!(timed.value, "frame_42");
+}
+
+#[test]
+fn timed_frame_and_pose_aliases_keep_existing_core_types_timestamped() {
+    let frame = Frame::new(7, 3);
+    let timed_frame: TimedFrame = Timed::new(Timestamp::from_nanoseconds(700), frame);
+    let pose = Pose::identity();
+    let timed_pose: TimedPose = Timed::new(Timestamp::from_nanoseconds(800), pose);
+
+    assert_eq!(timed_frame.timestamp(), Timestamp::from_nanoseconds(700));
+    assert_eq!(timed_frame.value.id, 7);
+    assert_eq!(timed_pose.timestamp(), Timestamp::from_nanoseconds(800));
+    assert_eq!(timed_pose.value, Pose::identity());
+}
+
+#[test]
+fn frame_timestamp_index_maps_core_frames_to_sensor_time() {
+    let frame_a = Frame::new(10, 1);
+    let frame_b = Frame::new(11, 1);
+    let mut index = FrameTimestampIndex::new();
+
+    assert!(index.is_empty());
+    index.insert_frame(&frame_a, Timestamp::from_nanoseconds(1_000));
+    index.insert_frame_id(frame_b.id, Timestamp::from_nanoseconds(2_000));
+
+    assert_eq!(index.len(), 2);
+    assert_eq!(
+        index.timestamp_for_frame(&frame_a),
+        Some(Timestamp::from_nanoseconds(1_000))
+    );
+    assert_eq!(
+        index.timestamp_for_frame_id(frame_b.id),
+        Some(Timestamp::from_nanoseconds(2_000))
+    );
+    assert_eq!(index.timestamp_for_frame_id(99), None);
+}
+
+#[test]
+fn frame_timestamp_index_can_be_built_from_timed_frames() {
+    let index = FrameTimestampIndex::from_timed_frames([
+        Timed::new(Timestamp::from_nanoseconds(20), Frame::new(2, 1)),
+        Timed::new(Timestamp::from_nanoseconds(10), Frame::new(1, 1)),
+    ]);
+
+    assert_eq!(
+        index.timestamp_for_frame_id(1),
+        Some(Timestamp::from_nanoseconds(10))
+    );
+    assert_eq!(
+        index.timestamp_for_frame_id(2),
+        Some(Timestamp::from_nanoseconds(20))
+    );
 }
 
 #[test]
