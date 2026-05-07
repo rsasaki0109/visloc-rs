@@ -9,8 +9,9 @@ Initial experiments should stay focused on map-based localization:
 - IO-backed localization with `cargo run --example localize_colmap_text`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Trajectory evaluation with `cargo run --example evaluate_trajectory_dummy`
-- KITTI file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_kitti_files`
-- TUM file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_tum_files`
+- KITTI file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti`
+- TUM file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval`
+- Browser-viewable trajectory reports are written as `trajectory_report.html` in those output directories
 - GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior`
 
 Future experiments can add image feature extraction, online Visual SLAM, inertial priors, and public automotive or UAV sequence data after the visual localization slice is stable.

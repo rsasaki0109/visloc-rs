@@ -497,6 +497,67 @@ fn pose_trajectory_can_align_first_matching_translation_before_error_summary() {
 }
 
 #[test]
+fn pose_trajectory_exports_html_report_against_reference() {
+    let estimated = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(10.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(11.0, 1.0, 0.0)),
+        ),
+    ]);
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    ]);
+
+    let html = estimated.to_html_report_against_with_alignment(
+        &reference,
+        TrajectoryAlignment::FirstMatchedTranslation,
+    );
+
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("visloc-rs trajectory evaluation"));
+    assert!(html.contains("Alignment: <code>FirstMatchedTranslation</code>"));
+    assert!(html.contains("<svg viewBox=\"0 0 900 520\""));
+    assert!(html.contains("<span class=\"value\">0.5000 m</span>"));
+    assert!(html.contains("<td>2</td><td>1.0000 m</td>"));
+}
+
+#[test]
+fn pose_trajectory_writes_html_report_against_reference() {
+    let estimated = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        1,
+        pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+    )]);
+    let reference = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        1,
+        pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+    )]);
+    let path = std::env::temp_dir().join(format!(
+        "visloc-rs-trajectory-report-{}.html",
+        std::process::id()
+    ));
+
+    estimated
+        .write_html_report_against(&reference, &path)
+        .unwrap();
+    let html = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+
+    assert!(html.contains("Mean error"));
+    assert!(html.contains("1.0000 m"));
+}
+
+#[test]
 fn pose_trajectory_error_summary_handles_no_matching_frames() {
     let estimated = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
         1,
