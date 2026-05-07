@@ -69,6 +69,18 @@ SLAM combines tracking, mapping, optimization, loop closure, persistence, and re
 
 The design keeps the path open for Visual SLAM, SfM map reuse, visual-inertial fusion, and GNSS fusion by separating core data types, geometry, matching, PnP, RANSAC, IO, and pipeline composition.
 
+## Roadmap
+
+The current public release focuses on map-based Visual Localization. Online Visual SLAM is planned, but it will build on this localization core instead of replacing it.
+
+Planned next layers:
+
+- Sequential localization and tracking quality improvements
+- Local mapping and lightweight keyframe policies
+- Online Visual SLAM with incremental map updates
+- Visual-inertial and GNSS priors/fusion
+- Larger public-data evaluation scripts
+
 ## Minimal Example
 
 ```rust

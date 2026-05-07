@@ -9,4 +9,4 @@ Initial experiments should stay focused on map-based localization:
 - IO-backed localization with `cargo run --example localize_colmap_text`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 
-Future experiments can add image feature extraction, tracking, inertial priors, and GNSS priors after the visual localization slice is stable.
+Future experiments can add image feature extraction, tracking, online Visual SLAM, inertial priors, and GNSS priors after the visual localization slice is stable.

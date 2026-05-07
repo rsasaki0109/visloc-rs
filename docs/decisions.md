@@ -6,6 +6,8 @@ The first implementation uses an existing visual map and estimates query camera 
 
 Full SLAM is deliberately out of scope because it would add keyframe policy, loop closure, local mapping, global optimization, and failure recovery before the map-based localization core has been validated.
 
+Online Visual SLAM remains a planned direction. The project keeps the localization core, map types, frame/keyframe types, and tracking pipeline boundaries available so that online mapping can be added incrementally after the map-based localization path is reliable.
+
 ## Stateless Core
 
 Geometry, matching, PnP, and RANSAC are implemented as reusable components. Pipeline crates compose these pieces but do not own global state.
@@ -13,4 +15,3 @@ Geometry, matching, PnP, and RANSAC are implemented as reusable components. Pipe
 ## Trait Boundaries
 
 Feature extraction, matching, and pose estimation are trait-oriented so future implementations can replace the initial brute-force matcher and DLT PnP solver without changing map types.
-
