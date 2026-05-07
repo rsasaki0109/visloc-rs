@@ -52,6 +52,7 @@ Implemented now:
 - Pose-estimator diagnostics in `LocalizationResult`, including refinement status and before/after reprojection error
 - Pose-estimation failure diagnostics for insufficient correspondences and RANSAC failures
 - COLMAP text and binary parsers for cameras, images, and 3D points
+- KITTI-style camera calibration parsing for automotive sequence inputs
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Lightweight grayscale corner feature extractor for dependency-free image-input smoke tests
@@ -152,6 +153,12 @@ cargo run --example evaluate_trajectory_from_tum_files -- --align-origin
 ```
 
 The file-based KITTI / TUM evaluators write `translation_errors.csv`, `error_summary.json`, `evaluation_result.json`, and a browser-viewable `trajectory_report.html` when `--out-dir` is provided. They can also enforce benchmark-style thresholds with `--max-mean`, `--max-rmse`, `--max-max`, `--min-matched`, and `--min-match-ratio`; threshold failures exit with a non-zero status.
+
+Automotive-style KITTI calibration files can be used to build a pinhole camera from a projection row:
+
+```rust
+let camera = read_kitti_pinhole_camera("calib.txt", "P2", 1, 1242, 375)?;
+```
 
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
 
