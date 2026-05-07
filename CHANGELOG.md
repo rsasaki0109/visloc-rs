@@ -47,6 +47,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Timestamp text parsing for image-sequence datasets with separate image folders and timestamp files.
 - GNSS text/CSV parsing for timestamped world-position priors used by sequence localization demos.
 - KITTI-style camera calibration parser for turning projection rows such as `P2` into `Camera::pinhole` inputs for automotive sequence demos.
+- KITTI-style image sequence loader that combines image frames, optional timestamp files, calibration, and validation summaries.
 - `FramePriorSyncSummary` diagnostics for checking external measurement coverage against frame timestamps.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.

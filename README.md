@@ -53,6 +53,7 @@ Implemented now:
 - Pose-estimation failure diagnostics for insufficient correspondences and RANSAC failures
 - COLMAP text and binary parsers for cameras, images, and 3D points
 - KITTI-style camera calibration parsing for automotive sequence inputs
+- KITTI-style image sequence loader that combines image frames, optional timestamps, and calibration
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Lightweight grayscale corner feature extractor for dependency-free image-input smoke tests
@@ -158,6 +159,18 @@ Automotive-style KITTI calibration files can be used to build a pinhole camera f
 
 ```rust
 let camera = read_kitti_pinhole_camera("calib.txt", "P2", 1, 1242, 375)?;
+```
+
+With `image-io`, an automotive image sequence can be loaded together with timestamps and calibration:
+
+```rust
+let sequence = read_kitti_image_sequence_dir_with_timestamp_file(
+    "image_2",
+    "times_ns.txt",
+    "calib.txt",
+    "P2",
+    1,
+)?;
 ```
 
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:

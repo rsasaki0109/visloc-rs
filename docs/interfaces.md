@@ -38,6 +38,8 @@ fn localize_frames(frames: Vec<Frame>, map: VisualMap) -> Vec<FrameLocalizationR
 
 `visloc_io::calibration` reads KITTI-style calibration text files. `parse_kitti_calibration_txt` extracts projection rows such as `P0` and `P2`, and `read_kitti_pinhole_camera` converts a selected row into a `Camera::pinhole` when the image dimensions are supplied by the caller. This is intentionally a small automotive-dataset bridge, not a full calibration database.
 
+With the `image-io` feature enabled, `visloc_io::kitti` can load a KITTI-style image directory together with optional timestamp text and calibration. `KittiImageSequence` returns the selected `Camera`, loaded frames, sequence summary, dimension issues, and timestamp issues so automotive demos can validate the dataset before starting localization or tracking.
+
 `FeatureSet` stores externally supplied keypoints and descriptors and can validate shape/dimension consistency with `FeatureSet::new`. `FeatureExtractor` can be connected through `ImageLocalizer` or the lower-level `LocalizationPipeline::localize_image_with_extractor` methods. `ProvidedFeatureExtractor` wraps precomputed features, and `FnFeatureExtractor` wraps a closure so OpenCV, learned features, or custom image pipelines can be connected without making those dependencies mandatory. `GrayscaleImage` and `CornerFeatureExtractor` provide a small dependency-free image-input extractor for smoke tests and examples; production feature pipelines should still plug in through the same trait boundary.
 
 `visloc_io::images` provides dependency-free PGM grayscale IO through `read_pgm`, `parse_pgm`, `write_pgm_ascii`, and `to_pgm_ascii`. This is intended for fixtures, smoke tests, and minimal examples rather than broad image-format coverage.
