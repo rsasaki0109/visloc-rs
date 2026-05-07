@@ -24,7 +24,7 @@ All notable changes to `visloc-rs` will be documented here.
 - File-based KITTI trajectory evaluation example with optional CSV / JSON / HTML output directory.
 - File-based sequence localization example that tracks query feature files and prints or writes CSV / KITTI / TUM trajectory exports plus `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`.
 - Tracking sequence example with optional `tracking.csv`, `tracking_summary.json`, `tracking_report.html`, and `trajectory_report.html` output directory.
-- Moving-camera GNSS-prior tracking example with optional `tracking.csv`, `tracking_summary.json`, `tracking_report.html`, and `trajectory_report.html` output directory.
+- Moving-camera GNSS-prior tracking example with optional tracking diagnostics plus `trajectory.csv`, `trajectory_summary.json`, and `trajectory_report.html` output directory.
 
 ## 0.1.0 - 2026-05-07
 
