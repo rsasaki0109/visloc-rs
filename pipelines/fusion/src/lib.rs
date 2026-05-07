@@ -135,6 +135,12 @@ impl FrameTimestampIndex {
     pub fn is_empty(&self) -> bool {
         self.timestamps.is_empty()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (FrameId, Timestamp)> + '_ {
+        self.timestamps
+            .iter()
+            .map(|(&frame_id, &timestamp)| (frame_id, timestamp))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +162,28 @@ impl Default for PriorConfig {
 
 pub trait LocalizationPriorProvider: TimedMeasurement {
     fn localization_prior(&self, config: &PriorConfig) -> Option<LocalizationPrior>;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FramePriorSyncSummary {
+    pub frame_count: usize,
+    pub measurement_count: usize,
+    pub matched_frame_count: usize,
+    pub missing_measurement_count: usize,
+}
+
+impl FramePriorSyncSummary {
+    pub fn matched_frame_ratio(&self) -> f64 {
+        if self.frame_count == 0 {
+            0.0
+        } else {
+            self.matched_frame_count as f64 / self.frame_count as f64
+        }
+    }
+
+    pub fn all_frames_matched(&self) -> bool {
+        self.missing_measurement_count == 0
+    }
 }
 
 pub type PoseCovarianceMatrix = SMatrix<f64, 6, 6>;
@@ -429,6 +457,22 @@ where
 
     pub fn measurement_count(&self) -> usize {
         self.measurements.len()
+    }
+
+    pub fn sync_summary(&self) -> FramePriorSyncSummary {
+        let matched_frame_count = self
+            .frame_timestamps
+            .iter()
+            .filter(|(frame_id, _)| self.nearest_measurement_for_frame_id(*frame_id).is_some())
+            .count();
+        let frame_count = self.frame_count();
+
+        FramePriorSyncSummary {
+            frame_count,
+            measurement_count: self.measurement_count(),
+            matched_frame_count,
+            missing_measurement_count: frame_count.saturating_sub(matched_frame_count),
+        }
     }
 }
 

@@ -56,7 +56,7 @@ pub use visloc_core::types::{
     QueryImage, VisualMap, VisualMapValidationIssue, VisualMapValidationReport,
 };
 pub use visloc_fusion::{
-    FramePriorSource, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
+    FramePriorSource, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
     LocalizationPriorProvider, MeasurementBuffer, PoseCovariance, PoseCovarianceMatrix,
     PosePriorMeasurement, PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame,
     TimedMeasurement, TimedPose, Timestamp,
@@ -137,9 +137,9 @@ pub mod prelude {
         CorrespondenceBuildError, CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher,
         DescriptorMatch, DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
         FixedLandmarkSelector, FixedLandmarkSubmapSelector, FnFeatureExtractor, Frame, FrameId,
-        FrameLocalizationResult, FrameLocalizer, FramePriorSource, FrameTimestampIndex,
-        GaussNewtonPoseRefiner, GnssMeasurement, GrayscaleImage, GrayscaleImageError,
-        ImageLocalizer, ImageTracker, ImuMeasurement, InMemoryMapProvider,
+        FrameLocalizationResult, FrameLocalizer, FramePriorSource, FramePriorSyncSummary,
+        FrameTimestampIndex, GaussNewtonPoseRefiner, GnssMeasurement, GrayscaleImage,
+        GrayscaleImageError, ImageLocalizer, ImageTracker, ImuMeasurement, InMemoryMapProvider,
         IntersectCandidateSelector, Keyframe, KeyframeDecision, KeyframePolicy,
         KeyframePolicyConfig, KittiTrajectoryParseError, Landmark, LandmarkCandidate,
         LandmarkCandidateId, LandmarkCandidateMappingFailure,
