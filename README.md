@@ -173,6 +173,12 @@ let sequence = read_kitti_image_sequence_dir_with_timestamp_file(
 )?;
 ```
 
+Run the KITTI-style image sequence loader smoke example:
+
+```bash
+cargo run --features image-io --example load_kitti_image_sequence
+```
+
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
 
 ```bash

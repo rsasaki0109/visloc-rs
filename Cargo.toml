@@ -72,3 +72,8 @@ required-features = ["image-io"]
 name = "track_timestamped_image_sequence_with_gnss_prior"
 path = "examples/track_timestamped_image_sequence_with_gnss_prior.rs"
 required-features = ["image-io"]
+
+[[example]]
+name = "load_kitti_image_sequence"
+path = "examples/load_kitti_image_sequence.rs"
+required-features = ["image-io"]

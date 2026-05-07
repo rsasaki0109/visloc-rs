@@ -31,3 +31,6 @@ cargo run --features image-io --example track_image_sequence_from_common_images
 
 echo "Running feature-gated example: track_timestamped_image_sequence_with_gnss_prior"
 cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior
+
+echo "Running feature-gated example: load_kitti_image_sequence"
+cargo run --features image-io --example load_kitti_image_sequence
