@@ -12,6 +12,7 @@ These APIs should change conservatively because many layers depend on them:
 - `LocalizationResult` and localization diagnostics
 - `SE3`, `SO3`, projection and reprojection helpers
 - `LandmarkDescriptorStore`
+- `visloc_rs::prelude` as the convenience import surface for common application code
 
 Changes here should be additive when practical. Field removals, coordinate-frame semantic changes, and id-type changes should wait for a major release.
 

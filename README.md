@@ -96,9 +96,7 @@ See [docs/colmap_compatibility.md](docs/colmap_compatibility.md) for supported C
 
 ```rust
 use nalgebra::{Point3, UnitQuaternion, Vector3};
-use visloc_rs::core::geometry::Pose;
-use visloc_rs::core::types::{Camera, Landmark, QueryImage, VisualMap};
-use visloc_rs::localize;
+use visloc_rs::prelude::*;
 
 let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
 let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
@@ -119,6 +117,8 @@ let result = localize(query, map);
 ```
 
 When descriptors live outside the map, use `LandmarkDescriptorStore` and call `localize_with_descriptor_store`.
+
+Applications can start with `visloc_rs::prelude::*` for the common localization, map, IO, tracking, mapping, SLAM, and fusion entry points. Explicit module paths such as `visloc_rs::io::colmap` remain available for narrower imports.
 
 The initial text descriptor format is intentionally simple:
 
