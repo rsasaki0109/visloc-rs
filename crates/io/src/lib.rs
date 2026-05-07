@@ -7,4 +7,5 @@
 
 pub mod colmap;
 pub mod descriptors;
+pub mod images;
 pub mod query_features;

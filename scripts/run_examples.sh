@@ -9,6 +9,7 @@ localize_dummy
 localize_colmap_text
 localize_colmap_provider
 localize_from_files
+localize_from_pgm
 localize_sequence_from_files
 localize_with_corner_extractor
 localize_with_extractor_dummy
