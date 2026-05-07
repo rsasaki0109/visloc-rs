@@ -308,6 +308,13 @@ impl TrajectoryTranslationError {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrajectoryAlignment {
+    #[default]
+    None,
+    FirstMatchedTranslation,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryErrorSummary {
     pub estimated_pose_count: usize,
@@ -323,6 +330,14 @@ pub struct TrajectoryErrorSummary {
 impl TrajectoryErrorSummary {
     pub fn from_trajectories(estimated: &PoseTrajectory, reference: &PoseTrajectory) -> Self {
         let errors = estimated.translation_errors_against(reference);
+        Self::from_translation_errors(estimated, reference, &errors)
+    }
+
+    fn from_translation_errors(
+        estimated: &PoseTrajectory,
+        reference: &PoseTrajectory,
+        errors: &[TrajectoryTranslationError],
+    ) -> Self {
         let matched_pose_count = errors.len();
         let estimated_ids = estimated.frame_id_set();
         let reference_ids = reference.frame_id_set();
@@ -654,6 +669,24 @@ impl PoseTrajectory {
         (Some(min), Some(max))
     }
 
+    fn translation_alignment_offset(
+        &self,
+        reference_by_frame_id: &HashMap<FrameId, Point3<f64>>,
+        alignment: TrajectoryAlignment,
+    ) -> Vector3<f64> {
+        match alignment {
+            TrajectoryAlignment::None => Vector3::zeros(),
+            TrajectoryAlignment::FirstMatchedTranslation => self
+                .samples
+                .iter()
+                .find_map(|sample| {
+                    let reference_center = reference_by_frame_id.get(&sample.frame_id)?;
+                    Some(sample.camera_center_world() - *reference_center)
+                })
+                .unwrap_or_else(Vector3::zeros),
+        }
+    }
+
     pub fn total_path_length(&self) -> f64 {
         self.samples
             .windows(2)
@@ -725,11 +758,21 @@ impl PoseTrajectory {
         &self,
         reference: &PoseTrajectory,
     ) -> Vec<TrajectoryTranslationError> {
+        self.translation_errors_against_with_alignment(reference, TrajectoryAlignment::None)
+    }
+
+    pub fn translation_errors_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+    ) -> Vec<TrajectoryTranslationError> {
         let reference_by_frame_id = reference
             .samples
             .iter()
             .map(|sample| (sample.frame_id, sample.camera_center_world()))
             .collect::<HashMap<_, _>>();
+        let translation_offset =
+            self.translation_alignment_offset(&reference_by_frame_id, alignment);
 
         self.samples
             .iter()
@@ -737,7 +780,9 @@ impl PoseTrajectory {
                 let reference_center = reference_by_frame_id.get(&sample.frame_id)?;
                 Some(TrajectoryTranslationError {
                     frame_id: sample.frame_id,
-                    translation_error: (sample.camera_center_world() - *reference_center).norm(),
+                    translation_error: ((sample.camera_center_world() - *reference_center)
+                        - translation_offset)
+                        .norm(),
                 })
             })
             .collect()
@@ -750,9 +795,26 @@ impl PoseTrajectory {
         TrajectoryErrorSummary::from_trajectories(self, reference)
     }
 
+    pub fn translation_error_summary_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+    ) -> TrajectoryErrorSummary {
+        let errors = self.translation_errors_against_with_alignment(reference, alignment);
+        TrajectoryErrorSummary::from_translation_errors(self, reference, &errors)
+    }
+
     pub fn translation_errors_csv_against(&self, reference: &PoseTrajectory) -> String {
+        self.translation_errors_csv_against_with_alignment(reference, TrajectoryAlignment::None)
+    }
+
+    pub fn translation_errors_csv_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+    ) -> String {
         let mut output = String::from("frame_id,translation_error\n");
-        for error in self.translation_errors_against(reference) {
+        for error in self.translation_errors_against_with_alignment(reference, alignment) {
             output.push_str(&error.to_csv_record());
             output.push('\n');
         }
@@ -767,12 +829,34 @@ impl PoseTrajectory {
         std::fs::write(path, self.translation_errors_csv_against(reference))
     }
 
+    pub fn write_translation_errors_csv_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        std::fs::write(
+            path,
+            self.translation_errors_csv_against_with_alignment(reference, alignment),
+        )
+    }
+
     pub fn write_translation_error_summary_json_against(
         &self,
         reference: &PoseTrajectory,
         path: impl AsRef<Path>,
     ) -> std::io::Result<()> {
         self.translation_error_summary_against(reference)
+            .write_json(path)
+    }
+
+    pub fn write_translation_error_summary_json_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        self.translation_error_summary_against_with_alignment(reference, alignment)
             .write_json(path)
     }
 
