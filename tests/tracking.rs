@@ -14,7 +14,7 @@ use visloc_rs::{
     FrameLocalizer, ImageTracker, InMemoryMapProvider, LocalizationPipeline, LocalizationPrior,
     MapProviderStats, MotionModel, PoseTrajectory, PriorSubmapSelector, SelectableMapProvider,
     Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
-    TrackingStats, TrajectoryAlignment,
+    TrackingStats, TrajectoryAlignment, TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
 };
 
 #[derive(Debug, Clone)]
@@ -543,6 +543,107 @@ fn pose_trajectory_can_align_first_matching_translation_before_error_summary() {
     assert_eq!(aligned_errors[0].translation_error, 0.0);
     assert_eq!(aligned_errors[1].translation_error, 1.0);
     assert_eq!(aligned_csv, "frame_id,translation_error\n1,0\n2,1\n");
+}
+
+#[test]
+fn trajectory_evaluation_passes_when_summary_meets_thresholds() {
+    let estimated = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(1.1, 0.0, 0.0)),
+        ),
+    ]);
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    ]);
+
+    let summary = estimated.translation_error_summary_against(&reference);
+    let result = summary.evaluate(TrajectoryEvaluationConfig {
+        max_mean_translation_error: Some(0.1),
+        max_rmse_translation_error: Some(0.1),
+        max_max_translation_error: Some(0.11),
+        min_matched_pose_count: Some(2),
+        min_match_ratio: Some(1.0),
+    });
+
+    assert!(result.passed);
+    assert_eq!(result.match_ratio, Some(1.0));
+    assert!(result.failures.is_empty());
+    assert!(result.to_json().contains("\"passed\": true"));
+}
+
+#[test]
+fn trajectory_evaluation_reports_failed_thresholds() {
+    let estimated = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        1,
+        pose_with_identity_rotation_at_center(Vector3::new(5.0, 0.0, 0.0)),
+    )]);
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    ]);
+
+    let summary = estimated.translation_error_summary_against(&reference);
+    let result = summary.evaluate(TrajectoryEvaluationConfig {
+        max_mean_translation_error: Some(1.0),
+        max_rmse_translation_error: Some(1.0),
+        max_max_translation_error: Some(1.0),
+        min_matched_pose_count: Some(2),
+        min_match_ratio: Some(0.75),
+    });
+
+    assert!(!result.passed);
+    assert_eq!(result.match_ratio, Some(0.5));
+    assert!(result
+        .failures
+        .contains(&TrajectoryEvaluationFailure::MeanTranslationErrorTooHigh {
+            actual: 5.0,
+            maximum: 1.0,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrajectoryEvaluationFailure::RmseTranslationErrorTooHigh {
+            actual: 5.0,
+            maximum: 1.0,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrajectoryEvaluationFailure::MaxTranslationErrorTooHigh {
+            actual: 5.0,
+            maximum: 1.0,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrajectoryEvaluationFailure::NotEnoughMatchedPoses {
+            actual: 1,
+            minimum: 2,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrajectoryEvaluationFailure::MatchRatioTooLow {
+            actual: 0.5,
+            minimum: 0.75,
+        }));
+    assert!(result
+        .to_json()
+        .contains("\"reason\": \"mean_translation_error_too_high\""));
 }
 
 #[test]

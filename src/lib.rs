@@ -89,8 +89,9 @@ pub use visloc_tracking::{
     write_tracking_results_html_report, ConstantPoseMotionModel, ConstantVelocityMotionModel,
     FrameLocalizer, ImageTracker, KittiTrajectoryParseError, MotionModel, PoseTrajectory, Tracker,
     TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
-    TrackingStats, TrajectoryAlignment, TrajectoryErrorSummary, TrajectoryFileError,
-    TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
+    TrackingStats, TrajectoryAlignment, TrajectoryErrorSummary, TrajectoryEvaluationConfig,
+    TrajectoryEvaluationFailure, TrajectoryEvaluationResult, TrajectoryFileError, TrajectorySample,
+    TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
@@ -140,8 +141,9 @@ pub mod prelude {
         SelectableMapProvider, SimpleKeyframePolicy, StagedMapUpdate, SubmapSelector, TimeDelta,
         Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp, Tracker, TrackingConfig,
         TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
-        TrajectoryAlignment, TrajectoryErrorSummary, TrajectoryFileError, TrajectorySample,
-        TrajectorySummary, TrajectoryTranslationError, TriangulationConfig,
+        TrajectoryAlignment, TrajectoryErrorSummary, TrajectoryEvaluationConfig,
+        TrajectoryEvaluationFailure, TrajectoryEvaluationResult, TrajectoryFileError,
+        TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TriangulationConfig,
         TriangulationFailureReason, Triangulator, TumTrajectoryParseError, VisualMap,
         VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
     };
