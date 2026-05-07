@@ -6,6 +6,8 @@
 //! failure/lost/relocalization events, and leaves keyframe management, map
 //! updates, loop closure, and bundle adjustment to future layers.
 
+use std::path::Path;
+
 use nalgebra::Point3;
 use visloc_core::geometry::Pose;
 use visloc_core::types::{
@@ -134,6 +136,31 @@ impl TrajectorySample {
     pub fn camera_center_world(&self) -> Point3<f64> {
         self.pose.camera_center_world()
     }
+
+    pub fn to_csv_record(&self) -> String {
+        let center = self.camera_center_world();
+        let q = self.pose.world_to_camera.rotation.quaternion();
+        let t = self.pose.world_to_camera.translation;
+        format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{:?},{:?},{},{},{}",
+            self.frame_id,
+            center.x,
+            center.y,
+            center.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+            t.x,
+            t.y,
+            t.z,
+            self.state,
+            self.event,
+            self.inlier_count,
+            self.inlier_ratio,
+            optional_f64_csv(self.reprojection_error)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -219,6 +246,25 @@ impl PoseTrajectory {
             Some(sum / count as f64)
         }
     }
+
+    pub fn to_csv(&self) -> String {
+        let mut output = String::from(
+            "frame_id,camera_center_x,camera_center_y,camera_center_z,qw,qx,qy,qz,tx,ty,tz,state,event,inlier_count,inlier_ratio,reprojection_error\n",
+        );
+        for sample in &self.samples {
+            output.push_str(&sample.to_csv_record());
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn write_csv(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_csv())
+    }
+}
+
+fn optional_f64_csv(value: Option<f64>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
