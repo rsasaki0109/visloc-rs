@@ -6,10 +6,11 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
-    loop_closure_constraints_from_candidates, verify_loop_closure_candidates,
-    write_online_slam_results_html_report, EssentialMatrixLoopClosureVerifier,
-    LocalMappingPipeline, LocalizationPipeline, LoopClosureConfig, LoopClosureConstraint,
-    LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline, Tracker, TrackingConfig,
+    loop_closure_constraints_from_candidates, relative_world_to_camera,
+    verify_loop_closure_candidates, write_online_slam_results_html_report,
+    EssentialMatrixLoopClosureVerifier, LocalMappingPipeline, LocalizationPipeline,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
+    OnlineSlamPipeline, PoseGraph, Tracker, TrackingConfig,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,6 +98,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("total_loop_constraints={}", constraints.len());
+
+    // Build a pose graph over the tracked keyframes, inject a small drift
+    // into the most recent node, and show the translation-only Gauss-Newton
+    // step pulling it back along the verified loop closure. The verifier
+    // reused the truth scale, so this matches the synthetic ground truth
+    // when drift is zero.
+    let mut graph = PoseGraph::new();
+    let tracked_keyframes = [
+        (10u64, &results[0]),
+        (20u64, &results[1]),
+        (30u64, &results[2]),
+    ];
+    for (id, result) in tracked_keyframes {
+        let Some(pose) = result.tracking.localization.pose.clone() else {
+            continue;
+        };
+        graph.add_pose(id, pose);
+    }
+    if let (Some(prev), Some(curr)) = (graph.poses.get(&10).cloned(), graph.poses.get(&20).cloned())
+    {
+        graph.add_sequential_edge(10, 20, relative_world_to_camera(&prev, &curr));
+    }
+    if let (Some(prev), Some(curr)) = (graph.poses.get(&20).cloned(), graph.poses.get(&30).cloned())
+    {
+        graph.add_sequential_edge(20, 30, relative_world_to_camera(&prev, &curr));
+    }
+    for constraint in &constraints {
+        graph.add_loop_closure_constraint(constraint);
+    }
+    graph.anchor(10);
+
+    if let Some(pose_30) = graph.poses.get_mut(&30) {
+        let drifted_center = pose_30.camera_center_world() + Vector3::new(0.05, 0.02, -0.04);
+        pose_30.world_to_camera.translation =
+            -(pose_30.world_to_camera.rotation.to_rotation_matrix() * drifted_center.coords);
+    }
+
+    let pre_optim_centers = pose_centers_snapshot(&graph);
+    println!(
+        "pose_graph_pre_optim node_count={} edge_count={} translation_cost={:.6}",
+        graph.poses.len(),
+        graph.edges.len(),
+        graph.translation_cost(),
+    );
+    for (id, center) in &pre_optim_centers {
+        println!(
+            "  pre_optim keyframe={} center=[{:.3}, {:.3}, {:.3}]",
+            id, center.x, center.y, center.z
+        );
+    }
+
+    match graph.optimize_translations_once() {
+        Ok(step) => {
+            println!(
+                "pose_graph_step anchor={} edges={} variables={} cost_before={:.6} cost_after={:.6} mean_correction={:.6} max_correction={:.6}",
+                step.anchor_id,
+                step.edge_count,
+                step.variable_count,
+                step.cost_before,
+                step.cost_after,
+                step.mean_translation_correction,
+                step.max_translation_correction,
+            );
+            for (id, pose) in &graph.poses {
+                let center = pose.camera_center_world();
+                println!(
+                    "  post_optim keyframe={} center=[{:.3}, {:.3}, {:.3}]",
+                    id, center.x, center.y, center.z
+                );
+            }
+        }
+        Err(error) => println!("pose_graph_step error={error}"),
+    }
 
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
@@ -196,6 +270,14 @@ fn print_candidate(candidate: &visloc_rs::LoopClosureCandidate) {
         verifier_score,
         failure,
     );
+}
+
+fn pose_centers_snapshot(graph: &PoseGraph) -> Vec<(u64, Point3<f64>)> {
+    graph
+        .poses
+        .iter()
+        .map(|(id, pose)| (*id, pose.camera_center_world()))
+        .collect()
 }
 
 fn print_constraint(constraint: &LoopClosureConstraint) {

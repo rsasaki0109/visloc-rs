@@ -112,11 +112,12 @@ pub use visloc_mapping::{
 };
 pub use visloc_slam::{
     correspondences_for_loop_candidate, loop_closure_constraints_from_candidates,
-    online_slam_results_to_html_report, verify_loop_closure_candidates,
+    online_slam_results_to_html_report, relative_world_to_camera, verify_loop_closure_candidates,
     write_online_slam_results_html_report, EssentialMatrixLoopClosureVerifier,
     LoopClosureCandidate, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerification,
     LoopClosureVerificationFailureReason, LoopClosureVerifier, LoopClosureVerifierConfig,
-    OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult,
+    OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphEdge,
+    PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,
@@ -189,7 +190,8 @@ pub mod prelude {
         NoopVisualOdometryFrontend, Observation, OnlineSlamConfig, OnlineSlamPipeline,
         OnlineSlamResult, PnPRansac, Pose, PoseCovariance, PoseCovarianceMatrix,
         PoseEstimationFailureDiagnostics, PoseEstimationFailureReason, PoseEstimator,
-        PoseEstimatorDiagnostics, PosePriorMeasurement, PoseRefiner, PoseTrajectory,
+        PoseEstimatorDiagnostics, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError,
+        PoseGraphOptimizationStep, PosePriorMeasurement, PoseRefiner, PoseTrajectory,
         PositionCovariance, PriorConfig, PriorSubmapSelector, ProvidedFeatureExtractor, QueryImage,
         RadiusLandmarkSelector, RadiusSubmapSelector, RansacReport, RobustPoseEstimator,
         SelectableMapProvider, SimpleKeyframePolicy, StagedMapUpdate, SubmapSelector, TimeDelta,
