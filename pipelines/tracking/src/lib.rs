@@ -216,6 +216,12 @@ pub struct TrajectoryTranslationError {
     pub translation_error: f64,
 }
 
+impl TrajectoryTranslationError {
+    pub fn to_csv_record(&self) -> String {
+        format!("{},{}", self.frame_id, self.translation_error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryErrorSummary {
     pub estimated_pose_count: usize,
@@ -295,6 +301,10 @@ impl TrajectoryErrorSummary {
             optional_f64_json(self.rmse_translation_error),
             optional_f64_json(self.max_translation_error)
         )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
     }
 }
 
@@ -542,6 +552,32 @@ impl PoseTrajectory {
         reference: &PoseTrajectory,
     ) -> TrajectoryErrorSummary {
         TrajectoryErrorSummary::from_trajectories(self, reference)
+    }
+
+    pub fn translation_errors_csv_against(&self, reference: &PoseTrajectory) -> String {
+        let mut output = String::from("frame_id,translation_error\n");
+        for error in self.translation_errors_against(reference) {
+            output.push_str(&error.to_csv_record());
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn write_translation_errors_csv_against(
+        &self,
+        reference: &PoseTrajectory,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        std::fs::write(path, self.translation_errors_csv_against(reference))
+    }
+
+    pub fn write_translation_error_summary_json_against(
+        &self,
+        reference: &PoseTrajectory,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        self.translation_error_summary_against(reference)
+            .write_json(path)
     }
 
     pub fn summary(&self) -> TrajectorySummary {
