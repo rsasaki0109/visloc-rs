@@ -6,7 +6,7 @@ markdown_anchor_exists() {
     anchor=$2
 
     headings=$(mktemp)
-    rg '^#+[[:space:]]+' "$file" | while IFS= read -r heading; do
+    (grep -E '^#+[[:space:]]+' "$file" || true) | while IFS= read -r heading; do
         printf '%s\n' "$heading" \
             | sed -E 's/^#+[[:space:]]*//; s/<[^>]*>//g; s/`//g; s/[^[:alnum:] _-]//g; s/[[:space:]]+/-/g; s/-+/-/g; s/^-//; s/-$//' \
             | tr '[:upper:]' '[:lower:]'
@@ -23,7 +23,13 @@ markdown_anchor_exists() {
 
 matches=$(mktemp)
 trap 'rm -f "$matches"' EXIT
-rg -n -o '\[[^]]+\]\([^)]+\)' README.md docs -g '*.md' > "$matches"
+{
+    printf '%s\n' README.md
+    find docs -type f -name '*.md' | sort
+} | while IFS= read -r file; do
+    [ -f "$file" ] || continue
+    (grep -n -o '\[[^][]*\]([^)]*)' "$file" || true) | sed "s|^|$file:|"
+done > "$matches"
 
 status=0
 while IFS= read -r entry; do
