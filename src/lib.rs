@@ -64,9 +64,11 @@ pub use visloc_fusion::{
 pub use visloc_io::colmap::ColmapMapProvider;
 #[cfg(feature = "image-io")]
 pub use visloc_io::images::{
-    common_image_sequence_summary, decode_common_image, read_common_image,
-    read_common_image_sequence, read_common_image_sequence_dir,
-    read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+    common_image_sequence_summary, decode_common_image, parse_timestamp_nanoseconds_txt,
+    read_common_image, read_common_image_sequence, read_common_image_sequence_dir,
+    read_common_image_sequence_dir_with_timestamp_file,
+    read_common_image_sequence_dir_with_timestamps, read_common_image_sequence_with_timestamps,
+    read_timestamp_nanoseconds_txt, validate_common_image_sequence_dimensions,
     validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
     ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
 };
@@ -168,9 +170,11 @@ pub mod prelude {
     pub use crate::io::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
     #[cfg(feature = "image-io")]
     pub use crate::io::images::{
-        common_image_sequence_summary, decode_common_image, read_common_image,
-        read_common_image_sequence, read_common_image_sequence_dir,
-        read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+        common_image_sequence_summary, decode_common_image, parse_timestamp_nanoseconds_txt,
+        read_common_image, read_common_image_sequence, read_common_image_sequence_dir,
+        read_common_image_sequence_dir_with_timestamp_file,
+        read_common_image_sequence_dir_with_timestamps, read_common_image_sequence_with_timestamps,
+        read_timestamp_nanoseconds_txt, validate_common_image_sequence_dimensions,
         validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
         ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
     };

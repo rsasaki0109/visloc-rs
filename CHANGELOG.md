@@ -44,6 +44,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Common-image sequence summaries and dimension validation for image-sequence tracking inputs.
 - Optional nanosecond timestamps and timestamp validation for common-image sequence inputs.
 - Timestamped common-image sequence tracking example with GNSS-derived localization priors.
+- Timestamp text parsing for image-sequence datasets with separate image folders and timestamp files.
 
 ## 0.1.0 - 2026-05-07
 

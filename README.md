@@ -201,6 +201,8 @@ Timestamped image sequences can also be connected to GNSS-derived localization p
 cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior
 ```
 
+Timestamp text files use one nanosecond timestamp per non-comment line and can be loaded with `read_timestamp_nanoseconds_txt` or `read_common_image_sequence_dir_with_timestamp_file`.
+
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
 ```bash
