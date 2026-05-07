@@ -155,6 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trajectory_summary_path = output_dir.join("trajectory_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
         let trajectory_evaluation_path = output_dir.join("trajectory_evaluation.html");
+        let manifest_path = output_dir.join("manifest.json");
         let demo_index_path = output_dir.join("index.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
@@ -172,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trajectory.write_summary_json(&trajectory_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         trajectory.write_html_report_against(&reference_trajectory, &trajectory_evaluation_path)?;
+        write_demo_manifest_json(&manifest_path, tracker.stats(), &trajectory, &error_summary)?;
         write_demo_index_html(
             &demo_index_path,
             tracker.stats(),
@@ -179,8 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &error_summary,
         )?;
         println!(
-            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} reference_kitti={} reference_tum={} translation_errors={} error_summary={} trajectory_summary={} trajectory_report={} trajectory_evaluation={}",
+            "wrote gnss tracking exports: index={} manifest={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} reference_kitti={} reference_tum={} translation_errors={} error_summary={} trajectory_summary={} trajectory_report={} trajectory_evaluation={}",
             demo_index_path.display(),
+            manifest_path.display(),
             tracking_csv_path.display(),
             tracking_summary_path.display(),
             tracking_report_path.display(),
@@ -210,6 +213,69 @@ fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
     let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
     args.remove(output_flag_index);
     Some(output_dir)
+}
+
+fn write_demo_manifest_json(
+    path: impl AsRef<Path>,
+    stats: &TrackingStats,
+    trajectory: &PoseTrajectory,
+    error_summary: &TrajectoryErrorSummary,
+) -> std::io::Result<()> {
+    fs::write(path, demo_manifest_json(stats, trajectory, error_summary))
+}
+
+fn demo_manifest_json(
+    stats: &TrackingStats,
+    trajectory: &PoseTrajectory,
+    error_summary: &TrajectoryErrorSummary,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"demo\": \"track_sequence_with_gnss_prior\",\n",
+            "  \"description\": \"Moving-camera map-based localization with GNSS-derived external priors\",\n",
+            "  \"files\": [\n",
+            "    \"index.html\",\n",
+            "    \"tracking_report.html\",\n",
+            "    \"trajectory_report.html\",\n",
+            "    \"trajectory_evaluation.html\",\n",
+            "    \"tracking.csv\",\n",
+            "    \"trajectory.csv\",\n",
+            "    \"poses.txt\",\n",
+            "    \"trajectory_tum.txt\",\n",
+            "    \"reference_poses.txt\",\n",
+            "    \"reference_tum.txt\",\n",
+            "    \"translation_errors.csv\",\n",
+            "    \"tracking_summary.json\",\n",
+            "    \"trajectory_summary.json\",\n",
+            "    \"error_summary.json\",\n",
+            "    \"manifest.json\"\n",
+            "  ],\n",
+            "  \"metrics\": {{\n",
+            "    \"frame_count\": {},\n",
+            "    \"success_rate\": {},\n",
+            "    \"external_localization_prior_used_count\": {},\n",
+            "    \"external_localization_prior_usage_rate\": {},\n",
+            "    \"trajectory_pose_count\": {},\n",
+            "    \"trajectory_path_length\": {},\n",
+            "    \"matched_reference_pose_count\": {},\n",
+            "    \"mean_translation_error\": {},\n",
+            "    \"rmse_translation_error\": {},\n",
+            "    \"max_translation_error\": {}\n",
+            "  }}\n",
+            "}}\n"
+        ),
+        stats.frame_count,
+        stats.success_rate(),
+        stats.external_localization_prior_used_count,
+        stats.external_localization_prior_usage_rate(),
+        trajectory.len(),
+        trajectory.total_path_length(),
+        error_summary.matched_pose_count,
+        optional_f64_json(error_summary.mean_translation_error),
+        optional_f64_json(error_summary.rmse_translation_error),
+        optional_f64_json(error_summary.max_translation_error),
+    )
 }
 
 fn write_demo_index_html(
@@ -273,6 +339,7 @@ a{{color:#185abc;text-decoration:none;font-weight:700}}
 <div class=\"link\"><a href=\"tracking_summary.json\">tracking_summary.json</a><span class=\"detail\">Aggregate tracking success and prior-use metrics.</span></div>
 <div class=\"link\"><a href=\"trajectory_summary.json\">trajectory_summary.json</a><span class=\"detail\">Pose count, path length, bounds, and reprojection summary.</span></div>
 <div class=\"link\"><a href=\"error_summary.json\">error_summary.json</a><span class=\"detail\">Mean, RMSE, and max translation error summary.</span></div>
+<div class=\"link\"><a href=\"manifest.json\">manifest.json</a><span class=\"detail\">Machine-readable demo output list and top-level metrics.</span></div>
 </section>
 </main>
 </body>
@@ -306,6 +373,12 @@ fn reference_trajectory_from_poses(poses: &[(u64, Pose, Point3<f64>)]) -> PoseTr
         });
     }
     trajectory
+}
+
+fn optional_f64_json(value: Option<f64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn frame_from_projected_landmarks(
