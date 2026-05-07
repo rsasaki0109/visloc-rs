@@ -277,6 +277,32 @@ fn pose_trajectory_exports_tum_poses() {
 }
 
 #[test]
+fn pose_trajectory_parses_tum_poses() {
+    let trajectory = PoseTrajectory::from_tum_poses_str(
+        "# frame_id tx ty tz qx qy qz qw\n1 1 2 3 0 0 0 1\n3 4 5 6 0 0 0 1\n",
+    )
+    .unwrap();
+
+    assert_eq!(trajectory.frame_ids(), vec![1, 3]);
+    assert_eq!(
+        trajectory.camera_centers_world(),
+        vec![Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0)]
+    );
+    assert_eq!(
+        trajectory.to_tum_poses(),
+        "1 1 2 3 0 0 0 1\n3 4 5 6 0 0 0 1\n"
+    );
+}
+
+#[test]
+fn pose_trajectory_rejects_invalid_tum_pose_lines() {
+    let error = PoseTrajectory::from_tum_poses_str("1 2 3\n").unwrap_err();
+
+    assert_eq!(error.line_number, 1);
+    assert!(error.message.contains("expected 8 fields"));
+}
+
+#[test]
 fn pose_trajectory_exports_summary_json() {
     let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
     let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 6.0, 8.0));

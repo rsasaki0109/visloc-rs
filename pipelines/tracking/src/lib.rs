@@ -7,10 +7,11 @@
 //! updates, loop closure, and bundle adjustment to future layers.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::Path;
 
-use nalgebra::Point3;
-use visloc_core::geometry::Pose;
+use nalgebra::{Point3, Quaternion, UnitQuaternion, Vector3};
+use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{
     CameraId, Frame, FrameId, LandmarkDescriptorStore, LocalizationResult, VisualMap,
 };
@@ -196,6 +197,35 @@ impl TrajectorySample {
 pub struct PoseTrajectory {
     samples: Vec<TrajectorySample>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TumTrajectoryParseError {
+    pub line_number: usize,
+    pub line: String,
+    pub message: String,
+}
+
+impl TumTrajectoryParseError {
+    fn new(line_number: usize, line: &str, message: impl Into<String>) -> Self {
+        Self {
+            line_number,
+            line: line.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for TumTrajectoryParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid TUM trajectory line {}: {} ({})",
+            self.line_number, self.line, self.message
+        )
+    }
+}
+
+impl std::error::Error for TumTrajectoryParseError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectorySummary {
@@ -390,6 +420,57 @@ impl PoseTrajectory {
             trajectory.push_result(result);
         }
         trajectory
+    }
+
+    pub fn from_tum_poses_str(text: &str) -> Result<Self, TumTrajectoryParseError> {
+        let mut trajectory = Self::new();
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let fields = trimmed.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 8 {
+                return Err(TumTrajectoryParseError::new(
+                    line_number,
+                    line,
+                    format!("expected 8 fields, got {}", fields.len()),
+                ));
+            }
+
+            let frame_id = parse_tum_frame_id(fields[0], line_number, line)?;
+            let tx = parse_tum_f64(fields[1], "tx", line_number, line)?;
+            let ty = parse_tum_f64(fields[2], "ty", line_number, line)?;
+            let tz = parse_tum_f64(fields[3], "tz", line_number, line)?;
+            let qx = parse_tum_f64(fields[4], "qx", line_number, line)?;
+            let qy = parse_tum_f64(fields[5], "qy", line_number, line)?;
+            let qz = parse_tum_f64(fields[6], "qz", line_number, line)?;
+            let qw = parse_tum_f64(fields[7], "qw", line_number, line)?;
+            let Some(rotation) = UnitQuaternion::try_new(Quaternion::new(qw, qx, qy, qz), 1.0e-12)
+            else {
+                return Err(TumTrajectoryParseError::new(
+                    line_number,
+                    line,
+                    "quaternion norm is too small",
+                ));
+            };
+
+            let camera_to_world = SE3::new(rotation, Vector3::new(tx, ty, tz));
+            trajectory.push_sample(TrajectorySample {
+                frame_id,
+                pose: Pose {
+                    world_to_camera: camera_to_world.inverse(),
+                },
+                state: TrackingState::Tracking,
+                event: TrackingEvent::Tracked,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                reprojection_error: None,
+            });
+        }
+        Ok(trajectory)
     }
 
     pub fn push_result(&mut self, result: &TrackingResult) -> bool {
@@ -595,6 +676,27 @@ impl PoseTrajectory {
 
 fn optional_f64_csv(value: Option<f64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn parse_tum_frame_id(
+    value: &str,
+    line_number: usize,
+    line: &str,
+) -> Result<FrameId, TumTrajectoryParseError> {
+    value.parse::<FrameId>().map_err(|error| {
+        TumTrajectoryParseError::new(line_number, line, format!("invalid frame_id: {error}"))
+    })
+}
+
+fn parse_tum_f64(
+    value: &str,
+    field_name: &str,
+    line_number: usize,
+    line: &str,
+) -> Result<f64, TumTrajectoryParseError> {
+    value.parse::<f64>().map_err(|error| {
+        TumTrajectoryParseError::new(line_number, line, format!("invalid {field_name}: {error}"))
+    })
 }
 
 fn export_f64(value: f64) -> String {
