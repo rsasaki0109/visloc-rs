@@ -6,7 +6,7 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
-- `PoseTrajectory` and `TrajectorySample` helpers for extracting successful tracking poses, camera centers, path length, mean reprojection error, and CSV output from sequence-localization results.
+- `PoseTrajectory` and `TrajectorySample` helpers for extracting successful tracking poses, camera centers, path length, mean reprojection error, CSV output, and KITTI-style 3x4 pose rows from sequence-localization results.
 
 ## 0.1.0 - 2026-05-07
 

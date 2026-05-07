@@ -86,6 +86,7 @@ fn main() {
         trajectory.mean_reprojection_error(),
     );
     println!("trajectory_csv:\n{}", trajectory.to_csv());
+    println!("trajectory_kitti_poses:\n{}", trajectory.to_kitti_poses());
 
     let stats = tracker.stats();
     println!(
