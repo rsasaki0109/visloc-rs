@@ -13,7 +13,23 @@ The long-term shape is:
 3. Track poses across frames with priors and relocalization.
 4. Add local mapping and lightweight keyframe policies.
 5. Grow into online Visual SLAM with incremental map updates.
-6. Add visual-inertial and GNSS priors/fusion.
+6. Add a deep visual odometry frontend as an optional tracking path.
+7. Add loop-closure candidate detection and later pose-graph optimization hooks.
+8. Add visual-inertial and GNSS priors/fusion.
+
+## Near-Term Technical Bets
+
+Two goals should drive the next public demos:
+
+- **Deep Visual Odometry frontend.** The project should support learned feature
+  extraction and learned matching as replaceable frontends for frame-to-frame
+  motion estimation. This should stay optional: model runtimes, weights, and
+  accelerator-specific code should live behind traits or integration crates, not
+  inside `visloc-core`.
+- **Loop-closure candidate detection.** The first loop-closure milestone should
+  detect and report candidates, then geometrically verify them. Full global pose
+  graph optimization can come later. The demo value is showing that the system
+  recognizes a previously visited place and exposes the candidate clearly.
 
 ## v0.1: Map-Based Visual Localization
 
@@ -122,7 +138,55 @@ Exit criteria:
 - Lost tracking can relocalize.
 - Updated maps can be saved and reused for localization.
 
-## v0.5: Sensor Fusion Foundation
+## v0.5: Deep Visual Odometry Frontend
+
+Goal: make frame-to-frame motion estimation stronger while keeping the Rust core replaceable and inspectable.
+
+Focus:
+
+- Visual-odometry frontend traits for two-view motion and frame-to-frame pose priors
+- Learned feature/matcher integration points for SuperPoint/LightGlue-style pipelines
+- Descriptor/keypoint adapters that can consume external model outputs
+- Sequence demos that compare classical/localization-only tracking with deep-frontend priors
+- Failure diagnostics for low-texture, motion blur, and weak-match cases
+
+Out of scope:
+
+- Bundling large neural-network weights into the core crate
+- Requiring a specific inference runtime
+- Dense neural reconstruction
+
+Exit criteria:
+
+- A deep or externally supplied VO frontend can provide pose priors without changing `VisualMap`, `Frame`, or localization APIs.
+- The same tracking pipeline can run with either classical features or learned frontend outputs.
+- Public demos make feature density, correspondence quality, and pose continuity visible.
+
+## v0.6: Loop Closure Candidate Layer
+
+Goal: make the SLAM direction visible by detecting likely returns to previously seen places.
+
+Focus:
+
+- Loop-closure candidate types and diagnostics
+- Keyframe/image similarity interfaces
+- Geometric verification through reusable matching and pose-estimation components
+- Demo visualization for candidate links in a sequence trajectory
+- Hooks for future pose-graph constraints
+
+Out of scope:
+
+- Full pose-graph optimization
+- Large-scale image retrieval infrastructure
+- Production-grade place-recognition databases
+
+Exit criteria:
+
+- A sequence can report likely loop candidates with scores and verification status.
+- Demos can show a loop candidate edge without claiming global optimization.
+- The API leaves room for later pose-graph optimization and map correction.
+
+## v0.7: Sensor Fusion Foundation
 
 Goal: prepare Visual Localization and Visual SLAM for robotics use cases.
 
@@ -158,6 +222,7 @@ Focus:
 - Clear crate boundaries
 - API stability tiers for core types, replaceable algorithm traits, and experimental composition layers
 - Public benchmark scripts
+- Deep VO and loop-closure extension points documented as optional layers
 - Compatibility notes for COLMAP/SfM map formats
 - Migration guides for earlier versions
 

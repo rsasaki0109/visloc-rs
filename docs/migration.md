@@ -94,4 +94,4 @@ The explicit module paths still work. The prelude is now the recommended entry p
 
 ### Keep SLAM Expectations Explicit
 
-`OnlineSlamPipeline` is currently an MVP composition over tracking and local mapping. It does not implement loop closure, global pose graph optimization, dense mapping, or production bundle adjustment. Applications that only need map-based localization should keep using `LocalizationPipeline` and `Tracker`.
+`OnlineSlamPipeline` is currently an MVP composition over tracking and local mapping. It reports lightweight loop-closure candidates, but it does not implement global pose graph optimization, dense mapping, or production bundle adjustment. Applications that only need map-based localization should keep using `LocalizationPipeline` and `Tracker`.

@@ -3,7 +3,7 @@ use visloc_core::geometry::Pose;
 use visloc_core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
-use visloc_slam::{OnlineSlamConfig, OnlineSlamPipeline};
+use visloc_slam::{LoopClosureConfig, OnlineSlamConfig, OnlineSlamPipeline};
 use visloc_tracking::{Tracker, TrackingConfig};
 
 fn map_and_frame(frame_id: u64, camera_id: u64) -> (VisualMap, Frame) {
@@ -45,7 +45,15 @@ fn slam_pipeline(
         map,
         Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
         LocalMappingPipeline::default(),
-        OnlineSlamConfig { apply_map_updates },
+        OnlineSlamConfig {
+            apply_map_updates,
+            loop_closure: LoopClosureConfig {
+                min_frame_id_gap: 5,
+                min_shared_landmarks: 4,
+                min_shared_landmark_ratio_percent: 50,
+                ..LoopClosureConfig::default()
+            },
+        },
     )
 }
 
@@ -61,6 +69,7 @@ fn online_slam_tracks_and_applies_keyframe_update() {
     assert_eq!(result.map_keyframe_count, 1);
     assert_eq!(result.map_landmark_count, 6);
     assert!(result.mapping.as_ref().unwrap().keyframe_decision.selected);
+    assert!(!result.has_loop_closure_candidate());
     assert_eq!(slam.map().keyframes.len(), 1);
     assert!(slam.map().validate().is_valid());
 }
@@ -106,4 +115,42 @@ fn online_slam_reset_clears_sequence_state_but_keeps_map() {
 
     assert_eq!(slam.map().keyframes.len(), 1);
     assert_eq!(slam.tracker.stats().frame_count, 0);
+}
+
+#[test]
+fn online_slam_reports_loop_closure_candidate_against_older_keyframe() {
+    let (map, first_frame) = map_and_frame(10, 1);
+    let (_, second_frame) = map_and_frame(30, 1);
+    let mut slam = slam_pipeline(map, true);
+
+    let first = slam.process_frame(&first_frame, []);
+    assert!(first.tracking_succeeded());
+    assert!(!first.has_loop_closure_candidate());
+
+    let second = slam.process_frame(&second_frame, []);
+
+    assert!(second.tracking_succeeded());
+    assert!(second.has_loop_closure_candidate());
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+    let candidate = &second.loop_closure_candidates[0];
+    assert_eq!(candidate.query_frame_id, 30);
+    assert_eq!(candidate.matched_keyframe_id, 10);
+    assert_eq!(candidate.shared_landmark_count, 6);
+    assert_eq!(candidate.query_inlier_count, 6);
+    assert_eq!(candidate.keyframe_observation_count, 6);
+    assert!((candidate.shared_landmark_ratio - 1.0).abs() < 1.0e-9);
+    assert!(candidate.geometrically_verified);
+}
+
+#[test]
+fn online_slam_respects_loop_closure_frame_gap() {
+    let (map, first_frame) = map_and_frame(10, 1);
+    let (_, second_frame) = map_and_frame(12, 1);
+    let mut slam = slam_pipeline(map, true);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let second = slam.process_frame(&second_frame, []);
+
+    assert!(second.tracking_succeeded());
+    assert!(!second.has_loop_closure_candidate());
 }

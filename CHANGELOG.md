@@ -56,6 +56,11 @@ All notable changes to `visloc-rs` will be documented here.
 - docs.rs metadata now builds every publishable crate with all features enabled so optional APIs are included in hosted documentation, and `scripts/package_check.sh` verifies the metadata is present.
 - Local and CI checks now verify release metadata consistency across Cargo manifests, docs.rs settings, publish docs, and documented CI demo artifacts.
 - README first-view copy and imagery now highlight the real public-data localization demo, robotics use case, current inputs/outputs, working demos, and explicit non-goals for readers evaluating the project quickly.
+- README public-data demo assets now include a feature-rich variant with many detected image features and highlighted pose-link overlays for a clearer visual-localization first impression.
+- Demo guidance now calls out feature-rich visualization and the future path for learned feature/matcher integrations without implying bundled deep models.
+- Roadmap and demo strategy now make deep visual odometry and loop-closure candidate detection explicit next technical targets.
+- `visloc-slam` now reports lightweight loop-closure candidates from shared verified landmarks between the current frame and older keyframes.
+- Large README animation GIFs are excluded from the root crates.io package while remaining available on GitHub.
 - `FramePriorSyncSummary` diagnostics for checking external measurement coverage against frame timestamps.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.
