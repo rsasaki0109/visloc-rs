@@ -6,8 +6,8 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
-    write_tracking_results_html_report, LocalizationPipeline, PoseTrajectory, Tracker,
-    TrackingConfig,
+    write_tracking_results_csv, write_tracking_results_html_report, LocalizationPipeline,
+    PoseTrajectory, Tracker, TrackingConfig,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,12 +121,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
+        let tracking_csv_path = output_dir.join("tracking.csv");
         let report_path = output_dir.join("tracking_report.html");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
+        write_tracking_results_csv(&results, &tracking_csv_path)?;
         write_tracking_results_html_report(&results, &report_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         println!(
-            "wrote tracking exports: report={} trajectory_report={}",
+            "wrote tracking exports: csv={} report={} trajectory_report={}",
+            tracking_csv_path.display(),
             report_path.display(),
             trajectory_report_path.display()
         );
