@@ -4,10 +4,13 @@ use std::convert::Infallible;
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
-use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
+use visloc_rs::core::types::{
+    Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationResult, LocalizationSuccess,
+    VisualMap,
+};
 use visloc_rs::{
-    ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, ImageTracker, InMemoryMapProvider,
-    LocalizationPipeline, MapProviderStats, MotionModel, PriorSubmapSelector,
+    ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
+    InMemoryMapProvider, LocalizationPipeline, MapProviderStats, MotionModel, PriorSubmapSelector,
     SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
     TrackingResult, TrackingState,
 };
@@ -31,6 +34,22 @@ impl MotionModel for FixedPoseMotionModel {
 #[derive(Debug, Clone)]
 struct StaticFeatureExtractor {
     features: FeatureSet,
+}
+
+#[derive(Debug, Clone)]
+struct FixedFrameLocalizer {
+    result: LocalizationResult,
+}
+
+impl FrameLocalizer for FixedFrameLocalizer {
+    fn localize_frame_with_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _descriptor_store: &LandmarkDescriptorStore,
+    ) -> LocalizationResult {
+        self.result.clone()
+    }
 }
 
 impl FeatureExtractor for StaticFeatureExtractor {
@@ -82,6 +101,26 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
             },
         ),
     }
+}
+
+fn successful_localization_result(
+    inlier_count: usize,
+    correspondence_count: usize,
+    mean_reprojection_error: f64,
+) -> LocalizationResult {
+    LocalizationResult::success(LocalizationSuccess {
+        pose: Pose::identity(),
+        candidate_landmark_count: correspondence_count,
+        match_count: correspondence_count,
+        correspondence_count,
+        inliers: (0..inlier_count).collect(),
+        inlier_query_indices: (0..inlier_count).collect(),
+        inlier_landmark_ids: (1..=inlier_count as u64).collect(),
+        inlier_reprojection_errors: vec![mean_reprojection_error; inlier_count],
+        mean_reprojection_error,
+        median_reprojection_error: mean_reprojection_error,
+        max_reprojection_error: mean_reprojection_error,
+    })
 }
 
 fn build_map_and_frame(frame_id: u64, camera_id: u64) -> (VisualMap, Frame) {
@@ -327,6 +366,7 @@ fn tracking_result_exposes_pose_prior_as_localization_prior() {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
             max_pose_prior_translation_error: None,
+            ..TrackingConfig::default()
         },
     );
 
@@ -466,6 +506,7 @@ fn tracker_uses_last_pose_prior_to_limit_landmark_candidates() {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
             max_pose_prior_translation_error: None,
+            ..TrackingConfig::default()
         },
     );
 
@@ -511,6 +552,7 @@ fn tracker_quality_gate_rejects_large_jump_from_pose_prior() {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
             max_pose_prior_translation_error: Some(0.1),
+            ..TrackingConfig::default()
         },
     );
 
@@ -544,6 +586,86 @@ fn tracker_quality_gate_rejects_large_jump_from_pose_prior() {
 }
 
 #[test]
+fn tracker_quality_gate_rejects_too_few_inliers() {
+    let (_map, frame) = build_map_and_frame(10, 1);
+    let mut tracker = Tracker::new(
+        FixedFrameLocalizer {
+            result: successful_localization_result(3, 3, 0.0),
+        },
+        TrackingConfig {
+            min_inliers: 4,
+            ..TrackingConfig::default()
+        },
+    );
+
+    let result = tracker.track_frame(&frame, &VisualMap::new());
+
+    assert!(!result.localization.success);
+    assert_eq!(result.event, TrackingEvent::TrackingFailed);
+    assert!(matches!(
+        result.tracking_failure_reason,
+        Some(TrackingFailureReason::InsufficientInliers {
+            inlier_count: 3,
+            min_inliers: 4,
+        })
+    ));
+    assert_eq!(tracker.stats().tracking_quality_gate_failure_count, 1);
+    assert_eq!(tracker.stats().failed_frame_count, 1);
+}
+
+#[test]
+fn tracker_quality_gate_rejects_low_inlier_ratio() {
+    let (_map, frame) = build_map_and_frame(10, 1);
+    let mut tracker = Tracker::new(
+        FixedFrameLocalizer {
+            result: successful_localization_result(3, 6, 0.0),
+        },
+        TrackingConfig {
+            min_inlier_ratio: 0.75,
+            ..TrackingConfig::default()
+        },
+    );
+
+    let result = tracker.track_frame(&frame, &VisualMap::new());
+
+    assert!(!result.localization.success);
+    assert!(matches!(
+        result.tracking_failure_reason,
+        Some(TrackingFailureReason::InlierRatioTooLow {
+            inlier_ratio: 0.5,
+            min_inlier_ratio: 0.75,
+        })
+    ));
+    assert_eq!(tracker.stats().tracking_quality_gate_failure_count, 1);
+}
+
+#[test]
+fn tracker_quality_gate_rejects_high_reprojection_error() {
+    let (_map, frame) = build_map_and_frame(10, 1);
+    let mut tracker = Tracker::new(
+        FixedFrameLocalizer {
+            result: successful_localization_result(6, 6, 2.5),
+        },
+        TrackingConfig {
+            max_mean_reprojection_error: Some(1.0),
+            ..TrackingConfig::default()
+        },
+    );
+
+    let result = tracker.track_frame(&frame, &VisualMap::new());
+
+    assert!(!result.localization.success);
+    assert!(matches!(
+        result.tracking_failure_reason,
+        Some(TrackingFailureReason::MeanReprojectionErrorTooHigh {
+            reprojection_error: 2.5,
+            max_reprojection_error: 1.0,
+        })
+    ));
+    assert_eq!(tracker.stats().tracking_quality_gate_failure_count, 1);
+}
+
+#[test]
 fn tracker_accepts_custom_motion_model_for_pose_prior() {
     let (mut map, frame) = build_map_and_frame(10, 1);
     let far_points = [
@@ -570,6 +692,7 @@ fn tracker_accepts_custom_motion_model_for_pose_prior() {
             min_successive_failures_to_lost: 2,
             last_pose_candidate_radius: Some(8.0),
             max_pose_prior_translation_error: None,
+            ..TrackingConfig::default()
         },
     );
 

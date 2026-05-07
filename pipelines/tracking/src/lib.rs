@@ -40,6 +40,9 @@ pub struct TrackingConfig {
     pub min_successive_failures_to_lost: usize,
     pub last_pose_candidate_radius: Option<f64>,
     pub max_pose_prior_translation_error: Option<f64>,
+    pub min_inliers: usize,
+    pub min_inlier_ratio: f64,
+    pub max_mean_reprojection_error: Option<f64>,
 }
 
 impl Default for TrackingConfig {
@@ -48,12 +51,27 @@ impl Default for TrackingConfig {
             min_successive_failures_to_lost: 3,
             last_pose_candidate_radius: None,
             max_pose_prior_translation_error: None,
+            min_inliers: 0,
+            min_inlier_ratio: 0.0,
+            max_mean_reprojection_error: None,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackingFailureReason {
+    InsufficientInliers {
+        inlier_count: usize,
+        min_inliers: usize,
+    },
+    InlierRatioTooLow {
+        inlier_ratio: f64,
+        min_inlier_ratio: f64,
+    },
+    MeanReprojectionErrorTooHigh {
+        reprojection_error: f64,
+        max_reprojection_error: f64,
+    },
     PosePriorTranslationErrorExceeded {
         translation_error: f64,
         max_translation_error: f64,
@@ -550,6 +568,35 @@ where
     ) -> Option<TrackingFailureReason> {
         if !localization.success {
             return None;
+        }
+
+        if localization.inlier_count < self.config.min_inliers {
+            *localization = localization.clone().rejected_by_quality_gate();
+            return Some(TrackingFailureReason::InsufficientInliers {
+                inlier_count: localization.inlier_count,
+                min_inliers: self.config.min_inliers,
+            });
+        }
+
+        if localization.inlier_ratio < self.config.min_inlier_ratio {
+            *localization = localization.clone().rejected_by_quality_gate();
+            return Some(TrackingFailureReason::InlierRatioTooLow {
+                inlier_ratio: localization.inlier_ratio,
+                min_inlier_ratio: self.config.min_inlier_ratio,
+            });
+        }
+
+        if let (Some(reprojection_error), Some(max_reprojection_error)) = (
+            localization.reprojection_error,
+            self.config.max_mean_reprojection_error,
+        ) {
+            if reprojection_error > max_reprojection_error {
+                *localization = localization.clone().rejected_by_quality_gate();
+                return Some(TrackingFailureReason::MeanReprojectionErrorTooHigh {
+                    reprojection_error,
+                    max_reprojection_error,
+                });
+            }
         }
 
         let max_translation_error = self.config.max_pose_prior_translation_error?;
