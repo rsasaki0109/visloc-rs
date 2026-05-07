@@ -273,6 +273,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "visloc-fusion"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "visloc-core",
+ "visloc-localization",
+]
+
+[[package]]
 name = "visloc-io"
 version = "0.1.0"
 dependencies = [
@@ -307,6 +316,7 @@ version = "0.1.0"
 dependencies = [
  "nalgebra",
  "visloc-core",
+ "visloc-fusion",
  "visloc-io",
  "visloc-localization",
  "visloc-mapping",

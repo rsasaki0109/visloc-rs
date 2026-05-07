@@ -19,6 +19,7 @@ members = [
     "pipelines/tracking",
     "pipelines/mapping",
     "pipelines/slam",
+    "pipelines/fusion",
 ]
 resolver = "2"
 
@@ -47,3 +48,4 @@ visloc-localization = { path = "pipelines/localization", version = "0.1.0" }
 visloc-tracking = { path = "pipelines/tracking", version = "0.1.0" }
 visloc-mapping = { path = "pipelines/mapping", version = "0.1.0" }
 visloc-slam = { path = "pipelines/slam", version = "0.1.0" }
+visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
