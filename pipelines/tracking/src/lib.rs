@@ -161,6 +161,17 @@ impl TrajectorySample {
             optional_f64_csv(self.reprojection_error)
         )
     }
+
+    pub fn to_kitti_pose_record(&self) -> String {
+        let camera_to_world = self.pose.camera_to_world().matrix();
+        let mut values = Vec::with_capacity(12);
+        for row in 0..3 {
+            for column in 0..4 {
+                values.push(camera_to_world[(row, column)].to_string());
+            }
+        }
+        values.join(" ")
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -260,6 +271,19 @@ impl PoseTrajectory {
 
     pub fn write_csv(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         std::fs::write(path, self.to_csv())
+    }
+
+    pub fn to_kitti_poses(&self) -> String {
+        let mut output = String::new();
+        for sample in &self.samples {
+            output.push_str(&sample.to_kitti_pose_record());
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn write_kitti_poses(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_kitti_poses())
     }
 }
 

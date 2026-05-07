@@ -247,6 +247,21 @@ fn pose_trajectory_exports_csv() {
 }
 
 #[test]
+fn pose_trajectory_exports_kitti_poses() {
+    let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
+    let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 5.0, 6.0));
+    let trajectory = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(1, pose_a),
+        failed_tracking_result(2),
+        successful_tracking_result(3, pose_b),
+    ]);
+
+    let kitti = trajectory.to_kitti_poses();
+
+    assert_eq!(kitti, "1 0 0 1 0 1 0 2 0 0 1 3\n1 0 0 4 0 1 0 5 0 0 1 6\n");
+}
+
+#[test]
 fn tracker_enters_tracking_after_successful_localization() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
