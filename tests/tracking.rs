@@ -262,6 +262,35 @@ fn pose_trajectory_exports_kitti_poses() {
 }
 
 #[test]
+fn pose_trajectory_exports_summary_json() {
+    let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
+    let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 6.0, 8.0));
+    let trajectory = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(10, pose_a),
+        failed_tracking_result(11),
+        successful_tracking_result(12, pose_b),
+    ]);
+
+    let summary = trajectory.summary();
+    let json = trajectory.to_summary_json();
+
+    assert_eq!(summary.pose_count, 2);
+    assert_eq!(summary.first_frame_id, Some(10));
+    assert_eq!(summary.last_frame_id, Some(12));
+    assert!(
+        (summary.total_path_length - (3.0_f64 * 3.0 + 4.0 * 4.0 + 5.0 * 5.0).sqrt()).abs() < 1.0e-9
+    );
+    assert_eq!(summary.mean_inlier_count, Some(0.0));
+    assert_eq!(summary.mean_inlier_ratio, Some(0.0));
+    assert_eq!(summary.mean_reprojection_error, Some(0.0));
+    assert_eq!(summary.min_camera_center_world, Some([1.0, 2.0, 3.0]));
+    assert_eq!(summary.max_camera_center_world, Some([4.0, 6.0, 8.0]));
+    assert!(json.contains("\"pose_count\": 2"));
+    assert!(json.contains("\"first_frame_id\": 10"));
+    assert!(json.contains("\"min_camera_center_world\": [1, 2, 3]"));
+}
+
+#[test]
 fn tracker_enters_tracking_after_successful_localization() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());

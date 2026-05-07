@@ -87,7 +87,7 @@ pub use visloc_slam::{OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult};
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
     MotionModel, PoseTrajectory, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
-    TrackingResult, TrackingState, TrackingStats, TrajectorySample,
+    TrackingResult, TrackingState, TrackingStats, TrajectorySample, TrajectorySummary,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
@@ -135,8 +135,8 @@ pub mod prelude {
         SelectableMapProvider, SimpleKeyframePolicy, StagedMapUpdate, SubmapSelector, TimeDelta,
         Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp, Tracker, TrackingConfig,
         TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
-        TrajectorySample, TriangulationConfig, TriangulationFailureReason, Triangulator, VisualMap,
-        VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
+        TrajectorySample, TrajectorySummary, TriangulationConfig, TriangulationFailureReason,
+        Triangulator, VisualMap, VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
     };
 
     pub use crate::io::colmap::{

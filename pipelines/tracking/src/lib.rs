@@ -179,6 +179,90 @@ pub struct PoseTrajectory {
     samples: Vec<TrajectorySample>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrajectorySummary {
+    pub pose_count: usize,
+    pub first_frame_id: Option<FrameId>,
+    pub last_frame_id: Option<FrameId>,
+    pub total_path_length: f64,
+    pub mean_inlier_count: Option<f64>,
+    pub mean_inlier_ratio: Option<f64>,
+    pub mean_reprojection_error: Option<f64>,
+    pub min_camera_center_world: Option<[f64; 3]>,
+    pub max_camera_center_world: Option<[f64; 3]>,
+}
+
+impl TrajectorySummary {
+    pub fn from_trajectory(trajectory: &PoseTrajectory) -> Self {
+        let pose_count = trajectory.len();
+        let first_frame_id = trajectory.samples.first().map(|sample| sample.frame_id);
+        let last_frame_id = trajectory.samples.last().map(|sample| sample.frame_id);
+        let total_path_length = trajectory.total_path_length();
+        let mean_reprojection_error = trajectory.mean_reprojection_error();
+
+        let (mean_inlier_count, mean_inlier_ratio) = if pose_count == 0 {
+            (None, None)
+        } else {
+            let inlier_count_sum: usize = trajectory
+                .samples
+                .iter()
+                .map(|sample| sample.inlier_count)
+                .sum();
+            let inlier_ratio_sum: f64 = trajectory
+                .samples
+                .iter()
+                .map(|sample| sample.inlier_ratio)
+                .sum();
+            (
+                Some(inlier_count_sum as f64 / pose_count as f64),
+                Some(inlier_ratio_sum / pose_count as f64),
+            )
+        };
+
+        let (min_camera_center_world, max_camera_center_world) =
+            trajectory.camera_center_bounds_world();
+
+        Self {
+            pose_count,
+            first_frame_id,
+            last_frame_id,
+            total_path_length,
+            mean_inlier_count,
+            mean_inlier_ratio,
+            mean_reprojection_error,
+            min_camera_center_world,
+            max_camera_center_world,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"pose_count\": {},\n",
+                "  \"first_frame_id\": {},\n",
+                "  \"last_frame_id\": {},\n",
+                "  \"total_path_length\": {},\n",
+                "  \"mean_inlier_count\": {},\n",
+                "  \"mean_inlier_ratio\": {},\n",
+                "  \"mean_reprojection_error\": {},\n",
+                "  \"min_camera_center_world\": {},\n",
+                "  \"max_camera_center_world\": {}\n",
+                "}}\n"
+            ),
+            self.pose_count,
+            optional_frame_id_json(self.first_frame_id),
+            optional_frame_id_json(self.last_frame_id),
+            self.total_path_length,
+            optional_f64_json(self.mean_inlier_count),
+            optional_f64_json(self.mean_inlier_ratio),
+            optional_f64_json(self.mean_reprojection_error),
+            optional_vec3_json(self.min_camera_center_world),
+            optional_vec3_json(self.max_camera_center_world)
+        )
+    }
+}
+
 impl PoseTrajectory {
     pub fn new() -> Self {
         Self::default()
@@ -230,6 +314,28 @@ impl PoseTrajectory {
             .iter()
             .map(TrajectorySample::camera_center_world)
             .collect()
+    }
+
+    pub fn camera_center_bounds_world(&self) -> (Option<[f64; 3]>, Option<[f64; 3]>) {
+        let Some(first) = self.samples.first() else {
+            return (None, None);
+        };
+
+        let first_center = first.camera_center_world();
+        let mut min = [first_center.x, first_center.y, first_center.z];
+        let mut max = min;
+
+        for sample in self.samples.iter().skip(1) {
+            let center = sample.camera_center_world();
+            min[0] = min[0].min(center.x);
+            min[1] = min[1].min(center.y);
+            min[2] = min[2].min(center.z);
+            max[0] = max[0].max(center.x);
+            max[1] = max[1].max(center.y);
+            max[2] = max[2].max(center.z);
+        }
+
+        (Some(min), Some(max))
     }
 
     pub fn total_path_length(&self) -> f64 {
@@ -285,10 +391,40 @@ impl PoseTrajectory {
     pub fn write_kitti_poses(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         std::fs::write(path, self.to_kitti_poses())
     }
+
+    pub fn summary(&self) -> TrajectorySummary {
+        TrajectorySummary::from_trajectory(self)
+    }
+
+    pub fn to_summary_json(&self) -> String {
+        self.summary().to_json()
+    }
+
+    pub fn write_summary_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_summary_json())
+    }
 }
 
 fn optional_f64_csv(value: Option<f64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn optional_f64_json(value: Option<f64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_frame_id_json(value: Option<FrameId>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_vec3_json(value: Option<[f64; 3]>) -> String {
+    value
+        .map(|value| format!("[{}, {}, {}]", value[0], value[1], value[2]))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
