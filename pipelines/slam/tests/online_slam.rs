@@ -3,7 +3,9 @@ use visloc_core::geometry::Pose;
 use visloc_core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
-use visloc_slam::{LoopClosureConfig, OnlineSlamConfig, OnlineSlamPipeline};
+use visloc_slam::{
+    online_slam_results_to_html_report, LoopClosureConfig, OnlineSlamConfig, OnlineSlamPipeline,
+};
 use visloc_tracking::{Tracker, TrackingConfig};
 
 fn map_and_frame(frame_id: u64, camera_id: u64) -> (VisualMap, Frame) {
@@ -140,6 +142,23 @@ fn online_slam_reports_loop_closure_candidate_against_older_keyframe() {
     assert_eq!(candidate.keyframe_observation_count, 6);
     assert!((candidate.shared_landmark_ratio - 1.0).abs() < 1.0e-9);
     assert!(candidate.geometrically_verified);
+}
+
+#[test]
+fn online_slam_html_report_renders_loop_candidate_edge() {
+    let (map, first_frame) = map_and_frame(10, 1);
+    let (_, second_frame) = map_and_frame(30, 1);
+    let mut slam = slam_pipeline(map, true);
+
+    let first = slam.process_frame(&first_frame, []);
+    let second = slam.process_frame(&second_frame, []);
+
+    let html = online_slam_results_to_html_report(&[first, second]);
+
+    assert!(html.contains("online SLAM loop report"));
+    assert!(html.contains("Loop Closure Candidates"));
+    assert!(html.contains("loop candidate edge"));
+    assert!(html.contains("<td>30</td><td>10</td><td>6</td>"));
 }
 
 #[test]

@@ -107,7 +107,9 @@ pub use visloc_mapping::{
     TriangulationFailureReason, Triangulator,
 };
 pub use visloc_slam::{
-    LoopClosureCandidate, LoopClosureConfig, OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult,
+    online_slam_results_to_html_report, write_online_slam_results_html_report,
+    LoopClosureCandidate, LoopClosureConfig, OnlineSlamConfig, OnlineSlamPipeline,
+    OnlineSlamResult,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,
@@ -142,7 +144,8 @@ pub mod prelude {
     pub use crate::{
         localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
         localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
-        reproject, tracking_results_to_csv, tracking_results_to_html_report,
+        online_slam_results_to_html_report, reproject, tracking_results_to_csv,
+        tracking_results_to_html_report, write_online_slam_results_html_report,
         write_tracking_results_csv, write_tracking_results_html_report, AllLandmarksSelector,
         AllMapSelector, BruteForceMatcher, Camera, CameraId, CameraModel, CandidateSelector,
         ColmapMapProvider, ConstantPoseMotionModel, ConstantVelocityMotionModel,

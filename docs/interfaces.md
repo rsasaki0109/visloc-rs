@@ -137,12 +137,13 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 - `LoopClosureConfig`: controls candidate detection using frame-id gap, shared-landmark count, shared-landmark ratio, and max returned candidates
 - `LoopClosureCandidate`: reports the current frame, matched older keyframe, shared landmark count, overlap ratio, score, and geometric verification flag
 - `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, loop-closure candidates, and current map sizes
+- `online_slam_results_to_html_report`: creates a self-contained HTML/SVG report showing tracked camera centers and loop-candidate edges
 
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
 
 Loop-closure candidates are deliberately diagnostic at this layer. They identify likely returns to older keyframes using shared verified landmarks, but they do not yet add pose-graph constraints or correct the map globally.
 
-The `online_slam_loop_candidate_dummy` example shows this diagnostic path on a tiny synthetic sequence: an older keyframe is inserted first, a later frame observes the same landmarks, and the pipeline reports a loop candidate with overlap score and verification status.
+The `online_slam_loop_candidate_dummy` example shows this diagnostic path on a tiny synthetic sequence: an older keyframe is inserted first, a later frame observes the same landmarks, and the pipeline reports a loop candidate with overlap score and verification status. With `--out-dir`, it writes `loop_report.html` so the candidate edge is visible in a browser.
 
 ## Sensor Fusion Foundation
 
