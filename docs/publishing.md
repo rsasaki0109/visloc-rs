@@ -35,7 +35,7 @@ Run the normal quality gate before publishing:
 scripts/check.sh
 ```
 
-This runs formatting, clippy, tests, examples, docs, and package checks.
+This runs formatting, clippy, tests, examples, the GNSS demo output smoke check, docs, and package checks.
 
 When only package metadata changed, this narrower check is useful:
 
