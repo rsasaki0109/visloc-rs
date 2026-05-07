@@ -63,6 +63,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload timestamped GNSS image demo outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: timestamped-gnss-image-demo-outputs
+          path: target/visloc_timestamped_image_sequence_demo
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
