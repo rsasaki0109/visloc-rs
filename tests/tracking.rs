@@ -306,6 +306,79 @@ fn pose_trajectory_exports_summary_json() {
 }
 
 #[test]
+fn pose_trajectory_reports_translation_errors_against_reference() {
+    let estimated = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 2.0, 0.0)),
+        ),
+        successful_tracking_result(
+            4,
+            pose_with_identity_rotation_at_center(Vector3::new(9.0, 0.0, 0.0)),
+        ),
+    ]);
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            3,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 3.0)),
+        ),
+    ]);
+
+    let errors = estimated.translation_errors_against(&reference);
+    let summary = estimated.translation_error_summary_against(&reference);
+    let json = summary.to_json();
+
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].frame_id, 1);
+    assert_eq!(errors[0].translation_error, 1.0);
+    assert_eq!(errors[1].frame_id, 2);
+    assert_eq!(errors[1].translation_error, 2.0);
+    assert_eq!(summary.estimated_pose_count, 3);
+    assert_eq!(summary.reference_pose_count, 3);
+    assert_eq!(summary.matched_pose_count, 2);
+    assert_eq!(summary.missing_reference_count, 1);
+    assert_eq!(summary.missing_estimate_count, 1);
+    assert_eq!(summary.mean_translation_error, Some(1.5));
+    assert!((summary.rmse_translation_error.unwrap() - (2.5_f64).sqrt()).abs() < 1.0e-9);
+    assert_eq!(summary.max_translation_error, Some(2.0));
+    assert!(json.contains("\"matched_pose_count\": 2"));
+    assert!(json.contains("\"mean_translation_error\": 1.5"));
+}
+
+#[test]
+fn pose_trajectory_error_summary_handles_no_matching_frames() {
+    let estimated = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        1,
+        pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+    )]);
+    let reference = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        2,
+        pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 0.0)),
+    )]);
+
+    let summary = estimated.translation_error_summary_against(&reference);
+
+    assert_eq!(summary.matched_pose_count, 0);
+    assert_eq!(summary.missing_reference_count, 1);
+    assert_eq!(summary.missing_estimate_count, 1);
+    assert_eq!(summary.mean_translation_error, None);
+    assert_eq!(summary.rmse_translation_error, None);
+    assert_eq!(summary.max_translation_error, None);
+}
+
+#[test]
 fn tracker_enters_tracking_after_successful_localization() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());

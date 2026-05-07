@@ -163,6 +163,8 @@ cargo run --example localize_sequence_from_files
 cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo
 ```
 
+When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
+
 Run the tracking skeleton example:
 
 ```bash

@@ -6,6 +6,7 @@
 //! failure/lost/relocalization events, and leaves keyframe management, map
 //! updates, loop closure, and bundle adjustment to future layers.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use nalgebra::Point3;
@@ -209,6 +210,94 @@ pub struct TrajectorySummary {
     pub max_camera_center_world: Option<[f64; 3]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrajectoryTranslationError {
+    pub frame_id: FrameId,
+    pub translation_error: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrajectoryErrorSummary {
+    pub estimated_pose_count: usize,
+    pub reference_pose_count: usize,
+    pub matched_pose_count: usize,
+    pub missing_reference_count: usize,
+    pub missing_estimate_count: usize,
+    pub mean_translation_error: Option<f64>,
+    pub rmse_translation_error: Option<f64>,
+    pub max_translation_error: Option<f64>,
+}
+
+impl TrajectoryErrorSummary {
+    pub fn from_trajectories(estimated: &PoseTrajectory, reference: &PoseTrajectory) -> Self {
+        let errors = estimated.translation_errors_against(reference);
+        let matched_pose_count = errors.len();
+        let estimated_ids = estimated.frame_id_set();
+        let reference_ids = reference.frame_id_set();
+        let missing_reference_count = estimated_ids.difference(&reference_ids).count();
+        let missing_estimate_count = reference_ids.difference(&estimated_ids).count();
+
+        let (mean_translation_error, rmse_translation_error, max_translation_error) =
+            if errors.is_empty() {
+                (None, None, None)
+            } else {
+                let sum = errors
+                    .iter()
+                    .map(|error| error.translation_error)
+                    .sum::<f64>();
+                let squared_sum = errors
+                    .iter()
+                    .map(|error| error.translation_error * error.translation_error)
+                    .sum::<f64>();
+                let max = errors
+                    .iter()
+                    .map(|error| error.translation_error)
+                    .fold(0.0_f64, f64::max);
+                (
+                    Some(sum / matched_pose_count as f64),
+                    Some((squared_sum / matched_pose_count as f64).sqrt()),
+                    Some(max),
+                )
+            };
+
+        Self {
+            estimated_pose_count: estimated.len(),
+            reference_pose_count: reference.len(),
+            matched_pose_count,
+            missing_reference_count,
+            missing_estimate_count,
+            mean_translation_error,
+            rmse_translation_error,
+            max_translation_error,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"estimated_pose_count\": {},\n",
+                "  \"reference_pose_count\": {},\n",
+                "  \"matched_pose_count\": {},\n",
+                "  \"missing_reference_count\": {},\n",
+                "  \"missing_estimate_count\": {},\n",
+                "  \"mean_translation_error\": {},\n",
+                "  \"rmse_translation_error\": {},\n",
+                "  \"max_translation_error\": {}\n",
+                "}}\n"
+            ),
+            self.estimated_pose_count,
+            self.reference_pose_count,
+            self.matched_pose_count,
+            self.missing_reference_count,
+            self.missing_estimate_count,
+            optional_f64_json(self.mean_translation_error),
+            optional_f64_json(self.rmse_translation_error),
+            optional_f64_json(self.max_translation_error)
+        )
+    }
+}
+
 impl TrajectorySummary {
     pub fn from_trajectory(trajectory: &PoseTrajectory) -> Self {
         let pose_count = trajectory.len();
@@ -326,6 +415,10 @@ impl PoseTrajectory {
         self.samples.iter().map(|sample| sample.frame_id).collect()
     }
 
+    fn frame_id_set(&self) -> HashSet<FrameId> {
+        self.samples.iter().map(|sample| sample.frame_id).collect()
+    }
+
     pub fn camera_centers_world(&self) -> Vec<Point3<f64>> {
         self.samples
             .iter()
@@ -420,6 +513,35 @@ impl PoseTrajectory {
 
     pub fn write_tum_poses(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         std::fs::write(path, self.to_tum_poses())
+    }
+
+    pub fn translation_errors_against(
+        &self,
+        reference: &PoseTrajectory,
+    ) -> Vec<TrajectoryTranslationError> {
+        let reference_by_frame_id = reference
+            .samples
+            .iter()
+            .map(|sample| (sample.frame_id, sample.camera_center_world()))
+            .collect::<HashMap<_, _>>();
+
+        self.samples
+            .iter()
+            .filter_map(|sample| {
+                let reference_center = reference_by_frame_id.get(&sample.frame_id)?;
+                Some(TrajectoryTranslationError {
+                    frame_id: sample.frame_id,
+                    translation_error: (sample.camera_center_world() - *reference_center).norm(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn translation_error_summary_against(
+        &self,
+        reference: &PoseTrajectory,
+    ) -> TrajectoryErrorSummary {
+        TrajectoryErrorSummary::from_trajectories(self, reference)
     }
 
     pub fn summary(&self) -> TrajectorySummary {
