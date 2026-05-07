@@ -7,6 +7,7 @@ Initial experiments should stay focused on map-based localization:
 - Descriptor matching quality with ratio-test thresholds
 - PnP RANSAC sensitivity to reprojection threshold and outlier ratio
 - IO-backed localization with `cargo run --example localize_colmap_text`
+- File-based sequence localization with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Trajectory evaluation with `cargo run --example evaluate_trajectory_dummy`
 - KITTI file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti`

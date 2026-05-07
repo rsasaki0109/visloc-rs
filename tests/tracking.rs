@@ -396,6 +396,49 @@ fn pose_trajectory_exports_summary_json() {
 }
 
 #[test]
+fn pose_trajectory_exports_html_report_without_reference() {
+    let trajectory = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            7,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            9,
+            pose_with_identity_rotation_at_center(Vector3::new(1.0, 0.0, 1.0)),
+        ),
+    ]);
+
+    let html = trajectory.to_html_report();
+
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("visloc-rs trajectory report"));
+    assert!(html.contains("<span class=\"label\">Poses</span><span class=\"value\">2</span>"));
+    assert!(html.contains("<span class=\"label\">First frame</span><span class=\"value\">7</span>"));
+    assert!(html.contains("<span class=\"label\">Last frame</span><span class=\"value\">9</span>"));
+    assert!(html.contains("estimated trajectory"));
+    assert!(html.contains("<svg viewBox=\"0 0 900 520\""));
+}
+
+#[test]
+fn pose_trajectory_writes_html_report_without_reference() {
+    let trajectory = PoseTrajectory::from_tracking_results(&[successful_tracking_result(
+        7,
+        pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+    )]);
+    let path = std::env::temp_dir().join(format!(
+        "visloc-rs-trajectory-only-report-{}.html",
+        std::process::id()
+    ));
+
+    trajectory.write_html_report(&path).unwrap();
+    let html = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+
+    assert!(html.contains("Estimated camera-center trajectory"));
+    assert!(html.contains("Path length"));
+}
+
+#[test]
 fn pose_trajectory_reports_translation_errors_against_reference() {
     let estimated = PoseTrajectory::from_tracking_results(&[
         successful_tracking_result(
