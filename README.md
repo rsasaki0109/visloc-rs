@@ -160,6 +160,7 @@ Run the file-based sequence localization example, which tracks multiple query fe
 
 ```bash
 cargo run --example localize_sequence_from_files
+cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo
 ```
 
 Run the tracking skeleton example:

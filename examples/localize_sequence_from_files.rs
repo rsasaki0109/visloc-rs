@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use visloc_rs::core::types::Frame;
@@ -9,7 +10,8 @@ use visloc_rs::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = env::args().skip(1).collect::<Vec<_>>();
+    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let output_dir = parse_output_dir(&mut args);
     let example_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
     let (map_dir, descriptor_path, camera_id, query_feature_paths) = match args.as_slice() {
         [] => {
@@ -37,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "usage: cargo run --example localize_sequence_from_files -- <colmap_text_dir> <landmark_descriptors.txt> <camera_id> <query_features.txt> [query_features_2.txt ...]"
+                "usage: cargo run --example localize_sequence_from_files -- [--out-dir <dir>] <colmap_text_dir> <landmark_descriptors.txt> <camera_id> <query_features.txt> [query_features_2.txt ...]"
             );
             std::process::exit(2);
         }
@@ -100,6 +102,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("trajectory_csv:\n{}", trajectory.to_csv());
     println!("trajectory_kitti_poses:\n{}", trajectory.to_kitti_poses());
+    if let Some(output_dir) = output_dir {
+        fs::create_dir_all(&output_dir)?;
+        let csv_path = output_dir.join("trajectory.csv");
+        let kitti_path = output_dir.join("poses.txt");
+        trajectory.write_csv(&csv_path)?;
+        trajectory.write_kitti_poses(&kitti_path)?;
+        println!(
+            "wrote trajectory exports: csv={} kitti={}",
+            csv_path.display(),
+            kitti_path.display()
+        );
+    }
 
     Ok(())
+}
+
+fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
+    let output_flag_index = args.iter().position(|arg| arg == "--out-dir")?;
+    if output_flag_index + 1 >= args.len() {
+        eprintln!("--out-dir requires a directory path");
+        std::process::exit(2);
+    }
+
+    let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
+    args.remove(output_flag_index);
+    Some(output_dir)
 }
