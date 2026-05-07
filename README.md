@@ -156,6 +156,12 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
+Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI trajectory exports:
+
+```bash
+cargo run --example localize_sequence_from_files
+```
+
 Run the tracking skeleton example:
 
 ```bash
