@@ -2,9 +2,10 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Frame;
 use visloc_fusion::{
-    FrameTimestampIndex, GnssMeasurement, ImuMeasurement, LocalizationPriorProvider,
-    MeasurementBuffer, PoseCovariance, PosePriorMeasurement, PositionCovariance, PriorConfig,
-    TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp,
+    FramePriorSource, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
+    LocalizationPriorProvider, MeasurementBuffer, PoseCovariance, PosePriorMeasurement,
+    PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose,
+    Timestamp,
 };
 
 #[test]
@@ -361,5 +362,51 @@ fn measurement_buffer_builds_localization_prior_for_frame_timestamp() {
 
     assert_eq!(prior.position_world, Some(Point3::new(2.0, 0.0, 0.0)));
     assert_eq!(prior.radius, Some(12.0));
+    assert_eq!(prior_by_id, prior);
+}
+
+#[test]
+fn frame_prior_source_packages_frame_timestamps_measurements_and_prior_config() {
+    let frame = Frame::new(7, 1);
+    let frame_timestamps = FrameTimestampIndex::from_timed_frames([Timed::new(
+        Timestamp::from_nanoseconds(5_005),
+        frame.clone(),
+    )]);
+    let measurements = MeasurementBuffer::from_measurements([
+        GnssMeasurement::new(
+            Timestamp::from_nanoseconds(4_000),
+            Point3::new(1.0, 0.0, 0.0),
+        )
+        .with_accuracy(Some(2.0), None),
+        GnssMeasurement::new(
+            Timestamp::from_nanoseconds(5_000),
+            Point3::new(5.0, 0.0, 0.0),
+        )
+        .with_accuracy(Some(3.0), None),
+    ]);
+    let source = FramePriorSource::new(
+        frame_timestamps,
+        measurements,
+        TimeDelta::from_nanoseconds(10),
+    )
+    .with_prior_config(PriorConfig {
+        default_radius: 100.0,
+        min_radius: 1.0,
+        confidence_multiplier: 2.0,
+    });
+
+    let nearest = source.nearest_measurement_for_frame(&frame).unwrap();
+    let prior = source.localization_prior_for_frame(&frame).unwrap();
+    let prior_by_id = source.localization_prior_for_frame_id(frame.id).unwrap();
+
+    assert_eq!(source.frame_count(), 1);
+    assert_eq!(source.measurement_count(), 2);
+    assert_eq!(
+        source.timestamp_for_frame(&frame),
+        Some(Timestamp::from_nanoseconds(5_005))
+    );
+    assert_eq!(nearest.timestamp(), Timestamp::from_nanoseconds(5_000));
+    assert_eq!(prior.position_world, Some(Point3::new(5.0, 0.0, 0.0)));
+    assert_eq!(prior.radius, Some(6.0));
     assert_eq!(prior_by_id, prior);
 }
