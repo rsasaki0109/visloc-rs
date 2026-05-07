@@ -69,10 +69,10 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 
 - `TrackingState`: `Uninitialized`, `Tracking`, or `Lost`
 - `TrackingEvent`: `Initialized`, `Tracked`, `TrackingFailed`, `Lost`, or `Relocalized`
-- `TrackingResult`: localization result plus state transition, pose prior, map provider stats, map landmark count convenience field, prior-use diagnostics, and optional tracking failure reason
+- `TrackingResult`: localization result plus state transition, motion pose prior, external localization-prior diagnostics, map provider stats, map landmark count convenience field, and optional tracking failure reason
 - `TrackingConfig`: controls `min_successive_failures_to_lost`, optional `last_pose_candidate_radius`, and tracking quality gates for pose-prior translation error, minimum inliers, minimum inlier ratio, and maximum mean reprojection error
 - `TrackingFailureReason`: records tracking-layer quality gate failures such as insufficient inliers, low inlier ratio, high reprojection error, or pose jumps that exceed the motion-prior translation threshold
-- `TrackingStats`: sequence diagnostics including first/last frame id, success/failure counts, lost/relocalization counts, pose-prior usage, tracking quality-gate failures, aggregate inlier/correspondence totals with rate helpers, and JSON summary export
+- `TrackingStats`: sequence diagnostics including first/last frame id, success/failure counts, lost/relocalization counts, motion-pose-prior and external-localization-prior usage, tracking quality-gate failures, aggregate inlier/correspondence totals with rate helpers, and JSON summary export
 - `TrackingStats::from_results`: rebuilds sequence-level diagnostics from stored `TrackingResult` values
 - `tracking_results_to_csv`: exports frame-by-frame tracking state, localization counts, failures, priors, and map stats for downstream plotting or regression checks
 - `tracking_results_to_html_report`: creates a self-contained HTML tracking report with per-frame state, inlier diagnostics, failures, and a timeline
