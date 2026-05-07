@@ -13,6 +13,7 @@ localize_from_pgm
 localize_sequence_from_files
 localize_with_corner_extractor
 localize_with_extractor_dummy
+online_slam_loop_candidate_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
 track_sequence_with_gnss_prior

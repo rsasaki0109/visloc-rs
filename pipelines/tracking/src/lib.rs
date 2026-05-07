@@ -2311,6 +2311,66 @@ pub trait MotionModel {
     fn reset(&mut self) {}
 }
 
+pub trait VisualOdometryFrontend {
+    type Error;
+
+    fn estimate_relative_pose(
+        &self,
+        previous_frame: &Frame,
+        current_frame: &Frame,
+    ) -> Result<Option<VisualOdometryEstimate>, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualOdometryEstimate {
+    pub previous_frame_id: FrameId,
+    pub current_frame_id: FrameId,
+    pub previous_to_current: SE3,
+    pub match_count: usize,
+    pub inlier_count: usize,
+    pub mean_reprojection_error: Option<f64>,
+}
+
+impl VisualOdometryEstimate {
+    pub fn new(
+        previous_frame_id: FrameId,
+        current_frame_id: FrameId,
+        previous_to_current: SE3,
+    ) -> Self {
+        Self {
+            previous_frame_id,
+            current_frame_id,
+            previous_to_current,
+            match_count: 0,
+            inlier_count: 0,
+            mean_reprojection_error: None,
+        }
+    }
+
+    pub fn pose_prior_from_previous_pose(&self, previous_pose: &Pose) -> Pose {
+        Pose {
+            world_to_camera: self
+                .previous_to_current
+                .compose(&previous_pose.world_to_camera),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoopVisualOdometryFrontend;
+
+impl VisualOdometryFrontend for NoopVisualOdometryFrontend {
+    type Error = std::convert::Infallible;
+
+    fn estimate_relative_pose(
+        &self,
+        _previous_frame: &Frame,
+        _current_frame: &Frame,
+    ) -> Result<Option<VisualOdometryEstimate>, Self::Error> {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConstantPoseMotionModel;
 

@@ -29,6 +29,13 @@ impl SE3 {
         self.rotation.transform_vector(vector)
     }
 
+    pub fn compose(&self, other: &SE3) -> Self {
+        Self::new(
+            self.rotation * other.rotation,
+            self.rotation.transform_vector(&other.translation) + self.translation,
+        )
+    }
+
     pub fn inverse(&self) -> Self {
         let rotation_inv = self.rotation.inverse();
         let translation_inv = -(rotation_inv.transform_vector(&self.translation));

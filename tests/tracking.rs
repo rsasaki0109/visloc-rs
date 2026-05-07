@@ -3,7 +3,7 @@
 use std::{convert::Infallible, fs};
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
-use visloc_rs::core::geometry::Pose;
+use visloc_rs::core::geometry::{Pose, SE3};
 use visloc_rs::core::types::{
     Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationFailureReason,
     LocalizationResult, LocalizationSuccess, VisualMap,
@@ -15,7 +15,8 @@ use visloc_rs::{
     MapProviderStats, MotionModel, PoseTrajectory, PriorSubmapSelector, SelectableMapProvider,
     Tracker, TrackingConfig, TrackingEvaluationConfig, TrackingEvaluationFailure, TrackingEvent,
     TrackingFailureReason, TrackingResult, TrackingState, TrackingStats, TrajectoryAlignment,
-    TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
+    TrajectoryEvaluationConfig, TrajectoryEvaluationFailure, VisualOdometryEstimate,
+    VisualOdometryFrontend,
 };
 
 #[derive(Debug, Clone)]
@@ -150,6 +151,31 @@ fn successful_localization_result(
     })
 }
 
+#[derive(Debug, Clone)]
+struct FixedVisualOdometryFrontend {
+    previous_to_current: SE3,
+}
+
+impl VisualOdometryFrontend for FixedVisualOdometryFrontend {
+    type Error = Infallible;
+
+    fn estimate_relative_pose(
+        &self,
+        previous_frame: &Frame,
+        current_frame: &Frame,
+    ) -> Result<Option<VisualOdometryEstimate>, Self::Error> {
+        let mut estimate = VisualOdometryEstimate::new(
+            previous_frame.id,
+            current_frame.id,
+            self.previous_to_current.clone(),
+        );
+        estimate.match_count = 32;
+        estimate.inlier_count = 24;
+        estimate.mean_reprojection_error = Some(0.75);
+        Ok(Some(estimate))
+    }
+}
+
 fn build_map_and_frame(frame_id: u64, camera_id: u64) -> (VisualMap, Frame) {
     let camera = Camera::pinhole(camera_id, 640, 480, 500.0, 500.0, 320.0, 240.0);
     let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
@@ -209,6 +235,29 @@ fn constant_velocity_motion_model_reset_clears_history() {
     model.reset();
 
     assert!(model.predict_pose(&frame, None, None).is_none());
+}
+
+#[test]
+fn visual_odometry_estimate_builds_pose_prior_from_relative_motion() {
+    let previous = Frame::new(10, 1);
+    let current = Frame::new(11, 1);
+    let previous_pose = pose_with_identity_rotation_at_center(Vector3::new(2.0, 0.0, 0.0));
+    let frontend = FixedVisualOdometryFrontend {
+        previous_to_current: SE3::new(UnitQuaternion::identity(), Vector3::new(-1.5, 0.0, 0.0)),
+    };
+
+    let estimate = frontend
+        .estimate_relative_pose(&previous, &current)
+        .unwrap()
+        .unwrap();
+    let prior = estimate.pose_prior_from_previous_pose(&previous_pose);
+
+    assert_eq!(estimate.previous_frame_id, 10);
+    assert_eq!(estimate.current_frame_id, 11);
+    assert_eq!(estimate.match_count, 32);
+    assert_eq!(estimate.inlier_count, 24);
+    assert_eq!(estimate.mean_reprojection_error, Some(0.75));
+    assert!((prior.camera_center_world() - Point3::new(3.5, 0.0, 0.0)).norm() < 1.0e-9);
 }
 
 #[test]
