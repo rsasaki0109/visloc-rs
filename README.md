@@ -204,6 +204,7 @@ cargo run --features image-io --example track_timestamped_image_sequence_with_gn
 Timestamp text files use one nanosecond timestamp per non-comment line and can be loaded with `read_timestamp_nanoseconds_txt` or `read_common_image_sequence_dir_with_timestamp_file`.
 GNSS prior logs can be loaded with `read_gnss_measurements_txt`; each non-comment row is `timestamp_ns x y z [horizontal_accuracy] [vertical_accuracy]`, with either whitespace or commas as separators.
 `FramePriorSource::sync_summary` and `FramePriorSyncEvaluationConfig` can check whether external measurements cover the image frame timestamps before tracking starts, and sync evaluation results can be written as JSON.
+See [docs/timestamped_gnss_image_demo.md](docs/timestamped_gnss_image_demo.md) for the timestamped image GNSS-prior demo output guide. CI uploads the checked output directory as the `timestamped-gnss-image-demo-outputs` artifact.
 
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
@@ -265,6 +266,7 @@ docs/api_stability.md     public API stability policy toward v1.0
 docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/gnss_demo.md         GNSS-prior sequence demo output guide
+docs/timestamped_gnss_image_demo.md timestamped image GNSS-prior demo output guide
 docs/migration.md         pre-1.0 to v1.0 API migration guidance
 docs/publishing.md        workspace publish order and package checks
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
