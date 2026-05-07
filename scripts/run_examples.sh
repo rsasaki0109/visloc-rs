@@ -17,6 +17,7 @@ online_slam_loop_candidate_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
 track_sequence_with_gnss_prior
+visual_odometry_prior_dummy
 "
 
 for example in $examples; do

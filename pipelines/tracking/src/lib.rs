@@ -2356,6 +2356,56 @@ impl VisualOdometryEstimate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualOdometryPosePrior {
+    pub estimate: VisualOdometryEstimate,
+    pub pose: Pose,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VisualOdometryPriorProvider<F> {
+    frontend: F,
+}
+
+impl<F> VisualOdometryPriorProvider<F> {
+    pub fn new(frontend: F) -> Self {
+        Self { frontend }
+    }
+
+    pub fn frontend(&self) -> &F {
+        &self.frontend
+    }
+
+    pub fn frontend_mut(&mut self) -> &mut F {
+        &mut self.frontend
+    }
+
+    pub fn into_inner(self) -> F {
+        self.frontend
+    }
+}
+
+impl<F> VisualOdometryPriorProvider<F>
+where
+    F: VisualOdometryFrontend,
+{
+    pub fn predict_pose_prior(
+        &self,
+        previous_frame: &Frame,
+        previous_pose: &Pose,
+        current_frame: &Frame,
+    ) -> Result<Option<VisualOdometryPosePrior>, F::Error> {
+        let Some(estimate) = self
+            .frontend
+            .estimate_relative_pose(previous_frame, current_frame)?
+        else {
+            return Ok(None);
+        };
+        let pose = estimate.pose_prior_from_previous_pose(previous_pose);
+        Ok(Some(VisualOdometryPosePrior { estimate, pose }))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoopVisualOdometryFrontend;
 
