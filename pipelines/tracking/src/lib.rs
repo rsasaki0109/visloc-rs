@@ -172,6 +172,23 @@ impl TrajectorySample {
         }
         values.join(" ")
     }
+
+    pub fn to_tum_pose_record(&self) -> String {
+        let camera_to_world = self.pose.camera_to_world();
+        let q = camera_to_world.rotation.quaternion();
+        let t = camera_to_world.translation;
+        format!(
+            "{} {} {} {} {} {} {} {}",
+            self.frame_id,
+            export_f64(t.x),
+            export_f64(t.y),
+            export_f64(t.z),
+            export_f64(q.i),
+            export_f64(q.j),
+            export_f64(q.k),
+            export_f64(q.w)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -392,6 +409,19 @@ impl PoseTrajectory {
         std::fs::write(path, self.to_kitti_poses())
     }
 
+    pub fn to_tum_poses(&self) -> String {
+        let mut output = String::new();
+        for sample in &self.samples {
+            output.push_str(&sample.to_tum_pose_record());
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn write_tum_poses(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_tum_poses())
+    }
+
     pub fn summary(&self) -> TrajectorySummary {
         TrajectorySummary::from_trajectory(self)
     }
@@ -407,6 +437,14 @@ impl PoseTrajectory {
 
 fn optional_f64_csv(value: Option<f64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn export_f64(value: f64) -> String {
+    if value.abs() < 1.0e-15 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn optional_f64_json(value: Option<f64>) -> String {

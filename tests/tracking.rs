@@ -262,6 +262,21 @@ fn pose_trajectory_exports_kitti_poses() {
 }
 
 #[test]
+fn pose_trajectory_exports_tum_poses() {
+    let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
+    let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 5.0, 6.0));
+    let trajectory = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(1, pose_a),
+        failed_tracking_result(2),
+        successful_tracking_result(3, pose_b),
+    ]);
+
+    let tum = trajectory.to_tum_poses();
+
+    assert_eq!(tum, "1 1 2 3 0 0 0 1\n3 4 5 6 0 0 0 1\n");
+}
+
+#[test]
 fn pose_trajectory_exports_summary_json() {
     let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
     let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 6.0, 8.0));
