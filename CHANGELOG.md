@@ -29,6 +29,7 @@ All notable changes to `visloc-rs` will be documented here.
 - GNSS-prior tracking demo now exports a synthetic reference trajectory plus translation-error CSV, JSON summary, and trajectory-comparison HTML report.
 - GNSS-prior tracking demo output now includes `manifest.json` with generated file names and top-level tracking / trajectory / error metrics.
 - Local quality checks now include a GNSS demo output smoke test for the dashboard, manifest, trajectory exports, and error reports.
+- CI now runs the GNSS demo output smoke test in addition to the regular example suite.
 
 ## 0.1.0 - 2026-05-07
 
