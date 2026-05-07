@@ -11,6 +11,7 @@
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm local README/docs links and anchors pass with `scripts/check_docs_links.sh`.
+- Confirm docs.rs metadata is present for every publishable crate so optional APIs are documented with all features enabled.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
 - Confirm `docs/api_stability.md` reflects the intended stable and experimental API tiers.
 - Confirm `docs/colmap_compatibility.md` matches current COLMAP reader/writer behavior.
@@ -18,7 +19,7 @@
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
 - Confirm `docs/publishing.md` matches workspace dependencies and publish order.
-- Check package metadata and crate contents with `scripts/package_check.sh` when package details are changed independently of the full local gate.
+- Check package metadata, docs.rs metadata, and crate contents with `scripts/package_check.sh` when package details are changed independently of the full local gate.
 - For crates that depend on other `visloc-*` crates, run `VISLOC_PACKAGE_ALL=1 scripts/package_check.sh` in publish order after their internal dependencies are available from the target registry.
 
 ## API Stability

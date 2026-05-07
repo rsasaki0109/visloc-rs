@@ -12,6 +12,9 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-localization = { path = "../localization", version = "0.1.0" }

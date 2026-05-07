@@ -12,5 +12,8 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 nalgebra = { workspace = true }
