@@ -18,7 +18,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Trajectory-evaluation example showing frame-id matched translation errors, CSV output, and JSON summary output.
 - File-based TUM trajectory evaluation example with optional CSV / JSON / HTML output directory.
 - File-based KITTI trajectory evaluation example with optional CSV / JSON / HTML output directory.
-- File-based sequence localization example that tracks query feature files and prints or writes CSV / KITTI / TUM trajectory exports plus `summary.json` and `trajectory_report.html`.
+- File-based sequence localization example that tracks query feature files and prints or writes CSV / KITTI / TUM trajectory exports plus `summary.json`, `trajectory_report.html`, and `tracking_report.html`.
 - Tracking sequence example with optional `tracking_report.html` and `trajectory_report.html` output directory.
 
 ## 0.1.0 - 2026-05-07

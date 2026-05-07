@@ -170,7 +170,7 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
-Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json` and a browser-viewable `trajectory_report.html`:
+Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
 ```bash
 cargo run --example localize_sequence_from_files
@@ -186,7 +186,7 @@ cargo run --example track_sequence_dummy
 cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo
 ```
 
-With `--out-dir`, the tracking example writes `tracking_report.html` for frame-by-frame state transitions and `trajectory_report.html` for the estimated pose path.
+With `--out-dir`, sequence/tracking examples write `tracking_report.html` for frame-by-frame state transitions and `trajectory_report.html` for the estimated pose path.
 
 Run a GNSS-prior tracking example that narrows the visual map before localization:
 
