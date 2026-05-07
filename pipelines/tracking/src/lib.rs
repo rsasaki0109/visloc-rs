@@ -256,6 +256,33 @@ impl fmt::Display for KittiTrajectoryParseError {
 
 impl std::error::Error for KittiTrajectoryParseError {}
 
+#[derive(Debug)]
+pub enum TrajectoryFileError {
+    Io(std::io::Error),
+    TumParse(TumTrajectoryParseError),
+    KittiParse(KittiTrajectoryParseError),
+}
+
+impl fmt::Display for TrajectoryFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "trajectory file I/O error: {error}"),
+            Self::TumParse(error) => write!(formatter, "{error}"),
+            Self::KittiParse(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for TrajectoryFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::TumParse(error) => Some(error),
+            Self::KittiParse(error) => Some(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectorySummary {
     pub pose_count: usize,
@@ -502,6 +529,11 @@ impl PoseTrajectory {
         Ok(trajectory)
     }
 
+    pub fn read_tum_poses(path: impl AsRef<Path>) -> Result<Self, TrajectoryFileError> {
+        let text = std::fs::read_to_string(path).map_err(TrajectoryFileError::Io)?;
+        Self::from_tum_poses_str(&text).map_err(TrajectoryFileError::TumParse)
+    }
+
     pub fn from_kitti_poses_str(text: &str) -> Result<Self, KittiTrajectoryParseError> {
         let mut trajectory = Self::new();
         let mut pose_index = 0_u64;
@@ -549,6 +581,11 @@ impl PoseTrajectory {
             pose_index += 1;
         }
         Ok(trajectory)
+    }
+
+    pub fn read_kitti_poses(path: impl AsRef<Path>) -> Result<Self, TrajectoryFileError> {
+        let text = std::fs::read_to_string(path).map_err(TrajectoryFileError::Io)?;
+        Self::from_kitti_poses_str(&text).map_err(TrajectoryFileError::KittiParse)
     }
 
     pub fn push_result(&mut self, result: &TrackingResult) -> bool {

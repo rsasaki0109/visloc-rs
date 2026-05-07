@@ -1,6 +1,6 @@
 #![allow(clippy::useless_vec)]
 
-use std::convert::Infallible;
+use std::{convert::Infallible, fs};
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
@@ -280,6 +280,25 @@ fn pose_trajectory_parses_kitti_poses() {
 }
 
 #[test]
+fn pose_trajectory_reads_kitti_pose_file() {
+    let path = std::env::temp_dir().join(format!(
+        "visloc_tracking_kitti_{}_{}.txt",
+        std::process::id(),
+        "pose_file"
+    ));
+    fs::write(&path, "1 0 0 1 0 1 0 2 0 0 1 3\n").unwrap();
+
+    let trajectory = PoseTrajectory::read_kitti_poses(&path).unwrap();
+
+    assert_eq!(trajectory.frame_ids(), vec![0]);
+    assert_eq!(
+        trajectory.camera_centers_world(),
+        vec![Point3::new(1.0, 2.0, 3.0)]
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn pose_trajectory_rejects_invalid_kitti_pose_lines() {
     let error = PoseTrajectory::from_kitti_poses_str("1 2 3\n").unwrap_err();
 
@@ -318,6 +337,25 @@ fn pose_trajectory_parses_tum_poses() {
         trajectory.to_tum_poses(),
         "1 1 2 3 0 0 0 1\n3 4 5 6 0 0 0 1\n"
     );
+}
+
+#[test]
+fn pose_trajectory_reads_tum_pose_file() {
+    let path = std::env::temp_dir().join(format!(
+        "visloc_tracking_tum_{}_{}.txt",
+        std::process::id(),
+        "pose_file"
+    ));
+    fs::write(&path, "7 1 2 3 0 0 0 1\n").unwrap();
+
+    let trajectory = PoseTrajectory::read_tum_poses(&path).unwrap();
+
+    assert_eq!(trajectory.frame_ids(), vec![7]);
+    assert_eq!(
+        trajectory.camera_centers_world(),
+        vec![Point3::new(1.0, 2.0, 3.0)]
+    );
+    fs::remove_file(path).unwrap();
 }
 
 #[test]

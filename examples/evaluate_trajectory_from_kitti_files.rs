@@ -21,15 +21,16 @@ const DEFAULT_REFERENCE_KITTI: &str = "\
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let output_dir = parse_output_dir(&mut args);
-    let (estimated_text, reference_text) = match args.as_slice() {
+    let (estimated, reference) = match args.as_slice() {
         [] => (
-            DEFAULT_ESTIMATED_KITTI.to_string(),
-            DEFAULT_REFERENCE_KITTI.to_string(),
+            PoseTrajectory::from_kitti_poses_str(DEFAULT_ESTIMATED_KITTI)?,
+            PoseTrajectory::from_kitti_poses_str(DEFAULT_REFERENCE_KITTI)?,
         ),
-        [estimated_path, reference_path] => (
-            fs::read_to_string(estimated_path)?,
-            fs::read_to_string(reference_path)?,
-        ),
+        [estimated_path, reference_path] => {
+            let estimated = PoseTrajectory::read_kitti_poses(estimated_path)?;
+            let reference = PoseTrajectory::read_kitti_poses(reference_path)?;
+            (estimated, reference)
+        }
         _ => {
             eprintln!(
                 "usage: cargo run --example evaluate_trajectory_from_kitti_files -- [--out-dir <dir>] [estimated_poses.txt reference_poses.txt]"
@@ -38,8 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let estimated = PoseTrajectory::from_kitti_poses_str(&estimated_text)?;
-    let reference = PoseTrajectory::from_kitti_poses_str(&reference_text)?;
     let summary = estimated.translation_error_summary_against(&reference);
     let errors_csv = estimated.translation_errors_csv_against(&reference);
 
