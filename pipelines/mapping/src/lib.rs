@@ -451,3 +451,96 @@ fn observation_key(observation: &Observation) -> (FrameId, LandmarkId, usize) {
         observation.keypoint_index,
     )
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalMapWindowConfig {
+    pub max_keyframes: usize,
+}
+
+impl Default for LocalMapWindowConfig {
+    fn default() -> Self {
+        Self { max_keyframes: 5 }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalMapWindow {
+    pub anchor_frame_id: Option<FrameId>,
+    pub keyframe_ids: Vec<FrameId>,
+    pub landmark_ids: Vec<LandmarkId>,
+    pub observation_count: usize,
+}
+
+impl LocalMapWindow {
+    pub fn from_anchor(
+        map: &VisualMap,
+        anchor_frame_id: FrameId,
+        config: &LocalMapWindowConfig,
+    ) -> Self {
+        let max_keyframes = config.max_keyframes.max(1);
+        let mut keyframe_ids = map
+            .keyframes
+            .keys()
+            .copied()
+            .filter(|frame_id| *frame_id <= anchor_frame_id)
+            .collect::<Vec<_>>();
+        keyframe_ids.sort_unstable();
+        if keyframe_ids.len() > max_keyframes {
+            keyframe_ids = keyframe_ids[keyframe_ids.len() - max_keyframes..].to_vec();
+        }
+
+        Self::from_keyframe_ids(map, Some(anchor_frame_id), keyframe_ids)
+    }
+
+    pub fn from_recent(map: &VisualMap, config: &LocalMapWindowConfig) -> Self {
+        let Some(anchor_frame_id) = map.keyframes.keys().max().copied() else {
+            return Self::default();
+        };
+        Self::from_anchor(map, anchor_frame_id, config)
+    }
+
+    pub fn from_keyframe_ids(
+        map: &VisualMap,
+        anchor_frame_id: Option<FrameId>,
+        mut keyframe_ids: Vec<FrameId>,
+    ) -> Self {
+        keyframe_ids.sort_unstable();
+        keyframe_ids.dedup();
+        keyframe_ids.retain(|frame_id| map.keyframes.contains_key(frame_id));
+
+        let mut landmark_ids = Vec::new();
+        let mut observation_count = 0;
+        for keyframe_id in &keyframe_ids {
+            let Some(keyframe) = map.keyframes.get(keyframe_id) else {
+                continue;
+            };
+            observation_count += keyframe.observations.len();
+            for observation in &keyframe.observations {
+                if map.landmarks.contains_key(&observation.landmark_id) {
+                    landmark_ids.push(observation.landmark_id);
+                }
+            }
+        }
+        landmark_ids.sort_unstable();
+        landmark_ids.dedup();
+
+        Self {
+            anchor_frame_id,
+            keyframe_ids,
+            landmark_ids,
+            observation_count,
+        }
+    }
+
+    pub fn keyframe_count(&self) -> usize {
+        self.keyframe_ids.len()
+    }
+
+    pub fn landmark_count(&self) -> usize {
+        self.landmark_ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keyframe_ids.is_empty()
+    }
+}

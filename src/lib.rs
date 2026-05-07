@@ -62,8 +62,8 @@ pub use visloc_localization::{
 };
 pub use visloc_mapping::{
     AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason, KeyframePolicy,
-    KeyframePolicyConfig, MapUpdateValidationIssue, MapUpdateValidationReport,
-    SimpleKeyframePolicy, StagedMapUpdate,
+    KeyframePolicyConfig, LocalMapWindow, LocalMapWindowConfig, MapUpdateValidationIssue,
+    MapUpdateValidationReport, SimpleKeyframePolicy, StagedMapUpdate,
 };
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
