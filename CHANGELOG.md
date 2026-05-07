@@ -6,6 +6,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `track_sequence_with_two_view_match_vo_prior` example reads per-pair two-view match text files with `read_two_view_matches_txt`, populates `TwoViewMatchVisualOdometryFrontend`, and feeds the resulting VO priors through `track_frame_with_localization_prior_submap_provider` for a short three-frame sequence; with `--out-dir` it writes the generated input match files plus a per-frame text report.
+- `tests/two_view_vo.rs` now covers the file-backed two-view match VO path across consecutive frame pairs to guard the `read_two_view_matches_txt` → `TwoViewMatchVisualOdometryFrontend` → `VisualOdometryPriorProvider` chain.
+- Documentation now clarifies that `VisualOdometryEstimate::mean_reprojection_error` stores the mean inlier two-view flow residual in pixels when produced by `TwoViewMatchVisualOdometryFrontend`, and recommends labeling the field as `mean_flow_residual_px` in user-facing logs/reports for that case.
+- Deep VO / loop-close milestone completion increased to 55% to reflect the file-backed two-view VO sequence path.
 - `PoseTrajectory` and `TrajectorySample` helpers for extracting successful tracking poses, camera centers, path length, mean reprojection error, CSV output, KITTI-style 3x4 pose rows, and TUM-style trajectory rows from sequence-localization results.
 - KITTI- and TUM-style trajectory parsers and file readers for reading pose rows back into `PoseTrajectory`.
 - `TrajectorySummary` helper and JSON summary export for sequence-localization demos and downstream visualization scripts.
