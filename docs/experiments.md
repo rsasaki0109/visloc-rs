@@ -11,6 +11,7 @@ Initial experiments should stay focused on map-based localization:
 - PGM-backed grayscale image localization with `cargo run --example localize_from_pgm`
 - Optional PNG/JPEG-backed grayscale image localization with `cargo run --features image-io --example localize_from_common_image`
 - Optional PNG/JPEG-backed image sequence tracking with `cargo run --features image-io --example track_image_sequence_from_common_images`
+- Timestamped PNG/JPEG-backed image sequence tracking with GNSS priors using `cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior`
 - File-based sequence localization and tracking report export with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Tracking report export with `cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo`
