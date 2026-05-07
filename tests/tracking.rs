@@ -10,9 +10,9 @@ use visloc_rs::core::types::{
 };
 use visloc_rs::{
     ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
-    InMemoryMapProvider, LocalizationPipeline, MapProviderStats, MotionModel, PriorSubmapSelector,
-    SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
-    TrackingResult, TrackingState,
+    InMemoryMapProvider, LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel,
+    PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent,
+    TrackingFailureReason, TrackingResult, TrackingState,
 };
 
 #[derive(Debug, Clone)]
@@ -345,6 +345,59 @@ fn tracker_tracks_with_motion_prior_submap_provider() {
 }
 
 #[test]
+fn tracker_tracks_with_external_localization_prior_submap_provider() {
+    let (mut map, frame) = build_map_and_frame(10, 1);
+    for index in 0..6 {
+        let landmark_id = index as u64 + 100;
+        let mut landmark = Landmark::new(landmark_id, Point3::new(100.0 + index as f64, 0.0, 5.0));
+        landmark.descriptor = Some(vec![index as f32 + 100.0, 9.0]);
+        map.landmarks.insert(landmark_id, landmark);
+    }
+    let provider = InMemoryMapProvider::new(map);
+    let prior = LocalizationPrior::from_position(Point3::origin(), 8.0);
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let result =
+        tracker.track_frame_with_localization_prior_submap_provider(&frame, &provider, &prior);
+
+    assert!(result.localization.success);
+    assert_eq!(result.map_landmark_count, 6);
+    assert_eq!(result.map_stats.landmark_count, 6);
+    assert_eq!(result.map_stats.descriptor_count, 6);
+    assert_eq!(result.localization.candidate_landmark_count, 6);
+    assert!(result.pose_prior.is_none());
+    assert!(!result.used_pose_prior);
+}
+
+#[test]
+fn tracker_tracks_sequence_with_optional_external_localization_priors() {
+    let (mut map, frame) = build_map_and_frame(10, 1);
+    let mut second_frame = frame.clone();
+    second_frame.id = 11;
+    for index in 0..6 {
+        let landmark_id = index as u64 + 100;
+        let mut landmark = Landmark::new(landmark_id, Point3::new(100.0 + index as f64, 0.0, 5.0));
+        landmark.descriptor = Some(vec![index as f32 + 100.0, 9.0]);
+        map.landmarks.insert(landmark_id, landmark);
+    }
+    let provider = InMemoryMapProvider::new(map);
+    let prior = LocalizationPrior::from_position(Point3::origin(), 8.0);
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let results = tracker.track_frames_with_localization_prior_submap_provider(
+        [(&frame, Some(&prior)), (&second_frame, None)],
+        &provider,
+    );
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.localization.success));
+    assert_eq!(results[0].map_landmark_count, 6);
+    assert_eq!(results[0].localization.candidate_landmark_count, 6);
+    assert_eq!(results[1].map_landmark_count, 12);
+    assert_eq!(results[1].localization.candidate_landmark_count, 12);
+}
+
+#[test]
 fn image_tracker_tracks_extracted_frame_image() {
     let (map, frame) = build_map_and_frame(10, 1);
     let extractor = extractor_from_frame(&frame);
@@ -443,6 +496,37 @@ fn image_tracker_tracks_with_motion_prior_submap_provider() {
     assert_eq!(second.map_stats.descriptor_count, 6);
     assert_eq!(second.localization.candidate_landmark_count, 6);
     assert!(second.pose_prior.is_some());
+}
+
+#[test]
+fn image_tracker_tracks_with_external_localization_prior_submap_provider() {
+    let (mut map, frame) = build_map_and_frame(10, 1);
+    for index in 0..6 {
+        let landmark_id = index as u64 + 100;
+        let mut landmark = Landmark::new(landmark_id, Point3::new(100.0 + index as f64, 0.0, 5.0));
+        landmark.descriptor = Some(vec![index as f32 + 100.0, 9.0]);
+        map.landmarks.insert(landmark_id, landmark);
+    }
+    let provider = InMemoryMapProvider::new(map);
+    let prior = LocalizationPrior::from_position(Point3::origin(), 8.0);
+    let extractor = extractor_from_frame(&frame);
+    let mut image_tracker = ImageTracker::new(extractor, TrackingConfig::default());
+
+    let result = image_tracker
+        .track_frame_image_with_localization_prior_submap_provider(
+            10,
+            frame.camera_id,
+            &(),
+            &provider,
+            &prior,
+        )
+        .unwrap();
+
+    assert!(result.localization.success);
+    assert_eq!(result.map_landmark_count, 6);
+    assert_eq!(result.map_stats.landmark_count, 6);
+    assert_eq!(result.localization.candidate_landmark_count, 6);
+    assert!(result.pose_prior.is_none());
 }
 
 #[test]

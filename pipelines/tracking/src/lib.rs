@@ -447,6 +447,45 @@ where
             .collect()
     }
 
+    pub fn track_frame_with_localization_prior_submap_provider<P2>(
+        &mut self,
+        frame: &Frame,
+        provider: &P2,
+        prior: &LocalizationPrior,
+    ) -> TrackingResult
+    where
+        P2: MapProvider + DescriptorProvider,
+    {
+        if let (Some(center_world), Some(radius)) = (prior.center_world(), prior.radius) {
+            let submap_provider =
+                InMemoryMapProvider::from_provider_radius(provider, center_world, radius);
+            self.track_frame_with_provider(frame, &submap_provider)
+        } else {
+            self.track_frame_with_provider(frame, provider)
+        }
+    }
+
+    pub fn track_frames_with_localization_prior_submap_provider<'a, P2, I>(
+        &mut self,
+        frames_and_priors: I,
+        provider: &P2,
+    ) -> Vec<TrackingResult>
+    where
+        P2: MapProvider + DescriptorProvider,
+        I: IntoIterator<Item = (&'a Frame, Option<&'a LocalizationPrior>)>,
+    {
+        frames_and_priors
+            .into_iter()
+            .map(|(frame, prior)| {
+                if let Some(prior) = prior {
+                    self.track_frame_with_localization_prior_submap_provider(frame, provider, prior)
+                } else {
+                    self.track_frame_with_provider(frame, provider)
+                }
+            })
+            .collect()
+    }
+
     pub fn track_frame_with_descriptor_store(
         &mut self,
         frame: &Frame,
@@ -761,6 +800,24 @@ where
         Ok(self
             .tracker
             .track_frame_with_prior_submap_provider(&frame, provider, radius))
+    }
+
+    pub fn track_frame_image_with_localization_prior_submap_provider<P2>(
+        &mut self,
+        frame_id: FrameId,
+        camera_id: CameraId,
+        image: &X::Image,
+        provider: &P2,
+        prior: &LocalizationPrior,
+    ) -> Result<TrackingResult, X::Error>
+    where
+        P2: MapProvider + DescriptorProvider,
+    {
+        let features = self.extractor.extract(image)?;
+        let frame = frame_from_features(frame_id, camera_id, features);
+        Ok(self
+            .tracker
+            .track_frame_with_localization_prior_submap_provider(&frame, provider, prior))
     }
 
     pub fn track_frame_images_with_prior_submap_provider<'a, I, P2>(
