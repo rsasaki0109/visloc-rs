@@ -986,15 +986,92 @@ pub struct PoseGraphOptimizationStep {
     pub max_translation_correction: f64,
 }
 
+/// Robust kernel applied to each pose-graph edge's residual norm-squared.
+/// Down-weights edges whose squared residual exceeds the kernel threshold so
+/// outlier loop closures cannot dominate the least-squares solve.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum RobustKernel {
+    /// Standard squared-error cost (`ρ(s) = s`).
+    #[default]
+    None,
+    /// Huber kernel: quadratic for `s ≤ δ²`, linear in `√s` beyond.
+    /// `delta` is the threshold on residual norm where the kernel switches
+    /// from quadratic to linear.
+    Huber { delta: f64 },
+    /// Cauchy / Lorentzian kernel: `ρ(s) = c² · log(1 + s / c²)`.
+    /// `c` is the soft-saturation scale on residual norm.
+    Cauchy { c: f64 },
+}
+
+impl RobustKernel {
+    /// Applied cost `ρ(s)` for `s = ||r||²`.
+    pub fn cost(&self, s: f64) -> f64 {
+        match *self {
+            RobustKernel::None => s,
+            RobustKernel::Huber { delta } => {
+                let delta_sq = delta * delta;
+                if s <= delta_sq {
+                    s
+                } else {
+                    2.0 * delta * s.sqrt() - delta_sq
+                }
+            }
+            RobustKernel::Cauchy { c } => {
+                let c_sq = c * c;
+                c_sq * (1.0 + s / c_sq).ln()
+            }
+        }
+    }
+
+    /// Influence weight `ρ'(s)` used as a multiplier on each edge's normal-equation
+    /// contribution (a.k.a. IRLS weight).
+    pub fn weight(&self, s: f64) -> f64 {
+        match *self {
+            RobustKernel::None => 1.0,
+            RobustKernel::Huber { delta } => {
+                let delta_sq = delta * delta;
+                if s <= delta_sq {
+                    1.0
+                } else {
+                    delta / s.sqrt()
+                }
+            }
+            RobustKernel::Cauchy { c } => {
+                let c_sq = c * c;
+                1.0 / (1.0 + s / c_sq)
+            }
+        }
+    }
+}
+
 /// Configuration for [`PoseGraph::optimize_se3_iterative`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphSe3Config {
-    /// Hard cap on Gauss-Newton iterations.
+    /// Hard cap on iterations (including rejected LM steps).
     pub max_iterations: usize,
-    /// Convergence threshold on the largest per-node 6-vector update.
+    /// Convergence threshold on the largest per-node 6-vector update of the
+    /// most recent accepted step.
     pub step_tolerance: f64,
-    /// Convergence threshold on the absolute cost change between two iterations.
+    /// Convergence threshold on the absolute cost change between two
+    /// successive accepted steps.
     pub cost_tolerance: f64,
+    /// Robust kernel applied to each edge's squared residual norm.
+    pub robust_kernel: RobustKernel,
+    /// Initial Levenberg-Marquardt damping `λ`. `None` runs pure
+    /// Gauss-Newton (every step is accepted unconditionally). `Some(λ₀)`
+    /// enables LM: solve `(H + λI) δ = -g`, accept if cost decreases (and
+    /// scale `λ` down by `lambda_decrease_factor`), otherwise reject and
+    /// scale `λ` up by `lambda_increase_factor`.
+    pub initial_lambda: Option<f64>,
+    /// Multiplier applied to `λ` after a rejected LM step.
+    pub lambda_increase_factor: f64,
+    /// Multiplier applied to `λ` after an accepted LM step.
+    pub lambda_decrease_factor: f64,
+    /// Upper bound on `λ`. When a step is rejected and `λ * factor > max_lambda`,
+    /// the optimizer gives up and returns `converged: false`.
+    pub max_lambda: f64,
+    /// Lower bound on `λ`. Decreases stop here so `λ` cannot collapse to zero.
+    pub min_lambda: f64,
 }
 
 impl Default for PoseGraphSe3Config {
@@ -1003,6 +1080,12 @@ impl Default for PoseGraphSe3Config {
             max_iterations: 20,
             step_tolerance: 1e-6,
             cost_tolerance: 1e-9,
+            robust_kernel: RobustKernel::None,
+            initial_lambda: None,
+            lambda_increase_factor: 10.0,
+            lambda_decrease_factor: 0.1,
+            max_lambda: 1e12,
+            min_lambda: 1e-9,
         }
     }
 }
@@ -1014,6 +1097,10 @@ pub struct PoseGraphSe3IterationStats {
     pub cost_before: f64,
     pub cost_after: f64,
     pub max_step_norm: f64,
+    /// LM damping `λ` used for this iteration (`0.0` for pure Gauss-Newton).
+    pub lambda: f64,
+    /// `true` when the trial step was kept; only false for rejected LM steps.
+    pub step_accepted: bool,
 }
 
 /// Result of a full SE(3) Gauss-Newton run.
@@ -1260,6 +1347,13 @@ impl PoseGraph {
     /// weighted by `edge.weight`. Unlike [`Self::translation_cost`], this
     /// includes both the translation and rotation components of every edge.
     pub fn se3_cost(&self) -> f64 {
+        self.robust_se3_cost(&RobustKernel::None)
+    }
+
+    /// Robust SE(3) cost: `Σ_e edge.weight · ρ(||r_e||²)` where `ρ` is the
+    /// supplied [`RobustKernel`]. With [`RobustKernel::None`] this matches
+    /// [`Self::se3_cost`].
+    pub fn robust_se3_cost(&self, kernel: &RobustKernel) -> f64 {
         let mut total = 0.0;
         for edge in &self.edges {
             let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
@@ -1268,7 +1362,7 @@ impl PoseGraph {
             };
             let predicted = to.world_to_camera.compose(&from.world_to_camera.inverse());
             let r = edge.measurement.inverse().compose(&predicted).log();
-            total += edge.weight * r.norm_squared();
+            total += edge.weight * kernel.cost(r.norm_squared());
         }
         total
     }
@@ -1316,11 +1410,13 @@ impl PoseGraph {
             return Err(PoseGraphError::NoVariables);
         }
 
-        let initial_cost = self.se3_cost();
+        let kernel = config.robust_kernel;
+        let initial_cost = self.robust_se3_cost(&kernel);
         let mut iterations: Vec<PoseGraphSe3IterationStats> =
             Vec::with_capacity(config.max_iterations);
         let mut converged = false;
         let mut current_cost = initial_cost;
+        let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let dim = variable_count * 6;
 
         for iteration in 0..config.max_iterations {
@@ -1333,7 +1429,8 @@ impl PoseGraph {
                 let predicted = t_to.compose(&t_from.inverse());
                 let r = edge.measurement.inverse().compose(&predicted).log();
                 let ad_from = t_from.adjoint();
-                let weight = edge.weight;
+                let robust_weight = kernel.weight(r.norm_squared());
+                let weight = edge.weight * robust_weight;
                 let ata = ad_from.transpose() * ad_from;
                 let atr = ad_from.transpose() * r;
 
@@ -1356,11 +1453,23 @@ impl PoseGraph {
                 }
             }
 
+            let mut h_damped = h.clone();
+            if lambda > 0.0 {
+                for k in 0..dim {
+                    h_damped[(k, k)] += lambda;
+                }
+            }
             let neg_g = -&g;
-            let delta = h.lu().solve(&neg_g).ok_or(PoseGraphError::SingularSystem)?;
+            let delta = solve_normal_equations(&h_damped, &neg_g)?;
 
+            // Tentatively apply the step so we can evaluate the new cost.
             let mut max_step_norm: f64 = 0.0;
             let cost_before = current_cost;
+            let saved_poses = if config.initial_lambda.is_some() {
+                Some(self.poses.clone())
+            } else {
+                None
+            };
             for (&id, &i) in &node_index {
                 let block = i * 6;
                 let mut xi = Vector6::<f64>::zeros();
@@ -1378,14 +1487,44 @@ impl PoseGraph {
                 pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&xi));
             }
 
-            let cost_after = self.se3_cost();
-            current_cost = cost_after;
+            let cost_after = self.robust_se3_cost(&kernel);
+            let step_accepted = match config.initial_lambda {
+                None => true,
+                Some(_) => cost_after < cost_before,
+            };
+
+            if !step_accepted {
+                if let Some(saved) = saved_poses {
+                    self.poses = saved;
+                }
+                lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                iterations.push(PoseGraphSe3IterationStats {
+                    iteration,
+                    cost_before,
+                    cost_after,
+                    max_step_norm,
+                    lambda,
+                    step_accepted: false,
+                });
+                if lambda >= config.max_lambda {
+                    // λ saturated without finding a downhill step → bail.
+                    break;
+                }
+                continue;
+            }
+
             iterations.push(PoseGraphSe3IterationStats {
                 iteration,
                 cost_before,
                 cost_after,
                 max_step_norm,
+                lambda,
+                step_accepted: true,
             });
+            current_cost = cost_after;
+            if config.initial_lambda.is_some() {
+                lambda = (lambda * config.lambda_decrease_factor).max(config.min_lambda);
+            }
 
             if max_step_norm < config.step_tolerance {
                 converged = true;
@@ -1407,6 +1546,21 @@ impl PoseGraph {
             converged,
         })
     }
+}
+
+/// Solve `H · x = b` preferring Cholesky (SPD path) and falling back to LU
+/// for ill-conditioned or rank-deficient systems.
+fn solve_normal_equations(
+    h: &DMatrix<f64>,
+    b: &DVector<f64>,
+) -> Result<DVector<f64>, PoseGraphError> {
+    if let Some(chol) = h.clone().cholesky() {
+        return Ok(chol.solve(b));
+    }
+    h.clone()
+        .lu()
+        .solve(b)
+        .ok_or(PoseGraphError::SingularSystem)
 }
 
 fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {

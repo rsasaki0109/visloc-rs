@@ -91,6 +91,18 @@ Completed pieces:
   `so3_left_jacobian`, `so3_left_jacobian_inverse`) live in
   `visloc-core::geometry::se3` with Taylor fallbacks for small angles and
   `exp ∘ log` round-trip + adjoint-conjugation tests.
+- `optimize_se3_iterative` now also runs Levenberg-Marquardt with optional
+  Huber / Cauchy robust kernels (`RobustKernel::{None, Huber{delta},
+  Cauchy{c}}`). `PoseGraphSe3Config` gains `robust_kernel`, `initial_lambda`,
+  `lambda_increase_factor`, `lambda_decrease_factor`, `max_lambda`, and
+  `min_lambda`. `PoseGraphSe3IterationStats` records per-attempt `lambda`
+  and `step_accepted` so the LM trajectory is inspectable. The dense
+  normal-equations solve now prefers Cholesky on the SPD system and falls
+  back to LU on ill-conditioned cases. `PoseGraph::robust_se3_cost` reports
+  the kernel-shaped objective. The new `pose_graph_robust_demo` example
+  shows that a wildly wrong outlier loop closure that drags KF30 ~0.20 m
+  off truth under pure Gauss-Newton is suppressed to ~0.002 m drift under
+  LM + Huber.
 - A second loop-closure demo, `online_slam_public_loop_demo`, ingests a
   COLMAP-text-format sparse reconstruction from disk (defaulting to a
   synthesized 12-keyframe / 60-landmark orbit fixture written via
