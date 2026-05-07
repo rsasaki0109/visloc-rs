@@ -6,7 +6,9 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb};
 use visloc_io::images::{
     common_image_sequence_summary, decode_common_image, read_common_image,
     read_common_image_sequence, read_common_image_sequence_dir,
-    validate_common_image_sequence_dimensions, write_png_gray, ImageSequenceValidationIssue,
+    read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+    validate_common_image_sequence_timestamps, write_png_gray, ImageSequenceError,
+    ImageSequenceValidationIssue,
 };
 use visloc_vision::features::GrayscaleImage;
 
@@ -83,11 +85,57 @@ fn reads_common_image_sequence_in_given_order() {
 
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].frame_id, 0);
+    assert_eq!(frames[0].timestamp_nanoseconds, None);
     assert_eq!(frames[0].path, second);
     assert_eq!(frames[0].image.pixels()[0], 1.0);
     assert_eq!(frames[1].frame_id, 1);
+    assert_eq!(frames[1].timestamp_nanoseconds, None);
     assert_eq!(frames[1].path, first);
     assert_eq!(frames[1].image.pixels()[0], 0.0);
+}
+
+#[test]
+fn reads_common_image_sequence_with_timestamps() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    let second = dir.join("0001.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &second,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![255]).unwrap(),
+    )
+    .unwrap();
+
+    let frames = read_common_image_sequence_with_timestamps(&[first, second], &[100, 200]).unwrap();
+
+    assert_eq!(frames[0].timestamp_nanoseconds, Some(100));
+    assert_eq!(frames[1].timestamp_nanoseconds, Some(200));
+}
+
+#[test]
+fn rejects_mismatched_image_sequence_timestamp_count() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap(),
+    )
+    .unwrap();
+
+    let error = read_common_image_sequence_with_timestamps(&[first], &[100, 200])
+        .expect_err("timestamp count mismatch should fail");
+
+    assert!(matches!(
+        error,
+        ImageSequenceError::TimestampCountMismatch {
+            path_count: 1,
+            timestamp_count: 2,
+        }
+    ));
 }
 
 #[test]
@@ -134,6 +182,10 @@ fn summarizes_common_image_sequence() {
     assert_eq!(summary.width, Some(2));
     assert_eq!(summary.height, Some(1));
     assert!(!summary.varying_dimensions);
+    assert_eq!(summary.timestamp_count, 0);
+    assert_eq!(summary.first_timestamp_nanoseconds, None);
+    assert_eq!(summary.last_timestamp_nanoseconds, None);
+    assert!(summary.timestamps_valid);
 }
 
 #[test]
@@ -168,6 +220,82 @@ fn validates_common_image_sequence_dimensions() {
         }]
     );
     assert!(summary.varying_dimensions);
+}
+
+#[test]
+fn summarizes_timestamped_common_image_sequence() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    let second = dir.join("0001.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &second,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![255]).unwrap(),
+    )
+    .unwrap();
+    let frames =
+        read_common_image_sequence_with_timestamps(&[first, second], &[1_000, 2_000]).unwrap();
+
+    let summary = common_image_sequence_summary(&frames);
+
+    assert_eq!(summary.timestamp_count, 2);
+    assert_eq!(summary.first_timestamp_nanoseconds, Some(1_000));
+    assert_eq!(summary.last_timestamp_nanoseconds, Some(2_000));
+    assert!(summary.timestamps_valid);
+}
+
+#[test]
+fn validates_common_image_sequence_timestamps() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    let second = dir.join("0001.png");
+    let third = dir.join("0002.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &second,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![128]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &third,
+        &GrayscaleImage::from_luma_u8(1, 1, vec![255]).unwrap(),
+    )
+    .unwrap();
+    let mut frames = read_common_image_sequence_with_timestamps(
+        &[first, second.clone(), third.clone()],
+        &[100, 200, 50],
+    )
+    .unwrap();
+    frames[1].timestamp_nanoseconds = None;
+
+    let issues = validate_common_image_sequence_timestamps(&frames);
+    let summary = common_image_sequence_summary(&frames);
+
+    assert_eq!(
+        issues,
+        vec![
+            ImageSequenceValidationIssue::MissingTimestamp {
+                frame_id: 1,
+                path: second,
+            },
+            ImageSequenceValidationIssue::NonMonotonicTimestamp {
+                frame_id: 2,
+                path: third,
+                timestamp_nanoseconds: 50,
+                previous_frame_id: 0,
+                previous_timestamp_nanoseconds: 100,
+            },
+        ]
+    );
+    assert!(!summary.timestamps_valid);
 }
 
 fn tempfile_dir() -> std::path::PathBuf {
