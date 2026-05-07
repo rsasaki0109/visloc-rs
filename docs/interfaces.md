@@ -96,6 +96,8 @@ This is not SLAM: it does not create keyframes, update maps, run bundle adjustme
 - `LocalMapWindowConfig`: controls local window size
 - `LandmarkCandidate`: represents an untriangulated landmark hypothesis from multiple keyframe observations
 - `LandmarkCandidateValidationReport`: checks observation count, keyframe references, keypoint bounds, duplicate observations, and optional local-window membership
+- `Triangulator`: converts a valid landmark candidate into a triangulated landmark through a swappable backend
+- `LinearTriangulator`: minimal normalized DLT triangulator for bootstrapping local mapping experiments
 
 This is the first v0.3 extension point. Future landmark candidates, triangulation, and local refinement should consume these decisions and staged updates instead of being baked into tracking.
 
