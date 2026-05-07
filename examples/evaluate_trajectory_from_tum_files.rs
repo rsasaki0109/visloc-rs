@@ -67,16 +67,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(&output_dir)?;
         let errors_path = output_dir.join("translation_errors.csv");
         let summary_path = output_dir.join("error_summary.json");
+        let report_path = output_dir.join("trajectory_report.html");
         estimated.write_translation_errors_csv_against_with_alignment(
             &reference,
             alignment,
             &errors_path,
         )?;
         summary.write_json(&summary_path)?;
+        estimated.write_html_report_against_with_alignment(&reference, alignment, &report_path)?;
         println!(
-            "wrote evaluation exports: errors={} summary={}",
+            "wrote evaluation exports: errors={} summary={} report={}",
             errors_path.display(),
-            summary_path.display()
+            summary_path.display(),
+            report_path.display()
         );
     }
 

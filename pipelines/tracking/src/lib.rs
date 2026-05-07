@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use nalgebra::{Matrix3, Point3, Quaternion, Rotation3, UnitQuaternion, Vector3};
@@ -860,6 +861,129 @@ impl PoseTrajectory {
             .write_json(path)
     }
 
+    pub fn to_html_report_against(&self, reference: &PoseTrajectory) -> String {
+        self.to_html_report_against_with_alignment(reference, TrajectoryAlignment::None)
+    }
+
+    pub fn to_html_report_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+    ) -> String {
+        let summary = self.translation_error_summary_against_with_alignment(reference, alignment);
+        let errors = self.translation_errors_against_with_alignment(reference, alignment);
+        let svg = trajectory_comparison_svg(self, reference, alignment);
+        let mut output = String::new();
+        output.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+        output
+            .push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+        output.push_str("<title>visloc-rs trajectory evaluation</title>\n");
+        output.push_str("<style>");
+        output.push_str(
+            "body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f7f9;color:#182026}\
+             main{max-width:1080px;margin:0 auto;padding:28px}\
+             h1{font-size:24px;margin:0 0 8px}\
+             .sub{margin:0 0 22px;color:#52616b}\
+             .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}\
+             .metric{background:white;border:1px solid #dde3ea;border-radius:8px;padding:12px}\
+             .label{display:block;font-size:12px;color:#65727e}\
+             .value{display:block;font-size:22px;font-weight:700;margin-top:4px}\
+             .panel{background:white;border:1px solid #dde3ea;border-radius:8px;padding:16px;margin-top:14px}\
+             .legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 0;color:#52616b;font-size:13px}\
+             .swatch{display:inline-block;width:26px;height:4px;border-radius:2px;vertical-align:middle;margin-right:6px}\
+             table{width:100%;border-collapse:collapse;font-size:13px}\
+             th,td{text-align:right;border-bottom:1px solid #e7ecf0;padding:6px 8px}\
+             th:first-child,td:first-child{text-align:left}\
+             code{background:#eef2f5;border-radius:4px;padding:2px 4px}\
+             svg{width:100%;height:auto;display:block}",
+        );
+        output.push_str("</style>\n</head>\n<body>\n<main>\n");
+        output.push_str("<h1>visloc-rs trajectory evaluation</h1>\n");
+        let _ = writeln!(
+            output,
+            "<p class=\"sub\">Estimated trajectory compared with reference poses. Alignment: <code>{alignment:?}</code></p>"
+        );
+        output.push_str("<section class=\"grid\">\n");
+        push_metric_card(
+            &mut output,
+            "Estimated poses",
+            &summary.estimated_pose_count.to_string(),
+        );
+        push_metric_card(
+            &mut output,
+            "Reference poses",
+            &summary.reference_pose_count.to_string(),
+        );
+        push_metric_card(
+            &mut output,
+            "Matched poses",
+            &summary.matched_pose_count.to_string(),
+        );
+        push_metric_card(
+            &mut output,
+            "Mean error",
+            &format_optional_metric(summary.mean_translation_error, "m"),
+        );
+        push_metric_card(
+            &mut output,
+            "RMSE",
+            &format_optional_metric(summary.rmse_translation_error, "m"),
+        );
+        push_metric_card(
+            &mut output,
+            "Max error",
+            &format_optional_metric(summary.max_translation_error, "m"),
+        );
+        output.push_str("</section>\n");
+        output.push_str("<section class=\"panel\">\n");
+        output.push_str(&svg);
+        output.push_str(
+            "<div class=\"legend\"><span><span class=\"swatch\" style=\"background:#e0574f\"></span>estimated</span><span><span class=\"swatch\" style=\"background:#2676c9\"></span>reference</span><span><span class=\"swatch\" style=\"background:#9aa7b2\"></span>matched error</span></div>\n",
+        );
+        output.push_str("</section>\n");
+        output.push_str("<section class=\"panel\">\n<h2>Matched translation errors</h2>\n");
+        output.push_str(
+            "<table><thead><tr><th>frame</th><th>translation error</th></tr></thead><tbody>\n",
+        );
+        for error in errors.iter().take(80) {
+            let _ = writeln!(
+                output,
+                "<tr><td>{}</td><td>{}</td></tr>",
+                error.frame_id,
+                format_optional_metric(Some(error.translation_error), "m")
+            );
+        }
+        if errors.len() > 80 {
+            let _ = writeln!(
+                output,
+                "<tr><td colspan=\"2\">{} more rows omitted</td></tr>",
+                errors.len() - 80
+            );
+        }
+        output.push_str("</tbody></table>\n</section>\n</main>\n</body>\n</html>\n");
+        output
+    }
+
+    pub fn write_html_report_against(
+        &self,
+        reference: &PoseTrajectory,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        std::fs::write(path, self.to_html_report_against(reference))
+    }
+
+    pub fn write_html_report_against_with_alignment(
+        &self,
+        reference: &PoseTrajectory,
+        alignment: TrajectoryAlignment,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<()> {
+        std::fs::write(
+            path,
+            self.to_html_report_against_with_alignment(reference, alignment),
+        )
+    }
+
     pub fn summary(&self) -> TrajectorySummary {
         TrajectorySummary::from_trajectory(self)
     }
@@ -875,6 +999,203 @@ impl PoseTrajectory {
 
 fn optional_f64_csv(value: Option<f64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn push_metric_card(output: &mut String, label: &str, value: &str) {
+    let _ = writeln!(
+        output,
+        "<div class=\"metric\"><span class=\"label\">{}</span><span class=\"value\">{}</span></div>",
+        label, value
+    );
+}
+
+fn format_optional_metric(value: Option<f64>, unit: &str) -> String {
+    value
+        .map(|value| format!("{value:.4} {unit}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn trajectory_comparison_svg(
+    estimated: &PoseTrajectory,
+    reference: &PoseTrajectory,
+    alignment: TrajectoryAlignment,
+) -> String {
+    let reference_by_frame_id = reference
+        .samples
+        .iter()
+        .map(|sample| (sample.frame_id, sample.camera_center_world()))
+        .collect::<HashMap<_, _>>();
+    let offset = estimated.translation_alignment_offset(&reference_by_frame_id, alignment);
+    let estimated_points = estimated
+        .samples
+        .iter()
+        .map(|sample| sample.camera_center_world() - offset)
+        .collect::<Vec<_>>();
+    let reference_points = reference.camera_centers_world();
+    let projection = TrajectorySvgProjection::from_points(&estimated_points, &reference_points);
+
+    let mut output = String::new();
+    output.push_str("<svg viewBox=\"0 0 900 520\" role=\"img\" aria-label=\"trajectory plot\">\n");
+    output.push_str("<rect x=\"0\" y=\"0\" width=\"900\" height=\"520\" fill=\"#fbfcfd\"/>\n");
+    output.push_str("<g stroke=\"#e4e9ef\" stroke-width=\"1\">\n");
+    for x in [80, 228, 376, 524, 672, 820] {
+        let _ = writeln!(output, "<line x1=\"{x}\" y1=\"54\" x2=\"{x}\" y2=\"450\"/>");
+    }
+    for y in [54, 133, 212, 291, 370, 450] {
+        let _ = writeln!(output, "<line x1=\"80\" y1=\"{y}\" x2=\"820\" y2=\"{y}\"/>");
+    }
+    output.push_str("</g>\n");
+    output.push_str("<g fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n");
+    push_polyline(&mut output, &estimated_points, &projection, "#e0574f", 4);
+    push_polyline(&mut output, &reference_points, &projection, "#2676c9", 4);
+    output.push_str("</g>\n");
+
+    output.push_str("<g stroke=\"#9aa7b2\" stroke-width=\"1.5\" stroke-dasharray=\"4 5\">\n");
+    for sample in &estimated.samples {
+        let Some(reference_center) = reference_by_frame_id.get(&sample.frame_id) else {
+            continue;
+        };
+        let estimated_center = sample.camera_center_world() - offset;
+        let (ex, ey) = projection.project(&estimated_center);
+        let (rx, ry) = projection.project(reference_center);
+        let _ = writeln!(
+            output,
+            "<line x1=\"{ex:.2}\" y1=\"{ey:.2}\" x2=\"{rx:.2}\" y2=\"{ry:.2}\"/>"
+        );
+    }
+    output.push_str("</g>\n");
+    push_points(&mut output, &reference_points, &projection, "#2676c9");
+    push_points(&mut output, &estimated_points, &projection, "#e0574f");
+    output.push_str(
+        "<text x=\"80\" y=\"486\" fill=\"#65727e\" font-size=\"13\">top-down camera-center trajectory</text>\n",
+    );
+    output.push_str("</svg>\n");
+    output
+}
+
+fn push_polyline(
+    output: &mut String,
+    points: &[Point3<f64>],
+    projection: &TrajectorySvgProjection,
+    color: &str,
+    stroke_width: usize,
+) {
+    if points.is_empty() {
+        return;
+    }
+
+    let mut point_text = String::new();
+    for point in points {
+        let (x, y) = projection.project(point);
+        let _ = write!(point_text, "{x:.2},{y:.2} ");
+    }
+    let _ = writeln!(
+        output,
+        "<polyline points=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>",
+        point_text.trim_end(),
+        color,
+        stroke_width
+    );
+}
+
+fn push_points(
+    output: &mut String,
+    points: &[Point3<f64>],
+    projection: &TrajectorySvgProjection,
+    color: &str,
+) {
+    output.push_str("<g>\n");
+    for point in points {
+        let (x, y) = projection.project(point);
+        let _ = writeln!(
+            output,
+            "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"4\" fill=\"{color}\"/>"
+        );
+    }
+    output.push_str("</g>\n");
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrajectorySvgProjection {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+    axis_y: usize,
+}
+
+impl TrajectorySvgProjection {
+    fn from_points(estimated: &[Point3<f64>], reference: &[Point3<f64>]) -> Self {
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for point in estimated.iter().chain(reference.iter()) {
+            min[0] = min[0].min(point.x);
+            min[1] = min[1].min(point.y);
+            min[2] = min[2].min(point.z);
+            max[0] = max[0].max(point.x);
+            max[1] = max[1].max(point.y);
+            max[2] = max[2].max(point.z);
+        }
+
+        if !min[0].is_finite() {
+            return Self {
+                min_x: -1.0,
+                max_x: 1.0,
+                min_y: -1.0,
+                max_y: 1.0,
+                axis_y: 2,
+            };
+        }
+
+        let spread_y = max[1] - min[1];
+        let spread_z = max[2] - min[2];
+        let axis_y = if spread_z >= spread_y { 2 } else { 1 };
+        let (mut min_x, mut max_x) = padded_range(min[0], max[0]);
+        let (mut min_y, mut max_y) = padded_range(min[axis_y], max[axis_y]);
+        let x_span = max_x - min_x;
+        let y_span = max_y - min_y;
+        if x_span > y_span {
+            let delta = (x_span - y_span) * 0.5;
+            min_y -= delta;
+            max_y += delta;
+        } else {
+            let delta = (y_span - x_span) * 0.5;
+            min_x -= delta;
+            max_x += delta;
+        }
+
+        Self {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            axis_y,
+        }
+    }
+
+    fn project(&self, point: &Point3<f64>) -> (f64, f64) {
+        let plot_left = 80.0;
+        let plot_top = 54.0;
+        let plot_width = 740.0;
+        let plot_height = 396.0;
+        let horizontal = (point.x - self.min_x) / (self.max_x - self.min_x);
+        let vertical_value = if self.axis_y == 2 { point.z } else { point.y };
+        let vertical = (vertical_value - self.min_y) / (self.max_y - self.min_y);
+        (
+            plot_left + horizontal * plot_width,
+            plot_top + (1.0 - vertical) * plot_height,
+        )
+    }
+}
+
+fn padded_range(min: f64, max: f64) -> (f64, f64) {
+    let span = max - min;
+    if span.abs() < 1.0e-12 {
+        (min - 1.0, max + 1.0)
+    } else {
+        let padding = span * 0.08;
+        (min - padding, max + padding)
+    }
 }
 
 fn parse_tum_frame_id(

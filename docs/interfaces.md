@@ -78,6 +78,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `PoseTrajectory::from_tum_poses_str` / `read_tum_poses`: read TUM-style `frame_id tx ty tz qx qy qz qw` rows back into a trajectory for simple file-based evaluation
 - `TrajectoryErrorSummary` and `TrajectoryTranslationError`: compare an estimated trajectory against a reference trajectory by matching frame ids and reporting translation ATE-style mean, RMSE, max, missing-pose counts, CSV rows, and JSON summaries
 - `TrajectoryAlignment::FirstMatchedTranslation`: optionally removes the translation offset at the first matched frame before computing trajectory translation errors
+- `PoseTrajectory::to_html_report_against`: creates a self-contained HTML / SVG trajectory-evaluation report for demos and quick inspection
 - `MotionModel`: predicts an optional pose prior for the next frame
 - `ConstantPoseMotionModel`: default motion model that reuses the last successful pose
 - `ConstantVelocityMotionModel`: extrapolates the next camera center from the two latest successful poses
