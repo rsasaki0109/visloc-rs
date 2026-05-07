@@ -88,7 +88,7 @@ pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
     MotionModel, PoseTrajectory, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
     TrackingResult, TrackingState, TrackingStats, TrajectoryErrorSummary, TrajectorySample,
-    TrajectorySummary, TrajectoryTranslationError,
+    TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
@@ -137,8 +137,8 @@ pub mod prelude {
         Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp, Tracker, TrackingConfig,
         TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
         TrajectoryErrorSummary, TrajectorySample, TrajectorySummary, TrajectoryTranslationError,
-        TriangulationConfig, TriangulationFailureReason, Triangulator, VisualMap,
-        VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
+        TriangulationConfig, TriangulationFailureReason, Triangulator, TumTrajectoryParseError,
+        VisualMap, VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
     };
 
     pub use crate::io::colmap::{
