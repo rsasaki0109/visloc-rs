@@ -5,14 +5,14 @@ use std::convert::Infallible;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{
-    Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationResult, LocalizationSuccess,
-    VisualMap,
+    Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationFailureReason,
+    LocalizationResult, LocalizationSuccess, VisualMap,
 };
 use visloc_rs::{
     ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
     InMemoryMapProvider, LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel,
-    PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig, TrackingEvent,
-    TrackingFailureReason, TrackingResult, TrackingState,
+    PoseTrajectory, PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig,
+    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
 };
 
 #[derive(Debug, Clone)]
@@ -103,6 +103,26 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
     }
 }
 
+fn failed_tracking_result(frame_id: u64) -> TrackingResult {
+    TrackingResult {
+        frame_id,
+        state: TrackingState::Tracking,
+        event: TrackingEvent::TrackingFailed,
+        successive_failures: 1,
+        pose_prior: None,
+        used_pose_prior: false,
+        tracking_failure_reason: None,
+        map_landmark_count: 0,
+        map_stats: MapProviderStats::default(),
+        localization: LocalizationResult::failure(
+            LocalizationFailureReason::NoDescriptorMatches,
+            0,
+            0,
+            0,
+        ),
+    }
+}
+
 fn successful_localization_result(
     inlier_count: usize,
     correspondence_count: usize,
@@ -182,6 +202,35 @@ fn constant_velocity_motion_model_reset_clears_history() {
     model.reset();
 
     assert!(model.predict_pose(&frame, None, None).is_none());
+}
+
+#[test]
+fn pose_trajectory_keeps_successful_tracking_poses() {
+    let pose_a = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let pose_b = pose_with_identity_rotation_at_center(Vector3::new(3.0, 4.0, 0.0));
+    let pose_c = pose_with_identity_rotation_at_center(Vector3::new(3.0, 4.0, 12.0));
+    let results = vec![
+        successful_tracking_result(1, pose_a),
+        failed_tracking_result(2),
+        successful_tracking_result(3, pose_b),
+        successful_tracking_result(4, pose_c),
+    ];
+
+    let trajectory = PoseTrajectory::from_tracking_results(&results);
+
+    assert_eq!(trajectory.len(), 3);
+    assert_eq!(trajectory.frame_ids(), vec![1, 3, 4]);
+    assert!((trajectory.total_path_length() - 17.0).abs() < 1.0e-9);
+    assert_eq!(trajectory.mean_reprojection_error(), Some(0.0));
+    assert_eq!(trajectory.samples()[0].inlier_count, 0);
+    assert_eq!(
+        trajectory.camera_centers_world(),
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(3.0, 4.0, 0.0),
+            Point3::new(3.0, 4.0, 12.0)
+        ]
+    );
 }
 
 #[test]

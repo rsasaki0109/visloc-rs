@@ -86,8 +86,8 @@ pub use visloc_mapping::{
 pub use visloc_slam::{OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult};
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
-    MotionModel, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult,
-    TrackingState, TrackingStats,
+    MotionModel, PoseTrajectory, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
+    TrackingResult, TrackingState, TrackingStats, TrajectorySample,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
@@ -129,13 +129,13 @@ pub mod prelude {
         MapProviderStats, Matcher, MeasurementBuffer, MotionModel, NoopLocalRefiner, Observation,
         OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PnPRansac, Pose, PoseCovariance,
         PoseCovarianceMatrix, PoseEstimationFailureDiagnostics, PoseEstimationFailureReason,
-        PoseEstimator, PoseEstimatorDiagnostics, PosePriorMeasurement, PoseRefiner,
+        PoseEstimator, PoseEstimatorDiagnostics, PosePriorMeasurement, PoseRefiner, PoseTrajectory,
         PositionCovariance, PriorConfig, PriorSubmapSelector, ProvidedFeatureExtractor, QueryImage,
         RadiusLandmarkSelector, RadiusSubmapSelector, RansacReport, RobustPoseEstimator,
         SelectableMapProvider, SimpleKeyframePolicy, StagedMapUpdate, SubmapSelector, TimeDelta,
         Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp, Tracker, TrackingConfig,
         TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
-        TriangulationConfig, TriangulationFailureReason, Triangulator, VisualMap,
+        TrajectorySample, TriangulationConfig, TriangulationFailureReason, Triangulator, VisualMap,
         VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
     };
 

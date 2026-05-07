@@ -6,6 +6,7 @@
 //! failure/lost/relocalization events, and leaves keyframe management, map
 //! updates, loop closure, and bundle adjustment to future layers.
 
+use nalgebra::Point3;
 use visloc_core::geometry::Pose;
 use visloc_core::types::{
     CameraId, Frame, FrameId, LandmarkDescriptorStore, LocalizationResult, VisualMap,
@@ -98,6 +99,124 @@ impl TrackingResult {
             LocalizationPrior::from_pose(pose_prior, radius)
         } else {
             LocalizationPrior::none()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrajectorySample {
+    pub frame_id: FrameId,
+    pub pose: Pose,
+    pub state: TrackingState,
+    pub event: TrackingEvent,
+    pub inlier_count: usize,
+    pub inlier_ratio: f64,
+    pub reprojection_error: Option<f64>,
+}
+
+impl TrajectorySample {
+    pub fn from_tracking_result(result: &TrackingResult) -> Option<Self> {
+        if !result.localization.success {
+            return None;
+        }
+
+        Some(Self {
+            frame_id: result.frame_id,
+            pose: result.localization.pose.clone()?,
+            state: result.state,
+            event: result.event,
+            inlier_count: result.localization.inlier_count,
+            inlier_ratio: result.localization.inlier_ratio,
+            reprojection_error: result.localization.reprojection_error,
+        })
+    }
+
+    pub fn camera_center_world(&self) -> Point3<f64> {
+        self.pose.camera_center_world()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PoseTrajectory {
+    samples: Vec<TrajectorySample>,
+}
+
+impl PoseTrajectory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_tracking_results(results: &[TrackingResult]) -> Self {
+        let mut trajectory = Self::new();
+        for result in results {
+            trajectory.push_result(result);
+        }
+        trajectory
+    }
+
+    pub fn push_result(&mut self, result: &TrackingResult) -> bool {
+        if let Some(sample) = TrajectorySample::from_tracking_result(result) {
+            self.samples.push(sample);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn push_sample(&mut self, sample: TrajectorySample) {
+        self.samples.push(sample);
+    }
+
+    pub fn samples(&self) -> &[TrajectorySample] {
+        &self.samples
+    }
+
+    pub fn into_samples(self) -> Vec<TrajectorySample> {
+        self.samples
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    pub fn frame_ids(&self) -> Vec<FrameId> {
+        self.samples.iter().map(|sample| sample.frame_id).collect()
+    }
+
+    pub fn camera_centers_world(&self) -> Vec<Point3<f64>> {
+        self.samples
+            .iter()
+            .map(TrajectorySample::camera_center_world)
+            .collect()
+    }
+
+    pub fn total_path_length(&self) -> f64 {
+        self.samples
+            .windows(2)
+            .map(|window| {
+                (window[1].camera_center_world() - window[0].camera_center_world()).norm()
+            })
+            .sum()
+    }
+
+    pub fn mean_reprojection_error(&self) -> Option<f64> {
+        let mut sum = 0.0;
+        let mut count = 0;
+        for sample in &self.samples {
+            if let Some(error) = sample.reprojection_error {
+                sum += error;
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            None
+        } else {
+            Some(sum / count as f64)
         }
     }
 }

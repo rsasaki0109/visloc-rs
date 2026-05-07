@@ -4,6 +4,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- `PoseTrajectory` and `TrajectorySample` helpers for extracting successful tracking poses, camera centers, path length, and mean reprojection error from sequence-localization results.
+
 ## 0.1.0 - 2026-05-07
 
 ### Added
