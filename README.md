@@ -142,6 +142,8 @@ Run the trajectory-evaluation example:
 
 ```bash
 cargo run --example evaluate_trajectory_dummy
+cargo run --example evaluate_trajectory_from_kitti_files
+cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti
 cargo run --example evaluate_trajectory_from_tum_files
 cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval
 ```

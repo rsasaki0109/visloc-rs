@@ -3,6 +3,7 @@ set -eu
 
 examples="
 evaluate_trajectory_dummy
+evaluate_trajectory_from_kitti_files
 evaluate_trajectory_from_tum_files
 localize_dummy
 localize_colmap_text

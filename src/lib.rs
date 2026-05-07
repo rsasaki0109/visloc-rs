@@ -86,9 +86,9 @@ pub use visloc_mapping::{
 pub use visloc_slam::{OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult};
 pub use visloc_tracking::{
     ConstantPoseMotionModel, ConstantVelocityMotionModel, FrameLocalizer, ImageTracker,
-    MotionModel, PoseTrajectory, Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason,
-    TrackingResult, TrackingState, TrackingStats, TrajectoryErrorSummary, TrajectorySample,
-    TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
+    KittiTrajectoryParseError, MotionModel, PoseTrajectory, Tracker, TrackingConfig, TrackingEvent,
+    TrackingFailureReason, TrackingResult, TrackingState, TrackingStats, TrajectoryErrorSummary,
+    TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
 };
 pub use visloc_vision::features::{
     FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
@@ -119,13 +119,13 @@ pub mod prelude {
         FrameLocalizationResult, FrameLocalizer, FramePriorSource, FrameTimestampIndex,
         GaussNewtonPoseRefiner, GnssMeasurement, ImageLocalizer, ImageTracker, ImuMeasurement,
         InMemoryMapProvider, IntersectCandidateSelector, Keyframe, KeyframeDecision,
-        KeyframePolicy, KeyframePolicyConfig, Landmark, LandmarkCandidate, LandmarkCandidateId,
-        LandmarkCandidateMappingFailure, LandmarkCandidateMappingFailureReason,
-        LandmarkCandidateObservation, LandmarkCandidateValidationConfig,
-        LandmarkCandidateValidationIssue, LandmarkCandidateValidationReport,
-        LandmarkDescriptorStore, LandmarkId, LinearTriangulator, LocalMapWindow,
-        LocalMapWindowConfig, LocalMappingPipeline, LocalMappingResult, LocalizationConfig,
-        LocalizationFailureReason, LocalizationPipeline, LocalizationPrior,
+        KeyframePolicy, KeyframePolicyConfig, KittiTrajectoryParseError, Landmark,
+        LandmarkCandidate, LandmarkCandidateId, LandmarkCandidateMappingFailure,
+        LandmarkCandidateMappingFailureReason, LandmarkCandidateObservation,
+        LandmarkCandidateValidationConfig, LandmarkCandidateValidationIssue,
+        LandmarkCandidateValidationReport, LandmarkDescriptorStore, LandmarkId, LinearTriangulator,
+        LocalMapWindow, LocalMapWindowConfig, LocalMappingPipeline, LocalMappingResult,
+        LocalizationConfig, LocalizationFailureReason, LocalizationPipeline, LocalizationPrior,
         LocalizationPriorProvider, LocalizationResult, LocalizationSuccess, MapProvider,
         MapProviderStats, Matcher, MeasurementBuffer, MotionModel, NoopLocalRefiner, Observation,
         OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PnPRansac, Pose, PoseCovariance,
