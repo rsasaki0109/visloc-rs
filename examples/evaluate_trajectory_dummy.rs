@@ -29,6 +29,10 @@ fn main() {
     }
 
     print_summary(&summary);
+    println!(
+        "translation_errors_csv:\n{}",
+        estimated.translation_errors_csv_against(&reference)
+    );
     println!("summary_json:\n{}", summary.to_json());
 }
 

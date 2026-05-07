@@ -338,9 +338,11 @@ fn pose_trajectory_reports_translation_errors_against_reference() {
 
     let errors = estimated.translation_errors_against(&reference);
     let summary = estimated.translation_error_summary_against(&reference);
+    let csv = estimated.translation_errors_csv_against(&reference);
     let json = summary.to_json();
 
     assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].to_csv_record(), "1,1");
     assert_eq!(errors[0].frame_id, 1);
     assert_eq!(errors[0].translation_error, 1.0);
     assert_eq!(errors[1].frame_id, 2);
@@ -353,6 +355,7 @@ fn pose_trajectory_reports_translation_errors_against_reference() {
     assert_eq!(summary.mean_translation_error, Some(1.5));
     assert!((summary.rmse_translation_error.unwrap() - (2.5_f64).sqrt()).abs() < 1.0e-9);
     assert_eq!(summary.max_translation_error, Some(2.0));
+    assert_eq!(csv, "frame_id,translation_error\n1,1\n2,2\n");
     assert!(json.contains("\"matched_pose_count\": 2"));
     assert!(json.contains("\"mean_translation_error\": 1.5"));
 }
