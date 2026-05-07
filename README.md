@@ -196,6 +196,8 @@ cargo run --example track_sequence_with_gnss_prior
 cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo
 ```
 
+Open `target/visloc_gnss_tracking_demo/index.html` first; it is the dashboard for the tracking, trajectory, and evaluation reports. See [docs/gnss_demo.md](docs/gnss_demo.md) for the file-by-file guide and expected metrics. CI also uploads the checked GNSS demo output directory as the `gnss-demo-outputs` artifact.
+
 Run the full local quality gate:
 
 ```bash
@@ -227,6 +229,7 @@ docs/assets/              README images and visual explainers
 docs/api_stability.md     public API stability policy toward v1.0
 docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
+docs/gnss_demo.md         GNSS-prior sequence demo output guide
 docs/migration.md         pre-1.0 to v1.0 API migration guidance
 docs/publishing.md        workspace publish order and package checks
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
