@@ -170,14 +170,14 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
-Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes a compact `summary.json` for visualization scripts:
+Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json` and a browser-viewable `trajectory_report.html`:
 
 ```bash
 cargo run --example localize_sequence_from_files
 cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo
 ```
 
-When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. `TrajectoryAlignment::FirstMatchedTranslation` can remove a simple origin offset before computing errors. `PoseTrajectory::to_html_report_against` creates a compact trajectory plot and metric table for demos. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
+`PoseTrajectory::to_html_report` creates a compact single-trajectory plot and metric table for demos. When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. `TrajectoryAlignment::FirstMatchedTranslation` can remove a simple origin offset before computing errors, and `PoseTrajectory::to_html_report_against` creates a comparison report. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
 
 Run the tracking skeleton example:
 

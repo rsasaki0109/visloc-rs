@@ -12,10 +12,11 @@ All notable changes to `visloc-rs` will be documented here.
 - `TrajectoryErrorSummary` and per-frame translation-error helpers for comparing estimated trajectories against reference poses.
 - Optional first-matched-frame translation alignment for trajectory-error reports.
 - Self-contained HTML / SVG trajectory-evaluation reports for quick visual inspection.
+- Self-contained HTML / SVG single-trajectory reports for sequence-localization demos.
 - Trajectory-evaluation example showing frame-id matched translation errors, CSV output, and JSON summary output.
 - File-based TUM trajectory evaluation example with optional CSV / JSON / HTML output directory.
 - File-based KITTI trajectory evaluation example with optional CSV / JSON / HTML output directory.
-- File-based sequence localization example that tracks query feature files and prints or writes CSV / KITTI / TUM trajectory exports plus `summary.json`.
+- File-based sequence localization example that tracks query feature files and prints or writes CSV / KITTI / TUM trajectory exports plus `summary.json` and `trajectory_report.html`.
 
 ## 0.1.0 - 2026-05-07
 
