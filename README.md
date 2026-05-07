@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
+  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-45%25-f59e0b" alt="Deep VO / loop close completion: 45%">
 </p>
 
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
@@ -80,6 +81,8 @@ Two roadmap goals should make the project feel more like a SLAM foundation witho
 
 - **Deep Visual Odometry frontend:** `VisualOdometryFrontend` and `VisualOdometryPriorProvider` now give tracking a two-frame relative-pose boundary and a way to convert it into a pose prior. The target remains SuperPoint/LightGlue-style integration without forcing a heavy ML runtime into `visloc-core`.
 - **Loop-closure visualization:** candidate detection now exists in the online SLAM MVP; next is showing loop candidates clearly in sequence demos before adding pose-graph optimization.
+
+Current Deep VO / loop-close progress is tracked in [docs/progress.md](docs/progress.md). Development updates use that value as the milestone completion percentage.
 
 ## Scope
 
