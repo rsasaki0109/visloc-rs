@@ -39,6 +39,7 @@ pub enum TrackingEvent {
 pub struct TrackingConfig {
     pub min_successive_failures_to_lost: usize,
     pub last_pose_candidate_radius: Option<f64>,
+    pub max_pose_prior_translation_error: Option<f64>,
 }
 
 impl Default for TrackingConfig {
@@ -46,8 +47,17 @@ impl Default for TrackingConfig {
         Self {
             min_successive_failures_to_lost: 3,
             last_pose_candidate_radius: None,
+            max_pose_prior_translation_error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackingFailureReason {
+    PosePriorTranslationErrorExceeded {
+        translation_error: f64,
+        max_translation_error: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +68,7 @@ pub struct TrackingResult {
     pub successive_failures: usize,
     pub pose_prior: Option<Pose>,
     pub used_pose_prior: bool,
+    pub tracking_failure_reason: Option<TrackingFailureReason>,
     pub map_landmark_count: usize,
     pub map_stats: MapProviderStats,
     pub localization: LocalizationResult,
@@ -365,7 +376,7 @@ where
         );
         let used_pose_prior =
             pose_prior.is_some() && self.config.last_pose_candidate_radius.is_some();
-        let localization = self
+        let mut localization = self
             .localization_pipeline
             .localize_frame_with_pose_prior_and_descriptor_store(
                 frame,
@@ -374,6 +385,8 @@ where
                 pose_prior.as_ref(),
                 self.config.last_pose_candidate_radius,
             );
+        let tracking_failure_reason =
+            self.apply_tracking_quality_gate(pose_prior.as_ref(), &mut localization);
 
         let previous_state = self.state;
         let event = if localization.success {
@@ -405,6 +418,7 @@ where
             successive_failures: self.successive_failures,
             pose_prior,
             used_pose_prior,
+            tracking_failure_reason,
             map_landmark_count: map_stats.landmark_count,
             map_stats,
             localization,
@@ -433,6 +447,32 @@ where
         }
 
         self.last_result = Some(result.clone());
+    }
+
+    fn apply_tracking_quality_gate(
+        &self,
+        pose_prior: Option<&Pose>,
+        localization: &mut LocalizationResult,
+    ) -> Option<TrackingFailureReason> {
+        if !localization.success {
+            return None;
+        }
+
+        let max_translation_error = self.config.max_pose_prior_translation_error?;
+        let pose_prior = pose_prior?;
+        let estimated_pose = localization.pose.as_ref()?;
+
+        let translation_error =
+            (estimated_pose.camera_center_world() - pose_prior.camera_center_world()).norm();
+        if translation_error <= max_translation_error {
+            return None;
+        }
+
+        *localization = localization.clone().rejected_by_quality_gate();
+        Some(TrackingFailureReason::PosePriorTranslationErrorExceeded {
+            translation_error,
+            max_translation_error,
+        })
     }
 }
 

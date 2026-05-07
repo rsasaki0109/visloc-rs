@@ -67,8 +67,9 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 
 - `TrackingState`: `Uninitialized`, `Tracking`, or `Lost`
 - `TrackingEvent`: `Initialized`, `Tracked`, `TrackingFailed`, `Lost`, or `Relocalized`
-- `TrackingResult`: localization result plus state transition, pose prior, map provider stats, map landmark count convenience field, and prior-use diagnostics
-- `TrackingConfig`: controls `min_successive_failures_to_lost` and optional `last_pose_candidate_radius`
+- `TrackingResult`: localization result plus state transition, pose prior, map provider stats, map landmark count convenience field, prior-use diagnostics, and optional tracking failure reason
+- `TrackingConfig`: controls `min_successive_failures_to_lost`, optional `last_pose_candidate_radius`, and optional `max_pose_prior_translation_error`
+- `TrackingFailureReason`: records tracking-layer quality gate failures such as pose jumps that exceed the motion-prior translation threshold
 - `TrackingStats`: frame, success/failure, lost, and relocalization counters
 - `MotionModel`: predicts an optional pose prior for the next frame
 - `ConstantPoseMotionModel`: default motion model that reuses the last successful pose
@@ -76,7 +77,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `Tracker`: feeds frames through a localization pipeline and updates state from success/failure
 - `ImageTracker`: extracts features from image inputs and feeds generated frames into `Tracker`
 
-`Tracker` also exposes `last_result`, `last_successful_frame_id`, `last_successful_pose`, and next-frame `LocalizationPrior` helpers for caller-side diagnostics or lightweight temporal consumers. `track_frame_with_prior_submap_provider` and the matching `ImageTracker` method can use the motion prior to create a temporary radius submap before localization. When `last_pose_candidate_radius` is set, successful localization stores the last pose and later frames use its camera center as a temporary radius prior for landmark selection.
+`Tracker` also exposes `last_result`, `last_successful_frame_id`, `last_successful_pose`, and next-frame `LocalizationPrior` helpers for caller-side diagnostics or lightweight temporal consumers. `track_frame_with_prior_submap_provider` and the matching `ImageTracker` method can use the motion prior to create a temporary radius submap before localization. When `last_pose_candidate_radius` is set, successful localization stores the last pose and later frames use its camera center as a temporary radius prior for landmark selection. When `max_pose_prior_translation_error` is set, a pose estimate that jumps too far from the predicted pose prior is rejected as a tracking quality-gate failure while retaining the localization diagnostics.
 
 This is not SLAM: it does not create keyframes, update maps, run bundle adjustment, or estimate map structure.
 
