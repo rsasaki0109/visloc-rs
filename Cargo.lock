@@ -340,6 +340,7 @@ dependencies = [
 name = "visloc-tracking"
 version = "0.1.0"
 dependencies = [
+ "nalgebra",
  "visloc-core",
  "visloc-localization",
  "visloc-vision",
