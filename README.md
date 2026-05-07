@@ -138,6 +138,12 @@ Run the dummy vertical slice:
 cargo run --example localize_dummy
 ```
 
+Run the trajectory-evaluation example:
+
+```bash
+cargo run --example evaluate_trajectory_dummy
+```
+
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
 
 ```bash
