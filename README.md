@@ -90,6 +90,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 - Larger public-data evaluation scripts
 
 See [docs/demo_strategy.md](docs/demo_strategy.md) for the automotive/UAV demo plan.
+See [docs/colmap_compatibility.md](docs/colmap_compatibility.md) for supported COLMAP/SfM map formats and current limitations.
 
 ## Minimal Example
 
@@ -193,6 +194,7 @@ tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
 docs/api_stability.md     public API stability policy toward v1.0
+docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building

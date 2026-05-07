@@ -9,6 +9,7 @@
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
 - Confirm `docs/api_stability.md` reflects the intended stable and experimental API tiers.
+- Confirm `docs/colmap_compatibility.md` matches current COLMAP reader/writer behavior.
 - Confirm `docs/decisions.md` explains any new module boundary or algorithm choice.
 - Update `CHANGELOG.md`.
 - Check package metadata and crate contents with `scripts/package_check.sh`.
