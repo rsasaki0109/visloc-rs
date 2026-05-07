@@ -2,7 +2,8 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Frame;
 use visloc_fusion::{
-    FramePriorSource, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
+    FramePriorSource, FramePriorSyncEvaluationConfig, FramePriorSyncEvaluationFailure,
+    FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
     LocalizationPriorProvider, MeasurementBuffer, PoseCovariance, PosePriorMeasurement,
     PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose,
     Timestamp,
@@ -440,4 +441,50 @@ fn frame_prior_source_summarizes_measurement_sync() {
     );
     assert!((summary.matched_frame_ratio() - 2.0 / 3.0).abs() < 1.0e-12);
     assert!(!summary.all_frames_matched());
+}
+
+#[test]
+fn frame_prior_source_evaluates_measurement_sync_thresholds() {
+    let mut frame_timestamps = FrameTimestampIndex::new();
+    frame_timestamps.insert_frame_id(1, Timestamp::from_nanoseconds(100));
+    frame_timestamps.insert_frame_id(2, Timestamp::from_nanoseconds(200));
+    frame_timestamps.insert_frame_id(3, Timestamp::from_nanoseconds(300));
+    let measurements = MeasurementBuffer::from_measurements([GnssMeasurement::new(
+        Timestamp::from_nanoseconds(100),
+        Point3::new(1.0, 0.0, 0.0),
+    )]);
+    let source = FramePriorSource::new(
+        frame_timestamps,
+        measurements,
+        TimeDelta::from_nanoseconds(10),
+    );
+
+    let result = source.evaluate_sync(FramePriorSyncEvaluationConfig {
+        min_matched_frame_count: Some(2),
+        min_matched_frame_ratio: Some(0.75),
+    });
+
+    assert!(!result.passed);
+    assert_eq!(result.summary.frame_count, 3);
+    assert_eq!(result.summary.matched_frame_count, 1);
+    assert_eq!(
+        result.failures,
+        vec![
+            FramePriorSyncEvaluationFailure::MatchedFrameCountTooLow {
+                actual: 1,
+                minimum: 2,
+            },
+            FramePriorSyncEvaluationFailure::MatchedFrameRatioTooLow {
+                actual: 1.0 / 3.0,
+                minimum: 0.75,
+            },
+        ]
+    );
+
+    let passing = result.summary.evaluate(FramePriorSyncEvaluationConfig {
+        min_matched_frame_count: Some(1),
+        min_matched_frame_ratio: Some(1.0 / 3.0),
+    });
+    assert!(passing.passed);
+    assert!(passing.failures.is_empty());
 }

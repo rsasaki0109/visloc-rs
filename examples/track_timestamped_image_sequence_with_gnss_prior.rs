@@ -29,6 +29,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = InMemoryMapProvider::new(map);
     let prior_source = gnss_prior_source_from_files(&frames, &gnss_path)?;
     let sync_summary = prior_source.sync_summary();
+    let sync_evaluation = sync_summary.evaluate(FramePriorSyncEvaluationConfig {
+        min_matched_frame_count: Some(frames.len()),
+        min_matched_frame_ratio: Some(1.0),
+    });
 
     let mut tracker = ImageTracker::new(extractor, TrackingConfig::default());
     let mut results = Vec::new();
@@ -65,12 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         timestamp_issues.len()
     );
     println!(
-        "gnss sync: frames={} measurements={} matched={} missing={} ratio={:.3}",
+        "gnss sync: frames={} measurements={} matched={} missing={} ratio={:.3} passed={}",
         sync_summary.frame_count,
         sync_summary.measurement_count,
         sync_summary.matched_frame_count,
         sync_summary.missing_measurement_count,
-        sync_summary.matched_frame_ratio()
+        sync_summary.matched_frame_ratio(),
+        sync_evaluation.passed
     );
     println!(
         "tracking stats: frames={} success_rate={:.3} external_prior_rate={:.3} trajectory_poses={}",

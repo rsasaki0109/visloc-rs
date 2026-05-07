@@ -184,6 +184,57 @@ impl FramePriorSyncSummary {
     pub fn all_frames_matched(&self) -> bool {
         self.missing_measurement_count == 0
     }
+
+    pub fn evaluate(
+        &self,
+        config: FramePriorSyncEvaluationConfig,
+    ) -> FramePriorSyncEvaluationResult {
+        let mut failures = Vec::new();
+        if let Some(minimum) = config.min_matched_frame_count {
+            if self.matched_frame_count < minimum {
+                failures.push(FramePriorSyncEvaluationFailure::MatchedFrameCountTooLow {
+                    actual: self.matched_frame_count,
+                    minimum,
+                });
+            }
+        }
+        if let Some(minimum) = config.min_matched_frame_ratio {
+            let actual = self.matched_frame_ratio();
+            if actual < minimum {
+                failures.push(FramePriorSyncEvaluationFailure::MatchedFrameRatioTooLow {
+                    actual,
+                    minimum,
+                });
+            }
+        }
+
+        FramePriorSyncEvaluationResult {
+            passed: failures.is_empty(),
+            summary: *self,
+            config,
+            failures,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FramePriorSyncEvaluationConfig {
+    pub min_matched_frame_count: Option<usize>,
+    pub min_matched_frame_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FramePriorSyncEvaluationFailure {
+    MatchedFrameCountTooLow { actual: usize, minimum: usize },
+    MatchedFrameRatioTooLow { actual: f64, minimum: f64 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FramePriorSyncEvaluationResult {
+    pub passed: bool,
+    pub summary: FramePriorSyncSummary,
+    pub config: FramePriorSyncEvaluationConfig,
+    pub failures: Vec<FramePriorSyncEvaluationFailure>,
 }
 
 pub type PoseCovarianceMatrix = SMatrix<f64, 6, 6>;
@@ -473,6 +524,13 @@ where
             matched_frame_count,
             missing_measurement_count: frame_count.saturating_sub(matched_frame_count),
         }
+    }
+
+    pub fn evaluate_sync(
+        &self,
+        config: FramePriorSyncEvaluationConfig,
+    ) -> FramePriorSyncEvaluationResult {
+        self.sync_summary().evaluate(config)
     }
 }
 
