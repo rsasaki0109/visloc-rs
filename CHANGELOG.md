@@ -26,6 +26,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Pre-1.0 to v1.0 migration guide covering recommended imports, localization boundaries, COLMAP descriptor handling, tracking priors, and experimental layers.
 - Package metadata and crate-content checks in the local quality gate and CI.
 - crates.io package metadata now includes project homepage and repository URLs.
+- Workspace member crates now use crate-specific descriptions and docs.rs URLs.
 - Publishing guide documenting workspace crate publish order and package-check workflow.
 - Examples, integration tests, design docs, local check script, and GitHub Actions CI.
 
