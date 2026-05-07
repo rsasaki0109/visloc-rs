@@ -1,15 +1,15 @@
 # Roadmap
 
-`visloc-rs` is intended to grow from a practical Visual Localization core into a foundation for Visual SLAM, SfM map reuse, and sensor-fusion based localization.
+`visloc-rs` is intended to grow from a practical Visual Localization core into a foundation for robotics Visual SLAM, SfM map reuse, and sensor-fusion based localization.
 
-The project should keep one rule throughout the roadmap: make each stage useful on its own, then use it as the base for the next stage. Online SLAM is planned, but it should not be added before the map-based localization and tracking layers are reliable.
+The main showcase direction is automotive / robotics sequence localization, with UAV localization as a closely related target once GNSS/altitude priors are available. The project should keep one rule throughout the roadmap: make each stage useful on its own, then use it as the base for the next stage. Online SLAM is planned, but it should not be added before the map-based localization and tracking layers are reliable.
 
 ## Direction
 
 The long-term shape is:
 
 1. Load or reuse an existing visual map.
-2. Localize a query image or image sequence against that map.
+2. Localize a query image or robotics image sequence against that map.
 3. Track poses across frames with priors and relocalization.
 4. Add local mapping and lightweight keyframe policies.
 5. Grow into online Visual SLAM with incremental map updates.
@@ -28,7 +28,7 @@ Focus:
 - PnP + RANSAC pose estimation
 - Optional pose refinement
 - Localization result quality and failure diagnostics
-- Public-data demo and examples
+- Public-data demo and examples, with automotive sequence demos prioritized
 
 Out of scope:
 
@@ -69,6 +69,7 @@ Exit criteria:
 - A sequence can be processed with explicit tracking state.
 - Tracking can recover through relocalization against the existing map.
 - Pose priors reduce matching/search work without hiding failures.
+- Automotive-style sequence demos can show pose continuity and failure recovery clearly.
 
 ## v0.3: Local Mapping Skeleton
 
@@ -133,6 +134,7 @@ Focus:
 - Loose-coupling fusion hooks
 - Covariance/uncertainty representation
 - Time synchronization utilities
+- Automotive odometry/GNSS and UAV GNSS/altitude prior compatibility
 
 Out of scope:
 

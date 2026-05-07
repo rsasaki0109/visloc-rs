@@ -15,3 +15,11 @@ Geometry, matching, PnP, and RANSAC are implemented as reusable components. Pipe
 ## Trait Boundaries
 
 Feature extraction, matching, and pose estimation are trait-oriented so future implementations can replace the initial brute-force matcher and DLT PnP solver without changing map types.
+
+## Public Demo Direction
+
+The near-term public demo should emphasize automotive / robotics sequence localization. That demo shape is easy to understand: a camera moves through a mapped environment, frames are localized against a reusable sparse map, and the estimated pose trajectory is visible.
+
+UAV localization remains an important target, but it benefits more from GNSS, altitude, timestamps, and sensor-fusion hooks. Those should be added as optional priors after the visual localization and tracking demos are strong.
+
+The core library should remain domain-neutral. Automotive and UAV demos should exercise the same map, feature, matching, PnP, tracking, mapping, and fusion interfaces instead of creating domain-specific forks.

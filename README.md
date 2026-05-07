@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
 </p>
 
-`visloc-rs` is a Rust foundation library for visual localization with existing SfM / visual maps.
+`visloc-rs` is a Rust foundation library for visual localization with existing SfM / visual maps. The practical target is robotics visual localization, with automotive and UAV image sequences as the main demo directions.
 
 The initial scope is intentionally narrow: load or build a visual map, connect query-image 2D features to map 3D landmarks, and estimate a camera pose with PnP + RANSAC. This gives a working vertical slice before adding heavier SLAM machinery.
 
@@ -34,6 +34,10 @@ Static view:
 <p align="center">
   <img src="docs/assets/south-building-localization.png" alt="Final frame of South Building time-series visual localization with current image, matches, map, and camera trajectory" width="92%">
 </p>
+
+## Demo Direction
+
+The strongest near-term public demo path is automotive / robotics sequence localization: a moving camera, a reusable sparse visual map, and a pose trajectory that is easy to understand at a glance. UAV localization remains a primary target use case, especially when GNSS/altitude priors are added, but automotive public datasets are a good first showcase because they make sequence motion, relocalization, and map reuse visually obvious.
 
 ## Scope
 
@@ -81,6 +85,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 - Online Visual SLAM with incremental map updates
 - Visual-inertial and GNSS priors/fusion
 - Larger public-data evaluation scripts
+
+See [docs/demo_strategy.md](docs/demo_strategy.md) for the automotive/UAV demo plan.
 
 ## Minimal Example
 
@@ -167,6 +173,7 @@ examples/                 executable examples
 tests/                    integration tests
 docs/                     design notes and interfaces
 docs/assets/              README images and visual explainers
+docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building
 docs/assets/south-building-localization.png public-data localization visualization
