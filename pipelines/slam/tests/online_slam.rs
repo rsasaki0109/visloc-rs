@@ -7,7 +7,7 @@ use visloc_slam::{
     loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
     relative_world_to_camera, verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier,
     LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
-    OnlineSlamPipeline, PoseGraph, PoseGraphError,
+    OnlineSlamPipeline, PoseGraph, PoseGraphError, PoseGraphSe3Config,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -516,5 +516,127 @@ fn pose_graph_optimize_returns_no_variables_error_when_only_anchor_present() {
     assert_eq!(
         graph.optimize_translations_once(),
         Err(PoseGraphError::NoVariables)
+    );
+}
+
+fn pose_with_yaw(camera_center: Vector3<f64>, yaw_rad: f64) -> Pose {
+    let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw_rad);
+    let translation = -(rotation.transform_vector(&camera_center));
+    Pose::from_world_to_camera(rotation, translation)
+}
+
+#[test]
+fn pose_graph_se3_gauss_newton_corrects_rotation_and_translation_drift() {
+    // Three keyframes with non-trivial rotations. Truth poses come from a small
+    // 2D loop traversal where each keyframe yaws progressively. Sequential and
+    // loop-closure edges encode the truth measurements; node 30 is initialized
+    // with both translation drift AND rotation drift, and the iterative SE3 GN
+    // solver must pull it back.
+    let truth_10 = pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0);
+    let truth_20 = pose_with_yaw(Vector3::new(1.5, 0.0, 0.5), 0.4);
+    let truth_30 = pose_with_yaw(Vector3::new(0.3, 0.0, 0.2), 0.8);
+
+    let edge_10_20 = relative_world_to_camera(&truth_10, &truth_20);
+    let edge_20_30 = relative_world_to_camera(&truth_20, &truth_30);
+    let edge_10_30 = relative_world_to_camera(&truth_10, &truth_30);
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10.clone());
+    graph.add_pose(20, truth_20.clone());
+    let drifted_30 = pose_with_yaw(Vector3::new(0.6, 0.05, 0.4), 0.55);
+    graph.add_pose(30, drifted_30);
+    graph.anchor(10);
+
+    graph.add_sequential_edge(10, 20, edge_10_20);
+    graph.add_sequential_edge(20, 30, edge_20_30);
+    graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        from_keyframe_id: 10,
+        to_keyframe_id: 30,
+        relative_pose: edge_10_30,
+        inlier_count: 12,
+        inlier_ratio: 1.0,
+        mean_sampson_error: 1.0e-4,
+        score: 100.0,
+    });
+
+    let cost_before = graph.se3_cost();
+    assert!(
+        cost_before > 1.0e-3,
+        "expected nontrivial drift cost, got {cost_before}"
+    );
+
+    let result = graph
+        .optimize_se3_iterative(&PoseGraphSe3Config::default())
+        .expect("solve must succeed");
+    assert_eq!(result.anchor_id, 10);
+    assert_eq!(result.edge_count, 3);
+    assert_eq!(result.variable_count, 2);
+    assert!(result.converged, "GN should converge: {:?}", result);
+    assert!(
+        result.final_cost < 1.0e-12,
+        "final cost too large: {}",
+        result.final_cost
+    );
+    assert!(result.final_cost < result.initial_cost);
+
+    let pose_30 = &graph.poses[&30];
+    let center_30 = pose_30.camera_center_world();
+    assert!(
+        (center_30 - Point3::new(0.3, 0.0, 0.2)).norm() < 1.0e-9,
+        "node 30 center should snap to truth: {center_30:?}"
+    );
+    let r_truth = truth_30
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    let r_now = pose_30
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    assert!(
+        (r_truth - r_now).norm() < 1.0e-9,
+        "node 30 rotation should snap to truth"
+    );
+}
+
+#[test]
+fn pose_graph_se3_converges_immediately_without_drift() {
+    let truth_10 = pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0);
+    let truth_20 = pose_with_yaw(Vector3::new(1.0, 0.0, 0.0), 0.3);
+    let edge = relative_world_to_camera(&truth_10, &truth_20);
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10);
+    graph.add_pose(20, truth_20);
+    graph.anchor(10);
+    graph.add_sequential_edge(10, 20, edge);
+
+    let result = graph
+        .optimize_se3_iterative(&PoseGraphSe3Config::default())
+        .expect("solve must succeed");
+    assert!(result.converged);
+    assert!(result.initial_cost < 1.0e-15);
+    assert!(result.final_cost < 1.0e-15);
+}
+
+#[test]
+fn pose_graph_se3_returns_no_anchor_error_when_unset() {
+    let mut graph = PoseGraph::new();
+    graph.add_pose(1, pose_at(Vector3::zeros()));
+    graph.add_pose(2, pose_at(Vector3::new(1.0, 0.0, 0.0)));
+    graph.add_sequential_edge(
+        1,
+        2,
+        relative_world_to_camera(
+            &pose_at(Vector3::zeros()),
+            &pose_at(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    );
+
+    assert_eq!(
+        graph.optimize_se3_iterative(&PoseGraphSe3Config::default()),
+        Err(PoseGraphError::NoAnchor)
     );
 }

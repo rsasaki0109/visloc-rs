@@ -10,7 +10,7 @@ use visloc_rs::{
     verify_loop_closure_candidates, write_online_slam_results_html_report,
     EssentialMatrixLoopClosureVerifier, LocalMappingPipeline, LocalizationPipeline,
     LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
-    OnlineSlamPipeline, OnlineSlamResult, PoseGraph, Tracker, TrackingConfig,
+    OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphSe3Config, Tracker, TrackingConfig,
 };
 
 const KEYFRAME_IDS: [u64; 6] = [10, 20, 30, 40, 50, 60];
@@ -230,6 +230,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(error) => println!("pose_graph_step error={error}"),
+    }
+
+    // Demonstrate rotation-aware correction: translation-only GN already pulled
+    // KF60 back to truth above, so now we inject a combined translation +
+    // rotation drift onto KF60 and run the full SE(3) Gauss-Newton solver.
+    let rotation_drift = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.18);
+    let translation_drift = Vector3::new(0.04, 0.0, -0.03);
+    if let Some(last_id) = KEYFRAME_IDS.last() {
+        if let Some(pose) = graph.poses.get_mut(last_id) {
+            let truth_center = pose.camera_center_world().coords + translation_drift;
+            let new_rotation = rotation_drift * pose.world_to_camera.rotation;
+            let new_translation = -(new_rotation.transform_vector(&truth_center));
+            pose.world_to_camera.rotation = new_rotation;
+            pose.world_to_camera.translation = new_translation;
+        }
+    }
+    println!(
+        "se3_drift_applied keyframe={} se3_cost_before={:.6}",
+        KEYFRAME_IDS[5],
+        graph.se3_cost(),
+    );
+
+    match graph.optimize_se3_iterative(&PoseGraphSe3Config::default()) {
+        Ok(result) => {
+            println!(
+                "pose_graph_se3 anchor={} edges={} variables={} initial_cost={:.6} final_cost={:.6} iterations={} converged={}",
+                result.anchor_id,
+                result.edge_count,
+                result.variable_count,
+                result.initial_cost,
+                result.final_cost,
+                result.iterations.len(),
+                result.converged,
+            );
+            for stats in &result.iterations {
+                println!(
+                    "  iter={} cost_before={:.6} cost_after={:.6} max_step={:.6}",
+                    stats.iteration, stats.cost_before, stats.cost_after, stats.max_step_norm,
+                );
+            }
+            for (frame_id, truth) in KEYFRAME_IDS.iter().zip(camera_centers.iter()) {
+                let pose = graph.poses.get(frame_id);
+                if let Some(pose) = pose {
+                    let center = pose.camera_center_world();
+                    let truth_point = Point3::from(*truth);
+                    let translation_err = (center - truth_point).norm();
+                    // All truth keyframes are at identity rotation, so the residual
+                    // angle is just the rotation magnitude of the current quaternion.
+                    let rotation_err = pose.world_to_camera.rotation.angle();
+                    println!(
+                        "  post_se3 keyframe={} center=[{:.3}, {:.3}, {:.3}] t_err={:.4} rot_err={:.4}",
+                        frame_id,
+                        center.x,
+                        center.y,
+                        center.z,
+                        translation_err,
+                        rotation_err,
+                    );
+                }
+            }
+        }
+        Err(error) => println!("pose_graph_se3 error={error}"),
     }
 
     if let Some(output_dir) = output_dir {

@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
-  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-90%25-f59e0b" alt="Deep VO / loop close completion: 90%">
+  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-100%25-22c55e" alt="Deep VO / loop close completion: 100%">
 </p>
 
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.

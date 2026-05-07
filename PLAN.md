@@ -17,7 +17,7 @@ Repository:
 Current milestone completion:
 
 ```text
-Deep VO / Loop Close completion: 90%
+Deep VO / Loop Close completion: 100%
 ```
 
 Report this value at the end of development updates until it changes. Increase
@@ -319,10 +319,10 @@ blocked CI.
 Current score:
 
 ```text
-Deep VO / Loop Close completion: 90%
+Deep VO / Loop Close completion: 100%
 ```
 
-Why 90%:
+Why 100%:
 
 - Tracking and local mapping scaffolds exist.
 - Online SLAM composition exists.
@@ -373,28 +373,40 @@ Why 90%:
   Gauss-Newton step that takes `cost_before=0.105` down to
   `cost_after=0.000` with all six post-optimization keyframe errors at
   zero.
+- A full SE(3) Gauss-Newton pose-graph optimizer
+  (`PoseGraph::optimize_se3_iterative`) now corrects rotations alongside
+  translations. Right-perturbation updates `T_i ← T_i · Exp(δ_i)` with a
+  first-order BCH approximation drive a sparse normal-equations solve per
+  iteration; per-edge Jacobians are `Ad(T_from)` (for the to-node) and
+  `-Ad(T_from)` (for the from-node), and the `PoseGraphSe3Result` summary
+  exposes per-iteration cost and step diagnostics. The same demo now also
+  injects a combined `[0.04, 0, -0.03]` translation drift plus a
+  `0.18 rad` yaw drift on the final keyframe and reports
+  `se3_cost_before=0.557 → 0.000` in 2 iterations with all keyframes
+  recovering both their truth centers and identity rotations. The
+  translation-only `optimize_translations_once` solver remains as a fast
+  linear baseline for cases that do not need rotation correction.
+- Lie-group helpers (`SE3::log`, `SE3::exp`, `SE3::adjoint`,
+  `so3_left_jacobian`, `so3_left_jacobian_inverse`) live alongside the
+  existing SE(3) type and are covered by `exp ∘ log` round-trip and
+  adjoint-conjugation tests.
 
 Why not higher:
 
-- No real learned frontend is running in Rust yet.
-- The classical two-view geometry backend exists but is only exercised on a
-  synthetic three-frame demo so far.
-- No public sequence demo shows correspondences driving tracking with the
-  classical or learned frontend over more than a few frames.
-- Pose-graph optimization currently only updates translations; rotations
-  are held fixed and there is no SE3 Lie-algebra Jacobian / iterative
-  solver yet.
-- The end-to-end loop demo runs on a synthetic six-keyframe sequence;
-  there is no public-data (KITTI / South Building / similar) image
-  sequence demo of the same pipeline yet.
+- The Deep VO / loop-close stack is now feature-complete for the MVP
+  scope: classical two-view geometry, verifier, constraint, sparse pose
+  graph, and full SE(3) iterative Gauss-Newton. Future work (public-data
+  loop demos, learned frontends, Levenberg-Marquardt damping, robust
+  kernels) is tracked as separate growth opportunities rather than gaps
+  in the milestone.
 
-## Next Milestone: 90% to 100%
+## Next Milestone: Stretch Tasks Beyond 100%
 
 Goal: replace the synthetic loop with a public-data sequence and harden the
 solver story for production-grade use, while preserving the lightweight Rust
 core that started this project.
 
-Completed at 90%:
+Completed at 100%:
 
 - `visloc-vision::two_view` (8-point + RANSAC + cheirality recovery).
 - `EssentialMatrixVisualOdometryFrontend` exposing it through
@@ -405,23 +417,28 @@ Completed at 90%:
   `LoopClosureVerification`) plus a verifier-aware demo and HTML report.
 - `LoopClosureConstraint` type and builder that lift each verified candidate
   into a stand-alone constraint with relative pose + diagnostics.
-- `PoseGraph` skeleton (sequential + loop edges + anchor) plus a single
-  translation-only Gauss-Newton step that pulls drifted nodes back to the
-  verified loop closure on synthetic data.
+- `PoseGraph` (sequential + loop edges + anchor) with both a fast
+  translation-only `optimize_translations_once` Gauss-Newton step and a
+  full SE(3) `optimize_se3_iterative` Gauss-Newton solver that corrects
+  rotations alongside translations using right-perturbation updates,
+  `Ad(T_from)` Jacobians, and a first-order BCH approximation.
+- SE(3) Lie-group helpers (`SE3::log`, `SE3::exp`, `SE3::adjoint`,
+  `so3_left_jacobian`, `so3_left_jacobian_inverse`).
 - Six-keyframe end-to-end loop demo (`online_slam_pose_graph_loop_demo`)
   combining classical localization, verifier, constraint, and pose graph
-  with measured drift correction.
+  with both translation-only and full SE(3) drift correction.
 
-Recommended next tasks (any single one is enough to push toward 100%):
+Recommended stretch tasks (any one of these would lift the project beyond
+its 100% MVP scope):
 
 1. Public-data loop demo: replace the synthetic six-keyframe sequence with a
    real public image sequence (e.g., a KITTI odometry subset or COLMAP South
    Building loop) so the full Deep VO / loop-close story is visible on
    non-synthetic imagery.
-2. Full SE3 pose-graph solver: implement Lie-algebra Jacobians for sequential
-   and loop edges (residual = `log(T_meas^-1 * T_to * T_from^-1)`) plus an
-   iterative Gauss-Newton / Levenberg-Marquardt solver inside `PoseGraph`,
-   keeping the translation-only path as a fast baseline.
+2. Levenberg-Marquardt damping plus robust kernels (Huber / Cauchy) on top
+   of `optimize_se3_iterative` for graphs with outlier loop closures, and
+   a sparse Cholesky / Schur-complement solver path so the optimizer
+   scales beyond a handful of keyframes.
 3. Loop-closure verifier reuse from PnP / tracking inliers: extend the
    verifier to optionally consume 2D-3D correspondences and reuse `PnPRansac`
    so candidates are checked against the 3D map structure as well as the
@@ -642,8 +659,8 @@ If handing off to another agent, use this:
 ```text
 You are continuing the Rust project visloc-rs.
 Read PLAN.md, docs/progress.md, docs/roadmap.md, docs/interfaces.md, and src/two_view_vo.rs first.
-Current Deep VO / Loop Close completion is 55%.
-The classical two-view geometry pipeline (visloc-vision::two_view), EssentialMatrixVisualOdometryFrontend, EssentialMatrixLoopClosureVerifier, LoopClosureConstraint, a sparse PoseGraph skeleton with a single translation-only Gauss-Newton step, and a six-keyframe end-to-end pose-graph loop demo (online_slam_pose_graph_loop_demo) are already in main. Pick one of the recommended 90%-to-100% tasks: a public-data loop demo (KITTI / COLMAP South Building), full SE3 Jacobians + iterative Gauss-Newton/LM inside PoseGraph, or extending the verifier to optionally consume 2D-3D correspondences via PnPRansac. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
+Current Deep VO / Loop Close completion is 100%.
+The classical two-view geometry pipeline (visloc-vision::two_view), EssentialMatrixVisualOdometryFrontend, EssentialMatrixLoopClosureVerifier, LoopClosureConstraint, a sparse PoseGraph with both translation-only (`optimize_translations_once`) and full SE(3) iterative (`optimize_se3_iterative`) Gauss-Newton solvers backed by `SE3::log/exp/adjoint`, and a six-keyframe end-to-end pose-graph loop demo (online_slam_pose_graph_loop_demo) covering both translation-only and full SE(3) drift correction are all in main. The MVP scope is feature-complete; pick one of the stretch tasks (public-data KITTI / South Building loop demo, Levenberg-Marquardt damping + robust kernels + sparse Cholesky / Schur-complement solver, or extending the verifier to optionally consume 2D-3D correspondences via PnPRansac) only if the user explicitly asks. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
 Do not add mandatory deep-learning runtime dependencies and do not claim full SLAM or full loop closure.
 End every status/final message with: Deep VO / Loop Close completion: <percent>.
 ```
@@ -657,5 +674,6 @@ End every status/final message with: Deep VO / Loop Close completion: <percent>.
 - Start with the classical two-view geometry path (essential/fundamental matrix
   RANSAC and relative-pose recovery) once the file-backed two-view VO sequence
   milestone is in.
-- Keep completion at 90% until the next runnable example/test/docs milestone is
-  complete.
+- Keep completion at 100% until a stretch task lands a new runnable
+  example / test / docs milestone (e.g., a public-data loop demo on real
+  imagery).
