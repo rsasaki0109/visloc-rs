@@ -43,3 +43,6 @@ visloc-vision = { path = "crates/vision", version = "0.1.0" }
 visloc-io = { path = "crates/io", version = "0.1.0" }
 visloc-localization = { path = "pipelines/localization", version = "0.1.0" }
 visloc-tracking = { path = "pipelines/tracking", version = "0.1.0" }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
