@@ -7,7 +7,7 @@ All notable changes to `visloc-rs` will be documented here.
 ### Added
 
 - `PoseTrajectory` and `TrajectorySample` helpers for extracting successful tracking poses, camera centers, path length, mean reprojection error, CSV output, KITTI-style 3x4 pose rows, and TUM-style trajectory rows from sequence-localization results.
-- KITTI- and TUM-style trajectory parsers for reading pose rows back into `PoseTrajectory`.
+- KITTI- and TUM-style trajectory parsers and file readers for reading pose rows back into `PoseTrajectory`.
 - `TrajectorySummary` helper and JSON summary export for sequence-localization demos and downstream visualization scripts.
 - `TrajectoryErrorSummary` and per-frame translation-error helpers for comparing estimated trajectories against reference poses.
 - Trajectory-evaluation example showing frame-id matched translation errors, CSV output, and JSON summary output.
