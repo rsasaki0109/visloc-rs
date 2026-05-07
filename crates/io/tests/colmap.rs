@@ -1,10 +1,16 @@
+use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use visloc_core::types::{CameraModel, VisualMapValidationIssue};
+use visloc_core::geometry::Pose;
+use visloc_core::types::{
+    Camera, CameraModel, Frame, Keyframe, Landmark, Observation, VisualMap,
+    VisualMapValidationIssue,
+};
 use visloc_io::colmap::{
-    parse_cameras_bin, parse_cameras_txt, parse_images_bin, parse_images_txt, parse_points3d_bin,
-    parse_points3d_txt, read_colmap_binary_model, read_colmap_text_model, ColmapMapProvider,
+    format_cameras_txt, format_images_txt, format_points3d_txt, parse_cameras_bin,
+    parse_cameras_txt, parse_images_bin, parse_images_txt, parse_points3d_bin, parse_points3d_txt,
+    read_colmap_binary_model, read_colmap_text_model, write_colmap_text_model, ColmapMapProvider,
     ColmapMapProviderError,
 };
 use visloc_localization::{DescriptorProvider, MapProvider};
@@ -233,6 +239,40 @@ fn colmap_map_provider_rejects_invalid_descriptor_store_when_validated() {
         .contains(&VisualMapValidationIssue::DescriptorForMissingLandmark { landmark_id: 9999 }));
 }
 
+#[test]
+fn formats_colmap_text_model_sections() {
+    let map = writable_map();
+
+    let cameras = format_cameras_txt(&map);
+    let images = format_images_txt(&map);
+    let points = format_points3d_txt(&map);
+
+    assert!(cameras.contains("1 PINHOLE 640 480 500 510 320 240"));
+    assert!(images.contains("10 1 0 0 0 0.1 0.2 0.3 1 image_10.jpg"));
+    assert!(images.contains("320 240 1000 10 20 -1 400 200 1001"));
+    assert!(points.contains("1000 1 2 3 255 255 255 0 10 0"));
+    assert!(points.contains("1001 -1 0.5 4 255 255 255 0 10 2 11 0"));
+}
+
+#[test]
+fn writes_and_reads_colmap_text_model_round_trip() {
+    let dir = binary_fixture_dir();
+    let map = writable_map();
+
+    write_colmap_text_model(&map, &dir).unwrap();
+    let loaded = read_colmap_text_model(&dir).unwrap();
+
+    assert_eq!(loaded.cameras.len(), 2);
+    assert_eq!(loaded.keyframes.len(), 2);
+    assert_eq!(loaded.landmarks.len(), 2);
+    assert!(loaded.validate().is_valid());
+    assert_eq!(
+        loaded.keyframes.get(&10).unwrap().observations[1].landmark_id,
+        1001
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
 fn camera_bin() -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u64(&mut bytes, 2);
@@ -254,6 +294,87 @@ fn camera_bin() -> Vec<u8> {
     }
 
     bytes
+}
+
+fn writable_map() -> VisualMap {
+    let mut map = VisualMap::new();
+    map.cameras.insert(
+        1,
+        Camera {
+            id: 1,
+            model: CameraModel::Pinhole,
+            width: 640,
+            height: 480,
+            params: vec![500.0, 510.0, 320.0, 240.0],
+        },
+    );
+    map.cameras.insert(
+        2,
+        Camera {
+            id: 2,
+            model: CameraModel::SimplePinhole,
+            width: 800,
+            height: 600,
+            params: vec![700.0, 400.0, 300.0],
+        },
+    );
+
+    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.1, 0.2, 0.3));
+    let mut frame_a = Frame::new(10, 1);
+    frame_a.pose = Some(pose.clone());
+    frame_a.keypoints = vec![
+        Point2::new(320.0, 240.0),
+        Point2::new(10.0, 20.0),
+        Point2::new(400.0, 200.0),
+    ];
+    let observations_a = vec![
+        Observation {
+            frame_id: 10,
+            landmark_id: 1000,
+            keypoint_index: 0,
+            xy: frame_a.keypoints[0],
+        },
+        Observation {
+            frame_id: 10,
+            landmark_id: 1001,
+            keypoint_index: 2,
+            xy: frame_a.keypoints[2],
+        },
+    ];
+    map.keyframes.insert(
+        10,
+        Keyframe {
+            frame: frame_a,
+            observations: observations_a.clone(),
+        },
+    );
+
+    let mut frame_b = Frame::new(11, 2);
+    frame_b.pose = Some(pose);
+    frame_b.keypoints = vec![Point2::new(123.0, 456.0)];
+    let observations_b = vec![Observation {
+        frame_id: 11,
+        landmark_id: 1001,
+        keypoint_index: 0,
+        xy: frame_b.keypoints[0],
+    }];
+    map.keyframes.insert(
+        11,
+        Keyframe {
+            frame: frame_b,
+            observations: observations_b.clone(),
+        },
+    );
+
+    let mut landmark_a = Landmark::new(1000, Point3::new(1.0, 2.0, 3.0));
+    landmark_a.observations = vec![observations_a[0].clone()];
+    map.landmarks.insert(1000, landmark_a);
+
+    let mut landmark_b = Landmark::new(1001, Point3::new(-1.0, 0.5, 4.0));
+    landmark_b.observations = vec![observations_a[1].clone(), observations_b[0].clone()];
+    map.landmarks.insert(1001, landmark_b);
+
+    map
 }
 
 fn images_bin() -> Vec<u8> {

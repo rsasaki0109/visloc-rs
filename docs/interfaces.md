@@ -32,7 +32,7 @@ fn localize_frames(frames: Vec<Frame>, map: VisualMap) -> Vec<FrameLocalizationR
 
 `LocalizationPrior` represents optional prior pose or world position plus a radius. It can be converted into a `RadiusSubmapSelector` or used through `PriorSubmapSelector`, giving GNSS/VIO/last-pose hints a common input shape without implementing sensor fusion yet.
 
-`visloc_io::colmap::ColmapMapProvider` loads a COLMAP text or binary model and optional landmark descriptor text file, then exposes them through the same provider traits. It also provides `validate_map` for structural checks and `validate_for_localization` for descriptor-aware checks; the `*_validated` constructors return an error when those checks fail.
+`visloc_io::colmap::ColmapMapProvider` loads a COLMAP text or binary model and optional landmark descriptor text file, then exposes them through the same provider traits. It also provides `validate_map` for structural checks and `validate_for_localization` for descriptor-aware checks; the `*_validated` constructors return an error when those checks fail. `write_colmap_text_model` saves a `VisualMap` back to COLMAP text files so maps updated by online pipelines can be reused by later localization runs.
 
 `FeatureSet` stores externally supplied keypoints and descriptors and can validate shape/dimension consistency with `FeatureSet::new`. `FeatureExtractor` can be connected through `ImageLocalizer` or the lower-level `LocalizationPipeline::localize_image_with_extractor` methods. `ProvidedFeatureExtractor` wraps precomputed features, and `FnFeatureExtractor` wraps a closure so OpenCV, learned features, or custom image pipelines can be connected without making those dependencies mandatory.
 
