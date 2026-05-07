@@ -5,65 +5,77 @@ use std::path::Path;
 
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::imageops::{resize, FilterType};
-use image::{Delay, DynamicImage, Frame, Rgb, RgbImage, RgbaImage};
+use image::{Delay, DynamicImage, Frame, GrayImage, Rgb, RgbImage, RgbaImage};
 use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Landmark, VisualMap};
 use visloc_rs::{FeatureExtractor, FeatureSet, ImageLocalizer};
 
+const IMAGE_WIDTH: u32 = 640;
+const IMAGE_HEIGHT: u32 = 480;
+const PATCH_SIZE: usize = 23;
+const PATCH_RADIUS: i32 = (PATCH_SIZE as i32) / 2;
+
 #[derive(Debug, Clone)]
-struct MarkerSpec {
+struct PatchLandmark {
     id: u64,
-    color: Rgb<u8>,
 }
 
-impl MarkerSpec {
+impl PatchLandmark {
+    fn template(&self) -> [[u8; PATCH_SIZE]; PATCH_SIZE] {
+        let mut template = [[128_u8; PATCH_SIZE]; PATCH_SIZE];
+        for (y, row) in template.iter_mut().enumerate() {
+            for (x, value) in row.iter_mut().enumerate() {
+                let border = x == 0 || y == 0 || x == PATCH_SIZE - 1 || y == PATCH_SIZE - 1;
+                let center_line = x == PATCH_SIZE / 2 || y == PATCH_SIZE / 2;
+                *value = if border {
+                    245
+                } else if center_line {
+                    18
+                } else if texture_bit(self.id, x as u32, y as u32) {
+                    220
+                } else {
+                    42
+                };
+            }
+        }
+        template
+    }
+
     fn descriptor(&self) -> Vec<f32> {
-        vec![
-            self.id as f32,
-            self.color[0] as f32,
-            self.color[1] as f32,
-            self.color[2] as f32,
-        ]
+        self.template()
+            .iter()
+            .flatten()
+            .map(|value| *value as f32 / 255.0)
+            .collect()
     }
 }
 
 #[derive(Debug, Clone)]
-struct ColorBlobExtractor {
-    markers: Vec<MarkerSpec>,
+struct PatchWindowExtractor {
+    expected_feature_count: usize,
 }
 
-impl FeatureExtractor for ColorBlobExtractor {
+impl FeatureExtractor for PatchWindowExtractor {
     type Image = DynamicImage;
     type Error = DemoError;
 
     fn extract(&self, image: &Self::Image) -> Result<FeatureSet, Self::Error> {
-        let rgb = image.to_rgb8();
-        let mut keypoints = Vec::with_capacity(self.markers.len());
-        let mut descriptors = Vec::with_capacity(self.markers.len());
+        let gray = image.to_luma8();
+        let centers = detect_patch_windows(&gray);
+        if centers.len() != self.expected_feature_count {
+            return Err(DemoError(format!(
+                "expected {} visual patches, detected {}",
+                self.expected_feature_count,
+                centers.len()
+            )));
+        }
 
-        for marker in &self.markers {
-            let mut count = 0.0;
-            let mut sum_x = 0.0;
-            let mut sum_y = 0.0;
-
-            for (x, y, pixel) in rgb.enumerate_pixels() {
-                if color_distance_sq(pixel, &marker.color) <= 26 * 26 {
-                    count += 1.0;
-                    sum_x += x as f64;
-                    sum_y += y as f64;
-                }
-            }
-
-            if count < 40.0 {
-                return Err(DemoError(format!(
-                    "marker {} was not detected strongly enough; matching pixels={count}",
-                    marker.id
-                )));
-            }
-
-            keypoints.push(Point2::new(sum_x / count, sum_y / count));
-            descriptors.push(marker.descriptor());
+        let mut keypoints = Vec::with_capacity(centers.len());
+        let mut descriptors = Vec::with_capacity(centers.len());
+        for (x, y) in centers {
+            keypoints.push(Point2::new(x as f64, y as f64));
+            descriptors.push(extract_patch_descriptor(&gray, x, y)?);
         }
 
         FeatureSet::new(keypoints, descriptors).map_err(|error| DemoError(error.to_string()))
@@ -87,36 +99,37 @@ fn main() -> Result<(), Box<dyn Error>> {
     let overlay_path = root.join("docs/assets/image-processing-demo.png");
     let gif_path = root.join("docs/assets/image-processing-demo.gif");
 
-    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let camera = Camera::pinhole(1, IMAGE_WIDTH, IMAGE_HEIGHT, 500.0, 500.0, 320.0, 240.0);
     let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
-    let markers = demo_markers();
+    let landmarks = demo_landmarks();
     let points = demo_points();
 
-    render_query_image(&query_path, &camera, &pose, &points, &markers)?;
+    render_query_image(&query_path, &camera, &pose, &points, &landmarks)?;
 
     let query_image = image::open(&query_path)?;
-    let extractor = ColorBlobExtractor {
-        markers: markers.clone(),
+    let extractor = PatchWindowExtractor {
+        expected_feature_count: landmarks.len(),
     };
     let features = extractor.extract(&query_image)?;
-    let map = build_demo_map(&camera, &points, &markers);
+    let map = build_demo_map(&camera, &points, &landmarks);
     let localizer = ImageLocalizer::new(extractor);
     let result = localizer.localize_image(&query_image, camera, &map)?;
 
-    let detected = draw_detected_features(&query_image.to_rgb8(), &features.keypoints);
+    let raw = query_image.to_rgb8();
+    let detected = draw_detected_features(&raw, &features.keypoints);
     let localized = draw_localization_overlay(
-        &query_image.to_rgb8(),
+        &raw,
         &features.keypoints,
         result.success,
         result.inlier_count,
     );
     localized.save(&overlay_path)?;
-    write_demo_gif(&gif_path, &query_image.to_rgb8(), &detected, &localized)?;
+    write_demo_gif(&gif_path, &raw, &detected, &localized)?;
 
     println!("input image: {}", query_path.display());
     println!("output overlay: {}", overlay_path.display());
     println!("output gif: {}", gif_path.display());
-    println!("detected image features: {}", features.keypoints.len());
+    println!("detected patch features: {}", features.keypoints.len());
     println!("success: {}", result.success);
     println!("matches: {}", result.match_count);
     println!("inliers: {}", result.inlier_count);
@@ -126,12 +139,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn build_demo_map(camera: &Camera, points: &[Point3<f64>], markers: &[MarkerSpec]) -> VisualMap {
+fn build_demo_map(
+    camera: &Camera,
+    points: &[Point3<f64>],
+    landmarks: &[PatchLandmark],
+) -> VisualMap {
     let mut map = VisualMap::new();
     map.cameras.insert(camera.id, camera.clone());
-    for (point, marker) in points.iter().zip(markers.iter()) {
-        let mut landmark = Landmark::new(marker.id, *point);
-        landmark.descriptor = Some(marker.descriptor());
+    for (point, landmark_patch) in points.iter().zip(landmarks.iter()) {
+        let mut landmark = Landmark::new(landmark_patch.id, *point);
+        landmark.descriptor = Some(landmark_patch.descriptor());
         map.landmarks.insert(landmark.id, landmark);
     }
     map
@@ -142,98 +159,195 @@ fn render_query_image(
     camera: &Camera,
     pose: &Pose,
     points: &[Point3<f64>],
-    markers: &[MarkerSpec],
+    landmarks: &[PatchLandmark],
 ) -> Result<(), Box<dyn Error>> {
-    let mut image = RgbImage::from_pixel(960, 640, Rgb([218, 232, 242]));
+    let mut image = RgbImage::from_pixel(IMAGE_WIDTH, IMAGE_HEIGHT, Rgb([219, 232, 240]));
 
-    for y in 0..330 {
-        let t = y as f32 / 330.0;
-        let color = lerp_rgb(Rgb([139, 190, 221]), Rgb([238, 244, 248]), t);
-        for x in 0..960 {
+    for y in 0..250 {
+        let t = y as f32 / 250.0;
+        let color = lerp_rgb(Rgb([132, 184, 218]), Rgb([235, 242, 247]), t);
+        for x in 0..IMAGE_WIDTH {
             image.put_pixel(x, y, color);
         }
     }
 
     fill_polygon(
         &mut image,
-        &[(0, 640), (260, 330), (700, 330), (960, 640)],
+        &[(0, 480), (170, 246), (470, 246), (640, 480)],
         Rgb([55, 64, 76]),
     );
-    draw_line(&mut image, (333, 334), (250, 640), Rgb([230, 238, 246]), 5);
-    draw_line(&mut image, (627, 334), (710, 640), Rgb([230, 238, 246]), 5);
+    draw_line(&mut image, (238, 250), (170, 480), Rgb([230, 238, 246]), 5);
+    draw_line(&mut image, (402, 250), (470, 480), Rgb([230, 238, 246]), 5);
     draw_dashed_line(
         &mut image,
-        (480, 360),
-        (480, 640),
+        (320, 275),
+        (320, 480),
         Rgb([249, 199, 79]),
         5,
-        26,
-        20,
+        24,
+        18,
     );
 
     draw_building(
         &mut image,
-        70,
-        155,
-        230,
-        325,
-        Rgb([191, 166, 137]),
-        Rgb([66, 111, 143]),
+        42,
+        120,
+        168,
+        255,
+        Rgb([190, 168, 142]),
+        Rgb([69, 111, 142]),
     );
     draw_building(
         &mut image,
-        674,
-        98,
-        214,
-        390,
-        Rgb([172, 184, 196]),
+        448,
+        70,
+        150,
+        316,
+        Rgb([170, 182, 194]),
         Rgb([71, 116, 147]),
     );
     draw_building(
         &mut image,
-        355,
-        210,
-        253,
-        150,
+        236,
+        162,
+        170,
+        116,
         Rgb([185, 193, 201]),
         Rgb([74, 118, 150]),
     );
 
-    draw_line(&mut image, (110, 470), (420, 286), Rgb([27, 37, 52]), 2);
-    draw_line(&mut image, (420, 286), (480, 343), Rgb([27, 37, 52]), 2);
-    draw_line(&mut image, (480, 343), (548, 279), Rgb([27, 37, 52]), 2);
-    draw_line(&mut image, (548, 279), (805, 482), Rgb([27, 37, 52]), 2);
-
-    for (point, marker) in points.iter().zip(markers.iter()) {
+    for (point, landmark_patch) in points.iter().zip(landmarks.iter()) {
         let pixel = camera
             .project(&pose.transform_world_point(point))
             .ok_or("demo point projected behind the camera")?;
-        let center = (pixel.x.round() as i32, pixel.y.round() as i32);
-        draw_filled_circle(&mut image, center, 14, Rgb([10, 16, 32]));
-        draw_filled_circle(&mut image, center, 9, marker.color);
-        draw_circle(&mut image, center, 18, Rgb([246, 247, 251]), 2);
+        draw_patch(
+            &mut image,
+            (pixel.x.round() as i32, pixel.y.round() as i32),
+            &landmark_patch.template(),
+        );
     }
 
     image.save(path)?;
     Ok(())
 }
 
+fn extract_patch_descriptor(
+    image: &GrayImage,
+    center_x: i32,
+    center_y: i32,
+) -> Result<Vec<f32>, DemoError> {
+    if center_x < PATCH_RADIUS
+        || center_y < PATCH_RADIUS
+        || center_x >= image.width() as i32 - PATCH_RADIUS
+        || center_y >= image.height() as i32 - PATCH_RADIUS
+    {
+        return Err(DemoError(
+            "detected patch is too close to the image border".to_owned(),
+        ));
+    }
+
+    let mut descriptor = Vec::with_capacity(PATCH_SIZE * PATCH_SIZE);
+    for y in center_y - PATCH_RADIUS..=center_y + PATCH_RADIUS {
+        for x in center_x - PATCH_RADIUS..=center_x + PATCH_RADIUS {
+            descriptor.push(image.get_pixel(x as u32, y as u32)[0] as f32 / 255.0);
+        }
+    }
+    Ok(descriptor)
+}
+
+fn detect_patch_windows(image: &GrayImage) -> Vec<(i32, i32)> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let mut visited = vec![false; width * height];
+    let mut centers = Vec::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if visited[index] || image.get_pixel(x as u32, y as u32)[0] < 242 {
+                continue;
+            }
+
+            let mut stack = vec![(x as i32, y as i32)];
+            visited[index] = true;
+            let mut min_x = x as i32;
+            let mut max_x = x as i32;
+            let mut min_y = y as i32;
+            let mut max_y = y as i32;
+            let mut count = 0_usize;
+
+            while let Some((cx, cy)) = stack.pop() {
+                count += 1;
+                min_x = min_x.min(cx);
+                max_x = max_x.max(cx);
+                min_y = min_y.min(cy);
+                max_y = max_y.max(cy);
+
+                for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                        continue;
+                    }
+                    let nindex = ny as usize * width + nx as usize;
+                    if visited[nindex] || image.get_pixel(nx as u32, ny as u32)[0] < 242 {
+                        continue;
+                    }
+                    visited[nindex] = true;
+                    stack.push((nx, ny));
+                }
+            }
+
+            let box_width = max_x - min_x + 1;
+            let box_height = max_y - min_y + 1;
+            if (26..=32).contains(&box_width)
+                && (26..=32).contains(&box_height)
+                && (220..=460).contains(&count)
+            {
+                centers.push(((min_x + max_x) / 2, (min_y + max_y) / 2));
+            }
+        }
+    }
+
+    centers.sort_by_key(|(x, y)| (*y, *x));
+    centers
+}
+
+fn draw_patch(image: &mut RgbImage, center: (i32, i32), template: &[[u8; PATCH_SIZE]; PATCH_SIZE]) {
+    draw_rect(
+        image,
+        center.0 - PATCH_RADIUS - 3,
+        center.1 - PATCH_RADIUS - 3,
+        PATCH_SIZE as i32 + 6,
+        PATCH_SIZE as i32 + 6,
+        Rgb([245, 247, 250]),
+    );
+    for (y, row) in template.iter().enumerate() {
+        for (x, value) in row.iter().enumerate() {
+            put_pixel_checked(
+                image,
+                center.0 + x as i32 - PATCH_RADIUS,
+                center.1 + y as i32 - PATCH_RADIUS,
+                Rgb([*value, *value, *value]),
+            );
+        }
+    }
+}
+
 fn draw_detected_features(image: &RgbImage, keypoints: &[Point2<f64>]) -> RgbImage {
     let mut output = image.clone();
     for keypoint in keypoints {
         let center = (keypoint.x.round() as i32, keypoint.y.round() as i32);
-        draw_circle(&mut output, center, 24, Rgb([53, 208, 186]), 4);
+        draw_circle(&mut output, center, 21, Rgb([53, 208, 186]), 3);
         draw_line(
             &mut output,
-            (center.0 - 30, center.1),
-            (center.0 + 30, center.1),
+            (center.0 - 27, center.1),
+            (center.0 + 27, center.1),
             Rgb([53, 208, 186]),
             2,
         );
         draw_line(
             &mut output,
-            (center.0, center.1 - 30),
-            (center.0, center.1 + 30),
+            (center.0, center.1 - 27),
+            (center.0, center.1 + 27),
             Rgb([53, 208, 186]),
             2,
         );
@@ -250,25 +364,25 @@ fn draw_localization_overlay(
     let mut output = draw_detected_features(image, keypoints);
     for keypoint in keypoints {
         let center = (keypoint.x.round() as i32, keypoint.y.round() as i32);
-        draw_line(&mut output, center, (480, 560), Rgb([249, 199, 79]), 2);
+        draw_line(&mut output, center, (320, 430), Rgb([249, 199, 79]), 2);
     }
 
-    draw_filled_circle(&mut output, (480, 560), 12, Rgb([112, 165, 255]));
-    draw_line(&mut output, (480, 560), (560, 560), Rgb([239, 68, 68]), 5);
-    draw_line(&mut output, (480, 560), (480, 480), Rgb([34, 197, 94]), 5);
-    draw_line(&mut output, (480, 560), (532, 508), Rgb([59, 130, 246]), 5);
+    draw_filled_circle(&mut output, (320, 430), 11, Rgb([112, 165, 255]));
+    draw_line(&mut output, (320, 430), (390, 430), Rgb([239, 68, 68]), 5);
+    draw_line(&mut output, (320, 430), (320, 360), Rgb([34, 197, 94]), 5);
+    draw_line(&mut output, (320, 430), (366, 384), Rgb([59, 130, 246]), 5);
 
     let badge = if success {
         Rgb([16, 122, 89])
     } else {
         Rgb([140, 45, 45])
     };
-    draw_rect(&mut output, 30, 28, 335, 74, Rgb([11, 18, 32]));
-    draw_rect(&mut output, 38, 36, 68, 58, badge);
+    draw_rect(&mut output, 22, 22, 258, 62, Rgb([11, 18, 32]));
+    draw_rect(&mut output, 31, 31, 48, 44, badge);
     draw_digit_text(
         &mut output,
-        120,
-        50,
+        96,
+        42,
         inlier_count as u32,
         Rgb([246, 247, 251]),
     );
@@ -286,7 +400,7 @@ fn write_demo_gif(
     let mut encoder = GifEncoder::new(&mut file);
     encoder.set_repeat(Repeat::Infinite)?;
     let frames = [raw, detected, localized].into_iter().map(|image| {
-        let resized = resize(image, 720, 480, FilterType::Lanczos3);
+        let resized = resize(image, 640, 480, FilterType::Lanczos3);
         Frame::from_parts(
             RgbaImage::from_fn(resized.width(), resized.height(), |x, y| {
                 let p = resized.get_pixel(x, y);
@@ -294,48 +408,26 @@ fn write_demo_gif(
             }),
             0,
             0,
-            Delay::from_numer_denom_ms(950, 1),
+            Delay::from_numer_denom_ms(900, 1),
         )
     });
     encoder.encode_frames(frames)?;
     Ok(())
 }
 
-fn demo_markers() -> Vec<MarkerSpec> {
-    vec![
-        MarkerSpec {
-            id: 1,
-            color: Rgb([239, 68, 68]),
-        },
-        MarkerSpec {
-            id: 2,
-            color: Rgb([53, 208, 186]),
-        },
-        MarkerSpec {
-            id: 3,
-            color: Rgb([112, 165, 255]),
-        },
-        MarkerSpec {
-            id: 4,
-            color: Rgb([249, 199, 79]),
-        },
-        MarkerSpec {
-            id: 5,
-            color: Rgb([168, 85, 247]),
-        },
-        MarkerSpec {
-            id: 6,
-            color: Rgb([14, 165, 233]),
-        },
-        MarkerSpec {
-            id: 7,
-            color: Rgb([34, 197, 94]),
-        },
-        MarkerSpec {
-            id: 8,
-            color: Rgb([251, 113, 133]),
-        },
-    ]
+fn demo_landmarks() -> Vec<PatchLandmark> {
+    (1..=8).map(|id| PatchLandmark { id }).collect()
+}
+
+fn texture_bit(id: u64, x: u32, y: u32) -> bool {
+    let mut value = id
+        .wrapping_mul(0x9E37_79B1_85EB_CA87)
+        .wrapping_add((x as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+        .wrapping_add((y as u64).wrapping_mul(0x1656_67B1_9E37_79F9));
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    value ^= value >> 29;
+    value & 1 == 1
 }
 
 fn demo_points() -> Vec<Point3<f64>> {
@@ -349,13 +441,6 @@ fn demo_points() -> Vec<Point3<f64>> {
         Point3::new(-0.5, 0.4, 6.5),
         Point3::new(0.25, 0.75, 8.0),
     ]
-}
-
-fn color_distance_sq(a: &Rgb<u8>, b: &Rgb<u8>) -> i32 {
-    let dr = a[0] as i32 - b[0] as i32;
-    let dg = a[1] as i32 - b[1] as i32;
-    let db = a[2] as i32 - b[2] as i32;
-    dr * dr + dg * dg + db * db
 }
 
 fn lerp_rgb(a: Rgb<u8>, b: Rgb<u8>, t: f32) -> Rgb<u8> {
@@ -405,23 +490,23 @@ fn draw_building(
     glass: Rgb<u8>,
 ) {
     draw_rect(image, x, y, width, height, wall);
-    let window_width = (width / 5).max(18);
-    let window_height = (height / 5).max(26);
+    let window_width = (width / 5).max(16);
+    let window_height = (height / 5).max(22);
     for row in 0..3 {
         for col in 0..3 {
-            let wx = x + 22 + col * (window_width + 22);
-            let wy = y + 28 + row * (window_height + 22);
-            if wx + window_width < x + width - 12 && wy + window_height < y + height - 12 {
+            let wx = x + 18 + col * (window_width + 18);
+            let wy = y + 22 + row * (window_height + 18);
+            if wx + window_width < x + width - 10 && wy + window_height < y + height - 10 {
                 draw_rect(image, wx, wy, window_width, window_height, glass);
             }
         }
     }
     draw_rect(
         image,
-        x - 18,
+        x - 14,
         y + height,
-        width + 36,
-        42,
+        width + 28,
+        34,
         darken(wall, 0.72),
     );
 }

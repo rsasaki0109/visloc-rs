@@ -33,7 +33,7 @@ The preview above is README-safe SVG. A real screen recording or benchmark clip 
   <img src="docs/assets/image-processing-demo.gif" alt="Image processing visual localization demo: raw image, detected features, and estimated pose overlay" width="86%">
 </p>
 
-This demo uses real raster image data. The example renders and reads `examples/data/query_frame.png`, segments colored feature blobs from pixels, builds descriptors from the detected blobs, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC.
+This demo uses real raster image data. The example renders and reads `examples/data/query_frame.png`, detects high-contrast local patch windows from grayscale pixels, builds patch descriptors from image crops, matches them to 3D landmarks, and estimates the camera pose with PnP + RANSAC.
 
 ```bash
 cargo run --example localize_image_processing_demo
@@ -61,7 +61,7 @@ Implemented now:
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
 - Query feature text parser and file-based localization example
-- Image processing localization example that reads PNG pixels, detects feature blobs, and writes README demo overlays
+- Image processing localization example that reads PNG pixels, detects local patch features, and writes README demo overlays
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 
 Not implemented yet:
@@ -141,7 +141,7 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 cargo run --example localize_from_files
 ```
 
-Run the image processing demo, which reads PNG pixels, detects feature blobs, localizes through `ImageLocalizer`, and writes README demo assets:
+Run the image processing demo, which reads PNG pixels, detects local patch features, localizes through `ImageLocalizer`, and writes README demo assets:
 
 ```bash
 cargo run --example localize_image_processing_demo
