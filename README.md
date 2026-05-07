@@ -140,6 +140,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 - Visual-inertial and GNSS priors/fusion
 - Larger public-data evaluation scripts
 
+For a detailed development handoff and next-task checklist, see [PLAN.md](PLAN.md).
+
 See [docs/demo_strategy.md](docs/demo_strategy.md) for the automotive/UAV demo plan.
 See [docs/colmap_compatibility.md](docs/colmap_compatibility.md) for supported COLMAP/SfM map formats and current limitations.
 See [docs/migration.md](docs/migration.md) for the pre-1.0 to v1.0 API migration guidance.
