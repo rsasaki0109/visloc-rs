@@ -169,6 +169,22 @@ fn constant_velocity_motion_model_extrapolates_camera_center() {
 }
 
 #[test]
+fn constant_velocity_motion_model_reset_clears_history() {
+    let mut model = ConstantVelocityMotionModel::new();
+    let frame = Frame::new(3, 1);
+    let pose_a = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let pose_b = pose_with_identity_rotation_at_center(Vector3::new(2.0, 0.0, 0.0));
+
+    model.observe(&successful_tracking_result(1, pose_a));
+    model.observe(&successful_tracking_result(2, pose_b));
+    assert!(model.predict_pose(&frame, None, None).is_some());
+
+    model.reset();
+
+    assert!(model.predict_pose(&frame, None, None).is_none());
+}
+
+#[test]
 fn tracker_enters_tracking_after_successful_localization() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
@@ -198,6 +214,31 @@ fn tracker_enters_tracking_after_successful_localization() {
     assert_eq!(tracker.stats().failure_rate(), 0.0);
     assert_eq!(tracker.stats().overall_inlier_ratio(), 1.0);
     assert_eq!(tracker.stats().mean_inliers_per_successful_frame(), 6.0);
+}
+
+#[test]
+fn tracker_reset_clears_sequence_state_history_and_stats() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let result = tracker.track_frame(&frame, &map);
+    assert!(result.localization.success);
+    assert_eq!(tracker.state(), TrackingState::Tracking);
+    assert!(tracker.last_result().is_some());
+    assert!(tracker.last_successful_pose().is_some());
+    assert_eq!(tracker.stats().frame_count, 1);
+
+    tracker.reset();
+
+    assert_eq!(tracker.state(), TrackingState::Uninitialized);
+    assert_eq!(tracker.successive_failures(), 0);
+    assert!(tracker.last_result().is_none());
+    assert_eq!(tracker.last_successful_frame_id(), None);
+    assert!(tracker.last_successful_pose().is_none());
+    assert_eq!(tracker.stats().frame_count, 0);
+    assert_eq!(tracker.stats().successful_frame_count, 0);
+    assert_eq!(tracker.stats().first_frame_id, None);
+    assert_eq!(tracker.stats().last_frame_id, None);
 }
 
 #[test]
@@ -348,6 +389,27 @@ fn image_tracker_tracks_image_sequence_with_convenience_api() {
     assert_eq!(image_tracker.tracker().stats().first_frame_id, Some(10));
     assert_eq!(image_tracker.tracker().stats().last_frame_id, Some(11));
     assert_eq!(image_tracker.tracker().stats().successful_frame_count, 2);
+}
+
+#[test]
+fn image_tracker_reset_clears_inner_tracker_state() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let extractor = extractor_from_frame(&frame);
+    let mut image_tracker = ImageTracker::new(extractor, TrackingConfig::default());
+
+    image_tracker
+        .track_frame_image(10, frame.camera_id, &(), &map)
+        .unwrap();
+    assert_eq!(image_tracker.tracker().state(), TrackingState::Tracking);
+
+    image_tracker.reset();
+
+    assert_eq!(
+        image_tracker.tracker().state(),
+        TrackingState::Uninitialized
+    );
+    assert!(image_tracker.tracker().last_result().is_none());
+    assert_eq!(image_tracker.tracker().stats().frame_count, 0);
 }
 
 #[test]
