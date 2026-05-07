@@ -262,6 +262,32 @@ fn pose_trajectory_exports_kitti_poses() {
 }
 
 #[test]
+fn pose_trajectory_parses_kitti_poses() {
+    let trajectory = PoseTrajectory::from_kitti_poses_str(
+        "# r00 r01 r02 tx r10 r11 r12 ty r20 r21 r22 tz\n1 0 0 1 0 1 0 2 0 0 1 3\n1 0 0 4 0 1 0 5 0 0 1 6\n",
+    )
+    .unwrap();
+
+    assert_eq!(trajectory.frame_ids(), vec![0, 1]);
+    assert_eq!(
+        trajectory.camera_centers_world(),
+        vec![Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0)]
+    );
+    assert_eq!(
+        trajectory.to_kitti_poses(),
+        "1 0 0 1 0 1 0 2 0 0 1 3\n1 0 0 4 0 1 0 5 0 0 1 6\n"
+    );
+}
+
+#[test]
+fn pose_trajectory_rejects_invalid_kitti_pose_lines() {
+    let error = PoseTrajectory::from_kitti_poses_str("1 2 3\n").unwrap_err();
+
+    assert_eq!(error.line_number, 1);
+    assert!(error.message.contains("expected 12 fields"));
+}
+
+#[test]
 fn pose_trajectory_exports_tum_poses() {
     let pose_a = pose_with_identity_rotation_at_center(Vector3::new(1.0, 2.0, 3.0));
     let pose_b = pose_with_identity_rotation_at_center(Vector3::new(4.0, 5.0, 6.0));

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
-use nalgebra::{Point3, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point3, Quaternion, Rotation3, UnitQuaternion, Vector3};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{
     CameraId, Frame, FrameId, LandmarkDescriptorStore, LocalizationResult, VisualMap,
@@ -226,6 +226,35 @@ impl fmt::Display for TumTrajectoryParseError {
 }
 
 impl std::error::Error for TumTrajectoryParseError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KittiTrajectoryParseError {
+    pub line_number: usize,
+    pub line: String,
+    pub message: String,
+}
+
+impl KittiTrajectoryParseError {
+    fn new(line_number: usize, line: &str, message: impl Into<String>) -> Self {
+        Self {
+            line_number,
+            line: line.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for KittiTrajectoryParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid KITTI trajectory line {}: {} ({})",
+            self.line_number, self.line, self.message
+        )
+    }
+}
+
+impl std::error::Error for KittiTrajectoryParseError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectorySummary {
@@ -473,6 +502,55 @@ impl PoseTrajectory {
         Ok(trajectory)
     }
 
+    pub fn from_kitti_poses_str(text: &str) -> Result<Self, KittiTrajectoryParseError> {
+        let mut trajectory = Self::new();
+        let mut pose_index = 0_u64;
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let fields = trimmed.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 12 {
+                return Err(KittiTrajectoryParseError::new(
+                    line_number,
+                    line,
+                    format!("expected 12 fields, got {}", fields.len()),
+                ));
+            }
+
+            let mut values = [0.0_f64; 12];
+            for (index, field) in fields.iter().enumerate() {
+                values[index] = parse_kitti_f64(field, index, line_number, line)?;
+            }
+
+            let rotation = Matrix3::new(
+                values[0], values[1], values[2], values[4], values[5], values[6], values[8],
+                values[9], values[10],
+            );
+            let translation = Vector3::new(values[3], values[7], values[11]);
+            let camera_to_world = SE3::new(
+                UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rotation)),
+                translation,
+            );
+            trajectory.push_sample(TrajectorySample {
+                frame_id: pose_index,
+                pose: Pose {
+                    world_to_camera: camera_to_world.inverse(),
+                },
+                state: TrackingState::Tracking,
+                event: TrackingEvent::Tracked,
+                inlier_count: 0,
+                inlier_ratio: 0.0,
+                reprojection_error: None,
+            });
+            pose_index += 1;
+        }
+        Ok(trajectory)
+    }
+
     pub fn push_result(&mut self, result: &TrackingResult) -> bool {
         if let Some(sample) = TrajectorySample::from_tracking_result(result) {
             self.samples.push(sample);
@@ -696,6 +774,21 @@ fn parse_tum_f64(
 ) -> Result<f64, TumTrajectoryParseError> {
     value.parse::<f64>().map_err(|error| {
         TumTrajectoryParseError::new(line_number, line, format!("invalid {field_name}: {error}"))
+    })
+}
+
+fn parse_kitti_f64(
+    value: &str,
+    field_index: usize,
+    line_number: usize,
+    line: &str,
+) -> Result<f64, KittiTrajectoryParseError> {
+    value.parse::<f64>().map_err(|error| {
+        KittiTrajectoryParseError::new(
+            line_number,
+            line,
+            format!("invalid field {field_index}: {error}"),
+        )
     })
 }
 
