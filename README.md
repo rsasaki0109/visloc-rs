@@ -25,7 +25,7 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
   <img src="docs/assets/south-building-localization.gif" alt="COLMAP South Building public dataset visual localization demo with real query image and sparse SfM map" width="92%">
 </p>
 
-This README demo uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The visualization shows a real query image, its 2D observations linked to reconstructed 3D points, and the recovered camera pose/frustum.
+This README demo uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The animation is a four-step explainer: start from one real query photo, match photo points to the reusable 3D map, reject unreliable matches, then show the recovered camera position and viewing direction.
 
 Data source: the COLMAP official South Building dataset, distributed as [`south-building.zip`](https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip) from the COLMAP example datasets.
 
