@@ -23,6 +23,7 @@ All notable changes to `visloc-rs` will be documented here.
 - GNSS-prior tracking example showing radius-submap narrowing before localization.
 - COLMAP compatibility notes covering supported sparse model inputs, descriptor handling, writer behavior, and current limitations.
 - Root crate prelude and top-level re-exports for common application-facing localization APIs.
+- Pre-1.0 to v1.0 migration guide covering recommended imports, localization boundaries, COLMAP descriptor handling, tracking priors, and experimental layers.
 - Examples, integration tests, design docs, local check script, and GitHub Actions CI.
 
 ### Not Yet Implemented
