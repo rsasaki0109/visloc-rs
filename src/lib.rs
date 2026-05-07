@@ -67,7 +67,8 @@ pub use visloc_mapping::{
     LandmarkCandidateMappingFailureReason, LandmarkCandidateObservation,
     LandmarkCandidateValidationConfig, LandmarkCandidateValidationIssue,
     LandmarkCandidateValidationReport, LinearTriangulator, LocalMapWindow, LocalMapWindowConfig,
-    LocalMappingPipeline, LocalMappingResult, MapUpdateValidationIssue, MapUpdateValidationReport,
+    LocalMappingPipeline, LocalMappingResult, LocalRefinementReason, LocalRefinementResult,
+    LocalRefiner, MapUpdateValidationIssue, MapUpdateValidationReport, NoopLocalRefiner,
     SimpleKeyframePolicy, StagedMapUpdate, TriangulatedLandmark, TriangulationConfig,
     TriangulationFailureReason, Triangulator,
 };

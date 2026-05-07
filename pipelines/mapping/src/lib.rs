@@ -949,26 +949,86 @@ fn mean(values: &[f64]) -> f64 {
     }
 }
 
+pub trait LocalRefiner {
+    fn refine(
+        &self,
+        map: &VisualMap,
+        local_window: &LocalMapWindow,
+        staged_update: &mut StagedMapUpdate,
+    ) -> LocalRefinementResult;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoopLocalRefiner;
+
+impl LocalRefiner for NoopLocalRefiner {
+    fn refine(
+        &self,
+        _map: &VisualMap,
+        _local_window: &LocalMapWindow,
+        _staged_update: &mut StagedMapUpdate,
+    ) -> LocalRefinementResult {
+        LocalRefinementResult {
+            refined: false,
+            reason: LocalRefinementReason::Noop,
+            keyframe_count: 0,
+            landmark_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRefinementResult {
+    pub refined: bool,
+    pub reason: LocalRefinementReason,
+    pub keyframe_count: usize,
+    pub landmark_count: usize,
+}
+
+impl LocalRefinementResult {
+    pub fn skipped(reason: LocalRefinementReason) -> Self {
+        Self {
+            refined: false,
+            reason,
+            keyframe_count: 0,
+            landmark_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalRefinementReason {
+    Noop,
+    NoSelectedKeyframe,
+    Refined,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct LocalMappingPipeline<K = SimpleKeyframePolicy, T = LinearTriangulator> {
+pub struct LocalMappingPipeline<
+    K = SimpleKeyframePolicy,
+    T = LinearTriangulator,
+    R = NoopLocalRefiner,
+> {
     pub keyframe_policy: K,
     pub triangulator: T,
+    pub local_refiner: R,
     pub local_window_config: LocalMapWindowConfig,
     pub candidate_validation_config: LandmarkCandidateValidationConfig,
 }
 
-impl Default for LocalMappingPipeline<SimpleKeyframePolicy, LinearTriangulator> {
+impl Default for LocalMappingPipeline<SimpleKeyframePolicy, LinearTriangulator, NoopLocalRefiner> {
     fn default() -> Self {
         Self {
             keyframe_policy: SimpleKeyframePolicy::default(),
             triangulator: LinearTriangulator::default(),
+            local_refiner: NoopLocalRefiner,
             local_window_config: LocalMapWindowConfig::default(),
             candidate_validation_config: LandmarkCandidateValidationConfig::default(),
         }
     }
 }
 
-impl<K, T> LocalMappingPipeline<K, T>
+impl<K, T> LocalMappingPipeline<K, T, NoopLocalRefiner>
 where
     K: KeyframePolicy,
     T: Triangulator,
@@ -982,6 +1042,30 @@ where
         Self {
             keyframe_policy,
             triangulator,
+            local_refiner: NoopLocalRefiner,
+            local_window_config,
+            candidate_validation_config,
+        }
+    }
+}
+
+impl<K, T, R> LocalMappingPipeline<K, T, R>
+where
+    K: KeyframePolicy,
+    T: Triangulator,
+    R: LocalRefiner,
+{
+    pub fn with_refiner(
+        keyframe_policy: K,
+        triangulator: T,
+        local_refiner: R,
+        local_window_config: LocalMapWindowConfig,
+        candidate_validation_config: LandmarkCandidateValidationConfig,
+    ) -> Self {
+        Self {
+            keyframe_policy,
+            triangulator,
+            local_refiner,
             local_window_config,
             candidate_validation_config,
         }
@@ -1009,12 +1093,15 @@ where
         if !keyframe_decision.selected {
             let local_window = LocalMapWindow::from_recent(map, &self.local_window_config);
             let staged_update_validation = staged_update.validate_against(map);
+            let refinement =
+                LocalRefinementResult::skipped(LocalRefinementReason::NoSelectedKeyframe);
             return LocalMappingResult {
                 keyframe_decision,
                 local_window,
                 staged_update,
                 triangulated_landmarks,
                 candidate_failures,
+                refinement,
                 staged_update_validation,
             };
         }
@@ -1059,6 +1146,9 @@ where
             }
         }
 
+        let refinement = self
+            .local_refiner
+            .refine(&working_map, &local_window, &mut staged_update);
         let staged_update_validation = staged_update.validate_against(map);
         LocalMappingResult {
             keyframe_decision,
@@ -1066,6 +1156,7 @@ where
             staged_update,
             triangulated_landmarks,
             candidate_failures,
+            refinement,
             staged_update_validation,
         }
     }
@@ -1078,6 +1169,7 @@ pub struct LocalMappingResult {
     pub staged_update: StagedMapUpdate,
     pub triangulated_landmarks: Vec<TriangulatedLandmark>,
     pub candidate_failures: Vec<LandmarkCandidateMappingFailure>,
+    pub refinement: LocalRefinementResult,
     pub staged_update_validation: MapUpdateValidationReport,
 }
 
