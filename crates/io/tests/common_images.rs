@@ -4,8 +4,9 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb};
 use visloc_io::images::{
-    decode_common_image, read_common_image, read_common_image_sequence,
-    read_common_image_sequence_dir, write_png_gray,
+    common_image_sequence_summary, decode_common_image, read_common_image,
+    read_common_image_sequence, read_common_image_sequence_dir,
+    validate_common_image_sequence_dimensions, write_png_gray, ImageSequenceValidationIssue,
 };
 use visloc_vision::features::GrayscaleImage;
 
@@ -106,6 +107,67 @@ fn reads_common_image_sequence_dir_sorted_by_path() {
     assert_eq!(frames[0].path, a);
     assert_eq!(frames[1].frame_id, 1);
     assert_eq!(frames[1].path, b);
+}
+
+#[test]
+fn summarizes_common_image_sequence() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    let second = dir.join("0001.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(2, 1, vec![0, 255]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &second,
+        &GrayscaleImage::from_luma_u8(2, 1, vec![255, 0]).unwrap(),
+    )
+    .unwrap();
+    let frames = read_common_image_sequence(&[first, second]).unwrap();
+
+    let summary = common_image_sequence_summary(&frames);
+
+    assert_eq!(summary.frame_count, 2);
+    assert_eq!(summary.first_frame_id, Some(0));
+    assert_eq!(summary.last_frame_id, Some(1));
+    assert_eq!(summary.width, Some(2));
+    assert_eq!(summary.height, Some(1));
+    assert!(!summary.varying_dimensions);
+}
+
+#[test]
+fn validates_common_image_sequence_dimensions() {
+    let dir = tempfile_dir();
+    let first = dir.join("0000.png");
+    let second = dir.join("0001.png");
+    write_png_gray(
+        &first,
+        &GrayscaleImage::from_luma_u8(2, 1, vec![0, 255]).unwrap(),
+    )
+    .unwrap();
+    write_png_gray(
+        &second,
+        &GrayscaleImage::from_luma_u8(1, 2, vec![255, 0]).unwrap(),
+    )
+    .unwrap();
+    let frames = read_common_image_sequence(&[first, second.clone()]).unwrap();
+
+    let issues = validate_common_image_sequence_dimensions(&frames);
+    let summary = common_image_sequence_summary(&frames);
+
+    assert_eq!(
+        issues,
+        vec![ImageSequenceValidationIssue::InconsistentDimensions {
+            frame_id: 1,
+            path: second,
+            width: 1,
+            height: 2,
+            expected_width: 2,
+            expected_height: 1,
+        }]
+    );
+    assert!(summary.varying_dimensions);
 }
 
 fn tempfile_dir() -> std::path::PathBuf {
