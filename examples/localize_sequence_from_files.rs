@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tum_path = output_dir.join("trajectory_tum.txt");
         let summary_path = output_dir.join("summary.json");
         let tracking_csv_path = output_dir.join("tracking.csv");
+        let tracking_summary_path = output_dir.join("tracking_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
         let tracking_report_path = output_dir.join("tracking_report.html");
         trajectory.write_csv(&csv_path)?;
@@ -118,15 +119,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trajectory.write_tum_poses(&tum_path)?;
         trajectory.write_summary_json(&summary_path)?;
         write_tracking_results_csv(&results, &tracking_csv_path)?;
+        tracker.stats().write_json(&tracking_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
         println!(
-            "wrote trajectory exports: csv={} kitti={} tum={} summary={} tracking_csv={} trajectory_report={} tracking_report={}",
+            "wrote trajectory exports: csv={} kitti={} tum={} summary={} tracking_csv={} tracking_summary={} trajectory_report={} tracking_report={}",
             csv_path.display(),
             kitti_path.display(),
             tum_path.display(),
             summary_path.display(),
             tracking_csv_path.display(),
+            tracking_summary_path.display(),
             trajectory_report_path.display(),
             tracking_report_path.display()
         );
