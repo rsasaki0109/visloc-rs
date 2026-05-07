@@ -1,6 +1,26 @@
 #!/usr/bin/env sh
 set -eu
 
+markdown_anchor_exists() {
+    file=$1
+    anchor=$2
+
+    headings=$(mktemp)
+    rg '^#+[[:space:]]+' "$file" | while IFS= read -r heading; do
+        printf '%s\n' "$heading" \
+            | sed -E 's/^#+[[:space:]]*//; s/<[^>]*>//g; s/`//g; s/[^[:alnum:] _-]//g; s/[[:space:]]+/-/g; s/-+/-/g; s/^-//; s/-$//' \
+            | tr '[:upper:]' '[:lower:]'
+    done > "$headings"
+
+    if grep -Fxq "$anchor" "$headings"; then
+        rm -f "$headings"
+        return 0
+    fi
+
+    rm -f "$headings"
+    return 1
+}
+
 matches=$(mktemp)
 trap 'rm -f "$matches"' EXIT
 rg -n -o '\[[^]]+\]\([^)]+\)' README.md docs -g '*.md' > "$matches"
@@ -20,22 +40,35 @@ while IFS= read -r entry; do
     esac
 
     target_file=${target%%#*}
-    if [ -z "$target_file" ]; then
-        continue
-    fi
-
-    case "$target_file" in
-        /*)
-            path=".$target_file"
-            ;;
-        *)
-            source_dir=$(dirname "$source_file")
-            path="$source_dir/$target_file"
+    anchor=""
+    case "$target" in
+        *#*)
+            anchor=${target#*#}
             ;;
     esac
 
+    if [ -z "$target_file" ]; then
+        path="$source_file"
+    else
+        case "$target_file" in
+            /*)
+                path=".$target_file"
+                ;;
+            *)
+                source_dir=$(dirname "$source_file")
+                path="$source_dir/$target_file"
+                ;;
+        esac
+    fi
+
     if [ ! -e "$path" ]; then
         printf 'broken markdown link: %s:%s -> %s\n' "$source_file" "$line_number" "$target" >&2
+        status=1
+        continue
+    fi
+
+    if [ -n "$anchor" ] && ! markdown_anchor_exists "$path" "$anchor"; then
+        printf 'broken markdown anchor: %s:%s -> %s\n' "$source_file" "$line_number" "$target" >&2
         status=1
     fi
 done < "$matches"
