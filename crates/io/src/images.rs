@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
+#[cfg(feature = "image-io")]
+use std::path::PathBuf;
 use thiserror::Error;
+#[cfg(feature = "image-io")]
+use visloc_core::types::FrameId;
 use visloc_vision::features::{GrayscaleImage, GrayscaleImageError};
 
 #[derive(Debug, Error)]
@@ -35,6 +39,26 @@ pub enum CommonImageError {
     DimensionTooLarge { width: usize, height: usize },
     #[error("failed to build grayscale image buffer")]
     InvalidImageBuffer,
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Error)]
+pub enum ImageSequenceError {
+    #[error("image sequence I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("image frame {path} failed to load: {source}")]
+    FrameLoad {
+        path: PathBuf,
+        source: CommonImageError,
+    },
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedImageFrame {
+    pub frame_id: FrameId,
+    pub path: PathBuf,
+    pub image: GrayscaleImage,
 }
 
 pub fn read_pgm(path: impl AsRef<Path>) -> Result<GrayscaleImage, PgmImageError> {
@@ -115,6 +139,55 @@ pub fn write_png_gray(
         .ok_or(CommonImageError::InvalidImageBuffer)?;
     buffer.save_with_format(path, image::ImageFormat::Png)?;
     Ok(())
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image_sequence<P>(
+    paths: &[P],
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError>
+where
+    P: AsRef<Path>,
+{
+    let mut frames = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        let path = path.as_ref();
+        let image = read_common_image(path).map_err(|source| ImageSequenceError::FrameLoad {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        frames.push(LoadedImageFrame {
+            frame_id: index as FrameId,
+            path: path.to_path_buf(),
+            image,
+        });
+    }
+    Ok(frames)
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image_sequence_dir(
+    dir: impl AsRef<Path>,
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if is_supported_common_image_path(&path) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    read_common_image_sequence(&paths)
+}
+
+#[cfg(feature = "image-io")]
+fn is_supported_common_image_path(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "png"
+    )
 }
 
 #[cfg(feature = "image-io")]

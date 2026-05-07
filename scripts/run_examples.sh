@@ -25,3 +25,6 @@ done
 
 echo "Running feature-gated example: localize_from_common_image"
 cargo run --features image-io --example localize_from_common_image
+
+echo "Running feature-gated example: track_image_sequence_from_common_images"
+cargo run --features image-io --example track_image_sequence_from_common_images

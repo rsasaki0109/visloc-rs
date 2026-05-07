@@ -62,3 +62,8 @@ visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
 name = "localize_from_common_image"
 path = "examples/localize_from_common_image.rs"
 required-features = ["image-io"]
+
+[[example]]
+name = "track_image_sequence_from_common_images"
+path = "examples/track_image_sequence_from_common_images.rs"
+required-features = ["image-io"]
