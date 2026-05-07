@@ -74,6 +74,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `TrackingFailureReason`: records tracking-layer quality gate failures such as insufficient inliers, low inlier ratio, high reprojection error, or pose jumps that exceed the motion-prior translation threshold
 - `TrackingStats`: sequence diagnostics including first/last frame id, success/failure counts, lost/relocalization counts, pose-prior usage, tracking quality-gate failures, and aggregate inlier/correspondence totals with rate helpers
 - `TrackingStats::from_results`: rebuilds sequence-level diagnostics from stored `TrackingResult` values
+- `tracking_results_to_csv`: exports frame-by-frame tracking state, localization counts, failures, priors, and map stats for downstream plotting or regression checks
 - `tracking_results_to_html_report`: creates a self-contained HTML tracking report with per-frame state, inlier diagnostics, failures, and a timeline
 - `PoseTrajectory` and `TrajectorySample`: convert successful `TrackingResult` values into frame ids, poses, camera centers, path length, reprojection-error summaries, CSV output, KITTI-style 3x4 pose rows, and TUM-style trajectory rows for sequence demos and evaluation export
 - `PoseTrajectory::from_kitti_poses_str` / `read_kitti_poses`: read KITTI-style 3x4 pose rows back into a trajectory, using row index as frame id

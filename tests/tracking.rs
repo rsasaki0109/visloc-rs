@@ -9,12 +9,12 @@ use visloc_rs::core::types::{
     LocalizationResult, LocalizationSuccess, VisualMap,
 };
 use visloc_rs::{
-    tracking_results_to_html_report, write_tracking_results_html_report,
-    ConstantVelocityMotionModel, FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker,
-    InMemoryMapProvider, LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel,
-    PoseTrajectory, PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig,
-    TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState, TrackingStats,
-    TrajectoryAlignment,
+    tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,
+    write_tracking_results_html_report, ConstantVelocityMotionModel, FeatureExtractor, FeatureSet,
+    FrameLocalizer, ImageTracker, InMemoryMapProvider, LocalizationPipeline, LocalizationPrior,
+    MapProviderStats, MotionModel, PoseTrajectory, PriorSubmapSelector, SelectableMapProvider,
+    Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
+    TrackingStats, TrajectoryAlignment,
 };
 
 #[derive(Debug, Clone)]
@@ -681,6 +681,37 @@ fn tracking_results_write_html_report() {
 
     assert!(html.contains("Frame-by-frame sequence-localization state"));
     assert!(html.contains("failed"));
+}
+
+#[test]
+fn tracking_results_export_csv() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let mut initialized = successful_tracking_result(10, pose);
+    initialized.event = TrackingEvent::Initialized;
+    initialized.used_pose_prior = true;
+    let mut lost = failed_tracking_result(11);
+    lost.state = TrackingState::Lost;
+    lost.event = TrackingEvent::Lost;
+
+    let csv = tracking_results_to_csv(&[initialized, lost]);
+
+    assert!(csv.starts_with("frame_id,state,event,success,successive_failures"));
+    assert!(csv.contains("10,Tracking,Initialized,true,0,true"));
+    assert!(csv.contains("11,Lost,Lost,false,1,false"));
+    assert!(csv.contains("NoDescriptorMatches"));
+}
+
+#[test]
+fn tracking_results_write_csv() {
+    let path = std::env::temp_dir().join(format!("visloc-rs-tracking-{}.csv", std::process::id()));
+    let result = failed_tracking_result(12);
+
+    write_tracking_results_csv(&[result], &path).unwrap();
+    let csv = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+
+    assert!(csv.contains("frame_id,state,event"));
+    assert!(csv.contains("12,Tracking,TrackingFailed,false"));
 }
 
 #[test]

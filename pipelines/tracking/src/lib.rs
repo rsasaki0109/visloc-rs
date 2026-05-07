@@ -1537,6 +1537,47 @@ pub fn write_tracking_results_html_report(
     std::fs::write(path, tracking_results_to_html_report(results))
 }
 
+pub fn tracking_results_to_csv(results: &[TrackingResult]) -> String {
+    let mut output = String::from(
+        "frame_id,state,event,success,successive_failures,used_pose_prior,tracking_failure_reason,localization_failure_reason,candidate_landmark_count,match_count,correspondence_count,inlier_count,outlier_count,inlier_ratio,reprojection_error,median_reprojection_error,max_reprojection_error,map_cameras,map_keyframes,map_landmarks,map_descriptors\n",
+    );
+    for result in results {
+        let _ = writeln!(
+            output,
+            "{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            result.frame_id,
+            result.state,
+            result.event,
+            result.localization.success,
+            result.successive_failures,
+            result.used_pose_prior,
+            csv_escape(&format_optional_debug(&result.tracking_failure_reason)),
+            csv_escape(&format_optional_debug(&result.localization.failure_reason)),
+            result.localization.candidate_landmark_count,
+            result.localization.match_count,
+            result.localization.correspondence_count,
+            result.localization.inlier_count,
+            result.localization.outlier_count,
+            result.localization.inlier_ratio,
+            optional_f64_csv(result.localization.reprojection_error),
+            optional_f64_csv(result.localization.median_reprojection_error),
+            optional_f64_csv(result.localization.max_reprojection_error),
+            result.map_stats.camera_count,
+            result.map_stats.keyframe_count,
+            result.map_stats.landmark_count,
+            result.map_stats.descriptor_count,
+        );
+    }
+    output
+}
+
+pub fn write_tracking_results_csv(
+    results: &[TrackingResult],
+    path: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    std::fs::write(path, tracking_results_to_csv(results))
+}
+
 fn tracking_timeline_svg(results: &[TrackingResult]) -> String {
     let mut output = String::new();
     output
@@ -1615,6 +1656,21 @@ fn tracking_result_reason(result: &TrackingResult) -> String {
         format!("{reason:?}")
     } else {
         String::new()
+    }
+}
+
+fn format_optional_debug<T: fmt::Debug>(value: &Option<T>) -> String {
+    value
+        .as_ref()
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_default()
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
