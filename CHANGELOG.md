@@ -54,6 +54,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Local and CI checks now verify local README/docs markdown links and anchors.
 - Local and CI MSRV checks now cover all workspace targets and all features through `scripts/check_msrv.sh`.
 - docs.rs metadata now builds every publishable crate with all features enabled so optional APIs are included in hosted documentation, and `scripts/package_check.sh` verifies the metadata is present.
+- Local and CI checks now verify release metadata consistency across Cargo manifests, docs.rs settings, publish docs, and documented CI demo artifacts.
 - `FramePriorSyncSummary` diagnostics for checking external measurement coverage against frame timestamps.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.

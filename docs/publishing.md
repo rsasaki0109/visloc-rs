@@ -35,7 +35,7 @@ Run the normal quality gate before publishing:
 scripts/check.sh
 ```
 
-This runs formatting, clippy, tests, examples, the GNSS demo output smoke check, docs, and package checks.
+This runs formatting, clippy, tests, examples, release metadata checks, the GNSS demo output smoke check, docs, and package checks.
 
 Each crate sets `package.metadata.docs.rs.all-features = true`, so docs.rs builds include optional public APIs such as image IO.
 
