@@ -12,6 +12,18 @@
   <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-100%25-22c55e" alt="Deep VO / loop close completion: 100%">
 </p>
 
+<p align="center">
+  <img src="docs/assets/kitti_loop_closure.gif" alt="Pose-graph SE(3) Gauss-Newton loop closure on KITTI 00 ground-truth trajectory: 152 keyframes, 160 m drifted endpoint pulled back to within 0.01 m of truth" width="62%">
+</p>
+
+<p align="center">
+  <em>Pose-graph SE(3) Gauss-Newton loop closure on the real KITTI 00 trajectory — 152 keyframes, 160&nbsp;m of simulated odometry drift collapsed to a 0.01&nbsp;m endpoint error after a single loop edge.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/kitti_loop_closure.png" alt="Three-panel comparison of ground truth, drifted odometry, and corrected trajectory on KITTI 00" width="92%">
+</p>
+
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
 
 It is built for robotics localization work where you want a small, inspectable Rust core before growing into tracking, local mapping, online Visual SLAM, or GNSS/visual-inertial fusion.

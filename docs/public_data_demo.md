@@ -74,3 +74,42 @@ gap so the verifier scale calibrated for that pair is not contaminated by
 intermediate matches; the demo prints the chosen `min_frame_id_gap`,
 per-iteration cost, and per-keyframe translation / rotation error against
 the loaded ground-truth poses.
+
+## KITTI Loop-Closure Asset (README)
+
+The README includes a KITTI 00 pose-graph loop-closure visualization
+(`docs/assets/kitti_loop_closure.{png,gif}`). It is generated from the real
+KITTI odometry ground-truth poses, not from synthetic data. Pipeline:
+
+1. Run the Rust demo against the KITTI odometry pose file:
+
+   ```sh
+   cargo run --release --example online_slam_kitti_loop_demo -- \
+       --kitti-poses /path/to/KITTI_odometry/poses/00.txt \
+       --keyframe-stride 30 \
+       --max-keyframes 200 \
+       --out-dir target/kitti_loop_demo
+   ```
+
+   The demo subsamples the GT trajectory to ~150 keyframes, fabricates a
+   realistic per-edge yaw drift on the sequential odometry (so the chained
+   estimate diverges hundreds of metres by the end of the loop), adds a
+   single truth-relative loop-closure constraint between the first and last
+   keyframes, and runs `PoseGraph::optimize_se3_iterative` (Levenberg-
+   Marquardt + Cholesky). It writes `truth.csv`, `drifted.csv`, and
+   `corrected.csv` (id, x, y, z) to the output directory. Sample run:
+   `endpoint err: drifted=160.9 m → corrected=0.007 m` after 12 LM
+   iterations.
+
+2. Render the README asset:
+
+   ```sh
+   python3 scripts/build_kitti_loop_asset.py \
+       --input-dir target/kitti_loop_demo \
+       --out-dir docs/assets
+   ```
+
+   This emits `kitti_loop_closure.png` (three-panel: truth / drifted /
+   corrected, top-down XZ view) and `kitti_loop_closure.gif` (drifted →
+   corrected morph animation). The Python helper is asset-generation only,
+   not part of the Rust runtime or the CI gate.
