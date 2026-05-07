@@ -329,6 +329,11 @@ where
         self.track_frame_with_descriptor_store(frame, map, &descriptor_store)
     }
 
+    pub fn track_frames(&mut self, frames: &[Frame], map: &VisualMap) -> Vec<TrackingResult> {
+        let descriptor_store = LandmarkDescriptorStore::from_visual_map(map);
+        self.track_frames_with_descriptor_store(frames, map, &descriptor_store)
+    }
+
     pub fn track_frame_with_provider<P2>(&mut self, frame: &Frame, provider: &P2) -> TrackingResult
     where
         P2: MapProvider + DescriptorProvider,
@@ -357,6 +362,20 @@ where
         }
     }
 
+    pub fn track_frames_with_provider<P2>(
+        &mut self,
+        frames: &[Frame],
+        provider: &P2,
+    ) -> Vec<TrackingResult>
+    where
+        P2: MapProvider + DescriptorProvider,
+    {
+        frames
+            .iter()
+            .map(|frame| self.track_frame_with_provider(frame, provider))
+            .collect()
+    }
+
     pub fn track_frame_with_prior_submap_provider<P2>(
         &mut self,
         frame: &Frame,
@@ -378,6 +397,21 @@ where
         }
     }
 
+    pub fn track_frames_with_prior_submap_provider<P2>(
+        &mut self,
+        frames: &[Frame],
+        provider: &P2,
+        radius: f64,
+    ) -> Vec<TrackingResult>
+    where
+        P2: MapProvider + DescriptorProvider,
+    {
+        frames
+            .iter()
+            .map(|frame| self.track_frame_with_prior_submap_provider(frame, provider, radius))
+            .collect()
+    }
+
     pub fn track_frame_with_descriptor_store(
         &mut self,
         frame: &Frame,
@@ -396,6 +430,18 @@ where
             descriptor_store,
             map_stats,
         )
+    }
+
+    pub fn track_frames_with_descriptor_store(
+        &mut self,
+        frames: &[Frame],
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+    ) -> Vec<TrackingResult> {
+        frames
+            .iter()
+            .map(|frame| self.track_frame_with_descriptor_store(frame, map, descriptor_store))
+            .collect()
     }
 
     fn track_frame_with_descriptor_store_and_map_stats(

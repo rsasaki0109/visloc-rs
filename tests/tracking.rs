@@ -179,6 +179,44 @@ fn tracker_tracks_frame_with_map_provider() {
 }
 
 #[test]
+fn tracker_tracks_frame_sequence_with_convenience_api() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let mut second_frame = frame.clone();
+    second_frame.id = 11;
+    let frames = vec![frame, second_frame];
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let results = tracker.track_frames(&frames, &map);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].event, TrackingEvent::Initialized);
+    assert_eq!(results[1].event, TrackingEvent::Tracked);
+    assert!(results.iter().all(|result| result.localization.success));
+    assert_eq!(tracker.stats().first_frame_id, Some(10));
+    assert_eq!(tracker.stats().last_frame_id, Some(11));
+    assert_eq!(tracker.stats().frame_count, 2);
+    assert_eq!(tracker.stats().success_rate(), 1.0);
+}
+
+#[test]
+fn tracker_tracks_provider_sequence_with_convenience_api() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let mut second_frame = frame.clone();
+    second_frame.id = 11;
+    let frames = vec![frame, second_frame];
+    let provider = InMemoryMapProvider::new(map);
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let results = tracker.track_frames_with_provider(&frames, &provider);
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.localization.success));
+    assert_eq!(results[0].map_stats.landmark_count, 6);
+    assert_eq!(results[1].map_stats.descriptor_count, 6);
+    assert_eq!(tracker.stats().successful_frame_count, 2);
+}
+
+#[test]
 fn tracker_predicts_localization_prior_for_next_frame() {
     let (map, frame) = build_map_and_frame(10, 1);
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());

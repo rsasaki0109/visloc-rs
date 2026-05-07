@@ -52,14 +52,15 @@ fn main() {
         },
     );
 
-    for frame in [
+    let frames = [
         good_frame_a,
         good_frame_b,
         bad_frame_a,
         bad_frame_b,
         relocalize_frame,
-    ] {
-        let tracking = tracker.track_frame(&frame, &map);
+    ];
+
+    for tracking in tracker.track_frames(&frames, &map) {
         println!(
             "frame={} state={:?} event={:?} success={} failures={} prior={} reason={:?} map_landmarks={} descriptors={} inliers={} ratio={:.3}",
             tracking.frame_id,
