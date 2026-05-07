@@ -708,6 +708,11 @@ fn tracking_results_export_html_report() {
     assert!(html.contains("<span class=\"label\">Frames</span><span class=\"value\">2</span>"));
     assert!(html
         .contains("<span class=\"label\">Success rate</span><span class=\"value\">50.0%</span>"));
+    assert!(html
+        .contains("<span class=\"label\">Motion prior</span><span class=\"value\">50.0%</span>"));
+    assert!(html.contains(
+        "<span class=\"label\">External prior</span><span class=\"value\">1 (50.0%)</span>"
+    ));
     assert!(html.contains("NoDescriptorMatches"));
     assert!(html.contains("motion + external(8.000m)"));
     assert!(html.contains("Lost"));

@@ -17,6 +17,7 @@ All notable changes to `visloc-rs` will be documented here.
 - CSV export for frame-by-frame tracking state, localization counts, failures, priors, and map stats.
 - `TrackingStats` JSON export for aggregate tracking summaries.
 - Tracking diagnostics now distinguish motion pose priors from external localization priors such as GNSS-derived submap narrowing.
+- Tracking HTML reports now summarize motion-prior and external-localization-prior usage in the top-level metrics.
 - `TrackingStats::from_results` helper for rebuilding sequence diagnostics from stored tracking outputs.
 - Trajectory-evaluation example showing frame-id matched translation errors, CSV output, and JSON summary output.
 - File-based TUM trajectory evaluation example with optional CSV / JSON / HTML output directory.
