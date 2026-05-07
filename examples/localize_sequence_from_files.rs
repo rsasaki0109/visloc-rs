@@ -6,7 +6,8 @@ use visloc_rs::core::types::Frame;
 use visloc_rs::io::colmap::ColmapMapProvider;
 use visloc_rs::io::query_features::read_query_features_txt;
 use visloc_rs::{
-    DescriptorProvider, LocalizationPipeline, MapProvider, PoseTrajectory, Tracker, TrackingConfig,
+    write_tracking_results_html_report, DescriptorProvider, LocalizationPipeline, MapProvider,
+    PoseTrajectory, Tracker, TrackingConfig,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -109,19 +110,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let kitti_path = output_dir.join("poses.txt");
         let tum_path = output_dir.join("trajectory_tum.txt");
         let summary_path = output_dir.join("summary.json");
-        let report_path = output_dir.join("trajectory_report.html");
+        let trajectory_report_path = output_dir.join("trajectory_report.html");
+        let tracking_report_path = output_dir.join("tracking_report.html");
         trajectory.write_csv(&csv_path)?;
         trajectory.write_kitti_poses(&kitti_path)?;
         trajectory.write_tum_poses(&tum_path)?;
         trajectory.write_summary_json(&summary_path)?;
-        trajectory.write_html_report(&report_path)?;
+        trajectory.write_html_report(&trajectory_report_path)?;
+        write_tracking_results_html_report(&results, &tracking_report_path)?;
         println!(
-            "wrote trajectory exports: csv={} kitti={} tum={} summary={} report={}",
+            "wrote trajectory exports: csv={} kitti={} tum={} summary={} trajectory_report={} tracking_report={}",
             csv_path.display(),
             kitti_path.display(),
             tum_path.display(),
             summary_path.display(),
-            report_path.display()
+            trajectory_report_path.display(),
+            tracking_report_path.display()
         );
     }
 
