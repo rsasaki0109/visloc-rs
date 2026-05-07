@@ -62,6 +62,8 @@ All notable changes to `visloc-rs` will be documented here.
 - `visloc-slam` now reports lightweight loop-closure candidates from shared verified landmarks between the current frame and older keyframes.
 - `VisualOdometryFrontend`, `VisualOdometryEstimate`, and `NoopVisualOdometryFrontend` now provide the first tracking-level boundary for optional classical or learned two-frame VO integrations.
 - `VisualOdometryPriorProvider` and `VisualOdometryPosePrior` convert two-frame VO estimates into current-frame pose priors.
+- Two-view match text parsing supports external learned/classical matcher outputs for VO frontend experiments.
+- `read_two_view_matches_dummy` demonstrates the external two-view match text bridge.
 - `visual_odometry_prior_dummy` demonstrates the VO-prior adapter path without bundling a model runtime.
 - `track_sequence_with_visual_odometry_prior` demonstrates using a VO-derived external prior to narrow localization candidates during tracking.
 - `online_slam_loop_candidate_dummy` demonstrates loop-candidate reporting on a tiny synthetic sequence.

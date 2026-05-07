@@ -85,6 +85,10 @@ pub use visloc_io::kitti::{
 pub use visloc_io::sensors::{
     parse_gnss_measurements_txt, read_gnss_measurements_txt, SensorLogError,
 };
+pub use visloc_io::two_view_matches::{
+    parse_two_view_matches_txt, read_two_view_matches_txt, TwoViewFeatureMatch, TwoViewMatchError,
+    TwoViewMatchSet,
+};
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
     localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
@@ -145,14 +149,15 @@ pub mod prelude {
     pub use crate::{
         localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
         localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
-        online_slam_results_to_html_report, reproject, tracking_results_to_csv,
-        tracking_results_to_html_report, write_online_slam_results_html_report,
-        write_tracking_results_csv, write_tracking_results_html_report, AllLandmarksSelector,
-        AllMapSelector, BruteForceMatcher, Camera, CameraId, CameraModel, CandidateSelector,
-        ColmapMapProvider, ConstantPoseMotionModel, ConstantVelocityMotionModel,
-        CornerFeatureConfig, CornerFeatureError, CornerFeatureExtractor, Correspondence2D3D,
-        CorrespondenceBuildError, CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher,
-        DescriptorMatch, DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
+        online_slam_results_to_html_report, parse_two_view_matches_txt, read_two_view_matches_txt,
+        reproject, tracking_results_to_csv, tracking_results_to_html_report,
+        write_online_slam_results_html_report, write_tracking_results_csv,
+        write_tracking_results_html_report, AllLandmarksSelector, AllMapSelector,
+        BruteForceMatcher, Camera, CameraId, CameraModel, CandidateSelector, ColmapMapProvider,
+        ConstantPoseMotionModel, ConstantVelocityMotionModel, CornerFeatureConfig,
+        CornerFeatureError, CornerFeatureExtractor, Correspondence2D3D, CorrespondenceBuildError,
+        CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher, DescriptorMatch,
+        DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
         FixedLandmarkSelector, FixedLandmarkSubmapSelector, FnFeatureExtractor, Frame, FrameId,
         FrameLocalizationResult, FrameLocalizer, FramePriorSource, FramePriorSyncEvaluationConfig,
         FramePriorSyncEvaluationFailure, FramePriorSyncEvaluationResult, FramePriorSyncSummary,
@@ -181,9 +186,10 @@ pub mod prelude {
         TrajectoryAlignment, TrajectoryErrorSummary, TrajectoryEvaluationConfig,
         TrajectoryEvaluationFailure, TrajectoryEvaluationResult, TrajectoryFileError,
         TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TriangulationConfig,
-        TriangulationFailureReason, Triangulator, TumTrajectoryParseError, VisualMap,
-        VisualMapValidationIssue, VisualMapValidationReport, VisualOdometryEstimate,
-        VisualOdometryFrontend, VisualOdometryPosePrior, VisualOdometryPriorProvider, SE3, SO3,
+        TriangulationFailureReason, Triangulator, TumTrajectoryParseError, TwoViewFeatureMatch,
+        TwoViewMatchError, TwoViewMatchSet, VisualMap, VisualMapValidationIssue,
+        VisualMapValidationReport, VisualOdometryEstimate, VisualOdometryFrontend,
+        VisualOdometryPosePrior, VisualOdometryPriorProvider, SE3, SO3,
     };
 
     pub use crate::io::calibration::{
