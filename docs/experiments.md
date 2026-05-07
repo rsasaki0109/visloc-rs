@@ -14,6 +14,9 @@ Initial experiments should stay focused on map-based localization:
 - Timestamped PNG/JPEG-backed image sequence tracking with GNSS priors using `cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior`
 - `scripts/check_timestamped_gnss_image_demo_outputs.sh` verifies the timestamped image GNSS-prior demo images, timestamp file, GNSS log, and sync evaluation JSON.
 - The timestamped image GNSS-prior demo output guide is in [timestamped_gnss_image_demo.md](timestamped_gnss_image_demo.md).
+- KITTI-style image sequence loading with `cargo run --features image-io --example load_kitti_image_sequence`
+- `scripts/check_kitti_image_sequence_demo_outputs.sh` verifies the KITTI-style image sequence demo images, timestamp file, calibration file, and loader output log.
+- The KITTI-style image sequence demo output guide is in [kitti_image_sequence_demo.md](kitti_image_sequence_demo.md).
 - File-based sequence localization and tracking report export with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Tracking report export with `cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo`
@@ -24,6 +27,6 @@ Initial experiments should stay focused on map-based localization:
 - Browser-viewable reports are written as `trajectory_report.html` / `tracking_report.html`, with frame-level tracking diagnostics in `tracking.csv` and aggregate tracking metrics in `tracking_summary.json`
 - Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`, including an `index.html` dashboard, `manifest.json`, tracking diagnostics, `tracking_evaluation.json`, KITTI/TUM poses, synthetic-reference translation errors, and trajectory CSV / JSON / HTML exports
 - The GNSS-prior demo output guide is in [gnss_demo.md](gnss_demo.md).
-- CI checks both the moving-camera GNSS dashboard demo and the timestamped image GNSS-prior demo; it uploads the checked output directories as `gnss-demo-outputs` and `timestamped-gnss-image-demo-outputs` artifacts.
+- CI checks the moving-camera GNSS dashboard demo, timestamped image GNSS-prior demo, and KITTI-style image sequence demo; it uploads the checked output directories as `gnss-demo-outputs`, `timestamped-gnss-image-demo-outputs`, and `kitti-image-sequence-demo-outputs` artifacts.
 
 Future experiments can add image feature extraction, online Visual SLAM, inertial priors, and public automotive or UAV sequence data after the visual localization slice is stable.
