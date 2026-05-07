@@ -102,6 +102,16 @@ This is not SLAM: it does not create keyframes, update maps, run bundle adjustme
 
 This is the first v0.3 extension point. Future landmark candidates, triangulation, and local refinement should consume these decisions and staged updates instead of being baked into tracking.
 
+## Online SLAM MVP
+
+`visloc-slam` composes tracking and local mapping without adding loop closure or global optimization:
+
+- `OnlineSlamPipeline`: owns a `VisualMap`, a `Tracker`, and a `LocalMappingPipeline`
+- `OnlineSlamConfig`: controls whether valid staged updates are applied immediately
+- `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, and current map sizes
+
+Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
+
 ## Descriptor Store Text Format
 
 ```text
