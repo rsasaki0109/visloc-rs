@@ -1,4 +1,5 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
+use std::fs;
 use visloc_core::geometry::Pose;
 use visloc_core::types::Frame;
 use visloc_fusion::{
@@ -487,4 +488,38 @@ fn frame_prior_source_evaluates_measurement_sync_thresholds() {
     });
     assert!(passing.passed);
     assert!(passing.failures.is_empty());
+}
+
+#[test]
+fn frame_prior_sync_evaluation_exports_json() {
+    let summary = FramePriorSyncSummary {
+        frame_count: 3,
+        measurement_count: 2,
+        matched_frame_count: 1,
+        missing_measurement_count: 2,
+    };
+    let result = summary.evaluate(FramePriorSyncEvaluationConfig {
+        min_matched_frame_count: Some(2),
+        min_matched_frame_ratio: Some(0.75),
+    });
+    let path = tempfile_path("visloc-frame-prior-sync-evaluation.json");
+
+    let json = result.to_json();
+    result.write_json(&path).unwrap();
+    let written = fs::read_to_string(&path).unwrap();
+
+    assert!(json.contains("\"passed\": false"));
+    assert!(json.contains("\"matched_frame_count\": 1"));
+    assert!(json.contains("\"matched_frame_ratio\": 0.3333333333333333"));
+    assert!(json.contains("\"min_matched_frame_count\": 2"));
+    assert!(json.contains("\"matched_frame_ratio_too_low\""));
+    assert_eq!(written, json);
+}
+
+fn tempfile_path(name: &str) -> std::path::PathBuf {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{}_{}_{}", std::process::id(), suffix, name))
 }

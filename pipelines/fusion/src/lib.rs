@@ -7,6 +7,7 @@
 //! without depending on a specific robotics stack.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use nalgebra::{Matrix3, Point3, SMatrix, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
@@ -215,6 +216,25 @@ impl FramePriorSyncSummary {
             failures,
         }
     }
+
+    fn to_json_inline(self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"frame_count\": {}, ",
+                "\"measurement_count\": {}, ",
+                "\"matched_frame_count\": {}, ",
+                "\"missing_measurement_count\": {}, ",
+                "\"matched_frame_ratio\": {}",
+                "}}"
+            ),
+            self.frame_count,
+            self.measurement_count,
+            self.matched_frame_count,
+            self.missing_measurement_count,
+            export_f64(self.matched_frame_ratio())
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -223,10 +243,40 @@ pub struct FramePriorSyncEvaluationConfig {
     pub min_matched_frame_ratio: Option<f64>,
 }
 
+impl FramePriorSyncEvaluationConfig {
+    fn to_json_inline(self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"min_matched_frame_count\": {}, ",
+                "\"min_matched_frame_ratio\": {}",
+                "}}"
+            ),
+            optional_usize_json(self.min_matched_frame_count),
+            optional_f64_json(self.min_matched_frame_ratio)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FramePriorSyncEvaluationFailure {
     MatchedFrameCountTooLow { actual: usize, minimum: usize },
     MatchedFrameRatioTooLow { actual: f64, minimum: f64 },
+}
+
+impl FramePriorSyncEvaluationFailure {
+    fn to_json_inline(&self) -> String {
+        match self {
+            Self::MatchedFrameCountTooLow { actual, minimum } => format!(
+                "{{\"kind\": \"matched_frame_count_too_low\", \"actual\": {actual}, \"minimum\": {minimum}}}"
+            ),
+            Self::MatchedFrameRatioTooLow { actual, minimum } => format!(
+                "{{\"kind\": \"matched_frame_ratio_too_low\", \"actual\": {}, \"minimum\": {}}}",
+                export_f64(*actual),
+                export_f64(*minimum)
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +285,29 @@ pub struct FramePriorSyncEvaluationResult {
     pub summary: FramePriorSyncSummary,
     pub config: FramePriorSyncEvaluationConfig,
     pub failures: Vec<FramePriorSyncEvaluationFailure>,
+}
+
+impl FramePriorSyncEvaluationResult {
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"passed\": {},\n",
+                "  \"summary\": {},\n",
+                "  \"config\": {},\n",
+                "  \"failures\": {}\n",
+                "}}\n"
+            ),
+            self.passed,
+            self.summary.to_json_inline(),
+            self.config.to_json_inline(),
+            frame_prior_sync_failures_json(&self.failures)
+        )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
 }
 
 pub type PoseCovarianceMatrix = SMatrix<f64, 6, 6>;
@@ -738,5 +811,33 @@ fn standard_deviation_from_variance(variance: f64) -> Option<f64> {
         Some(variance.sqrt())
     } else {
         None
+    }
+}
+
+fn frame_prior_sync_failures_json(failures: &[FramePriorSyncEvaluationFailure]) -> String {
+    let mut output = String::from("[");
+    for (index, failure) in failures.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&failure.to_json_inline());
+    }
+    output.push(']');
+    output
+}
+
+fn optional_usize_json(value: Option<usize>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
+}
+
+fn optional_f64_json(value: Option<f64>) -> String {
+    value.map_or_else(|| "null".to_owned(), export_f64)
+}
+
+fn export_f64(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_owned()
     }
 }
