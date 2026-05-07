@@ -102,18 +102,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("trajectory_csv:\n{}", trajectory.to_csv());
     println!("trajectory_kitti_poses:\n{}", trajectory.to_kitti_poses());
+    println!("trajectory_tum_poses:\n{}", trajectory.to_tum_poses());
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
         let csv_path = output_dir.join("trajectory.csv");
         let kitti_path = output_dir.join("poses.txt");
+        let tum_path = output_dir.join("trajectory_tum.txt");
         let summary_path = output_dir.join("summary.json");
         trajectory.write_csv(&csv_path)?;
         trajectory.write_kitti_poses(&kitti_path)?;
+        trajectory.write_tum_poses(&tum_path)?;
         trajectory.write_summary_json(&summary_path)?;
         println!(
-            "wrote trajectory exports: csv={} kitti={} summary={}",
+            "wrote trajectory exports: csv={} kitti={} tum={} summary={}",
             csv_path.display(),
             kitti_path.display(),
+            tum_path.display(),
             summary_path.display()
         );
     }
