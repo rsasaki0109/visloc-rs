@@ -1,0 +1,65 @@
+name: Bug Report
+description: Report incorrect behavior, crashes, parser failures, or localization regressions.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a `visloc-rs` issue. Please include enough detail to reproduce the problem with a small map, query feature file, or synthetic case when possible.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: PnP RANSAC returns no pose for a valid COLMAP text map...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Commands, input files, or a minimal Rust snippet that reproduces the issue.
+      placeholder: |
+        cargo run --example localize_from_files -- ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What result did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: Include logs, diagnostics, inlier counts, reprojection errors, or parser errors.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version Or Commit
+      placeholder: 0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, and relevant dataset/map format.
+      placeholder: |
+        Ubuntu 24.04
+        rustc 1.82.0
+        COLMAP text model
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I have checked the README and relevant docs.
+          required: true
+        - label: I can reproduce this on the latest main branch or a specific released version.
+          required: true
