@@ -2,6 +2,7 @@
 set -eu
 
 examples="
+evaluate_trajectory_dummy
 localize_dummy
 localize_colmap_text
 localize_colmap_provider
