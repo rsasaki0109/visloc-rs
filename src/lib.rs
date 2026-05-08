@@ -117,7 +117,8 @@ pub use visloc_slam::{
     LoopClosureCandidate, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerification,
     LoopClosureVerificationFailureReason, LoopClosureVerifier, LoopClosureVerifierConfig,
     OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphEdge,
-    PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
+    PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep, PoseGraphSe3Config,
+    PoseGraphSe3IterationStats, PoseGraphSe3Result,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use nalgebra::{DMatrix, DVector, Point2, Point3};
+use nalgebra::{DMatrix, DVector, Matrix6, Point2, Point3, Vector6};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
@@ -986,6 +986,48 @@ pub struct PoseGraphOptimizationStep {
     pub max_translation_correction: f64,
 }
 
+/// Configuration for [`PoseGraph::optimize_se3_iterative`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphSe3Config {
+    /// Hard cap on Gauss-Newton iterations.
+    pub max_iterations: usize,
+    /// Convergence threshold on the largest per-node 6-vector update.
+    pub step_tolerance: f64,
+    /// Convergence threshold on the absolute cost change between two iterations.
+    pub cost_tolerance: f64,
+}
+
+impl Default for PoseGraphSe3Config {
+    fn default() -> Self {
+        Self {
+            max_iterations: 20,
+            step_tolerance: 1e-6,
+            cost_tolerance: 1e-9,
+        }
+    }
+}
+
+/// Per-iteration diagnostics for [`PoseGraph::optimize_se3_iterative`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphSe3IterationStats {
+    pub iteration: usize,
+    pub cost_before: f64,
+    pub cost_after: f64,
+    pub max_step_norm: f64,
+}
+
+/// Result of a full SE(3) Gauss-Newton run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphSe3Result {
+    pub anchor_id: u64,
+    pub edge_count: usize,
+    pub variable_count: usize,
+    pub initial_cost: f64,
+    pub final_cost: f64,
+    pub iterations: Vec<PoseGraphSe3IterationStats>,
+    pub converged: bool,
+}
+
 /// Errors returned by [`PoseGraph::optimize_translations_once`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoseGraphError {
@@ -1212,6 +1254,172 @@ impl PoseGraph {
             mean_translation_correction,
             max_translation_correction: max_correction,
         })
+    }
+
+    /// Sum of squared SE(3) residuals: r_e = log(meas_e⁻¹ · T_to · T_from⁻¹),
+    /// weighted by `edge.weight`. Unlike [`Self::translation_cost`], this
+    /// includes both the translation and rotation components of every edge.
+    pub fn se3_cost(&self) -> f64 {
+        let mut total = 0.0;
+        for edge in &self.edges {
+            let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
+            else {
+                continue;
+            };
+            let predicted = to.world_to_camera.compose(&from.world_to_camera.inverse());
+            let r = edge.measurement.inverse().compose(&predicted).log();
+            total += edge.weight * r.norm_squared();
+        }
+        total
+    }
+
+    /// Run a full SE(3) Gauss-Newton optimization with right-perturbation
+    /// updates `T_i ← T_i · Exp(δ_i)`. Uses the first-order BCH approximation
+    /// `J_r⁻¹(r) ≈ I`, so each edge contributes:
+    ///
+    /// - residual: `r_e = log(meas_e⁻¹ · T_to · T_from⁻¹)` (6-vector),
+    /// - Jacobians: `∂r/∂δ_to = Ad(T_from)`, `∂r/∂δ_from = -Ad(T_from)`.
+    ///
+    /// The anchor pose is held fixed; all other poses are updated. Returns the
+    /// per-iteration cost trace plus a `converged` flag derived from the
+    /// configured tolerances.
+    pub fn optimize_se3_iterative(
+        &mut self,
+        config: &PoseGraphSe3Config,
+    ) -> Result<PoseGraphSe3Result, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if !self.poses.contains_key(&anchor_id) {
+            return Err(PoseGraphError::MissingNode(anchor_id));
+        }
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        for edge in &self.edges {
+            if !self.poses.contains_key(&edge.from) {
+                return Err(PoseGraphError::MissingNode(edge.from));
+            }
+            if !self.poses.contains_key(&edge.to) {
+                return Err(PoseGraphError::MissingNode(edge.to));
+            }
+        }
+
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+
+        let initial_cost = self.se3_cost();
+        let mut iterations: Vec<PoseGraphSe3IterationStats> =
+            Vec::with_capacity(config.max_iterations);
+        let mut converged = false;
+        let mut current_cost = initial_cost;
+        let dim = variable_count * 6;
+
+        for iteration in 0..config.max_iterations {
+            let mut h = DMatrix::<f64>::zeros(dim, dim);
+            let mut g = DVector::<f64>::zeros(dim);
+
+            for edge in &self.edges {
+                let t_from = &self.poses[&edge.from].world_to_camera;
+                let t_to = &self.poses[&edge.to].world_to_camera;
+                let predicted = t_to.compose(&t_from.inverse());
+                let r = edge.measurement.inverse().compose(&predicted).log();
+                let ad_from = t_from.adjoint();
+                let weight = edge.weight;
+                let ata = ad_from.transpose() * ad_from;
+                let atr = ad_from.transpose() * r;
+
+                let i_from = node_index.get(&edge.from).copied();
+                let i_to = node_index.get(&edge.to).copied();
+
+                if let Some(j) = i_to {
+                    add_block6(&mut h, j * 6, j * 6, weight, &ata);
+                    add_segment6(&mut g, j * 6, weight, &atr);
+                }
+                if let Some(i) = i_from {
+                    add_block6(&mut h, i * 6, i * 6, weight, &ata);
+                    add_segment6(&mut g, i * 6, -weight, &atr);
+                }
+                if let (Some(j), Some(i)) = (i_to, i_from) {
+                    let cross = -ata;
+                    let cross_t = cross.transpose();
+                    add_block6(&mut h, j * 6, i * 6, weight, &cross);
+                    add_block6(&mut h, i * 6, j * 6, weight, &cross_t);
+                }
+            }
+
+            let neg_g = -&g;
+            let delta = h.lu().solve(&neg_g).ok_or(PoseGraphError::SingularSystem)?;
+
+            let mut max_step_norm: f64 = 0.0;
+            let cost_before = current_cost;
+            for (&id, &i) in &node_index {
+                let block = i * 6;
+                let mut xi = Vector6::<f64>::zeros();
+                for k in 0..6 {
+                    xi[k] = delta[block + k];
+                }
+                let step = xi.norm();
+                if step > max_step_norm {
+                    max_step_norm = step;
+                }
+                let pose = self
+                    .poses
+                    .get_mut(&id)
+                    .ok_or(PoseGraphError::MissingNode(id))?;
+                pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&xi));
+            }
+
+            let cost_after = self.se3_cost();
+            current_cost = cost_after;
+            iterations.push(PoseGraphSe3IterationStats {
+                iteration,
+                cost_before,
+                cost_after,
+                max_step_norm,
+            });
+
+            if max_step_norm < config.step_tolerance {
+                converged = true;
+                break;
+            }
+            if (cost_before - cost_after).abs() < config.cost_tolerance {
+                converged = true;
+                break;
+            }
+        }
+
+        Ok(PoseGraphSe3Result {
+            anchor_id,
+            edge_count: self.edges.len(),
+            variable_count,
+            initial_cost,
+            final_cost: current_cost,
+            iterations,
+            converged,
+        })
+    }
+}
+
+fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {
+    for r in 0..6 {
+        for c in 0..6 {
+            h[(row + r, col + c)] += weight * block[(r, c)];
+        }
+    }
+}
+
+fn add_segment6(g: &mut DVector<f64>, start: usize, weight: f64, v: &Vector6<f64>) {
+    for k in 0..6 {
+        g[start + k] += weight * v[k];
     }
 }
 
