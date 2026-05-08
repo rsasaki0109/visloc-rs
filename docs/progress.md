@@ -4,15 +4,17 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 70%**
+**Deep VO / Loop Close completion: 80%**
 
 This score means the file-backed two-view match VO path drives a short tracking
 sequence end-to-end, a classical essential-matrix RANSAC frontend recovers
 metric relative pose from the same external correspondences, loop-closure
-candidates are geometrically verified through that classical frontend, and
-verified candidates now lift into a `LoopClosureConstraint` type ready for a
-future pose-graph layer. The project has not yet reached a real
-learned-frontend sequence demo or pose-graph optimization.
+candidates are geometrically verified through that classical frontend,
+verified candidates lift into a `LoopClosureConstraint`, and a sparse
+`PoseGraph` skeleton can consume sequential and loop-closure edges and run a
+single translation-only Gauss-Newton step that pulls drifted nodes back along
+the verified loop. The project has not yet reached a real learned-frontend
+sequence demo or full SE3 pose-graph optimization with rotation updates.
 
 Completed pieces:
 
@@ -44,12 +46,22 @@ Completed pieces:
   `loop_closure_constraints_from_candidates`) lifts each verified candidate
   into a stand-alone constraint (`from_keyframe_id`, `to_keyframe_id`,
   `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`,
-  `score`) that a future pose-graph backend can consume. No solver lives
-  in this crate yet.
+  `score`) that a future pose-graph backend can consume.
+- `PoseGraph` skeleton (nodes = `BTreeMap<u64, Pose>`, edges =
+  `PoseGraphEdge { from, to, measurement, kind, weight }`,
+  anchor = `Option<u64>`) plus `PoseGraphEdgeKind::{Sequential, LoopClosure}`,
+  builders (`add_pose`, `add_sequential_edge`, `add_loop_closure_constraint`,
+  `anchor`, `relative_world_to_camera`), `translation_cost`, and a single
+  translation-only Gauss-Newton step `optimize_translations_once` that holds
+  rotations fixed and returns a `PoseGraphOptimizationStep` diagnostic. The
+  step is exact for translation-only residuals.
 - `online_slam_loop_candidate_with_verifier_dummy` example now also builds
   per-frame `LoopClosureConstraint`s and prints the recovered relative
   translation; the loop HTML/SVG report surfaces a separate Loop Closure
-  Constraints table alongside the candidate diagnostics.
+  Constraints table alongside the candidate diagnostics. The example also
+  injects a small drift into the most recent keyframe, builds a `PoseGraph`,
+  runs `optimize_translations_once`, and prints the cost / mean-correction /
+  max-correction diagnostics so the loop drift correction is visible.
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
@@ -69,7 +81,7 @@ Remaining pieces before this milestone is considered complete:
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 70%
+Deep VO / Loop Close completion: 80%
 ```
 
 Increase the number only when a runnable example, test, or documented API

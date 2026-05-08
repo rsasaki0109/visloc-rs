@@ -5,8 +5,9 @@ use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
     loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
-    verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier, LoopClosureConfig,
-    LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline,
+    relative_world_to_camera, verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
+    OnlineSlamPipeline, PoseGraph, PoseGraphError,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -402,4 +403,118 @@ fn online_slam_respects_loop_closure_frame_gap() {
 
     assert!(second.tracking_succeeded());
     assert!(!second.has_loop_closure_candidate());
+}
+
+fn pose_at(camera_center: Vector3<f64>) -> Pose {
+    Pose::from_world_to_camera(UnitQuaternion::identity(), -camera_center)
+}
+
+#[test]
+fn pose_graph_translation_gauss_newton_pulls_drifted_loop_back_to_anchor() {
+    // Three keyframes laid out as a small loop. Truth camera centers:
+    //   10 -> (0.0, 0.0, 0.0)  (anchor)
+    //   20 -> (1.4, 0.0, 0.4)
+    //   30 -> (0.2, 0.0, 0.1)
+    // Sequential edges 10->20 and 20->30 carry truth measurements; the loop
+    // closure 10->30 is also at truth. The graph node for 30 is initialized
+    // with drift, and the single Gauss-Newton step must pull it back.
+    let truth_10 = pose_at(Vector3::new(0.0, 0.0, 0.0));
+    let truth_20 = pose_at(Vector3::new(1.4, 0.0, 0.4));
+    let truth_30 = pose_at(Vector3::new(0.2, 0.0, 0.1));
+
+    let edge_10_20 = relative_world_to_camera(&truth_10, &truth_20);
+    let edge_20_30 = relative_world_to_camera(&truth_20, &truth_30);
+    let edge_10_30 = relative_world_to_camera(&truth_10, &truth_30);
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10.clone());
+    graph.add_pose(20, truth_20.clone());
+    // Initialize node 30 with a deliberate translation drift.
+    let drifted_30 = pose_at(Vector3::new(0.45, 0.10, 0.30));
+    graph.add_pose(30, drifted_30);
+    graph.anchor(10);
+
+    graph.add_sequential_edge(10, 20, edge_10_20);
+    graph.add_sequential_edge(20, 30, edge_20_30);
+    graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        from_keyframe_id: 10,
+        to_keyframe_id: 30,
+        relative_pose: edge_10_30,
+        inlier_count: 12,
+        inlier_ratio: 1.0,
+        mean_sampson_error: 1.0e-4,
+        score: 100.0,
+    });
+
+    let cost_before = graph.translation_cost();
+    assert!(
+        cost_before > 0.05,
+        "expected nontrivial drift cost, got {cost_before}"
+    );
+
+    let step = graph
+        .optimize_translations_once()
+        .expect("solve must succeed");
+    assert_eq!(step.anchor_id, 10);
+    assert_eq!(step.edge_count, 3);
+    assert_eq!(step.variable_count, 2);
+    assert!(step.cost_after < 1.0e-9);
+    assert!(step.cost_after < step.cost_before);
+
+    let center_30 = graph.poses[&30].camera_center_world();
+    assert!(
+        (center_30 - Point3::new(0.2, 0.0, 0.1)).norm() < 1.0e-9,
+        "node 30 should snap back to truth: {center_30:?}"
+    );
+    let center_20 = graph.poses[&20].camera_center_world();
+    assert!((center_20 - Point3::new(1.4, 0.0, 0.4)).norm() < 1.0e-9);
+}
+
+#[test]
+fn pose_graph_optimize_returns_no_anchor_error_when_unset() {
+    let mut graph = PoseGraph::new();
+    graph.add_pose(1, pose_at(Vector3::zeros()));
+    graph.add_pose(2, pose_at(Vector3::new(1.0, 0.0, 0.0)));
+    graph.add_sequential_edge(
+        1,
+        2,
+        relative_world_to_camera(
+            &pose_at(Vector3::zeros()),
+            &pose_at(Vector3::new(1.0, 0.0, 0.0)),
+        ),
+    );
+
+    assert_eq!(
+        graph.optimize_translations_once(),
+        Err(PoseGraphError::NoAnchor)
+    );
+}
+
+#[test]
+fn pose_graph_optimize_returns_no_edges_error_when_empty() {
+    let mut graph = PoseGraph::new();
+    graph.add_pose(1, pose_at(Vector3::zeros()));
+    graph.anchor(1);
+
+    assert_eq!(
+        graph.optimize_translations_once(),
+        Err(PoseGraphError::NoEdges)
+    );
+}
+
+#[test]
+fn pose_graph_optimize_returns_no_variables_error_when_only_anchor_present() {
+    let mut graph = PoseGraph::new();
+    graph.add_pose(1, pose_at(Vector3::zeros()));
+    graph.anchor(1);
+    graph.add_sequential_edge(
+        1,
+        1,
+        relative_world_to_camera(&pose_at(Vector3::zeros()), &pose_at(Vector3::zeros())),
+    );
+
+    assert_eq!(
+        graph.optimize_translations_once(),
+        Err(PoseGraphError::NoVariables)
+    );
 }

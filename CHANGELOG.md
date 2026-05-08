@@ -6,6 +6,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- Sparse `PoseGraph` skeleton with `PoseGraphEdge`, `PoseGraphEdgeKind::{Sequential, LoopClosure}`, builders (`add_pose`, `add_sequential_edge`, `add_loop_closure_constraint`, `anchor`), `translation_cost`, and a single translation-only `optimize_translations_once` Gauss-Newton step that holds rotations fixed and returns `PoseGraphOptimizationStep` diagnostics.
+- `relative_world_to_camera` helper turns two `Pose`s into a `previous_to_current` SE3 measurement for `PoseGraphEdge`.
+- `online_slam_loop_candidate_with_verifier_dummy` example now also injects a small drift into the most recent keyframe, builds a `PoseGraph`, and runs `optimize_translations_once` so the loop drift correction is visible: cost goes from 0.0585 to 0.0 with mean translation correction ~0.034 m.
+- Deep VO / loop-close milestone completion increased to 80% to reflect the pose-graph skeleton and translation-only solver.
 - `LoopClosureConstraint` plus `LoopClosureConstraint::from_verified_candidate` and `loop_closure_constraints_from_candidates` lift a verified `LoopClosureCandidate` into a stand-alone constraint (`from_keyframe_id`, `to_keyframe_id`, `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`, `score`) ready for a future pose-graph backend; no solver lives in the crate yet.
 - `LoopClosureVerification` now carries the recovered `relative_pose: Option<SE3>` so callers can build constraints (or apply their own scale) without re-running the essential-matrix RANSAC, and `LoopClosureVerifierConfig` adds `default_translation_scale` for caller-controlled translation scale.
 - `online_slam_loop_candidate_with_verifier_dummy` example now also builds and prints `LoopClosureConstraint`s; the loop HTML/SVG report renders a separate Loop Closure Constraints table next to the candidate diagnostics.
