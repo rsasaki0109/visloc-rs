@@ -51,12 +51,18 @@ pub enum ImageSequenceError {
         path: PathBuf,
         source: CommonImageError,
     },
+    #[error("timestamp count mismatch: {path_count} image paths, {timestamp_count} timestamps")]
+    TimestampCountMismatch {
+        path_count: usize,
+        timestamp_count: usize,
+    },
 }
 
 #[cfg(feature = "image-io")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedImageFrame {
     pub frame_id: FrameId,
+    pub timestamp_nanoseconds: Option<i128>,
     pub path: PathBuf,
     pub image: GrayscaleImage,
 }
@@ -70,6 +76,10 @@ pub struct ImageSequenceSummary {
     pub width: Option<usize>,
     pub height: Option<usize>,
     pub varying_dimensions: bool,
+    pub timestamp_count: usize,
+    pub first_timestamp_nanoseconds: Option<i128>,
+    pub last_timestamp_nanoseconds: Option<i128>,
+    pub timestamps_valid: bool,
 }
 
 #[cfg(feature = "image-io")]
@@ -82,6 +92,17 @@ pub enum ImageSequenceValidationIssue {
         height: usize,
         expected_width: usize,
         expected_height: usize,
+    },
+    MissingTimestamp {
+        frame_id: FrameId,
+        path: PathBuf,
+    },
+    NonMonotonicTimestamp {
+        frame_id: FrameId,
+        path: PathBuf,
+        timestamp_nanoseconds: i128,
+        previous_frame_id: FrameId,
+        previous_timestamp_nanoseconds: i128,
     },
 }
 
@@ -172,6 +193,34 @@ pub fn read_common_image_sequence<P>(
 where
     P: AsRef<Path>,
 {
+    read_common_image_sequence_with_optional_timestamps(paths, None)
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image_sequence_with_timestamps<P>(
+    paths: &[P],
+    timestamps_nanoseconds: &[i128],
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError>
+where
+    P: AsRef<Path>,
+{
+    if paths.len() != timestamps_nanoseconds.len() {
+        return Err(ImageSequenceError::TimestampCountMismatch {
+            path_count: paths.len(),
+            timestamp_count: timestamps_nanoseconds.len(),
+        });
+    }
+    read_common_image_sequence_with_optional_timestamps(paths, Some(timestamps_nanoseconds))
+}
+
+#[cfg(feature = "image-io")]
+fn read_common_image_sequence_with_optional_timestamps<P>(
+    paths: &[P],
+    timestamps_nanoseconds: Option<&[i128]>,
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError>
+where
+    P: AsRef<Path>,
+{
     let mut frames = Vec::with_capacity(paths.len());
     for (index, path) in paths.iter().enumerate() {
         let path = path.as_ref();
@@ -181,6 +230,7 @@ where
         })?;
         frames.push(LoadedImageFrame {
             frame_id: index as FrameId,
+            timestamp_nanoseconds: timestamps_nanoseconds.map(|timestamps| timestamps[index]),
             path: path.to_path_buf(),
             image,
         });
@@ -206,6 +256,10 @@ pub fn read_common_image_sequence_dir(
 #[cfg(feature = "image-io")]
 pub fn common_image_sequence_summary(frames: &[LoadedImageFrame]) -> ImageSequenceSummary {
     let first = frames.first();
+    let timestamp_count = frames
+        .iter()
+        .filter(|frame| frame.timestamp_nanoseconds.is_some())
+        .count();
     ImageSequenceSummary {
         frame_count: frames.len(),
         first_frame_id: first.map(|frame| frame.frame_id),
@@ -213,6 +267,13 @@ pub fn common_image_sequence_summary(frames: &[LoadedImageFrame]) -> ImageSequen
         width: first.map(|frame| frame.image.width()),
         height: first.map(|frame| frame.image.height()),
         varying_dimensions: !validate_common_image_sequence_dimensions(frames).is_empty(),
+        timestamp_count,
+        first_timestamp_nanoseconds: frames.iter().find_map(|frame| frame.timestamp_nanoseconds),
+        last_timestamp_nanoseconds: frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.timestamp_nanoseconds),
+        timestamps_valid: validate_common_image_sequence_timestamps(frames).is_empty(),
     }
 }
 
@@ -244,6 +305,45 @@ pub fn validate_common_image_sequence_dimensions(
             })
         })
         .collect()
+}
+
+#[cfg(feature = "image-io")]
+pub fn validate_common_image_sequence_timestamps(
+    frames: &[LoadedImageFrame],
+) -> Vec<ImageSequenceValidationIssue> {
+    if frames
+        .iter()
+        .all(|frame| frame.timestamp_nanoseconds.is_none())
+    {
+        return Vec::new();
+    }
+
+    let mut issues = Vec::new();
+    let mut previous: Option<(FrameId, i128)> = None;
+    for frame in frames {
+        let Some(timestamp_nanoseconds) = frame.timestamp_nanoseconds else {
+            issues.push(ImageSequenceValidationIssue::MissingTimestamp {
+                frame_id: frame.frame_id,
+                path: frame.path.clone(),
+            });
+            continue;
+        };
+
+        if let Some((previous_frame_id, previous_timestamp_nanoseconds)) = previous {
+            if timestamp_nanoseconds < previous_timestamp_nanoseconds {
+                issues.push(ImageSequenceValidationIssue::NonMonotonicTimestamp {
+                    frame_id: frame.frame_id,
+                    path: frame.path.clone(),
+                    timestamp_nanoseconds,
+                    previous_frame_id,
+                    previous_timestamp_nanoseconds,
+                });
+            }
+        }
+        previous = Some((frame.frame_id, timestamp_nanoseconds));
+    }
+
+    issues
 }
 
 #[cfg(feature = "image-io")]

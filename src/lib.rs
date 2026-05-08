@@ -66,7 +66,8 @@ pub use visloc_io::colmap::ColmapMapProvider;
 pub use visloc_io::images::{
     common_image_sequence_summary, decode_common_image, read_common_image,
     read_common_image_sequence, read_common_image_sequence_dir,
-    validate_common_image_sequence_dimensions, write_png_gray, CommonImageError,
+    read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+    validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
     ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
 };
 pub use visloc_localization::{
@@ -169,7 +170,8 @@ pub mod prelude {
     pub use crate::io::images::{
         common_image_sequence_summary, decode_common_image, read_common_image,
         read_common_image_sequence, read_common_image_sequence_dir,
-        validate_common_image_sequence_dimensions, write_png_gray, CommonImageError,
+        read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+        validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
         ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
     };
     pub use crate::io::images::{

@@ -32,11 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("sequence dir: {}", sequence_dir.display());
     println!(
-        "loaded image frames: {} size={:?}x{:?} varying_dimensions={}",
+        "loaded image frames: {} size={:?}x{:?} varying_dimensions={} timestamps={}",
         sequence_summary.frame_count,
         sequence_summary.width,
         sequence_summary.height,
-        sequence_summary.varying_dimensions
+        sequence_summary.varying_dimensions,
+        sequence_summary.timestamp_count
     );
     println!("dimension validation issues: {}", dimension_issues.len());
     println!("map landmarks: {}", map.landmarks.len());
