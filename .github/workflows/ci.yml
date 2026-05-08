@@ -32,6 +32,9 @@ jobs:
       - name: Examples
         run: scripts/run_examples.sh
 
+      - name: GNSS demo outputs
+        run: scripts/check_gnss_demo_outputs.sh
+
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
