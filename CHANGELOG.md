@@ -32,6 +32,7 @@ All notable changes to `visloc-rs` will be documented here.
 - CI now runs the GNSS demo output smoke test in addition to the regular example suite.
 - CI now uploads the checked GNSS demo dashboard and export directory as a `gnss-demo-outputs` artifact.
 - Documentation now includes a GNSS-prior tracking demo guide with dashboard, report, export, and expected-metric notes.
+- GitHub issue templates, a pull request template, contribution guide, and security policy now document the project scope and local quality gate.
 
 ## 0.1.0 - 2026-05-07
 

@@ -1,0 +1,57 @@
+name: Feature Request
+description: Suggest a localization, tracking, mapping, SLAM, fusion, IO, or demo improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `visloc-rs` is localization-first. Please describe the smallest useful capability before proposing a full SLAM or fusion subsystem.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What user workflow should this enable?
+      placeholder: Localize a UAV image sequence against a sparse photogrammetry map with GNSS radius priors...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Visual Localization
+        - Tracking
+        - Local Mapping
+        - Online SLAM
+        - Sensor Fusion / GNSS / IMU
+        - COLMAP / SfM IO
+        - Demo / Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Shape
+      description: Mention API boundaries, traits, examples, or tests if you have a concrete design.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-Goals
+      description: What should this not try to solve yet?
+      placeholder: No loop closure, no dense mapping, no production GNSS/INS stack...
+  - type: textarea
+    id: data
+    attributes:
+      label: Data Or Demo
+      description: Public dataset, synthetic setup, or example that could validate this feature.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I understand that full SLAM, loop closure, dense mapping, and production fusion are not near-term scope.
+          required: true

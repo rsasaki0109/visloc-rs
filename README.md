@@ -236,6 +236,8 @@ docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building
 docs/assets/south-building-localization.png public-data localization visualization
 docs/assets/south-building-localization.gif animated public-data localization demo
+CONTRIBUTING.md          contribution guide and local check expectations
+SECURITY.md              security and safety-critical use policy
 CHANGELOG.md             unreleased changes and release notes
 LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
@@ -244,5 +246,7 @@ scripts/check.sh          local fmt/clippy/test/doc gate
 scripts/run_examples.sh   runs all user-facing examples
 scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
 scripts/package_check.sh  checks package metadata and crate contents
+.github/ISSUE_TEMPLATE/   bug report and feature request templates
+.github/pull_request_template.md PR checklist
 .github/workflows/ci.yml  GitHub Actions CI gate
 ```

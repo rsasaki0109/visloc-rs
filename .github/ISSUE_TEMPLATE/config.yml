@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Roadmap
+    url: https://github.com/rsasaki0109/visloc-rs/blob/main/docs/roadmap.md
+    about: Check the staged plan before requesting large SLAM or fusion work.
+  - name: Demo Guide
+    url: https://github.com/rsasaki0109/visloc-rs/blob/main/docs/gnss_demo.md
+    about: See the current GNSS-prior sequence-localization demo output guide.
