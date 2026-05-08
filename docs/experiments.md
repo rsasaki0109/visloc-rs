@@ -14,6 +14,6 @@ Initial experiments should stay focused on map-based localization:
 - KITTI file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti`
 - TUM file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval`
 - Browser-viewable reports are written as `trajectory_report.html` / `tracking_report.html`, with frame-level tracking diagnostics in `tracking.csv` and aggregate tracking metrics in `tracking_summary.json`
-- Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`
+- Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`, including tracking diagnostics and trajectory CSV / JSON / HTML exports
 
 Future experiments can add image feature extraction, online Visual SLAM, inertial priors, and public automotive or UAV sequence data after the visual localization slice is stable.

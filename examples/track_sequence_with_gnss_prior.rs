@@ -141,16 +141,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tracking_csv_path = output_dir.join("tracking.csv");
         let tracking_summary_path = output_dir.join("tracking_summary.json");
         let tracking_report_path = output_dir.join("tracking_report.html");
+        let trajectory_csv_path = output_dir.join("trajectory.csv");
+        let trajectory_summary_path = output_dir.join("trajectory_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
+        trajectory.write_csv(&trajectory_csv_path)?;
+        trajectory.write_summary_json(&trajectory_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         println!(
-            "wrote gnss tracking exports: csv={} summary={} tracking_report={} trajectory_report={}",
+            "wrote gnss tracking exports: tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_summary={} trajectory_report={}",
             tracking_csv_path.display(),
             tracking_summary_path.display(),
             tracking_report_path.display(),
+            trajectory_csv_path.display(),
+            trajectory_summary_path.display(),
             trajectory_report_path.display()
         );
     }
