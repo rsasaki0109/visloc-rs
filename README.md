@@ -54,6 +54,7 @@ Implemented now:
 - COLMAP text and binary parsers for cameras, images, and 3D points
 - Visual map validation for structural references and descriptor availability
 - Feature extractor adapters for validated externally supplied features
+- Lightweight grayscale corner feature extractor for dependency-free image-input smoke tests
 - Query feature text parser and file-based localization example
 - Public-data README demo built from COLMAP South Building images and a `pycolmap` sparse reconstruction
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
@@ -168,6 +169,12 @@ Run the file-based localization example, which reads a COLMAP text model, landma
 
 ```bash
 cargo run --example localize_from_files
+```
+
+Run the dependency-free grayscale corner extractor example, which creates a synthetic marker image, extracts corner features, builds a small descriptor map, and localizes the image:
+
+```bash
+cargo run --example localize_with_corner_extractor
 ```
 
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:

@@ -95,7 +95,9 @@ pub use visloc_tracking::{
     TrajectorySummary, TrajectoryTranslationError, TumTrajectoryParseError,
 };
 pub use visloc_vision::features::{
-    FeatureExtractor, FeatureSet, FeatureSetError, FnFeatureExtractor, ProvidedFeatureExtractor,
+    CornerFeatureConfig, CornerFeatureError, CornerFeatureExtractor, FeatureExtractor, FeatureSet,
+    FeatureSetError, FnFeatureExtractor, GrayscaleImage, GrayscaleImageError,
+    ProvidedFeatureExtractor,
 };
 pub use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, DescriptorMatch, Matcher};
 pub use visloc_vision::pnp::{
@@ -118,11 +120,12 @@ pub mod prelude {
         write_tracking_results_csv, write_tracking_results_html_report, AllLandmarksSelector,
         AllMapSelector, BruteForceMatcher, Camera, CameraId, CameraModel, CandidateSelector,
         ColmapMapProvider, ConstantPoseMotionModel, ConstantVelocityMotionModel,
-        Correspondence2D3D, CorrespondenceBuildError, CorrespondenceBuilder, CorrespondenceSet,
-        CrossCheckMatcher, DescriptorMatch, DescriptorProvider, DltPnP, FeatureExtractor,
-        FeatureSet, FeatureSetError, FixedLandmarkSelector, FixedLandmarkSubmapSelector,
-        FnFeatureExtractor, Frame, FrameId, FrameLocalizationResult, FrameLocalizer,
-        FramePriorSource, FrameTimestampIndex, GaussNewtonPoseRefiner, GnssMeasurement,
+        CornerFeatureConfig, CornerFeatureError, CornerFeatureExtractor, Correspondence2D3D,
+        CorrespondenceBuildError, CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher,
+        DescriptorMatch, DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
+        FixedLandmarkSelector, FixedLandmarkSubmapSelector, FnFeatureExtractor, Frame, FrameId,
+        FrameLocalizationResult, FrameLocalizer, FramePriorSource, FrameTimestampIndex,
+        GaussNewtonPoseRefiner, GnssMeasurement, GrayscaleImage, GrayscaleImageError,
         ImageLocalizer, ImageTracker, ImuMeasurement, InMemoryMapProvider,
         IntersectCandidateSelector, Keyframe, KeyframeDecision, KeyframePolicy,
         KeyframePolicyConfig, KittiTrajectoryParseError, Landmark, LandmarkCandidate,

@@ -37,6 +37,7 @@ All notable changes to `visloc-rs` will be documented here.
 - CI now verifies the declared Rust 1.82 MSRV with `cargo check --workspace --all-targets`.
 - Trajectory evaluation now has reusable pass/fail threshold types, evaluator CLI threshold flags, `evaluation_result.json` export, and a local trajectory-evaluation smoke check.
 - Tracking statistics now have reusable pass/fail threshold types, and the GNSS-prior demo exports `tracking_evaluation.json` for tracking smoke checks.
+- `GrayscaleImage` and `CornerFeatureExtractor` provide a dependency-free image feature extraction smoke path, with a new `localize_with_corner_extractor` example.
 
 ## 0.1.0 - 2026-05-07
 
