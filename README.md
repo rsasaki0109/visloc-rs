@@ -206,6 +206,7 @@ Run only the user-facing examples:
 
 ```bash
 scripts/run_examples.sh
+sh scripts/check_gnss_demo_outputs.sh
 ```
 
 ## Layout

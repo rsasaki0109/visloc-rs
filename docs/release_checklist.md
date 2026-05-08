@@ -4,7 +4,7 @@
 
 ## Before Tagging
 
-- Run `scripts/check.sh`, including package metadata and crate-content checks.
+- Run `scripts/check.sh`, including package metadata, crate-content checks, and the GNSS demo output smoke check.
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
