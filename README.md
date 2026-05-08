@@ -248,5 +248,6 @@ scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
 scripts/package_check.sh  checks package metadata and crate contents
 .github/ISSUE_TEMPLATE/   bug report and feature request templates
 .github/pull_request_template.md PR checklist
+.github/dependabot.yml    dependency update configuration
 .github/workflows/ci.yml  GitHub Actions CI gate
 ```
