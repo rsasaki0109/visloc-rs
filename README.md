@@ -1,7 +1,7 @@
-# visloc-rs
+# visloc-rs: Visual Localization in Rust
 
 <p align="center">
-  <img src="docs/assets/visloc-hero.svg" alt="visloc-rs visual localization overview" width="100%">
+  <img src="docs/assets/south-building-localization.gif" alt="COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, and localized camera path" width="92%">
 </p>
 
 <p align="center">
@@ -11,9 +11,18 @@
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
 </p>
 
-`visloc-rs` is a Rust foundation library for visual localization with existing SfM / visual maps. The practical target is robotics visual localization, with automotive and UAV image sequences as the main demo directions.
+`visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
 
-The initial scope is intentionally narrow: load or build a visual map, connect query-image 2D features to map 3D landmarks, and estimate a camera pose with PnP + RANSAC. This gives a working vertical slice before adding heavier SLAM machinery.
+It is built for robotics localization work where you want a small, inspectable Rust core before growing into tracking, local mapping, online Visual SLAM, or GNSS/visual-inertial fusion.
+
+## At A Glance
+
+- **Input:** existing COLMAP/SfM map, landmark descriptors, query features, or image sequences
+- **Output:** `SE3` / `Pose` estimates, inlier counts, reprojection error, tracking diagnostics, and pose trajectories
+- **Works today:** map-based localization, sequence tracking scaffold, COLMAP IO, KITTI-style image-sequence IO, GNSS-prior hooks, demo reports
+- **Deliberately not yet:** full SLAM, loop closure, dense mapping, global bundle adjustment, or tightly coupled VIO/GNSS
+
+The first public slice is intentionally narrow: make visual localization solid, observable, and easy to extend instead of hiding an unfinished SLAM stack behind a large API.
 
 <p align="center">
   <img src="docs/assets/localization-flow.svg" alt="visloc-rs localization pipeline" width="92%">
@@ -21,11 +30,7 @@ The initial scope is intentionally narrow: load or build a visual map, connect q
 
 ## Public Data Localization Demo
 
-<p align="center">
-  <img src="docs/assets/south-building-localization.gif" alt="COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, and localized camera path" width="92%">
-</p>
-
-This README demo uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The animation plays the 9 real images as a short sequence: each frame is localized against the same reusable visual map, and the estimated camera path advances on the map. This is map-based localization over a sequence, not full SLAM.
+The README animation uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The animation plays the 9 real images as a short sequence: each frame is localized against the same reusable visual map, and the estimated camera path advances on the map. This is map-based localization over a sequence, not full SLAM.
 
 Data source: the COLMAP official South Building dataset, distributed as [`south-building.zip`](https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip) from the COLMAP example datasets.
 
@@ -34,6 +39,32 @@ Static view:
 <p align="center">
   <img src="docs/assets/south-building-localization.png" alt="Final frame of South Building time-series visual localization with current image, matches, map, and camera trajectory" width="92%">
 </p>
+
+## Try It
+
+Run the core vertical slice:
+
+```bash
+cargo run --example localize_dummy
+```
+
+Run the COLMAP-backed localization example:
+
+```bash
+cargo run --example localize_colmap_provider
+```
+
+Run an image-sequence smoke demo with optional image IO:
+
+```bash
+cargo run --features image-io --example track_image_sequence_from_common_images
+```
+
+Run the full local quality gate:
+
+```bash
+scripts/check.sh
+```
 
 ## Demo Direction
 
@@ -67,7 +98,7 @@ Implemented now:
 
 Not implemented yet:
 
-- Full Visual SLAM
+- Full production Visual SLAM
 - Full SfM
 - Loop closure
 - Dense mapping
