@@ -102,6 +102,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `VisualOdometryPosePrior`: bundles the generated pose prior with the VO estimate diagnostics
 - `NoopVisualOdometryFrontend`: default no-estimate implementation for callers that want to wire the interface before adding a real frontend
 - `TwoViewMatchVisualOdometryFrontend`: converts externally supplied two-view correspondences into a lightweight translation-only VO prior without adding a model runtime dependency
+- `EssentialMatrixVisualOdometryFrontend`: classical-geometry VO frontend that runs the `visloc-vision::two_view` essential-matrix RANSAC + cheirality recovery on externally supplied correspondences, returning a full `SE3` relative pose with caller-supplied translation scale
 - `Tracker`: feeds frames through a localization pipeline and updates state from success/failure
 - `ImageTracker`: extracts features from image inputs and feeds generated frames into `Tracker`
 
@@ -188,6 +189,32 @@ Use `visloc_io::descriptors::read_landmark_descriptors_txt` for the first experi
 ```
 
 Use `visloc_io::query_features::read_query_features_txt` for file-based experiments. `examples/localize_from_files.rs` combines this query format with a COLMAP text model and landmark descriptor file.
+
+## Two-View Geometry
+
+`visloc-vision::two_view` ships the classical two-view geometry pieces used by
+`EssentialMatrixVisualOdometryFrontend`:
+
+- `TwoViewCorrespondence`: pixel-space correspondence between the previous and
+  current frame.
+- `EssentialMatrixEstimator` / `EightPointEssentialMatrixEstimator`:
+  Hartley-normalized 8-point essential-matrix estimator. Pixels are first
+  normalized with the camera intrinsics, then Hartley-normalized for
+  conditioning before solving the linear system on `A^T A` so the smallest
+  right singular vector is always available.
+- `EssentialRansac`: Sampson-distance scored RANSAC that returns the best
+  essential matrix, inlier indices, and mean Sampson error.
+- `recover_relative_pose`: SVD-based decomposition of the essential matrix
+  into the four (R, t) candidates, with cheirality scoring to pick the
+  candidate that puts the most inliers in front of both cameras.
+- `RelativePoseEstimator`: composes the RANSAC and recovery steps and applies a
+  caller-supplied translation scale (`default_translation_scale` or per-pair
+  scale through `EssentialMatrixVisualOdometryFrontend::insert_matches_with_scale`)
+  because translation is recovered up to a scalar.
+
+This module deliberately avoids OpenCV / OpenGV dependencies. Heavier or more
+specialized two-view solvers can be added as separate frontends without
+touching this baseline.
 
 ## Two-View Match Text Format
 

@@ -4,12 +4,13 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 55%**
+**Deep VO / Loop Close completion: 60%**
 
-This score means the core extension boundaries exist and the file-backed
-two-view match VO path now drives a short tracking sequence end-to-end, but the
-project has not yet reached a real learned-frontend sequence demo or full
-loop-closure backend.
+This score means the file-backed two-view match VO path drives a short tracking
+sequence end-to-end and a classical essential-matrix RANSAC frontend recovers
+metric relative pose (rotation + translation direction) from the same external
+correspondences, but the project has not yet reached a real learned-frontend
+sequence demo or full loop-closure backend.
 
 Completed pieces:
 
@@ -22,6 +23,14 @@ Completed pieces:
   through `read_two_view_matches_txt`, and the resulting VO priors feed the
   external-prior tracking path on a short multi-frame sequence in the
   `track_sequence_with_two_view_match_vo_prior` example.
+- A classical essential-matrix two-view geometry pipeline now lives in
+  `visloc-vision::two_view` with a Hartley-normalized 8-point estimator,
+  Sampson-distance scored RANSAC, and 4-fold cheirality disambiguation.
+- `EssentialMatrixVisualOdometryFrontend` exposes that pipeline as a
+  `VisualOdometryFrontend`, returning a full SE3 relative pose with
+  caller-supplied translation scale; `two_view_vo_compare` runs the new
+  frontend alongside the flow-only adapter on the same synthetic three-frame
+  sequence to make the difference visible.
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
@@ -41,7 +50,7 @@ Remaining pieces before this milestone is considered complete:
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 55%
+Deep VO / Loop Close completion: 60%
 ```
 
 Increase the number only when a runnable example, test, or documented API
