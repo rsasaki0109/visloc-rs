@@ -39,6 +39,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Tracking statistics now have reusable pass/fail threshold types, and the GNSS-prior demo exports `tracking_evaluation.json` for tracking smoke checks.
 - `GrayscaleImage` and `CornerFeatureExtractor` provide a dependency-free image feature extraction smoke path, with a new `localize_with_corner_extractor` example.
 - PGM grayscale image IO now supports dependency-free image fixtures and the `localize_from_pgm` example.
+- Optional `image-io` feature support for PNG/JPEG grayscale loading and the `localize_from_common_image` example.
 
 ## 0.1.0 - 2026-05-07
 

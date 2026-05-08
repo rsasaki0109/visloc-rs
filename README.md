@@ -183,6 +183,12 @@ Run the PGM-backed variant, which writes and reads a grayscale image file before
 cargo run --example localize_from_pgm
 ```
 
+Enable `image-io` to read common PNG/JPEG inputs through the optional `image` dependency. The example writes a PNG fixture, reloads it as grayscale, extracts corners, and localizes:
+
+```bash
+cargo run --features image-io --example localize_from_common_image
+```
+
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
 ```bash

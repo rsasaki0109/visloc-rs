@@ -9,6 +9,7 @@ Initial experiments should stay focused on map-based localization:
 - IO-backed localization with `cargo run --example localize_colmap_text`
 - Dependency-free grayscale corner extraction with `cargo run --example localize_with_corner_extractor`
 - PGM-backed grayscale image localization with `cargo run --example localize_from_pgm`
+- Optional PNG/JPEG-backed grayscale image localization with `cargo run --features image-io --example localize_from_common_image`
 - File-based sequence localization and tracking report export with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Tracking report export with `cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo`

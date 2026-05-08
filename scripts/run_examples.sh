@@ -22,3 +22,6 @@ for example in $examples; do
     echo "Running example: $example"
     cargo run --example "$example"
 done
+
+echo "Running feature-gated example: localize_from_common_image"
+cargo run --features image-io --example localize_from_common_image

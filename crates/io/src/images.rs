@@ -24,6 +24,19 @@ pub enum PgmImageError {
     Grayscale(#[from] GrayscaleImageError),
 }
 
+#[cfg(feature = "image-io")]
+#[derive(Debug, Error)]
+pub enum CommonImageError {
+    #[error("image decode/encode error: {0}")]
+    Image(#[from] image::ImageError),
+    #[error("grayscale image error: {0}")]
+    Grayscale(#[from] GrayscaleImageError),
+    #[error("image dimensions are too large for common image encoders: {width}x{height}")]
+    DimensionTooLarge { width: usize, height: usize },
+    #[error("failed to build grayscale image buffer")]
+    InvalidImageBuffer,
+}
+
 pub fn read_pgm(path: impl AsRef<Path>) -> Result<GrayscaleImage, PgmImageError> {
     parse_pgm(&fs::read(path)?)
 }
@@ -66,6 +79,52 @@ pub fn to_pgm_ascii(image: &GrayscaleImage) -> Result<String, PgmImageError> {
         }
     }
     Ok(output)
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image(path: impl AsRef<Path>) -> Result<GrayscaleImage, CommonImageError> {
+    dynamic_image_to_grayscale(image::open(path)?)
+}
+
+#[cfg(feature = "image-io")]
+pub fn decode_common_image(bytes: &[u8]) -> Result<GrayscaleImage, CommonImageError> {
+    dynamic_image_to_grayscale(image::load_from_memory(bytes)?)
+}
+
+#[cfg(feature = "image-io")]
+pub fn write_png_gray(
+    path: impl AsRef<Path>,
+    grayscale: &GrayscaleImage,
+) -> Result<(), CommonImageError> {
+    let width =
+        u32::try_from(grayscale.width()).map_err(|_| CommonImageError::DimensionTooLarge {
+            width: grayscale.width(),
+            height: grayscale.height(),
+        })?;
+    let height =
+        u32::try_from(grayscale.height()).map_err(|_| CommonImageError::DimensionTooLarge {
+            width: grayscale.width(),
+            height: grayscale.height(),
+        })?;
+    let pixels = grayscale
+        .pixels()
+        .iter()
+        .map(|pixel| (pixel.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    let buffer = image::GrayImage::from_raw(width, height, pixels)
+        .ok_or(CommonImageError::InvalidImageBuffer)?;
+    buffer.save_with_format(path, image::ImageFormat::Png)?;
+    Ok(())
+}
+
+#[cfg(feature = "image-io")]
+fn dynamic_image_to_grayscale(
+    dynamic: image::DynamicImage,
+) -> Result<GrayscaleImage, CommonImageError> {
+    let luma = dynamic.to_luma8();
+    let (width, height) = luma.dimensions();
+    GrayscaleImage::from_luma_u8(width as usize, height as usize, luma.into_raw())
+        .map_err(CommonImageError::from)
 }
 
 fn parse_pgm_ascii_pixels(

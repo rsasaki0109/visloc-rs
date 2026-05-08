@@ -12,7 +12,12 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+image-io = ["dep:image"]
+
 [dependencies]
+image = { version = "=0.25.5", default-features = false, features = ["jpeg", "png"], optional = true }
 nalgebra = { workspace = true }
 thiserror = { workspace = true }
 visloc-core = { path = "../core", version = "0.1.0" }
