@@ -318,6 +318,7 @@ docs/release_checklist.md pre-release quality checklist
 scripts/check.sh          local fmt/clippy/test/doc gate
 scripts/check_msrv.sh     Rust 1.82.0 all-targets/all-features check
 scripts/check_docs_links.sh checks local README/docs markdown links and anchors
+scripts/check_release_metadata.sh checks release metadata, docs.rs settings, and CI artifact docs
 scripts/run_examples.sh   runs all user-facing examples
 scripts/check_trajectory_evaluation.sh checks trajectory metric thresholds and exports
 scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
