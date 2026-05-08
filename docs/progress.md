@@ -91,6 +91,16 @@ Completed pieces:
   `so3_left_jacobian`, `so3_left_jacobian_inverse`) live in
   `visloc-core::geometry::se3` with Taylor fallbacks for small angles and
   `exp ∘ log` round-trip + adjoint-conjugation tests.
+- A second loop-closure verifier path, `PnPLoopClosureVerifier`, reuses
+  `visloc-vision::ransac::PnPRansac` to re-localize the current frame
+  against the candidate keyframe's landmarks. It operates on 2D-3D
+  correspondences (built via `correspondences_2d3d_for_loop_candidate`
+  from the current frame's tracking inliers intersected with the older
+  keyframe's observed landmarks) and returns a metric relative SE(3)
+  directly — no externally supplied translation scale required. The
+  `online_slam_pnp_loop_demo` example runs both the essential-matrix and
+  PnP verifiers on the same candidate and prints the diagnostics
+  side-by-side.
 - `optimize_se3_iterative` now also runs Levenberg-Marquardt with optional
   Huber / Cauchy robust kernels (`RobustKernel::{None, Huber{delta},
   Cauchy{c}}`). `PoseGraphSe3Config` gains `robust_kernel`, `initial_lambda`,
