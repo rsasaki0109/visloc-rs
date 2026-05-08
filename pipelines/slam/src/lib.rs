@@ -6,12 +6,12 @@
 //! graph optimization, dense mapping, and production bundle adjustment remain
 //! outside this MVP layer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use nalgebra::Point2;
-use visloc_core::geometry::SE3;
+use nalgebra::{DMatrix, DVector, Point2, Point3};
+use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::{
@@ -951,4 +951,287 @@ fn detect_loop_closure_candidates(
     });
     candidates.truncate(config.max_candidates);
     candidates
+}
+
+/// Kind of an edge inside a [`PoseGraph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoseGraphEdgeKind {
+    /// Sequential odometry edge between consecutive keyframes.
+    Sequential,
+    /// Loop-closure edge backed by a verified [`LoopClosureConstraint`].
+    LoopClosure,
+}
+
+/// Edge in a sparse [`PoseGraph`]. Encodes a measured `previous_to_current`
+/// SE3 between two keyframes plus a positive weight used by translation-only
+/// least squares.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphEdge {
+    pub from: u64,
+    pub to: u64,
+    pub measurement: SE3,
+    pub kind: PoseGraphEdgeKind,
+    pub weight: f64,
+}
+
+/// Single Gauss-Newton step diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphOptimizationStep {
+    pub anchor_id: u64,
+    pub edge_count: usize,
+    pub variable_count: usize,
+    pub cost_before: f64,
+    pub cost_after: f64,
+    pub mean_translation_correction: f64,
+    pub max_translation_correction: f64,
+}
+
+/// Errors returned by [`PoseGraph::optimize_translations_once`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoseGraphError {
+    /// No anchor was specified before optimization.
+    NoAnchor,
+    /// An edge or anchor referenced a node that is missing from the graph.
+    MissingNode(u64),
+    /// The graph contains no edges, so there is nothing to optimize.
+    NoEdges,
+    /// The graph contains no non-anchor nodes (all variables are fixed).
+    NoVariables,
+    /// The Gauss-Newton normal equations were singular, e.g., because the
+    /// graph has disconnected components or rank-deficient constraints.
+    SingularSystem,
+}
+
+impl std::fmt::Display for PoseGraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PoseGraphError::NoAnchor => write!(f, "pose graph has no anchor"),
+            PoseGraphError::MissingNode(id) => write!(f, "pose graph is missing node {id}"),
+            PoseGraphError::NoEdges => write!(f, "pose graph has no edges"),
+            PoseGraphError::NoVariables => write!(f, "pose graph has no non-anchor nodes"),
+            PoseGraphError::SingularSystem => {
+                write!(f, "pose graph translation Gauss-Newton system was singular")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PoseGraphError {}
+
+/// Sparse pose graph keyed by keyframe id. Stores per-node poses plus a flat
+/// list of sequential and loop-closure edges, and provides a single
+/// translation-only Gauss-Newton step that keeps node rotations fixed.
+///
+/// This is intentionally a skeleton: rotations are not optimized, the solver
+/// is a single linear least-squares step rather than an iterative SE3 solver,
+/// and there is no incremental incremental map update. Future milestones can
+/// extend the same data type with full SE3 Jacobians, robust kernels, or a
+/// production solver.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PoseGraph {
+    /// Keyframe id → pose. `BTreeMap` keeps the iteration order deterministic
+    /// so the variable layout in the linear system is reproducible.
+    pub poses: BTreeMap<u64, Pose>,
+    /// Edges in insertion order.
+    pub edges: Vec<PoseGraphEdge>,
+    /// Anchor keyframe id; its pose is held fixed during optimization.
+    pub anchor: Option<u64>,
+}
+
+impl PoseGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace a pose for `keyframe_id`.
+    pub fn add_pose(&mut self, keyframe_id: u64, pose: Pose) {
+        self.poses.insert(keyframe_id, pose);
+    }
+
+    /// Designate `keyframe_id` as the anchor whose pose stays fixed during
+    /// translation optimization. Replaces any previously selected anchor.
+    pub fn anchor(&mut self, keyframe_id: u64) {
+        self.anchor = Some(keyframe_id);
+    }
+
+    /// Add a sequential odometry edge with weight `1.0`.
+    pub fn add_sequential_edge(&mut self, from: u64, to: u64, measurement: SE3) {
+        self.edges.push(PoseGraphEdge {
+            from,
+            to,
+            measurement,
+            kind: PoseGraphEdgeKind::Sequential,
+            weight: 1.0,
+        });
+    }
+
+    /// Append a loop-closure constraint as a graph edge. The verifier-derived
+    /// inlier count is reused as the edge weight (clamped to a minimum of
+    /// `1.0`) so loops with more inliers carry more pull on the solver.
+    pub fn add_loop_closure_constraint(&mut self, constraint: &LoopClosureConstraint) {
+        let weight = (constraint.inlier_count as f64).max(1.0);
+        self.edges.push(PoseGraphEdge {
+            from: constraint.from_keyframe_id,
+            to: constraint.to_keyframe_id,
+            measurement: constraint.relative_pose.clone(),
+            kind: PoseGraphEdgeKind::LoopClosure,
+            weight,
+        });
+    }
+
+    /// Sum of squared edge translation residuals in world coordinates.
+    /// Rotation residuals are ignored — this is a translation-only metric
+    /// that matches what [`Self::optimize_translations_once`] minimizes.
+    pub fn translation_cost(&self) -> f64 {
+        let mut total = 0.0;
+        for edge in &self.edges {
+            let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
+            else {
+                continue;
+            };
+            let displacement = expected_world_displacement(to, &edge.measurement);
+            let actual = to.camera_center_world() - from.camera_center_world();
+            let residual = actual - displacement;
+            total += edge.weight * residual.norm_squared();
+        }
+        total
+    }
+
+    /// Solve a single Gauss-Newton step on the translation residuals while
+    /// holding rotations fixed. With linear-in-translation residuals the
+    /// "single step" is the exact least-squares optimum of the underlying
+    /// linear system, not a Newton iteration that needs to be repeated.
+    pub fn optimize_translations_once(
+        &mut self,
+    ) -> Result<PoseGraphOptimizationStep, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        let anchor_pose = self
+            .poses
+            .get(&anchor_id)
+            .ok_or(PoseGraphError::MissingNode(anchor_id))?
+            .clone();
+        let anchor_center = anchor_pose.camera_center_world();
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+
+        let row_count = self.edges.len() * 3;
+        let column_count = variable_count * 3;
+        let mut a = DMatrix::<f64>::zeros(row_count, column_count);
+        let mut b = DVector::<f64>::zeros(row_count);
+
+        for edge in &self.edges {
+            if !self.poses.contains_key(&edge.from) {
+                return Err(PoseGraphError::MissingNode(edge.from));
+            }
+            if !self.poses.contains_key(&edge.to) {
+                return Err(PoseGraphError::MissingNode(edge.to));
+            }
+        }
+
+        let cost_before = self.translation_cost();
+
+        for (edge_index, edge) in self.edges.iter().enumerate() {
+            let to_pose = &self.poses[&edge.to];
+            let displacement = expected_world_displacement(to_pose, &edge.measurement);
+            let mut rhs = displacement;
+            let weight = edge.weight.sqrt();
+            let row = edge_index * 3;
+
+            if let Some(&j) = node_index.get(&edge.to) {
+                for k in 0..3 {
+                    a[(row + k, j * 3 + k)] += weight;
+                }
+            } else {
+                rhs -= anchor_center.coords;
+            }
+            if let Some(&i) = node_index.get(&edge.from) {
+                for k in 0..3 {
+                    a[(row + k, i * 3 + k)] -= weight;
+                }
+            } else {
+                rhs += anchor_center.coords;
+            }
+            for k in 0..3 {
+                b[row + k] = weight * rhs[k];
+            }
+        }
+
+        let ata = a.transpose() * &a;
+        let atb = a.transpose() * &b;
+        let solution = ata.lu().solve(&atb).ok_or(PoseGraphError::SingularSystem)?;
+
+        let mut total_correction = 0.0;
+        let mut max_correction: f64 = 0.0;
+        for (&id, &i) in &node_index {
+            let new_center = Point3::new(solution[i * 3], solution[i * 3 + 1], solution[i * 3 + 2]);
+            let pose = self
+                .poses
+                .get_mut(&id)
+                .ok_or(PoseGraphError::MissingNode(id))?;
+            let old_center = pose.camera_center_world();
+            let correction_norm = (new_center - old_center).norm();
+            total_correction += correction_norm;
+            if correction_norm > max_correction {
+                max_correction = correction_norm;
+            }
+            let rotation_matrix = pose
+                .world_to_camera
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
+            pose.world_to_camera.translation = -(rotation_matrix * new_center.coords);
+        }
+
+        let cost_after = self.translation_cost();
+        let mean_translation_correction = if variable_count > 0 {
+            total_correction / variable_count as f64
+        } else {
+            0.0
+        };
+
+        Ok(PoseGraphOptimizationStep {
+            anchor_id,
+            edge_count: self.edges.len(),
+            variable_count,
+            cost_before,
+            cost_after,
+            mean_translation_correction,
+            max_translation_correction: max_correction,
+        })
+    }
+}
+
+/// Compute the relative SE3 `previous_to_current` such that
+/// `to_pose.world_to_camera == relative * from_pose.world_to_camera`. This is
+/// the same convention used by [`PoseGraphEdge::measurement`].
+pub fn relative_world_to_camera(from_pose: &Pose, to_pose: &Pose) -> SE3 {
+    to_pose
+        .world_to_camera
+        .compose(&from_pose.world_to_camera.inverse())
+}
+
+/// Translation-only constraint on camera centers in world coordinates implied
+/// by `measurement` together with `to_pose`'s rotation: `c_to - c_from`
+/// equals this displacement.
+fn expected_world_displacement(to_pose: &Pose, measurement: &SE3) -> nalgebra::Vector3<f64> {
+    let rotation_matrix = to_pose
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    -(rotation_matrix.transpose() * measurement.translation)
 }
