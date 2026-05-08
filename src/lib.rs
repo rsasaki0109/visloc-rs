@@ -113,9 +113,11 @@ pub use visloc_mapping::{
 pub use visloc_slam::{
     correspondences_2d3d_for_loop_candidate, correspondences_for_loop_candidate,
     loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
-    relative_world_to_camera, verify_loop_closure_candidates, verify_loop_closure_candidates_pnp,
+    relative_world_to_camera, verify_loop_closure_candidates,
+    verify_loop_closure_candidates_hybrid, verify_loop_closure_candidates_pnp,
     write_online_slam_results_html_report, EssentialMatrixLoopClosureVerifier,
-    LoopClosureCandidate, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerification,
+    HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig, LoopClosureCandidate,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerification,
     LoopClosureVerificationFailureReason, LoopClosureVerifier, LoopClosureVerifierConfig,
     OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PnPLoopClosureVerifier,
     PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError,
