@@ -121,6 +121,7 @@ pub use visloc_tracking::{
     TrajectoryEvaluationConfig, TrajectoryEvaluationFailure, TrajectoryEvaluationResult,
     TrajectoryFileError, TrajectorySample, TrajectorySummary, TrajectoryTranslationError,
     TumTrajectoryParseError, VisualOdometryEstimate, VisualOdometryFrontend,
+    VisualOdometryPosePrior, VisualOdometryPriorProvider,
 };
 pub use visloc_vision::features::{
     CornerFeatureConfig, CornerFeatureError, CornerFeatureExtractor, FeatureExtractor, FeatureSet,
@@ -182,7 +183,7 @@ pub mod prelude {
         TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TriangulationConfig,
         TriangulationFailureReason, Triangulator, TumTrajectoryParseError, VisualMap,
         VisualMapValidationIssue, VisualMapValidationReport, VisualOdometryEstimate,
-        VisualOdometryFrontend, SE3, SO3,
+        VisualOdometryFrontend, VisualOdometryPosePrior, VisualOdometryPriorProvider, SE3, SO3,
     };
 
     pub use crate::io::calibration::{

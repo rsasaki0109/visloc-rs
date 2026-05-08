@@ -61,6 +61,8 @@ All notable changes to `visloc-rs` will be documented here.
 - Roadmap and demo strategy now make deep visual odometry and loop-closure candidate detection explicit next technical targets.
 - `visloc-slam` now reports lightweight loop-closure candidates from shared verified landmarks between the current frame and older keyframes.
 - `VisualOdometryFrontend`, `VisualOdometryEstimate`, and `NoopVisualOdometryFrontend` now provide the first tracking-level boundary for optional classical or learned two-frame VO integrations.
+- `VisualOdometryPriorProvider` and `VisualOdometryPosePrior` convert two-frame VO estimates into current-frame pose priors.
+- `visual_odometry_prior_dummy` demonstrates the VO-prior adapter path without bundling a model runtime.
 - `online_slam_loop_candidate_dummy` demonstrates loop-candidate reporting on a tiny synthetic sequence.
 - Online SLAM results can now be exported to a self-contained HTML/SVG loop-candidate report.
 - Large README animation GIFs are excluded from the root crates.io package while remaining available on GitHub.

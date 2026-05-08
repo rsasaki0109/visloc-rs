@@ -16,7 +16,7 @@ use visloc_rs::{
     Tracker, TrackingConfig, TrackingEvaluationConfig, TrackingEvaluationFailure, TrackingEvent,
     TrackingFailureReason, TrackingResult, TrackingState, TrackingStats, TrajectoryAlignment,
     TrajectoryEvaluationConfig, TrajectoryEvaluationFailure, VisualOdometryEstimate,
-    VisualOdometryFrontend,
+    VisualOdometryFrontend, VisualOdometryPriorProvider,
 };
 
 #[derive(Debug, Clone)]
@@ -258,6 +258,26 @@ fn visual_odometry_estimate_builds_pose_prior_from_relative_motion() {
     assert_eq!(estimate.inlier_count, 24);
     assert_eq!(estimate.mean_reprojection_error, Some(0.75));
     assert!((prior.camera_center_world() - Point3::new(3.5, 0.0, 0.0)).norm() < 1.0e-9);
+}
+
+#[test]
+fn visual_odometry_prior_provider_predicts_pose_prior() {
+    let previous = Frame::new(10, 1);
+    let current = Frame::new(11, 1);
+    let previous_pose = pose_with_identity_rotation_at_center(Vector3::new(2.0, 0.0, 0.0));
+    let provider = VisualOdometryPriorProvider::new(FixedVisualOdometryFrontend {
+        previous_to_current: SE3::new(UnitQuaternion::identity(), Vector3::new(-1.5, 0.0, 0.0)),
+    });
+
+    let prior = provider
+        .predict_pose_prior(&previous, &previous_pose, &current)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(prior.estimate.previous_frame_id, 10);
+    assert_eq!(prior.estimate.current_frame_id, 11);
+    assert_eq!(prior.estimate.inlier_count, 24);
+    assert!((prior.pose.camera_center_world() - Point3::new(3.5, 0.0, 0.0)).norm() < 1.0e-9);
 }
 
 #[test]
