@@ -96,6 +96,9 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `MotionModel`: predicts an optional pose prior for the next frame
 - `ConstantPoseMotionModel`: default motion model that reuses the last successful pose
 - `ConstantVelocityMotionModel`: extrapolates the next camera center from the two latest successful poses
+- `VisualOdometryFrontend`: optional two-frame frontend boundary for classical or learned VO integrations
+- `VisualOdometryEstimate`: relative frame motion, match/inlier diagnostics, and helper for turning a previous pose into a current-frame pose prior
+- `NoopVisualOdometryFrontend`: default no-estimate implementation for callers that want to wire the interface before adding a real frontend
 - `Tracker`: feeds frames through a localization pipeline and updates state from success/failure
 - `ImageTracker`: extracts features from image inputs and feeds generated frames into `Tracker`
 
@@ -138,6 +141,8 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
 
 Loop-closure candidates are deliberately diagnostic at this layer. They identify likely returns to older keyframes using shared verified landmarks, but they do not yet add pose-graph constraints or correct the map globally.
+
+The `online_slam_loop_candidate_dummy` example shows this diagnostic path on a tiny synthetic sequence: an older keyframe is inserted first, a later frame observes the same landmarks, and the pipeline reports a loop candidate with overlap score and verification status.
 
 ## Sensor Fusion Foundation
 

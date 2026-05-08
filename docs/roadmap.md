@@ -25,11 +25,14 @@ Two goals should drive the next public demos:
   extraction and learned matching as replaceable frontends for frame-to-frame
   motion estimation. This should stay optional: model runtimes, weights, and
   accelerator-specific code should live behind traits or integration crates, not
-  inside `visloc-core`.
+  inside `visloc-core`. The first `VisualOdometryFrontend` boundary exists in
+  `visloc-tracking`; the next step is connecting a real classical or learned
+  implementation to sequence demos.
 - **Loop-closure candidate detection.** The first loop-closure milestone should
-  detect and report candidates, then geometrically verify them. Full global pose
-  graph optimization can come later. The demo value is showing that the system
-  recognizes a previously visited place and exposes the candidate clearly.
+  detect and report candidates, then geometrically verify them. Lightweight
+  shared-landmark candidate reporting now exists in `visloc-slam`; full global
+  pose graph optimization can come later. The demo value is showing that the
+  system recognizes a previously visited place and exposes the candidate clearly.
 
 ## v0.1: Map-Based Visual Localization
 

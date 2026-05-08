@@ -78,7 +78,7 @@ The strongest near-term public demo path is automotive / robotics sequence local
 
 Two roadmap goals should make the project feel more like a SLAM foundation without pretending full SLAM is already solved:
 
-- **Deep Visual Odometry frontend:** keep the Rust core trait-based, then add an optional learned-feature / learned-matching path for frame-to-frame motion estimation. The target is a replaceable frontend that can integrate SuperPoint/LightGlue-style features or other external model runners without forcing a heavy ML runtime into `visloc-core`.
+- **Deep Visual Odometry frontend:** `VisualOdometryFrontend` now gives tracking a two-frame relative-pose boundary; next is plugging in a real classical or learned frontend. The target remains SuperPoint/LightGlue-style integration without forcing a heavy ML runtime into `visloc-core`.
 - **Loop-closure visualization:** candidate detection now exists in the online SLAM MVP; next is showing loop candidates clearly in sequence demos before adding pose-graph optimization.
 
 ## Scope
@@ -300,6 +300,7 @@ Run the tracking skeleton example:
 ```bash
 cargo run --example track_sequence_dummy
 cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo
+cargo run --example online_slam_loop_candidate_dummy
 ```
 
 With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_summary.json`, `tracking_report.html` for frame-by-frame state transitions, and `trajectory_report.html` for the estimated pose path. The GNSS-prior demo also writes `tracking_evaluation.json` so success-rate, lost-count, prior-usage, and inlier-quality thresholds can be checked by CI.
