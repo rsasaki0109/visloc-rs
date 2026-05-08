@@ -22,6 +22,11 @@ Good dataset candidates:
 - nuScenes / autonomous-driving camera sequences.
 - Small self-contained public visual localization benchmarks with permissive redistribution rules.
 
+The current KITTI-style loader smoke path is documented in
+[kitti_image_sequence_demo.md](kitti_image_sequence_demo.md). It covers the
+image-directory, timestamp, and calibration-file plumbing needed before a larger
+public automotive localization demo is added.
+
 The first demo does not need full SLAM. It should show map-based sequence localization, tracking state, and pose continuity.
 
 ## Secondary Demo: UAV Localization

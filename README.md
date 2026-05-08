@@ -186,6 +186,8 @@ timestamps, calibration file, and loader output:
 scripts/check_kitti_image_sequence_demo_outputs.sh
 ```
 
+See [docs/kitti_image_sequence_demo.md](docs/kitti_image_sequence_demo.md) for the KITTI-style image sequence demo output guide. CI uploads the checked output directory as the `kitti-image-sequence-demo-outputs` artifact.
+
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
 
 ```bash
@@ -299,6 +301,7 @@ docs/api_stability.md     public API stability policy toward v1.0
 docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
 docs/demo_strategy.md     public demo strategy for automotive and UAV localization
 docs/gnss_demo.md         GNSS-prior sequence demo output guide
+docs/kitti_image_sequence_demo.md KITTI-style image sequence demo output guide
 docs/timestamped_gnss_image_demo.md timestamped image GNSS-prior demo output guide
 docs/migration.md         pre-1.0 to v1.0 API migration guidance
 docs/publishing.md        workspace publish order and package checks
@@ -317,6 +320,7 @@ scripts/run_examples.sh   runs all user-facing examples
 scripts/check_trajectory_evaluation.sh checks trajectory metric thresholds and exports
 scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
 scripts/check_timestamped_gnss_image_demo_outputs.sh checks timestamped image GNSS sync outputs
+scripts/check_kitti_image_sequence_demo_outputs.sh checks KITTI-style image sequence outputs
 scripts/package_check.sh  checks package metadata and crate contents
 .github/ISSUE_TEMPLATE/   bug report and feature request templates
 .github/pull_request_template.md PR checklist
