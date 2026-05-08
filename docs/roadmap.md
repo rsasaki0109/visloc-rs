@@ -30,9 +30,10 @@ Two goals should drive the next public demos:
   implementation to sequence demos.
 - **Loop-closure candidate detection.** The first loop-closure milestone should
   detect and report candidates, then geometrically verify them. Lightweight
-  shared-landmark candidate reporting now exists in `visloc-slam`; full global
-  pose graph optimization can come later. The demo value is showing that the
-  system recognizes a previously visited place and exposes the candidate clearly.
+  shared-landmark candidate reporting and HTML/SVG candidate-edge reporting now
+  exist in `visloc-slam`; full global pose graph optimization can come later.
+  The demo value is showing that the system recognizes a previously visited
+  place and exposes the candidate clearly.
 
 ## v0.1: Map-Based Visual Localization
 
