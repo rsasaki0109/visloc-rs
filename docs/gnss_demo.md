@@ -16,6 +16,7 @@ The demo is intentionally tiny so each file is inspectable:
 
 - `index.html` is the dashboard entry point.
 - `tracking_report.html` shows frame-by-frame localization status, inlier counts, reprojection error, map sizes, and prior usage.
+- `tracking_evaluation.json` records whether tracking-level smoke thresholds passed.
 - `trajectory_report.html` shows the estimated moving-camera path.
 - `trajectory_evaluation.html` compares the estimated trajectory against the synthetic reference trajectory.
 - `tracking.csv` is the per-frame tracking log.

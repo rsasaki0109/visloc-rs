@@ -15,7 +15,7 @@ Initial experiments should stay focused on map-based localization:
 - TUM file-based trajectory evaluation with `cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval`
 - KITTI / TUM trajectory evaluators support pass/fail thresholds with `--max-mean`, `--max-rmse`, `--max-max`, `--min-matched`, and `--min-match-ratio`; `scripts/check_trajectory_evaluation.sh` runs both fixture checks.
 - Browser-viewable reports are written as `trajectory_report.html` / `tracking_report.html`, with frame-level tracking diagnostics in `tracking.csv` and aggregate tracking metrics in `tracking_summary.json`
-- Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`, including an `index.html` dashboard, `manifest.json`, tracking diagnostics, KITTI/TUM poses, synthetic-reference translation errors, and trajectory CSV / JSON / HTML exports
+- Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`, including an `index.html` dashboard, `manifest.json`, tracking diagnostics, `tracking_evaluation.json`, KITTI/TUM poses, synthetic-reference translation errors, and trajectory CSV / JSON / HTML exports
 - The GNSS-prior demo output guide is in [gnss_demo.md](gnss_demo.md).
 - CI uploads the checked GNSS demo output directory as the `gnss-demo-outputs` artifact for browser inspection.
 

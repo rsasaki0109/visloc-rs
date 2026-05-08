@@ -9,8 +9,8 @@ use visloc_rs::{
     write_tracking_results_csv, write_tracking_results_html_report, FramePriorSource,
     FrameTimestampIndex, GnssMeasurement, InMemoryMapProvider, LocalizationPipeline,
     MeasurementBuffer, PoseTrajectory, PriorConfig, TimeDelta, Timed, Timestamp, Tracker,
-    TrackingConfig, TrackingEvent, TrackingState, TrackingStats, TrajectoryErrorSummary,
-    TrajectorySample,
+    TrackingConfig, TrackingEvaluationConfig, TrackingEvent, TrackingState, TrackingStats,
+    TrajectoryErrorSummary, TrajectorySample,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -126,6 +126,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stats = tracker.stats();
+    let tracking_evaluation = stats.evaluate(TrackingEvaluationConfig {
+        min_success_rate: Some(1.0),
+        max_failure_rate: Some(0.0),
+        max_lost_count: Some(0),
+        max_tracking_quality_gate_failure_count: Some(0),
+        min_external_localization_prior_usage_rate: Some(1.0),
+        min_overall_inlier_ratio: Some(1.0),
+        min_mean_inliers_per_successful_frame: Some(6.0),
+    });
     let trajectory = PoseTrajectory::from_tracking_results(&results);
     let reference_trajectory = reference_trajectory_from_poses(&poses);
     let error_summary = trajectory.translation_error_summary_against(&reference_trajectory);
@@ -144,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(&output_dir)?;
         let tracking_csv_path = output_dir.join("tracking.csv");
         let tracking_summary_path = output_dir.join("tracking_summary.json");
+        let tracking_evaluation_path = output_dir.join("tracking_evaluation.json");
         let tracking_report_path = output_dir.join("tracking_report.html");
         let trajectory_csv_path = output_dir.join("trajectory.csv");
         let trajectory_kitti_path = output_dir.join("poses.txt");
@@ -159,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let demo_index_path = output_dir.join("index.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
+        tracking_evaluation.write_json(&tracking_evaluation_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
         trajectory.write_csv(&trajectory_csv_path)?;
         trajectory.write_kitti_poses(&trajectory_kitti_path)?;
@@ -181,11 +192,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &error_summary,
         )?;
         println!(
-            "wrote gnss tracking exports: index={} manifest={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} reference_kitti={} reference_tum={} translation_errors={} error_summary={} trajectory_summary={} trajectory_report={} trajectory_evaluation={}",
+            "wrote gnss tracking exports: index={} manifest={} tracking_csv={} tracking_summary={} tracking_evaluation={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} reference_kitti={} reference_tum={} translation_errors={} error_summary={} trajectory_summary={} trajectory_report={} trajectory_evaluation={}",
             demo_index_path.display(),
             manifest_path.display(),
             tracking_csv_path.display(),
             tracking_summary_path.display(),
+            tracking_evaluation_path.display(),
             tracking_report_path.display(),
             trajectory_csv_path.display(),
             trajectory_kitti_path.display(),
@@ -247,6 +259,7 @@ fn demo_manifest_json(
             "    \"reference_tum.txt\",\n",
             "    \"translation_errors.csv\",\n",
             "    \"tracking_summary.json\",\n",
+            "    \"tracking_evaluation.json\",\n",
             "    \"trajectory_summary.json\",\n",
             "    \"error_summary.json\",\n",
             "    \"manifest.json\"\n",
@@ -337,6 +350,7 @@ a{{color:#185abc;text-decoration:none;font-weight:700}}
 <div class=\"link\"><a href=\"reference_tum.txt\">reference_tum.txt</a><span class=\"detail\">Synthetic reference trajectory in TUM-style pose format.</span></div>
 <div class=\"link\"><a href=\"translation_errors.csv\">translation_errors.csv</a><span class=\"detail\">Frame-matched translation errors against the synthetic reference.</span></div>
 <div class=\"link\"><a href=\"tracking_summary.json\">tracking_summary.json</a><span class=\"detail\">Aggregate tracking success and prior-use metrics.</span></div>
+<div class=\"link\"><a href=\"tracking_evaluation.json\">tracking_evaluation.json</a><span class=\"detail\">Machine-readable tracking pass/fail result for smoke checks and benchmark gates.</span></div>
 <div class=\"link\"><a href=\"trajectory_summary.json\">trajectory_summary.json</a><span class=\"detail\">Pose count, path length, bounds, and reprojection summary.</span></div>
 <div class=\"link\"><a href=\"error_summary.json\">error_summary.json</a><span class=\"detail\">Mean, RMSE, and max translation error summary.</span></div>
 <div class=\"link\"><a href=\"manifest.json\">manifest.json</a><span class=\"detail\">Machine-readable demo output list and top-level metrics.</span></div>

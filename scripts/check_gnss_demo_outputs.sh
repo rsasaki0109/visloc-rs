@@ -11,6 +11,7 @@ index.html
 manifest.json
 tracking.csv
 tracking_summary.json
+tracking_evaluation.json
 tracking_report.html
 trajectory.csv
 poses.txt
@@ -33,7 +34,11 @@ grep -q '"frame_count": 3' "$output_dir/manifest.json"
 grep -q '"external_localization_prior_used_count": 3' "$output_dir/manifest.json"
 grep -q '"matched_reference_pose_count": 3' "$output_dir/manifest.json"
 grep -q 'trajectory_evaluation.html' "$output_dir/index.html"
+grep -q 'tracking_evaluation.json' "$output_dir/index.html"
 grep -q 'manifest.json' "$output_dir/index.html"
 grep -q 'Mean translation error' "$output_dir/index.html"
 grep -q 'frame_id,translation_error' "$output_dir/translation_errors.csv"
 grep -q '"matched_pose_count": 3' "$output_dir/error_summary.json"
+grep -q '"passed": true' "$output_dir/tracking_evaluation.json"
+grep -q '"min_success_rate": 1' "$output_dir/tracking_evaluation.json"
+grep -q '"failures": \[\]' "$output_dir/tracking_evaluation.json"

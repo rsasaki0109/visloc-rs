@@ -13,8 +13,9 @@ use visloc_rs::{
     write_tracking_results_html_report, ConstantVelocityMotionModel, FeatureExtractor, FeatureSet,
     FrameLocalizer, ImageTracker, InMemoryMapProvider, LocalizationPipeline, LocalizationPrior,
     MapProviderStats, MotionModel, PoseTrajectory, PriorSubmapSelector, SelectableMapProvider,
-    Tracker, TrackingConfig, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
-    TrackingStats, TrajectoryAlignment, TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
+    Tracker, TrackingConfig, TrackingEvaluationConfig, TrackingEvaluationFailure, TrackingEvent,
+    TrackingFailureReason, TrackingResult, TrackingState, TrackingStats, TrajectoryAlignment,
+    TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
 };
 
 #[derive(Debug, Clone)]
@@ -788,6 +789,103 @@ fn tracking_stats_writes_json() {
 
     assert!(json.contains("\"frame_count\": 1"));
     assert!(json.contains("\"failure_rate\": 1"));
+}
+
+#[test]
+fn tracking_stats_evaluation_passes_when_thresholds_are_met() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let mut success = successful_tracking_result(10, pose.clone());
+    success.used_external_localization_prior = true;
+    let mut success2 = successful_tracking_result(11, pose);
+    success2.used_external_localization_prior = true;
+    let stats = TrackingStats::from_results(&[success, success2]);
+
+    let result = stats.evaluate(TrackingEvaluationConfig {
+        min_success_rate: Some(1.0),
+        max_failure_rate: Some(0.0),
+        max_lost_count: Some(0),
+        max_tracking_quality_gate_failure_count: Some(0),
+        min_external_localization_prior_usage_rate: Some(1.0),
+        min_overall_inlier_ratio: Some(0.0),
+        min_mean_inliers_per_successful_frame: Some(0.0),
+    });
+
+    assert!(result.passed);
+    assert!(result.failures.is_empty());
+    assert!(result.to_json().contains("\"passed\": true"));
+}
+
+#[test]
+fn tracking_stats_evaluation_reports_failed_thresholds() {
+    let success = successful_tracking_result(
+        10,
+        pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+    );
+    let mut lost = failed_tracking_result(11);
+    lost.state = TrackingState::Lost;
+    lost.event = TrackingEvent::Lost;
+    lost.tracking_failure_reason = Some(TrackingFailureReason::InsufficientInliers {
+        inlier_count: 0,
+        min_inliers: 4,
+    });
+    let stats = TrackingStats::from_results(&[success, lost]);
+
+    let result = stats.evaluate(TrackingEvaluationConfig {
+        min_success_rate: Some(0.75),
+        max_failure_rate: Some(0.25),
+        max_lost_count: Some(0),
+        max_tracking_quality_gate_failure_count: Some(0),
+        min_external_localization_prior_usage_rate: Some(0.5),
+        min_overall_inlier_ratio: Some(1.1),
+        min_mean_inliers_per_successful_frame: Some(7.0),
+    });
+
+    assert!(!result.passed);
+    assert!(result
+        .failures
+        .contains(&TrackingEvaluationFailure::SuccessRateTooLow {
+            actual: 0.5,
+            minimum: 0.75,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrackingEvaluationFailure::FailureRateTooHigh {
+            actual: 0.5,
+            maximum: 0.25,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrackingEvaluationFailure::LostCountTooHigh {
+            actual: 1,
+            maximum: 0,
+        }));
+    assert!(result
+        .failures
+        .contains(&TrackingEvaluationFailure::QualityGateFailureCountTooHigh {
+            actual: 1,
+            maximum: 0,
+        }));
+    assert!(result.failures.contains(
+        &TrackingEvaluationFailure::ExternalLocalizationPriorUsageRateTooLow {
+            actual: 0.0,
+            minimum: 0.5,
+        }
+    ));
+    assert!(result
+        .failures
+        .contains(&TrackingEvaluationFailure::OverallInlierRatioTooLow {
+            actual: 0.0,
+            minimum: 1.1,
+        }));
+    assert!(result.failures.contains(
+        &TrackingEvaluationFailure::MeanInliersPerSuccessfulFrameTooLow {
+            actual: 0.0,
+            minimum: 7.0,
+        }
+    ));
+    assert!(result
+        .to_json()
+        .contains("\"reason\": \"success_rate_too_low\""));
 }
 
 #[test]
