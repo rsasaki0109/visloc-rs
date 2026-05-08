@@ -23,3 +23,9 @@ The near-term public demo should emphasize automotive / robotics sequence locali
 UAV localization remains an important target, but it benefits more from GNSS, altitude, timestamps, and sensor-fusion hooks. Those should be added as optional priors after the visual localization and tracking demos are strong.
 
 The core library should remain domain-neutral. Automotive and UAV demos should exercise the same map, feature, matching, PnP, tracking, mapping, and fusion interfaces instead of creating domain-specific forks.
+
+## Deep VO and Loop Closure Direction
+
+Visual odometry should be able to use deep frontends, but the core crates should not depend on one model runtime or ship large weights. Learned keypoints, descriptors, and matchers should enter through the existing feature-extractor and matcher traits, or through a future VO frontend trait that returns frame-to-frame pose priors.
+
+Loop closure is a roadmap goal, but the first milestone should be candidate detection and geometric verification rather than full pose-graph optimization. This keeps the demo honest: the system can show that it recognizes a previously visited place before claiming globally optimized SLAM.

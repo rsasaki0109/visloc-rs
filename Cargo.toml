@@ -9,6 +9,7 @@ readme = "README.md"
 documentation = "https://docs.rs/visloc-rs"
 homepage = "https://github.com/rsasaki0109/visloc-rs"
 repository = "https://github.com/rsasaki0109/visloc-rs"
+exclude = ["docs/assets/*.gif"]
 keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
 categories = ["computer-vision", "science::robotics"]
 

@@ -1,7 +1,7 @@
 # visloc-rs: Visual Localization in Rust
 
 <p align="center">
-  <img src="docs/assets/south-building-localization.gif" alt="COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, and localized camera path" width="92%">
+  <img src="docs/assets/south-building-localization-rich.gif" alt="Feature-rich COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, feature points, pose links, and localized camera path" width="92%">
 </p>
 
 <p align="center">
@@ -20,7 +20,9 @@ It is built for robotics localization work where you want a small, inspectable R
 - **Input:** existing COLMAP/SfM map, landmark descriptors, query features, or image sequences
 - **Output:** `SE3` / `Pose` estimates, inlier counts, reprojection error, tracking diagnostics, and pose trajectories
 - **Works today:** map-based localization, sequence tracking scaffold, COLMAP IO, KITTI-style image-sequence IO, GNSS-prior hooks, demo reports
-- **Deliberately not yet:** full SLAM, loop closure, dense mapping, global bundle adjustment, or tightly coupled VIO/GNSS
+- **Extensible:** feature extractors and matchers are trait-based, so learned features such as SuperPoint-style keypoints or LightGlue-style matching can be integrated outside the core
+- **Next targets:** deep visual odometry frontends and loop-closure visualization for a more SLAM-like sequence demo
+- **Deliberately not yet:** full SLAM, global loop-closure optimization, dense mapping, global bundle adjustment, or tightly coupled VIO/GNSS
 
 The first public slice is intentionally narrow: make visual localization solid, observable, and easy to extend instead of hiding an unfinished SLAM stack behind a large API.
 
@@ -32,12 +34,14 @@ The first public slice is intentionally narrow: make visual localization solid, 
 
 The README animation uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The animation plays the 9 real images as a short sequence: each frame is localized against the same reusable visual map, and the estimated camera path advances on the map. This is map-based localization over a sequence, not full SLAM.
 
+The feature-rich overlay emphasizes the localization signal for README viewing: many cyan points are detected image features, while the highlighted yellow links show pose-constraint visualization between 2D image evidence and the sparse visual map.
+
 Data source: the COLMAP official South Building dataset, distributed as [`south-building.zip`](https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip) from the COLMAP example datasets.
 
 Static view:
 
 <p align="center">
-  <img src="docs/assets/south-building-localization.png" alt="Final frame of South Building time-series visual localization with current image, matches, map, and camera trajectory" width="92%">
+  <img src="docs/assets/south-building-localization-rich.png" alt="Feature-rich final frame of South Building time-series visual localization with current image, visual features, pose links, map, and camera trajectory" width="92%">
 </p>
 
 ## Try It
@@ -70,6 +74,13 @@ scripts/check.sh
 
 The strongest near-term public demo path is automotive / robotics sequence localization: a moving camera, a reusable sparse visual map, and a pose trajectory that is easy to understand at a glance. UAV localization remains a primary target use case, especially when GNSS/altitude priors are added, but automotive public datasets are a good first showcase because they make sequence motion, relocalization, and map reuse visually obvious.
 
+## Next Technical Targets
+
+Two roadmap goals should make the project feel more like a SLAM foundation without pretending full SLAM is already solved:
+
+- **Deep Visual Odometry frontend:** keep the Rust core trait-based, then add an optional learned-feature / learned-matching path for frame-to-frame motion estimation. The target is a replaceable frontend that can integrate SuperPoint/LightGlue-style features or other external model runners without forcing a heavy ML runtime into `visloc-core`.
+- **Loop-closure visualization:** candidate detection now exists in the online SLAM MVP; next is showing loop candidates clearly in sequence demos before adding pose-graph optimization.
+
 ## Scope
 
 Implemented now:
@@ -93,14 +104,15 @@ Implemented now:
 - Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
 - Localization-based tracking scaffold with motion priors, lost/relocalized events, and a pose-prior translation quality gate
 - Local mapping skeleton with keyframe policy, local map windows, staged map updates, landmark candidates, linear triangulation, and local refinement hooks
-- Online SLAM MVP composition over tracking and local mapping, without loop closure or global optimization
+- Online SLAM MVP composition over tracking and local mapping, including lightweight loop-closure candidate diagnostics but not global optimization
+- Loop-closure candidate reporting based on shared verified landmarks between the current frame and older keyframes
 - Loose-coupling fusion foundation with timestamped frames/poses, GNSS/pose/IMU measurements, covariance types, and external localization-prior tracking hooks
 
 Not implemented yet:
 
 - Full production Visual SLAM
 - Full SfM
-- Loop closure
+- Full loop closure with global pose-graph optimization
 - Dense mapping
 - Full bundle adjustment
 - Full tightly-coupled visual-inertial or GNSS/INS fusion
@@ -120,6 +132,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 - Sequential localization and tracking quality improvements
 - Local mapping and lightweight keyframe policies
 - Online Visual SLAM with incremental map updates
+- Deep visual odometry frontend integration
+- Loop-closure candidate detection and visualization
 - Visual-inertial and GNSS priors/fusion
 - Larger public-data evaluation scripts
 
@@ -340,6 +354,8 @@ docs/public_data_demo.md  public-data demo provenance and reproduction notes
 docs/assets/south-building-query.jpg real query image from COLMAP South Building
 docs/assets/south-building-localization.png public-data localization visualization
 docs/assets/south-building-localization.gif animated public-data localization demo
+docs/assets/south-building-localization-rich.png feature-rich README visualization
+docs/assets/south-building-localization-rich.gif feature-rich animated README demo
 CONTRIBUTING.md          contribution guide and local check expectations
 SECURITY.md              security and safety-critical use policy
 CHANGELOG.md             unreleased changes and release notes
@@ -356,6 +372,7 @@ scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
 scripts/check_timestamped_gnss_image_demo_outputs.sh checks timestamped image GNSS sync outputs
 scripts/check_kitti_image_sequence_demo_outputs.sh checks KITTI-style image sequence outputs
 scripts/package_check.sh  checks package metadata and crate contents
+scripts/build_rich_readme_demo.py regenerates feature-rich README demo assets
 .github/ISSUE_TEMPLATE/   bug report and feature request templates
 .github/pull_request_template.md PR checklist
 .github/dependabot.yml    dependency update configuration

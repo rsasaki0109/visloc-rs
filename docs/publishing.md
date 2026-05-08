@@ -39,6 +39,8 @@ This runs formatting, clippy, tests, examples, release metadata checks, the GNSS
 
 Each crate sets `package.metadata.docs.rs.all-features = true`, so docs.rs builds include optional public APIs such as image IO.
 
+Large README animation GIFs are kept in the GitHub repository for the project page but excluded from the root crates.io package to keep release artifacts small.
+
 When only package metadata changed, this narrower check is useful:
 
 ```sh

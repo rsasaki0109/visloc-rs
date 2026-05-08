@@ -127,13 +127,17 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 
 ## Online SLAM MVP
 
-`visloc-slam` composes tracking and local mapping without adding loop closure or global optimization:
+`visloc-slam` composes tracking and local mapping with lightweight loop-closure candidate diagnostics, but without global pose-graph optimization:
 
 - `OnlineSlamPipeline`: owns a `VisualMap`, a `Tracker`, and a `LocalMappingPipeline`
-- `OnlineSlamConfig`: controls whether valid staged updates are applied immediately
-- `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, and current map sizes
+- `OnlineSlamConfig`: controls whether valid staged updates are applied immediately and configures loop-closure candidate thresholds
+- `LoopClosureConfig`: controls candidate detection using frame-id gap, shared-landmark count, shared-landmark ratio, and max returned candidates
+- `LoopClosureCandidate`: reports the current frame, matched older keyframe, shared landmark count, overlap ratio, score, and geometric verification flag
+- `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, loop-closure candidates, and current map sizes
 
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
+
+Loop-closure candidates are deliberately diagnostic at this layer. They identify likely returns to older keyframes using shared verified landmarks, but they do not yet add pose-graph constraints or correct the map globally.
 
 ## Sensor Fusion Foundation
 

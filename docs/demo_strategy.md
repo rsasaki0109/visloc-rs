@@ -12,8 +12,11 @@ The best near-term showcase is automotive-style visual localization:
 - A visible pose trajectory.
 - Match/inlier diagnostics.
 - Clear failure and relocalization states.
+- Enough visual feature points, inlier links, sparse map points, and trajectory motion to read as localization at a glance.
 
 This is easy for non-specialists to understand because the camera motion and map reuse are visible. It also exercises the same core pieces needed later for online SLAM.
+
+Learned feature pipelines such as SuperPoint-style keypoints or LightGlue-style matching should plug in through the existing feature-extractor and matcher traits. README assets should not imply deep weights are bundled unless the repository actually ships that integration.
 
 Good dataset candidates:
 
@@ -28,6 +31,15 @@ image-directory, timestamp, and calibration-file plumbing needed before a larger
 public automotive localization demo is added.
 
 The first demo does not need full SLAM. It should show map-based sequence localization, tracking state, and pose continuity.
+
+## SLAM-Feeling Demo Targets
+
+To make the project feel closer to practical SLAM while staying honest about the current implementation, the next demos should target two visible behaviors:
+
+- **Deep Visual Odometry frontend:** show denser and more stable frame-to-frame correspondences from an optional learned-feature pipeline, then feed the resulting motion as a tracking prior.
+- **Loop-closure candidate:** show a sequence revisiting a place, draw a candidate loop edge, and report the candidate score and geometric verification status.
+
+The demo should label these as targets until the corresponding Rust APIs and examples exist. It should not claim full loop closure or global pose-graph correction before those pieces are implemented.
 
 ## Secondary Demo: UAV Localization
 

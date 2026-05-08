@@ -27,5 +27,16 @@ The generated model registered 9 cameras and reconstructed 1,428 sparse 3D point
 - `docs/assets/south-building-query.jpg`: real query image from the public dataset subset.
 - `docs/assets/south-building-localization.png`: final frame of the public-data sequence demo, with the current real image, reliable 2D-3D matches, sparse SfM map, and localized camera path.
 - `docs/assets/south-building-localization.gif`: animated README sequence demo showing 9 real images localized frame by frame against the same reusable visual map.
+- `docs/assets/south-building-localization-rich.png`: feature-rich README variant built from the same final frame, with additional detected image-feature overlays and highlighted pose-link visualization for a clearer first impression.
+- `docs/assets/south-building-localization-rich.gif`: feature-rich animated README variant built from the same real-image sequence.
+
+The feature-rich README variants are generated with:
+
+```sh
+python3 scripts/build_rich_readme_demo.py
+```
+
+This helper uses Python with Pillow and OpenCV. It is an asset-generation tool,
+not part of the Rust runtime or CI quality gate.
 
 The visualization is intentionally a lightweight README artifact. It is not a benchmark and does not claim full SLAM; it demonstrates the library direction in a readable way: Visual Localization first, using a reusable visual map and per-frame camera poses for a short image sequence.
