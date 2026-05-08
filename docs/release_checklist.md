@@ -4,10 +4,10 @@
 
 ## Before Tagging
 
-- Run `scripts/check.sh`, including package metadata, crate-content checks, documentation link checks, GNSS demo output smoke checks, timestamped image GNSS sync-output checks, and KITTI image sequence demo output checks.
+- Run `scripts/check.sh`, including MSRV all-features checks, package metadata, crate-content checks, documentation link checks, GNSS demo output smoke checks, timestamped image GNSS sync-output checks, and KITTI image sequence demo output checks.
 - Confirm CI uploads both GNSS demo artifacts: `gnss-demo-outputs` and `timestamped-gnss-image-demo-outputs`.
 - Confirm trajectory evaluation thresholds still pass through `scripts/check_trajectory_evaluation.sh`.
-- Confirm the CI MSRV job passes with Rust 1.82.0.
+- Confirm the CI MSRV job passes with Rust 1.82.0 through `scripts/check_msrv.sh`.
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
 - Confirm local README/docs links and anchors pass with `scripts/check_docs_links.sh`.

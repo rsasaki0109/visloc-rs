@@ -21,7 +21,7 @@ jobs:
           key: msrv
 
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        run: scripts/check_msrv.sh
 
   rust:
     runs-on: ubuntu-latest
