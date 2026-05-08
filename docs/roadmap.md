@@ -37,6 +37,11 @@ Two goals should drive the next public demos:
   The demo value is showing that the system recognizes a previously visited
   place and exposes the candidate clearly.
 
+Current completion toward the Deep VO / loop-closure milestone is tracked in
+[progress.md](progress.md). Development updates should report that value as the
+milestone completion percentage, and it should only increase when backed by a
+runnable example, test, or documented API.
+
 ## v0.1: Map-Based Visual Localization
 
 Goal: make the vertical slice solid.
