@@ -40,3 +40,37 @@ This helper uses Python with Pillow and OpenCV. It is an asset-generation tool,
 not part of the Rust runtime or CI quality gate.
 
 The visualization is intentionally a lightweight README artifact. It is not a benchmark and does not claim full SLAM; it demonstrates the library direction in a readable way: Visual Localization first, using a reusable visual map and per-frame camera poses for a short image sequence.
+
+## Public-Data Loop-Closure Demo
+
+The `online_slam_public_loop_demo` example reads a COLMAP-text-format sparse
+reconstruction (`cameras.txt`, `images.txt`, `points3D.txt`) from disk and
+runs the full tracking + verifier + pose-graph SE(3) Gauss-Newton stack on
+the loaded keyframes. Without flags it synthesizes a 12-keyframe orbit
+fixture so the demo stays runnable in CI:
+
+```sh
+cargo run --example online_slam_public_loop_demo
+```
+
+To point it at a real reconstruction (e.g., a COLMAP run on the South
+Building subset above):
+
+```sh
+cargo run --example online_slam_public_loop_demo -- \
+    --colmap-path path/to/sparse/0
+```
+
+If the COLMAP folder contains a sibling `landmark_descriptors.txt` (one row
+per landmark: `LANDMARK_ID D0 D1 ...`), it is consumed automatically;
+otherwise the demo generates synthetic per-landmark descriptors so it can
+run unmodified on any registered COLMAP reconstruction. Override the
+descriptor file explicitly with `--descriptors-path <file>`. Use
+`--out-dir <dir>` to copy the generated synthetic fixture out of the
+temporary directory for inspection.
+
+Loop closure is triggered on the keyframe pair with the largest frame-id
+gap so the verifier scale calibrated for that pair is not contaminated by
+intermediate matches; the demo prints the chosen `min_frame_id_gap`,
+per-iteration cost, and per-keyframe translation / rotation error against
+the loaded ground-truth poses.

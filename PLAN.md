@@ -431,10 +431,13 @@ Completed at 100%:
 Recommended stretch tasks (any one of these would lift the project beyond
 its 100% MVP scope):
 
-1. Public-data loop demo: replace the synthetic six-keyframe sequence with a
-   real public image sequence (e.g., a KITTI odometry subset or COLMAP South
-   Building loop) so the full Deep VO / loop-close story is visible on
-   non-synthetic imagery.
+1. Public-data loop demo (✓ runnable): `online_slam_public_loop_demo`
+   ingests a COLMAP-text-format sparse reconstruction from disk, defaulting
+   to a synthesized 12-keyframe orbit fixture for CI but accepting
+   `--colmap-path <dir>` for real reconstructions like South Building or
+   KITTI-derived sparse models. Remaining stretch: bundle a real subset
+   (sparse-only, no images) and add visualization assets so the README
+   demo path doesn't depend on Python tooling.
 2. Levenberg-Marquardt damping plus robust kernels (Huber / Cauchy) on top
    of `optimize_se3_iterative` for graphs with outlier loop closures, and
    a sparse Cholesky / Schur-complement solver path so the optimizer
