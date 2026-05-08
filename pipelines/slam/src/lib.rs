@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use nalgebra::Point2;
+use visloc_core::geometry::SE3;
 use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::{
@@ -92,6 +93,11 @@ pub struct LoopClosureVerifierConfig {
     /// Maximum allowed mean Sampson distance, in normalized image-plane units
     /// (multiply by focal length to convert to pixels).
     pub max_mean_sampson_error: f64,
+    /// Translation scale applied when recovering the relative pose. Two-view
+    /// geometry leaves translation up to scale; this default is what
+    /// [`LoopClosureVerification::relative_pose`] uses unless callers wrap
+    /// the verifier with their own scale source. Defaults to `1.0`.
+    pub default_translation_scale: f64,
 }
 
 impl Default for LoopClosureVerifierConfig {
@@ -100,6 +106,7 @@ impl Default for LoopClosureVerifierConfig {
             min_inliers: 8,
             min_inlier_ratio: 0.5,
             max_mean_sampson_error: 5.0e-3,
+            default_translation_scale: 1.0,
         }
     }
 }
@@ -129,6 +136,12 @@ pub struct LoopClosureVerification {
     pub mean_sampson_error: f64,
     pub score: f64,
     pub failure_reason: Option<LoopClosureVerificationFailureReason>,
+    /// Recovered relative pose (older keyframe → current frame) when the
+    /// underlying RANSAC converged. `Some` even for non-`verified` cases as
+    /// long as a pose was recovered; consult `verified` and `failure_reason`
+    /// before consuming. Translation is scaled by
+    /// [`LoopClosureVerifierConfig::default_translation_scale`].
+    pub relative_pose: Option<SE3>,
 }
 
 /// Trait for a loop-closure candidate verifier. Concrete implementations
@@ -185,10 +198,15 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
                 failure_reason: Some(
                     LoopClosureVerificationFailureReason::InsufficientCorrespondences,
                 ),
+                relative_pose: None,
             };
         }
 
-        let Some(report) = self.estimator.ransac.estimate(correspondences, camera) else {
+        let Some(relative_pose) = self.estimator.estimate_with_scale(
+            correspondences,
+            camera,
+            self.config.default_translation_scale,
+        ) else {
             return LoopClosureVerification {
                 verified: false,
                 correspondence_count,
@@ -199,12 +217,13 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
                 failure_reason: Some(
                     LoopClosureVerificationFailureReason::EssentialEstimationFailed,
                 ),
+                relative_pose: None,
             };
         };
 
-        let inlier_count = report.inliers.len();
+        let inlier_count = relative_pose.inliers.len();
         let inlier_ratio = inlier_count as f64 / correspondence_count as f64;
-        let mean_sampson = report.mean_sampson_error;
+        let mean_sampson = relative_pose.mean_sampson_error;
 
         let mut failure_reason = None;
         if inlier_count < self.config.min_inliers {
@@ -230,6 +249,7 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
             mean_sampson_error: mean_sampson,
             score,
             failure_reason,
+            relative_pose: Some(relative_pose.previous_to_current),
         }
     }
 }
@@ -266,6 +286,63 @@ pub fn correspondences_for_loop_candidate(
         });
     }
     correspondences
+}
+
+/// Pose-graph-style constraint between two keyframes derived from a verified
+/// loop-closure candidate. This is intentionally a lightweight data type — no
+/// solver lives in this crate yet — so downstream optimization layers can
+/// adopt it without committing to a specific backend.
+///
+/// `relative_pose` represents the rigid transform that takes a point in
+/// `from_keyframe_id`'s camera frame to `to_keyframe_id`'s camera frame, with
+/// the translation scaled by the verifier's
+/// [`LoopClosureVerifierConfig::default_translation_scale`] (or whatever
+/// scale the caller chose to apply before constructing the constraint).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopClosureConstraint {
+    pub from_keyframe_id: u64,
+    pub to_keyframe_id: u64,
+    pub relative_pose: SE3,
+    pub inlier_count: usize,
+    pub inlier_ratio: f64,
+    pub mean_sampson_error: f64,
+    pub score: f64,
+}
+
+impl LoopClosureConstraint {
+    /// Builds a constraint from a verified candidate. Returns `None` when the
+    /// candidate has no verifier output, when the verifier rejected it, or
+    /// when no relative pose was recovered.
+    pub fn from_verified_candidate(
+        candidate: &LoopClosureCandidate,
+    ) -> Option<LoopClosureConstraint> {
+        let verification = candidate.verification.as_ref()?;
+        if !verification.verified {
+            return None;
+        }
+        let relative_pose = verification.relative_pose.clone()?;
+        Some(LoopClosureConstraint {
+            from_keyframe_id: candidate.matched_keyframe_id,
+            to_keyframe_id: candidate.query_frame_id,
+            relative_pose,
+            inlier_count: verification.inlier_count,
+            inlier_ratio: verification.inlier_ratio,
+            mean_sampson_error: verification.mean_sampson_error,
+            score: verification.score,
+        })
+    }
+}
+
+/// Convenience helper that builds a constraint per verified candidate. Keeps
+/// the same ordering as the input slice and silently drops candidates that
+/// were not verified or lack a recovered relative pose.
+pub fn loop_closure_constraints_from_candidates(
+    candidates: &[LoopClosureCandidate],
+) -> Vec<LoopClosureConstraint> {
+    candidates
+        .iter()
+        .filter_map(LoopClosureConstraint::from_verified_candidate)
+        .collect()
 }
 
 /// Run `verifier` on every supplied candidate, mutating each
@@ -528,6 +605,34 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
             mean_text,
             verifier_score_text,
             failure_text,
+        );
+    }
+    output.push_str("</tbody></table>\n</section>\n");
+
+    let constraints: Vec<LoopClosureConstraint> = loop_candidates
+        .iter()
+        .filter_map(|candidate| LoopClosureConstraint::from_verified_candidate(candidate))
+        .collect();
+    output.push_str("<section class=\"panel\">\n<h2>Loop Closure Constraints</h2>\n");
+    output.push_str("<p class=\"sub\">Each row is a verified candidate turned into a `LoopClosureConstraint` ready for a future pose-graph layer. No global optimization runs in this report.</p>\n");
+    output.push_str("<table><thead><tr><th>from keyframe</th><th>to keyframe</th><th>inliers</th><th>inlier ratio</th><th>mean Sampson</th><th>score</th><th>relative translation</th></tr></thead><tbody>\n");
+    if constraints.is_empty() {
+        output.push_str("<tr><td colspan=\"7\">no verified loop constraints</td></tr>\n");
+    }
+    for constraint in &constraints {
+        let translation = constraint.relative_pose.translation;
+        let _ = writeln!(
+            output,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.4}</td><td>{:.3}</td><td>[{:.3}, {:.3}, {:.3}]</td></tr>",
+            constraint.from_keyframe_id,
+            constraint.to_keyframe_id,
+            constraint.inlier_count,
+            constraint.inlier_ratio,
+            constraint.mean_sampson_error,
+            constraint.score,
+            translation.x,
+            translation.y,
+            translation.z,
         );
     }
     output.push_str("</tbody></table>\n</section>\n</main>\n</body>\n</html>\n");
