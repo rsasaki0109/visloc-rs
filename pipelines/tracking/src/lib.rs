@@ -1545,6 +1545,20 @@ pub fn tracking_results_to_html_report(results: &[TrackingResult]) -> String {
     );
     push_metric_card(
         &mut output,
+        "Motion prior",
+        &format!("{:.1}%", stats.pose_prior_usage_rate() * 100.0),
+    );
+    push_metric_card(
+        &mut output,
+        "External prior",
+        &format!(
+            "{} ({:.1}%)",
+            stats.external_localization_prior_used_count,
+            stats.external_localization_prior_usage_rate() * 100.0
+        ),
+    );
+    push_metric_card(
+        &mut output,
         "Mean inliers",
         &format!("{:.1}", stats.mean_inliers_per_successful_frame()),
     );

@@ -105,6 +105,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         results.push(result);
     }
 
+    let stats = tracker.stats();
+    println!(
+        "stats frames={} success_rate={:.3} external_prior_rate={:.3} external_prior_count={}",
+        stats.frame_count,
+        stats.success_rate(),
+        stats.external_localization_prior_usage_rate(),
+        stats.external_localization_prior_used_count,
+    );
+
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
         let tracking_csv_path = output_dir.join("tracking.csv");
