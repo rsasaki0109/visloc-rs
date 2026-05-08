@@ -117,9 +117,66 @@ cargo run --release --features image-io \
 
 ## KITTI Loop-Closure Asset (README)
 
-The README includes a KITTI 00 pose-graph loop-closure visualization
-(`docs/assets/kitti_loop_closure.{png,gif}`). It is generated from the real
-KITTI odometry ground-truth poses, not from synthetic data. Pipeline:
+The README hero (`docs/assets/kitti_loop_closure.{png,gif}`) is generated
+end-to-end from the **real-image** `online_slam_image_vo_loop_demo`
+pipeline on KITTI 00. Pipeline:
+
+1. Stream a stride-subsampled subset of KITTI odometry seq 00 `image_0`
+   directly from the public S3 archive (no full 23 GB download required):
+
+   ```sh
+   python3 scripts/fetch_kitti_seq00_images.py \
+       --stride 4 --max-frames 1140 --workers 8 --also-fetch-poses \
+       --out-dir ~/datasets/kitti_seq00_subset
+   ```
+
+2. Run the real-image VO + loop-closure example. Trim to where the loop
+   actually closes (KITTI 00 first revisits start within ~1 m at original
+   frame ~4447, i.e., subsample index 1111 at stride 4):
+
+   ```sh
+   cargo run --release --features image-io \
+       --example online_slam_image_vo_loop_demo -- \
+       --image-dir ~/datasets/kitti_seq00_subset/image_0 \
+       --calib    ~/datasets/kitti_seq00_subset/calib.txt \
+       --max-frames 1112 --frame-stride 1 \
+       --out-dir target/kitti_image_vo_loop_demo
+   ```
+
+   Sample run on the 1112-frame subset: 195.9 mean RANSAC inliers per
+   sequential edge, loop edge KF 0 ↔ KF 1111 verified with 40 inliers,
+   translation PGO collapses cost 1.6 M → 36.1, SE(3) refine drives it
+   down to 0.02.
+
+3. Render the README asset. The Python helper applies start-anchored
+   similarity Procrustes alignment so the unit-scale monocular VO and
+   the corrected trajectory share a common metric frame with truth:
+
+   ```sh
+   python3 scripts/build_kitti_loop_asset.py --mode real-vo \
+       --input-dir target/kitti_image_vo_loop_demo \
+       --truth-kitti-poses ~/datasets/kitti_seq00_subset/poses_00.txt \
+       --gt-stride 4 --out-dir docs/assets
+   ```
+
+   Sample run: VO endpoint drift ~548 m (Procrustes-aligned), corrected
+   endpoint error ~5 m after a single loop edge.
+
+The Python helper is asset-generation only — not part of the Rust
+runtime or the CI gate.
+
+## Legacy GT-Pose-Based KITTI Asset
+
+A simpler `online_slam_kitti_loop_demo` example (Rust-only, no images)
+is kept around for environments without the KITTI image archive. It
+reads `<KITTI>/poses/<seq>.txt` directly, fabricates a per-edge yaw
+drift on the truth trajectory, adds a single truth-relative loop edge
+between the first and last keyframes, runs `optimize_se3_iterative`
+(LM + Cholesky), and writes the same `truth.csv`/`drifted.csv`/
+`corrected.csv` triple. The `--mode gt-drift` path of
+`scripts/build_kitti_loop_asset.py` renders that variant.
+
+(Original GT-pose pipeline:)
 
 1. Run the Rust demo against the KITTI odometry pose file:
 
