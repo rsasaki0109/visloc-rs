@@ -49,6 +49,7 @@ All notable changes to `visloc-rs` will be documented here.
 - KITTI-style camera calibration parser for turning projection rows such as `P2` into `Camera::pinhole` inputs for automotive sequence demos.
 - KITTI-style image sequence loader that combines image frames, optional timestamp files, calibration, and validation summaries.
 - KITTI-style image sequence loader example that writes a small automotive-like image folder, timestamps, and calibration before reading them back.
+- Local and CI smoke checks now verify KITTI-style image sequence demo outputs and upload them as a CI artifact.
 - `FramePriorSyncSummary` diagnostics for checking external measurement coverage against frame timestamps.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.

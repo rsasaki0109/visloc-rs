@@ -55,6 +55,9 @@ jobs:
       - name: Timestamped GNSS image demo outputs
         run: scripts/check_timestamped_gnss_image_demo_outputs.sh
 
+      - name: KITTI image sequence demo outputs
+        run: scripts/check_kitti_image_sequence_demo_outputs.sh
+
       - name: Upload GNSS demo outputs
         uses: actions/upload-artifact@v4
         with:
@@ -68,6 +71,14 @@ jobs:
         with:
           name: timestamped-gnss-image-demo-outputs
           path: target/visloc_timestamped_image_sequence_demo
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload KITTI image sequence demo outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitti-image-sequence-demo-outputs
+          path: target/visloc_kitti_image_sequence_demo
           if-no-files-found: error
           retention-days: 14
 

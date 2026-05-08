@@ -179,6 +179,13 @@ Run the KITTI-style image sequence loader smoke example:
 cargo run --features image-io --example load_kitti_image_sequence
 ```
 
+The local and CI smoke checks verify the generated KITTI-style image folder,
+timestamps, calibration file, and loader output:
+
+```bash
+scripts/check_kitti_image_sequence_demo_outputs.sh
+```
+
 Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
 
 ```bash
