@@ -46,6 +46,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: Documentation links
+        run: scripts/check_docs_links.sh
+
       - name: Examples
         run: scripts/run_examples.sh
 
