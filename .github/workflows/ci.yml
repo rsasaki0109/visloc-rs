@@ -35,6 +35,14 @@ jobs:
       - name: GNSS demo outputs
         run: scripts/check_gnss_demo_outputs.sh
 
+      - name: Upload GNSS demo outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnss-demo-outputs
+          path: target/visloc_gnss_tracking_demo_check
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
