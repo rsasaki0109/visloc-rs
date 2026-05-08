@@ -177,6 +177,12 @@ Run the dependency-free grayscale corner extractor example, which creates a synt
 cargo run --example localize_with_corner_extractor
 ```
 
+Run the PGM-backed variant, which writes and reads a grayscale image file before extracting features:
+
+```bash
+cargo run --example localize_from_pgm
+```
+
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
 ```bash

@@ -38,6 +38,8 @@ fn localize_frames(frames: Vec<Frame>, map: VisualMap) -> Vec<FrameLocalizationR
 
 `FeatureSet` stores externally supplied keypoints and descriptors and can validate shape/dimension consistency with `FeatureSet::new`. `FeatureExtractor` can be connected through `ImageLocalizer` or the lower-level `LocalizationPipeline::localize_image_with_extractor` methods. `ProvidedFeatureExtractor` wraps precomputed features, and `FnFeatureExtractor` wraps a closure so OpenCV, learned features, or custom image pipelines can be connected without making those dependencies mandatory. `GrayscaleImage` and `CornerFeatureExtractor` provide a small dependency-free image-input extractor for smoke tests and examples; production feature pipelines should still plug in through the same trait boundary.
 
+`visloc_io::images` provides dependency-free PGM grayscale IO through `read_pgm`, `parse_pgm`, `write_pgm_ascii`, and `to_pgm_ascii`. This is intended for fixtures, smoke tests, and minimal examples rather than broad image-format coverage.
+
 `CorrespondenceBuilder` converts `QueryImage + VisualMap + LandmarkDescriptorStore` into 2D-3D correspondences before pose estimation. The localization pipeline uses this builder internally.
 
 `Matcher` is the descriptor matching boundary. `BruteForceMatcher` provides L2 nearest-neighbor matching with optional ratio test, and `CrossCheckMatcher` wraps another matcher to keep only mutual nearest matches. `DescriptorMatch` records query/train indices, best distance, second-best distance, and ratio diagnostics when available. `CorrespondenceSet` preserves those descriptor matches alongside 2D-3D correspondences for debugging.

@@ -158,5 +158,8 @@ pub mod prelude {
         ColmapMapProviderError,
     };
     pub use crate::io::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
+    pub use crate::io::images::{
+        parse_pgm, read_pgm, to_pgm_ascii, write_pgm_ascii, PgmImageError,
+    };
     pub use crate::io::query_features::{read_query_features_txt, QueryFeatureError};
 }
