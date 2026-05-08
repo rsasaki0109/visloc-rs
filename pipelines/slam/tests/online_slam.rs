@@ -7,7 +7,7 @@ use visloc_slam::{
     loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
     relative_world_to_camera, verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier,
     LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
-    OnlineSlamPipeline, PoseGraph, PoseGraphError, PoseGraphSe3Config,
+    OnlineSlamPipeline, PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -639,4 +639,154 @@ fn pose_graph_se3_returns_no_anchor_error_when_unset() {
         graph.optimize_se3_iterative(&PoseGraphSe3Config::default()),
         Err(PoseGraphError::NoAnchor)
     );
+}
+
+fn build_three_node_loop(third_drift: Vector3<f64>) -> PoseGraph {
+    let truth_10 = pose_at(Vector3::new(0.0, 0.0, 0.0));
+    let truth_20 = pose_at(Vector3::new(1.0, 0.0, 0.0));
+    let truth_30 = pose_at(Vector3::new(0.5, 0.0, 0.5));
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10.clone());
+    graph.add_pose(20, truth_20.clone());
+    let drifted_30 = pose_at(Vector3::new(0.5, 0.0, 0.5) + third_drift);
+    graph.add_pose(30, drifted_30);
+    graph.anchor(10);
+    graph.add_sequential_edge(10, 20, relative_world_to_camera(&truth_10, &truth_20));
+    graph.add_sequential_edge(20, 30, relative_world_to_camera(&truth_20, &truth_30));
+    graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        from_keyframe_id: 10,
+        to_keyframe_id: 30,
+        relative_pose: relative_world_to_camera(&truth_10, &truth_30),
+        inlier_count: 12,
+        inlier_ratio: 1.0,
+        mean_sampson_error: 1.0e-4,
+        score: 100.0,
+    });
+    graph
+}
+
+#[test]
+fn pose_graph_se3_huber_kernel_rejects_outlier_loop_constraint() {
+    let truth_10 = pose_at(Vector3::new(0.0, 0.0, 0.0));
+    let truth_20 = pose_at(Vector3::new(1.0, 0.0, 0.0));
+    let truth_30 = pose_at(Vector3::new(0.5, 0.0, 0.5));
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10.clone());
+    graph.add_pose(20, truth_20.clone());
+    graph.add_pose(30, truth_30.clone());
+    graph.anchor(10);
+    graph.add_sequential_edge(10, 20, relative_world_to_camera(&truth_10, &truth_20));
+    graph.add_sequential_edge(20, 30, relative_world_to_camera(&truth_20, &truth_30));
+
+    // Truth-consistent loop constraint with high weight.
+    graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        from_keyframe_id: 10,
+        to_keyframe_id: 30,
+        relative_pose: relative_world_to_camera(&truth_10, &truth_30),
+        inlier_count: 24,
+        inlier_ratio: 1.0,
+        mean_sampson_error: 1.0e-4,
+        score: 240.0,
+    });
+    // Outlier loop constraint with a wildly wrong relative pose.
+    let bogus_pose = pose_at(Vector3::new(5.0, 0.0, 5.0));
+    graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        from_keyframe_id: 20,
+        to_keyframe_id: 30,
+        relative_pose: relative_world_to_camera(&truth_20, &bogus_pose),
+        inlier_count: 8,
+        inlier_ratio: 0.6,
+        mean_sampson_error: 1.0e-2,
+        score: 30.0,
+    });
+
+    let mut graph_no_kernel = graph.clone();
+    let _ = graph_no_kernel
+        .optimize_se3_iterative(&PoseGraphSe3Config::default())
+        .expect("pure GN must succeed");
+    let center_30_no_kernel = graph_no_kernel.poses[&30].camera_center_world();
+    // Without a robust kernel, the outlier drags KF30 away from the truth.
+    let unbounded_drift = (center_30_no_kernel - Point3::new(0.5, 0.0, 0.5)).norm();
+    assert!(
+        unbounded_drift > 0.1,
+        "outlier should measurably bias KF30 without robust kernel; got drift {unbounded_drift}"
+    );
+
+    let mut graph_huber = graph.clone();
+    let result = graph_huber
+        .optimize_se3_iterative(&PoseGraphSe3Config {
+            robust_kernel: RobustKernel::Huber { delta: 0.05 },
+            initial_lambda: Some(1e-4),
+            max_iterations: 50,
+            ..PoseGraphSe3Config::default()
+        })
+        .expect("LM + Huber must succeed");
+    assert!(result.iterations.iter().any(|s| s.lambda > 0.0));
+    let center_30_huber = graph_huber.poses[&30].camera_center_world();
+    let huber_drift = (center_30_huber - Point3::new(0.5, 0.0, 0.5)).norm();
+    assert!(
+        huber_drift < unbounded_drift * 0.5,
+        "Huber kernel should suppress outlier; huber_drift={huber_drift} unbounded={unbounded_drift}"
+    );
+}
+
+#[test]
+fn pose_graph_se3_lm_records_lambda_trajectory() {
+    let mut graph = build_three_node_loop(Vector3::new(0.4, 0.05, -0.3));
+    let result = graph
+        .optimize_se3_iterative(&PoseGraphSe3Config {
+            initial_lambda: Some(1e-2),
+            max_iterations: 30,
+            ..PoseGraphSe3Config::default()
+        })
+        .expect("LM must succeed");
+    assert!(result.converged);
+    assert!(result.final_cost < 1.0e-9);
+    // LM must have run with positive λ for at least one iteration.
+    assert!(result.iterations.iter().any(|s| s.lambda > 0.0));
+    // After at least one accepted step, λ should have been adjusted (decreased
+    // on accept, increased on reject) so the trajectory is nonconstant.
+    let unique_lambdas: std::collections::BTreeSet<u64> = result
+        .iterations
+        .iter()
+        .map(|s| s.lambda.to_bits())
+        .collect();
+    assert!(
+        unique_lambdas.len() >= 2,
+        "λ should change across iterations"
+    );
+}
+
+#[test]
+fn pose_graph_se3_robust_kernel_cost_matches_se3_cost_when_none() {
+    let graph = build_three_node_loop(Vector3::new(0.1, 0.0, 0.0));
+    let kernel_none = graph.robust_se3_cost(&RobustKernel::None);
+    let plain = graph.se3_cost();
+    assert!((kernel_none - plain).abs() < 1.0e-12);
+}
+
+#[test]
+fn robust_kernel_huber_below_threshold_matches_quadratic() {
+    let kernel = RobustKernel::Huber { delta: 1.0 };
+    // s = 0.25 < δ² = 1.0 → ρ(s) = s, weight = 1.
+    assert!((kernel.cost(0.25) - 0.25).abs() < 1.0e-12);
+    assert!((kernel.weight(0.25) - 1.0).abs() < 1.0e-12);
+    // s = 4.0 > δ² = 1.0 → ρ(s) = 2δ√s − δ² = 4 − 1 = 3, weight = δ/√s = 0.5.
+    assert!((kernel.cost(4.0) - 3.0).abs() < 1.0e-12);
+    assert!((kernel.weight(4.0) - 0.5).abs() < 1.0e-12);
+}
+
+#[test]
+fn robust_kernel_cauchy_saturates_at_high_residual() {
+    let kernel = RobustKernel::Cauchy { c: 1.0 };
+    // weight strictly decreases as residual grows.
+    let w_small = kernel.weight(0.0);
+    let w_med = kernel.weight(1.0);
+    let w_large = kernel.weight(100.0);
+    assert!((w_small - 1.0).abs() < 1.0e-12);
+    assert!(w_med < w_small);
+    assert!(w_large < w_med);
+    assert!(w_large > 0.0);
 }
