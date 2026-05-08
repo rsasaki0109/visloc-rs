@@ -72,6 +72,9 @@ pub use visloc_io::images::{
     validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
     ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
 };
+pub use visloc_io::sensors::{
+    parse_gnss_measurements_txt, read_gnss_measurements_txt, SensorLogError,
+};
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
     localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
@@ -182,4 +185,7 @@ pub mod prelude {
         parse_pgm, read_pgm, to_pgm_ascii, write_pgm_ascii, PgmImageError,
     };
     pub use crate::io::query_features::{read_query_features_txt, QueryFeatureError};
+    pub use crate::io::sensors::{
+        parse_gnss_measurements_txt, read_gnss_measurements_txt, SensorLogError,
+    };
 }

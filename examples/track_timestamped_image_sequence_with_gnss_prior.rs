@@ -8,7 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sequence_dir = demo_sequence_dir();
     fs::create_dir_all(&sequence_dir)?;
     let timestamp_path = sequence_dir.join("timestamps_ns.txt");
-    write_demo_sequence(&sequence_dir, &timestamp_path)?;
+    let gnss_path = sequence_dir.join("gnss_world.txt");
+    write_demo_sequence(&sequence_dir, &timestamp_path, &gnss_path)?;
 
     let frames =
         read_common_image_sequence_dir_with_timestamp_file(&sequence_dir, &timestamp_path)?;
@@ -26,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let camera = Camera::pinhole(1, 64, 64, 50.0, 50.0, 32.0, 32.0);
     let map = build_map_from_image(&first.image, &extractor, &camera)?;
     let provider = InMemoryMapProvider::new(map);
-    let prior_source = gnss_prior_source_from_loaded_frames(&frames);
+    let prior_source = gnss_prior_source_from_files(&frames, &gnss_path)?;
 
     let mut tracker = ImageTracker::new(extractor, TrackingConfig::default());
     let mut results = Vec::new();
@@ -54,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("sequence dir: {}", sequence_dir.display());
+    println!("gnss file: {}", gnss_path.display());
     println!(
         "frames={} timestamps={} timestamp_valid={} timestamp_issues={}",
         sequence_summary.frame_count,
@@ -82,6 +84,7 @@ fn demo_sequence_dir() -> PathBuf {
 fn write_demo_sequence(
     dir: &Path,
     timestamp_path: &Path,
+    gnss_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let image = synthetic_marker_image()?;
     for frame_id in 0..3 {
@@ -89,14 +92,21 @@ fn write_demo_sequence(
         write_png_gray(&path, &image)?;
     }
     fs::write(timestamp_path, "0\n100000000\n200000000\n")?;
+    fs::write(
+        gnss_path,
+        "# timestamp_ns x y z horizontal_accuracy vertical_accuracy\n\
+         0 0.0 0.0 0.0 10.0 10.0\n\
+         100000000 0.0 0.0 0.0 10.0 10.0\n\
+         200000000 0.0 0.0 0.0 10.0 10.0\n",
+    )?;
     Ok(())
 }
 
-fn gnss_prior_source_from_loaded_frames(
+fn gnss_prior_source_from_files(
     frames: &[LoadedImageFrame],
-) -> FramePriorSource<GnssMeasurement> {
+    gnss_path: &Path,
+) -> Result<FramePriorSource<GnssMeasurement>, Box<dyn std::error::Error>> {
     let mut frame_timestamps = FrameTimestampIndex::new();
-    let mut measurements = Vec::new();
     for frame in frames {
         let timestamp = Timestamp::from_nanoseconds(
             frame
@@ -104,10 +114,10 @@ fn gnss_prior_source_from_loaded_frames(
                 .expect("demo frames are timestamped"),
         );
         frame_timestamps.insert_frame_id(frame.frame_id, timestamp);
-        measurements.push(GnssMeasurement::new(timestamp, Point3::origin()));
     }
+    let measurements = read_gnss_measurements_txt(gnss_path)?;
 
-    FramePriorSource::new(
+    Ok(FramePriorSource::new(
         frame_timestamps,
         MeasurementBuffer::from_measurements(measurements),
         TimeDelta::from_nanoseconds(1),
@@ -116,7 +126,7 @@ fn gnss_prior_source_from_loaded_frames(
         default_radius: 20.0,
         min_radius: 1.0,
         confidence_multiplier: 2.0,
-    })
+    }))
 }
 
 fn build_map_from_image(
