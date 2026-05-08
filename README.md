@@ -195,6 +195,12 @@ The same feature can load an ordered image directory for sequence tracking:
 cargo run --features image-io --example track_image_sequence_from_common_images
 ```
 
+Timestamped image sequences can also be connected to GNSS-derived localization priors:
+
+```bash
+cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior
+```
+
 Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
 
 ```bash

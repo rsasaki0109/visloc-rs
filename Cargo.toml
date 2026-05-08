@@ -67,3 +67,8 @@ required-features = ["image-io"]
 name = "track_image_sequence_from_common_images"
 path = "examples/track_image_sequence_from_common_images.rs"
 required-features = ["image-io"]
+
+[[example]]
+name = "track_timestamped_image_sequence_with_gnss_prior"
+path = "examples/track_timestamped_image_sequence_with_gnss_prior.rs"
+required-features = ["image-io"]
