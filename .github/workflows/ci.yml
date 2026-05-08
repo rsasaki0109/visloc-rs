@@ -6,6 +6,23 @@ on:
   pull_request:
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.82.0
+        uses: dtolnay/rust-toolchain@1.82.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
   rust:
     runs-on: ubuntu-latest
     steps:
