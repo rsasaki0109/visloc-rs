@@ -2,7 +2,7 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Frame;
 use visloc_fusion::{
-    FramePriorSource, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
+    FramePriorSource, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
     LocalizationPriorProvider, MeasurementBuffer, PoseCovariance, PosePriorMeasurement,
     PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose,
     Timestamp,
@@ -409,4 +409,35 @@ fn frame_prior_source_packages_frame_timestamps_measurements_and_prior_config() 
     assert_eq!(prior.position_world, Some(Point3::new(5.0, 0.0, 0.0)));
     assert_eq!(prior.radius, Some(6.0));
     assert_eq!(prior_by_id, prior);
+}
+
+#[test]
+fn frame_prior_source_summarizes_measurement_sync() {
+    let mut frame_timestamps = FrameTimestampIndex::new();
+    frame_timestamps.insert_frame_id(1, Timestamp::from_nanoseconds(100));
+    frame_timestamps.insert_frame_id(2, Timestamp::from_nanoseconds(200));
+    frame_timestamps.insert_frame_id(3, Timestamp::from_nanoseconds(300));
+    let measurements = MeasurementBuffer::from_measurements([
+        GnssMeasurement::new(Timestamp::from_nanoseconds(95), Point3::new(1.0, 0.0, 0.0)),
+        GnssMeasurement::new(Timestamp::from_nanoseconds(305), Point3::new(3.0, 0.0, 0.0)),
+    ]);
+    let source = FramePriorSource::new(
+        frame_timestamps,
+        measurements,
+        TimeDelta::from_nanoseconds(10),
+    );
+
+    let summary = source.sync_summary();
+
+    assert_eq!(
+        summary,
+        FramePriorSyncSummary {
+            frame_count: 3,
+            measurement_count: 2,
+            matched_frame_count: 2,
+            missing_measurement_count: 1,
+        }
+    );
+    assert!((summary.matched_frame_ratio() - 2.0 / 3.0).abs() < 1.0e-12);
+    assert!(!summary.all_frames_matched());
 }
