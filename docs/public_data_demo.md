@@ -75,6 +75,46 @@ intermediate matches; the demo prints the chosen `min_frame_id_gap`,
 per-iteration cost, and per-keyframe translation / rotation error against
 the loaded ground-truth poses.
 
+## Real-Image Visual Odometry + Loop Closure Demo
+
+The `online_slam_image_vo_loop_demo` example consumes a KITTI-format
+grayscale image sequence directly — no synthetic poses, no toy data — and
+runs the full visual SLAM loop in Rust:
+
+1. `read_kitti_image_sequence_dir` loads the `image_0` folder plus the
+   matching `calib.txt` (`P0` projection by default).
+2. Per-frame `CornerFeatureExtractor` features (Shi-Tomasi-style corners
+   with intensity-difference patch descriptors) feed a
+   `CrossCheckMatcher<BruteForceMatcher>` between consecutive frames.
+3. `RelativePoseEstimator` (8-point essential matrix RANSAC + cheirality
+   recovery) returns a `previous_to_current` SE(3) for every adjacent
+   pair, which is integrated into a monocular VO trajectory.
+4. The same essential-matrix pipeline runs once more between the first and
+   last frames; if it produces enough RANSAC inliers, the recovered
+   relative pose is kept as a loop-closure constraint.
+5. `PoseGraph::optimize_se3_iterative` (Levenberg-Marquardt + Cholesky)
+   pulls the chain back along the loop edge; the example writes `vo.csv`
+   and `corrected.csv` (id, x, y, z) to the output directory.
+
+Monocular essential-matrix VO is scale-ambiguous; this demo uses unit
+translation per pair, so the resulting trajectory is in arbitrary units.
+The loop-closure constraint, computed from the same essential-matrix
+path, is what closes the chain.
+
+To run on KITTI 00 (download the official odometry grayscale dataset
+first; the file layout expected here is the same as KITTI's
+`sequences/00/`):
+
+```sh
+cargo run --release --features image-io \
+    --example online_slam_image_vo_loop_demo -- \
+    --image-dir /path/to/KITTI_odometry/sequences/00/image_0 \
+    --calib    /path/to/KITTI_odometry/sequences/00/calib.txt \
+    --max-frames 200 \
+    --frame-stride 4 \
+    --out-dir target/kitti_image_vo_loop_demo
+```
+
 ## KITTI Loop-Closure Asset (README)
 
 The README includes a KITTI 00 pose-graph loop-closure visualization

@@ -431,6 +431,21 @@ Completed at 100%:
 Recommended stretch tasks (any one of these would lift the project beyond
 its 100% MVP scope):
 
+5. Real-image visual odometry + loop closure (✓ runnable):
+   `online_slam_image_vo_loop_demo` (gated behind the `image-io` feature)
+   loads a KITTI-format grayscale image sequence + `calib.txt`, extracts
+   features per frame, matches them across consecutive frames, recovers
+   relative SE(3) via 8-point essential-matrix RANSAC, integrates a VO
+   trajectory, runs the same essential-matrix pipeline between the first
+   and last frames as a loop-closure constraint, and corrects the chain
+   with `PoseGraph::optimize_se3_iterative`. No simulated drift and no
+   GT poses are used. Stretch beyond this would be (a) a stereo VO mode
+   that fixes the metric scale per pair from the calibration baseline,
+   (b) an in-flight loop-detection step that scans older keyframes
+   instead of only matching against frame 0, and (c) regenerating the
+   README asset from this real-VO output instead of the GT-pose-based
+   `online_slam_kitti_loop_demo`.
+
 1. Public-data loop demo (✓ runnable): `online_slam_public_loop_demo`
    ingests a COLMAP-text-format sparse reconstruction from disk, defaulting
    to a synthesized 12-keyframe orbit fixture for CI but accepting

@@ -91,6 +91,17 @@ Completed pieces:
   `so3_left_jacobian`, `so3_left_jacobian_inverse`) live in
   `visloc-core::geometry::se3` with Taylor fallbacks for small angles and
   `exp ∘ log` round-trip + adjoint-conjugation tests.
+- An end-to-end real-image VO + loop-closure demo,
+  `online_slam_image_vo_loop_demo` (gated behind the `image-io` feature),
+  reads a KITTI-format grayscale image sequence + `calib.txt`, extracts
+  `CornerFeatureExtractor` features per frame, matches them with
+  `CrossCheckMatcher<BruteForceMatcher>`, recovers each consecutive
+  pair's relative SE(3) via 8-point essential-matrix RANSAC, integrates
+  the trajectory, runs the same pipeline between the first and last
+  frames as the loop closure constraint, and corrects the chain with
+  `PoseGraph::optimize_se3_iterative`. No simulated drift and no GT
+  poses are used — the drifted trajectory is what monocular essential-
+  matrix VO actually produces from the pixel data.
 - A consensus loop-closure verifier, `HybridLoopClosureVerifier`, runs both
   the essential-matrix and PnP backends on the same candidate and accepts
   only when both verify AND their recovered relative poses agree within
