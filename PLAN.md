@@ -17,7 +17,7 @@ Repository:
 Current milestone completion:
 
 ```text
-Deep VO / Loop Close completion: 50%
+Deep VO / Loop Close completion: 55%
 ```
 
 Report this value at the end of development updates until it changes. Increase
@@ -319,10 +319,10 @@ blocked CI.
 Current score:
 
 ```text
-Deep VO / Loop Close completion: 50%
+Deep VO / Loop Close completion: 55%
 ```
 
-Why 50%:
+Why 55%:
 
 - Tracking and local mapping scaffolds exist.
 - Online SLAM composition exists.
@@ -331,6 +331,11 @@ Why 50%:
 - VO estimates can become tracking pose priors.
 - External two-view match files can be read.
 - External two-view matches can now produce a lightweight VO prior.
+- File-backed two-view match files now drive a short tracking sequence
+  end-to-end through `read_two_view_matches_txt`, `TwoViewMatchVisualOdometryFrontend`,
+  `VisualOdometryPriorProvider`, and `track_frame_with_localization_prior_submap_provider`,
+  exercised by the `track_sequence_with_two_view_match_vo_prior` example and a
+  matching integration test.
 
 Why not higher:
 
@@ -340,49 +345,27 @@ Why not higher:
 - Loop closure is candidate reporting only.
 - No pose-graph constraints or global correction exist.
 
-## Next Milestone: 50% to 60%
+## Next Milestone: 55% to 60%
 
 Goal: make the Deep VO path less synthetic while still avoiding mandatory model
 runtimes.
 
 Recommended next task:
 
-### 1. Add a File-Backed Two-View VO Sequence Example
+### 1. File-Backed Two-View VO Sequence Example (Done at 55%)
 
-Create an example that reads a sequence of external two-view match files and
-uses `TwoViewMatchVisualOdometryFrontend` through `VisualOdometryPriorProvider`
-to guide tracking.
-
-Suggested example name:
-
-```text
-examples/track_sequence_with_two_view_match_vo_prior.rs
-```
-
-Expected behavior:
-
-- Build or load a small visual map.
-- Build 3 synthetic or fixture-backed frames.
-- Read two-view match text for frame pairs:
-  - `100 -> 101`
-  - `101 -> 102`
-- Insert those matches into `TwoViewMatchVisualOdometryFrontend`.
-- Use the provider to predict a prior for frames after initialization.
-- Track with `track_frame_with_localization_prior_submap_provider`.
-- Print per-frame diagnostics:
-  - frame id
-  - whether VO prior existed
-  - match count
-  - inlier count
-  - mean flow residual
-  - candidate landmark count
-  - localization success
-  - estimated camera center
-- Optionally write a small report when `--out-dir` is supplied.
-
-Add tests around the core behavior if new helper code is introduced.
-
-This would justify raising completion to about 55%.
+`examples/track_sequence_with_two_view_match_vo_prior.rs` now exists. It builds
+a small visual map and three synthetic frames, generates per-pair two-view
+match text files for frame pairs `100 -> 101` and `101 -> 102`, reads them back
+with `read_two_view_matches_txt`, populates a
+`TwoViewMatchVisualOdometryFrontend`, and feeds each VO prior through
+`track_frame_with_localization_prior_submap_provider`. The example prints
+per-frame diagnostics (frame id, whether a VO prior was used, match count,
+inlier count, mean flow residual, candidate landmark count, localization
+success, used external prior, and estimated camera center) and writes a text
+report plus the generated input match files when `--out-dir` is supplied.
+`tests/two_view_vo.rs` covers the file-backed read → frontend → prior chain
+across consecutive frame pairs.
 
 ### 2. Make the VO Adapter Diagnostics More Explicit
 
@@ -599,8 +582,8 @@ If handing off to another agent, use this:
 ```text
 You are continuing the Rust project visloc-rs.
 Read PLAN.md, docs/progress.md, docs/roadmap.md, docs/interfaces.md, and src/two_view_vo.rs first.
-Current Deep VO / Loop Close completion is 50%.
-Implement the next milestone: a file-backed two-view VO sequence example that reads external match text for consecutive frame pairs, builds TwoViewMatchVisualOdometryFrontend priors, feeds them through VisualOdometryPriorProvider, tracks a short sequence, prints diagnostics, adds tests if helper code is introduced, updates README/docs/CHANGELOG, runs scripts/check.sh, commits, pushes, and watches CI.
+Current Deep VO / Loop Close completion is 55%.
+The file-backed two-view VO sequence example already exists as track_sequence_with_two_view_match_vo_prior with covering tests in tests/two_view_vo.rs. Implement the next milestone: a real classical two-view geometry path (essential or fundamental matrix RANSAC, relative-pose recovery, optional scale from priors) under crates/vision/src/two_view/, expose it through VisualOdometryFrontend, drive a short sequence demo that compares it with the existing flow-only adapter, add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
 Do not add mandatory deep-learning runtime dependencies and do not claim full SLAM or full loop closure.
 End every status/final message with: Deep VO / Loop Close completion: <percent>.
 ```
@@ -611,6 +594,8 @@ End every status/final message with: Deep VO / Loop Close completion: <percent>.
 - Confirm `git status --short` is clean.
 - Read this `PLAN.md`.
 - Run `cargo check --workspace --all-targets --all-features`.
-- Start with the file-backed two-view VO sequence example.
-- Keep completion at 50% until the next runnable example/test/docs milestone is
+- Start with the classical two-view geometry path (essential/fundamental matrix
+  RANSAC and relative-pose recovery) once the file-backed two-view VO sequence
+  milestone is in.
+- Keep completion at 55% until the next runnable example/test/docs milestone is
   complete.
