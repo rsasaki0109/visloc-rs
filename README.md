@@ -189,7 +189,7 @@ cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_dem
 With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_summary.json`, `tracking_report.html` for frame-by-frame state transitions, and `trajectory_report.html` for the estimated pose path.
 Tracking diagnostics distinguish motion pose priors from external localization priors, so GNSS-derived submap narrowing is visible in the CSV, JSON, and HTML reports.
 
-Run a moving-camera GNSS-prior tracking example that narrows the visual map before localization and writes an `index.html` dashboard, `tracking.csv`, `trajectory.csv`, KITTI/TUM pose exports, JSON summaries, and browser-viewable reports:
+Run a moving-camera GNSS-prior tracking example that narrows the visual map before localization and writes an `index.html` dashboard, `tracking.csv`, `trajectory.csv`, KITTI/TUM pose exports, synthetic-reference error reports, JSON summaries, and browser-viewable reports:
 
 ```bash
 cargo run --example track_sequence_with_gnss_prior

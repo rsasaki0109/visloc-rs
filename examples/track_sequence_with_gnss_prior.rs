@@ -9,7 +9,8 @@ use visloc_rs::{
     write_tracking_results_csv, write_tracking_results_html_report, FramePriorSource,
     FrameTimestampIndex, GnssMeasurement, InMemoryMapProvider, LocalizationPipeline,
     MeasurementBuffer, PoseTrajectory, PriorConfig, TimeDelta, Timed, Timestamp, Tracker,
-    TrackingConfig, TrackingStats,
+    TrackingConfig, TrackingEvent, TrackingState, TrackingStats, TrajectoryErrorSummary,
+    TrajectorySample,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -126,14 +127,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stats = tracker.stats();
     let trajectory = PoseTrajectory::from_tracking_results(&results);
+    let reference_trajectory = reference_trajectory_from_poses(&poses);
+    let error_summary = trajectory.translation_error_summary_against(&reference_trajectory);
     println!(
-        "stats frames={} success_rate={:.3} external_prior_rate={:.3} external_prior_count={} trajectory_poses={} path_length={:.3}",
+        "stats frames={} success_rate={:.3} external_prior_rate={:.3} external_prior_count={} trajectory_poses={} path_length={:.3} mean_translation_error={:?}",
         stats.frame_count,
         stats.success_rate(),
         stats.external_localization_prior_usage_rate(),
         stats.external_localization_prior_used_count,
         trajectory.len(),
         trajectory.total_path_length(),
+        error_summary.mean_translation_error,
     );
 
     if let Some(output_dir) = output_dir {
@@ -144,8 +148,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trajectory_csv_path = output_dir.join("trajectory.csv");
         let trajectory_kitti_path = output_dir.join("poses.txt");
         let trajectory_tum_path = output_dir.join("trajectory_tum.txt");
+        let reference_kitti_path = output_dir.join("reference_poses.txt");
+        let reference_tum_path = output_dir.join("reference_tum.txt");
+        let translation_errors_path = output_dir.join("translation_errors.csv");
+        let error_summary_path = output_dir.join("error_summary.json");
         let trajectory_summary_path = output_dir.join("trajectory_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
+        let trajectory_evaluation_path = output_dir.join("trajectory_evaluation.html");
         let demo_index_path = output_dir.join("index.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
@@ -153,11 +162,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trajectory.write_csv(&trajectory_csv_path)?;
         trajectory.write_kitti_poses(&trajectory_kitti_path)?;
         trajectory.write_tum_poses(&trajectory_tum_path)?;
+        reference_trajectory.write_kitti_poses(&reference_kitti_path)?;
+        reference_trajectory.write_tum_poses(&reference_tum_path)?;
+        trajectory.write_translation_errors_csv_against(
+            &reference_trajectory,
+            &translation_errors_path,
+        )?;
+        error_summary.write_json(&error_summary_path)?;
         trajectory.write_summary_json(&trajectory_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
-        write_demo_index_html(&demo_index_path, tracker.stats(), &trajectory)?;
+        trajectory.write_html_report_against(&reference_trajectory, &trajectory_evaluation_path)?;
+        write_demo_index_html(
+            &demo_index_path,
+            tracker.stats(),
+            &trajectory,
+            &error_summary,
+        )?;
         println!(
-            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} trajectory_summary={} trajectory_report={}",
+            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} reference_kitti={} reference_tum={} translation_errors={} error_summary={} trajectory_summary={} trajectory_report={} trajectory_evaluation={}",
             demo_index_path.display(),
             tracking_csv_path.display(),
             tracking_summary_path.display(),
@@ -165,8 +187,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             trajectory_csv_path.display(),
             trajectory_kitti_path.display(),
             trajectory_tum_path.display(),
+            reference_kitti_path.display(),
+            reference_tum_path.display(),
+            translation_errors_path.display(),
+            error_summary_path.display(),
             trajectory_summary_path.display(),
-            trajectory_report_path.display()
+            trajectory_report_path.display(),
+            trajectory_evaluation_path.display()
         );
     }
 
@@ -189,11 +216,16 @@ fn write_demo_index_html(
     path: impl AsRef<Path>,
     stats: &TrackingStats,
     trajectory: &PoseTrajectory,
+    error_summary: &TrajectoryErrorSummary,
 ) -> std::io::Result<()> {
-    fs::write(path, demo_index_html(stats, trajectory))
+    fs::write(path, demo_index_html(stats, trajectory, error_summary))
 }
 
-fn demo_index_html(stats: &TrackingStats, trajectory: &PoseTrajectory) -> String {
+fn demo_index_html(
+    stats: &TrackingStats,
+    trajectory: &PoseTrajectory,
+    error_summary: &TrajectoryErrorSummary,
+) -> String {
     format!(
         "<!doctype html>
 <html lang=\"en\">
@@ -225,16 +257,22 @@ a{{color:#185abc;text-decoration:none;font-weight:700}}
 <div class=\"metric\"><span class=\"label\">External prior</span><span class=\"value\">{} ({:.1}%)</span></div>
 <div class=\"metric\"><span class=\"label\">Trajectory poses</span><span class=\"value\">{}</span></div>
 <div class=\"metric\"><span class=\"label\">Path length</span><span class=\"value\">{:.3} m</span></div>
+<div class=\"metric\"><span class=\"label\">Mean translation error</span><span class=\"value\">{:.6} m</span></div>
 </section>
 <section class=\"links\">
 <div class=\"link\"><a href=\"tracking_report.html\">Tracking report</a><span class=\"detail\">Frame states, inliers, failures, and external-prior usage.</span></div>
 <div class=\"link\"><a href=\"trajectory_report.html\">Trajectory report</a><span class=\"detail\">Top-down camera-center path estimated from localized frames.</span></div>
+<div class=\"link\"><a href=\"trajectory_evaluation.html\">Trajectory evaluation</a><span class=\"detail\">Estimated trajectory compared with synthetic reference poses.</span></div>
 <div class=\"link\"><a href=\"tracking.csv\">tracking.csv</a><span class=\"detail\">Frame-by-frame localization diagnostics.</span></div>
 <div class=\"link\"><a href=\"trajectory.csv\">trajectory.csv</a><span class=\"detail\">Estimated camera centers and poses for plotting or regression checks.</span></div>
 <div class=\"link\"><a href=\"poses.txt\">poses.txt</a><span class=\"detail\">KITTI-style 3x4 camera-to-world pose rows.</span></div>
 <div class=\"link\"><a href=\"trajectory_tum.txt\">trajectory_tum.txt</a><span class=\"detail\">TUM-style timestamp, translation, quaternion pose rows.</span></div>
+<div class=\"link\"><a href=\"reference_poses.txt\">reference_poses.txt</a><span class=\"detail\">Synthetic reference trajectory in KITTI-style pose format.</span></div>
+<div class=\"link\"><a href=\"reference_tum.txt\">reference_tum.txt</a><span class=\"detail\">Synthetic reference trajectory in TUM-style pose format.</span></div>
+<div class=\"link\"><a href=\"translation_errors.csv\">translation_errors.csv</a><span class=\"detail\">Frame-matched translation errors against the synthetic reference.</span></div>
 <div class=\"link\"><a href=\"tracking_summary.json\">tracking_summary.json</a><span class=\"detail\">Aggregate tracking success and prior-use metrics.</span></div>
 <div class=\"link\"><a href=\"trajectory_summary.json\">trajectory_summary.json</a><span class=\"detail\">Pose count, path length, bounds, and reprojection summary.</span></div>
+<div class=\"link\"><a href=\"error_summary.json\">error_summary.json</a><span class=\"detail\">Mean, RMSE, and max translation error summary.</span></div>
 </section>
 </main>
 </body>
@@ -246,7 +284,28 @@ a{{color:#185abc;text-decoration:none;font-weight:700}}
         stats.external_localization_prior_usage_rate() * 100.0,
         trajectory.len(),
         trajectory.total_path_length(),
+        error_summary.mean_translation_error.unwrap_or(0.0),
     )
+}
+
+fn reference_trajectory_from_poses(poses: &[(u64, Pose, Point3<f64>)]) -> PoseTrajectory {
+    let mut trajectory = PoseTrajectory::new();
+    for (index, (frame_id, pose, _center)) in poses.iter().enumerate() {
+        trajectory.push_sample(TrajectorySample {
+            frame_id: *frame_id,
+            pose: pose.clone(),
+            state: TrackingState::Tracking,
+            event: if index == 0 {
+                TrackingEvent::Initialized
+            } else {
+                TrackingEvent::Tracked
+            },
+            inlier_count: 0,
+            inlier_ratio: 0.0,
+            reprojection_error: None,
+        });
+    }
+    trajectory
 }
 
 fn frame_from_projected_landmarks(

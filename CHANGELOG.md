@@ -26,6 +26,7 @@ All notable changes to `visloc-rs` will be documented here.
 - Tracking sequence example with optional `tracking.csv`, `tracking_summary.json`, `tracking_report.html`, and `trajectory_report.html` output directory.
 - Moving-camera GNSS-prior tracking example with optional tracking diagnostics plus `trajectory.csv`, `poses.txt`, `trajectory_tum.txt`, `trajectory_summary.json`, and `trajectory_report.html` output directory.
 - GNSS-prior tracking demo output now includes an `index.html` dashboard linking the tracking report, trajectory report, CSVs, KITTI/TUM poses, and JSON summaries.
+- GNSS-prior tracking demo now exports a synthetic reference trajectory plus translation-error CSV, JSON summary, and trajectory-comparison HTML report.
 
 ## 0.1.0 - 2026-05-07
 
