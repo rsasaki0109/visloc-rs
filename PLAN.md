@@ -438,10 +438,15 @@ its 100% MVP scope):
    KITTI-derived sparse models. Remaining stretch: bundle a real subset
    (sparse-only, no images) and add visualization assets so the README
    demo path doesn't depend on Python tooling.
-2. Levenberg-Marquardt damping plus robust kernels (Huber / Cauchy) on top
-   of `optimize_se3_iterative` for graphs with outlier loop closures, and
-   a sparse Cholesky / Schur-complement solver path so the optimizer
-   scales beyond a handful of keyframes.
+2. Levenberg-Marquardt damping plus robust kernels (✓ runnable):
+   `optimize_se3_iterative` now accepts an optional `initial_lambda` LM
+   damping schedule with adjustable accept / reject factors and a
+   `RobustKernel::{None, Huber, Cauchy}` IRLS cost. The dense normal-
+   equations solve prefers Cholesky on the SPD system and falls back to
+   LU. `pose_graph_robust_demo` shows the outlier-recovery story end-to-
+   end. Remaining stretch: a true sparse-matrix solver (`nalgebra-sparse`
+   `CsCholesky` / Schur-complement) so the optimizer scales beyond a few
+   tens of keyframes.
 3. Loop-closure verifier reuse from PnP / tracking inliers: extend the
    verifier to optionally consume 2D-3D correspondences and reuse `PnPRansac`
    so candidates are checked against the 3D map structure as well as the
