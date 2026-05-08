@@ -316,7 +316,7 @@ LICENSE-APACHE           Apache-2.0 license text
 LICENSE-MIT              MIT license text
 docs/release_checklist.md pre-release quality checklist
 scripts/check.sh          local fmt/clippy/test/doc gate
-scripts/check_docs_links.sh checks local README/docs markdown links
+scripts/check_docs_links.sh checks local README/docs markdown links and anchors
 scripts/run_examples.sh   runs all user-facing examples
 scripts/check_trajectory_evaluation.sh checks trajectory metric thresholds and exports
 scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs

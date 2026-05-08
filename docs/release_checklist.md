@@ -10,7 +10,7 @@
 - Confirm the CI MSRV job passes with Rust 1.82.0.
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).
 - Confirm `README.md` describes the current public API and does not imply full SLAM support.
-- Confirm local README/docs links pass with `scripts/check_docs_links.sh`.
+- Confirm local README/docs links and anchors pass with `scripts/check_docs_links.sh`.
 - Confirm `docs/interfaces.md` matches the exported traits and structs.
 - Confirm `docs/api_stability.md` reflects the intended stable and experimental API tiers.
 - Confirm `docs/colmap_compatibility.md` matches current COLMAP reader/writer behavior.
