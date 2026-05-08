@@ -56,6 +56,12 @@ pub enum ImageSequenceError {
         path_count: usize,
         timestamp_count: usize,
     },
+    #[error("invalid timestamp line {line_number}: {line} ({message})")]
+    InvalidTimestampLine {
+        line_number: usize,
+        line: String,
+        message: String,
+    },
 }
 
 #[cfg(feature = "image-io")]
@@ -214,6 +220,42 @@ where
 }
 
 #[cfg(feature = "image-io")]
+pub fn read_timestamp_nanoseconds_txt(
+    path: impl AsRef<Path>,
+) -> Result<Vec<i128>, ImageSequenceError> {
+    parse_timestamp_nanoseconds_txt(&fs::read_to_string(path)?)
+}
+
+#[cfg(feature = "image-io")]
+pub fn parse_timestamp_nanoseconds_txt(text: &str) -> Result<Vec<i128>, ImageSequenceError> {
+    let mut timestamps = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let token = trimmed.split_whitespace().next().ok_or_else(|| {
+            ImageSequenceError::InvalidTimestampLine {
+                line_number,
+                line: line.to_owned(),
+                message: "missing timestamp".to_owned(),
+            }
+        })?;
+        let timestamp =
+            token
+                .parse::<i128>()
+                .map_err(|error| ImageSequenceError::InvalidTimestampLine {
+                    line_number,
+                    line: line.to_owned(),
+                    message: error.to_string(),
+                })?;
+        timestamps.push(timestamp);
+    }
+    Ok(timestamps)
+}
+
+#[cfg(feature = "image-io")]
 fn read_common_image_sequence_with_optional_timestamps<P>(
     paths: &[P],
     timestamps_nanoseconds: Option<&[i128]>,
@@ -242,6 +284,32 @@ where
 pub fn read_common_image_sequence_dir(
     dir: impl AsRef<Path>,
 ) -> Result<Vec<LoadedImageFrame>, ImageSequenceError> {
+    let paths = common_image_sequence_paths_dir(dir)?;
+    read_common_image_sequence(&paths)
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image_sequence_dir_with_timestamps(
+    dir: impl AsRef<Path>,
+    timestamps_nanoseconds: &[i128],
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError> {
+    let paths = common_image_sequence_paths_dir(dir)?;
+    read_common_image_sequence_with_timestamps(&paths, timestamps_nanoseconds)
+}
+
+#[cfg(feature = "image-io")]
+pub fn read_common_image_sequence_dir_with_timestamp_file(
+    dir: impl AsRef<Path>,
+    timestamp_path: impl AsRef<Path>,
+) -> Result<Vec<LoadedImageFrame>, ImageSequenceError> {
+    let timestamps = read_timestamp_nanoseconds_txt(timestamp_path)?;
+    read_common_image_sequence_dir_with_timestamps(dir, &timestamps)
+}
+
+#[cfg(feature = "image-io")]
+fn common_image_sequence_paths_dir(
+    dir: impl AsRef<Path>,
+) -> Result<Vec<PathBuf>, ImageSequenceError> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -250,7 +318,7 @@ pub fn read_common_image_sequence_dir(
         }
     }
     paths.sort();
-    read_common_image_sequence(&paths)
+    Ok(paths)
 }
 
 #[cfg(feature = "image-io")]

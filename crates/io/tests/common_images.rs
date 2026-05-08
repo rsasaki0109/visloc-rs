@@ -4,9 +4,11 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb};
 use visloc_io::images::{
-    common_image_sequence_summary, decode_common_image, read_common_image,
-    read_common_image_sequence, read_common_image_sequence_dir,
-    read_common_image_sequence_with_timestamps, validate_common_image_sequence_dimensions,
+    common_image_sequence_summary, decode_common_image, parse_timestamp_nanoseconds_txt,
+    read_common_image, read_common_image_sequence, read_common_image_sequence_dir,
+    read_common_image_sequence_dir_with_timestamp_file,
+    read_common_image_sequence_dir_with_timestamps, read_common_image_sequence_with_timestamps,
+    read_timestamp_nanoseconds_txt, validate_common_image_sequence_dimensions,
     validate_common_image_sequence_timestamps, write_png_gray, ImageSequenceError,
     ImageSequenceValidationIssue,
 };
@@ -139,6 +141,27 @@ fn rejects_mismatched_image_sequence_timestamp_count() {
 }
 
 #[test]
+fn parses_timestamp_nanoseconds_text() {
+    let timestamps = parse_timestamp_nanoseconds_txt(
+        "\n# timestamp_ns\n100\n200 frame_0001.png\n 300   # inline note treated as extra columns\n",
+    )
+    .unwrap();
+
+    assert_eq!(timestamps, vec![100, 200, 300]);
+}
+
+#[test]
+fn rejects_invalid_timestamp_text_line() {
+    let error = parse_timestamp_nanoseconds_txt("100\nnot_a_timestamp\n")
+        .expect_err("invalid timestamp should fail");
+
+    assert!(matches!(
+        error,
+        ImageSequenceError::InvalidTimestampLine { line_number: 2, .. }
+    ));
+}
+
+#[test]
 fn reads_common_image_sequence_dir_sorted_by_path() {
     let dir = tempfile_dir();
     let a = dir.join("0000.png");
@@ -155,6 +178,44 @@ fn reads_common_image_sequence_dir_sorted_by_path() {
     assert_eq!(frames[0].path, a);
     assert_eq!(frames[1].frame_id, 1);
     assert_eq!(frames[1].path, b);
+}
+
+#[test]
+fn reads_common_image_sequence_dir_with_timestamps() {
+    let dir = tempfile_dir();
+    let a = dir.join("0000.png");
+    let b = dir.join("0001.png");
+    write_png_gray(&b, &GrayscaleImage::from_luma_u8(1, 1, vec![255]).unwrap()).unwrap();
+    write_png_gray(&a, &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap()).unwrap();
+
+    let frames = read_common_image_sequence_dir_with_timestamps(&dir, &[10, 20]).unwrap();
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].path, a);
+    assert_eq!(frames[0].timestamp_nanoseconds, Some(10));
+    assert_eq!(frames[1].path, b);
+    assert_eq!(frames[1].timestamp_nanoseconds, Some(20));
+}
+
+#[test]
+fn reads_common_image_sequence_dir_with_timestamp_file() {
+    let dir = tempfile_dir();
+    let a = dir.join("0000.png");
+    let b = dir.join("0001.png");
+    let timestamp_path = dir.join("timestamps_ns.txt");
+    write_png_gray(&b, &GrayscaleImage::from_luma_u8(1, 1, vec![255]).unwrap()).unwrap();
+    write_png_gray(&a, &GrayscaleImage::from_luma_u8(1, 1, vec![0]).unwrap()).unwrap();
+    std::fs::write(&timestamp_path, "# timestamp_ns\n100\n200\n").unwrap();
+
+    let timestamps = read_timestamp_nanoseconds_txt(&timestamp_path).unwrap();
+    let frames = read_common_image_sequence_dir_with_timestamp_file(&dir, &timestamp_path).unwrap();
+
+    assert_eq!(timestamps, vec![100, 200]);
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].path, a);
+    assert_eq!(frames[0].timestamp_nanoseconds, Some(100));
+    assert_eq!(frames[1].path, b);
+    assert_eq!(frames[1].timestamp_nanoseconds, Some(200));
 }
 
 #[test]

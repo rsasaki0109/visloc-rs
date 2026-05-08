@@ -7,10 +7,11 @@ use visloc_rs::prelude::*;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sequence_dir = demo_sequence_dir();
     fs::create_dir_all(&sequence_dir)?;
-    let image_paths = write_demo_sequence(&sequence_dir)?;
-    let timestamps = [0, 100_000_000, 200_000_000];
+    let timestamp_path = sequence_dir.join("timestamps_ns.txt");
+    write_demo_sequence(&sequence_dir, &timestamp_path)?;
 
-    let frames = read_common_image_sequence_with_timestamps(&image_paths, &timestamps)?;
+    let frames =
+        read_common_image_sequence_dir_with_timestamp_file(&sequence_dir, &timestamp_path)?;
     let timestamp_issues = validate_common_image_sequence_timestamps(&frames);
     let sequence_summary = common_image_sequence_summary(&frames);
     let first = frames
@@ -78,15 +79,17 @@ fn demo_sequence_dir() -> PathBuf {
     PathBuf::from("target").join("visloc_timestamped_image_sequence_demo")
 }
 
-fn write_demo_sequence(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn write_demo_sequence(
+    dir: &Path,
+    timestamp_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let image = synthetic_marker_image()?;
-    let mut paths = Vec::new();
     for frame_id in 0..3 {
         let path = dir.join(format!("{frame_id:04}.png"));
         write_png_gray(&path, &image)?;
-        paths.push(path);
     }
-    Ok(paths)
+    fs::write(timestamp_path, "0\n100000000\n200000000\n")?;
+    Ok(())
 }
 
 fn gnss_prior_source_from_loaded_frames(
