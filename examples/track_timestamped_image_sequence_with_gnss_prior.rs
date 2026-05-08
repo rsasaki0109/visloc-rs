@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&sequence_dir)?;
     let timestamp_path = sequence_dir.join("timestamps_ns.txt");
     let gnss_path = sequence_dir.join("gnss_world.txt");
+    let sync_evaluation_path = sequence_dir.join("gnss_sync_evaluation.json");
     write_demo_sequence(&sequence_dir, &timestamp_path, &gnss_path)?;
 
     let frames =
@@ -33,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_matched_frame_count: Some(frames.len()),
         min_matched_frame_ratio: Some(1.0),
     });
+    sync_evaluation.write_json(&sync_evaluation_path)?;
 
     let mut tracker = ImageTracker::new(extractor, TrackingConfig::default());
     let mut results = Vec::new();
@@ -61,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("sequence dir: {}", sequence_dir.display());
     println!("gnss file: {}", gnss_path.display());
+    println!("sync evaluation: {}", sync_evaluation_path.display());
     println!(
         "frames={} timestamps={} timestamp_valid={} timestamp_issues={}",
         sequence_summary.frame_count,

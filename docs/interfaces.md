@@ -140,7 +140,7 @@ Each frame is localized/tracked first. If tracking succeeds, the pipeline create
 - `MeasurementBuffer<T>` keeps timestamped measurements ordered, finds the latest or nearest measurement, and can resolve a frame's nearest external prior through `FrameTimestampIndex`.
 - `FramePriorSource<T>` packages frame timestamps, measurement buffers, sync tolerance, and prior radius configuration for per-frame external prior lookup.
 - `FramePriorSyncSummary` reports frame/measurement counts, matched frames, missing measurements, and sync ratio for debugging real automotive/UAV sensor logs.
-- `FramePriorSyncEvaluationConfig` turns sync summaries into pass/fail results with minimum matched-frame count or ratio thresholds.
+- `FramePriorSyncEvaluationConfig` turns sync summaries into pass/fail results with minimum matched-frame count or ratio thresholds. `FramePriorSyncEvaluationResult` can be exported as JSON for demo smoke checks.
 - `PositionCovariance`, `PoseCovariance`, and `PoseCovarianceMatrix` preserve uncertainty for future fusion backends while still supporting simple radius-based localization priors.
 - `GnssMeasurement` stores a world-position prior plus optional horizontal/vertical accuracy or 3D position covariance.
 - `PosePriorMeasurement` stores an external pose prior, such as odometry, VIO, or a previous fused estimate, plus optional translation sigma or 6D pose covariance.

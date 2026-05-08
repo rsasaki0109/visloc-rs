@@ -48,6 +48,7 @@ All notable changes to `visloc-rs` will be documented here.
 - GNSS text/CSV parsing for timestamped world-position priors used by sequence localization demos.
 - `FramePriorSyncSummary` diagnostics for checking external measurement coverage against frame timestamps.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
+- JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.
 
 ## 0.1.0 - 2026-05-07
 
