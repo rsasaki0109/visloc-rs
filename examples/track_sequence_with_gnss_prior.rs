@@ -142,6 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tracking_summary_path = output_dir.join("tracking_summary.json");
         let tracking_report_path = output_dir.join("tracking_report.html");
         let trajectory_csv_path = output_dir.join("trajectory.csv");
+        let trajectory_kitti_path = output_dir.join("poses.txt");
+        let trajectory_tum_path = output_dir.join("trajectory_tum.txt");
         let trajectory_summary_path = output_dir.join("trajectory_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
         let demo_index_path = output_dir.join("index.html");
@@ -149,16 +151,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracker.stats().write_json(&tracking_summary_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
         trajectory.write_csv(&trajectory_csv_path)?;
+        trajectory.write_kitti_poses(&trajectory_kitti_path)?;
+        trajectory.write_tum_poses(&trajectory_tum_path)?;
         trajectory.write_summary_json(&trajectory_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         write_demo_index_html(&demo_index_path, tracker.stats(), &trajectory)?;
         println!(
-            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_summary={} trajectory_report={}",
+            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_kitti={} trajectory_tum={} trajectory_summary={} trajectory_report={}",
             demo_index_path.display(),
             tracking_csv_path.display(),
             tracking_summary_path.display(),
             tracking_report_path.display(),
             trajectory_csv_path.display(),
+            trajectory_kitti_path.display(),
+            trajectory_tum_path.display(),
             trajectory_summary_path.display(),
             trajectory_report_path.display()
         );
@@ -225,6 +231,8 @@ a{{color:#185abc;text-decoration:none;font-weight:700}}
 <div class=\"link\"><a href=\"trajectory_report.html\">Trajectory report</a><span class=\"detail\">Top-down camera-center path estimated from localized frames.</span></div>
 <div class=\"link\"><a href=\"tracking.csv\">tracking.csv</a><span class=\"detail\">Frame-by-frame localization diagnostics.</span></div>
 <div class=\"link\"><a href=\"trajectory.csv\">trajectory.csv</a><span class=\"detail\">Estimated camera centers and poses for plotting or regression checks.</span></div>
+<div class=\"link\"><a href=\"poses.txt\">poses.txt</a><span class=\"detail\">KITTI-style 3x4 camera-to-world pose rows.</span></div>
+<div class=\"link\"><a href=\"trajectory_tum.txt\">trajectory_tum.txt</a><span class=\"detail\">TUM-style timestamp, translation, quaternion pose rows.</span></div>
 <div class=\"link\"><a href=\"tracking_summary.json\">tracking_summary.json</a><span class=\"detail\">Aggregate tracking success and prior-use metrics.</span></div>
 <div class=\"link\"><a href=\"trajectory_summary.json\">trajectory_summary.json</a><span class=\"detail\">Pose count, path length, bounds, and reprojection summary.</span></div>
 </section>
