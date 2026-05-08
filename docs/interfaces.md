@@ -80,6 +80,7 @@ The default `localize(query, map)` path builds a descriptor store from `Landmark
 - `PoseTrajectory::from_kitti_poses_str` / `read_kitti_poses`: read KITTI-style 3x4 pose rows back into a trajectory, using row index as frame id
 - `PoseTrajectory::from_tum_poses_str` / `read_tum_poses`: read TUM-style `frame_id tx ty tz qx qy qz qw` rows back into a trajectory for simple file-based evaluation
 - `TrajectoryErrorSummary` and `TrajectoryTranslationError`: compare an estimated trajectory against a reference trajectory by matching frame ids and reporting translation ATE-style mean, RMSE, max, missing-pose counts, CSV rows, and JSON summaries
+- `TrajectoryEvaluationConfig`, `TrajectoryEvaluationResult`, and `TrajectoryEvaluationFailure`: turn trajectory-error summaries into benchmark-style pass/fail results using optional mean/RMSE/max translation-error thresholds, minimum matched-pose counts, and minimum match ratio
 - `TrajectoryAlignment::FirstMatchedTranslation`: optionally removes the translation offset at the first matched frame before computing trajectory translation errors
 - `PoseTrajectory::to_html_report`: creates a self-contained HTML / SVG trajectory report for sequence-localization demos and quick inspection
 - `PoseTrajectory::to_html_report_against`: creates a self-contained HTML / SVG trajectory-evaluation report with reference-pose comparison

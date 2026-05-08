@@ -35,6 +35,7 @@ All notable changes to `visloc-rs` will be documented here.
 - GitHub issue templates, a pull request template, contribution guide, and security policy now document the project scope and local quality gate.
 - Dependabot now checks Rust crate and GitHub Actions dependencies weekly.
 - CI now verifies the declared Rust 1.82 MSRV with `cargo check --workspace --all-targets`.
+- Trajectory evaluation now has reusable pass/fail threshold types, evaluator CLI threshold flags, `evaluation_result.json` export, and a local trajectory-evaluation smoke check.
 
 ## 0.1.0 - 2026-05-07
 

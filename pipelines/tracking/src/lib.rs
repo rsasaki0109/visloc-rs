@@ -330,6 +330,34 @@ pub struct TrajectoryErrorSummary {
     pub max_translation_error: Option<f64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrajectoryEvaluationConfig {
+    pub max_mean_translation_error: Option<f64>,
+    pub max_rmse_translation_error: Option<f64>,
+    pub max_max_translation_error: Option<f64>,
+    pub min_matched_pose_count: Option<usize>,
+    pub min_match_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrajectoryEvaluationResult {
+    pub passed: bool,
+    pub summary: TrajectoryErrorSummary,
+    pub config: TrajectoryEvaluationConfig,
+    pub match_ratio: Option<f64>,
+    pub failures: Vec<TrajectoryEvaluationFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrajectoryEvaluationFailure {
+    MeanTranslationErrorTooHigh { actual: f64, maximum: f64 },
+    RmseTranslationErrorTooHigh { actual: f64, maximum: f64 },
+    MaxTranslationErrorTooHigh { actual: f64, maximum: f64 },
+    NotEnoughMatchedPoses { actual: usize, minimum: usize },
+    MatchRatioTooLow { actual: f64, minimum: f64 },
+    NoMatchedPoses,
+}
+
 impl TrajectoryErrorSummary {
     pub fn from_trajectories(estimated: &PoseTrajectory, reference: &PoseTrajectory) -> Self {
         let errors = estimated.translation_errors_against(reference);
@@ -407,8 +435,212 @@ impl TrajectoryErrorSummary {
         )
     }
 
+    fn to_json_inline(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"estimated_pose_count\": {}, ",
+                "\"reference_pose_count\": {}, ",
+                "\"matched_pose_count\": {}, ",
+                "\"missing_reference_count\": {}, ",
+                "\"missing_estimate_count\": {}, ",
+                "\"mean_translation_error\": {}, ",
+                "\"rmse_translation_error\": {}, ",
+                "\"max_translation_error\": {}",
+                "}}"
+            ),
+            self.estimated_pose_count,
+            self.reference_pose_count,
+            self.matched_pose_count,
+            self.missing_reference_count,
+            self.missing_estimate_count,
+            optional_f64_json(self.mean_translation_error),
+            optional_f64_json(self.rmse_translation_error),
+            optional_f64_json(self.max_translation_error)
+        )
+    }
+
     pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         std::fs::write(path, self.to_json())
+    }
+
+    pub fn evaluate(&self, config: TrajectoryEvaluationConfig) -> TrajectoryEvaluationResult {
+        TrajectoryEvaluationResult::from_summary(self.clone(), config)
+    }
+}
+
+impl TrajectoryEvaluationResult {
+    pub fn from_summary(
+        summary: TrajectoryErrorSummary,
+        config: TrajectoryEvaluationConfig,
+    ) -> Self {
+        let match_ratio = if summary.reference_pose_count == 0 {
+            None
+        } else {
+            Some(summary.matched_pose_count as f64 / summary.reference_pose_count as f64)
+        };
+        let mut failures = Vec::new();
+
+        if summary.matched_pose_count == 0 {
+            failures.push(TrajectoryEvaluationFailure::NoMatchedPoses);
+        }
+
+        if let Some(maximum) = config.max_mean_translation_error {
+            match summary.mean_translation_error {
+                Some(actual) if actual > maximum => {
+                    failures.push(TrajectoryEvaluationFailure::MeanTranslationErrorTooHigh {
+                        actual,
+                        maximum,
+                    })
+                }
+                None => failures.push(TrajectoryEvaluationFailure::NoMatchedPoses),
+                _ => {}
+            }
+        }
+
+        if let Some(maximum) = config.max_rmse_translation_error {
+            match summary.rmse_translation_error {
+                Some(actual) if actual > maximum => {
+                    failures.push(TrajectoryEvaluationFailure::RmseTranslationErrorTooHigh {
+                        actual,
+                        maximum,
+                    })
+                }
+                None => failures.push(TrajectoryEvaluationFailure::NoMatchedPoses),
+                _ => {}
+            }
+        }
+
+        if let Some(maximum) = config.max_max_translation_error {
+            match summary.max_translation_error {
+                Some(actual) if actual > maximum => {
+                    failures.push(TrajectoryEvaluationFailure::MaxTranslationErrorTooHigh {
+                        actual,
+                        maximum,
+                    })
+                }
+                None => failures.push(TrajectoryEvaluationFailure::NoMatchedPoses),
+                _ => {}
+            }
+        }
+
+        if let Some(minimum) = config.min_matched_pose_count {
+            if summary.matched_pose_count < minimum {
+                failures.push(TrajectoryEvaluationFailure::NotEnoughMatchedPoses {
+                    actual: summary.matched_pose_count,
+                    minimum,
+                });
+            }
+        }
+
+        if let Some(minimum) = config.min_match_ratio {
+            match match_ratio {
+                Some(actual) if actual < minimum => {
+                    failures.push(TrajectoryEvaluationFailure::MatchRatioTooLow { actual, minimum })
+                }
+                None => failures.push(TrajectoryEvaluationFailure::MatchRatioTooLow {
+                    actual: 0.0,
+                    minimum,
+                }),
+                _ => {}
+            }
+        }
+
+        failures.dedup();
+        let passed = failures.is_empty();
+
+        Self {
+            passed,
+            summary,
+            config,
+            match_ratio,
+            failures,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"passed\": {},\n",
+                "  \"match_ratio\": {},\n",
+                "  \"config\": {},\n",
+                "  \"summary\": {},\n",
+                "  \"failures\": {}\n",
+                "}}\n"
+            ),
+            self.passed,
+            optional_f64_json(self.match_ratio),
+            self.config.to_json_inline(),
+            self.summary.to_json_inline(),
+            trajectory_evaluation_failures_json(&self.failures)
+        )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+}
+
+impl TrajectoryEvaluationConfig {
+    fn to_json_inline(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"max_mean_translation_error\": {}, ",
+                "\"max_rmse_translation_error\": {}, ",
+                "\"max_max_translation_error\": {}, ",
+                "\"min_matched_pose_count\": {}, ",
+                "\"min_match_ratio\": {}",
+                "}}"
+            ),
+            optional_f64_json(self.max_mean_translation_error),
+            optional_f64_json(self.max_rmse_translation_error),
+            optional_f64_json(self.max_max_translation_error),
+            optional_usize_json(self.min_matched_pose_count),
+            optional_f64_json(self.min_match_ratio)
+        )
+    }
+}
+
+impl TrajectoryEvaluationFailure {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::MeanTranslationErrorTooHigh { .. } => "mean_translation_error_too_high",
+            Self::RmseTranslationErrorTooHigh { .. } => "rmse_translation_error_too_high",
+            Self::MaxTranslationErrorTooHigh { .. } => "max_translation_error_too_high",
+            Self::NotEnoughMatchedPoses { .. } => "not_enough_matched_poses",
+            Self::MatchRatioTooLow { .. } => "match_ratio_too_low",
+            Self::NoMatchedPoses => "no_matched_poses",
+        }
+    }
+
+    fn to_json_inline(&self) -> String {
+        match self {
+            Self::MeanTranslationErrorTooHigh { actual, maximum }
+            | Self::RmseTranslationErrorTooHigh { actual, maximum }
+            | Self::MaxTranslationErrorTooHigh { actual, maximum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"maximum\": {}}}",
+                self.reason(),
+                actual,
+                maximum
+            ),
+            Self::NotEnoughMatchedPoses { actual, minimum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"minimum\": {}}}",
+                self.reason(),
+                actual,
+                minimum
+            ),
+            Self::MatchRatioTooLow { actual, minimum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"minimum\": {}}}",
+                self.reason(),
+                actual,
+                minimum
+            ),
+            Self::NoMatchedPoses => {
+                format!("{{\"reason\": \"{}\"}}", self.reason())
+            }
+        }
     }
 }
 
@@ -1358,6 +1590,12 @@ fn optional_f64_json(value: Option<f64>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+fn optional_usize_json(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
 fn optional_frame_id_json(value: Option<FrameId>) -> String {
     value
         .map(|value| value.to_string())
@@ -1368,6 +1606,18 @@ fn optional_vec3_json(value: Option<[f64; 3]>) -> String {
     value
         .map(|value| format!("[{}, {}, {}]", value[0], value[1], value[2]))
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn trajectory_evaluation_failures_json(failures: &[TrajectoryEvaluationFailure]) -> String {
+    let mut output = String::from("[");
+    for (index, failure) in failures.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&failure.to_json_inline());
+    }
+    output.push(']');
+    output
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
