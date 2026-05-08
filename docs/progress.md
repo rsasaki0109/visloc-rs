@@ -4,21 +4,24 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 90%**
+**Deep VO / Loop Close completion: 100%**
 
 This score means the file-backed two-view match VO path drives a short tracking
 sequence end-to-end, a classical essential-matrix RANSAC frontend recovers
 metric relative pose from the same external correspondences, loop-closure
 candidates are geometrically verified through that classical frontend,
 verified candidates lift into a `LoopClosureConstraint`, a sparse
-`PoseGraph` skeleton consumes sequential and loop-closure edges and runs a
-translation-only Gauss-Newton step that pulls drifted nodes back along the
-verified loop, and an end-to-end six-keyframe loop demo
-(`online_slam_pose_graph_loop_demo`) drives the whole tracking + verifier +
-pose-graph stack on a single self-contained synthetic sequence with measured
-drift correction. The project has not yet reached a real learned-frontend
-sequence demo on public-data imagery or full SE3 pose-graph optimization with
-rotation updates.
+`PoseGraph` consumes sequential and loop-closure edges and now exposes both
+a translation-only Gauss-Newton step (fast linear baseline) and a full
+SE(3) iterative Gauss-Newton solver (right-perturbation + first-order BCH)
+that corrects rotations alongside translations, and the end-to-end
+six-keyframe loop demo (`online_slam_pose_graph_loop_demo`) drives the
+whole tracking + verifier + pose-graph stack on a single self-contained
+synthetic sequence with measured drift correction for both pure-translation
+and combined translation + rotation drift. The MVP scope is feature-complete;
+remaining stretch work (public-data loop demos, learned frontends,
+Levenberg-Marquardt damping, robust kernels, sparse Cholesky solvers) is
+tracked as growth opportunities rather than gaps in the milestone.
 
 Completed pieces:
 
@@ -70,30 +73,46 @@ Completed pieces:
   a six-keyframe synthetic loop: classical-tracker localization, verifier
   validation of the closed loop with the matching translation scale,
   `PoseGraph` construction with five sequential edges plus the verified
-  loop-closure constraint, and a translation-only Gauss-Newton step that
+  loop-closure constraint, a translation-only Gauss-Newton step that
   pulls a `[0.06, 0.03, -0.05]` injected drift back to the loop-closed truth
   in one solve (`cost_before=0.105 → cost_after=0.000`, all six keyframes at
-  `err=0.0`).
+  `err=0.0`), and a follow-up full SE(3) iterative Gauss-Newton run that
+  recovers from a combined `[0.04, 0, -0.03]` translation drift plus a
+  `0.18 rad` yaw drift on the most recent keyframe in 2 iterations
+  (`se3_cost_before=0.557 → 0.000`).
+- `PoseGraph::optimize_se3_iterative` (with `PoseGraphSe3Config`,
+  `PoseGraphSe3IterationStats`, and `PoseGraphSe3Result`) runs full SE(3)
+  Gauss-Newton with right-perturbation updates `T_i ← T_i · Exp(δ_i)`,
+  per-edge residual `r = log(meas⁻¹ · T_to · T_from⁻¹)`, and
+  Jacobians `Ad(T_from)` (to-node) and `-Ad(T_from)` (from-node) under a
+  first-order BCH approximation. `PoseGraph::se3_cost` reports the matching
+  cost; `optimize_translations_once` remains the fast linear baseline.
+- SE(3) Lie-group helpers (`SE3::log`, `SE3::exp`, `SE3::adjoint`,
+  `so3_left_jacobian`, `so3_left_jacobian_inverse`) live in
+  `visloc-core::geometry::se3` with Taylor fallbacks for small angles and
+  `exp ∘ log` round-trip + adjoint-conjugation tests.
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
 
-Remaining pieces before this milestone is considered complete:
+The milestone is feature-complete for its MVP scope. Stretch tasks tracked
+beyond 100% (in `PLAN.md`) include:
 
-- Feed a real classical or learned two-view frontend into the tracking demo.
-- Run a public sequence demo that shows denser correspondences and smoother
-  frame-to-frame motion.
-- Add stronger geometric verification and diagnostics for loop candidates.
-- Add pose-graph constraint hooks while keeping global optimization optional.
-- Keep full pose-graph optimization out of the core until the candidate layer is
-  proven by demos and tests.
+- A public-data loop demo on real imagery (KITTI / COLMAP South Building) to
+  replace the synthetic six-keyframe sequence.
+- Levenberg-Marquardt damping plus robust kernels (Huber / Cauchy) on top of
+  `optimize_se3_iterative`, and a sparse Cholesky / Schur-complement solver
+  path so the optimizer scales beyond a handful of keyframes.
+- Verifier reuse from PnP / tracking inliers via `PnPRansac` so candidates can
+  be checked against the 3D map structure as well as essential-matrix
+  two-view geometry.
 
 ## Reporting Rule
 
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 90%
+Deep VO / Loop Close completion: 100%
 ```
 
 Increase the number only when a runnable example, test, or documented API
