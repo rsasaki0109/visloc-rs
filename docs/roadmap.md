@@ -28,7 +28,8 @@ Two goals should drive the next public demos:
   inside `visloc-core`. The first `VisualOdometryFrontend` and
   `VisualOdometryPriorProvider` boundaries exist in `visloc-tracking`; the next
   step is replacing the fixed demo frontend with a real classical or learned
-  implementation in sequence demos.
+  implementation in sequence demos. The two-view match text parser is the first
+  file-backed bridge for externally generated matcher output.
 - **Loop-closure candidate detection.** The first loop-closure milestone should
   detect and report candidates, then geometrically verify them. Lightweight
   shared-landmark candidate reporting and HTML/SVG candidate-edge reporting now

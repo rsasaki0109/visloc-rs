@@ -302,6 +302,7 @@ cargo run --example track_sequence_dummy
 cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo
 cargo run --example online_slam_loop_candidate_dummy
 cargo run --example online_slam_loop_candidate_dummy -- --out-dir target/visloc_loop_demo
+cargo run --example read_two_view_matches_dummy
 cargo run --example visual_odometry_prior_dummy
 cargo run --example track_sequence_with_visual_odometry_prior
 ```
@@ -310,6 +311,7 @@ With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_sum
 Tracking diagnostics distinguish motion pose priors from external localization priors, so GNSS-derived submap narrowing is visible in the CSV, JSON, and HTML reports.
 The online SLAM loop-candidate example writes `loop_report.html`, a small top-down HTML/SVG view of tracked camera centers and the detected loop-candidate edge.
 The visual-odometry-prior tracking example uses a two-frame VO prior to narrow map candidates through the same external-prior path used by GNSS/VIO integrations.
+The two-view match reader example shows the simple text bridge for external learned matchers without making a model runtime a core dependency.
 
 Run a moving-camera GNSS-prior tracking example that narrows the visual map before localization and writes an `index.html` dashboard, `manifest.json`, `tracking.csv`, `trajectory.csv`, KITTI/TUM pose exports, synthetic-reference error reports, JSON summaries, and browser-viewable reports:
 

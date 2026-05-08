@@ -187,3 +187,13 @@ Use `visloc_io::descriptors::read_landmark_descriptors_txt` for the first experi
 ```
 
 Use `visloc_io::query_features::read_query_features_txt` for file-based experiments. `examples/localize_from_files.rs` combines this query format with a COLMAP text model and landmark descriptor file.
+
+## Two-View Match Text Format
+
+```text
+# PREV_IDX CURR_IDX PREV_X PREV_Y CURR_X CURR_Y [SCORE]
+0 3 120.0 140.0 124.5 141.0 0.99
+1 9 260.0 180.0 263.0 183.5 0.94
+```
+
+Use `visloc_io::two_view_matches::read_two_view_matches_txt` for early external-frontend experiments. This format is intended for outputs from learned or classical matchers, such as SuperPoint/LightGlue-style pipelines, without adding a model runtime dependency to `visloc-rs`.
