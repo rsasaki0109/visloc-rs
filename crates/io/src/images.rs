@@ -61,6 +61,30 @@ pub struct LoadedImageFrame {
     pub image: GrayscaleImage,
 }
 
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSequenceSummary {
+    pub frame_count: usize,
+    pub first_frame_id: Option<FrameId>,
+    pub last_frame_id: Option<FrameId>,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub varying_dimensions: bool,
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSequenceValidationIssue {
+    InconsistentDimensions {
+        frame_id: FrameId,
+        path: PathBuf,
+        width: usize,
+        height: usize,
+        expected_width: usize,
+        expected_height: usize,
+    },
+}
+
 pub fn read_pgm(path: impl AsRef<Path>) -> Result<GrayscaleImage, PgmImageError> {
     parse_pgm(&fs::read(path)?)
 }
@@ -177,6 +201,49 @@ pub fn read_common_image_sequence_dir(
     }
     paths.sort();
     read_common_image_sequence(&paths)
+}
+
+#[cfg(feature = "image-io")]
+pub fn common_image_sequence_summary(frames: &[LoadedImageFrame]) -> ImageSequenceSummary {
+    let first = frames.first();
+    ImageSequenceSummary {
+        frame_count: frames.len(),
+        first_frame_id: first.map(|frame| frame.frame_id),
+        last_frame_id: frames.last().map(|frame| frame.frame_id),
+        width: first.map(|frame| frame.image.width()),
+        height: first.map(|frame| frame.image.height()),
+        varying_dimensions: !validate_common_image_sequence_dimensions(frames).is_empty(),
+    }
+}
+
+#[cfg(feature = "image-io")]
+pub fn validate_common_image_sequence_dimensions(
+    frames: &[LoadedImageFrame],
+) -> Vec<ImageSequenceValidationIssue> {
+    let Some(first) = frames.first() else {
+        return Vec::new();
+    };
+    let expected_width = first.image.width();
+    let expected_height = first.image.height();
+
+    frames
+        .iter()
+        .skip(1)
+        .filter_map(|frame| {
+            let width = frame.image.width();
+            let height = frame.image.height();
+            (width != expected_width || height != expected_height).then(|| {
+                ImageSequenceValidationIssue::InconsistentDimensions {
+                    frame_id: frame.frame_id,
+                    path: frame.path.clone(),
+                    width,
+                    height,
+                    expected_width,
+                    expected_height,
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(feature = "image-io")]

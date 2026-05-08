@@ -41,6 +41,7 @@ All notable changes to `visloc-rs` will be documented here.
 - PGM grayscale image IO now supports dependency-free image fixtures and the `localize_from_pgm` example.
 - Optional `image-io` feature support for PNG/JPEG grayscale loading and the `localize_from_common_image` example.
 - Optional common-image sequence loading and the `track_image_sequence_from_common_images` example.
+- Common-image sequence summaries and dimension validation for image-sequence tracking inputs.
 
 ## 0.1.0 - 2026-05-07
 

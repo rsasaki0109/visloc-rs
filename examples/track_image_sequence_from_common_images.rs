@@ -13,6 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = frames
         .first()
         .ok_or("demo sequence should contain at least one frame")?;
+    let sequence_summary = common_image_sequence_summary(&frames);
+    let dimension_issues = validate_common_image_sequence_dimensions(&frames);
 
     let extractor = CornerFeatureExtractor::new(CornerFeatureConfig {
         max_features: 16,
@@ -29,7 +31,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<Vec<_>, _>>()?;
 
     println!("sequence dir: {}", sequence_dir.display());
-    println!("loaded image frames: {}", frames.len());
+    println!(
+        "loaded image frames: {} size={:?}x{:?} varying_dimensions={}",
+        sequence_summary.frame_count,
+        sequence_summary.width,
+        sequence_summary.height,
+        sequence_summary.varying_dimensions
+    );
+    println!("dimension validation issues: {}", dimension_issues.len());
     println!("map landmarks: {}", map.landmarks.len());
     for (frame, result) in frames.iter().zip(results.iter()) {
         println!(
