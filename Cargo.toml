@@ -39,9 +39,9 @@ keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
 categories = ["computer-vision", "science::robotics"]
 
 [workspace.dependencies]
-nalgebra = "0.33"
-rand = { version = "0.8", features = ["small_rng"] }
-thiserror = "1"
+nalgebra = "0.34"
+rand = { version = "0.9", features = ["small_rng"] }
+thiserror = "2"
 
 [dependencies]
 nalgebra = { workspace = true }
