@@ -158,6 +158,7 @@ Focus:
 - Visual-odometry frontend traits for two-view motion and frame-to-frame pose priors
 - Learned feature/matcher integration points for SuperPoint/LightGlue-style pipelines
 - Descriptor/keypoint adapters that can consume external model outputs
+- File-backed two-view match adapter that can produce a lightweight VO prior
 - Sequence demos that compare classical/localization-only tracking with deep-frontend priors
 - Failure diagnostics for low-texture, motion blur, and weak-match cases
 

@@ -4,7 +4,7 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 45%**
+**Deep VO / Loop Close completion: 50%**
 
 This score means the core extension boundaries exist, but the project has not
 yet reached a real learned-frontend sequence demo or full loop-closure backend.
@@ -14,6 +14,8 @@ Completed pieces:
 - `VisualOdometryFrontend` and `VisualOdometryPriorProvider` boundaries exist.
 - VO-derived pose priors can narrow tracking candidates.
 - Externally generated two-view match files can be parsed.
+- External two-view correspondences can produce a lightweight translation-only
+  VO prior through `TwoViewMatchVisualOdometryFrontend`.
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
@@ -21,8 +23,6 @@ Completed pieces:
 Remaining pieces before this milestone is considered complete:
 
 - Feed a real classical or learned two-view frontend into the tracking demo.
-- Convert external two-view matches into a measured VO estimate, not just a
-  file-backed import boundary.
 - Run a public sequence demo that shows denser correspondences and smoother
   frame-to-frame motion.
 - Add stronger geometric verification and diagnostics for loop candidates.
@@ -35,7 +35,7 @@ Remaining pieces before this milestone is considered complete:
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 45%
+Deep VO / Loop Close completion: 50%
 ```
 
 Increase the number only when a runnable example, test, or documented API

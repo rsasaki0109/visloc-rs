@@ -15,6 +15,7 @@ localize_with_corner_extractor
 localize_with_extractor_dummy
 online_slam_loop_candidate_dummy
 read_two_view_matches_dummy
+two_view_match_vo_prior_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
 track_sequence_with_gnss_prior

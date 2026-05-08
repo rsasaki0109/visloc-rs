@@ -65,6 +65,8 @@ All notable changes to `visloc-rs` will be documented here.
 - Two-view match text parsing supports external learned/classical matcher outputs for VO frontend experiments.
 - `read_two_view_matches_dummy` demonstrates the external two-view match text bridge.
 - Deep VO / loop-close milestone completion is now tracked in docs and surfaced in the README.
+- `TwoViewMatchVisualOdometryFrontend` converts external two-view correspondences into a lightweight translation-only VO prior.
+- `two_view_match_vo_prior_dummy` demonstrates the first file-backed bridge from external matches to `VisualOdometryPriorProvider`.
 - `visual_odometry_prior_dummy` demonstrates the VO-prior adapter path without bundling a model runtime.
 - `track_sequence_with_visual_odometry_prior` demonstrates using a VO-derived external prior to narrow localization candidates during tracking.
 - `online_slam_loop_candidate_dummy` demonstrates loop-candidate reporting on a tiny synthetic sequence.

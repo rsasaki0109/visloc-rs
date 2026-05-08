@@ -138,6 +138,9 @@ pub use visloc_vision::pnp::{
 };
 pub use visloc_vision::ransac::{PnPRansac, RansacReport, RobustPoseEstimator};
 
+mod two_view_vo;
+pub use two_view_vo::{TwoViewMatchVisualOdometryConfig, TwoViewMatchVisualOdometryFrontend};
+
 /// Common imports for applications using the default visual-localization stack.
 ///
 /// The prelude is intentionally focused on the stable, high-level surface:
@@ -187,7 +190,8 @@ pub mod prelude {
         TrajectoryEvaluationFailure, TrajectoryEvaluationResult, TrajectoryFileError,
         TrajectorySample, TrajectorySummary, TrajectoryTranslationError, TriangulationConfig,
         TriangulationFailureReason, Triangulator, TumTrajectoryParseError, TwoViewFeatureMatch,
-        TwoViewMatchError, TwoViewMatchSet, VisualMap, VisualMapValidationIssue,
+        TwoViewMatchError, TwoViewMatchSet, TwoViewMatchVisualOdometryConfig,
+        TwoViewMatchVisualOdometryFrontend, VisualMap, VisualMapValidationIssue,
         VisualMapValidationReport, VisualOdometryEstimate, VisualOdometryFrontend,
         VisualOdometryPosePrior, VisualOdometryPriorProvider, SE3, SO3,
     };
