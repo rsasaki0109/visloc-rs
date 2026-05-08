@@ -6,6 +6,8 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `online_slam_pose_graph_loop_demo` example exercises the full tracking + verifier + pose-graph stack on a six-keyframe synthetic loop: classical localization, verified loop-closure constraint with the matching translation scale, sparse `PoseGraph` with five sequential edges plus the loop edge, a `[0.06, 0.03, -0.05]` injected drift on the last keyframe, and a single translation-only Gauss-Newton step that takes `cost_before=0.105` down to `cost_after=0.000` and reports each keyframe's post-optimization error against the truth path. With `--out-dir` it writes `loop_demo_report.html`.
+- Deep VO / loop-close milestone completion increased to 90% to reflect the end-to-end loop demo.
 - Sparse `PoseGraph` skeleton with `PoseGraphEdge`, `PoseGraphEdgeKind::{Sequential, LoopClosure}`, builders (`add_pose`, `add_sequential_edge`, `add_loop_closure_constraint`, `anchor`), `translation_cost`, and a single translation-only `optimize_translations_once` Gauss-Newton step that holds rotations fixed and returns `PoseGraphOptimizationStep` diagnostics.
 - `relative_world_to_camera` helper turns two `Pose`s into a `previous_to_current` SE3 measurement for `PoseGraphEdge`.
 - `online_slam_loop_candidate_with_verifier_dummy` example now also injects a small drift into the most recent keyframe, builds a `PoseGraph`, and runs `optimize_translations_once` so the loop drift correction is visible: cost goes from 0.0585 to 0.0 with mean translation correction ~0.034 m.

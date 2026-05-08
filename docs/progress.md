@@ -4,17 +4,21 @@ This file tracks the project milestone completion used in development updates.
 
 ## Current Development Completion
 
-**Deep VO / Loop Close completion: 80%**
+**Deep VO / Loop Close completion: 90%**
 
 This score means the file-backed two-view match VO path drives a short tracking
 sequence end-to-end, a classical essential-matrix RANSAC frontend recovers
 metric relative pose from the same external correspondences, loop-closure
 candidates are geometrically verified through that classical frontend,
-verified candidates lift into a `LoopClosureConstraint`, and a sparse
-`PoseGraph` skeleton can consume sequential and loop-closure edges and run a
-single translation-only Gauss-Newton step that pulls drifted nodes back along
-the verified loop. The project has not yet reached a real learned-frontend
-sequence demo or full SE3 pose-graph optimization with rotation updates.
+verified candidates lift into a `LoopClosureConstraint`, a sparse
+`PoseGraph` skeleton consumes sequential and loop-closure edges and runs a
+translation-only Gauss-Newton step that pulls drifted nodes back along the
+verified loop, and an end-to-end six-keyframe loop demo
+(`online_slam_pose_graph_loop_demo`) drives the whole tracking + verifier +
+pose-graph stack on a single self-contained synthetic sequence with measured
+drift correction. The project has not yet reached a real learned-frontend
+sequence demo on public-data imagery or full SE3 pose-graph optimization with
+rotation updates.
 
 Completed pieces:
 
@@ -62,6 +66,14 @@ Completed pieces:
   injects a small drift into the most recent keyframe, builds a `PoseGraph`,
   runs `optimize_translations_once`, and prints the cost / mean-correction /
   max-correction diagnostics so the loop drift correction is visible.
+- `online_slam_pose_graph_loop_demo` example exercises the full pipeline on
+  a six-keyframe synthetic loop: classical-tracker localization, verifier
+  validation of the closed loop with the matching translation scale,
+  `PoseGraph` construction with five sequential edges plus the verified
+  loop-closure constraint, and a translation-only Gauss-Newton step that
+  pulls a `[0.06, 0.03, -0.05]` injected drift back to the loop-closed truth
+  in one solve (`cost_before=0.105 → cost_after=0.000`, all six keyframes at
+  `err=0.0`).
 - Online SLAM composition exists over tracking and local mapping.
 - Loop-closure candidates can be detected from shared verified landmarks.
 - Loop-candidate HTML/SVG reporting exists for synthetic sequence demos.
@@ -81,7 +93,7 @@ Remaining pieces before this milestone is considered complete:
 Development updates should report this value as:
 
 ```text
-Deep VO / Loop Close completion: 80%
+Deep VO / Loop Close completion: 90%
 ```
 
 Increase the number only when a runnable example, test, or documented API

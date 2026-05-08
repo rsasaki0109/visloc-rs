@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
-  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-80%25-f59e0b" alt="Deep VO / loop close completion: 80%">
+  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-90%25-f59e0b" alt="Deep VO / loop close completion: 90%">
 </p>
 
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
@@ -309,6 +309,8 @@ cargo run --example online_slam_loop_candidate_dummy
 cargo run --example online_slam_loop_candidate_dummy -- --out-dir target/visloc_loop_demo
 cargo run --example online_slam_loop_candidate_with_verifier_dummy
 cargo run --example online_slam_loop_candidate_with_verifier_dummy -- --out-dir target/visloc_loop_verifier_demo
+cargo run --example online_slam_pose_graph_loop_demo
+cargo run --example online_slam_pose_graph_loop_demo -- --out-dir target/visloc_pose_graph_loop_demo
 cargo run --example read_two_view_matches_dummy
 cargo run --example two_view_match_vo_prior_dummy
 cargo run --example visual_odometry_prior_dummy
@@ -323,6 +325,7 @@ With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_sum
 Tracking diagnostics distinguish motion pose priors from external localization priors, so GNSS-derived submap narrowing is visible in the CSV, JSON, and HTML reports.
 The online SLAM loop-candidate example writes `loop_report.html`, a small top-down HTML/SVG view of tracked camera centers and the detected loop-candidate edge.
 The verifier-enhanced loop-candidate example runs the same pipeline on a 12-landmark synthetic sequence and feeds each candidate into `EssentialMatrixLoopClosureVerifier`. Each verified candidate is then lifted into a `LoopClosureConstraint` (`from_keyframe_id`, `to_keyframe_id`, `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`, `score`) printed alongside the candidate diagnostics. The HTML report adds verifier inlier counts, inlier ratio, mean Sampson error, verifier score, an enumerated failure reason for rejected candidates, and a separate Loop Closure Constraints table so the verification + constraint output is visible. The example then builds a `PoseGraph`, injects a small drift into the most recent keyframe, and runs `optimize_translations_once` (a single translation-only Gauss-Newton step that keeps rotations fixed) so the loop drift correction is visible without claiming full SE3 pose-graph optimization.
+The pose-graph loop demo extends the same pipeline to a six-keyframe synthetic loop and runs everything end-to-end: per-frame `OnlineSlamPipeline::process_frame`, `EssentialMatrixLoopClosureVerifier` over the closing pair, `LoopClosureConstraint` extraction, `PoseGraph` construction with five sequential edges plus the verified loop edge, an injected `[0.06, 0.03, -0.05]` drift on the last keyframe, and a single translation-only Gauss-Newton step that brings `cost_before=0.105` down to `cost_after=0.000` and reports each keyframe's post-optimization error against the truth path.
 The visual-odometry-prior tracking example uses a two-frame VO prior to narrow map candidates through the same external-prior path used by GNSS/VIO integrations.
 The two-view match reader example shows the simple text bridge for external learned matchers without making a model runtime a core dependency.
 The two-view match VO prior example turns externally supplied correspondences into a lightweight translation-only VO prior that can be fed through `VisualOdometryPriorProvider`.
