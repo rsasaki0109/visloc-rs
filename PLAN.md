@@ -447,10 +447,17 @@ its 100% MVP scope):
    end. Remaining stretch: a true sparse-matrix solver (`nalgebra-sparse`
    `CsCholesky` / Schur-complement) so the optimizer scales beyond a few
    tens of keyframes.
-3. Loop-closure verifier reuse from PnP / tracking inliers: extend the
-   verifier to optionally consume 2D-3D correspondences and reuse `PnPRansac`
-   so candidates are checked against the 3D map structure as well as the
-   essential-matrix two-view geometry.
+3. Loop-closure verifier reuse from PnP / tracking inliers (✓ runnable):
+   `PnPLoopClosureVerifier` reuses `PnPRansac` to re-localize the current
+   frame against the candidate keyframe's landmarks, returning metric
+   relative poses without needing an externally supplied scale parameter.
+   `correspondences_2d3d_for_loop_candidate` builds the inputs by
+   intersecting the current frame's tracking inliers with landmarks
+   observed by the older keyframe; `verify_loop_closure_candidates_pnp`
+   runs the verifier over a slice of candidates. `online_slam_pnp_loop_demo`
+   compares it side-by-side with the essential-matrix verifier on the
+   same candidate. Remaining stretch: a hybrid verifier that consults both
+   geometric paths and reports the consensus (or escalates ambiguity).
 
 ### 2. Make the VO Adapter Diagnostics More Explicit
 

@@ -4,10 +4,12 @@ use visloc_core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
-    loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
-    relative_world_to_camera, verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier,
-    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
-    OnlineSlamPipeline, PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
+    correspondences_2d3d_for_loop_candidate, loop_closure_constraints_from_candidates,
+    online_slam_results_to_html_report, relative_world_to_camera, verify_loop_closure_candidates,
+    verify_loop_closure_candidates_pnp, EssentialMatrixLoopClosureVerifier, LoopClosureConfig,
+    LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline,
+    PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphError,
+    PoseGraphSe3Config, RobustKernel,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -789,4 +791,142 @@ fn robust_kernel_cauchy_saturates_at_high_residual() {
     assert!(w_med < w_small);
     assert!(w_large < w_med);
     assert!(w_large > 0.0);
+}
+
+#[test]
+fn pnp_loop_closure_verifier_marks_consistent_candidate_as_verified() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let camera = map.cameras.get(&1).cloned().unwrap();
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let mut second = slam.process_frame(&second_frame, []);
+    assert!(second.tracking_succeeded());
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+
+    let verifier: PnPLoopClosureVerifier = PnPLoopClosureVerifier {
+        config: PnPLoopClosureVerifierConfig {
+            min_inliers: 8,
+            min_inlier_ratio: 0.6,
+            max_mean_reprojection_error_px: 4.0,
+        },
+        ..Default::default()
+    };
+    verify_loop_closure_candidates_pnp(
+        &mut second.loop_closure_candidates,
+        &second_frame,
+        &second.tracking,
+        slam.map(),
+        &camera,
+        &verifier,
+    );
+
+    let candidate = &second.loop_closure_candidates[0];
+    let verification = candidate
+        .verification
+        .as_ref()
+        .expect("verifier output must be populated");
+    assert!(verification.verified, "verification: {:?}", verification);
+    assert!(candidate.geometrically_verified);
+    assert!(verification.inlier_count >= 8);
+    assert!(verification.mean_reprojection_error_px.is_some());
+    assert!(verification.relative_pose.is_some());
+    // Compare against the truth relative SE3 (10 → 30) computed from the same
+    // poses the fixture generated.
+    let truth_first = pose_at(Vector3::zeros());
+    let truth_second = pose_at(Vector3::new(0.2, 0.0, 0.1));
+    let expected = relative_world_to_camera(&truth_first, &truth_second);
+    let relative = verification.relative_pose.as_ref().unwrap();
+    let translation_err = (relative.translation - expected.translation).norm();
+    let rotation_err = relative.rotation.rotation_to(&expected.rotation).angle();
+    assert!(
+        translation_err < 0.02,
+        "PnP relative translation should match truth; got {:?} expected {:?} err={translation_err}",
+        relative.translation,
+        expected.translation
+    );
+    assert!(
+        rotation_err < 0.02,
+        "PnP relative rotation should match truth; rot_err={rotation_err}"
+    );
+}
+
+#[test]
+fn pnp_loop_closure_verifier_rejects_when_too_few_correspondences() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let camera = map.cameras.get(&1).cloned().unwrap();
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let mut second = slam.process_frame(&second_frame, []);
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+
+    // Demand more inliers than the test fixture can produce.
+    let verifier: PnPLoopClosureVerifier = PnPLoopClosureVerifier {
+        config: PnPLoopClosureVerifierConfig {
+            min_inliers: 64,
+            min_inlier_ratio: 0.6,
+            max_mean_reprojection_error_px: 4.0,
+        },
+        ..Default::default()
+    };
+    verify_loop_closure_candidates_pnp(
+        &mut second.loop_closure_candidates,
+        &second_frame,
+        &second.tracking,
+        slam.map(),
+        &camera,
+        &verifier,
+    );
+
+    let candidate = &second.loop_closure_candidates[0];
+    let verification = candidate
+        .verification
+        .as_ref()
+        .expect("verifier output must be populated");
+    assert!(!verification.verified);
+    assert!(!candidate.geometrically_verified);
+    assert_eq!(
+        verification.failure_reason,
+        Some(visloc_slam::LoopClosureVerificationFailureReason::InsufficientCorrespondences)
+    );
+    assert!(verification.relative_pose.is_none());
+}
+
+#[test]
+fn correspondences_2d3d_only_includes_landmarks_observed_by_keyframe() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    let _ = slam.process_frame(&first_frame, []);
+    let second = slam.process_frame(&second_frame, []);
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+    let candidate = &second.loop_closure_candidates[0];
+    let keyframe = slam
+        .map()
+        .keyframes
+        .get(&candidate.matched_keyframe_id)
+        .unwrap();
+
+    let correspondences = correspondences_2d3d_for_loop_candidate(
+        &second_frame,
+        &second.tracking.localization.inlier_query_indices,
+        &second.tracking.localization.inlier_landmark_ids,
+        keyframe,
+        slam.map(),
+    );
+    assert_eq!(correspondences.len(), 12);
+    // Each correspondence must have its 2D point inside the second frame's
+    // keypoint list and its 3D point matching a map landmark.
+    for c in &correspondences {
+        assert!(second_frame.keypoints.contains(&c.point2d));
+        assert!(slam
+            .map()
+            .landmarks
+            .values()
+            .any(|landmark| landmark.position == c.point3d));
+    }
 }
