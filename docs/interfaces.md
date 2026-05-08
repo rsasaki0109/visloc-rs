@@ -141,7 +141,12 @@ This is the first v0.3 extension point. Future landmark candidates, triangulatio
 - `LoopClosureConfig`: controls candidate detection using frame-id gap, shared-landmark count, shared-landmark ratio, and max returned candidates
 - `LoopClosureCandidate`: reports the current frame, matched older keyframe, shared landmark count, overlap ratio, score, and geometric verification flag
 - `OnlineSlamResult`: returns tracking output, optional mapping output, optional applied update counts, loop-closure candidates, and current map sizes
-- `online_slam_results_to_html_report`: creates a self-contained HTML/SVG report showing tracked camera centers and loop-candidate edges
+- `online_slam_results_to_html_report`: creates a self-contained HTML/SVG report showing tracked camera centers and loop-candidate edges, including verifier inlier/Sampson columns when `LoopClosureCandidate::verification` is populated
+- `LoopClosureVerifier`: trait for swappable loop-closure verifiers operating on pixel-space `TwoViewCorrespondence`s plus camera intrinsics
+- `EssentialMatrixLoopClosureVerifier`: classical-geometry verifier built on `visloc-vision::two_view`'s essential-matrix RANSAC, with `LoopClosureVerifierConfig` thresholds for `min_inliers`, `min_inlier_ratio`, and `max_mean_sampson_error`
+- `LoopClosureVerification` and `LoopClosureVerificationFailureReason`: verifier outputs covering inlier count, inlier ratio, mean Sampson error, combined score, and an enumerated failure reason
+- `correspondences_for_loop_candidate`: helper that builds two-view correspondences for a candidate from the current frame's tracking inliers and the older keyframe's observations
+- `verify_loop_closure_candidates`: convenience helper that runs a `LoopClosureVerifier` over a slice of `LoopClosureCandidate`s in place, updating each `verification` and `geometrically_verified` field
 
 Each frame is localized/tracked first. If tracking succeeds, the pipeline creates a keyframe from the tracked frame, runs local mapping with caller-supplied landmark candidates, and optionally applies the validated staged update to the growing map. If tracking fails, mapping is skipped and the caller still receives the tracking diagnostics.
 

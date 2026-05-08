@@ -425,6 +425,7 @@ dependencies = [
  "visloc-localization",
  "visloc-mapping",
  "visloc-tracking",
+ "visloc-vision",
 ]
 
 [[package]]

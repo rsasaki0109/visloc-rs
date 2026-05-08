@@ -6,6 +6,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- `LoopClosureVerifier` trait, `EssentialMatrixLoopClosureVerifier`, `LoopClosureVerifierConfig`, `LoopClosureVerification`, and `LoopClosureVerificationFailureReason` give loop-closure candidates a classical-geometry verifier built on `visloc-vision::two_view`'s essential-matrix RANSAC, with explicit inlier count, inlier ratio, mean Sampson error, score, and enumerated failure reasons.
+- `correspondences_for_loop_candidate` and `verify_loop_closure_candidates` plumb the current frame's tracking inliers and an older keyframe's observations into the verifier without forcing `OnlineSlamPipeline` callers to change their constructors.
+- `LoopClosureCandidate.verification` now optionally carries the verifier's output; `geometrically_verified` is updated in place when the verifier rejects a candidate.
+- `online_slam_loop_candidate_with_verifier_dummy` example demonstrates the candidate-detection plus geometric-verification path on a 12-landmark synthetic sequence; the loop HTML/SVG report adds verifier inlier counts, inlier ratio, mean Sampson error, score, and failure-reason columns.
+- Deep VO / loop-close milestone completion increased to 65% to reflect the loop-closure verifier and verifier-aware demo.
 - `visloc-vision::two_view` module with `TwoViewCorrespondence`, a Hartley-normalized 8-point `EightPointEssentialMatrixEstimator`, Sampson-distance-scored `EssentialRansac`, 4-fold `recover_relative_pose` cheirality decomposition, and a composing `RelativePoseEstimator` that applies a caller-supplied translation scale.
 - `EssentialMatrixVisualOdometryFrontend` and `EssentialMatrixVisualOdometryConfig` expose the classical-geometry pipeline as a `VisualOdometryFrontend`, returning a full SE3 relative pose plus inlier/Sampson diagnostics and supporting per-pair translation-scale overrides.
 - `two_view_vo_compare` example runs the classical essential-matrix frontend alongside the flow-only `TwoViewMatchVisualOdometryFrontend` on the same synthetic three-frame sequence to make the structural difference visible; with `--out-dir` it writes a per-frame text report.

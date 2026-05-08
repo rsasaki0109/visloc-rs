@@ -17,7 +17,7 @@ Repository:
 Current milestone completion:
 
 ```text
-Deep VO / Loop Close completion: 60%
+Deep VO / Loop Close completion: 65%
 ```
 
 Report this value at the end of development updates until it changes. Increase
@@ -319,10 +319,10 @@ blocked CI.
 Current score:
 
 ```text
-Deep VO / Loop Close completion: 60%
+Deep VO / Loop Close completion: 65%
 ```
 
-Why 60%:
+Why 65%:
 
 - Tracking and local mapping scaffolds exist.
 - Online SLAM composition exists.
@@ -344,6 +344,14 @@ Why 60%:
   caller-supplied translation scale. The `two_view_vo_compare` example runs the
   classical and flow-only frontends on the same synthetic three-frame
   sequence and prints relative-translation estimates against ground truth.
+- Loop-closure candidates can now be geometrically verified through
+  `EssentialMatrixLoopClosureVerifier` with explicit
+  `LoopClosureVerification` (inlier count / inlier ratio / mean Sampson
+  error / score / failure reason), plumbed via
+  `correspondences_for_loop_candidate` and `verify_loop_closure_candidates`.
+  `online_slam_loop_candidate_with_verifier_dummy` exercises the full path
+  on a 12-landmark sequence and the loop HTML report surfaces the verifier
+  diagnostics.
 
 Why not higher:
 
@@ -352,41 +360,46 @@ Why not higher:
   synthetic three-frame demo so far.
 - No public sequence demo shows correspondences driving tracking with the
   classical or learned frontend over more than a few frames.
-- Loop closure is candidate reporting only; the verifier does not yet feed the
-  classical relative-pose estimator.
-- No pose-graph constraints or global correction exist.
+- Loop closure now has classical-geometry verification, but no
+  pose-graph constraints or global correction exist yet.
+- Verifier exists but is not yet driven from a public sequence demo over
+  more than three frames.
 
-## Next Milestone: 60% to 70%
+## Next Milestone: 65% to 70%
 
-Goal: turn the existing classical two-view geometry from a synthetic comparison
-demo into something that visibly drives a longer sequence and feeds loop
-closure verification, while keeping mandatory deep-learning runtimes out of the
-default crates.
+Goal: keep the classical pipeline visible across longer sequences and
+introduce the type that loop-closure backends will consume, while keeping
+mandatory deep-learning runtimes out of the default crates.
 
-Completed at 60%:
+Completed at 65%:
 
 - `visloc-vision::two_view` (8-point + RANSAC + cheirality recovery).
 - `EssentialMatrixVisualOdometryFrontend` exposing it through
   `VisualOdometryFrontend`.
 - `two_view_vo_compare` short-sequence demo that prints classical vs flow-only
   relative-translation estimates against ground truth.
+- Classical-geometry loop-closure verifier (`EssentialMatrixLoopClosureVerifier`,
+  `LoopClosureVerification`, helper functions) plus
+  `online_slam_loop_candidate_with_verifier_dummy` and an HTML report that
+  surfaces inlier count, inlier ratio, mean Sampson error, score, and failure
+  reasons for rejected candidates.
 
 Recommended next tasks (any single one is enough to push toward 70%):
 
 1. Public sequence demo: replace the synthetic three frames in
-   `two_view_vo_compare` with a small public image sequence (e.g., a KITTI
-   subset or a tiny self-contained fixture) so the classical frontend's
-   correspondence quality, pose continuity, and Sampson diagnostics are visible
-   over more than three frames.
-2. Stronger loop-closure candidate verification: feed the candidate pairs from
-   `LoopClosureCandidate` into `EssentialMatrixVisualOdometryFrontend` (or a
-   direct `RelativePoseEstimator` call) plus existing PnP RANSAC to score
-   candidates with inlier count, inlier ratio, and reprojection error before
-   accepting them.
-3. Pose-graph constraint type (no global optimization yet): introduce a
+   `two_view_vo_compare` (or in a new example) with a small public image
+   sequence (e.g., a KITTI subset or a tiny self-contained fixture) so the
+   classical frontend's correspondence quality, pose continuity, and Sampson
+   diagnostics are visible over more than three frames.
+2. Pose-graph constraint type (no global optimization yet): introduce a
    `LoopClosureConstraint { from_keyframe_id, to_keyframe_id, relative_pose,
    inlier_count, score }` type plus a small builder that turns a verified
-   candidate into a constraint, leaving the actual graph solver out.
+   `LoopClosureCandidate` into a constraint, leaving the actual graph solver
+   out.
+3. Loop-closure verifier reuse from PnP/tracking inliers: extend the verifier
+   to optionally consume 2D-3D correspondences and reuse `PnPRansac` so
+   candidates can be checked against the existing 3D map structure as well as
+   the essential-matrix two-view geometry.
 
 ### 2. Make the VO Adapter Diagnostics More Explicit
 
@@ -604,7 +617,7 @@ If handing off to another agent, use this:
 You are continuing the Rust project visloc-rs.
 Read PLAN.md, docs/progress.md, docs/roadmap.md, docs/interfaces.md, and src/two_view_vo.rs first.
 Current Deep VO / Loop Close completion is 55%.
-The classical two-view geometry pipeline already exists in visloc-vision::two_view (8-point, Sampson RANSAC, cheirality recovery), and EssentialMatrixVisualOdometryFrontend exposes it through VisualOdometryFrontend. The two_view_vo_compare example contrasts it with the flow-only frontend on a synthetic three-frame sequence. Pick one of the recommended 60%-to-70% tasks: a public-data sequence demo, geometric verification of LoopClosureCandidate via the classical frontend, or introducing a LoopClosureConstraint type without a full pose-graph solver. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
+The classical two-view geometry pipeline already exists in visloc-vision::two_view (8-point, Sampson RANSAC, cheirality recovery), EssentialMatrixVisualOdometryFrontend exposes it through VisualOdometryFrontend, and EssentialMatrixLoopClosureVerifier plus verify_loop_closure_candidates wire it into geometric verification of LoopClosureCandidate (with HTML report columns). Pick one of the recommended 65%-to-70% tasks: a public-data sequence demo, a LoopClosureConstraint type without a full pose-graph solver, or extending the verifier to optionally consume 2D-3D correspondences via PnPRansac. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
 Do not add mandatory deep-learning runtime dependencies and do not claim full SLAM or full loop closure.
 End every status/final message with: Deep VO / Loop Close completion: <percent>.
 ```
@@ -618,5 +631,5 @@ End every status/final message with: Deep VO / Loop Close completion: <percent>.
 - Start with the classical two-view geometry path (essential/fundamental matrix
   RANSAC and relative-pose recovery) once the file-backed two-view VO sequence
   milestone is in.
-- Keep completion at 60% until the next runnable example/test/docs milestone is
+- Keep completion at 65% until the next runnable example/test/docs milestone is
   complete.
