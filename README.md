@@ -13,15 +13,15 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/kitti_loop_closure.gif" alt="Pose-graph SE(3) Gauss-Newton loop closure on KITTI 00 ground-truth trajectory: 152 keyframes, 160 m drifted endpoint pulled back to within 0.01 m of truth" width="62%">
+  <img src="docs/assets/kitti_loop_closure.gif" alt="Real-image visual odometry + loop closure on KITTI 00 (1112 keyframes): monocular essential-matrix VO drifts ~548 m, then a single loop-closure edge plus pose-graph SE(3) Gauss-Newton brings the endpoint back to within ~5 m of truth" width="62%">
 </p>
 
 <p align="center">
-  <em>Pose-graph SE(3) Gauss-Newton loop closure on the real KITTI 00 trajectory — 152 keyframes, 160&nbsp;m of simulated odometry drift collapsed to a 0.01&nbsp;m endpoint error after a single loop edge.</em>
+  <em>Real-image visual odometry + loop closure on KITTI 00 (1112 keyframes from <code>image_0</code>): Shi-Tomasi corners → essential-matrix RANSAC for every consecutive pair → loop edge from the same pipeline → pose-graph SE(3) Gauss-Newton. Monocular VO drifts ~548&nbsp;m before the loop closure; a single loop edge plus the SE(3) optimizer brings endpoint error to ~5&nbsp;m.</em>
 </p>
 
 <p align="center">
-  <img src="docs/assets/kitti_loop_closure.png" alt="Three-panel comparison of ground truth, drifted odometry, and corrected trajectory on KITTI 00" width="92%">
+  <img src="docs/assets/kitti_loop_closure.png" alt="Three-panel comparison: KITTI 00 ground truth, monocular VO Procrustes-aligned, and corrected trajectory after loop closure + SE(3) Gauss-Newton" width="92%">
 </p>
 
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.

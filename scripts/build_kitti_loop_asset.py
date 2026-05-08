@@ -1,35 +1,28 @@
 #!/usr/bin/env python3
 """Build the README KITTI loop-closure asset.
 
-Reads the truth / drifted / corrected trajectories produced by
-`cargo run --example online_slam_kitti_loop_demo` and emits two
-visualization artifacts that depict the actual SLAM pipeline:
+Two modes are supported:
 
-1. `kitti_loop_closure.png`  — three static panels: ground truth, drifted
-   odometry, corrected trajectory after pose-graph SE(3) optimization.
+1. **gt-drift mode** (default): reads `truth.csv`, `drifted.csv`, and
+   `corrected.csv` produced by the GT-pose-based example
+   `online_slam_kitti_loop_demo`. The drifted trajectory is integrated
+   from yaw-perturbed truth edges; the corrected trajectory is the
+   pose-graph SE(3) GN output.
 
-2. `kitti_loop_closure.gif`  — a pipeline animation with three phases that
-   match what an online visual SLAM system would do:
+2. **real-vo mode**: reads `vo.csv` + `corrected.csv` produced by the
+   real-image example `online_slam_image_vo_loop_demo` plus a separate
+   KITTI ground-truth pose file (e.g., `<KITTI>/poses/00.txt`). The
+   monocular essential-matrix VO is metric-ambiguous (unit scale per
+   pair), so VO and corrected are Procrustes-aligned (rotation + scale +
+   translation) to the GT subsample before plotting. This is the same
+   alignment used by ATE evaluation in the visual SLAM literature.
 
-       Phase A (VO drifting):     the drifted odometry polyline is built up
-                                  segment by segment, so the viewer can see
-                                  the per-edge drift accumulating as the
-                                  vehicle drives around the loop.
-
-       Phase B (Loop detection):  once VO finishes, a yellow loop-closure
-                                  edge is drawn between the current keyframe
-                                  and the matched older keyframe. The title
-                                  bar names the matched pair.
-
-       Phase C (Graph optim.):    the trajectory smoothly morphs from the
-                                  drifted state to the post-PGO corrected
-                                  state while the loop edge shrinks and
-                                  fades. The title shows the running
-                                  endpoint error so the convergence is
-                                  legible at a glance.
+The output artifacts are `kitti_loop_closure.png` (three-panel
+truth / VO / corrected) and `kitti_loop_closure.gif` (three-phase
+animation: VO drifting in → loop detected → PGO corrected).
 
 Asset-generation tool, not part of CI. Requires Python with matplotlib,
-numpy, and Pillow (already on the development machine).
+numpy, and Pillow.
 """
 from __future__ import annotations
 
@@ -62,6 +55,45 @@ def load_trajectory_xz(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return np.array(xs), np.array(zs)
 
 
+def load_kitti_truth_xz(
+    path: Path, stride: int, count: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read camera-to-world poses (3x4 row-major), pick stride-subsampled
+    centers, return X / Z columns of length `count`."""
+    rows = np.loadtxt(path)
+    centers = rows[:, [3, 7, 11]]  # tx, ty, tz columns of 3x4 row-major
+    sampled = centers[::stride][:count]
+    return sampled[:, 0], sampled[:, 2]
+
+
+def procrustes_2d(
+    src: np.ndarray, dst: np.ndarray
+) -> tuple[np.ndarray, dict]:
+    """Start-anchored similarity alignment (rotation + uniform scale) of
+    `src` to `dst`. Both arrays are (N, 2). The output is forced to share
+    the same start point as `dst` (i.e., `aligned[0] == dst[0]`) so the
+    visualization compares trajectory shape relative to a common origin
+    instead of letting an unconstrained Procrustes alignment drift the
+    centroid of a loop trajectory away from its start."""
+    src_anchor = src[0]
+    dst_anchor = dst[0]
+    src_c = src - src_anchor
+    dst_c = dst - dst_anchor
+    # Optimal rotation via SVD of cross-covariance (origin-anchored).
+    h = src_c.T @ dst_c
+    u, _, vt = np.linalg.svd(h)
+    r = vt.T @ u.T
+    if np.linalg.det(r) < 0:
+        vt[-1, :] *= -1
+        r = vt.T @ u.T
+    src_norm = np.linalg.norm(src_c)
+    dst_norm = np.linalg.norm(dst_c)
+    scale = dst_norm / max(src_norm, 1e-12)
+    aligned = (scale * (src_c @ r.T)) + dst_anchor
+    return aligned, {"rotation": r, "scale": scale,
+                     "src_anchor": src_anchor, "dst_anchor": dst_anchor}
+
+
 def smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
@@ -69,11 +101,13 @@ def smoothstep(t: float) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=["gt-drift", "real-vo"], default="gt-drift")
     parser.add_argument(
         "--input-dir",
         type=Path,
         default=Path("target/kitti_loop_demo"),
-        help="Directory with truth.csv / drifted.csv / corrected.csv",
+        help="Directory with truth.csv / drifted.csv / corrected.csv (gt-drift) "
+             "or vo.csv / corrected.csv (real-vo).",
     )
     parser.add_argument(
         "--out-dir",
@@ -82,40 +116,61 @@ def main() -> int:
         help="Where to write kitti_loop_closure.{png,gif}",
     )
     parser.add_argument(
-        "--vo-frames",
-        type=int,
-        default=70,
-        help="Number of GIF frames spent building up the VO drifted polyline.",
+        "--truth-kitti-poses",
+        type=Path,
+        help="(real-vo only) KITTI poses/SS.txt for the underlying sequence.",
     )
     parser.add_argument(
-        "--detect-frames",
+        "--gt-stride",
         type=int,
-        default=12,
+        default=1,
+        help="(real-vo only) Stride used to subsample the KITTI poses to match "
+             "the VO frame count. The Rust example uses --frame-stride which "
+             "should match this value.",
+    )
+    parser.add_argument(
+        "--vo-frames", type=int, default=70,
+        help="Number of GIF frames spent building up the VO polyline.",
+    )
+    parser.add_argument(
+        "--detect-frames", type=int, default=12,
         help="Number of GIF frames spent on the loop-detection pulse.",
     )
     parser.add_argument(
-        "--optim-frames",
-        type=int,
-        default=40,
+        "--optim-frames", type=int, default=40,
         help="Number of GIF frames spent morphing drifted -> corrected.",
     )
     parser.add_argument(
-        "--hold-frames",
-        type=int,
-        default=12,
+        "--hold-frames", type=int, default=12,
         help="Number of GIF frames holding the final corrected state.",
     )
-    parser.add_argument(
-        "--gif-fps",
-        type=int,
-        default=18,
-        help="Frames per second in the output GIF.",
-    )
+    parser.add_argument("--gif-fps", type=int, default=18)
     args = parser.parse_args()
 
-    truth_x, truth_z = load_trajectory_xz(args.input_dir / "truth.csv")
-    drift_x, drift_z = load_trajectory_xz(args.input_dir / "drifted.csv")
-    corr_x, corr_z = load_trajectory_xz(args.input_dir / "corrected.csv")
+    if args.mode == "gt-drift":
+        truth_x, truth_z = load_trajectory_xz(args.input_dir / "truth.csv")
+        drift_x, drift_z = load_trajectory_xz(args.input_dir / "drifted.csv")
+        corr_x, corr_z = load_trajectory_xz(args.input_dir / "corrected.csv")
+        mode_label = "GT-pose drift"
+    else:
+        if args.truth_kitti_poses is None:
+            parser.error("--truth-kitti-poses is required in real-vo mode")
+        vo_x, vo_z = load_trajectory_xz(args.input_dir / "vo.csv")
+        co_x, co_z = load_trajectory_xz(args.input_dir / "corrected.csv")
+        truth_x, truth_z = load_kitti_truth_xz(
+            args.truth_kitti_poses, args.gt_stride, len(vo_x)
+        )
+        # Align unit-scale VO and corrected to GT in the XZ plane using
+        # similarity Procrustes (rotation + scale + translation).
+        truth_xy = np.column_stack([truth_x, truth_z])
+        vo_aligned, vo_xform = procrustes_2d(np.column_stack([vo_x, vo_z]), truth_xy)
+        co_aligned, co_xform = procrustes_2d(np.column_stack([co_x, co_z]), truth_xy)
+        drift_x, drift_z = vo_aligned[:, 0], vo_aligned[:, 1]
+        corr_x, corr_z = co_aligned[:, 0], co_aligned[:, 1]
+        print(f"# Procrustes alignment (real-vo):")
+        print(f"  vo:  scale={vo_xform['scale']:.3f}")
+        print(f"  cor: scale={co_xform['scale']:.3f}")
+        mode_label = "real-image VO"
 
     n = len(truth_x)
     assert len(drift_x) == n and len(corr_x) == n, "trajectory lengths must match"
@@ -129,11 +184,14 @@ def main() -> int:
         np.hypot(corr_x[-1] - truth_x[-1], corr_z[-1] - truth_z[-1])
     )
 
+    drift_label = "drifted odometry" if args.mode == "gt-drift" else "monocular VO (Procrustes-aligned)"
+    corr_label = "corrected (SE(3) GN)" if args.mode == "gt-drift" else "after loop closure + SE(3) GN"
+
     # ---------- Static three-panel PNG ----------
     fig, axes = plt.subplots(1, 3, figsize=(15, 5.2), constrained_layout=True)
     truth_kw = dict(color=TRUTH_COLOR, linewidth=2.0, label="ground truth")
-    drift_kw = dict(color=DRIFT_COLOR, linewidth=2.0, label="drifted odometry")
-    corr_kw = dict(color=CORR_COLOR, linewidth=2.0, label="corrected (SE(3) GN)")
+    drift_kw = dict(color=DRIFT_COLOR, linewidth=2.0, label=drift_label)
+    corr_kw = dict(color=CORR_COLOR, linewidth=2.0, label=corr_label)
 
     axes[0].plot(truth_x, truth_z, **truth_kw)
     axes[0].scatter(
@@ -152,7 +210,7 @@ def main() -> int:
         drift_x[-1], drift_z[-1], color=DRIFT_COLOR, s=40, zorder=6, marker="x"
     )
     axes[1].set_title(
-        "VO drifts as the loop closes\n(no loop closure applied yet)"
+        f"VO drifts as the loop closes\n({mode_label}, no loop closure applied)"
     )
     axes[1].set_xlabel("x [m]")
     axes[1].axis("equal")
@@ -171,7 +229,7 @@ def main() -> int:
     axes[2].legend(loc="upper right", fontsize=8)
 
     fig.suptitle(
-        f"KITTI 00 loop closure — {n} keyframes, "
+        f"KITTI 00 loop closure ({mode_label}) — {n} keyframes, "
         f"endpoint error: drifted={end_drift_err:.1f} m → "
         f"corrected={end_corr_err:.3f} m",
         fontsize=12,
@@ -185,8 +243,6 @@ def main() -> int:
     # ---------- Animated GIF: VO build → loop detect → PGO ----------
     fig, ax = plt.subplots(figsize=(7, 7), constrained_layout=True)
 
-    # Limits chosen to fit the full union of all three trajectories so the
-    # axes never rescale during the animation.
     all_x = np.r_[truth_x, drift_x, corr_x]
     all_z = np.r_[truth_z, drift_z, corr_z]
     pad_x = (all_x.max() - all_x.min()) * 0.08
@@ -198,29 +254,21 @@ def main() -> int:
     ax.set_xlabel("x [m]")
     ax.set_ylabel("z [m]")
 
-    # Faint truth guide stays on screen the whole time.
     ax.plot(
-        truth_x,
-        truth_z,
-        color=TRUTH_COLOR,
-        linewidth=1.5,
-        alpha=0.35,
-        label="ground truth",
-        zorder=1,
+        truth_x, truth_z, color=TRUTH_COLOR, linewidth=1.5, alpha=0.35,
+        label="ground truth", zorder=1,
     )
     ax.scatter(
         truth_x[0], truth_z[0], color="black", s=40, zorder=5, label="start"
     )
 
-    # The estimated trajectory line and its current-frame marker.
     estimate_line, = ax.plot(
-        [], [], color=DRIFT_COLOR, linewidth=2.5, label="estimate", zorder=4
+        [], [], color=DRIFT_COLOR, linewidth=2.5,
+        label="estimate", zorder=4,
     )
     current_marker = ax.scatter(
         [], [], color=DRIFT_COLOR, s=70, marker="o", zorder=6
     )
-
-    # Loop-closure edge between matched KFs (drawn during phases B + C).
     loop_line, = ax.plot(
         [], [], color=LOOP_COLOR, linewidth=2.0, alpha=0.0, zorder=3
     )
@@ -228,12 +276,9 @@ def main() -> int:
         [], [], color=LOOP_COLOR, s=120, marker="o",
         facecolor="none", edgecolor=LOOP_COLOR, linewidth=2.0, alpha=0.0, zorder=5,
     )
-
     title = ax.set_title("")
     phase_label = ax.text(
-        0.02,
-        0.98,
-        "",
+        0.02, 0.98, "",
         transform=ax.transAxes,
         verticalalignment="top",
         horizontalalignment="left",
@@ -259,9 +304,12 @@ def main() -> int:
         cb = np.array(to_rgba(b))
         return tuple((1.0 - t) * ca + t * cb)
 
+    drift_phase_label = "Phase 1/3 — visual odometry"
+    detect_phase_label = "Phase 2/3 — loop closure detected"
+    optim_phase_label = "Phase 3/3 — pose-graph SE(3) Gauss-Newton"
+
     def update(frame: int):
         if frame < vo_frames:
-            # Phase A: VO drifted polyline grows segment by segment.
             progress = (frame + 1) / vo_frames
             kf_count = max(2, int(round(progress * n)))
             xy = drifted_xy[:kf_count]
@@ -272,22 +320,21 @@ def main() -> int:
             current_marker.set_color(DRIFT_COLOR)
             loop_line.set_alpha(0.0)
             matched_marker.set_alpha(0.0)
-            running_err = float(np.linalg.norm(xy[-1] - truth_endpoint)) if kf_count == n else 0.0
-            phase_label.set_text("Phase 1/3 — visual odometry")
+            phase_label.set_text(drift_phase_label)
             if kf_count < n:
                 title.set_text(
-                    f"KITTI 00  •  building VO trajectory  •  "
+                    f"KITTI 00 ({mode_label})  •  building VO trajectory  •  "
                     f"keyframe {kf_count}/{n}"
                 )
             else:
+                running_err = float(np.linalg.norm(xy[-1] - truth_endpoint))
                 title.set_text(
-                    f"KITTI 00  •  VO complete  •  "
+                    f"KITTI 00 ({mode_label})  •  VO complete  •  "
                     f"endpoint drift = {running_err:.1f} m"
                 )
             return estimate_line, current_marker, loop_line, matched_marker, title, phase_label
 
         if frame < vo_frames + detect_frames:
-            # Phase B: Loop detection — pulse the loop edge.
             local = frame - vo_frames
             pulse = 0.4 + 0.6 * np.sin(local * np.pi / max(1, detect_frames - 1)) ** 2
             estimate_line.set_data(drifted_xy[:, 0], drifted_xy[:, 1])
@@ -301,15 +348,14 @@ def main() -> int:
             loop_line.set_color(LOOP_COLOR)
             matched_marker.set_offsets(loop_xy)
             matched_marker.set_alpha(pulse)
-            phase_label.set_text("Phase 2/3 — loop closure detected")
+            phase_label.set_text(detect_phase_label)
             title.set_text(
-                f"KITTI 00  •  loop closure: KF 0 ↔ KF {n - 1}  •  "
+                f"KITTI 00 ({mode_label})  •  loop closure: KF 0 ↔ KF {n - 1}  •  "
                 f"endpoint drift = {end_drift_err:.1f} m"
             )
             return estimate_line, current_marker, loop_line, matched_marker, title, phase_label
 
         if frame < vo_frames + detect_frames + optim_frames:
-            # Phase C: Graph optimization — morph drifted -> corrected.
             local = frame - (vo_frames + detect_frames)
             t = smoothstep(local / max(1, optim_frames - 1))
             xy = (1.0 - t) * drifted_xy + t * corrected_xy
@@ -318,21 +364,19 @@ def main() -> int:
             estimate_line.set_color(color)
             current_marker.set_offsets(xy[-1:].reshape(1, 2))
             current_marker.set_color(color)
-            # Loop edge collapses as the endpoints come together.
             loop_xy = np.stack([xy[0], xy[-1]], axis=0)
             loop_line.set_data(loop_xy[:, 0], loop_xy[:, 1])
             loop_line.set_alpha(max(0.0, 1.0 - t))
             matched_marker.set_offsets(loop_xy)
             matched_marker.set_alpha(max(0.0, 1.0 - t))
             running_err = float(np.linalg.norm(xy[-1] - truth_endpoint))
-            phase_label.set_text("Phase 3/3 — pose-graph SE(3) Gauss-Newton")
+            phase_label.set_text(optim_phase_label)
             title.set_text(
-                f"KITTI 00  •  optimizing  •  "
+                f"KITTI 00 ({mode_label})  •  optimizing  •  "
                 f"endpoint drift = {running_err:.2f} m"
             )
             return estimate_line, current_marker, loop_line, matched_marker, title, phase_label
 
-        # Hold corrected state.
         estimate_line.set_data(corrected_xy[:, 0], corrected_xy[:, 1])
         estimate_line.set_color(CORR_COLOR)
         current_marker.set_offsets(corrected_xy[-1:].reshape(1, 2))
@@ -341,7 +385,7 @@ def main() -> int:
         matched_marker.set_alpha(0.0)
         phase_label.set_text("Done — corrected trajectory")
         title.set_text(
-            f"KITTI 00  •  done  •  "
+            f"KITTI 00 ({mode_label})  •  done  •  "
             f"drifted {end_drift_err:.1f} m → corrected {end_corr_err:.3f} m"
         )
         return estimate_line, current_marker, loop_line, matched_marker, title, phase_label

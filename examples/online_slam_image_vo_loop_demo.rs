@@ -58,7 +58,7 @@ use visloc_rs::vision::features::{
     CornerFeatureConfig, CornerFeatureExtractor, FeatureExtractor, FeatureSet, GrayscaleImage,
 };
 #[cfg(feature = "image-io")]
-use visloc_rs::vision::matching::{BruteForceMatcher, CrossCheckMatcher, Matcher};
+use visloc_rs::vision::matching::{BruteForceMatcher, Matcher};
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 #[cfg(feature = "image-io")]
@@ -170,12 +170,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Extract features for every kept frame once. CornerFeatureExtractor uses
-    // simple intensity-difference patches as descriptors which are enough for
-    // short-baseline matching across a sequence.
+    // simple intensity-difference patches as descriptors. For real KITTI
+    // imagery we need many more candidate corners and a larger descriptor
+    // patch than the synthetic-fixture defaults to keep matching alive across
+    // the per-pair vehicle motion.
     let extractor = CornerFeatureExtractor::new(CornerFeatureConfig {
-        max_features: 600,
-        min_score: 0.04,
-        descriptor_radius: 3,
+        max_features: 1500,
+        min_score: 0.02,
+        descriptor_radius: 5,
     });
     let mut feature_sets: Vec<FeatureSet> = Vec::with_capacity(n);
     for image in &frames {
@@ -190,7 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         feature_counts.iter().copied().max().unwrap_or(0),
     );
 
-    let matcher = CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(0.85) });
+    // Drop cross-check on real data — it cuts matches roughly in half, which
+    // patch descriptors can't afford. Rely on the essential-matrix RANSAC to
+    // reject the extra outliers a pure brute-force matcher leaves in.
+    let matcher = BruteForceMatcher { ratio: Some(0.9) };
     let estimator = RelativePoseEstimator::default();
 
     // Sequential VO: for each consecutive pair, build correspondences from
@@ -295,35 +300,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph.se3_cost(),
     );
 
-    let result = if loop_constraint.is_some() {
-        Some(graph.optimize_se3_iterative(&PoseGraphSe3Config {
-            initial_lambda: Some(1.0e-3),
-            max_iterations: 50,
-            ..PoseGraphSe3Config::default()
-        })?)
-    } else {
-        None
-    };
-
-    if let Some(result) = result.as_ref() {
+    // For monocular VO the per-pair translation scale is arbitrary (unit by
+    // default). The loop edge expresses the same arbitrary-scale convention,
+    // so the chain's translations must be rescaled to satisfy it. The
+    // translation-only Gauss-Newton step is exact for that linear residual
+    // system, converges in one solve, and (because rotations look reasonable
+    // out of the essential-matrix RANSAC) preserves the trajectory shape.
+    if loop_constraint.is_some() {
+        let step = graph.optimize_translations_once()?;
         println!(
-            "optimization initial_cost={:.4} final_cost={:.4} iterations={} converged={}",
+            "translation_pgo cost_before={:.4} cost_after={:.4} mean_correction={:.4} max_correction={:.4}",
+            step.cost_before,
+            step.cost_after,
+            step.mean_translation_correction,
+            step.max_translation_correction,
+        );
+        // Follow up with a few SE(3) GN iterations so rotations are also
+        // pulled into agreement now that translations are consistent.
+        let result = graph.optimize_se3_iterative(&PoseGraphSe3Config {
+            initial_lambda: Some(1.0e-4),
+            max_iterations: 20,
+            ..PoseGraphSe3Config::default()
+        })?;
+        println!(
+            "se3_refine initial_cost={:.4} final_cost={:.4} iterations={} converged={}",
             result.initial_cost,
             result.final_cost,
             result.iterations.len(),
             result.converged,
         );
-        for stats in result.iterations.iter().take(8) {
-            println!(
-                "  iter={} cost_before={:.4} cost_after={:.4} max_step={:.4} lambda={:.2e} accepted={}",
-                stats.iteration,
-                stats.cost_before,
-                stats.cost_after,
-                stats.max_step_norm,
-                stats.lambda,
-                stats.step_accepted,
-            );
-        }
     }
 
     let corrected: Vec<Pose> = (0..n as u64).map(|id| graph.poses[&id].clone()).collect();
@@ -353,7 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_correspondences(
     a: &FeatureSet,
     b: &FeatureSet,
-    matcher: &CrossCheckMatcher<BruteForceMatcher>,
+    matcher: &BruteForceMatcher,
 ) -> Vec<TwoViewCorrespondence> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
