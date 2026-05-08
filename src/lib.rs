@@ -56,10 +56,11 @@ pub use visloc_core::types::{
     QueryImage, VisualMap, VisualMapValidationIssue, VisualMapValidationReport,
 };
 pub use visloc_fusion::{
-    FramePriorSource, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement, ImuMeasurement,
-    LocalizationPriorProvider, MeasurementBuffer, PoseCovariance, PoseCovarianceMatrix,
-    PosePriorMeasurement, PositionCovariance, PriorConfig, TimeDelta, Timed, TimedFrame,
-    TimedMeasurement, TimedPose, Timestamp,
+    FramePriorSource, FramePriorSyncEvaluationConfig, FramePriorSyncEvaluationFailure,
+    FramePriorSyncEvaluationResult, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement,
+    ImuMeasurement, LocalizationPriorProvider, MeasurementBuffer, PoseCovariance,
+    PoseCovarianceMatrix, PosePriorMeasurement, PositionCovariance, PriorConfig, TimeDelta, Timed,
+    TimedFrame, TimedMeasurement, TimedPose, Timestamp,
 };
 pub use visloc_io::colmap::ColmapMapProvider;
 #[cfg(feature = "image-io")]
@@ -137,7 +138,8 @@ pub mod prelude {
         CorrespondenceBuildError, CorrespondenceBuilder, CorrespondenceSet, CrossCheckMatcher,
         DescriptorMatch, DescriptorProvider, DltPnP, FeatureExtractor, FeatureSet, FeatureSetError,
         FixedLandmarkSelector, FixedLandmarkSubmapSelector, FnFeatureExtractor, Frame, FrameId,
-        FrameLocalizationResult, FrameLocalizer, FramePriorSource, FramePriorSyncSummary,
+        FrameLocalizationResult, FrameLocalizer, FramePriorSource, FramePriorSyncEvaluationConfig,
+        FramePriorSyncEvaluationFailure, FramePriorSyncEvaluationResult, FramePriorSyncSummary,
         FrameTimestampIndex, GaussNewtonPoseRefiner, GnssMeasurement, GrayscaleImage,
         GrayscaleImageError, ImageLocalizer, ImageTracker, ImuMeasurement, InMemoryMapProvider,
         IntersectCandidateSelector, Keyframe, KeyframeDecision, KeyframePolicy,
