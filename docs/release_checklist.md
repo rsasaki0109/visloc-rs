@@ -4,7 +4,7 @@
 
 ## Before Tagging
 
-- Run `scripts/check.sh`, including package metadata, crate-content checks, and the GNSS demo output smoke check.
+- Run `scripts/check.sh`, including package metadata, crate-content checks, GNSS demo output smoke checks, and timestamped image GNSS sync-output checks.
 - Confirm trajectory evaluation thresholds still pass through `scripts/check_trajectory_evaluation.sh`.
 - Confirm the CI MSRV job passes with Rust 1.82.0.
 - Run every example that is expected to stay user-facing with `scripts/run_examples.sh` (also covered by `scripts/check.sh`).

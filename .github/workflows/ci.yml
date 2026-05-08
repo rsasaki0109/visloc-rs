@@ -52,6 +52,9 @@ jobs:
       - name: GNSS demo outputs
         run: scripts/check_gnss_demo_outputs.sh
 
+      - name: Timestamped GNSS image demo outputs
+        run: scripts/check_timestamped_gnss_image_demo_outputs.sh
+
       - name: Upload GNSS demo outputs
         uses: actions/upload-artifact@v4
         with:
