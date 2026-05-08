@@ -51,6 +51,7 @@ All notable changes to `visloc-rs` will be documented here.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.
 - Local and CI smoke checks now verify timestamped image GNSS-prior demo outputs and sync evaluation JSON.
 - CI now uploads timestamped image GNSS-prior demo outputs as a separate artifact.
+- Documentation now includes a timestamped image GNSS-prior demo guide covering generated images, timestamp/GNSS files, sync evaluation JSON, and CI artifacts.
 
 ## 0.1.0 - 2026-05-07
 

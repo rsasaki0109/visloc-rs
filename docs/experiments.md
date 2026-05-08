@@ -13,6 +13,7 @@ Initial experiments should stay focused on map-based localization:
 - Optional PNG/JPEG-backed image sequence tracking with `cargo run --features image-io --example track_image_sequence_from_common_images`
 - Timestamped PNG/JPEG-backed image sequence tracking with GNSS priors using `cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior`
 - `scripts/check_timestamped_gnss_image_demo_outputs.sh` verifies the timestamped image GNSS-prior demo images, timestamp file, GNSS log, and sync evaluation JSON.
+- The timestamped image GNSS-prior demo output guide is in [timestamped_gnss_image_demo.md](timestamped_gnss_image_demo.md).
 - File-based sequence localization and tracking report export with `cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo`
 - Localization-based tracking state transitions with `cargo run --example track_sequence_dummy`
 - Tracking report export with `cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo`
