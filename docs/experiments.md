@@ -23,6 +23,6 @@ Initial experiments should stay focused on map-based localization:
 - Browser-viewable reports are written as `trajectory_report.html` / `tracking_report.html`, with frame-level tracking diagnostics in `tracking.csv` and aggregate tracking metrics in `tracking_summary.json`
 - Moving-camera GNSS-prior submap narrowing with `cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo`, including an `index.html` dashboard, `manifest.json`, tracking diagnostics, `tracking_evaluation.json`, KITTI/TUM poses, synthetic-reference translation errors, and trajectory CSV / JSON / HTML exports
 - The GNSS-prior demo output guide is in [gnss_demo.md](gnss_demo.md).
-- CI checks both the moving-camera GNSS dashboard demo and the timestamped image GNSS-prior demo; it uploads the checked GNSS dashboard output directory as the `gnss-demo-outputs` artifact for browser inspection.
+- CI checks both the moving-camera GNSS dashboard demo and the timestamped image GNSS-prior demo; it uploads the checked output directories as `gnss-demo-outputs` and `timestamped-gnss-image-demo-outputs` artifacts.
 
 Future experiments can add image feature extraction, online Visual SLAM, inertial priors, and public automotive or UAV sequence data after the visual localization slice is stable.

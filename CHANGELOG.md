@@ -50,6 +50,7 @@ All notable changes to `visloc-rs` will be documented here.
 - `FramePriorSyncEvaluationConfig` and pass/fail sync evaluation for CI-checkable external sensor coverage.
 - JSON export for frame-prior sync evaluation results and the timestamped image GNSS-prior demo.
 - Local and CI smoke checks now verify timestamped image GNSS-prior demo outputs and sync evaluation JSON.
+- CI now uploads timestamped image GNSS-prior demo outputs as a separate artifact.
 
 ## 0.1.0 - 2026-05-07
 
