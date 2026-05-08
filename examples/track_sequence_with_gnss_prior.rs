@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
@@ -21,7 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
-    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
     let near_points = [
         Point3::new(-1.0, -1.0, 4.0),
         Point3::new(1.0, -1.0, 4.5),
@@ -34,21 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut map = VisualMap::new();
     map.cameras.insert(camera.id, camera.clone());
 
-    let mut frame_a = Frame::new(100, camera.id);
-    let mut frame_b = Frame::new(101, camera.id);
+    let mut descriptors = Vec::new();
     for (index, point) in near_points.iter().enumerate() {
         let descriptor = vec![index as f32, 9.0];
         let mut landmark = Landmark::new(index as u64 + 1, *point);
         landmark.descriptor = Some(descriptor.clone());
         map.landmarks.insert(landmark.id, landmark);
-
-        let keypoint = camera
-            .project(&pose.transform_world_point(point))
-            .expect("dummy point must be in front of the camera");
-        frame_a.keypoints.push(keypoint);
-        frame_a.descriptors.push(descriptor.clone());
-        frame_b.keypoints.push(keypoint);
-        frame_b.descriptors.push(descriptor);
+        descriptors.push(descriptor);
     }
 
     for index in 0..6 {
@@ -58,20 +49,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         map.landmarks.insert(landmark_id, landmark);
     }
 
+    let poses = [
+        (
+            100,
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0)),
+            Point3::new(0.0, 0.0, 0.0),
+        ),
+        (
+            101,
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.45, 0.0, 0.0)),
+            Point3::new(0.45, 0.0, 0.0),
+        ),
+        (
+            102,
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.9, 0.0, -0.1)),
+            Point3::new(0.9, 0.0, 0.1),
+        ),
+    ];
+    let frames = poses
+        .iter()
+        .map(|(frame_id, pose, _center)| {
+            frame_from_projected_landmarks(*frame_id, &camera, pose, &near_points, &descriptors)
+        })
+        .collect::<Vec<_>>();
+
     let provider = InMemoryMapProvider::new(map);
-    let frame_timestamps = FrameTimestampIndex::from_timed_frames([
-        Timed::new(Timestamp::from_nanoseconds(0), frame_a.clone()),
-        Timed::new(Timestamp::from_nanoseconds(100_000_000), frame_b.clone()),
-    ]);
-    let gnss_measurements = MeasurementBuffer::from_measurements([
-        GnssMeasurement::new(Timestamp::from_nanoseconds(5_000_000), Point3::origin())
-            .with_accuracy(Some(4.0), None),
-        GnssMeasurement::new(
-            Timestamp::from_nanoseconds(105_000_000),
-            Point3::new(0.1, 0.0, 0.0),
-        )
-        .with_accuracy(Some(4.0), None),
-    ]);
+    let frame_timestamps =
+        FrameTimestampIndex::from_timed_frames(frames.iter().enumerate().map(|(index, frame)| {
+            Timed::new(
+                Timestamp::from_nanoseconds(index as i128 * 100_000_000),
+                frame.clone(),
+            )
+        }));
+    let gnss_measurements = MeasurementBuffer::from_measurements(poses.iter().enumerate().map(
+        |(index, (_frame_id, _pose, center))| {
+            GnssMeasurement::new(
+                Timestamp::from_nanoseconds(index as i128 * 100_000_000 + 5_000_000),
+                *center,
+            )
+            .with_accuracy(Some(4.0), None)
+        },
+    ));
     let prior_source = FramePriorSource::new(
         frame_timestamps,
         gnss_measurements,
@@ -85,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
     let mut results = Vec::new();
-    for frame in [&frame_a, &frame_b] {
+    for frame in &frames {
         let prior = prior_source
             .localization_prior_for_frame(frame)
             .expect("dummy GNSS prior must be available");
@@ -93,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracker.track_frame_with_localization_prior_submap_provider(frame, &provider, &prior);
 
         println!(
-            "frame={} gnss_radius={:?} map_landmarks={} candidates={} success={} inliers={} event={:?}",
+            "frame={} gnss_radius={:?} map_landmarks={} candidates={} success={} inliers={} event={:?} center={}",
             result.frame_id,
             prior.radius,
             result.map_landmark_count,
@@ -101,17 +119,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.localization.success,
             result.localization.inlier_count,
             result.event,
+            format_estimated_center(&result.localization.pose),
         );
         results.push(result);
     }
 
     let stats = tracker.stats();
+    let trajectory = PoseTrajectory::from_tracking_results(&results);
     println!(
-        "stats frames={} success_rate={:.3} external_prior_rate={:.3} external_prior_count={}",
+        "stats frames={} success_rate={:.3} external_prior_rate={:.3} external_prior_count={} trajectory_poses={} path_length={:.3}",
         stats.frame_count,
         stats.success_rate(),
         stats.external_localization_prior_usage_rate(),
         stats.external_localization_prior_used_count,
+        trajectory.len(),
+        trajectory.total_path_length(),
     );
 
     if let Some(output_dir) = output_dir {
@@ -120,7 +142,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tracking_summary_path = output_dir.join("tracking_summary.json");
         let tracking_report_path = output_dir.join("tracking_report.html");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
-        let trajectory = PoseTrajectory::from_tracking_results(&results);
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
@@ -147,4 +168,31 @@ fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
     let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
     args.remove(output_flag_index);
     Some(output_dir)
+}
+
+fn frame_from_projected_landmarks(
+    frame_id: u64,
+    camera: &Camera,
+    pose: &Pose,
+    points: &[Point3<f64>],
+    descriptors: &[Vec<f32>],
+) -> Frame {
+    let mut frame = Frame::new(frame_id, camera.id);
+    for (point, descriptor) in points.iter().zip(descriptors) {
+        let keypoint: Point2<f64> = camera
+            .project(&pose.transform_world_point(point))
+            .expect("dummy point must be visible in the moving camera");
+        frame.keypoints.push(keypoint);
+        frame.descriptors.push(descriptor.clone());
+    }
+    frame
+}
+
+fn format_estimated_center(pose: &Option<Pose>) -> String {
+    if let Some(pose) = pose {
+        let center = pose.camera_center_world();
+        format!("[{:.3}, {:.3}, {:.3}]", center.x, center.y, center.z)
+    } else {
+        "none".to_string()
+    }
 }
