@@ -9,5 +9,7 @@ pub mod calibration;
 pub mod colmap;
 pub mod descriptors;
 pub mod images;
+#[cfg(feature = "image-io")]
+pub mod kitti;
 pub mod query_features;
 pub mod sensors;

@@ -77,6 +77,11 @@ pub use visloc_io::images::{
     validate_common_image_sequence_timestamps, write_png_gray, CommonImageError,
     ImageSequenceError, ImageSequenceSummary, ImageSequenceValidationIssue, LoadedImageFrame,
 };
+#[cfg(feature = "image-io")]
+pub use visloc_io::kitti::{
+    read_kitti_image_sequence_dir, read_kitti_image_sequence_dir_with_timestamp_file,
+    KittiDatasetError, KittiImageSequence,
+};
 pub use visloc_io::sensors::{
     parse_gnss_measurements_txt, read_gnss_measurements_txt, SensorLogError,
 };
@@ -193,6 +198,11 @@ pub mod prelude {
     };
     pub use crate::io::images::{
         parse_pgm, read_pgm, to_pgm_ascii, write_pgm_ascii, PgmImageError,
+    };
+    #[cfg(feature = "image-io")]
+    pub use crate::io::kitti::{
+        read_kitti_image_sequence_dir, read_kitti_image_sequence_dir_with_timestamp_file,
+        KittiDatasetError, KittiImageSequence,
     };
     pub use crate::io::query_features::{read_query_features_txt, QueryFeatureError};
     pub use crate::io::sensors::{
