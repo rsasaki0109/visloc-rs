@@ -17,7 +17,7 @@ Repository:
 Current milestone completion:
 
 ```text
-Deep VO / Loop Close completion: 80%
+Deep VO / Loop Close completion: 90%
 ```
 
 Report this value at the end of development updates until it changes. Increase
@@ -319,10 +319,10 @@ blocked CI.
 Current score:
 
 ```text
-Deep VO / Loop Close completion: 80%
+Deep VO / Loop Close completion: 90%
 ```
 
-Why 80%:
+Why 90%:
 
 - Tracking and local mapping scaffolds exist.
 - Online SLAM composition exists.
@@ -364,6 +364,15 @@ Why 80%:
   `online_slam_loop_candidate_with_verifier_dummy`: a 5 cm / 2 cm / -4 cm
   drift on the most recent keyframe is corrected back to the loop-closed
   truth in a single step.
+- A six-keyframe synthetic loop demo, `online_slam_pose_graph_loop_demo`,
+  drives the entire tracking + verifier + pose-graph stack on a single
+  self-contained sequence: classical localization, verified loop-closure
+  constraint with the matching translation scale, sparse `PoseGraph` with
+  five sequential edges plus the loop edge, an injected `[0.06, 0.03,
+  -0.05]` drift on the last keyframe, and a single translation-only
+  Gauss-Newton step that takes `cost_before=0.105` down to
+  `cost_after=0.000` with all six post-optimization keyframe errors at
+  zero.
 
 Why not higher:
 
@@ -375,17 +384,17 @@ Why not higher:
 - Pose-graph optimization currently only updates translations; rotations
   are held fixed and there is no SE3 Lie-algebra Jacobian / iterative
   solver yet.
-- Verifier, constraint type, and pose-graph step exist but are not yet
-  driven from a public sequence demo over more than three frames.
+- The end-to-end loop demo runs on a synthetic six-keyframe sequence;
+  there is no public-data (KITTI / South Building / similar) image
+  sequence demo of the same pipeline yet.
 
-## Next Milestone: 80% to 90%
+## Next Milestone: 90% to 100%
 
-Goal: take the existing translation-only pose-graph step toward something
-closer to a real SE3 solver, and start covering the path with a longer
-public sequence so the deep-VO / loop-close story is no longer purely
-synthetic.
+Goal: replace the synthetic loop with a public-data sequence and harden the
+solver story for production-grade use, while preserving the lightweight Rust
+core that started this project.
 
-Completed at 80%:
+Completed at 90%:
 
 - `visloc-vision::two_view` (8-point + RANSAC + cheirality recovery).
 - `EssentialMatrixVisualOdometryFrontend` exposing it through
@@ -399,20 +408,23 @@ Completed at 80%:
 - `PoseGraph` skeleton (sequential + loop edges + anchor) plus a single
   translation-only Gauss-Newton step that pulls drifted nodes back to the
   verified loop closure on synthetic data.
+- Six-keyframe end-to-end loop demo (`online_slam_pose_graph_loop_demo`)
+  combining classical localization, verifier, constraint, and pose graph
+  with measured drift correction.
 
-Recommended next tasks (any single one is enough to push toward 90%):
+Recommended next tasks (any single one is enough to push toward 100%):
 
-1. Public sequence demo: feed a small public image sequence (KITTI subset or a
-   tiny self-contained fixture) through the classical frontend, the verifier,
-   and the pose graph so pose continuity, loop closure, and drift correction
-   are visible over more than three frames.
-2. Full SE3 pose-graph step: implement Lie-algebra Jacobians for sequential +
-   loop edges (residual = `log(T_meas^-1 * T_to * T_from^-1)`) and an iterative
-   Gauss-Newton / Levenberg-Marquardt solver inside `PoseGraph`, keeping the
-   translation-only path as a fast baseline.
-3. Loop-closure verifier reuse from PnP/tracking inliers: extend the verifier
-   to optionally consume 2D-3D correspondences and reuse `PnPRansac` so
-   candidates are checked against the 3D map structure as well as the
+1. Public-data loop demo: replace the synthetic six-keyframe sequence with a
+   real public image sequence (e.g., a KITTI odometry subset or COLMAP South
+   Building loop) so the full Deep VO / loop-close story is visible on
+   non-synthetic imagery.
+2. Full SE3 pose-graph solver: implement Lie-algebra Jacobians for sequential
+   and loop edges (residual = `log(T_meas^-1 * T_to * T_from^-1)`) plus an
+   iterative Gauss-Newton / Levenberg-Marquardt solver inside `PoseGraph`,
+   keeping the translation-only path as a fast baseline.
+3. Loop-closure verifier reuse from PnP / tracking inliers: extend the
+   verifier to optionally consume 2D-3D correspondences and reuse `PnPRansac`
+   so candidates are checked against the 3D map structure as well as the
    essential-matrix two-view geometry.
 
 ### 2. Make the VO Adapter Diagnostics More Explicit
@@ -631,7 +643,7 @@ If handing off to another agent, use this:
 You are continuing the Rust project visloc-rs.
 Read PLAN.md, docs/progress.md, docs/roadmap.md, docs/interfaces.md, and src/two_view_vo.rs first.
 Current Deep VO / Loop Close completion is 55%.
-The classical two-view geometry pipeline (visloc-vision::two_view), EssentialMatrixVisualOdometryFrontend, EssentialMatrixLoopClosureVerifier, LoopClosureConstraint, and a sparse PoseGraph skeleton with a single translation-only Gauss-Newton step are already in main. The verifier-aware demo injects a small drift, builds a PoseGraph, and snaps it back to the loop-closed truth in one solver step. Pick one of the recommended 80%-to-90% tasks: a public-data sequence demo, full SE3 Jacobians + iterative Gauss-Newton/LM inside PoseGraph, or extending the verifier to optionally consume 2D-3D correspondences via PnPRansac. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
+The classical two-view geometry pipeline (visloc-vision::two_view), EssentialMatrixVisualOdometryFrontend, EssentialMatrixLoopClosureVerifier, LoopClosureConstraint, a sparse PoseGraph skeleton with a single translation-only Gauss-Newton step, and a six-keyframe end-to-end pose-graph loop demo (online_slam_pose_graph_loop_demo) are already in main. Pick one of the recommended 90%-to-100% tasks: a public-data loop demo (KITTI / COLMAP South Building), full SE3 Jacobians + iterative Gauss-Newton/LM inside PoseGraph, or extending the verifier to optionally consume 2D-3D correspondences via PnPRansac. Add tests, update README/docs/CHANGELOG, run scripts/check.sh, commit, push, and watch CI.
 Do not add mandatory deep-learning runtime dependencies and do not claim full SLAM or full loop closure.
 End every status/final message with: Deep VO / Loop Close completion: <percent>.
 ```
@@ -645,5 +657,5 @@ End every status/final message with: Deep VO / Loop Close completion: <percent>.
 - Start with the classical two-view geometry path (essential/fundamental matrix
   RANSAC and relative-pose recovery) once the file-backed two-view VO sequence
   milestone is in.
-- Keep completion at 80% until the next runnable example/test/docs milestone is
+- Keep completion at 90% until the next runnable example/test/docs milestone is
   complete.
