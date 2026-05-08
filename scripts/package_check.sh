@@ -13,6 +13,24 @@ visloc-fusion
 visloc-rs
 "
 
+manifests="
+Cargo.toml
+crates/core/Cargo.toml
+crates/vision/Cargo.toml
+crates/io/Cargo.toml
+pipelines/localization/Cargo.toml
+pipelines/tracking/Cargo.toml
+pipelines/mapping/Cargo.toml
+pipelines/slam/Cargo.toml
+pipelines/fusion/Cargo.toml
+"
+
+for manifest in $manifests; do
+    echo "Checking docs.rs metadata: $manifest"
+    grep -q '^\[package.metadata.docs.rs\]$' "$manifest"
+    grep -q '^all-features = true$' "$manifest"
+done
+
 for package in $packages; do
     echo "Listing package contents: $package"
     cargo package -p "$package" --allow-dirty --no-verify --list >/dev/null

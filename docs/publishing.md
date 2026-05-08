@@ -37,13 +37,15 @@ scripts/check.sh
 
 This runs formatting, clippy, tests, examples, the GNSS demo output smoke check, docs, and package checks.
 
+Each crate sets `package.metadata.docs.rs.all-features = true`, so docs.rs builds include optional public APIs such as image IO.
+
 When only package metadata changed, this narrower check is useful:
 
 ```sh
 scripts/package_check.sh
 ```
 
-By default, `scripts/package_check.sh` lists package contents for all crates and packages the first independently publishable crate, `visloc-core`.
+By default, `scripts/package_check.sh` verifies docs.rs metadata, lists package contents for all crates, and packages the first independently publishable crate, `visloc-core`.
 
 After internal dependencies are published to the target registry, run:
 
