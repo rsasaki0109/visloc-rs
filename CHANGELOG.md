@@ -63,6 +63,7 @@ All notable changes to `visloc-rs` will be documented here.
 - `VisualOdometryFrontend`, `VisualOdometryEstimate`, and `NoopVisualOdometryFrontend` now provide the first tracking-level boundary for optional classical or learned two-frame VO integrations.
 - `VisualOdometryPriorProvider` and `VisualOdometryPosePrior` convert two-frame VO estimates into current-frame pose priors.
 - `visual_odometry_prior_dummy` demonstrates the VO-prior adapter path without bundling a model runtime.
+- `track_sequence_with_visual_odometry_prior` demonstrates using a VO-derived external prior to narrow localization candidates during tracking.
 - `online_slam_loop_candidate_dummy` demonstrates loop-candidate reporting on a tiny synthetic sequence.
 - Online SLAM results can now be exported to a self-contained HTML/SVG loop-candidate report.
 - Large README animation GIFs are excluded from the root crates.io package while remaining available on GitHub.
