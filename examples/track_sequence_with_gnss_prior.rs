@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
@@ -9,7 +9,7 @@ use visloc_rs::{
     write_tracking_results_csv, write_tracking_results_html_report, FramePriorSource,
     FrameTimestampIndex, GnssMeasurement, InMemoryMapProvider, LocalizationPipeline,
     MeasurementBuffer, PoseTrajectory, PriorConfig, TimeDelta, Timed, Timestamp, Tracker,
-    TrackingConfig,
+    TrackingConfig, TrackingStats,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,14 +144,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trajectory_csv_path = output_dir.join("trajectory.csv");
         let trajectory_summary_path = output_dir.join("trajectory_summary.json");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
+        let demo_index_path = output_dir.join("index.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
         tracker.stats().write_json(&tracking_summary_path)?;
         write_tracking_results_html_report(&results, &tracking_report_path)?;
         trajectory.write_csv(&trajectory_csv_path)?;
         trajectory.write_summary_json(&trajectory_summary_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
+        write_demo_index_html(&demo_index_path, tracker.stats(), &trajectory)?;
         println!(
-            "wrote gnss tracking exports: tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_summary={} trajectory_report={}",
+            "wrote gnss tracking exports: index={} tracking_csv={} tracking_summary={} tracking_report={} trajectory_csv={} trajectory_summary={} trajectory_report={}",
+            demo_index_path.display(),
             tracking_csv_path.display(),
             tracking_summary_path.display(),
             tracking_report_path.display(),
@@ -174,6 +177,68 @@ fn parse_output_dir(args: &mut Vec<String>) -> Option<PathBuf> {
     let output_dir = PathBuf::from(args.remove(output_flag_index + 1));
     args.remove(output_flag_index);
     Some(output_dir)
+}
+
+fn write_demo_index_html(
+    path: impl AsRef<Path>,
+    stats: &TrackingStats,
+    trajectory: &PoseTrajectory,
+) -> std::io::Result<()> {
+    fs::write(path, demo_index_html(stats, trajectory))
+}
+
+fn demo_index_html(stats: &TrackingStats, trajectory: &PoseTrajectory) -> String {
+    format!(
+        "<!doctype html>
+<html lang=\"en\">
+<head>
+<meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<title>visloc-rs GNSS-prior localization demo</title>
+<style>
+body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f7f9;color:#182026}}
+main{{max-width:960px;margin:0 auto;padding:28px}}
+h1{{font-size:26px;margin:0 0 8px}}
+.sub{{margin:0 0 22px;color:#52616b;line-height:1.5}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:18px 0}}
+.metric,.link{{background:white;border:1px solid #dde3ea;border-radius:8px;padding:14px}}
+.label{{display:block;font-size:12px;color:#65727e}}
+.value{{display:block;font-size:23px;font-weight:700;margin-top:4px}}
+.links{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:18px}}
+a{{color:#185abc;text-decoration:none;font-weight:700}}
+.detail{{display:block;color:#52616b;font-size:13px;margin-top:6px;line-height:1.4}}
+</style>
+</head>
+<body>
+<main>
+<h1>visloc-rs GNSS-prior localization demo</h1>
+<p class=\"sub\">Moving-camera sequence localization with a reusable sparse visual map. GNSS measurements create an external localization prior that narrows the map before PnP localization, then successful poses are exported as a camera trajectory.</p>
+<section class=\"grid\">
+<div class=\"metric\"><span class=\"label\">Frames</span><span class=\"value\">{}</span></div>
+<div class=\"metric\"><span class=\"label\">Success rate</span><span class=\"value\">{:.1}%</span></div>
+<div class=\"metric\"><span class=\"label\">External prior</span><span class=\"value\">{} ({:.1}%)</span></div>
+<div class=\"metric\"><span class=\"label\">Trajectory poses</span><span class=\"value\">{}</span></div>
+<div class=\"metric\"><span class=\"label\">Path length</span><span class=\"value\">{:.3} m</span></div>
+</section>
+<section class=\"links\">
+<div class=\"link\"><a href=\"tracking_report.html\">Tracking report</a><span class=\"detail\">Frame states, inliers, failures, and external-prior usage.</span></div>
+<div class=\"link\"><a href=\"trajectory_report.html\">Trajectory report</a><span class=\"detail\">Top-down camera-center path estimated from localized frames.</span></div>
+<div class=\"link\"><a href=\"tracking.csv\">tracking.csv</a><span class=\"detail\">Frame-by-frame localization diagnostics.</span></div>
+<div class=\"link\"><a href=\"trajectory.csv\">trajectory.csv</a><span class=\"detail\">Estimated camera centers and poses for plotting or regression checks.</span></div>
+<div class=\"link\"><a href=\"tracking_summary.json\">tracking_summary.json</a><span class=\"detail\">Aggregate tracking success and prior-use metrics.</span></div>
+<div class=\"link\"><a href=\"trajectory_summary.json\">trajectory_summary.json</a><span class=\"detail\">Pose count, path length, bounds, and reprojection summary.</span></div>
+</section>
+</main>
+</body>
+</html>
+",
+        stats.frame_count,
+        stats.success_rate() * 100.0,
+        stats.external_localization_prior_used_count,
+        stats.external_localization_prior_usage_rate() * 100.0,
+        trajectory.len(),
+        trajectory.total_path_length(),
+    )
 }
 
 fn frame_from_projected_landmarks(
