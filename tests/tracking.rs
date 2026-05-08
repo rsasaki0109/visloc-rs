@@ -84,6 +84,8 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
         successive_failures: 0,
         pose_prior: None,
         used_pose_prior: false,
+        used_external_localization_prior: false,
+        external_localization_prior_radius: None,
         tracking_failure_reason: None,
         map_landmark_count: 0,
         map_stats: MapProviderStats::default(),
@@ -113,6 +115,8 @@ fn failed_tracking_result(frame_id: u64) -> TrackingResult {
         successive_failures: 1,
         pose_prior: None,
         used_pose_prior: false,
+        used_external_localization_prior: false,
+        external_localization_prior_radius: None,
         tracking_failure_reason: None,
         map_landmark_count: 0,
         map_stats: MapProviderStats::default(),
@@ -629,6 +633,8 @@ fn tracking_stats_can_be_rebuilt_from_results() {
     let mut success = successful_tracking_result(10, pose);
     success.event = TrackingEvent::Initialized;
     success.used_pose_prior = true;
+    success.used_external_localization_prior = true;
+    success.external_localization_prior_radius = Some(8.0);
     let mut lost = failed_tracking_result(11);
     lost.state = TrackingState::Lost;
     lost.event = TrackingEvent::Lost;
@@ -642,7 +648,9 @@ fn tracking_stats_can_be_rebuilt_from_results() {
     assert_eq!(stats.failed_frame_count, 1);
     assert_eq!(stats.lost_count, 1);
     assert_eq!(stats.pose_prior_used_count, 1);
+    assert_eq!(stats.external_localization_prior_used_count, 1);
     assert_eq!(stats.success_rate(), 0.5);
+    assert_eq!(stats.external_localization_prior_usage_rate(), 0.5);
 }
 
 #[test]
@@ -650,6 +658,8 @@ fn tracking_stats_exports_json() {
     let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
     let mut success = successful_tracking_result(10, pose);
     success.used_pose_prior = true;
+    success.used_external_localization_prior = true;
+    success.external_localization_prior_radius = Some(8.0);
     let failed = failed_tracking_result(11);
     let stats = TrackingStats::from_results(&[success, failed]);
 
@@ -660,6 +670,7 @@ fn tracking_stats_exports_json() {
     assert!(json.contains("\"frame_count\": 2"));
     assert!(json.contains("\"success_rate\": 0.5"));
     assert!(json.contains("\"pose_prior_usage_rate\": 0.5"));
+    assert!(json.contains("\"external_localization_prior_usage_rate\": 0.5"));
 }
 
 #[test]
@@ -684,6 +695,8 @@ fn tracking_results_export_html_report() {
     let mut initialized = successful_tracking_result(10, pose);
     initialized.event = TrackingEvent::Initialized;
     initialized.used_pose_prior = true;
+    initialized.used_external_localization_prior = true;
+    initialized.external_localization_prior_radius = Some(8.0);
     let mut lost = failed_tracking_result(11);
     lost.state = TrackingState::Lost;
     lost.event = TrackingEvent::Lost;
@@ -696,6 +709,7 @@ fn tracking_results_export_html_report() {
     assert!(html
         .contains("<span class=\"label\">Success rate</span><span class=\"value\">50.0%</span>"));
     assert!(html.contains("NoDescriptorMatches"));
+    assert!(html.contains("motion + external(8.000m)"));
     assert!(html.contains("Lost"));
     assert!(html.contains("<svg viewBox=\"0 0 900 190\""));
 }
@@ -722,6 +736,8 @@ fn tracking_results_export_csv() {
     let mut initialized = successful_tracking_result(10, pose);
     initialized.event = TrackingEvent::Initialized;
     initialized.used_pose_prior = true;
+    initialized.used_external_localization_prior = true;
+    initialized.external_localization_prior_radius = Some(8.0);
     let mut lost = failed_tracking_result(11);
     lost.state = TrackingState::Lost;
     lost.event = TrackingEvent::Lost;
@@ -729,8 +745,8 @@ fn tracking_results_export_csv() {
     let csv = tracking_results_to_csv(&[initialized, lost]);
 
     assert!(csv.starts_with("frame_id,state,event,success,successive_failures"));
-    assert!(csv.contains("10,Tracking,Initialized,true,0,true"));
-    assert!(csv.contains("11,Lost,Lost,false,1,false"));
+    assert!(csv.contains("10,Tracking,Initialized,true,0,true,true,8"));
+    assert!(csv.contains("11,Lost,Lost,false,1,false,false,"));
     assert!(csv.contains("NoDescriptorMatches"));
 }
 
@@ -930,6 +946,16 @@ fn tracker_tracks_with_external_localization_prior_submap_provider() {
     assert_eq!(result.localization.candidate_landmark_count, 6);
     assert!(result.pose_prior.is_none());
     assert!(!result.used_pose_prior);
+    assert!(result.used_external_localization_prior);
+    assert_eq!(result.external_localization_prior_radius, Some(8.0));
+    assert_eq!(
+        tracker
+            .last_result()
+            .unwrap()
+            .external_localization_prior_radius,
+        Some(8.0)
+    );
+    assert_eq!(tracker.stats().external_localization_prior_used_count, 1);
 }
 
 #[test]
@@ -956,8 +982,12 @@ fn tracker_tracks_sequence_with_optional_external_localization_priors() {
     assert!(results.iter().all(|result| result.localization.success));
     assert_eq!(results[0].map_landmark_count, 6);
     assert_eq!(results[0].localization.candidate_landmark_count, 6);
+    assert!(results[0].used_external_localization_prior);
+    assert_eq!(results[0].external_localization_prior_radius, Some(8.0));
     assert_eq!(results[1].map_landmark_count, 12);
     assert_eq!(results[1].localization.candidate_landmark_count, 12);
+    assert!(!results[1].used_external_localization_prior);
+    assert_eq!(tracker.stats().external_localization_prior_used_count, 1);
 }
 
 #[test]
@@ -1090,6 +1120,15 @@ fn image_tracker_tracks_with_external_localization_prior_submap_provider() {
     assert_eq!(result.map_stats.landmark_count, 6);
     assert_eq!(result.localization.candidate_landmark_count, 6);
     assert!(result.pose_prior.is_none());
+    assert!(result.used_external_localization_prior);
+    assert_eq!(result.external_localization_prior_radius, Some(8.0));
+    assert_eq!(
+        image_tracker
+            .tracker()
+            .stats()
+            .external_localization_prior_used_count,
+        1
+    );
 }
 
 #[test]

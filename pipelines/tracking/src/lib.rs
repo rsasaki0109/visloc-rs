@@ -92,6 +92,8 @@ pub struct TrackingResult {
     pub successive_failures: usize,
     pub pose_prior: Option<Pose>,
     pub used_pose_prior: bool,
+    pub used_external_localization_prior: bool,
+    pub external_localization_prior_radius: Option<f64>,
     pub tracking_failure_reason: Option<TrackingFailureReason>,
     pub map_landmark_count: usize,
     pub map_stats: MapProviderStats,
@@ -1378,6 +1380,7 @@ pub struct TrackingStats {
     pub lost_count: usize,
     pub relocalization_count: usize,
     pub pose_prior_used_count: usize,
+    pub external_localization_prior_used_count: usize,
     pub tracking_quality_gate_failure_count: usize,
     pub total_inlier_count: usize,
     pub total_correspondence_count: usize,
@@ -1406,6 +1409,9 @@ impl TrackingStats {
             if result.used_pose_prior {
                 stats.pose_prior_used_count += 1;
             }
+            if result.used_external_localization_prior {
+                stats.external_localization_prior_used_count += 1;
+            }
             if result.tracking_failure_reason.is_some() {
                 stats.tracking_quality_gate_failure_count += 1;
             }
@@ -1425,6 +1431,13 @@ impl TrackingStats {
 
     pub fn pose_prior_usage_rate(&self) -> f64 {
         ratio(self.pose_prior_used_count, self.frame_count)
+    }
+
+    pub fn external_localization_prior_usage_rate(&self) -> f64 {
+        ratio(
+            self.external_localization_prior_used_count,
+            self.frame_count,
+        )
     }
 
     pub fn overall_inlier_ratio(&self) -> f64 {
@@ -1447,12 +1460,14 @@ impl TrackingStats {
                 "  \"lost_count\": {},\n",
                 "  \"relocalization_count\": {},\n",
                 "  \"pose_prior_used_count\": {},\n",
+                "  \"external_localization_prior_used_count\": {},\n",
                 "  \"tracking_quality_gate_failure_count\": {},\n",
                 "  \"total_inlier_count\": {},\n",
                 "  \"total_correspondence_count\": {},\n",
                 "  \"success_rate\": {},\n",
                 "  \"failure_rate\": {},\n",
                 "  \"pose_prior_usage_rate\": {},\n",
+                "  \"external_localization_prior_usage_rate\": {},\n",
                 "  \"overall_inlier_ratio\": {},\n",
                 "  \"mean_inliers_per_successful_frame\": {}\n",
                 "}}\n"
@@ -1465,12 +1480,14 @@ impl TrackingStats {
             self.lost_count,
             self.relocalization_count,
             self.pose_prior_used_count,
+            self.external_localization_prior_used_count,
             self.tracking_quality_gate_failure_count,
             self.total_inlier_count,
             self.total_correspondence_count,
             self.success_rate(),
             self.failure_rate(),
             self.pose_prior_usage_rate(),
+            self.external_localization_prior_usage_rate(),
             self.overall_inlier_ratio(),
             self.mean_inliers_per_successful_frame(),
         )
@@ -1536,7 +1553,7 @@ pub fn tracking_results_to_html_report(results: &[TrackingResult]) -> String {
     output.push_str(&tracking_timeline_svg(results));
     output.push_str("</section>\n");
     output.push_str("<section class=\"panel\">\n<h2>Frames</h2>\n");
-    output.push_str("<table><thead><tr><th>frame</th><th>success</th><th>state</th><th>event</th><th>inliers</th><th>ratio</th><th>reprojection</th><th>prior</th><th>reason</th></tr></thead><tbody>\n");
+    output.push_str("<table><thead><tr><th>frame</th><th>success</th><th>state</th><th>event</th><th>inliers</th><th>ratio</th><th>reprojection</th><th>priors</th><th>reason</th></tr></thead><tbody>\n");
     for result in results.iter().take(160) {
         let success_class = if result.localization.success {
             "ok"
@@ -1560,7 +1577,7 @@ pub fn tracking_results_to_html_report(results: &[TrackingResult]) -> String {
             result.localization.inlier_count,
             result.localization.inlier_ratio,
             format_optional_metric(result.localization.reprojection_error, "px"),
-            if result.used_pose_prior { "yes" } else { "no" },
+            tracking_prior_text(result),
             html_escape(&reason),
         );
     }
@@ -1584,18 +1601,20 @@ pub fn write_tracking_results_html_report(
 
 pub fn tracking_results_to_csv(results: &[TrackingResult]) -> String {
     let mut output = String::from(
-        "frame_id,state,event,success,successive_failures,used_pose_prior,tracking_failure_reason,localization_failure_reason,candidate_landmark_count,match_count,correspondence_count,inlier_count,outlier_count,inlier_ratio,reprojection_error,median_reprojection_error,max_reprojection_error,map_cameras,map_keyframes,map_landmarks,map_descriptors\n",
+        "frame_id,state,event,success,successive_failures,used_pose_prior,used_external_localization_prior,external_localization_prior_radius,tracking_failure_reason,localization_failure_reason,candidate_landmark_count,match_count,correspondence_count,inlier_count,outlier_count,inlier_ratio,reprojection_error,median_reprojection_error,max_reprojection_error,map_cameras,map_keyframes,map_landmarks,map_descriptors\n",
     );
     for result in results {
         let _ = writeln!(
             output,
-            "{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             result.frame_id,
             result.state,
             result.event,
             result.localization.success,
             result.successive_failures,
             result.used_pose_prior,
+            result.used_external_localization_prior,
+            optional_f64_csv(result.external_localization_prior_radius),
             csv_escape(&format_optional_debug(&result.tracking_failure_reason)),
             csv_escape(&format_optional_debug(&result.localization.failure_reason)),
             result.localization.candidate_landmark_count,
@@ -1701,6 +1720,27 @@ fn tracking_result_reason(result: &TrackingResult) -> String {
         format!("{reason:?}")
     } else {
         String::new()
+    }
+}
+
+fn tracking_prior_text(result: &TrackingResult) -> String {
+    let mut priors = Vec::new();
+    if result.used_pose_prior {
+        priors.push("motion".to_string());
+    }
+    if result.used_external_localization_prior {
+        let label = if let Some(radius) = result.external_localization_prior_radius {
+            format!("external({radius:.3}m)")
+        } else {
+            "external".to_string()
+        };
+        priors.push(label);
+    }
+
+    if priors.is_empty() {
+        "none".to_string()
+    } else {
+        priors.join(" + ")
     }
 }
 
@@ -2046,7 +2086,12 @@ where
         if let (Some(center_world), Some(radius)) = (prior.center_world(), prior.radius) {
             let submap_provider =
                 InMemoryMapProvider::from_provider_radius(provider, center_world, radius);
-            self.track_frame_with_provider(frame, &submap_provider)
+            let mut result = self.track_frame_with_provider(frame, &submap_provider);
+            result.used_external_localization_prior = true;
+            result.external_localization_prior_radius = Some(radius);
+            self.stats.external_localization_prior_used_count += 1;
+            self.last_result = Some(result.clone());
+            result
         } else {
             self.track_frame_with_provider(frame, provider)
         }
@@ -2161,6 +2206,8 @@ where
             successive_failures: self.successive_failures,
             pose_prior,
             used_pose_prior,
+            used_external_localization_prior: false,
+            external_localization_prior_radius: None,
             tracking_failure_reason,
             map_landmark_count: map_stats.landmark_count,
             map_stats,

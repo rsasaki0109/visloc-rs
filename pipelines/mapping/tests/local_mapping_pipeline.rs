@@ -32,6 +32,8 @@ fn tracking_success(frame_id: u64, pose: Pose) -> TrackingResult {
         successive_failures: 0,
         pose_prior: None,
         used_pose_prior: false,
+        used_external_localization_prior: false,
+        external_localization_prior_radius: None,
         tracking_failure_reason: None,
         map_landmark_count: 0,
         map_stats: Default::default(),
