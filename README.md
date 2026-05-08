@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
-  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-50%25-f59e0b" alt="Deep VO / loop close completion: 50%">
+  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-55%25-f59e0b" alt="Deep VO / loop close completion: 55%">
 </p>
 
 `visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
@@ -311,6 +311,8 @@ cargo run --example read_two_view_matches_dummy
 cargo run --example two_view_match_vo_prior_dummy
 cargo run --example visual_odometry_prior_dummy
 cargo run --example track_sequence_with_visual_odometry_prior
+cargo run --example track_sequence_with_two_view_match_vo_prior
+cargo run --example track_sequence_with_two_view_match_vo_prior -- --out-dir target/visloc_two_view_match_vo_demo
 ```
 
 With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_summary.json`, `tracking_report.html` for frame-by-frame state transitions, and `trajectory_report.html` for the estimated pose path. The GNSS-prior demo also writes `tracking_evaluation.json` so success-rate, lost-count, prior-usage, and inlier-quality thresholds can be checked by CI.
@@ -319,6 +321,7 @@ The online SLAM loop-candidate example writes `loop_report.html`, a small top-do
 The visual-odometry-prior tracking example uses a two-frame VO prior to narrow map candidates through the same external-prior path used by GNSS/VIO integrations.
 The two-view match reader example shows the simple text bridge for external learned matchers without making a model runtime a core dependency.
 The two-view match VO prior example turns externally supplied correspondences into a lightweight translation-only VO prior that can be fed through `VisualOdometryPriorProvider`.
+The file-backed two-view match VO sequence example writes per-pair match text files, reads them back with `read_two_view_matches_txt`, builds a `TwoViewMatchVisualOdometryFrontend`, and feeds the resulting pose priors through `track_frame_with_localization_prior_submap_provider` for a short three-frame sequence. With `--out-dir`, it also writes the per-frame text report and stores the generated input match files alongside it.
 
 Run a moving-camera GNSS-prior tracking example that narrows the visual map before localization and writes an `index.html` dashboard, `manifest.json`, `tracking.csv`, `trajectory.csv`, KITTI/TUM pose exports, synthetic-reference error reports, JSON summaries, and browser-viewable reports:
 

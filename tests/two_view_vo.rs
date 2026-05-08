@@ -1,7 +1,11 @@
+use std::fs;
+use std::path::PathBuf;
+
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_rs::{
-    parse_two_view_matches_txt, Frame, Pose, TwoViewMatchVisualOdometryConfig,
-    TwoViewMatchVisualOdometryFrontend, VisualOdometryFrontend, VisualOdometryPriorProvider,
+    parse_two_view_matches_txt, read_two_view_matches_txt, Frame, Pose,
+    TwoViewMatchVisualOdometryConfig, TwoViewMatchVisualOdometryFrontend, VisualOdometryFrontend,
+    VisualOdometryPriorProvider,
 };
 
 #[test]
@@ -103,4 +107,65 @@ fn two_view_match_prior_provider_converts_estimate_to_pose_prior() {
         .unwrap();
 
     assert!((prior.pose.camera_center_world() - Point3::new(0.45, 0.0, 0.0)).norm() < 1.0e-9);
+}
+
+#[test]
+fn two_view_match_frontend_consumes_file_backed_pairs_for_a_short_sequence() {
+    let tmp_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("two_view_match_sequence");
+    fs::create_dir_all(&tmp_dir).unwrap();
+
+    let pair_specs = [(100u64, 101u64), (101u64, 102u64)];
+    fs::write(
+        tmp_dir.join("matches_100_to_101.txt"),
+        "# PREV_IDX CURR_IDX PREV_X PREV_Y CURR_X CURR_Y\n\
+         0 0 100.0 120.0 55.0 120.0\n\
+         1 1 200.0 130.0 155.0 130.0\n\
+         2 2 300.0 140.0 255.0 140.0\n\
+         3 3 400.0 150.0 355.0 150.0\n\
+         4 4 120.0 220.0 75.0 220.0\n\
+         5 5 220.0 230.0 175.0 230.0\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp_dir.join("matches_101_to_102.txt"),
+        "# PREV_IDX CURR_IDX PREV_X PREV_Y CURR_X CURR_Y\n\
+         0 0 55.0 120.0 10.0 120.0\n\
+         1 1 155.0 130.0 110.0 130.0\n\
+         2 2 255.0 140.0 210.0 140.0\n\
+         3 3 355.0 150.0 310.0 150.0\n\
+         4 4 75.0 220.0 30.0 220.0\n\
+         5 5 175.0 230.0 130.0 230.0\n",
+    )
+    .unwrap();
+
+    let mut frontend = TwoViewMatchVisualOdometryFrontend::new(TwoViewMatchVisualOdometryConfig {
+        min_matches: 4,
+        min_inliers: 4,
+        max_residual_pixels: 1.0,
+        pixel_translation_scale: 0.01,
+        forward_translation: 0.0,
+    });
+    for (previous_id, current_id) in pair_specs {
+        let path = tmp_dir.join(format!("matches_{previous_id}_to_{current_id}.txt"));
+        let matches = read_two_view_matches_txt(&path).unwrap();
+        frontend.insert_matches(previous_id, current_id, matches);
+    }
+    let provider = VisualOdometryPriorProvider::new(frontend);
+
+    let frames = [Frame::new(100, 1), Frame::new(101, 1), Frame::new(102, 1)];
+    let mut current_pose =
+        Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+    let expected_centers = [Point3::new(0.45, 0.0, 0.0), Point3::new(0.90, 0.0, 0.0)];
+
+    for (pair_index, window) in frames.windows(2).enumerate() {
+        let prior = provider
+            .predict_pose_prior(&window[0], &current_pose, &window[1])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(prior.estimate.match_count, 6);
+        assert_eq!(prior.estimate.inlier_count, 6);
+        assert!((prior.pose.camera_center_world() - expected_centers[pair_index]).norm() < 1.0e-9);
+        current_pose = prior.pose.clone();
+    }
 }

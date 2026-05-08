@@ -26,6 +26,16 @@ impl Default for TwoViewMatchVisualOdometryConfig {
     }
 }
 
+/// Lightweight two-view VO frontend that turns externally supplied
+/// correspondences into a translation-only relative-pose estimate.
+///
+/// Note: when this frontend produces a [`VisualOdometryEstimate`], the
+/// estimate's `mean_reprojection_error` field stores the mean inlier flow
+/// residual in pixels around the median two-view flow, not a 3D reprojection
+/// error. The field name is reused so callers and downstream
+/// `VisualOdometryPriorProvider` consumers do not need a separate diagnostic
+/// type; refer to the value as `mean_flow_residual_px` in user-facing logs and
+/// reports for the two-view-match case.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TwoViewMatchVisualOdometryFrontend {
     config: TwoViewMatchVisualOdometryConfig,

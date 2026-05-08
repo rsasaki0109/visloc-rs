@@ -19,6 +19,7 @@ two_view_match_vo_prior_dummy
 track_sequence_dummy
 track_sequence_with_extractor_dummy
 track_sequence_with_gnss_prior
+track_sequence_with_two_view_match_vo_prior
 track_sequence_with_visual_odometry_prior
 visual_odometry_prior_dummy
 "
