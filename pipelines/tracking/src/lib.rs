@@ -1434,6 +1434,51 @@ impl TrackingStats {
     pub fn mean_inliers_per_successful_frame(&self) -> f64 {
         ratio(self.total_inlier_count, self.successful_frame_count)
     }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"first_frame_id\": {},\n",
+                "  \"last_frame_id\": {},\n",
+                "  \"frame_count\": {},\n",
+                "  \"successful_frame_count\": {},\n",
+                "  \"failed_frame_count\": {},\n",
+                "  \"lost_count\": {},\n",
+                "  \"relocalization_count\": {},\n",
+                "  \"pose_prior_used_count\": {},\n",
+                "  \"tracking_quality_gate_failure_count\": {},\n",
+                "  \"total_inlier_count\": {},\n",
+                "  \"total_correspondence_count\": {},\n",
+                "  \"success_rate\": {},\n",
+                "  \"failure_rate\": {},\n",
+                "  \"pose_prior_usage_rate\": {},\n",
+                "  \"overall_inlier_ratio\": {},\n",
+                "  \"mean_inliers_per_successful_frame\": {}\n",
+                "}}\n"
+            ),
+            optional_frame_id_json(self.first_frame_id),
+            optional_frame_id_json(self.last_frame_id),
+            self.frame_count,
+            self.successful_frame_count,
+            self.failed_frame_count,
+            self.lost_count,
+            self.relocalization_count,
+            self.pose_prior_used_count,
+            self.tracking_quality_gate_failure_count,
+            self.total_inlier_count,
+            self.total_correspondence_count,
+            self.success_rate(),
+            self.failure_rate(),
+            self.pose_prior_usage_rate(),
+            self.overall_inlier_ratio(),
+            self.mean_inliers_per_successful_frame(),
+        )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
 }
 
 pub fn tracking_results_to_html_report(results: &[TrackingResult]) -> String {

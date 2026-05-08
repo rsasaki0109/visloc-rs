@@ -122,14 +122,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(output_dir) = output_dir {
         fs::create_dir_all(&output_dir)?;
         let tracking_csv_path = output_dir.join("tracking.csv");
+        let tracking_summary_path = output_dir.join("tracking_summary.json");
         let report_path = output_dir.join("tracking_report.html");
         let trajectory_report_path = output_dir.join("trajectory_report.html");
         write_tracking_results_csv(&results, &tracking_csv_path)?;
+        stats.write_json(&tracking_summary_path)?;
         write_tracking_results_html_report(&results, &report_path)?;
         trajectory.write_html_report(&trajectory_report_path)?;
         println!(
-            "wrote tracking exports: csv={} report={} trajectory_report={}",
+            "wrote tracking exports: csv={} summary={} report={} trajectory_report={}",
             tracking_csv_path.display(),
+            tracking_summary_path.display(),
             report_path.display(),
             trajectory_report_path.display()
         );

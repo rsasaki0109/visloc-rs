@@ -646,6 +646,39 @@ fn tracking_stats_can_be_rebuilt_from_results() {
 }
 
 #[test]
+fn tracking_stats_exports_json() {
+    let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
+    let mut success = successful_tracking_result(10, pose);
+    success.used_pose_prior = true;
+    let failed = failed_tracking_result(11);
+    let stats = TrackingStats::from_results(&[success, failed]);
+
+    let json = stats.to_json();
+
+    assert!(json.contains("\"first_frame_id\": 10"));
+    assert!(json.contains("\"last_frame_id\": 11"));
+    assert!(json.contains("\"frame_count\": 2"));
+    assert!(json.contains("\"success_rate\": 0.5"));
+    assert!(json.contains("\"pose_prior_usage_rate\": 0.5"));
+}
+
+#[test]
+fn tracking_stats_writes_json() {
+    let path = std::env::temp_dir().join(format!(
+        "visloc-rs-tracking-summary-{}.json",
+        std::process::id()
+    ));
+    let stats = TrackingStats::from_results(&[failed_tracking_result(12)]);
+
+    stats.write_json(&path).unwrap();
+    let json = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+
+    assert!(json.contains("\"frame_count\": 1"));
+    assert!(json.contains("\"failure_rate\": 1"));
+}
+
+#[test]
 fn tracking_results_export_html_report() {
     let pose = pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0));
     let mut initialized = successful_tracking_result(10, pose);
