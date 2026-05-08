@@ -6,10 +6,11 @@ use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
     correspondences_2d3d_for_loop_candidate, loop_closure_constraints_from_candidates,
     online_slam_results_to_html_report, relative_world_to_camera, verify_loop_closure_candidates,
-    verify_loop_closure_candidates_pnp, EssentialMatrixLoopClosureVerifier, LoopClosureConfig,
-    LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline,
-    PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphError,
-    PoseGraphSe3Config, RobustKernel,
+    verify_loop_closure_candidates_hybrid, verify_loop_closure_candidates_pnp,
+    EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerificationFailureReason,
+    LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamPipeline, PnPLoopClosureVerifier,
+    PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -929,4 +930,180 @@ fn correspondences_2d3d_only_includes_landmarks_observed_by_keyframe() {
             .values()
             .any(|landmark| landmark.position == c.point3d));
     }
+}
+
+#[test]
+fn hybrid_loop_closure_verifier_accepts_when_essential_and_pnp_agree() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let camera = map.cameras.get(&1).cloned().unwrap();
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let mut second = slam.process_frame(&second_frame, []);
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+
+    // Calibrate the essential verifier's translation scale to the truth so
+    // its recovered translation magnitude matches PnP's metric one. Hybrid
+    // direction-only check would still pass without this, but using the
+    // correct scale exercises the agreement path more realistically.
+    let truth_first = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+    let truth_second =
+        Pose::from_world_to_camera(UnitQuaternion::identity(), -Vector3::new(0.2, 0.0, 0.1));
+    let scale = relative_world_to_camera(&truth_first, &truth_second)
+        .translation
+        .norm();
+    let verifier: HybridLoopClosureVerifier = HybridLoopClosureVerifier {
+        essential: EssentialMatrixLoopClosureVerifier {
+            config: LoopClosureVerifierConfig {
+                min_inliers: 8,
+                min_inlier_ratio: 0.6,
+                max_mean_sampson_error: 5.0e-3,
+                default_translation_scale: scale,
+            },
+            ..Default::default()
+        },
+        pnp: PnPLoopClosureVerifier {
+            config: PnPLoopClosureVerifierConfig {
+                min_inliers: 8,
+                min_inlier_ratio: 0.6,
+                max_mean_reprojection_error_px: 4.0,
+            },
+            ..Default::default()
+        },
+        config: HybridLoopClosureVerifierConfig::default(),
+    };
+    verify_loop_closure_candidates_hybrid(
+        &mut second.loop_closure_candidates,
+        &second_frame,
+        &second.tracking,
+        slam.map(),
+        &camera,
+        &verifier,
+    );
+
+    let candidate = &second.loop_closure_candidates[0];
+    let verification = candidate
+        .verification
+        .as_ref()
+        .expect("hybrid verifier output must be populated");
+    assert!(
+        verification.verified,
+        "hybrid should accept consistent candidate: {verification:?}"
+    );
+    assert!(verification.relative_pose.is_some());
+    assert!(verification.mean_reprojection_error_px.is_some());
+    assert!(verification.failure_reason.is_none());
+}
+
+#[test]
+fn hybrid_loop_closure_verifier_rejects_when_essential_pose_disagrees_with_pnp() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let camera = map.cameras.get(&1).cloned().unwrap();
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let mut second = slam.process_frame(&second_frame, []);
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+
+    // Force pose disagreement by clamping the rotation tolerance to an
+    // unreasonably small value: even tiny numerical noise between the two
+    // backends will exceed it.
+    let verifier: HybridLoopClosureVerifier = HybridLoopClosureVerifier {
+        essential: EssentialMatrixLoopClosureVerifier {
+            config: LoopClosureVerifierConfig {
+                min_inliers: 8,
+                min_inlier_ratio: 0.6,
+                max_mean_sampson_error: 5.0e-3,
+                default_translation_scale: 1.0,
+            },
+            ..Default::default()
+        },
+        pnp: PnPLoopClosureVerifier {
+            config: PnPLoopClosureVerifierConfig {
+                min_inliers: 8,
+                min_inlier_ratio: 0.6,
+                max_mean_reprojection_error_px: 4.0,
+            },
+            ..Default::default()
+        },
+        config: HybridLoopClosureVerifierConfig {
+            max_translation_direction_disagreement_rad: 1.0e-9,
+            max_rotation_disagreement_rad: 1.0e-9,
+        },
+    };
+    verify_loop_closure_candidates_hybrid(
+        &mut second.loop_closure_candidates,
+        &second_frame,
+        &second.tracking,
+        slam.map(),
+        &camera,
+        &verifier,
+    );
+
+    let candidate = &second.loop_closure_candidates[0];
+    let verification = candidate
+        .verification
+        .as_ref()
+        .expect("hybrid verifier output must be populated");
+    assert!(!verification.verified);
+    assert_eq!(
+        verification.failure_reason,
+        Some(LoopClosureVerificationFailureReason::PoseDisagreement)
+    );
+}
+
+#[test]
+fn hybrid_loop_closure_verifier_propagates_essential_failure_when_essential_rejects() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(0.2, 0.0, 0.1));
+    let camera = map.cameras.get(&1).cloned().unwrap();
+    let mut slam = slam_pipeline_for_verifier(map);
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    let mut second = slam.process_frame(&second_frame, []);
+    assert_eq!(second.loop_closure_candidates.len(), 1);
+
+    let verifier: HybridLoopClosureVerifier = HybridLoopClosureVerifier {
+        essential: EssentialMatrixLoopClosureVerifier {
+            // Demand more correspondences than possible so essential rejects
+            // up front via InsufficientCorrespondences.
+            config: LoopClosureVerifierConfig {
+                min_inliers: 64,
+                min_inlier_ratio: 0.6,
+                max_mean_sampson_error: 5.0e-3,
+                default_translation_scale: 1.0,
+            },
+            ..Default::default()
+        },
+        pnp: PnPLoopClosureVerifier {
+            config: PnPLoopClosureVerifierConfig {
+                min_inliers: 8,
+                min_inlier_ratio: 0.6,
+                max_mean_reprojection_error_px: 4.0,
+            },
+            ..Default::default()
+        },
+        config: HybridLoopClosureVerifierConfig::default(),
+    };
+    verify_loop_closure_candidates_hybrid(
+        &mut second.loop_closure_candidates,
+        &second_frame,
+        &second.tracking,
+        slam.map(),
+        &camera,
+        &verifier,
+    );
+
+    let candidate = &second.loop_closure_candidates[0];
+    let verification = candidate
+        .verification
+        .as_ref()
+        .expect("hybrid verifier output must be populated");
+    assert!(!verification.verified);
+    assert_eq!(
+        verification.failure_reason,
+        Some(LoopClosureVerificationFailureReason::InsufficientCorrespondences)
+    );
 }

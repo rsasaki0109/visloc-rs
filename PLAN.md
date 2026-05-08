@@ -447,6 +447,16 @@ its 100% MVP scope):
    end. Remaining stretch: a true sparse-matrix solver (`nalgebra-sparse`
    `CsCholesky` / Schur-complement) so the optimizer scales beyond a few
    tens of keyframes.
+4. Hybrid loop-closure verifier (✓ runnable): `HybridLoopClosureVerifier`
+   runs essential and PnP backends together and accepts only when both
+   verify and their recovered poses agree to within configurable
+   rotation / translation-direction tolerances. Adds the
+   `LoopClosureVerificationFailureReason::PoseDisagreement` variant for the
+   consensus-disagreement case. Stretch beyond this would be (a) bundling
+   the result into a per-edge `weight` correction for the pose-graph
+   solver, (b) extending `OnlineSlamPipeline` to optionally drive the
+   hybrid verifier in-line.
+
 3. Loop-closure verifier reuse from PnP / tracking inliers (✓ runnable):
    `PnPLoopClosureVerifier` reuses `PnPRansac` to re-localize the current
    frame against the candidate keyframe's landmarks, returning metric

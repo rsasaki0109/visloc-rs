@@ -91,6 +91,14 @@ Completed pieces:
   `so3_left_jacobian`, `so3_left_jacobian_inverse`) live in
   `visloc-core::geometry::se3` with Taylor fallbacks for small angles and
   `exp ∘ log` round-trip + adjoint-conjugation tests.
+- A consensus loop-closure verifier, `HybridLoopClosureVerifier`, runs both
+  the essential-matrix and PnP backends on the same candidate and accepts
+  only when both verify AND their recovered relative poses agree within
+  configurable rotation / translation-direction tolerances. Disagreement
+  surfaces as `LoopClosureVerificationFailureReason::PoseDisagreement`.
+  This catches ambiguity where the 2D-2D essential fit looks plausible but
+  conflicts with the 3D map structure (or vice versa) without forcing
+  callers to glue two verifier outputs together by hand.
 - A second loop-closure verifier path, `PnPLoopClosureVerifier`, reuses
   `visloc-vision::ransac::PnPRansac` to re-localize the current frame
   against the candidate keyframe's landmarks. It operates on 2D-3D

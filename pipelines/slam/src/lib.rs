@@ -126,6 +126,10 @@ pub enum LoopClosureVerificationFailureReason {
     LowInlierRatio,
     /// Mean Sampson error exceeded `max_mean_sampson_error`.
     HighSampsonError,
+    /// The hybrid verifier ran both backends successfully, but the recovered
+    /// essential-matrix and PnP relative poses disagreed beyond the configured
+    /// translation-direction or rotation tolerances.
+    PoseDisagreement,
 }
 
 /// Output of running a [`LoopClosureVerifier`] on a candidate.
@@ -598,6 +602,204 @@ pub fn verify_loop_closure_candidates_pnp<R>(
     }
 }
 
+/// Configuration for [`HybridLoopClosureVerifier`]: maximum allowed
+/// disagreement between the essential-matrix and PnP recovered poses before
+/// the hybrid verifier rejects the candidate as inconsistent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HybridLoopClosureVerifierConfig {
+    /// Maximum allowed angle (in radians) between the essential and PnP
+    /// translation directions. Compared on unit vectors so essential's
+    /// scale-up-to-translation ambiguity does not trigger spurious failures.
+    pub max_translation_direction_disagreement_rad: f64,
+    /// Maximum allowed rotation angle between the essential and PnP rotation
+    /// components.
+    pub max_rotation_disagreement_rad: f64,
+}
+
+impl Default for HybridLoopClosureVerifierConfig {
+    fn default() -> Self {
+        Self {
+            max_translation_direction_disagreement_rad: 0.20,
+            max_rotation_disagreement_rad: 0.20,
+        }
+    }
+}
+
+/// Loop-closure verifier that consults both the essential-matrix and PnP
+/// backends and reports a consensus decision: the candidate is accepted iff
+/// both verifiers accept it AND their recovered relative poses agree to
+/// within the configured rotation / translation-direction tolerances. This
+/// catches ambiguity where a 2D-2D essential fit looks plausible but
+/// disagrees with the 3D map structure (or vice versa).
+///
+/// The combined [`LoopClosureVerification`] uses the PnP relative pose
+/// (metric, no scale parameter), the minimum of both verifiers' inlier
+/// counts (conservative), and reports both `mean_sampson_error` and
+/// `mean_reprojection_error_px`. When either backend rejects, the failure
+/// reason is propagated; if both pass but the poses disagree the failure
+/// reason is [`LoopClosureVerificationFailureReason::PoseDisagreement`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HybridLoopClosureVerifier<R = PnPRansac> {
+    pub essential: EssentialMatrixLoopClosureVerifier,
+    pub pnp: PnPLoopClosureVerifier<R>,
+    pub config: HybridLoopClosureVerifierConfig,
+}
+
+impl<R> HybridLoopClosureVerifier<R>
+where
+    R: RobustPoseEstimator,
+{
+    pub fn new(
+        essential: EssentialMatrixLoopClosureVerifier,
+        pnp: PnPLoopClosureVerifier<R>,
+        config: HybridLoopClosureVerifierConfig,
+    ) -> Self {
+        Self {
+            essential,
+            pnp,
+            config,
+        }
+    }
+}
+
+/// Run a [`HybridLoopClosureVerifier`] on every supplied candidate. For each
+/// candidate this builds both 2D-2D and 2D-3D correspondences, runs the two
+/// backends in turn, combines them into a consensus
+/// [`LoopClosureVerification`], and writes the result back into
+/// `verification` / `geometrically_verified` in place. Candidates whose
+/// matched keyframe is no longer in `map` or whose stored keyframe pose is
+/// missing are left untouched.
+pub fn verify_loop_closure_candidates_hybrid<R>(
+    candidates: &mut [LoopClosureCandidate],
+    current_frame: &Frame,
+    tracking: &TrackingResult,
+    map: &VisualMap,
+    camera: &Camera,
+    verifier: &HybridLoopClosureVerifier<R>,
+) where
+    R: RobustPoseEstimator,
+{
+    for candidate in candidates.iter_mut() {
+        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
+            continue;
+        };
+        let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
+            continue;
+        };
+        let two_view = correspondences_for_loop_candidate(
+            current_frame,
+            &tracking.localization.inlier_query_indices,
+            &tracking.localization.inlier_landmark_ids,
+            keyframe,
+        );
+        let pnp_corrs = correspondences_2d3d_for_loop_candidate(
+            current_frame,
+            &tracking.localization.inlier_query_indices,
+            &tracking.localization.inlier_landmark_ids,
+            keyframe,
+            map,
+        );
+        let essential_v = verifier.essential.verify(&two_view, camera);
+        let pnp_v = verifier.pnp.verify(&pnp_corrs, keyframe_pose, camera);
+        let combined = combine_hybrid_verifications(&essential_v, &pnp_v, &verifier.config);
+        candidate.geometrically_verified = combined.verified;
+        candidate.verification = Some(combined);
+    }
+}
+
+fn combine_hybrid_verifications(
+    essential: &LoopClosureVerification,
+    pnp: &LoopClosureVerification,
+    config: &HybridLoopClosureVerifierConfig,
+) -> LoopClosureVerification {
+    // Inherit the minimum (conservative) inlier count and ratio so the
+    // combined diagnostics never overstate either backend's evidence.
+    let inlier_count = essential.inlier_count.min(pnp.inlier_count);
+    let inlier_ratio = essential.inlier_ratio.min(pnp.inlier_ratio);
+    let correspondence_count = essential.correspondence_count.min(pnp.correspondence_count);
+    let score = essential.score.min(pnp.score);
+
+    if !essential.verified {
+        return LoopClosureVerification {
+            verified: false,
+            correspondence_count,
+            inlier_count,
+            inlier_ratio,
+            mean_sampson_error: essential.mean_sampson_error,
+            score,
+            failure_reason: essential.failure_reason,
+            relative_pose: pnp.relative_pose.clone(),
+            mean_reprojection_error_px: pnp.mean_reprojection_error_px,
+        };
+    }
+    if !pnp.verified {
+        return LoopClosureVerification {
+            verified: false,
+            correspondence_count,
+            inlier_count,
+            inlier_ratio,
+            mean_sampson_error: essential.mean_sampson_error,
+            score,
+            failure_reason: pnp.failure_reason,
+            relative_pose: pnp.relative_pose.clone(),
+            mean_reprojection_error_px: pnp.mean_reprojection_error_px,
+        };
+    }
+    // Both verified — check pose agreement.
+    let (Some(ess_pose), Some(pnp_pose)) =
+        (essential.relative_pose.as_ref(), pnp.relative_pose.as_ref())
+    else {
+        return LoopClosureVerification {
+            verified: false,
+            correspondence_count,
+            inlier_count,
+            inlier_ratio,
+            mean_sampson_error: essential.mean_sampson_error,
+            score,
+            failure_reason: Some(LoopClosureVerificationFailureReason::PoseDisagreement),
+            relative_pose: pnp.relative_pose.clone(),
+            mean_reprojection_error_px: pnp.mean_reprojection_error_px,
+        };
+    };
+
+    let direction_disagreement =
+        translation_direction_disagreement_rad(&ess_pose.translation, &pnp_pose.translation);
+    let rotation_disagreement = ess_pose.rotation.rotation_to(&pnp_pose.rotation).angle();
+    let agreement_ok = direction_disagreement <= config.max_translation_direction_disagreement_rad
+        && rotation_disagreement <= config.max_rotation_disagreement_rad;
+
+    let failure_reason = if agreement_ok {
+        None
+    } else {
+        Some(LoopClosureVerificationFailureReason::PoseDisagreement)
+    };
+    LoopClosureVerification {
+        verified: agreement_ok,
+        correspondence_count,
+        inlier_count,
+        inlier_ratio,
+        mean_sampson_error: essential.mean_sampson_error,
+        score,
+        failure_reason,
+        relative_pose: Some(pnp_pose.clone()),
+        mean_reprojection_error_px: pnp.mean_reprojection_error_px,
+    }
+}
+
+fn translation_direction_disagreement_rad(
+    a: &nalgebra::Vector3<f64>,
+    b: &nalgebra::Vector3<f64>,
+) -> f64 {
+    let na = a.norm();
+    let nb = b.norm();
+    if na < 1.0e-9 || nb < 1.0e-9 {
+        return 0.0;
+    }
+    let dir_a = a / na;
+    let dir_b = b / nb;
+    dir_a.dot(&dir_b).clamp(-1.0, 1.0).acos()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamPipeline<T, M> {
     pub map: VisualMap,
@@ -874,6 +1076,9 @@ fn format_loop_closure_failure_reason(reason: &LoopClosureVerificationFailureRea
         LoopClosureVerificationFailureReason::TooFewInliers => "too few inliers".to_string(),
         LoopClosureVerificationFailureReason::LowInlierRatio => "low inlier ratio".to_string(),
         LoopClosureVerificationFailureReason::HighSampsonError => "high Sampson error".to_string(),
+        LoopClosureVerificationFailureReason::PoseDisagreement => {
+            "pose disagreement (hybrid)".to_string()
+        }
     }
 }
 
