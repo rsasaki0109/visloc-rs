@@ -64,7 +64,9 @@ pub use visloc_fusion::{
 pub use visloc_io::colmap::ColmapMapProvider;
 #[cfg(feature = "image-io")]
 pub use visloc_io::images::{
-    decode_common_image, read_common_image, write_png_gray, CommonImageError,
+    decode_common_image, read_common_image, read_common_image_sequence,
+    read_common_image_sequence_dir, write_png_gray, CommonImageError, ImageSequenceError,
+    LoadedImageFrame,
 };
 pub use visloc_localization::{
     localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
@@ -164,7 +166,9 @@ pub mod prelude {
     pub use crate::io::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
     #[cfg(feature = "image-io")]
     pub use crate::io::images::{
-        decode_common_image, read_common_image, write_png_gray, CommonImageError,
+        decode_common_image, read_common_image, read_common_image_sequence,
+        read_common_image_sequence_dir, write_png_gray, CommonImageError, ImageSequenceError,
+        LoadedImageFrame,
     };
     pub use crate::io::images::{
         parse_pgm, read_pgm, to_pgm_ascii, write_pgm_ascii, PgmImageError,
