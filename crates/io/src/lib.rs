@@ -5,6 +5,7 @@
 //! simple landmark/query descriptor text formats. Loaded maps can be exposed
 //! through provider traits in `visloc-localization`.
 
+pub mod calibration;
 pub mod colmap;
 pub mod descriptors;
 pub mod images;

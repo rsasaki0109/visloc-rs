@@ -62,6 +62,10 @@ pub use visloc_fusion::{
     PoseCovarianceMatrix, PosePriorMeasurement, PositionCovariance, PriorConfig, TimeDelta, Timed,
     TimedFrame, TimedMeasurement, TimedPose, Timestamp,
 };
+pub use visloc_io::calibration::{
+    kitti_projection_to_pinhole_camera, parse_kitti_calibration_txt, read_kitti_calibration_txt,
+    read_kitti_pinhole_camera, CalibrationError, KittiProjection,
+};
 pub use visloc_io::colmap::ColmapMapProvider;
 #[cfg(feature = "image-io")]
 pub use visloc_io::images::{
@@ -168,6 +172,10 @@ pub mod prelude {
         VisualMapValidationIssue, VisualMapValidationReport, SE3, SO3,
     };
 
+    pub use crate::io::calibration::{
+        kitti_projection_to_pinhole_camera, parse_kitti_calibration_txt,
+        read_kitti_calibration_txt, read_kitti_pinhole_camera, CalibrationError, KittiProjection,
+    };
     pub use crate::io::colmap::{
         read_colmap_binary_model, read_colmap_text_model, write_colmap_text_model, ColmapError,
         ColmapMapProviderError,
