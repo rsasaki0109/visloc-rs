@@ -1,3 +1,12 @@
+pub mod deep;
+pub mod superpoint_onnx;
+
+pub use deep::{
+    build_pyramid, CornerDeepAdapter, DeepFeatureExtractor, DeepFeatureSet, DeepFeatureSetError,
+    HogLikeFeatureConfig, HogLikeFeatureError, HogLikeFeatureExtractor, MultiScaleDeepConfig,
+    MultiScaleDeepExtractor, HOG_BINS, HOG_CELLS_PER_SIDE, HOG_CELL_SIZE, HOG_DESCRIPTOR_DIM,
+};
+
 use nalgebra::Point2;
 use std::convert::Infallible;
 use std::fmt;
@@ -265,6 +274,18 @@ impl CornerFeatureExtractor {
             }
         }
         descriptor
+    }
+
+    /// Compute the patch descriptor centred at the integer pixel
+    /// `(x, y)`, skipping corner detection. Returns `None` when the
+    /// requested centre is too close to the image border for a full
+    /// descriptor patch to fit.
+    pub fn describe_at(&self, image: &GrayscaleImage, x: usize, y: usize) -> Option<Vec<f32>> {
+        let radius = self.required_margin();
+        if x < radius || y < radius || x + radius >= image.width() || y + radius >= image.height() {
+            return None;
+        }
+        Some(self.descriptor(image, x, y))
     }
 }
 

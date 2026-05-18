@@ -1,6 +1,7 @@
 #![allow(clippy::useless_vec)]
 
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 
 use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
@@ -9,7 +10,7 @@ use visloc_rs::core::types::{
     PoseEstimationFailureReason, PoseEstimatorDiagnostics, QueryImage, VisualMap,
 };
 use visloc_rs::vision::features::{FeatureExtractor, FeatureSet};
-use visloc_rs::vision::matching::BruteForceMatcher;
+use visloc_rs::vision::matching::{BruteForceMatcher, DescriptorMatch, Matcher};
 use visloc_rs::vision::pnp::Correspondence2D3D;
 use visloc_rs::vision::ransac::RansacReport;
 use visloc_rs::{
@@ -43,6 +44,70 @@ impl RobustPoseEstimator for IdentityPoseEstimator {
                 refinement_error_delta: None,
             },
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FixedConfidenceMatcher {
+    confidences: Vec<Option<f32>>,
+}
+
+impl Matcher for FixedConfidenceMatcher {
+    fn match_descriptors(&self, query: &[Vec<f32>], train: &[Vec<f32>]) -> Vec<DescriptorMatch> {
+        let count = query.len().min(train.len()).min(self.confidences.len());
+        (0..count)
+            .map(|index| DescriptorMatch {
+                query_index: index,
+                train_index: index,
+                distance: 0.0,
+                second_best_distance: None,
+                ratio: None,
+                confidence: self.confidences[index],
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingPoseEstimator {
+    last_weights: Arc<Mutex<Option<Option<Vec<f32>>>>>,
+}
+
+impl RobustPoseEstimator for RecordingPoseEstimator {
+    fn estimate(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        _camera: &Camera,
+    ) -> Option<RansacReport> {
+        *self.last_weights.lock().unwrap() = Some(None);
+        Some(identity_report(correspondences))
+    }
+
+    fn estimate_with_weights(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        _camera: &Camera,
+        weights: &[f32],
+    ) -> Option<RansacReport> {
+        *self.last_weights.lock().unwrap() = Some(Some(weights.to_vec()));
+        Some(identity_report(correspondences))
+    }
+}
+
+fn identity_report(correspondences: &[Correspondence2D3D]) -> RansacReport {
+    RansacReport {
+        pose: Pose::identity(),
+        inliers: (0..correspondences.len()).collect(),
+        inlier_reprojection_errors: vec![0.0; correspondences.len()],
+        mean_reprojection_error: 0.0,
+        median_reprojection_error: 0.0,
+        max_reprojection_error: 0.0,
+        diagnostics: PoseEstimatorDiagnostics {
+            refinement_applied: false,
+            pre_refinement_mean_reprojection_error: None,
+            post_refinement_mean_reprojection_error: Some(0.0),
+            refinement_error_delta: None,
+        },
     }
 }
 
@@ -754,6 +819,53 @@ fn builds_correspondences_without_running_pose_estimation() {
     assert_eq!(correspondence_set.query_indices, vec![0, 1, 2]);
     assert_eq!(correspondence_set.landmark_ids, vec![1, 2, 3]);
     assert_eq!(correspondence_set.correspondences[0].point3d, points[0]);
+    assert!(correspondence_set
+        .correspondences
+        .iter()
+        .all(|correspondence| correspondence.confidence.is_none()));
+}
+
+#[test]
+fn correspondence_builder_copies_match_confidence_to_correspondences() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+    let points = [
+        Point3::new(-1.0, -1.0, 4.0),
+        Point3::new(1.0, -1.0, 4.5),
+        Point3::new(-1.0, 1.0, 5.0),
+    ];
+
+    let mut map = VisualMap::new();
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    let mut keypoints = Vec::new();
+    let mut descriptors = Vec::new();
+
+    for (index, point) in points.iter().enumerate() {
+        let landmark_id = index as u64 + 1;
+        let descriptor = vec![index as f32, 0.0];
+        map.landmarks
+            .insert(landmark_id, Landmark::new(landmark_id, *point));
+        descriptor_store.insert(landmark_id, descriptor.clone());
+        keypoints.push(camera.project(&pose.transform_world_point(point)).unwrap());
+        descriptors.push(descriptor);
+    }
+
+    let query = QueryImage {
+        camera,
+        keypoints,
+        descriptors,
+    };
+    let builder = CorrespondenceBuilder::new(FixedConfidenceMatcher {
+        confidences: vec![Some(0.2), None, Some(0.9)],
+    });
+    let correspondence_set = builder.build(&query, &map, &descriptor_store).unwrap();
+
+    let confidences = correspondence_set
+        .correspondences
+        .iter()
+        .map(|correspondence| correspondence.confidence)
+        .collect::<Vec<_>>();
+    assert_eq!(confidences, vec![Some(0.2), None, Some(0.9)]);
 }
 
 #[test]
@@ -1083,6 +1195,58 @@ fn localization_pipeline_accepts_custom_pose_estimator() {
         }
     );
     assert_eq!(result.pose.unwrap(), Pose::identity());
+}
+
+#[test]
+fn localization_pipeline_routes_correspondence_confidence_to_pose_estimator() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+    let points = [
+        Point3::new(-1.0, -1.0, 4.0),
+        Point3::new(1.0, -1.0, 4.5),
+        Point3::new(-1.0, 1.0, 5.0),
+    ];
+
+    let mut map = VisualMap::new();
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    let mut keypoints = Vec::new();
+    let mut descriptors = Vec::new();
+
+    for (index, point) in points.iter().enumerate() {
+        let landmark_id = index as u64 + 1;
+        let descriptor = vec![index as f32, 5.0];
+        map.landmarks
+            .insert(landmark_id, Landmark::new(landmark_id, *point));
+        descriptor_store.insert(landmark_id, descriptor.clone());
+        keypoints.push(camera.project(&pose.transform_world_point(point)).unwrap());
+        descriptors.push(descriptor);
+    }
+
+    let estimator = RecordingPoseEstimator::default();
+    let recorded_weights = estimator.last_weights.clone();
+    let pipeline = LocalizationPipeline::with_pose_estimator(
+        FixedConfidenceMatcher {
+            confidences: vec![Some(0.1), None, Some(0.8)],
+        },
+        FixedLandmarkSelector::new(vec![1, 2, 3]),
+        estimator,
+        LocalizationConfig::default(),
+    );
+    let result = pipeline.localize_with_descriptor_store(
+        &QueryImage {
+            camera,
+            keypoints,
+            descriptors,
+        },
+        &map,
+        &descriptor_store,
+    );
+
+    assert!(result.success);
+    assert_eq!(
+        *recorded_weights.lock().unwrap(),
+        Some(Some(vec![0.1, 0.0, 0.8]))
+    );
 }
 
 #[test]

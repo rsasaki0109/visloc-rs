@@ -222,6 +222,7 @@ where
             correspondences.push(Correspondence2D3D {
                 point2d,
                 point3d: landmark.position,
+                confidence: descriptor_match.confidence,
             });
             query_indices.push(descriptor_match.query_index);
             landmark_ids.push(landmark.id);

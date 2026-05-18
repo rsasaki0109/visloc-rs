@@ -8,9 +8,12 @@
 pub mod calibration;
 pub mod colmap;
 pub mod descriptors;
+pub mod euroc;
+pub mod external_deep;
 pub mod images;
 #[cfg(feature = "image-io")]
 pub mod kitti;
+pub mod kitti_imu;
 pub mod query_features;
 pub mod sensors;
 pub mod two_view_matches;

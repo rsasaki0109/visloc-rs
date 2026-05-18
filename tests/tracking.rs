@@ -11,12 +11,12 @@ use visloc_rs::core::types::{
 use visloc_rs::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,
     write_tracking_results_html_report, ConstantVelocityMotionModel, FeatureExtractor, FeatureSet,
-    FrameLocalizer, ImageTracker, InMemoryMapProvider, LocalizationPipeline, LocalizationPrior,
-    MapProviderStats, MotionModel, PoseTrajectory, PriorSubmapSelector, SelectableMapProvider,
-    Tracker, TrackingConfig, TrackingEvaluationConfig, TrackingEvaluationFailure, TrackingEvent,
-    TrackingFailureReason, TrackingResult, TrackingState, TrackingStats, TrajectoryAlignment,
-    TrajectoryEvaluationConfig, TrajectoryEvaluationFailure, VisualOdometryEstimate,
-    VisualOdometryFrontend, VisualOdometryPriorProvider,
+    FrameLocalizer, ImageTracker, InMemoryMapProvider, KittiOdometryBenchmarkConfig,
+    LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel, PoseTrajectory,
+    PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig, TrackingEvaluationConfig,
+    TrackingEvaluationFailure, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
+    TrackingStats, TrajectoryAlignment, TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
+    VisualOdometryEstimate, VisualOdometryFrontend, VisualOdometryPriorProvider,
 };
 
 #[derive(Debug, Clone)]
@@ -106,6 +106,7 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
                 max_reprojection_error: 0.0,
             },
         ),
+        covisibility_local_map_size: None,
     }
 }
 
@@ -128,6 +129,7 @@ fn failed_tracking_result(frame_id: u64) -> TrackingResult {
             0,
             0,
         ),
+        covisibility_local_map_size: None,
     }
 }
 
@@ -613,6 +615,68 @@ fn pose_trajectory_can_align_first_matching_translation_before_error_summary() {
     assert_eq!(aligned_errors[0].translation_error, 0.0);
     assert_eq!(aligned_errors[1].translation_error, 1.0);
     assert_eq!(aligned_csv, "frame_id,translation_error\n1,0\n2,1\n");
+}
+
+#[test]
+fn kitti_odometry_benchmark_reports_subsequence_relative_errors() {
+    let reference = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            0,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(100.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(200.0, 0.0, 0.0)),
+        ),
+    ]);
+    let estimated = PoseTrajectory::from_tracking_results(&[
+        successful_tracking_result(
+            0,
+            pose_with_identity_rotation_at_center(Vector3::new(0.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            1,
+            pose_with_identity_rotation_at_center(Vector3::new(101.0, 0.0, 0.0)),
+        ),
+        successful_tracking_result(
+            2,
+            pose_with_identity_rotation_at_center(Vector3::new(202.0, 0.0, 0.0)),
+        ),
+    ]);
+
+    let summary = estimated.kitti_odometry_benchmark_against(
+        &reference,
+        &KittiOdometryBenchmarkConfig {
+            segment_lengths_m: vec![100.0],
+            start_frame_step: 1,
+        },
+    );
+
+    assert_eq!(summary.matched_pose_count, 3);
+    assert_eq!(summary.segment_count, 2);
+    assert_eq!(summary.mean_translational_error_percent, Some(1.0));
+    assert_eq!(summary.mean_rotational_error_deg_per_m, Some(0.0));
+    assert_eq!(summary.max_translational_error_percent(), Some(1.0));
+    assert_eq!(summary.max_rotational_error_deg_per_m(), Some(0.0));
+    assert!(summary
+        .segment_errors_csv()
+        .contains("first_frame_id,last_frame_id,length_m"));
+    assert!(summary.to_json().contains("\"segment_count\": 2"));
+    assert!(summary
+        .to_json()
+        .contains("\"max_translational_error_percent\": 1"));
+}
+
+#[test]
+fn kitti_odometry_benchmark_default_lengths_match_current_leaderboard() {
+    assert_eq!(
+        KittiOdometryBenchmarkConfig::default().segment_lengths_m,
+        vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0]
+    );
 }
 
 #[test]

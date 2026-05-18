@@ -9,6 +9,8 @@ use visloc_core::types::{
     VisualMap, VisualMapValidationReport,
 };
 use visloc_localization::{DescriptorProvider, MapProvider};
+use visloc_vision::features::FeatureSet;
+use visloc_vision::stereo_vo::StereoFeature;
 
 use crate::descriptors::{read_landmark_descriptors_txt, DescriptorStoreError};
 
@@ -24,6 +26,20 @@ pub enum ColmapError {
     InvalidLine { file: &'static str, line: String },
     #[error("invalid COLMAP binary in {file}: {message}")]
     InvalidBinary { file: &'static str, message: String },
+    #[error("invalid COLMAP export input: {0}")]
+    InvalidExportInput(String),
+}
+
+/// Summary of a [`write_colmap_text_model_for_3dgs`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapExportSummary {
+    /// Number of camera viewpoints written to `images.txt`.
+    pub frame_count: usize,
+    /// Number of distinct 3D landmarks written to `points3D.txt`.
+    pub landmark_count: usize,
+    /// Total number of (frame, keypoint) observations written across all
+    /// landmark TRACK[] tails in `points3D.txt`.
+    pub observation_count: usize,
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +196,308 @@ pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Resul
     fs::write(path.join("images.txt"), format_images_txt(map))?;
     fs::write(path.join("points3D.txt"), format_points3d_txt(map))?;
     Ok(())
+}
+
+/// Write a COLMAP text model suitable for bootstrapping a 3D Gaussian
+/// Splatting (3DGS) / NeRF training pipeline.
+///
+/// The writer materialises `cameras.txt`, `images.txt`, and `points3D.txt`
+/// under `out_dir` from a stereo VO output:
+///
+/// - `camera`: shared pinhole intrinsics (the model is replicated as a single
+///   COLMAP camera id; `camera.params` must already match the COLMAP layout
+///   for [`camera.model`])
+/// - `poses`: per-frame `world_to_camera` SE3 (one COLMAP image entry each)
+/// - `left_features`: left keypoints per frame; only the keypoints that
+///   participate in a stereo feature are written to the per-image 2D point
+///   list, paired with the matching 3D landmark id
+/// - `stereo_per_frame`: triangulated stereo features whose `point_cam`
+///   (left-camera frame) is lifted through `pose.camera_to_world()` and
+///   aggregated into the sparse `points3D.txt` cloud
+/// - `image_name(frame_idx)` supplies the image filename to embed in
+///   `images.txt`; this must match the filenames the downstream trainer
+///   (gaussian-splatting / nerfstudio) will find under `<dataset>/images/`
+///
+/// Each stereo feature contributes one COLMAP landmark with one observation;
+/// temporal tracks are NOT merged across frames (the trainer optimises the
+/// gaussian primitives anyway, so a slightly denser cloud with duplicated
+/// landmark ids is the simpler, lower-friction MVP).
+pub fn write_colmap_text_model_for_3dgs<F>(
+    out_dir: impl AsRef<Path>,
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    image_name: F,
+) -> Result<ColmapExportSummary, ColmapError>
+where
+    F: Fn(usize) -> String,
+{
+    if poses.len() != left_features.len() || poses.len() != stereo_per_frame.len() {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "input length mismatch: poses={}, left_features={}, stereo_per_frame={}",
+            poses.len(),
+            left_features.len(),
+            stereo_per_frame.len(),
+        )));
+    }
+
+    // Reject CameraModel::Unknown(name) that the binary counterpart would
+    // also reject, so a caller driving both writers off the same input
+    // either gets both files or the same structured error from each.
+    colmap_id_from_camera_model(&camera.model)?;
+
+    let out_dir = out_dir.as_ref();
+    fs::create_dir_all(out_dir)?;
+
+    // cameras.txt — one shared camera.
+    let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
+    cameras_text.push_str(&format!(
+        "{} {} {} {}",
+        camera.id,
+        camera_model_to_colmap_name(&camera.model),
+        camera.width,
+        camera.height,
+    ));
+    for param in &camera.params {
+        cameras_text.push_str(&format!(" {}", format_f64(*param)));
+    }
+    cameras_text.push('\n');
+    fs::write(out_dir.join("cameras.txt"), cameras_text)?;
+
+    // Aggregate world-frame landmarks (deduplication is intentionally skipped
+    // — see the doc comment above).
+    let mut landmark_count: u64 = 0;
+    let mut observation_count: usize = 0;
+    // For each frame, record `(left_keypoint_index, landmark_id)` so the
+    // images.txt second line can emit POINTS2D[] in the COLMAP-mandated
+    // `X Y POINT3D_ID` triples.
+    let mut frame_landmarks: Vec<Vec<(usize, u64)>> = Vec::with_capacity(poses.len());
+    let mut points3d_text =
+        String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
+
+    for (frame_idx, (pose, features)) in poses.iter().zip(stereo_per_frame.iter()).enumerate() {
+        let cam_to_world = pose.camera_to_world();
+        let mut per_frame: Vec<(usize, u64)> = Vec::with_capacity(features.len());
+        for feature in features {
+            landmark_count += 1;
+            let landmark_id = landmark_count;
+            let world_point = cam_to_world.transform_point(&feature.point_cam);
+            points3d_text.push_str(&format!(
+                "{} {} {} {} 255 255 255 0 {} {}\n",
+                landmark_id,
+                format_f64(world_point.x),
+                format_f64(world_point.y),
+                format_f64(world_point.z),
+                frame_idx,
+                feature.left_index,
+            ));
+            observation_count += 1;
+            per_frame.push((feature.left_index, landmark_id));
+        }
+        frame_landmarks.push(per_frame);
+    }
+    fs::write(out_dir.join("points3D.txt"), points3d_text)?;
+
+    // images.txt — alternating header line + 2D point list.
+    let mut images_text = String::from(
+        "# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n# POINTS2D[] as X Y POINT3D_ID\n",
+    );
+    for (frame_idx, (pose, features)) in poses.iter().zip(left_features.iter()).enumerate() {
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        let name = image_name(frame_idx);
+        validate_colmap_image_name(&name, frame_idx)?;
+        images_text.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {}\n",
+            frame_idx,
+            format_f64(q.w),
+            format_f64(q.i),
+            format_f64(q.j),
+            format_f64(q.k),
+            format_f64(t.x),
+            format_f64(t.y),
+            format_f64(t.z),
+            camera.id,
+            name,
+        ));
+        // Emit one `X Y POINT3D_ID` triple per left keypoint that participates
+        // in a triangulated stereo feature; the rest map to POINT3D_ID = -1.
+        let mut by_kp: Vec<(usize, u64)> = frame_landmarks[frame_idx].clone();
+        by_kp.sort_by_key(|(kp, _)| *kp);
+        let mut tokens: Vec<String> = Vec::with_capacity(features.len());
+        for (kp_idx, kp) in features.keypoints.iter().enumerate() {
+            let landmark_id = by_kp
+                .iter()
+                .find(|(observed, _)| *observed == kp_idx)
+                .map(|(_, landmark_id)| landmark_id.to_string())
+                .unwrap_or_else(|| "-1".to_owned());
+            tokens.push(format!(
+                "{} {} {}",
+                format_f64(kp.x),
+                format_f64(kp.y),
+                landmark_id
+            ));
+        }
+        images_text.push_str(&tokens.join(" "));
+        images_text.push('\n');
+    }
+    fs::write(out_dir.join("images.txt"), images_text)?;
+
+    Ok(ColmapExportSummary {
+        frame_count: poses.len(),
+        landmark_count: landmark_count as usize,
+        observation_count,
+    })
+}
+
+/// Binary counterpart of [`write_colmap_text_model_for_3dgs`]. Writes
+/// `cameras.bin`, `images.bin`, and `points3D.bin` under `out_dir` in
+/// the same little-endian layout COLMAP's reference reader expects (see
+/// [`parse_cameras_bin`], [`parse_images_bin`], [`parse_points3d_bin`]
+/// for the exact byte layouts). Useful for downstream trainers that
+/// only ingest the binary form (Inria 3DGS / nerfstudio both accept it
+/// transparently). All other semantics — single shared camera, sparse
+/// per-frame stereo landmarks lifted through `pose.camera_to_world()`,
+/// `frame_idx` as the COLMAP image id, `image_name(frame_idx)` for the
+/// `NAME` field — match the text writer exactly.
+pub fn write_colmap_binary_model_for_3dgs<F>(
+    out_dir: impl AsRef<Path>,
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    image_name: F,
+) -> Result<ColmapExportSummary, ColmapError>
+where
+    F: Fn(usize) -> String,
+{
+    if poses.len() != left_features.len() || poses.len() != stereo_per_frame.len() {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "input length mismatch: poses={}, left_features={}, stereo_per_frame={}",
+            poses.len(),
+            left_features.len(),
+            stereo_per_frame.len(),
+        )));
+    }
+
+    let out_dir = out_dir.as_ref();
+    fs::create_dir_all(out_dir)?;
+
+    // cameras.bin — single shared camera (matches the text writer).
+    let model_id = colmap_id_from_camera_model(&camera.model)?;
+    let camera_id_u32 = u32::try_from(camera.id).map_err(|_| {
+        ColmapError::InvalidExportInput(format!(
+            "camera id {} does not fit in u32 (COLMAP binary cameras use u32 ids)",
+            camera.id
+        ))
+    })?;
+    let mut cameras_bytes: Vec<u8> = Vec::new();
+    cameras_bytes.extend_from_slice(&1u64.to_le_bytes());
+    cameras_bytes.extend_from_slice(&camera_id_u32.to_le_bytes());
+    cameras_bytes.extend_from_slice(&model_id.to_le_bytes());
+    cameras_bytes.extend_from_slice(&(camera.width as u64).to_le_bytes());
+    cameras_bytes.extend_from_slice(&(camera.height as u64).to_le_bytes());
+    for param in &camera.params {
+        cameras_bytes.extend_from_slice(&param.to_le_bytes());
+    }
+    fs::write(out_dir.join("cameras.bin"), cameras_bytes)?;
+
+    // Aggregate world-frame landmarks (deduplication is intentionally skipped
+    // — see the doc comment on `write_colmap_text_model_for_3dgs`).
+    let mut landmark_count: u64 = 0;
+    let mut observation_count: usize = 0;
+    let mut frame_landmarks: Vec<Vec<(usize, u64)>> = Vec::with_capacity(poses.len());
+    // We hold landmark records in memory so we can write the total count up
+    // front (the binary format requires `count` before the records).
+    let mut landmark_records: Vec<(u64, Point3<f64>, u32, u32)> = Vec::new();
+
+    for (frame_idx, (pose, features)) in poses.iter().zip(stereo_per_frame.iter()).enumerate() {
+        let image_id_u32 = u32::try_from(frame_idx).map_err(|_| {
+            ColmapError::InvalidExportInput(format!(
+                "frame index {frame_idx} does not fit in u32 (COLMAP binary uses u32 image ids)"
+            ))
+        })?;
+        let cam_to_world = pose.camera_to_world();
+        let mut per_frame: Vec<(usize, u64)> = Vec::with_capacity(features.len());
+        for feature in features {
+            landmark_count += 1;
+            let landmark_id = landmark_count;
+            let world_point = cam_to_world.transform_point(&feature.point_cam);
+            let kp_index_u32 = u32::try_from(feature.left_index).map_err(|_| {
+                ColmapError::InvalidExportInput(format!(
+                    "left keypoint index {} does not fit in u32",
+                    feature.left_index
+                ))
+            })?;
+            landmark_records.push((landmark_id, world_point, image_id_u32, kp_index_u32));
+            observation_count += 1;
+            per_frame.push((feature.left_index, landmark_id));
+        }
+        frame_landmarks.push(per_frame);
+    }
+
+    // points3D.bin: u64 count, then for each landmark:
+    //   u64 id, f64 x y z, u8 r g b (3 bytes), f64 error, u64 track_length,
+    //   [u32 image_id, u32 point2d_idx]*
+    let mut points_bytes: Vec<u8> = Vec::new();
+    points_bytes.extend_from_slice(&(landmark_records.len() as u64).to_le_bytes());
+    for (landmark_id, position, image_id_u32, kp_index_u32) in &landmark_records {
+        points_bytes.extend_from_slice(&landmark_id.to_le_bytes());
+        points_bytes.extend_from_slice(&position.x.to_le_bytes());
+        points_bytes.extend_from_slice(&position.y.to_le_bytes());
+        points_bytes.extend_from_slice(&position.z.to_le_bytes());
+        points_bytes.extend_from_slice(&[255u8, 255u8, 255u8]); // white RGB
+        points_bytes.extend_from_slice(&0.0f64.to_le_bytes()); // error
+        points_bytes.extend_from_slice(&1u64.to_le_bytes()); // track length
+        points_bytes.extend_from_slice(&image_id_u32.to_le_bytes());
+        points_bytes.extend_from_slice(&kp_index_u32.to_le_bytes());
+    }
+    fs::write(out_dir.join("points3D.bin"), points_bytes)?;
+
+    // images.bin: u64 count, then for each image:
+    //   u32 frame_id, f64 qw qx qy qz, f64 tx ty tz, u32 camera_id,
+    //   NULL-terminated NAME, u64 points2d_count, [f64 x, f64 y, i64 point3d_id]*
+    let mut images_bytes: Vec<u8> = Vec::new();
+    images_bytes.extend_from_slice(&(poses.len() as u64).to_le_bytes());
+    for (frame_idx, (pose, features)) in poses.iter().zip(left_features.iter()).enumerate() {
+        let image_id_u32 = u32::try_from(frame_idx).map_err(|_| {
+            ColmapError::InvalidExportInput(format!(
+                "frame index {frame_idx} does not fit in u32 (COLMAP binary uses u32 image ids)"
+            ))
+        })?;
+        images_bytes.extend_from_slice(&image_id_u32.to_le_bytes());
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        for v in [q.w, q.i, q.j, q.k, t.x, t.y, t.z] {
+            images_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        images_bytes.extend_from_slice(&camera_id_u32.to_le_bytes());
+        let name = image_name(frame_idx);
+        validate_colmap_image_name(&name, frame_idx)?;
+        images_bytes.extend_from_slice(name.as_bytes());
+        images_bytes.push(0u8); // NUL terminator
+
+        let by_kp = &frame_landmarks[frame_idx];
+        images_bytes.extend_from_slice(&(features.keypoints.len() as u64).to_le_bytes());
+        for (kp_idx, kp) in features.keypoints.iter().enumerate() {
+            images_bytes.extend_from_slice(&kp.x.to_le_bytes());
+            images_bytes.extend_from_slice(&kp.y.to_le_bytes());
+            let landmark_id = by_kp
+                .iter()
+                .find(|(observed, _)| *observed == kp_idx)
+                .map(|(_, lid)| *lid as i64)
+                .unwrap_or(-1);
+            images_bytes.extend_from_slice(&landmark_id.to_le_bytes());
+        }
+    }
+    fs::write(out_dir.join("images.bin"), images_bytes)?;
+
+    Ok(ColmapExportSummary {
+        frame_count: poses.len(),
+        landmark_count: landmark_count as usize,
+        observation_count,
+    })
 }
 
 pub fn format_cameras_txt(map: &VisualMap) -> String {
@@ -524,6 +842,53 @@ fn format_f64(value: f64) -> String {
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_owned()
+}
+
+/// Reject image NAME characters that would corrupt either writer surface.
+///
+/// - NUL terminates the binary NAME field early, silently truncating it.
+/// - ASCII whitespace breaks the text format's space-separated tokens.
+/// - LF / CR would inject a spurious image record into the text file (the
+///   reader's alternating header + 2D-points line layout depends on
+///   exactly one image per pair of lines).
+///
+/// Sharing the rule across both writers means any `image_name` closure
+/// accepted by one is also accepted by the other — what makes it safe to
+/// drive the text/binary writers from a single VO run against the same
+/// input (as the KITTI → COLMAP → 3DGS smoke harness does).
+fn validate_colmap_image_name(name: &str, frame_idx: usize) -> Result<(), ColmapError> {
+    if let Some(bad_idx) = name
+        .bytes()
+        .position(|b| matches!(b, 0 | b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "image name for frame {frame_idx} contains an invalid character at byte {bad_idx} (NUL or ASCII whitespace would corrupt the COLMAP export); got {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn colmap_id_from_camera_model(model: &CameraModel) -> Result<i32, ColmapError> {
+    Ok(match model {
+        CameraModel::SimplePinhole => 0,
+        CameraModel::Pinhole => 1,
+        CameraModel::SimpleRadial => 2,
+        CameraModel::Radial => 3,
+        CameraModel::OpenCv => 4,
+        CameraModel::Unknown(name) => match name.as_str() {
+            "OPENCV_FISHEYE" => 5,
+            "FULL_OPENCV" => 6,
+            "FOV" => 7,
+            "SIMPLE_RADIAL_FISHEYE" => 8,
+            "RADIAL_FISHEYE" => 9,
+            "THIN_PRISM_FISHEYE" => 10,
+            other => {
+                return Err(ColmapError::InvalidExportInput(format!(
+                    "cannot encode CameraModel::Unknown({other:?}) as a COLMAP binary model id"
+                )));
+            }
+        },
+    })
 }
 
 fn camera_model_from_colmap_id(model_id: i32) -> Result<(CameraModel, usize), ColmapError> {

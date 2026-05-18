@@ -50,6 +50,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "image-io")]
 use nalgebra::Point2;
 #[cfg(feature = "image-io")]
+use std::collections::HashMap;
+#[cfg(feature = "image-io")]
 use visloc_rs::core::geometry::{Pose, SE3};
 #[cfg(feature = "image-io")]
 use visloc_rs::io::kitti::read_kitti_image_sequence_dir;
@@ -62,7 +64,10 @@ use visloc_rs::vision::matching::{BruteForceMatcher, Matcher};
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 #[cfg(feature = "image-io")]
-use visloc_rs::{LoopClosureConstraint, PoseGraph, PoseGraphSe3Config};
+use visloc_rs::{
+    BaConfig, BaObservation, BundleAdjustment, LinearSolver, LoopClosureConstraint, PoseGraph,
+    PoseGraphSe3Config, RobustKernel,
+};
 
 #[cfg(feature = "image-io")]
 #[derive(Debug)]
@@ -199,13 +204,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let estimator = RelativePoseEstimator::default();
 
     // Sequential VO: for each consecutive pair, build correspondences from
-    // matched descriptors and run essential-matrix RANSAC.
+    // matched descriptors and run essential-matrix RANSAC. Also remember
+    // the (kp_a, kp_b) index pairs per consecutive pair so we can link
+    // them into multi-frame feature tracks for the BA step below.
     let mut sequential_edges: Vec<SE3> = Vec::with_capacity(n - 1);
     let mut sequential_inliers: Vec<usize> = Vec::with_capacity(n - 1);
     let mut sequential_correspondences: Vec<usize> = Vec::with_capacity(n - 1);
+    let mut per_pair_inlier_matches: Vec<Vec<(usize, usize)>> = Vec::with_capacity(n - 1);
     for i in 0..(n - 1) {
-        let correspondences =
-            build_correspondences(&feature_sets[i], &feature_sets[i + 1], &matcher);
+        let (correspondences, index_pairs) =
+            build_correspondences_with_indices(&feature_sets[i], &feature_sets[i + 1], &matcher);
         sequential_correspondences.push(correspondences.len());
         let edge = estimator
             .estimate(&correspondences, &camera)
@@ -219,6 +227,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
         sequential_inliers.push(edge.inliers.len());
         sequential_edges.push(edge.previous_to_current);
+        // Keep only RANSAC-inlier matches for tracking — outliers would
+        // pollute the tracks and force BA to reject them anyway.
+        let inlier_pairs: Vec<(usize, usize)> =
+            edge.inliers.iter().map(|&idx| index_pairs[idx]).collect();
+        per_pair_inlier_matches.push(inlier_pairs);
     }
     println!(
         "sequential edges: count={} mean_correspondences={:.1} mean_inliers={:.1}",
@@ -307,7 +320,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // system, converges in one solve, and (because rotations look reasonable
     // out of the essential-matrix RANSAC) preserves the trajectory shape.
     if loop_constraint.is_some() {
-        let step = graph.optimize_translations_once()?;
+        // Use sparse Cholesky so the optimizer scales to the thousand-keyframe
+        // KITTI run. The pose graph is block-banded (≤ 4 dense `3×3` (or
+        // `6×6`) blocks per edge), so CSC + `CscCholesky` is much faster and
+        // uses orders of magnitude less memory than the dense path.
+        let step = graph.optimize_translations_once_with(LinearSolver::Sparse)?;
         println!(
             "translation_pgo cost_before={:.4} cost_after={:.4} mean_correction={:.4} max_correction={:.4}",
             step.cost_before,
@@ -320,6 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = graph.optimize_se3_iterative(&PoseGraphSe3Config {
             initial_lambda: Some(1.0e-4),
             max_iterations: 20,
+            linear_solver: LinearSolver::Sparse,
             ..PoseGraphSe3Config::default()
         })?;
         println!(
@@ -351,7 +369,195 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint_distance,
     );
 
+    // -----------------------------------------------------------------
+    // Bundle adjustment pass on real-image feature tracks.
+    // -----------------------------------------------------------------
+    // Link the per-pair RANSAC-inlier matches into multi-frame feature
+    // tracks. Each match `(kp_a, kp_b)` between frames `i, i+1` either
+    // extends an existing track that ended at `(i, kp_a)` or starts a
+    // new track. Tracks observed by ≥ MIN_TRACK_LEN frames are
+    // triangulated by DLT using the post-PGO poses and become BA
+    // landmarks. Each track's per-frame keypoints become BA observations.
+    const MIN_TRACK_LEN: usize = 3;
+    let mut tracks: Vec<Vec<(usize, Point2<f64>)>> = Vec::new();
+    let mut endpoint_to_track: HashMap<(usize, usize), usize> = HashMap::new();
+    for (pair_idx, pair_matches) in per_pair_inlier_matches.iter().enumerate() {
+        let frame_a = pair_idx;
+        let frame_b = pair_idx + 1;
+        for &(kp_a, kp_b) in pair_matches {
+            let xy_b = feature_sets[frame_b].keypoints[kp_b];
+            let p_b = Point2::new(xy_b.x as f64, xy_b.y as f64);
+            if let Some(&track_id) = endpoint_to_track.get(&(frame_a, kp_a)) {
+                tracks[track_id].push((frame_b, p_b));
+                endpoint_to_track.remove(&(frame_a, kp_a));
+                endpoint_to_track.insert((frame_b, kp_b), track_id);
+            } else {
+                let xy_a = feature_sets[frame_a].keypoints[kp_a];
+                let p_a = Point2::new(xy_a.x as f64, xy_a.y as f64);
+                let track_id = tracks.len();
+                tracks.push(vec![(frame_a, p_a), (frame_b, p_b)]);
+                endpoint_to_track.insert((frame_b, kp_b), track_id);
+            }
+        }
+    }
+    let total_tracks = tracks.len();
+    tracks.retain(|t| t.len() >= MIN_TRACK_LEN);
+    let track_lengths: Vec<usize> = tracks.iter().map(|t| t.len()).collect();
+    let mean_track_len = if track_lengths.is_empty() {
+        0.0
+    } else {
+        track_lengths.iter().copied().sum::<usize>() as f64 / track_lengths.len() as f64
+    };
+    let max_track_len = track_lengths.iter().copied().max().unwrap_or(0);
+    println!(
+        "ba_tracks total={} long={} (≥{} frames) mean_len={:.1} max_len={}",
+        total_tracks,
+        tracks.len(),
+        MIN_TRACK_LEN,
+        mean_track_len,
+        max_track_len,
+    );
+
+    // Triangulate every long track via 2-row DLT and reject those with
+    // negative depth or large reprojection residual on any view.
+    let mut ba = BundleAdjustment::new(camera.clone());
+    for id in 0..(n as u64) {
+        ba.add_pose(id, corrected[id as usize].clone());
+    }
+    // Fix the first keyframe (gauge anchor) plus, when a loop closure was
+    // verified, the last keyframe too. Without this, BA has no incentive to
+    // honor the loop-closure constraint that lives only in the pose graph
+    // and would drift the chain back toward an arbitrary-scale per-pair
+    // optimum.
+    ba.fix_pose(0);
+    if loop_constraint.is_some() {
+        ba.fix_pose((n - 1) as u64);
+    }
+    let mut accepted = 0usize;
+    let mut rejected_depth = 0usize;
+    let mut rejected_reproj = 0usize;
+    for (track_id, observations) in tracks.iter().enumerate() {
+        let Some(point) = triangulate_track_dlt(observations, &corrected, &camera) else {
+            rejected_depth += 1;
+            continue;
+        };
+        // Sanity filter: reject only landmarks that are visibly broken
+        // — every-view depth ≤ 0 (DLT failed, point behind camera) or
+        // every-view reprojection error > 32 px (gross mismatch). The
+        // remaining residuals are absorbed by the Huber kernel below.
+        let mut max_reproj: f64 = 0.0;
+        let mut behind_camera = false;
+        for &(frame_id, xy) in observations {
+            let xc = corrected[frame_id].transform_world_point(&point);
+            if xc.z <= 0.0 {
+                behind_camera = true;
+                break;
+            }
+            if let Some(predicted) = camera.project(&xc) {
+                let err = (predicted - xy).norm();
+                if err > max_reproj {
+                    max_reproj = err;
+                }
+            }
+        }
+        if behind_camera {
+            rejected_depth += 1;
+            continue;
+        }
+        if max_reproj > 32.0 {
+            rejected_reproj += 1;
+            continue;
+        }
+        ba.add_landmark(track_id as u64, point);
+        for &(frame_id, xy) in observations {
+            ba.add_observation(BaObservation {
+                keyframe_id: frame_id as u64,
+                landmark_id: track_id as u64,
+                xy,
+            });
+        }
+        accepted += 1;
+    }
+    println!(
+        "ba_triangulation accepted={} rejected_depth={} rejected_reproj={}",
+        accepted, rejected_depth, rejected_reproj,
+    );
+    if accepted == 0 {
+        println!("ba_skipped no_landmarks");
+    } else {
+        // Sparse Cholesky on the Schur-reduced camera system + Huber kernel
+        // (δ=4 px) so any remaining matching outliers get down-weighted.
+        // Huber δ=4 px clips obvious matching outliers; δ matches the
+        // typical KITTI inlier residual after PGO so good observations
+        // stay in the quadratic region. Sparse Cholesky on the Schur-
+        // reduced camera system scales the solve to thousands of
+        // landmarks with hundreds of keyframes.
+        let ba_config = BaConfig {
+            linear_solver: LinearSolver::Sparse,
+            robust_kernel: RobustKernel::Huber { delta: 4.0 },
+            initial_lambda: Some(1.0e-2),
+            max_iterations: 50,
+            ..BaConfig::default()
+        };
+        match ba.optimize(&ba_config) {
+            Ok(result) => {
+                println!(
+                    "bundle_adjustment landmarks={} observations={} initial_cost={:.3} final_cost={:.3} iterations={} converged={}",
+                    accepted,
+                    ba.observations.len(),
+                    result.initial_cost,
+                    result.final_cost,
+                    result.iterations.len(),
+                    result.converged,
+                );
+                let ba_poses: Vec<Pose> = (0..n as u64).map(|id| ba.poses[&id].clone()).collect();
+                write_xyz_csv(&args.out_dir.join("ba.csv"), &ba_poses)?;
+                let last_ba = ba_poses[n - 1].camera_center_world();
+                let ba_endpoint_shift = (last_ba - last_corrected).norm();
+                println!(
+                    "endpoint ba=[{:.3}, {:.3}, {:.3}] corrected_to_ba_shift={:.3}",
+                    last_ba.x, last_ba.y, last_ba.z, ba_endpoint_shift,
+                );
+            }
+            Err(error) => println!("bundle_adjustment error={error}"),
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(feature = "image-io")]
+fn triangulate_track_dlt(
+    observations: &[(usize, Point2<f64>)],
+    poses: &[Pose],
+    camera: &visloc_rs::core::types::Camera,
+) -> Option<nalgebra::Point3<f64>> {
+    use nalgebra::DMatrix;
+    let n = observations.len();
+    if n < 2 {
+        return None;
+    }
+    let mut a = DMatrix::<f64>::zeros(n * 2, 4);
+    for (i, &(frame_id, xy)) in observations.iter().enumerate() {
+        let pose = &poses[frame_id];
+        let normalized = camera.normalize_pixel(&xy)?;
+        let matrix = pose.world_to_camera.matrix();
+        let row0 = matrix.row(0);
+        let row1 = matrix.row(1);
+        let row2 = matrix.row(2);
+        for col in 0..4 {
+            a[(i * 2, col)] = normalized.x * row2[col] - row0[col];
+            a[(i * 2 + 1, col)] = normalized.y * row2[col] - row1[col];
+        }
+    }
+    let svd = a.svd(false, true);
+    let v_t = svd.v_t?;
+    let h = v_t.row(v_t.nrows() - 1);
+    let w = h[3];
+    if w.abs() < 1.0e-9 {
+        return None;
+    }
+    Some(nalgebra::Point3::new(h[0] / w, h[1] / w, h[2] / w))
 }
 
 #[cfg(feature = "image-io")]
@@ -360,11 +566,25 @@ fn build_correspondences(
     b: &FeatureSet,
     matcher: &BruteForceMatcher,
 ) -> Vec<TwoViewCorrespondence> {
+    build_correspondences_with_indices(a, b, matcher).0
+}
+
+/// Same as [`build_correspondences`] but also returns the matched
+/// `(query_index, train_index)` pairs (in the same order as the returned
+/// `TwoViewCorrespondence` slice) so the demo can link multi-frame feature
+/// tracks for bundle adjustment.
+#[cfg(feature = "image-io")]
+fn build_correspondences_with_indices(
+    a: &FeatureSet,
+    b: &FeatureSet,
+    matcher: &BruteForceMatcher,
+) -> (Vec<TwoViewCorrespondence>, Vec<(usize, usize)>) {
     if a.is_empty() || b.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let matches = matcher.match_descriptors(&a.descriptors, &b.descriptors);
-    let mut out = Vec::with_capacity(matches.len());
+    let mut correspondences = Vec::with_capacity(matches.len());
+    let mut index_pairs = Vec::with_capacity(matches.len());
     for m in matches {
         let (Some(prev_xy), Some(curr_xy)) = (
             a.keypoints.get(m.query_index),
@@ -372,12 +592,13 @@ fn build_correspondences(
         ) else {
             continue;
         };
-        out.push(TwoViewCorrespondence {
+        correspondences.push(TwoViewCorrespondence {
             previous_xy: Point2::new(prev_xy.x, prev_xy.y),
             current_xy: Point2::new(curr_xy.x, curr_xy.y),
         });
+        index_pairs.push((m.query_index, m.train_index));
     }
-    out
+    (correspondences, index_pairs)
 }
 
 #[cfg(feature = "image-io")]

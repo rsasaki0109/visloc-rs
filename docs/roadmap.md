@@ -37,10 +37,9 @@ Two goals should drive the next public demos:
   The demo value is showing that the system recognizes a previously visited
   place and exposes the candidate clearly.
 
-Current completion toward the Deep VO / loop-closure milestone is tracked in
-[progress.md](progress.md). Development updates should report that value as the
-milestone completion percentage, and it should only increase when backed by a
-runnable example, test, or documented API.
+Current Deep VO / loop-closure milestone details are tracked in
+[progress.md](progress.md). Development updates should stay grounded in
+runnable examples, tests, documented APIs, and measured public-data behavior.
 
 ## v0.1: Map-Based Visual Localization
 
@@ -161,6 +160,9 @@ Focus:
 - File-backed two-view match adapter that can produce a lightweight VO prior
 - Sequence demos that compare classical/localization-only tracking with deep-frontend priors
 - Failure diagnostics for low-texture, motion blur, and weak-match cases
+- Multi-frame BA refinement (`visloc_slam::refine_stereo_vo_with_ba`) layered
+  on top of the per-pair frontend, with per-track residual gating, optional
+  sliding-window mode, and an auto-skip for low-feature sequences
 
 Out of scope:
 
@@ -173,6 +175,11 @@ Exit criteria:
 - A deep or externally supplied VO frontend can provide pose priors without changing `VisualMap`, `Frame`, or localization APIs.
 - The same tracking pipeline can run with either classical features or learned frontend outputs.
 - Public demos make feature density, correspondence quality, and pose continuity visible.
+- ✓ On the local KITTI 00-10 / 260-frame SP/LG benchmark, the pure-Rust
+  deep stack (SP/LG features → confidence-weighted PnP RANSAC →
+  multi-frame BA refinement) beats the HOG/MutualSoftmax reference on
+  10 of 11 sequences, with aggregate `mean_t_rel` 1.3403 % (was
+  1.6624 %) and `mean_max_t_rel` 3.1354 % (was 3.7188 %).
 
 ## v0.6: Loop Closure Candidate Layer
 

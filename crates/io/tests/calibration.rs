@@ -87,6 +87,48 @@ fn rejects_non_positive_focal_length() {
     ));
 }
 
+#[test]
+fn stereo_baseline_recovers_kitti_value() {
+    // KITTI seq 00 calibration (truncated): P0 has zero baseline column,
+    // P1 has tx = -3.861448e+02 and shared fx = 7.188560e+02. Their
+    // baseline is `-tx / fx ≈ 0.5371` m, the published KITTI baseline.
+    let projections = parse_kitti_calibration_txt(
+        r#"
+        P0: 7.188560e+02 0 6.071928e+02 0 0 7.188560e+02 1.852157e+02 0 0 0 1 0
+        P1: 7.188560e+02 0 6.071928e+02 -3.861448e+02 0 7.188560e+02 1.852157e+02 0 0 0 1 0
+        "#,
+    )
+    .unwrap();
+    let p0 = &projections[0];
+    let p1 = &projections[1];
+    let baseline = p1
+        .stereo_baseline_from(p0)
+        .expect("P0/P1 are a rectified stereo pair");
+    // 386.1448 / 718.856 ≈ 0.537166 m (matches the documented KITTI 00
+    // stereo baseline of ~0.54 m).
+    assert!((baseline - 0.537166).abs() < 1.0e-4, "baseline {baseline}");
+}
+
+#[test]
+fn stereo_baseline_returns_none_when_intrinsics_differ() {
+    let projections = parse_kitti_calibration_txt(
+        "P0: 700 0 600 0 0 700 180 0 0 0 1 0\nP2: 720 0 605 -300 0 720 182 0 0 0 1 0\n",
+    )
+    .unwrap();
+    assert!(projections[1]
+        .stereo_baseline_from(&projections[0])
+        .is_none());
+}
+
+#[test]
+fn stereo_baseline_returns_none_when_columns_match() {
+    // Both P columns have zero tx → no baseline.
+    let projections = parse_kitti_calibration_txt("P0: 700 0 600 0 0 700 180 0 0 0 1 0\n").unwrap();
+    assert!(projections[0]
+        .stereo_baseline_from(&projections[0])
+        .is_none());
+}
+
 fn tempfile_dir() -> std::path::PathBuf {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

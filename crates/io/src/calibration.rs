@@ -43,6 +43,36 @@ impl KittiProjection {
         self.values[6]
     }
 
+    /// 4th column entries of the `3×4` projection matrix. For rectified
+    /// KITTI stereo, the right camera's projection is `K · [I | t]` where
+    /// `t = (-b, 0, 0)`, so this column equals `(-fx·b, 0, 0)` and the
+    /// reference (left) camera's column is `(0, 0, 0)`.
+    pub fn t(&self) -> (f64, f64, f64) {
+        (self.values[3], self.values[7], self.values[11])
+    }
+    pub fn tx(&self) -> f64 {
+        self.values[3]
+    }
+
+    /// Stereo baseline (in meters) between this projection and a
+    /// reference projection sharing intrinsics. Returns `None` when the
+    /// two projections don't share `fx` (i.e., aren't a rectified stereo
+    /// pair) or when this projection's baseline column is zero.
+    ///
+    /// For rectified KITTI stereo, `P1.t = (-fx · b, 0, 0)` so the
+    /// baseline magnitude is `b = -P1.tx / fx`. The reference is usually
+    /// `P0` (left camera) and the absolute value is returned.
+    pub fn stereo_baseline_from(&self, reference: &KittiProjection) -> Option<f64> {
+        if (self.fx() - reference.fx()).abs() > 1e-6 || self.fx() <= 0.0 {
+            return None;
+        }
+        let tx = self.tx() - reference.tx();
+        if tx.abs() < 1e-9 {
+            return None;
+        }
+        Some((-tx / self.fx()).abs())
+    }
+
     pub fn to_pinhole_camera(
         &self,
         camera_id: CameraId,

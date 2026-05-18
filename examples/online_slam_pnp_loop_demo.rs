@@ -73,6 +73,7 @@ fn main() {
                 min_shared_landmark_ratio_percent: 50,
                 ..LoopClosureConfig::default()
             },
+            ..OnlineSlamConfig::default()
         },
     );
     let _ = slam.process_frame(&first_frame, []);

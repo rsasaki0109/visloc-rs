@@ -15,7 +15,23 @@ categories.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+default = []
+# Phase-27: in-Rust SuperPoint ONNX inference. Off by default; pulls in
+# the `ort` crate (~50 MB of ONNX Runtime native libraries via the
+# `download-binaries` sub-feature) plus `ndarray`. The empirical signal
+# for the EuRoC bench is identical between this path and the Phase-26 #1
+# Python pre-export path (`scripts/export_superpoint_lightglue.py
+# --mono-dir` consumed via `SuperPointOfflineExtractor`); enable this
+# feature only when a single-binary deployment matters more than the
+# build-time cost. See docs/superpoint_onnx_runtime_plan.md for the
+# validation gate and crates/vision/src/features/superpoint_onnx.rs for
+# the implementation.
+onnx-inference = ["dep:ort", "dep:ndarray"]
+
 [dependencies]
 nalgebra = { workspace = true }
 rand = { workspace = true }
 visloc-core = { path = "../core", version = "0.1.0" }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ndarray = { version = "0.17", optional = true }

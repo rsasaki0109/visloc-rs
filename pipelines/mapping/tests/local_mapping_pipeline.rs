@@ -50,6 +50,7 @@ fn tracking_success(frame_id: u64, pose: Pose) -> TrackingResult {
             median_reprojection_error: 0.0,
             max_reprojection_error: 0.0,
         }),
+        covisibility_local_map_size: None,
     }
 }
 

@@ -50,6 +50,11 @@ thiserror = "1"
 [features]
 default = []
 image-io = ["visloc-io/image-io"]
+# Phase-27: pass-through to enable in-Rust SuperPoint ONNX inference
+# in the vision crate. Combine with `image-io` for the EuRoC demo
+# wiring (`--feature-extractor superpoint-onnx --superpoint-onnx-model
+# <path>`). See `docs/superpoint_onnx_runtime_plan.md`.
+onnx-inference = ["visloc-vision/onnx-inference"]
 
 [dependencies]
 nalgebra = { workspace = true }
@@ -80,4 +85,14 @@ required-features = ["image-io"]
 [[example]]
 name = "load_kitti_image_sequence"
 path = "examples/load_kitti_image_sequence.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "deep_localization_demo"
+path = "examples/deep_localization_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "euroc_online_slam_vi_image_demo"
+path = "examples/euroc_online_slam_vi_image_demo.rs"
 required-features = ["image-io"]

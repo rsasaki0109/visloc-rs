@@ -1,3 +1,7 @@
+pub mod mutual_softmax;
+
+pub use mutual_softmax::{MutualSoftmaxConfig, MutualSoftmaxMatcher};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescriptorMatch {
     pub query_index: usize,
@@ -5,6 +9,13 @@ pub struct DescriptorMatch {
     pub distance: f32,
     pub second_best_distance: Option<f32>,
     pub ratio: Option<f32>,
+    /// Optional per-match confidence in `(0, 1]`. Populated by matchers that
+    /// have a probabilistic interpretation of the match (e.g.
+    /// [`mutual_softmax::MutualSoftmaxMatcher`] sets it to the dual-softmax
+    /// confidence). Classical matchers leave it `None`. Downstream consumers
+    /// (RANSAC sample weighting, scanner candidate ranking) treat `None` as
+    /// "no signal" and fall back to uniform / unweighted behaviour.
+    pub confidence: Option<f32>,
 }
 
 pub trait Matcher {
@@ -79,6 +90,7 @@ impl Matcher for BruteForceMatcher {
                 distance,
                 second_best_distance: second_best.map(|(_, second_distance)| second_distance),
                 ratio: second_best.map(|(_, second_distance)| distance / second_distance),
+                confidence: None,
             });
         }
 

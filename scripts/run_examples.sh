@@ -19,6 +19,7 @@ online_slam_pose_graph_loop_demo
 online_slam_public_loop_demo
 online_slam_pnp_loop_demo
 pose_graph_robust_demo
+bundle_adjustment_demo
 read_two_view_matches_dummy
 two_view_match_vo_prior_dummy
 track_sequence_dummy

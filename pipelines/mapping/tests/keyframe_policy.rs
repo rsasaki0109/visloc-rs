@@ -36,6 +36,7 @@ fn success_result(frame_id: u64, event: TrackingEvent, center: Vector3<f64>) -> 
             median_reprojection_error: 0.0,
             max_reprojection_error: 0.0,
         }),
+        covisibility_local_map_size: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn failed_result(frame_id: u64) -> TrackingResult {
             0,
             0,
         ),
+        covisibility_local_map_size: None,
     }
 }
 
