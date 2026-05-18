@@ -27,17 +27,29 @@ The generated model registered 9 cameras and reconstructed 1,428 sparse 3D point
 - `docs/assets/south-building-query.jpg`: real query image from the public dataset subset.
 - `docs/assets/south-building-localization.png`: final frame of the public-data sequence demo, with the current real image, reliable 2D-3D matches, sparse SfM map, and localized camera path.
 - `docs/assets/south-building-localization.gif`: animated README sequence demo showing 9 real images localized frame by frame against the same reusable visual map.
-- `docs/assets/south-building-localization-rich.png`: feature-rich README variant built from the same final frame, with additional detected image-feature overlays and highlighted pose-link visualization for a clearer first impression.
-- `docs/assets/south-building-localization-rich.gif`: feature-rich animated README variant built from the same real-image sequence.
+- `docs/assets/south-building-deep-vs-classical-matches.jpg`: real classical-vs-deep COLMAP localization match overlay on the `P1180141 → P1180144` pair, produced by `examples/deep_localization_demo.rs --out-dir ...` + `scripts/render_deep_localization_matches.py`. Top row shows classical Corner+BF inliers (132); bottom row shows deep HogLike+MutualSoftmax inliers (289). The match lines and counts are exactly what the Rust pipeline reports — not a Python-side overlay.
 
-The feature-rich README variants are generated with:
+The deep-vs-classical comparison asset is generated with:
 
 ```sh
-python3 scripts/build_rich_readme_demo.py
+# 1. Run the demo with --out-dir to write correspondences.json + summary.txt
+cargo run --release --features image-io --example deep_localization_demo -- \
+    --root ~/datasets/south-building/south-building \
+    --map-image P1180141.JPG --query-image P1180144.JPG \
+    --out-dir target/deep_localization_real
+
+# 2. Render the side-by-side PNG/JPG
+python3 scripts/render_deep_localization_matches.py \
+    --correspondences target/deep_localization_real/correspondences.json \
+    --images-dir ~/datasets/south-building/south-building/images \
+    --output docs/assets/south-building-deep-vs-classical-matches.jpg \
+    --image-width 700 --max-lines 180
 ```
 
-This helper uses Python with Pillow and OpenCV. It is an asset-generation tool,
-not part of the Rust runtime or CI quality gate.
+The renderer needs only Pillow; no OpenCV. The numbers in the title bar
+(matches / inliers) are read straight from the demo's JSON output, so
+the asset cannot drift away from the actual pipeline behaviour without
+re-running both steps.
 
 The visualization is intentionally a lightweight README artifact. It is not a benchmark and does not claim full SLAM; it demonstrates the library direction in a readable way: Visual Localization first, using a reusable visual map and per-frame camera poses for a short image sequence.
 
