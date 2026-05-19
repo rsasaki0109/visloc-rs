@@ -144,24 +144,26 @@ mod inner {
             );
         }
 
-        let results = FRONTENDS
+        let mut results_with_keypoints: Vec<(ExtractorChoice, LocalizationResult, Vec<Point2<f64>>)> = Vec::with_capacity(FRONTENDS.len());
+        for frontend in FRONTENDS.iter() {
+            let mut query_keypoints: Vec<Point2<f64>> = Vec::new();
+            let result = run_pipeline(
+                frontend.label(),
+                camera,
+                map,
+                &pair.map_keyframe,
+                &pair.query_keyframe,
+                &pair.map_image,
+                &pair.query_image,
+                *frontend,
+                Some(&mut query_keypoints),
+            );
+            results_with_keypoints.push((*frontend, result, query_keypoints));
+        }
+        let results: Vec<(ExtractorChoice, LocalizationResult)> = results_with_keypoints
             .iter()
-            .map(|frontend| {
-                (
-                    *frontend,
-                    run_pipeline(
-                        frontend.label(),
-                        camera,
-                        map,
-                        &pair.map_keyframe,
-                        &pair.query_keyframe,
-                        &pair.map_image,
-                        &pair.query_image,
-                        *frontend,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
+            .map(|(frontend, result, _)| (*frontend, result.clone()))
+            .collect();
 
         println!();
         println!("== Summary (truth from COLMAP `images.txt`) ==");
@@ -178,8 +180,101 @@ mod inner {
                 &results,
             )?;
             println!("wrote {}/summary.txt", dir.display());
+            write_correspondences_json(
+                dir,
+                map_image_name,
+                query_image_name,
+                &pair.map_keyframe,
+                &results_with_keypoints,
+            )?;
+            println!("wrote {}/correspondences.json", dir.display());
         }
         Ok(())
+    }
+
+    /// Write a JSON file capturing per-frontend inlier matches so a
+    /// downstream renderer (see `scripts/render_deep_localization_matches.py`)
+    /// can draw real match lines between the map image and the query
+    /// image. The map-side 2D position of each inlier landmark is the
+    /// COLMAP observation's `xy` on the map keyframe (the same anchor
+    /// the pipeline used to attach descriptors).
+    fn write_correspondences_json(
+        dir: &Path,
+        map_image_name: &str,
+        query_image_name: &str,
+        map_keyframe: &Keyframe,
+        results: &[(ExtractorChoice, LocalizationResult, Vec<Point2<f64>>)],
+    ) -> std::io::Result<()> {
+        // Build a lookup from landmark_id -> (map_x, map_y) for fast
+        // per-inlier resolution. We pick the *first* observation seen
+        // for each id; in COLMAP a landmark has exactly one observation
+        // per source image, so the map_keyframe contributes one entry
+        // per landmark in any case.
+        let mut map_xy_by_id: std::collections::HashMap<u64, (f64, f64)> =
+            std::collections::HashMap::new();
+        for observation in &map_keyframe.observations {
+            map_xy_by_id
+                .entry(observation.landmark_id)
+                .or_insert((observation.xy.x, observation.xy.y));
+        }
+
+        let mut body = String::new();
+        body.push_str("{\n");
+        body.push_str(&format!("  \"map_image\": {:?},\n", map_image_name));
+        body.push_str(&format!("  \"query_image\": {:?},\n", query_image_name));
+        body.push_str("  \"frontends\": [\n");
+        for (idx, (frontend, result, query_keypoints)) in results.iter().enumerate() {
+            body.push_str("    {\n");
+            body.push_str(&format!("      \"id\": {:?},\n", frontend.id()));
+            body.push_str(&format!("      \"label\": {:?},\n", frontend.label()));
+            body.push_str(&format!("      \"match_count\": {},\n", result.match_count));
+            body.push_str(&format!("      \"inlier_count\": {},\n", result.inlier_count));
+            // For DeepMultiScale the synthetic landmark ids do not
+            // appear in `map_xy_by_id` (they are derived from
+            // `next_landmark_id`, not from `observation.landmark_id`),
+            // so we skip those inliers — the renderer just shows
+            // Classical vs Deep, which is the README A/B anyway.
+            let mut inlier_pairs: Vec<((f64, f64), (f64, f64))> = Vec::new();
+            for (query_idx, landmark_id) in result
+                .inlier_query_indices
+                .iter()
+                .zip(result.inlier_landmark_ids.iter())
+            {
+                let Some(query_xy) = query_keypoints.get(*query_idx) else {
+                    continue;
+                };
+                let Some(map_xy) = map_xy_by_id.get(landmark_id) else {
+                    continue;
+                };
+                inlier_pairs.push(((query_xy.x, query_xy.y), *map_xy));
+            }
+            body.push_str(&format!(
+                "      \"inlier_pairs_rendered\": {},\n",
+                inlier_pairs.len()
+            ));
+            body.push_str("      \"inlier_pairs\": [\n");
+            for (j, (qxy, mxy)) in inlier_pairs.iter().enumerate() {
+                body.push_str(&format!(
+                    "        {{\"query_xy\": [{:.3}, {:.3}], \"map_xy\": [{:.3}, {:.3}]}}",
+                    qxy.0, qxy.1, mxy.0, mxy.1
+                ));
+                if j + 1 < inlier_pairs.len() {
+                    body.push(',');
+                }
+                body.push('\n');
+            }
+            body.push_str("      ]\n");
+            body.push_str("    }");
+            if idx + 1 < results.len() {
+                body.push(',');
+            }
+            body.push('\n');
+        }
+        body.push_str("  ]\n");
+        body.push_str("}\n");
+
+        fs::create_dir_all(dir)?;
+        fs::write(dir.join("correspondences.json"), body)
     }
 
     struct LoadedPair {
@@ -317,6 +412,7 @@ mod inner {
                     &pair.map_image,
                     &pair.query_image,
                     choice,
+                    None,
                 );
                 let (translation_error_m, rotation_error_rad) =
                     match (result.success, result.pose.as_ref()) {
@@ -662,6 +758,13 @@ mod inner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// `query_keypoints_out`, when supplied, is populated with the
+    /// query keypoints actually fed into the pipeline (one entry per
+    /// described query feature, in the same order the pipeline sees
+    /// them). The caller uses it together with the
+    /// `LocalizationResult::inlier_query_indices` to look up the 2D
+    /// pixel position of each inlier match for the
+    /// correspondence-export rendering path.
     fn run_pipeline(
         label: &str,
         camera: &Camera,
@@ -671,6 +774,7 @@ mod inner {
         map_image: &GrayscaleImage,
         query_image: &GrayscaleImage,
         choice: ExtractorChoice,
+        query_keypoints_out: Option<&mut Vec<Point2<f64>>>,
     ) -> LocalizationResult {
         println!();
         println!("-- {} --", label);
@@ -799,6 +903,9 @@ mod inner {
             query_keypoints.len(),
             query_keyframe.frame.keypoints.len()
         );
+        if let Some(out) = query_keypoints_out {
+            *out = query_keypoints.clone();
+        }
         let query = QueryImage {
             camera: camera.clone(),
             keypoints: query_keypoints,

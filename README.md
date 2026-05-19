@@ -16,19 +16,27 @@
   <img src="https://img.shields.io/badge/status-research%20foundation-6f42c1" alt="Research foundation">
 </p>
 
+<p align="center">
+  <img src="docs/assets/south-building-deep-vs-classical-matches.jpg" alt="Real classical-vs-deep COLMAP South Building localization match overlay: classical pipeline 132 inliers, deep pipeline 289 inliers (+119%)" width="92%">
+  <br>
+  <em>Real Rust-pipeline output on the COLMAP South Building map+query pair `P1180141 → P1180144` —
+  classical Corner+BF (top, orange) lands 132 inliers; deep HogLike+MutualSoftmax (bottom, cyan)
+  lands 289 (+119 %). Reproduce with the demo command under <a href="#try-it">Try It</a>.</em>
+</p>
+
 <table>
   <tr>
-    <td width="50%">
-      <img src="docs/assets/south-building-localization-rich.gif" alt="Feature-rich COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, feature points, pose links, and localized camera path" width="100%">
-      <br>
-      <strong>COLMAP map localization</strong><br>
-      Real South Building images localized against a reusable sparse SfM map.
-    </td>
     <td width="50%">
       <img src="docs/assets/kitti_deep_vo.gif" alt="Deep stereo visual odometry on KITTI 00" width="100%">
       <br>
       <strong>KITTI stereo VO</strong><br>
-      Metric stereo visual odometry with confidence-weighted PnP and BA diagnostics.
+      Metric rectified-stereo VO with confidence-weighted PnP and BA diagnostics.
+    </td>
+    <td width="50%">
+      <img src="docs/assets/scanner_loop_closure_demo.png" alt="Synthetic scanner-driven loop closure" width="100%">
+      <br>
+      <strong>Loop-candidate recovery</strong><br>
+      Appearance scan, geometric verification, loop edge, and SE(3) pose-graph correction.
     </td>
   </tr>
 </table>
