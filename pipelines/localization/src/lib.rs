@@ -406,7 +406,14 @@ where
 {
     let mut descriptor_store = LandmarkDescriptorStore::new();
     if let Some(source_store) = provider.landmark_descriptor_store() {
-        for landmark_id in submap.landmarks.keys().copied() {
+        // Sort the submap landmark ids before iterating so the
+        // insertion order into the new `LandmarkDescriptorStore` is
+        // independent of the per-process `HashMap` SipHash seed. The
+        // store itself is a `HashMap` but downstream callers should
+        // not observe ordering differences across binary builds.
+        let mut landmark_ids: Vec<u64> = submap.landmarks.keys().copied().collect();
+        landmark_ids.sort();
+        for landmark_id in landmark_ids {
             if let Some(descriptor) = source_store.get(landmark_id) {
                 descriptor_store.insert(landmark_id, descriptor.to_vec());
             }
@@ -803,7 +810,21 @@ where
     where
         S2: CandidateSelector + Clone,
     {
-        self.run_localization(query, map, descriptor_store, candidate_selector)
+        self.run_localization(query, map, descriptor_store, candidate_selector, None)
+    }
+
+    pub fn localize_with_candidate_selector_and_descriptor_store_and_pose_prior<S2>(
+        &self,
+        query: &QueryImage,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        candidate_selector: S2,
+        pose_prior: Option<&Pose>,
+    ) -> LocalizationResult
+    where
+        S2: CandidateSelector + Clone,
+    {
+        self.run_localization(query, map, descriptor_store, candidate_selector, pose_prior)
     }
 
     pub fn localize_with_descriptor_store(
@@ -817,6 +838,7 @@ where
             map,
             descriptor_store,
             self.candidate_selector.clone(),
+            None,
         )
     }
 
@@ -826,6 +848,7 @@ where
         map: &VisualMap,
         descriptor_store: &LandmarkDescriptorStore,
         candidate_selector: S2,
+        pose_prior: Option<&Pose>,
     ) -> LocalizationResult
     where
         S2: CandidateSelector + Clone,
@@ -845,10 +868,27 @@ where
         let candidate_landmark_count = correspondence_set.candidate_landmark_count;
         let correspondence_count = correspondence_set.correspondences.len();
 
-        let Some(report) = self
-            .pose_estimator
-            .estimate(&correspondence_set.correspondences, &query.camera)
-        else {
+        let confidence_weights =
+            correspondence_confidence_weights(&correspondence_set.correspondences);
+        let pose_report = if pose_prior.is_some() {
+            self.pose_estimator.estimate_with_pose_prior_and_weights(
+                &correspondence_set.correspondences,
+                &query.camera,
+                pose_prior,
+                confidence_weights.as_deref(),
+            )
+        } else if let Some(weights) = confidence_weights.as_deref() {
+            self.pose_estimator.estimate_with_weights(
+                &correspondence_set.correspondences,
+                &query.camera,
+                weights,
+            )
+        } else {
+            self.pose_estimator
+                .estimate(&correspondence_set.correspondences, &query.camera)
+        };
+
+        let Some(report) = pose_report else {
             let result = LocalizationResult::failure(
                 LocalizationFailureReason::PoseEstimationFailed {
                     correspondence_count,
@@ -898,6 +938,24 @@ where
             result.rejected_by_quality_gate()
         }
     }
+}
+
+fn correspondence_confidence_weights(
+    correspondences: &[visloc_vision::pnp::Correspondence2D3D],
+) -> Option<Vec<f32>> {
+    let weights = correspondences
+        .iter()
+        .map(|correspondence| {
+            correspondence
+                .confidence
+                .filter(|confidence| confidence.is_finite() && *confidence > 0.0)
+                .unwrap_or(0.0)
+        })
+        .collect::<Vec<_>>();
+    weights
+        .iter()
+        .any(|weight| *weight > 0.0)
+        .then_some(weights)
 }
 
 impl<X, M, S, E> ImageLocalizer<X, LocalizationPipeline<M, S, E>>

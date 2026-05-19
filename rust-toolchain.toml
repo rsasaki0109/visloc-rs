@@ -1,0 +1,22 @@
+# Pinned toolchain for reproducible builds.
+#
+# Reason: Phase-26 #4 and Phase-{20..27} closeout (2026-05-19) observed that
+# bit-identical re-runs of the EuRoC V2_01 strict configuration produce
+# identical trajectories within a single binary, but a fresh `cargo build`
+# can shift the rigid ATE by O(10^-3 m). The leading hypothesis is rustc
+# codegen variation (instruction selection, FMA fusion, register
+# allocation) cascading through the PnP RANSAC floating-point comparisons.
+# Pinning the toolchain removes one major source of cross-build variance.
+#
+# See: docs/binary_determinism_findings.md, docs/phase_20_to_27_closeout.md
+# (§"Known issues — binary determinism").
+#
+# Bump policy: when raising the channel, re-run the V2_01 strict and
+# V1_01 strict baselines and update the closeout table with the new
+# numbers. Toolchain bumps are expected to perturb the third or fourth
+# decimal place of the ATE.
+
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

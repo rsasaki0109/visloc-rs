@@ -117,53 +117,186 @@ cargo run --release --features image-io \
 
 ## KITTI Loop-Closure Asset (README)
 
-The README hero (`docs/assets/kitti_loop_closure.{png,gif}`) is generated
-end-to-end from the **real-image** `online_slam_image_vo_loop_demo`
-pipeline on KITTI 00. Pipeline:
+The current README KITTI VO hero (`docs/assets/kitti_deep_vo.{png,gif}`) is
+generated from the deep-frontend metric stereo `online_slam_stereo_vo_kitti_demo`
+pipeline on a 260-frame KITTI 00 seq00 subset. Pipeline:
 
-1. Stream a stride-subsampled subset of KITTI odometry seq 00 `image_0`
+1. Stream a 260-frame stereo subset of KITTI odometry seq 00
    directly from the public S3 archive (no full 23 GB download required):
 
    ```sh
    python3 scripts/fetch_kitti_seq00_images.py \
-       --stride 4 --max-frames 1140 --workers 8 --also-fetch-poses \
-       --out-dir ~/datasets/kitti_seq00_subset
+       --stride 1 --max-frames 260 --workers 8 --also-fetch-poses \
+       --cameras image_0,image_1 \
+       --out-dir ~/datasets/kitti_seq00_stride1_subset
    ```
 
-2. Run the real-image VO + loop-closure example. Trim to where the loop
-   actually closes (KITTI 00 first revisits start within ~1 m at original
-   frame ~4447, i.e., subsample index 1111 at stride 4):
+2. Run the deep metric stereo VO path with the adopted leaderboard-oriented
+   settings:
 
    ```sh
-   cargo run --release --features image-io \
-       --example online_slam_image_vo_loop_demo -- \
-       --image-dir ~/datasets/kitti_seq00_subset/image_0 \
-       --calib    ~/datasets/kitti_seq00_subset/calib.txt \
-       --max-frames 1112 --frame-stride 1 \
-       --out-dir target/kitti_image_vo_loop_demo
+   scripts/run_kitti_deep_vo_smoke.sh --skip-fetch \
+       --out-dir target/kitti_deep_vo_refine_guard_pnp332_260 \
+       --max-frames 260 \
+       --deep-max-features 1500 \
+       --deep-descriptor-clip 0.2 \
+       --deep-temperature 25.0 \
+       --pnp-reprojection-threshold 3.32 \
+       --relative-pose-iterations 1000
    ```
 
-   Sample run on the 1112-frame subset: 195.9 mean RANSAC inliers per
-   sequential edge, loop edge KF 0 ↔ KF 1111 verified with 40 inliers,
-   translation PGO collapses cost 1.6 M → 36.1, SE(3) refine drives it
-   down to 0.02.
-
-3. Render the README asset. The Python helper applies start-anchored
-   similarity Procrustes alignment so the unit-scale monocular VO and
-   the corrected trajectory share a common metric frame with truth:
+3. Render the README asset:
 
    ```sh
-   python3 scripts/build_kitti_loop_asset.py --mode real-vo \
-       --input-dir target/kitti_image_vo_loop_demo \
-       --truth-kitti-poses ~/datasets/kitti_seq00_subset/poses_00.txt \
-       --gt-stride 4 --out-dir docs/assets
+   python3 scripts/build_kitti_loop_asset.py --mode stereo-vo \
+       --frontend-label "deep stereo VO" \
+       --input-dir target/kitti_deep_vo_refine_guard_pnp332_260_early_stop \
+       --out-dir docs/assets
    ```
 
-   Sample run: VO endpoint drift ~548 m (Procrustes-aligned), corrected
-   endpoint error ~5 m after a single loop edge.
+   Sample 260-frame run: raw deep VO mean/RMSE/max ATE
+   2.49 / 2.63 / 4.18 m, with KITTI-style 100 m windows
+   `t_rel = 0.675%` and `r_rel = 0.0146 deg/m`.
+   The demo also writes KITTI-style pose rows (`vo_poses.txt`,
+   `gt_poses.txt`) plus
+   `relative_pose_errors.csv` when GT is available, so per-frame
+   translation-magnitude and rotation drift can be inspected before the
+   leaderboard-style relative-motion evaluator is run on the same output:
+
+   ```sh
+   cargo run --example evaluate_kitti_odometry_benchmark -- \
+       target/kitti_deep_vo_refine_guard_pnp332_260/vo_poses.txt \
+       target/kitti_deep_vo_refine_guard_pnp332_260/gt_poses.txt
+   ```
+
+The older loop-closure hero (`docs/assets/kitti_loop_closure.{png,gif}`) can
+still be regenerated with `--mode stereo` from a 50-frame
+`--synthetic-loop-closure` run when the goal is to visualize the BA/PGO
+correction chain instead of raw VO quality.
+
+   Sample short-window run: 122 windows, mean `t_rel = 3.41%`,
+   mean `r_rel = 0.0447 deg/m`. Running without `--lengths` uses KITTI's
+   current public benchmark lengths (`100,200,...,800 m`); this 45.70 m
+   slice is too short for those windows, so it intentionally produces no
+   leaderboard-style segments unless you pass shorter development lengths.
+
+   For a longer seq00 smoke test, run the helper that fetches/reuses 260
+   stride-1 stereo frames, runs the same deep frontend with a smaller
+   relative-pose RANSAC budget, and writes both current public-length and 100 m
+   KITTI summaries:
+
+   ```sh
+   scripts/run_kitti_deep_vo_smoke.sh
+   ```
+
+   To avoid overfitting seq00 before performance tuning, use the training
+   benchmark runner to execute the same smoke path over KITTI odometry
+   sequences 00-10 and collect one sequence-level report:
+
+   ```sh
+   scripts/run_kitti_deep_vo_train_benchmark.sh --max-frames 260
+   ```
+
+   It writes `target/kitti_deep_vo_train_benchmark/summary.csv` and
+   `summary.md` with ATE, public-length `t_rel` / `r_rel`, fallback counts,
+   the worst relative-pose pair, the worst KITTI segment, and links to each
+   sequence's `slam_debug` report.
+
+   To compare a new benchmark run against a previous root, pass
+   `--compare-root <old-benchmark-root>`. The runner writes per-sequence
+   `slam_debug_compare.md` links into the consolidated `summary.md` whenever
+   both sequence directories are present:
+
+   ```sh
+   scripts/run_kitti_deep_vo_train_benchmark.sh \
+       --out-dir target/kitti_deep_vo_train_benchmark_new \
+       --compare-root target/kitti_deep_vo_train_benchmark
+   ```
+
+   Sample 260-frame seq00 run: GT length 183.11 m, raw deep VO mean/max ATE
+   2.49 / 4.18 m, and KITTI current public lengths report `t_rel = 0.675%`,
+   `r_rel = 0.0146 deg/m` over 97 windows with the leaderboard-oriented
+   3.32 px PnP reprojection gate, guarded PnP refinement, high-consensus
+   PnP early-stop, lazy Kabsch fallback, adaptive 60 m depth rescue,
+   conservative motion-scale band rescue, p75 scale-target rescue,
+   translation-direction rescue, rotation-spike rescue, and automatic stereo
+   translation refinement for fast low-consensus pairs. The rescue gates leave
+   the seq00 260-frame result unchanged; on the seq01 260-frame highway slice
+   they improve public-length `t_rel` from `20.230%` to `4.984%` and `r_rel`
+   from `0.0313` to `0.0203 deg/m`. The older
+   short-window development set
+   (`--lengths 5,10,50,100,150,200,250,300,350,400`) reports `t_rel =
+   1.97%`, `r_rel = 0.0438 deg/m` over 816 windows on the same run.
+   This is an open seq00 subset diagnostic, not a held-out KITTI
+   leaderboard submission.
+
+   The smoke script also writes a visual-SLAM debug bundle under
+   `target/kitti_stereo_vo_deep_260/slam_debug/`:
+
+   - `slam_debug_report.md` / `slam_debug_report.html`: headline ATE,
+     source counts, worst translation pairs, worst rotation pairs, weakest
+     inlier-ratio pairs, and worst KITTI segments.
+   - `slam_debug_summary.json`: machine-readable version of the same report.
+   - `slam_debug_worst_pairs.csv`: compact triage table with tags such as
+     `fallback`, `weak_pnp`, `scale`, and `rotation`.
+
+   You can regenerate the report for any existing stereo VO output directory:
+
+   ```sh
+   scripts/visual_slam_debug_report.py target/kitti_stereo_vo_deep_260
+   ```
+
+   To compare two runs, pass the older run as `--compare`. The candidate run is
+   the positional argument, so negative deltas on error metrics mean the
+   candidate improved:
+
+   ```sh
+   scripts/visual_slam_debug_report.py \
+       target/kitti_deep_vo_train_seq01_direction_rescue10 \
+       --compare target/kitti_deep_vo_train_seq01_scale_ratio080
+   ```
+
+   This additionally writes `slam_debug_compare.md`,
+   `slam_debug_compare.html`, `slam_debug_compare.json`, and
+   `slam_debug_compare_metrics.csv`, including KITTI segment-level deltas such
+   as `205→243: 35.949% → 4.933%`.
+
+   To run the long VO smoke and the revisit scanner smoke together, use:
+
+   ```sh
+   scripts/run_kitti_deep_stack_smoke.sh
+   ```
+
+   This writes `target/kitti_deep_stack_smoke/deep_stack_smoke_summary.txt`
+   and `target/kitti_deep_stack_smoke/deep_stack_smoke_summary.json` plus
+   separate `vo/` and `revisit/` output folders. The JSON summary exposes the
+   headline ATE, per-frame relative-pose diagnostics, mean/max KITTI
+   relative-motion, and strongest revisit-loop metrics for regression
+   comparisons.
 
 The Python helper is asset-generation only — not part of the Rust
 runtime or the CI gate.
+
+The helper still supports `--mode real-vo` for the older monocular
+`online_slam_image_vo_loop_demo` asset path, but the README hero uses the
+deep stereo output because it shows the deep-style matcher in a metrically
+meaningful VO → BA → PGO chain without Procrustes scale alignment.
+
+## KITTI Revisit Scanner Smoke
+
+The real-image appearance-loop smoke test uses the same deep-style frontend on
+two KITTI 00 slices: frames `0-49` from the start and frames `4500-4529` from
+the major revisit area. The helper fetches/reuses both `image_0` subsets, runs
+`kitti_revisit_scanner_demo`, requires a strongest loop pair, and writes
+`deep_revisit_smoke_summary.txt`:
+
+```sh
+scripts/run_kitti_deep_vo_revisit_smoke.sh --frontend deep
+```
+
+Sample run: 62 cross-segment candidates, strongest pair `(49, 4500)` with
+152 inliers, inlier ratio 0.749, and score 76574.96. Use `--frontend both` to
+rerun the documented classical-vs-deep comparison.
 
 ## Legacy GT-Pose-Based KITTI Asset
 

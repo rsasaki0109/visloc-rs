@@ -86,7 +86,20 @@ This is intended for sparse map reuse after local/online updates. The writer emi
 - generated image names use `image_<FRAME_ID>.jpg`
 - missing keypoint observations are written with `POINT3D_ID = -1`
 
-The writer does not emit binary COLMAP models and does not write feature descriptors.
+The writer does not write feature descriptors. For binary COLMAP output, use the 3DGS exporter below.
+
+## 3DGS / NeRF Bootstrap Export
+
+`visloc_io::colmap::write_colmap_text_model_for_3dgs` and `write_colmap_binary_model_for_3dgs` materialise the COLMAP triple (`cameras.{txt,bin}`, `images.{txt,bin}`, `points3D.{txt,bin}`) directly from a stereo VO output — `(camera, &[Pose], &[FeatureSet], &[Vec<StereoFeature>], image_name: Fn(usize) -> String)` — for the explicit purpose of bootstrapping a downstream 3D Gaussian Splatting / NeRF trainer (drop the directory into `nerfstudio ns-train splatfacto --data <dir>` or Inria gaussian-splatting's `convert.py --skip-matching` flow).
+
+The two writers are a symmetric pair so a single VO run can emit both formats from the same input. Concretely, any `(camera, image_name)` accepted by one writer is also accepted by the other:
+
+- `image_name(frame_idx)` is checked for characters that would corrupt either format — NUL terminates the binary NAME field early, and ASCII space / tab / LF / CR break the text format's space-separated tokens (LF would inject a spurious image record into `images.txt`).
+- `camera.model` must be a COLMAP-recognised name (`PINHOLE` / `SIMPLE_PINHOLE` / `SIMPLE_RADIAL` / `RADIAL` / `OPENCV` / `OPENCV_FISHEYE` / `FULL_OPENCV` / `FOV` / `SIMPLE_RADIAL_FISHEYE` / `RADIAL_FISHEYE` / `THIN_PRISM_FISHEYE`); the binary writer needs a numeric model id, and the text writer enforces the same set so unencodable `CameraModel::Unknown(name)` values are rejected up-front by both surfaces.
+
+Both writers return a structured `ColmapError::InvalidExportInput` for inputs they refuse rather than writing partial files.
+
+Cross-format equivalence (same input → maps that re-read to the same camera intrinsics, keyframe poses, and landmark world positions within `1e-9`) is pinned by `crates/io/tests/colmap_export.rs::write_colmap_text_and_binary_models_for_3dgs_emit_equivalent_maps`. Real-data parity on a small KITTI stride-4 subset is exercised by `scripts/run_kitti_3dgs_smoke.sh`, which runs `examples/inspect_colmap_text_model` and `examples/inspect_colmap_binary_model` against the live writer output and aborts on any per-format count disagreement.
 
 ## Validation
 
@@ -104,6 +117,6 @@ Use map validation before localization:
 - Feature extraction from COLMAP databases.
 - Bundle adjustment compatibility.
 - Distortion-aware projection during PnP.
-- Binary COLMAP writing.
+- Generic binary COLMAP writing from a `VisualMap`. The 3DGS-shaped binary writer (`write_colmap_binary_model_for_3dgs`) covers the bootstrap path but there is no `write_colmap_binary_model(&VisualMap, path)` mirror of the generic text writer yet (no caller needs it).
 
 These can be added later without changing the map-based localization boundary.

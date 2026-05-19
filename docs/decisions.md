@@ -24,6 +24,12 @@ UAV localization remains an important target, but it benefits more from GNSS, al
 
 The core library should remain domain-neutral. Automotive and UAV demos should exercise the same map, feature, matching, PnP, tracking, mapping, and fusion interfaces instead of creating domain-specific forks.
 
+## Visual-Inertial Initialisation Direction
+
+VI initialisation lands in stages, not in one large drop. The first stage is the **stationary-window flavour** (`VisualInertialInitializer`): detect a quiet leading IMU segment, then read out `(R_w←b, b_g, b_a)` in closed form, leaving yaw at zero because gravity alone cannot observe it. The first stage ships as a standalone module so callers can validate it against ground truth before the `OnlineSlamPipeline` integration lands. Pipeline integration is a separate, smaller change tracked in [vi_initialization_integration.md](vi_initialization_integration.md).
+
+The second stage — **motion-based initialisation** (ORB-SLAM3's "wait for translation, then run a motion-only optimisation") — recovers yaw and, on monocular pipelines, scale. It is intentionally scheduled after the stationary flavour because it depends on a hot visual frontend and on the keyframe / pose-graph plumbing already in place. Splitting the two stages keeps the first usable on every IMU-carrying dataset, even when no visual frontend is wired up yet, and lets the second be added without churning the public API around the first.
+
 ## Deep VO and Loop Closure Direction
 
 Visual odometry should be able to use deep frontends, but the core crates should not depend on one model runtime or ship large weights. Learned keypoints, descriptors, and matchers should enter through the existing feature-extractor and matcher traits, or through a future VO frontend trait that returns frame-to-frame pose priors.

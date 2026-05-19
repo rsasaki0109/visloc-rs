@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_shared_landmark_ratio_percent: 50,
                 ..LoopClosureConfig::default()
             },
+            ..OnlineSlamConfig::default()
         },
     );
 

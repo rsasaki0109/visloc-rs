@@ -190,20 +190,76 @@ where
         correspondences: &[TwoViewCorrespondence],
         camera: &Camera,
     ) -> Option<EssentialRansacReport> {
+        self.estimate_with_optional_weights(correspondences, camera, None)
+    }
+
+    /// PROSAC-style confidence-weighted variant: sort correspondences by
+    /// `weights` descending, then for iteration `k` draw the minimal
+    /// sample uniformly from the top-`m_k` correspondences where `m_k`
+    /// expands from `sample_size` to `correspondences.len()` over the
+    /// configured iteration budget. High-confidence matches anchor the
+    /// early iterations (so RANSAC finds a consensus quickly when the
+    /// weights are informative) and the worst candidates get evaluated
+    /// only late in the schedule. Falls back to the uniform-shuffle
+    /// behaviour when `weights` is `None` or all weights are zero.
+    pub fn estimate_with_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+        weights: &[f32],
+    ) -> Option<EssentialRansacReport> {
+        if weights.len() != correspondences.len() {
+            return self.estimate(correspondences, camera);
+        }
+        self.estimate_with_optional_weights(correspondences, camera, Some(weights))
+    }
+
+    fn estimate_with_optional_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+        weights: Option<&[f32]>,
+    ) -> Option<EssentialRansacReport> {
         let sample_size = self.estimator.minimum_correspondences();
         if correspondences.len() < sample_size {
             return None;
         }
 
+        // PROSAC ordering: sort indices by descending weight when weights
+        // are usable; otherwise fall back to natural order + uniform
+        // shuffle (the original behaviour).
+        let weighted = weights.filter(|w| w.iter().any(|&v| v.is_finite() && v > 0.0));
+        let mut sorted_indices: Vec<usize> = (0..correspondences.len()).collect();
+        if let Some(w) = weighted {
+            sorted_indices
+                .sort_by(|&a, &b| w[b].partial_cmp(&w[a]).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
         let mut rng = SmallRng::seed_from_u64(self.config.seed);
-        let mut indices: Vec<usize> = (0..correspondences.len()).collect();
         let mut best_inliers: Vec<usize> = Vec::new();
         let mut best_essential: Option<Matrix3<f64>> = None;
         let threshold_sq = self.config.sampson_threshold * self.config.sampson_threshold;
+        let n = correspondences.len();
+        let total_iters = self.config.iterations.max(1);
 
-        for _ in 0..self.config.iterations {
-            indices.shuffle(&mut rng);
-            let sample: Vec<TwoViewCorrespondence> = indices[..sample_size]
+        for iteration in 0..self.config.iterations {
+            // PROSAC shrinking sample-set: m_k expands linearly from
+            // `sample_size` to `n` over the iteration budget. When
+            // weights are absent this collapses to `m_k = n` and the
+            // shuffle samples uniformly across all correspondences.
+            let m_k = if weighted.is_some() {
+                let progress = iteration as f64 / total_iters as f64;
+                let m = sample_size as f64 + (n - sample_size) as f64 * progress;
+                (m.ceil() as usize).clamp(sample_size, n)
+            } else {
+                n
+            };
+
+            // Sample `sample_size` distinct indices uniformly from the
+            // top-m_k of the (possibly sorted) index list.
+            let mut subset: Vec<usize> = sorted_indices[..m_k].to_vec();
+            subset.shuffle(&mut rng);
+            let sample: Vec<TwoViewCorrespondence> = subset[..sample_size]
                 .iter()
                 .map(|&i| correspondences[i])
                 .collect();
@@ -285,7 +341,47 @@ where
         camera: &Camera,
         translation_scale: f64,
     ) -> Option<RelativePose> {
-        let report = self.ransac.estimate(correspondences, camera)?;
+        self.estimate_with_scale_and_optional_weights(
+            correspondences,
+            camera,
+            translation_scale,
+            None,
+        )
+    }
+
+    /// PROSAC-flavoured variant: order RANSAC sampling by `weights` (e.g.
+    /// matcher confidence) so high-confidence correspondences anchor early
+    /// iterations. Falls back to the uniform path when `weights` is the
+    /// wrong length / all-zero / all-non-finite.
+    pub fn estimate_with_scale_and_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+        translation_scale: f64,
+        weights: &[f32],
+    ) -> Option<RelativePose> {
+        self.estimate_with_scale_and_optional_weights(
+            correspondences,
+            camera,
+            translation_scale,
+            Some(weights),
+        )
+    }
+
+    fn estimate_with_scale_and_optional_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        camera: &Camera,
+        translation_scale: f64,
+        weights: Option<&[f32]>,
+    ) -> Option<RelativePose> {
+        let report = match weights {
+            Some(w) if w.len() == correspondences.len() => {
+                self.ransac
+                    .estimate_with_weights(correspondences, camera, w)
+            }
+            _ => self.ransac.estimate(correspondences, camera),
+        }?;
         let (rotation, translation_unit) =
             recover_relative_pose(&report.essential, correspondences, camera, &report.inliers)?;
         let se3 = SE3::new(rotation, translation_unit * translation_scale);
@@ -676,5 +772,105 @@ mod tests {
 
         let estimator = RelativePoseEstimator::default();
         assert!(estimator.estimate(&correspondences, &camera).is_none());
+    }
+
+    #[test]
+    fn weighted_ransac_recovers_pose_with_correctly_ordered_confidence_weights() {
+        // 12 inlier correspondences from a real essential geometry, plus
+        // 18 outlier correspondences sprinkled in random positions. The
+        // inliers carry confidence ~ 0.9, the outliers ~ 0.05. The
+        // weighted estimator must recover the same pose as the uniform
+        // path (this checks that the PROSAC ordering doesn't break clean
+        // inputs and that the confidence-driven priority correctly anchors
+        // the early iterations on the inliers).
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let mut correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let n_inliers = correspondences.len();
+        let mut weights: Vec<f32> = vec![0.9; n_inliers];
+
+        // Inject outlier correspondences whose pixel positions are
+        // shuffled — they cannot satisfy the true essential geometry.
+        let outlier_seeds = [
+            (50.0, 60.0, 200.0, 90.0),
+            (310.0, 100.0, 70.0, 410.0),
+            (250.0, 200.0, 100.0, 100.0),
+            (440.0, 330.0, 200.0, 60.0),
+            (90.0, 350.0, 320.0, 240.0),
+            (10.0, 410.0, 540.0, 430.0),
+            (280.0, 70.0, 110.0, 200.0),
+            (190.0, 30.0, 460.0, 160.0),
+            (370.0, 250.0, 50.0, 50.0),
+            (230.0, 410.0, 600.0, 100.0),
+            (100.0, 110.0, 300.0, 350.0),
+            (420.0, 90.0, 30.0, 220.0),
+            (150.0, 300.0, 480.0, 60.0),
+            (350.0, 150.0, 70.0, 320.0),
+            (60.0, 250.0, 230.0, 70.0),
+            (270.0, 380.0, 540.0, 290.0),
+            (390.0, 20.0, 90.0, 270.0),
+            (210.0, 170.0, 470.0, 380.0),
+        ];
+        for (px, py, cx, cy) in outlier_seeds {
+            correspondences.push(TwoViewCorrespondence::new(
+                nalgebra::Point2::new(px, py),
+                nalgebra::Point2::new(cx, cy),
+            ));
+            weights.push(0.05);
+        }
+        assert_eq!(weights.len(), correspondences.len());
+
+        let ransac = EssentialRansac {
+            estimator: EightPointEssentialMatrixEstimator::default(),
+            config: EssentialRansacConfig {
+                iterations: 64,
+                sampson_threshold: 5.0e-3,
+                seed: 11,
+            },
+        };
+
+        let weighted_report = ransac
+            .estimate_with_weights(&correspondences, &camera, &weights)
+            .expect("weighted RANSAC must recover a model from clean inliers");
+
+        // The first n_inliers correspondences are the geometric inliers;
+        // the weighted RANSAC should recover essentially all of them.
+        let recovered_inliers: usize = weighted_report
+            .inliers
+            .iter()
+            .filter(|&&i| i < n_inliers)
+            .count();
+        assert!(
+            recovered_inliers >= n_inliers - 1,
+            "weighted RANSAC should recover the geometric inliers, got {recovered_inliers}/{n_inliers}"
+        );
+        assert!(weighted_report.mean_sampson_error < 5.0e-3);
+    }
+
+    #[test]
+    fn weighted_ransac_falls_back_to_uniform_when_weights_are_all_zero() {
+        // Same clean correspondences, but all weights are zero — the
+        // PROSAC ordering should fall back to the uniform sampling path
+        // (no iteration_progress shrinking) and the recovery should
+        // match the unweighted estimate.
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let weights: Vec<f32> = vec![0.0; correspondences.len()];
+
+        let ransac = EssentialRansac::default();
+        let unweighted = ransac.estimate(&correspondences, &camera).unwrap();
+        let weighted = ransac
+            .estimate_with_weights(&correspondences, &camera, &weights)
+            .unwrap();
+        assert_eq!(unweighted.inliers, weighted.inliers);
     }
 }

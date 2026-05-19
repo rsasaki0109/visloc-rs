@@ -2,15 +2,76 @@
 //! Minimal online SLAM orchestration.
 //!
 //! This crate wires tracking and local mapping together. It is not a full SLAM
-//! system: it can report lightweight loop-closure candidates, but global pose
-//! graph optimization, dense mapping, and production bundle adjustment remain
-//! outside this MVP layer.
+//! system, but it now hosts both a sparse pose-graph optimizer (translation-
+//! only and full SE(3), with dense or sparse Cholesky solves) and a Schur-
+//! complement bundle adjustment that jointly refines poses and landmarks
+//! from 2D reprojection residuals.
+
+pub mod bundle;
+pub use bundle::{
+    BaConfig, BaError, BaIterationStats, BaObservation, BaResult, BaStereoObservation,
+    BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner, GravityPrior,
+    PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior,
+    PositionPriorObservation,
+};
+
+pub mod imu_preintegration;
+pub use imu_preintegration::{ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator};
+
+pub mod stereo_vo_ba;
+pub use stereo_vo_ba::{
+    parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
+    LandmarkInit, StereoVoBaConfig, StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement,
+    StereoVoBaImuSample, StereoVoBaRefinement,
+};
+
+pub mod online_stereo_vo_ba;
+pub use online_stereo_vo_ba::{
+    online_ba_imu_state_rows, write_online_ba_imu_state_csv, OnlineBaImuStateRow,
+    OnlineBaTriggerStats, OnlineStereoVoBa, OnlineStereoVoBaConfig,
+};
+
+pub mod online_slam_vi_ba;
+pub use online_slam_vi_ba::{
+    estimate_scale_from_factors, run_inertial_only_vi_ba, run_local_vi_ba,
+    run_viba2_inertial_with_scale, InertialOnlyViBaStats, KeyframeImuState,
+    OnlineSlamLocalBaConfig, OnlineSlamLocalBaState, OnlineSlamLocalBaStats, Viba2Config,
+    Viba2Stats,
+};
+
+pub mod vi_initializer;
+pub use vi_initializer::{
+    StationaryRejectionReason, VisualInertialInitializationResult, VisualInertialInitializer,
+    VisualInertialInitializerConfig,
+};
+
+pub mod vi_motion_initializer;
+pub use vi_motion_initializer::{
+    MotionBasedViInitializationResult, MotionBasedViInitializationStatus, MotionBasedViInitializer,
+    MotionBasedViInitializerConfig, MotionBasedViRejectionReason,
+};
+
+pub mod online_slam_vi_init;
+use online_slam_vi_init::OnlineSlamViInitState;
+pub use online_slam_vi_init::{
+    OnlineSlamConfigError, OnlineSlamViInitConfig, ViInitFallback, ViInitializationEvent,
+    ViInitializationStatus,
+};
+
+pub mod online_slam_motion_vi_init;
+use online_slam_motion_vi_init::OnlineSlamMotionViInitState;
+pub use online_slam_motion_vi_init::{
+    MotionViInitializationEvent, MotionViInitializationStatus, OnlineSlamMotionViInitConfig,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use nalgebra::{DMatrix, DVector, Matrix6, Point2, Point3, Vector6};
+use nalgebra::{
+    DMatrix, DVector, Matrix6, Point2, Point3, Quaternion, UnitQuaternion, Vector3, Vector6,
+};
+use nalgebra_sparse::{factorization::CscCholesky, CooMatrix, CscMatrix};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
@@ -21,16 +82,136 @@ use visloc_mapping::{
 use visloc_tracking::{
     ConstantPoseMotionModel, FrameLocalizer, MotionModel, Tracker, TrackingConfig, TrackingResult,
 };
+use visloc_vision::features::FeatureSet;
+use visloc_vision::matching::Matcher;
 use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 use visloc_vision::two_view::{
     EightPointEssentialMatrixEstimator, RelativePoseEstimator, TwoViewCorrespondence,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamConfig {
     pub apply_map_updates: bool,
     pub loop_closure: LoopClosureConfig,
+    /// Optional IMU pre-integration hookup. When `Some`, the pipeline accepts
+    /// inter-frame IMU samples via [`OnlineSlamPipeline::push_imu_measurement`]
+    /// and emits an [`ImuPreintegrationFactor`] connecting each adjacent
+    /// keyframe pair on [`OnlineSlamResult::imu_factor`]. The factor is a
+    /// hint for downstream pose-graph / BA consumers; the tracker and local
+    /// mapper themselves remain appearance-driven. `None` (the default)
+    /// keeps the pipeline IMU-free and side-effect-free for existing callers.
+    pub imu: Option<OnlineSlamImuConfig>,
+    /// Optional sliding-window local VI-BA refinement triggered every
+    /// `local_vi_ba.trigger_every` IMU factors. When `Some`, the
+    /// [`crate::OnlineSlamLocalBaState`] table tracks per-keyframe
+    /// `(velocity, bias)` slots and refines the trailing
+    /// [`crate::OnlineSlamLocalBaConfig::window_size`] keyframes' poses +
+    /// landmarks + velocities + biases against the staged
+    /// [`ImuPreintegrationFactor`] history. Requires `imu = Some(_)`;
+    /// when `imu` is `None` (no IMU factors are ever emitted), the local
+    /// VI-BA stage simply never fires. `None` (default) keeps the
+    /// pipeline appearance-only on the critical path.
+    pub local_vi_ba: Option<OnlineSlamLocalBaConfig>,
+    /// Optional auto-bootstrap stage that runs a
+    /// [`crate::VisualInertialInitializer`] over the pipeline's incoming
+    /// IMU stream and atomically promotes the recovered
+    /// `(R_w←b, b_g, b_a)` into the running pre-integrator + first
+    /// keyframe on the first frame where both (a) `try_initialize` has
+    /// succeeded and (b) a new keyframe was just registered. Requires
+    /// `imu = Some(_)`; the configuration is rejected on
+    /// [`OnlineSlamPipeline::new`] otherwise. `None` (default) keeps the
+    /// pipeline's bias / rotation seeds at whatever the caller passed on
+    /// [`OnlineSlamImuConfig`].
+    pub vi_init: Option<OnlineSlamViInitConfig>,
+    /// Optional motion-based VI init stage that fires AFTER `vi_init`
+    /// has succeeded and the body has moved enough to give the IMU
+    /// translational excitation. Refines per-keyframe
+    /// `(R_w←b, v_w, b_g, b_a)` against IMU pre-integration factors only
+    /// (VIBA1, stereo / known-scale path; see
+    /// [`crate::vi_motion_initializer`] for the contract). Requires both
+    /// `imu = Some(_)` and `vi_init = Some(_)`; otherwise the config is
+    /// rejected on [`OnlineSlamPipeline::new`]. `None` (default) keeps
+    /// the pipeline at the static-only flavour.
+    pub vi_motion_init: Option<OnlineSlamMotionViInitConfig>,
+    /// When `true`, IMU factors staged on newly-registered keyframes
+    /// flow downstream (into the local-VI-BA factor history and onto
+    /// `OnlineSlamResult.imu_factor`) even while the auto-bootstrap
+    /// stage is still active. The factors carry the caller's
+    /// placeholder bias linearisation; the BA's own Gauss-Newton
+    /// iterations are expected to absorb the resulting initial-cost
+    /// bump. The legacy contract (this flag `false`, the default)
+    /// silently discards every pre-promotion factor and reports the
+    /// count on `discarded_stale_factor_count` for audit, matching
+    /// the conservative "never feed BA a known-bad linearisation"
+    /// posture. Empirically on real EuRoC the strict path leaves
+    /// local-VI-BA with at most one trigger before the visual tracker
+    /// dies on the takeoff transient (see
+    /// [`docs/motion_based_vi_alignment.md`] §Phase-12); flipping the
+    /// flag recovers the 6–7 pre-promotion factors and lets the
+    /// Phase-9 mirror update the IMU motion model more frequently.
+    pub keep_pre_promotion_imu_factors: bool,
+    /// Optional online loop-closure refinement stage. When `Some`, the
+    /// pipeline mirrors registered keyframe poses into a running
+    /// [`PoseGraph`], runs an [`EssentialMatrixLoopClosureVerifier`] over
+    /// every candidate [`detect_loop_closure_candidates`] produces, and
+    /// fires [`PoseGraph::optimize_se3_iterative`] whenever
+    /// `trigger_every_new_constraints` fresh verified loop edges have
+    /// accumulated since the last solve. On a successful solve the
+    /// optimised keyframe poses are written back into
+    /// `self.map.keyframes`. `None` (the default) keeps loop-closure
+    /// candidates as the existing diagnostic-only output on
+    /// [`OnlineSlamResult::loop_closure_candidates`] and never modifies
+    /// the map.
+    pub pose_graph_refinement: Option<OnlineSlamLoopClosureRefinementConfig>,
+    /// Optional relocalization-on-tracker-death stage. When `Some`,
+    /// every `process_frame` call whose primary tracker attempt failed
+    /// (`tracking.localization.success == false`) re-runs PnP against
+    /// the full visual map via the stage's owned
+    /// [`LocalizationPipeline`]; if the recovered solution clears the
+    /// stage's acceptance gate, the pipeline overrides the tracker's
+    /// state via [`Tracker::accept_relocalization_result`] and treats
+    /// the frame as a successful `TrackingEvent::Relocalized` event.
+    /// `None` (default) keeps the legacy behaviour where a failed
+    /// `track_frame` call leaves the tracker dead until manual reset.
+    pub relocalization: Option<OnlineSlamRelocalizationConfig>,
+}
+
+impl OnlineSlamConfig {
+    /// Validate cross-field invariants the type system cannot express.
+    /// Called from [`OnlineSlamPipeline::new`]; surfaces the same error
+    /// type to callers that want to validate before constructing a
+    /// pipeline (e.g. CLI front-ends).
+    pub fn validate(&self) -> Result<(), OnlineSlamConfigError> {
+        if let Some(vi_init) = &self.vi_init {
+            let Some(imu) = &self.imu else {
+                return Err(OnlineSlamConfigError::ViInitRequiresImu);
+            };
+            if (vi_init.initializer.gravity_world - imu.gravity_world).norm() > 1.0e-12 {
+                return Err(OnlineSlamConfigError::GravityMismatch {
+                    imu_gravity_world: imu.gravity_world,
+                    vi_init_gravity_world: vi_init.initializer.gravity_world,
+                });
+            }
+        }
+        if let Some(motion) = &self.vi_motion_init {
+            if self.imu.is_none() {
+                return Err(OnlineSlamConfigError::MotionViInitRequiresImu);
+            }
+            if self.vi_init.is_none() {
+                return Err(OnlineSlamConfigError::MotionViInitRequiresStaticViInit);
+            }
+            if let Some(imu) = &self.imu {
+                if (motion.initializer.gravity_world - imu.gravity_world).norm() > 1.0e-12 {
+                    return Err(OnlineSlamConfigError::MotionGravityMismatch {
+                        imu_gravity_world: imu.gravity_world,
+                        motion_gravity_world: motion.initializer.gravity_world,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for OnlineSlamConfig {
@@ -38,7 +219,330 @@ impl Default for OnlineSlamConfig {
         Self {
             apply_map_updates: true,
             loop_closure: LoopClosureConfig::default(),
+            imu: None,
+            local_vi_ba: None,
+            vi_init: None,
+            vi_motion_init: None,
+            keep_pre_promotion_imu_factors: false,
+            pose_graph_refinement: None,
+            relocalization: None,
         }
+    }
+}
+
+/// Per-session configuration for the relocalization-on-tracker-death
+/// stage owned by [`OnlineSlamPipeline`]. When attached via
+/// [`OnlineSlamConfig::relocalization`], the pipeline owns a
+/// [`LocalizationPipeline`] and runs it against the full visual map on
+/// every frame whose primary `track_frame` call returned
+/// `localization.success == false`. The recovered solution is accepted
+/// when it clears every gate below; on acceptance, the tracker's history
+/// is overwritten via [`Tracker::accept_relocalization_result`] and the
+/// frame proceeds through the rest of `process_frame` as if primary
+/// tracking had succeeded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamRelocalizationConfig {
+    /// Minimum inlier count the recovered PnP solution must report. A
+    /// higher bar than the regular tracker's `min_inliers` makes sense
+    /// here because relocalization runs against the full map with no
+    /// motion prior, so false positives are costlier.
+    pub min_inliers: usize,
+    /// Minimum inlier ratio (inliers / correspondences) for acceptance.
+    pub min_inlier_ratio: f64,
+    /// Optional maximum mean reprojection error. `None` disables the
+    /// gate; `Some(px)` rejects solutions with mean reprojection error
+    /// strictly greater than `px`.
+    pub max_mean_reprojection_error: Option<f64>,
+    /// When `Some(radius_m)`, the recovery PnP is run with the
+    /// tracker's per-frame motion prior fed into the localizer's
+    /// pose-prior warm-start path
+    /// ([`FrameLocalizer::localize_frame_with_pose_prior_warm_start_and_descriptor_store`])
+    /// instead of the no-prior global PnP. The radius restricts the
+    /// candidate landmark set to those within `radius_m` of the
+    /// prior's camera centre. Empirically on EuRoC, the no-prior path
+    /// accepts < 0.3 % of recovery attempts because cross-attitude
+    /// HOG descriptor mismatch dominates; threading the prior in
+    /// short-circuits the matcher to the local landmark set + seeds
+    /// RANSAC with the predicted pose, both of which lift recovery
+    /// quality. `None` (default) preserves the no-prior global path
+    /// for callers who explicitly want full-map relocalization.
+    pub pose_prior_candidate_radius_meters: Option<f64>,
+    /// Phase-26 #4a active-frontier submap selection. When
+    /// `Some(window_keyframes)`, the recovery PnP's descriptor store
+    /// is restricted to landmarks observed by any of the most recent
+    /// `window_keyframes` keyframes in the map (i.e., the "active
+    /// frontier" of the current map). `None` (default) preserves the
+    /// Phase-23 #1 full-map behaviour. Empirically on EuRoC (Phase-26
+    /// #2), the full-map recovery PnP accepts wrong-scale solutions
+    /// because the candidate landmark set spans the whole map and
+    /// admits geometrically self-consistent recoveries far from the
+    /// true pose; the active-frontier window targets that failure
+    /// mode by excluding stale landmarks from consideration.
+    pub recent_keyframe_window: Option<usize>,
+    /// Phase-26 #4b post-acceptance IMU sanity check. When
+    /// `Some(max_translation_m)`, recoveries that otherwise pass the
+    /// inlier-count / inlier-ratio / reprojection-error gates are
+    /// further rejected if the recovered camera centre is more than
+    /// `max_translation_m` away from the tracker's per-frame motion
+    /// prior's camera centre. `None` (default) preserves the
+    /// Phase-23 #1 no-IMU-sanity-check behaviour. The motivation
+    /// (Phase-26 #2 V1_01 false-positive diagnosis): the recovery
+    /// PnP can land at a wrong-scale solution that is geometrically
+    /// self-consistent but inconsistent with the IMU's belief about
+    /// where the camera is; a coarse translation gate filters out
+    /// those drift-incompatible recoveries cheaply.
+    pub max_translation_from_imu_prediction_meters: Option<f64>,
+}
+
+impl Default for OnlineSlamRelocalizationConfig {
+    fn default() -> Self {
+        Self {
+            min_inliers: 20,
+            min_inlier_ratio: 0.3,
+            max_mean_reprojection_error: Some(8.0),
+            pose_prior_candidate_radius_meters: None,
+            recent_keyframe_window: None,
+            max_translation_from_imu_prediction_meters: None,
+        }
+    }
+}
+
+/// Running state for the relocalization-on-tracker-death stage. Lives
+/// on [`OnlineSlamPipeline`] when [`OnlineSlamConfig::relocalization`]
+/// is `Some`. Owns a dedicated [`LocalizationPipeline`] with default
+/// thresholds so the relocalization attempt is independent of the
+/// tracker's own (typically much stricter, motion-prior-dependent)
+/// localization pipeline.
+#[derive(Debug, Clone)]
+pub struct OnlineSlamRelocalizationState {
+    pub config: OnlineSlamRelocalizationConfig,
+    pub localizer: LocalizationPipeline,
+    pub trigger_count: u64,
+    pub success_count: u64,
+    pub last_attempt_frame_id: Option<u64>,
+    pub last_success_frame_id: Option<u64>,
+}
+
+impl PartialEq for OnlineSlamRelocalizationState {
+    fn eq(&self, other: &Self) -> bool {
+        // The owned `LocalizationPipeline` does not implement `PartialEq`
+        // (it carries closures + RANSAC RNG state). Compare only the
+        // observable counters + config, matching the convention used by
+        // [`OnlineSlamImuState`] / [`OnlineSlamLocalBaState`].
+        self.config == other.config
+            && self.trigger_count == other.trigger_count
+            && self.success_count == other.success_count
+            && self.last_attempt_frame_id == other.last_attempt_frame_id
+            && self.last_success_frame_id == other.last_success_frame_id
+    }
+}
+
+impl OnlineSlamRelocalizationState {
+    fn new(config: OnlineSlamRelocalizationConfig) -> Self {
+        Self {
+            config,
+            localizer: LocalizationPipeline::default(),
+            trigger_count: 0,
+            success_count: 0,
+            last_attempt_frame_id: None,
+            last_success_frame_id: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.trigger_count = 0;
+        self.success_count = 0;
+        self.last_attempt_frame_id = None;
+        self.last_success_frame_id = None;
+    }
+}
+
+/// Per-frame outcome of the relocalization-on-tracker-death stage.
+/// Exposed on [`OnlineSlamResult::relocalization`]; `Some` only on
+/// frames where the stage actually attempted a recovery (i.e. the
+/// primary tracker returned `success == false` AND the stage was
+/// enabled).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OnlineSlamRelocalizationStats {
+    /// `true` iff the stage ran its localizer this frame.
+    pub attempted: bool,
+    /// `true` iff the recovered solution cleared every gate AND the
+    /// tracker accepted it via `accept_relocalization_result`.
+    pub succeeded: bool,
+    /// Inlier count reported by the recovery PnP solve. `0` when the
+    /// localizer returned no solution at all (e.g. zero correspondences).
+    pub inlier_count: usize,
+    /// Inlier ratio reported by the recovery PnP solve.
+    pub inlier_ratio: f64,
+    /// Total correspondence count the recovery PnP solve consumed.
+    pub correspondence_count: usize,
+    /// Mean reprojection error reported by the recovery PnP solve.
+    pub mean_reprojection_error: Option<f64>,
+}
+
+/// Per-session configuration for the online loop-closure + pose-graph
+/// refinement stage owned by [`OnlineSlamPipeline`]. When attached via
+/// [`OnlineSlamConfig::pose_graph_refinement`], the pipeline maintains a
+/// running [`PoseGraph`] mirror of `map.keyframes`, runs an
+/// [`EssentialMatrixLoopClosureVerifier`] on every candidate emitted by
+/// [`detect_loop_closure_candidates`], and folds verified
+/// [`LoopClosureConstraint`]s into the graph. When
+/// `trigger_every_new_constraints` new verified edges have accumulated
+/// since the last solve, [`PoseGraph::optimize_se3_iterative`] runs and
+/// the optimised keyframe poses are written back into the map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamLoopClosureRefinementConfig {
+    /// Camera intrinsics passed to the loop-closure verifier when it
+    /// builds essential-matrix correspondences. Must match the camera
+    /// that produced the keyframes' keypoints. Single-monocular for
+    /// now — per-frame intrinsics are out of scope for the first
+    /// version of this stage.
+    pub camera: Camera,
+    /// Thresholds (`min_inliers`, `min_inlier_ratio`,
+    /// `max_mean_sampson_error`, `default_translation_scale`) handed to
+    /// the [`EssentialMatrixLoopClosureVerifier`] every frame.
+    pub verifier_config: LoopClosureVerifierConfig,
+    /// SE(3) Gauss-Newton settings consumed by
+    /// [`PoseGraph::optimize_se3_iterative`] when the trigger fires.
+    pub pose_graph_config: PoseGraphSe3Config,
+    /// Minimum number of *new* verified loop-closure constraints that
+    /// must accumulate before a fresh pose-graph solve runs. Clamped to
+    /// at least `1`; `1` runs PGO on every accepted loop edge, higher
+    /// values batch.
+    pub trigger_every_new_constraints: usize,
+}
+
+/// Running state for the online loop-closure + pose-graph refinement
+/// stage. Lives on [`OnlineSlamPipeline`] when
+/// [`OnlineSlamConfig::pose_graph_refinement`] is `Some`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamLoopClosureRefinementState {
+    pub config: OnlineSlamLoopClosureRefinementConfig,
+    /// Running pose-graph mirror. One node per registered keyframe, one
+    /// sequential edge between every consecutive pair of registered
+    /// keyframes (in insertion order), and one loop-closure edge per
+    /// verified [`LoopClosureConstraint`].
+    pub graph: PoseGraph,
+    /// Keyframe ids in the order they were first registered. The first
+    /// entry is the [`PoseGraph::anchor`]; subsequent entries form the
+    /// sequential edge chain.
+    pub keyframe_order: Vec<u64>,
+    /// All verified loop-closure constraints accumulated to date.
+    pub verified_constraints: Vec<LoopClosureConstraint>,
+    /// New verified constraints since the last successful PGO trigger.
+    /// Reset to `0` after each fired solve.
+    pub pending_since_last_trigger: usize,
+    /// Total number of [`PoseGraph::optimize_se3_iterative`] calls fired
+    /// by the pipeline since construction (counts both converged and
+    /// not-converged solves; mismatches between the two go to
+    /// `OnlineSlamLoopClosureRefinementStats::pose_graph_result`).
+    pub trigger_count: u64,
+}
+
+impl OnlineSlamLoopClosureRefinementState {
+    fn new(config: OnlineSlamLoopClosureRefinementConfig) -> Self {
+        Self {
+            config,
+            graph: PoseGraph::new(),
+            keyframe_order: Vec::new(),
+            verified_constraints: Vec::new(),
+            pending_since_last_trigger: 0,
+            trigger_count: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.graph = PoseGraph::new();
+        self.keyframe_order.clear();
+        self.verified_constraints.clear();
+        self.pending_since_last_trigger = 0;
+        self.trigger_count = 0;
+    }
+}
+
+/// Per-frame outcome of the online loop-closure + pose-graph
+/// refinement stage. Exposed on
+/// [`OnlineSlamResult::pose_graph_refinement`] and used by the demos to
+/// audit verifier acceptance + PGO trigger cadence.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OnlineSlamLoopClosureRefinementStats {
+    /// Number of [`LoopClosureCandidate`]s fed through the verifier
+    /// this `process_frame` call.
+    pub verified_candidate_count: usize,
+    /// Number of candidates the verifier accepted this frame. Note that
+    /// only candidates whose `query_frame_id` matches the keyframe
+    /// registered this frame are eligible — a verified candidate for a
+    /// frame that did not become a keyframe is silently dropped because
+    /// the running graph has no node for it.
+    pub accepted_count: usize,
+    /// `Some` when [`PoseGraph::optimize_se3_iterative`] fired on this
+    /// frame; `None` when no new constraint arrived or the new-
+    /// constraint trigger threshold was not yet reached.
+    pub pose_graph_result: Option<PoseGraphSe3Result>,
+    /// Number of `map.keyframes[id].frame.pose` slots overwritten with
+    /// the optimised pose after PGO. Zero unless `pose_graph_result.is_some()`.
+    pub keyframes_updated: usize,
+}
+
+/// Per-session IMU integration parameters consumed by
+/// [`OnlineSlamPipeline`] when [`OnlineSlamConfig::imu`] is `Some`. Gravity
+/// is in the world frame (KITTI y-down: `(0, 9.81, 0)`); biases are the
+/// linearisation point for the pre-integrator's first-order bias-Jacobians;
+/// the three `weight_*` fields populate the corresponding
+/// [`ImuPreintegrationFactor`] weights so a downstream BA can consume the
+/// emitted factor without further configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamImuConfig {
+    pub gravity_world: Vector3<f64>,
+    pub bias_gyro: Vector3<f64>,
+    pub bias_acc: Vector3<f64>,
+    pub weight_position: f64,
+    pub weight_velocity: f64,
+    pub weight_rotation: f64,
+}
+
+impl Default for OnlineSlamImuConfig {
+    fn default() -> Self {
+        Self {
+            gravity_world: Vector3::new(0.0, 9.81, 0.0),
+            bias_gyro: Vector3::zeros(),
+            bias_acc: Vector3::zeros(),
+            weight_position: 1.0,
+            weight_velocity: 1.0,
+            weight_rotation: 1.0,
+        }
+    }
+}
+
+/// Internal IMU running state attached to an [`OnlineSlamPipeline`] when
+/// [`OnlineSlamConfig::imu`] is `Some`. Carries the running pre-integrator,
+/// the `keyframe_id_from` of the open integration window (`None` before the
+/// first keyframe is registered), and any factor staged by `process_frame`
+/// for the caller to take via [`OnlineSlamPipeline::take_pending_imu_factor`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamImuState {
+    pub config: OnlineSlamImuConfig,
+    pub preintegrator: ImuPreintegrator,
+    pub last_keyframe_id: Option<u64>,
+    pub pending_factor: Option<ImuPreintegrationFactor>,
+}
+
+impl OnlineSlamImuState {
+    fn new(config: OnlineSlamImuConfig) -> Self {
+        let preintegrator = ImuPreintegrator::new_with_bias(config.bias_gyro, config.bias_acc);
+        Self {
+            config,
+            preintegrator,
+            last_keyframe_id: None,
+            pending_factor: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.preintegrator =
+            ImuPreintegrator::new_with_bias(self.config.bias_gyro, self.config.bias_acc);
+        self.last_keyframe_id = None;
+        self.pending_factor = None;
     }
 }
 
@@ -169,6 +673,21 @@ pub trait LoopClosureVerifier {
         correspondences: &[TwoViewCorrespondence],
         camera: &Camera,
     ) -> LoopClosureVerification;
+
+    /// Confidence-aware variant: when `weights[i]` is high, correspondence
+    /// `i` is preferred during RANSAC sampling (PROSAC-style). Default
+    /// implementation falls back to the unweighted `verify` so existing
+    /// implementors don't need to change. Verifiers backed by RANSAC can
+    /// override to thread weights into `EssentialRansac::estimate_with_weights`.
+    fn verify_with_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        weights: Option<&[f32]>,
+        camera: &Camera,
+    ) -> LoopClosureVerification {
+        let _ = weights;
+        self.verify(correspondences, camera)
+    }
 }
 
 /// Geometric verifier that runs the classical essential-matrix RANSAC from
@@ -195,6 +714,15 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
         correspondences: &[TwoViewCorrespondence],
         camera: &Camera,
     ) -> LoopClosureVerification {
+        self.verify_with_weights(correspondences, None, camera)
+    }
+
+    fn verify_with_weights(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        weights: Option<&[f32]>,
+        camera: &Camera,
+    ) -> LoopClosureVerification {
         let correspondence_count = correspondences.len();
         let minimum = self
             .estimator
@@ -218,11 +746,22 @@ impl LoopClosureVerifier for EssentialMatrixLoopClosureVerifier {
             };
         }
 
-        let Some(relative_pose) = self.estimator.estimate_with_scale(
-            correspondences,
-            camera,
-            self.config.default_translation_scale,
-        ) else {
+        let relative_pose = match weights {
+            Some(w) if w.len() == correspondences.len() => {
+                self.estimator.estimate_with_scale_and_weights(
+                    correspondences,
+                    camera,
+                    self.config.default_translation_scale,
+                    w,
+                )
+            }
+            _ => self.estimator.estimate_with_scale(
+                correspondences,
+                camera,
+                self.config.default_translation_scale,
+            ),
+        };
+        let Some(relative_pose) = relative_pose else {
             return LoopClosureVerification {
                 verified: false,
                 correspondence_count,
@@ -439,6 +978,7 @@ pub fn correspondences_2d3d_for_loop_candidate(
         correspondences.push(Correspondence2D3D {
             point2d: *query_xy,
             point3d: landmark.position,
+            confidence: None,
         });
     }
     correspondences
@@ -521,6 +1061,27 @@ impl LoopClosureConstraint {
             score: verification.score,
         })
     }
+
+    /// Lift this loop-closure edge into a [`PairwisePoseFactor`] so it can be
+    /// added to a [`BundleAdjustment`] alongside reprojection residuals.
+    ///
+    /// The relative pose `T_rel = T_to · T_fromⁱ` (the constraint's
+    /// `relative_pose`) is used verbatim as the BA measurement; `weight` is
+    /// `1 / σ²` for an isotropic SE(3) measurement noise σ. A robust default is
+    /// to scale from the verifier's inlier count, e.g.
+    /// `weight = (inlier_count as f64) * base_weight`, but the choice is left
+    /// to the caller because verifier output differs by backend (essential
+    /// matrix vs PnP vs hybrid).
+    pub fn to_pairwise_pose_factor(&self, weight: f64) -> PairwisePoseFactor {
+        PairwisePoseFactor {
+            keyframe_id_from: self.from_keyframe_id,
+            keyframe_id_to: self.to_keyframe_id,
+            measurement: Pose {
+                world_to_camera: self.relative_pose.clone(),
+            },
+            weight,
+        }
+    }
 }
 
 /// Convenience helper that builds a constraint per verified candidate. Keeps
@@ -533,6 +1094,56 @@ pub fn loop_closure_constraints_from_candidates(
         .iter()
         .filter_map(LoopClosureConstraint::from_verified_candidate)
         .collect()
+}
+
+/// Convert a slice of verified [`LoopClosureConstraint`]s into BA-ready
+/// [`PairwisePoseFactor`]s, all sharing the same scalar `weight`. Convenience
+/// wrapper for the common case where every loop edge is treated as
+/// equally-informative. For per-edge weighting (e.g. scaling by
+/// `inlier_count`), call [`LoopClosureConstraint::to_pairwise_pose_factor`]
+/// directly.
+pub fn pairwise_pose_factors_from_loop_closures(
+    constraints: &[LoopClosureConstraint],
+    weight: f64,
+) -> Vec<PairwisePoseFactor> {
+    constraints
+        .iter()
+        .map(|c| c.to_pairwise_pose_factor(weight))
+        .collect()
+}
+
+/// Run `verify_one` on every candidate whose `matched_keyframe_id` still
+/// resolves in `map`. Candidates without a matching keyframe are silently
+/// skipped (the matched keyframe may have been deleted between candidate
+/// generation and verification). When `verify_one` returns `Some`, the
+/// candidate is mutated in place: `geometrically_verified` is set to
+/// `LoopClosureVerification::verified` and `verification` is set to the
+/// returned struct. `None` skips writing.
+///
+/// This is the shared iteration shell between
+/// [`verify_loop_closure_candidates`],
+/// [`verify_loop_closure_candidates_pnp`], and
+/// [`verify_loop_closure_candidates_hybrid`]. Each public wrapper supplies a
+/// closure that builds correspondences and calls its backend; this helper
+/// owns the candidate iteration and write-back so the public API stays
+/// uniform when new backends are added.
+fn verify_each_candidate<F>(
+    candidates: &mut [LoopClosureCandidate],
+    map: &VisualMap,
+    mut verify_one: F,
+) where
+    F: FnMut(&Keyframe) -> Option<LoopClosureVerification>,
+{
+    for candidate in candidates.iter_mut() {
+        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
+            continue;
+        };
+        let Some(verification) = verify_one(keyframe) else {
+            continue;
+        };
+        candidate.geometrically_verified = verification.verified;
+        candidate.verification = Some(verification);
+    }
 }
 
 /// Run `verifier` on every supplied candidate, mutating each
@@ -550,20 +1161,15 @@ pub fn verify_loop_closure_candidates<V>(
 ) where
     V: LoopClosureVerifier,
 {
-    for candidate in candidates.iter_mut() {
-        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
-            continue;
-        };
+    verify_each_candidate(candidates, map, |keyframe| {
         let correspondences = correspondences_for_loop_candidate(
             current_frame,
             &tracking.localization.inlier_query_indices,
             &tracking.localization.inlier_landmark_ids,
             keyframe,
         );
-        let verification = verifier.verify(&correspondences, camera);
-        candidate.geometrically_verified = verification.verified;
-        candidate.verification = Some(verification);
-    }
+        Some(verifier.verify(&correspondences, camera))
+    });
 }
 
 /// Run a PnP-based [`PnPLoopClosureVerifier`] on every supplied candidate.
@@ -582,13 +1188,8 @@ pub fn verify_loop_closure_candidates_pnp<R>(
 ) where
     R: RobustPoseEstimator,
 {
-    for candidate in candidates.iter_mut() {
-        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
-            continue;
-        };
-        let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
-            continue;
-        };
+    verify_each_candidate(candidates, map, |keyframe| {
+        let keyframe_pose = keyframe.frame.pose.as_ref()?;
         let correspondences = correspondences_2d3d_for_loop_candidate(
             current_frame,
             &tracking.localization.inlier_query_indices,
@@ -596,10 +1197,8 @@ pub fn verify_loop_closure_candidates_pnp<R>(
             keyframe,
             map,
         );
-        let verification = verifier.verify(&correspondences, keyframe_pose, camera);
-        candidate.geometrically_verified = verification.verified;
-        candidate.verification = Some(verification);
-    }
+        Some(verifier.verify(&correspondences, keyframe_pose, camera))
+    });
 }
 
 /// Configuration for [`HybridLoopClosureVerifier`]: maximum allowed
@@ -679,13 +1278,8 @@ pub fn verify_loop_closure_candidates_hybrid<R>(
 ) where
     R: RobustPoseEstimator,
 {
-    for candidate in candidates.iter_mut() {
-        let Some(keyframe) = map.keyframes.get(&candidate.matched_keyframe_id) else {
-            continue;
-        };
-        let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
-            continue;
-        };
+    verify_each_candidate(candidates, map, |keyframe| {
+        let keyframe_pose = keyframe.frame.pose.as_ref()?;
         let two_view = correspondences_for_loop_candidate(
             current_frame,
             &tracking.localization.inlier_query_indices,
@@ -701,10 +1295,144 @@ pub fn verify_loop_closure_candidates_hybrid<R>(
         );
         let essential_v = verifier.essential.verify(&two_view, camera);
         let pnp_v = verifier.pnp.verify(&pnp_corrs, keyframe_pose, camera);
-        let combined = combine_hybrid_verifications(&essential_v, &pnp_v, &verifier.config);
-        candidate.geometrically_verified = combined.verified;
-        candidate.verification = Some(combined);
+        Some(combine_hybrid_verifications(
+            &essential_v,
+            &pnp_v,
+            &verifier.config,
+        ))
+    });
+}
+
+/// One keyframe's appearance in a pairwise loop-closure scan: the frame id is
+/// what the produced [`LoopClosureCandidate`] uses for `query_frame_id` /
+/// `matched_keyframe_id`. The keypoint and descriptor slices are typically
+/// borrowed from a [`FeatureSet`] (see [`PairwiseKeyframeView::from_features`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PairwiseKeyframeView<'a> {
+    pub frame_id: u64,
+    pub keypoints: &'a [Point2<f64>],
+    pub descriptors: &'a [Vec<f32>],
+}
+
+impl<'a> PairwiseKeyframeView<'a> {
+    pub fn from_features(frame_id: u64, features: &'a FeatureSet) -> Self {
+        Self {
+            frame_id,
+            keypoints: &features.keypoints,
+            descriptors: &features.descriptors,
+        }
     }
+}
+
+/// Configuration for [`scan_pairwise_loop_closures`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PairwiseLoopClosureScannerConfig {
+    /// Minimum frame-id gap between two keyframes for a pair to be eligible.
+    /// Pairs `(i, j)` with `keyframes[j].frame_id - keyframes[i].frame_id <
+    /// min_keyframe_id_gap` are skipped, so adjacent keyframes (which share
+    /// most of their tracks) are never confused for loops.
+    pub min_keyframe_id_gap: u64,
+    /// Minimum number of descriptor matches a pair needs before its
+    /// correspondences are even handed to the verifier. Cheap reject for
+    /// keyframes whose appearance has no overlap.
+    pub min_matches: usize,
+}
+
+impl Default for PairwiseLoopClosureScannerConfig {
+    fn default() -> Self {
+        Self {
+            min_keyframe_id_gap: 20,
+            min_matches: 30,
+        }
+    }
+}
+
+/// Walk every keyframe pair `(i, j)` with `i < j` and a sufficient frame-id
+/// gap, brute-force match descriptors, and run the verifier on the resulting
+/// 2D-2D correspondences. Returns one [`LoopClosureCandidate`] per accepted
+/// pair, with `verification` populated and `geometrically_verified = true`.
+/// Rejected pairs are dropped (vs the `verify_loop_closure_candidates_*`
+/// helpers which mutate caller-supplied candidates in place); this routine is
+/// meant for the "I have a list of keyframes and want loop *detection*, not
+/// just verification" case.
+///
+/// `query_frame_id` is the later keyframe and `matched_keyframe_id` is the
+/// earlier one — the same convention `LoopClosureConstraint` builders use.
+/// `shared_landmark_count` and `keyframe_observation_count` are filled with
+/// inlier and total-match counts respectively (no map is consulted), so the
+/// candidate is ready for [`LoopClosureConstraint::from_verified_candidate`].
+pub fn scan_pairwise_loop_closures<M, V>(
+    keyframes: &[PairwiseKeyframeView],
+    matcher: &M,
+    verifier: &V,
+    camera: &Camera,
+    config: &PairwiseLoopClosureScannerConfig,
+) -> Vec<LoopClosureCandidate>
+where
+    M: Matcher,
+    V: LoopClosureVerifier,
+{
+    let mut out = Vec::new();
+    for i in 0..keyframes.len() {
+        for j in (i + 1)..keyframes.len() {
+            let from = &keyframes[i];
+            let to = &keyframes[j];
+            let gap = to.frame_id.saturating_sub(from.frame_id);
+            if gap < config.min_keyframe_id_gap {
+                continue;
+            }
+            let matches = matcher.match_descriptors(from.descriptors, to.descriptors);
+            if matches.len() < config.min_matches {
+                continue;
+            }
+            let mut correspondences: Vec<TwoViewCorrespondence> = Vec::with_capacity(matches.len());
+            let mut weights: Vec<f32> = Vec::with_capacity(matches.len());
+            let mut any_confidence = false;
+            for m in &matches {
+                let Some(prev) = from.keypoints.get(m.query_index) else {
+                    continue;
+                };
+                let Some(curr) = to.keypoints.get(m.train_index) else {
+                    continue;
+                };
+                correspondences.push(TwoViewCorrespondence {
+                    previous_xy: *prev,
+                    current_xy: *curr,
+                });
+                if let Some(c) = m.confidence {
+                    any_confidence = true;
+                    weights.push(c);
+                } else {
+                    weights.push(1.0);
+                }
+            }
+            if correspondences.len() < config.min_matches {
+                continue;
+            }
+            let weights_slice = if any_confidence {
+                Some(weights.as_slice())
+            } else {
+                None
+            };
+            let verification =
+                verifier.verify_with_weights(&correspondences, weights_slice, camera);
+            if !verification.verified {
+                continue;
+            }
+            out.push(LoopClosureCandidate {
+                query_frame_id: to.frame_id,
+                matched_keyframe_id: from.frame_id,
+                shared_landmark_count: verification.inlier_count,
+                query_inlier_count: verification.inlier_count,
+                keyframe_observation_count: matches.len(),
+                shared_landmark_ratio: verification.inlier_ratio,
+                score: verification.score,
+                geometrically_verified: true,
+                verification: Some(verification),
+            });
+        }
+    }
+    out
 }
 
 fn combine_hybrid_verifications(
@@ -806,6 +1534,38 @@ pub struct OnlineSlamPipeline<T, M> {
     pub tracker: T,
     pub mapper: M,
     pub config: OnlineSlamConfig,
+    /// Running IMU pre-integration state. `Some` exactly when
+    /// `config.imu.is_some()` (initialised by [`Self::new`]); `None`
+    /// otherwise so existing IMU-free flows pay no per-frame overhead.
+    pub imu_state: Option<OnlineSlamImuState>,
+    /// Running local VI-BA state. `Some` exactly when
+    /// `config.local_vi_ba.is_some()` (initialised by [`Self::new`]);
+    /// `None` otherwise so non-VI-BA flows do no extra book-keeping.
+    pub local_vi_ba_state: Option<OnlineSlamLocalBaState>,
+    /// Running auto-bootstrap state. `Some` exactly when
+    /// `config.vi_init.is_some() && config.imu.is_some()` (initialised
+    /// by [`Self::new`]); deliberately private because writes to
+    /// `completed` cross-cut with `imu_state` / `local_vi_ba_state` /
+    /// `map.keyframes`. Inspected via [`Self::vi_initialization_status`].
+    vi_init_state: Option<OnlineSlamViInitState>,
+    /// Running motion-based VI init state. `Some` exactly when
+    /// `config.vi_motion_init.is_some() && config.vi_init.is_some() &&
+    /// config.imu.is_some()`. Private because the motion-based fire is
+    /// gated on the static stage having completed first; the pipeline
+    /// owns the ordering. Inspected via
+    /// [`Self::motion_vi_initialization_status`].
+    vi_motion_init_state: Option<OnlineSlamMotionViInitState>,
+    /// Running loop-closure + pose-graph refinement state. `Some`
+    /// exactly when `config.pose_graph_refinement.is_some()`
+    /// (initialised by [`Self::new`]); `None` otherwise so pure-
+    /// odometry flows do no extra book-keeping.
+    pub pose_graph_state: Option<OnlineSlamLoopClosureRefinementState>,
+    /// Running relocalization-on-tracker-death state. `Some` exactly
+    /// when `config.relocalization.is_some()` (initialised by
+    /// [`Self::new`]). Owns its own [`LocalizationPipeline`] instance
+    /// so the recovery attempt does not perturb the tracker's primary
+    /// localizer state.
+    pub relocalization_state: Option<OnlineSlamRelocalizationState>,
 }
 
 impl Default
@@ -820,18 +1580,114 @@ impl Default
             tracker: Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
             mapper: LocalMappingPipeline::default(),
             config: OnlineSlamConfig::default(),
+            imu_state: None,
+            local_vi_ba_state: None,
+            vi_init_state: None,
+            vi_motion_init_state: None,
+            pose_graph_state: None,
+            relocalization_state: None,
         }
     }
 }
 
 impl<T, M> OnlineSlamPipeline<T, M> {
+    /// Construct a pipeline. Validates cross-field configuration
+    /// invariants (currently: `vi_init` requires `imu`, gravity vectors
+    /// must agree) via [`OnlineSlamConfig::validate`]; panics with the
+    /// surfaced [`OnlineSlamConfigError`] on a mismatch. This is a
+    /// developer error — every public caller passes a literal config —
+    /// so failing loudly at construction is correct.
     pub fn new(map: VisualMap, tracker: T, mapper: M, config: OnlineSlamConfig) -> Self {
+        if let Err(err) = config.validate() {
+            panic!("OnlineSlamPipeline::new: invalid config: {err}");
+        }
+        let imu_state = config.imu.clone().map(OnlineSlamImuState::new);
+        let local_vi_ba_state = config.local_vi_ba.clone().map(OnlineSlamLocalBaState::new);
+        let vi_init_state = config.vi_init.clone().map(OnlineSlamViInitState::new);
+        let vi_motion_init_state = config
+            .vi_motion_init
+            .clone()
+            .map(OnlineSlamMotionViInitState::new);
+        let pose_graph_state = config
+            .pose_graph_refinement
+            .clone()
+            .map(OnlineSlamLoopClosureRefinementState::new);
+        let relocalization_state = config
+            .relocalization
+            .clone()
+            .map(OnlineSlamRelocalizationState::new);
         Self {
             map,
             tracker,
             mapper,
             config,
+            imu_state,
+            local_vi_ba_state,
+            vi_init_state,
+            vi_motion_init_state,
+            pose_graph_state,
+            relocalization_state,
         }
+    }
+
+    /// Read-only snapshot of the auto-bootstrap stage. Returns
+    /// [`ViInitializationStatus::Disabled`] when `vi_init` is `None`;
+    /// otherwise reports buffering / initialised / gave-up state.
+    pub fn vi_initialization_status(&self) -> ViInitializationStatus {
+        match &self.vi_init_state {
+            None => ViInitializationStatus::Disabled,
+            Some(state) => state.snapshot(),
+        }
+    }
+
+    /// Read-only snapshot of the motion-based VI init stage. Returns
+    /// [`MotionViInitializationStatus::Disabled`] when
+    /// `vi_motion_init` is `None`; otherwise reports
+    /// waiting / initialised state.
+    pub fn motion_vi_initialization_status(&self) -> MotionViInitializationStatus {
+        match &self.vi_motion_init_state {
+            None => MotionViInitializationStatus::Disabled,
+            Some(state) => state.snapshot(),
+        }
+    }
+
+    /// Fold one body-frame IMU sample into the pipeline's running pre-
+    /// integrator. No-op when [`OnlineSlamConfig::imu`] is `None`. `dt`
+    /// is seconds since the previous sample; the integrator only accepts
+    /// strictly positive `dt` and silently drops non-positive values so
+    /// callers can replay raw IMU streams without pre-filtering.
+    pub fn push_imu_measurement(&mut self, gyro: Vector3<f64>, accel: Vector3<f64>, dt: f64) {
+        if !(dt > 0.0) || !dt.is_finite() {
+            return;
+        }
+        if let Some(state) = self.imu_state.as_mut() {
+            state.preintegrator.integrate_sample(gyro, accel, dt);
+        }
+        // While the auto-bootstrap stage is still active, also fan the
+        // sample into its initialiser buffer. Once `completed` /
+        // `gave_up` is `Some`, stop forwarding so the standalone module
+        // is not asked to keep growing memory after it has fired.
+        if let Some(state) = self.vi_init_state.as_mut() {
+            if state.is_active() {
+                state.initializer.push_sample(gyro, accel, dt);
+                state.samples_buffered += 1;
+                state.buffered_duration_seconds += dt;
+            }
+        }
+    }
+
+    /// Take the IMU pre-integration factor staged by the most recent
+    /// [`Self::process_frame`] call, if any. Returns `None` when IMU is
+    /// disabled, when the last `process_frame` did not register a new
+    /// keyframe to close the running window against, or when the
+    /// auto-bootstrap stale-factor gate is still active (factors staged
+    /// before VI init success are discarded — they were built with the
+    /// caller's placeholder bias linearisation and would feed an
+    /// inconsistent point into downstream VI-BA).
+    pub fn take_pending_imu_factor(&mut self) -> Option<ImuPreintegrationFactor> {
+        self.imu_state
+            .as_mut()
+            .and_then(|s| s.pending_factor.take())
     }
 
     pub fn map(&self) -> &VisualMap {
@@ -840,6 +1696,80 @@ impl<T, M> OnlineSlamPipeline<T, M> {
 
     pub fn map_mut(&mut self) -> &mut VisualMap {
         &mut self.map
+    }
+
+    /// Run the appearance-based pairwise loop scanner over every keyframe
+    /// currently in `self.map`. Returns the verifier-accepted pairs as
+    /// [`LoopClosureCandidate`]s with `verification` populated and
+    /// `geometrically_verified = true` — the same shape `process_frame`'s
+    /// shared-landmark detector emits, so callers can mix the two streams.
+    /// Unlike [`Self::process_frame`], this runs `O(K²)` over the keyframe
+    /// count and is meant for periodic (every-N-frames) or end-of-session
+    /// use rather than every frame. Each accepted pair has
+    /// `query_frame_id` set to the later keyframe and `matched_keyframe_id`
+    /// set to the earlier — same convention as `LoopClosureConstraint`.
+    /// `shared_landmark_count` is filled with the verifier inlier count
+    /// (no map-side landmark intersection is computed) so candidates are
+    /// directly consumable by [`LoopClosureConstraint::from_verified_candidate`].
+    pub fn scan_appearance_loops<Mat, V>(
+        &self,
+        matcher: &Mat,
+        verifier: &V,
+        camera: &Camera,
+        settings: &AppearanceLoopScannerSettings,
+    ) -> Vec<LoopClosureCandidate>
+    where
+        Mat: Matcher,
+        V: LoopClosureVerifier,
+    {
+        // Sort keyframes by id for deterministic pair ordering.
+        let mut kfs: Vec<(&u64, &Keyframe)> = self.map.keyframes.iter().collect();
+        kfs.sort_by_key(|(id, _)| *id);
+        let views: Vec<PairwiseKeyframeView> = kfs
+            .iter()
+            .map(|(_, kf)| PairwiseKeyframeView {
+                frame_id: kf.frame.id,
+                keypoints: &kf.frame.keypoints,
+                descriptors: &kf.frame.descriptors,
+            })
+            .collect();
+        scan_pairwise_loop_closures(
+            &views,
+            matcher,
+            verifier,
+            camera,
+            &PairwiseLoopClosureScannerConfig {
+                min_keyframe_id_gap: settings.min_keyframe_id_gap,
+                min_matches: settings.min_matches,
+            },
+        )
+    }
+}
+
+/// Tunables for [`OnlineSlamPipeline::scan_appearance_loops`]. Mirrors
+/// [`PairwiseLoopClosureScannerConfig`] but with names that emphasise the
+/// pipeline-level use ("how aggressively should the periodic scan run?").
+/// Defaults are chosen so a typical local-mapping window doesn't get
+/// confused for a loop, and so visually disjoint keyframes are rejected
+/// before the verifier ever fires.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppearanceLoopScannerSettings {
+    /// Minimum frame-id gap between two keyframes for the pair to be
+    /// considered. Set this larger than the local-mapping window so the
+    /// scanner never proposes a "loop" between adjacent keyframes that
+    /// share most of their tracks anyway.
+    pub min_keyframe_id_gap: u64,
+    /// Minimum number of brute-force descriptor matches a pair needs
+    /// before its 2D-2D correspondences are even handed to the verifier.
+    pub min_matches: usize,
+}
+
+impl Default for AppearanceLoopScannerSettings {
+    fn default() -> Self {
+        Self {
+            min_keyframe_id_gap: 30,
+            min_matches: 30,
+        }
     }
 }
 
@@ -854,10 +1784,17 @@ where
     where
         I: IntoIterator<Item = LandmarkCandidate>,
     {
-        let tracking = self.tracker.track_frame(frame, &self.map);
+        let mut tracking = self.tracker.track_frame(frame, &self.map);
+        // Relocalization-on-tracker-death: if the primary attempt
+        // failed and the stage is enabled, run a fresh PnP against the
+        // full map via the pipeline's owned `LocalizationPipeline`. On
+        // acceptance, override the tracker's history with the recovered
+        // result so the rest of `process_frame` (loop detection,
+        // mapper, IMU staging, etc.) sees a successful frame.
+        let relocalization_stats = self.maybe_run_relocalization(frame, &mut tracking);
         let mut mapping = None;
         let mut applied_update = None;
-        let loop_closure_candidates =
+        let mut loop_closure_candidates =
             detect_loop_closure_candidates(frame, &tracking, &self.map, &self.config.loop_closure);
 
         if tracking.localization.success {
@@ -873,19 +1810,828 @@ where
             mapping = Some(mapping_result);
         }
 
+        // When IMU is configured and the mapper registered a new keyframe
+        // at this frame, snapshot the running pre-integration window into
+        // an `ImuPreintegrationFactor` connecting the previous keyframe to
+        // this one, then reset the integrator so the next window starts
+        // fresh. The factor is exposed both inline on the result and via
+        // `take_pending_imu_factor()` so callers can pick whichever shape
+        // fits their pose-graph / BA glue.
+        let imu_factor = self.stage_imu_factor_on_new_keyframe(frame, applied_update.as_ref());
+        // Run the VI init step AFTER `stage_imu_factor_on_new_keyframe`
+        // so that on the success frame the just-promoted keyframe id is
+        // already in `imu_state.last_keyframe_id` and the staged factor
+        // (if any) has already been discarded by the stale-factor gate.
+        // The step is a no-op when VI init is disabled or terminal.
+        let vi_init = self.run_vi_init_step(frame, applied_update.as_ref());
+        let just_promoted_vi_init =
+            matches!(vi_init, Some(ViInitializationEvent::Succeeded { .. }));
+        let mut local_vi_ba = self.maybe_run_local_vi_ba(imu_factor.clone());
+        // Phase-16: when VI-init promoted *this frame* and the config
+        // opted in, force a sliding-window BA pass on the banked
+        // factors. Bypasses the new-factor gate inside
+        // `maybe_run_local_vi_ba` so the post-promotion refinement
+        // doesn't have to wait for the next keyframe registration —
+        // critical when the visual tracker is fragile and the next KF
+        // arrives late or never.
+        let run_at_promotion = self
+            .config
+            .local_vi_ba
+            .as_ref()
+            .map(|c| c.run_at_vi_init_promotion)
+            .unwrap_or(false);
+        if just_promoted_vi_init && run_at_promotion && local_vi_ba.is_none() {
+            if let Some(state) = self.local_vi_ba_state.as_mut() {
+                local_vi_ba = crate::online_slam_vi_ba::run_local_vi_ba(&mut self.map, state);
+            }
+        }
+        // The motion-based stage gates on the static stage having
+        // completed; runs AFTER local-VI-BA so the refined pose +
+        // velocity slot are already in `map.keyframes` /
+        // `local_vi_ba_state.keyframe_state` when the trigger fires.
+        let vi_motion_init =
+            self.run_motion_vi_init_step(frame, applied_update.as_ref(), imu_factor.as_ref());
+
+        // Online loop-closure + pose-graph refinement runs LAST so the
+        // graph mirrors the just-finalised keyframe pose (post local-VI-
+        // BA) before PGO write-back. No-op when the stage is disabled or
+        // no keyframe was registered this frame.
+        let pose_graph_refinement = self.maybe_run_loop_closure_refinement(
+            frame,
+            &tracking,
+            applied_update.as_ref(),
+            &mut loop_closure_candidates,
+        );
+
         OnlineSlamResult {
             tracking,
             mapping,
             applied_update,
             loop_closure_candidates,
+            imu_factor,
+            local_vi_ba,
             map_keyframe_count: self.map.keyframes.len(),
             map_landmark_count: self.map.landmarks.len(),
+            vi_init,
+            vi_motion_init,
+            pose_graph_refinement,
+            relocalization: relocalization_stats,
         }
+    }
+
+    /// Relocalization-on-tracker-death. Runs only when (a) the
+    /// `relocalization` stage is configured AND (b) the primary
+    /// `track_frame` call returned `localization.success == false`.
+    /// Re-runs PnP against the full visual map via the stage's owned
+    /// [`LocalizationPipeline`], gates the recovered solution against
+    /// the configured thresholds, and on acceptance overwrites the
+    /// tracker's per-frame history via
+    /// [`Tracker::accept_relocalization_result`] so the rest of
+    /// `process_frame` sees a successful frame. Returns
+    /// `Some(stats)` whenever the stage actually ran; `None` when
+    /// disabled OR primary tracking already succeeded.
+    fn maybe_run_relocalization(
+        &mut self,
+        frame: &Frame,
+        tracking: &mut TrackingResult,
+    ) -> Option<OnlineSlamRelocalizationStats> {
+        let state = self.relocalization_state.as_mut()?;
+        if tracking.localization.success {
+            return None;
+        }
+        state.trigger_count += 1;
+        state.last_attempt_frame_id = Some(frame.id);
+        // Build a one-shot descriptor store from the current map so the
+        // recovery localizer matches against every landmark, not just
+        // the local-map subset the tracker's covisibility filter may
+        // have used. When the Phase-26 #4a active-frontier window is
+        // configured, restrict to landmarks observed by the most recent
+        // N keyframes — this drops stale landmarks that Phase-26 #2
+        // showed admit wrong-scale geometrically-self-consistent
+        // recoveries.
+        let descriptor_store = match state.config.recent_keyframe_window {
+            Some(window) if window > 0 => {
+                let mut keyframe_ids: Vec<u64> = self.map.keyframes.keys().copied().collect();
+                keyframe_ids.sort();
+                let start = keyframe_ids.len().saturating_sub(window);
+                let mut active_landmark_ids: std::collections::HashSet<u64> =
+                    std::collections::HashSet::new();
+                for kf_id in &keyframe_ids[start..] {
+                    if let Some(kf) = self.map.keyframes.get(kf_id) {
+                        for observation in &kf.observations {
+                            active_landmark_ids.insert(observation.landmark_id);
+                        }
+                    }
+                }
+                let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+                for (lid, landmark) in &self.map.landmarks {
+                    if active_landmark_ids.contains(lid) {
+                        if let Some(descriptor) = landmark.descriptor.as_ref() {
+                            store.insert(*lid, descriptor.clone());
+                        }
+                    }
+                }
+                store
+            }
+            _ => visloc_core::types::LandmarkDescriptorStore::from_visual_map(&self.map),
+        };
+        // When `pose_prior_candidate_radius_meters` is set, thread the
+        // tracker's per-frame motion-model prediction into the recovery
+        // PnP — both as the RANSAC warm-start hypothesis and as a
+        // candidate-landmark filter (only landmarks within the radius
+        // of the prior's camera centre are considered). When `None`,
+        // fall back to the no-prior global PnP that Phase-23 #1 shipped.
+        let pose_prior = if state.config.pose_prior_candidate_radius_meters.is_some() {
+            self.tracker.pose_prior_for_frame(frame)
+        } else {
+            None
+        };
+        let candidate_radius = state.config.pose_prior_candidate_radius_meters;
+        let recovered = if pose_prior.is_some() {
+            state
+                .localizer
+                .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
+                    frame,
+                    &self.map,
+                    &descriptor_store,
+                    pose_prior.as_ref(),
+                    candidate_radius,
+                )
+        } else {
+            state.localizer.localize_frame_with_descriptor_store(
+                frame,
+                &self.map,
+                &descriptor_store,
+            )
+        };
+        let mut stats = OnlineSlamRelocalizationStats {
+            attempted: true,
+            succeeded: false,
+            inlier_count: recovered.inlier_count,
+            inlier_ratio: recovered.inlier_ratio,
+            correspondence_count: recovered.correspondence_count,
+            mean_reprojection_error: recovered.reprojection_error,
+        };
+        let basic_accept = recovered.success
+            && recovered.inlier_count >= state.config.min_inliers
+            && recovered.inlier_ratio >= state.config.min_inlier_ratio
+            && match (
+                state.config.max_mean_reprojection_error,
+                recovered.reprojection_error,
+            ) {
+                (Some(max), Some(actual)) => actual <= max,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+        // Phase-26 #4b post-acceptance IMU sanity check. When the
+        // configured `max_translation_from_imu_prediction_meters` is
+        // set AND a per-frame IMU prediction is available AND the
+        // recovered pose has a camera centre, reject recoveries whose
+        // recovered camera centre lies further from the IMU's
+        // predicted centre than the threshold. Targets Phase-26 #2's
+        // V1_01 false-positive failure mode where the recovery PnP
+        // accepted geometrically self-consistent but wrong-scale
+        // solutions far from the IMU's belief about where the camera
+        // was.
+        let imu_accept =
+            if let Some(max_dist) = state.config.max_translation_from_imu_prediction_meters {
+                match (
+                    self.tracker.pose_prior_for_frame(frame),
+                    recovered.pose.as_ref(),
+                ) {
+                    (Some(predicted), Some(recovered_pose)) => {
+                        let predicted_centre = predicted.world_to_camera.inverse().translation;
+                        let recovered_centre = recovered_pose.world_to_camera.inverse().translation;
+                        (recovered_centre - predicted_centre).norm() <= max_dist
+                    }
+                    // No prediction available (e.g. tracker just bootstrapped)
+                    // ⇒ do not gate; preserves recovery on cold-start.
+                    _ => true,
+                }
+            } else {
+                true
+            };
+        let accept = basic_accept && imu_accept;
+        if !accept {
+            return Some(stats);
+        }
+        let recovered_tracking = TrackingResult {
+            frame_id: frame.id,
+            state: visloc_tracking::TrackingState::Tracking,
+            event: visloc_tracking::TrackingEvent::Relocalized,
+            successive_failures: 0,
+            pose_prior: tracking.pose_prior.clone(),
+            used_pose_prior: tracking.used_pose_prior,
+            used_external_localization_prior: tracking.used_external_localization_prior,
+            external_localization_prior_radius: tracking.external_localization_prior_radius,
+            tracking_failure_reason: None,
+            map_landmark_count: tracking.map_landmark_count,
+            map_stats: tracking.map_stats.clone(),
+            localization: recovered,
+            covisibility_local_map_size: tracking.covisibility_local_map_size,
+        };
+        self.tracker
+            .accept_relocalization_result(recovered_tracking.clone());
+        state.success_count += 1;
+        state.last_success_frame_id = Some(frame.id);
+        stats.succeeded = true;
+        *tracking = recovered_tracking;
+        Some(stats)
+    }
+
+    /// Online loop-closure + pose-graph refinement. Runs verifier on the
+    /// candidates produced by [`detect_loop_closure_candidates`] this
+    /// frame, folds verified constraints into a running [`PoseGraph`]
+    /// that mirrors the registered keyframes, and triggers
+    /// [`PoseGraph::optimize_se3_iterative`] when the new-constraint
+    /// threshold has been reached. On a converged solve the optimised
+    /// poses are written back into `self.map.keyframes[id].frame.pose`.
+    ///
+    /// Returns `None` when the stage is disabled OR when the current
+    /// frame did not register a new keyframe (the running graph has no
+    /// node to anchor verifier output to). Returns `Some(stats)` whenever
+    /// the verifier was actually run this frame; `stats.pose_graph_result`
+    /// is `Some` only on the frames where PGO fired.
+    fn maybe_run_loop_closure_refinement(
+        &mut self,
+        frame: &Frame,
+        tracking: &TrackingResult,
+        applied_update: Option<&AppliedMapUpdate>,
+        loop_closure_candidates: &mut [LoopClosureCandidate],
+    ) -> Option<OnlineSlamLoopClosureRefinementStats> {
+        let state = self.pose_graph_state.as_mut()?;
+        // The pipeline mirrors keyframes into the running graph on
+        // every new-keyframe frame. Without a new keyframe this call,
+        // the verifier output would have no node to anchor against
+        // (loop constraints target the just-finalised keyframe id),
+        // so skip the entire stage.
+        applied_update?;
+        let new_keyframe_id = frame.id;
+        // Snapshot the new keyframe's pose from the map (which already
+        // reflects local-VI-BA refinement applied earlier this frame).
+        let new_pose = self
+            .map
+            .keyframes
+            .get(&new_keyframe_id)
+            .and_then(|kf| kf.frame.pose.clone())?;
+
+        // Add the node + the sequential edge from the previous
+        // keyframe in registration order. Anchor on the first registered
+        // keyframe so the absolute frame stays fixed across PGO solves.
+        let prev_keyframe_id = state.keyframe_order.last().copied();
+        state.graph.add_pose(new_keyframe_id, new_pose.clone());
+        if state.keyframe_order.is_empty() {
+            state.graph.anchor(new_keyframe_id);
+        } else if let Some(prev_id) = prev_keyframe_id {
+            if let Some(prev_pose) = state.graph.poses.get(&prev_id).cloned() {
+                state.graph.add_sequential_edge(
+                    prev_id,
+                    new_keyframe_id,
+                    relative_world_to_camera(&prev_pose, &new_pose),
+                );
+            }
+        }
+        state.keyframe_order.push(new_keyframe_id);
+
+        // Verify candidates (only essential-matrix verifier for now —
+        // the pipeline currently exposes only the monocular two-view
+        // backend; PnP/Hybrid wiring is a follow-up).
+        let mut stats = OnlineSlamLoopClosureRefinementStats::default();
+        if !loop_closure_candidates.is_empty() {
+            let verifier = EssentialMatrixLoopClosureVerifier {
+                config: state.config.verifier_config,
+                ..Default::default()
+            };
+            stats.verified_candidate_count = loop_closure_candidates.len();
+            verify_loop_closure_candidates(
+                loop_closure_candidates,
+                frame,
+                tracking,
+                &self.map,
+                &state.config.camera,
+                &verifier,
+            );
+            for candidate in loop_closure_candidates.iter() {
+                let Some(constraint) = LoopClosureConstraint::from_verified_candidate(candidate)
+                else {
+                    continue;
+                };
+                // Loop edges target the keyframe registered this frame
+                // (`candidate.query_frame_id == new_keyframe_id`); the
+                // matched keyframe must already exist in the graph.
+                if !state.graph.poses.contains_key(&constraint.from_keyframe_id) {
+                    continue;
+                }
+                state.graph.add_loop_closure_constraint(&constraint);
+                state.verified_constraints.push(constraint);
+                state.pending_since_last_trigger += 1;
+                stats.accepted_count += 1;
+            }
+        }
+
+        // Trigger PGO when the configured number of new constraints has
+        // accumulated. A higher threshold batches solves; `1` (the
+        // recommended default) runs PGO on every accepted loop edge.
+        let trigger_threshold = state.config.trigger_every_new_constraints.max(1);
+        if state.pending_since_last_trigger >= trigger_threshold {
+            let pgo_config = state.config.pose_graph_config.clone();
+            let pgo_result = state.graph.optimize_se3_iterative(&pgo_config);
+            state.pending_since_last_trigger = 0;
+            state.trigger_count += 1;
+            if let Ok(result) = pgo_result {
+                // Write optimised poses back into the map so subsequent
+                // tracking / local-VI-BA passes see the refined frame.
+                let mut updated = 0usize;
+                for (id, pose) in state.graph.poses.iter() {
+                    if let Some(keyframe) = self.map.keyframes.get_mut(id) {
+                        keyframe.frame.pose = Some(pose.clone());
+                        updated += 1;
+                    }
+                }
+                stats.keyframes_updated = updated;
+                stats.pose_graph_result = Some(result);
+            }
+        }
+
+        Some(stats)
+    }
+
+    /// Register the freshly-staged IMU factor with the local VI-BA state
+    /// table and, when the trigger threshold has been reached, run a
+    /// sliding-window VI-BA pass that refines the trailing window's
+    /// poses + landmarks + velocities + biases. No-op when local VI-BA
+    /// is disabled OR when no IMU factor was staged this frame.
+    fn maybe_run_local_vi_ba(
+        &mut self,
+        new_factor: Option<ImuPreintegrationFactor>,
+    ) -> Option<OnlineSlamLocalBaStats> {
+        // When `keep_pre_promotion_imu_factors` lets factors flow before
+        // VI-init promotes, the factors must still be banked for the
+        // post-promotion BA replay, but the BA itself cannot run yet —
+        // its bias linearisation is the placeholder zero seed and a
+        // pre-promotion solve corrupts the map's keyframe poses
+        // (empirically: tracking-success collapses from 9.8 % to 1.8 %
+        // on MH_01 because the next-frame matcher sees BA-shifted
+        // keyframe descriptors). Gate the trigger here so the
+        // `factor_history` accumulates but the solver waits.
+        let vi_init_still_active = self
+            .vi_init_state
+            .as_ref()
+            .map(|s| s.is_active())
+            .unwrap_or(false);
+        let state = self.local_vi_ba_state.as_mut()?;
+        let factor = new_factor?;
+        let should_trigger = state.register_new_factor(factor);
+        if !should_trigger || vi_init_still_active {
+            return None;
+        }
+        crate::online_slam_vi_ba::run_local_vi_ba(&mut self.map, state)
+    }
+
+    fn stage_imu_factor_on_new_keyframe(
+        &mut self,
+        frame: &Frame,
+        applied_update: Option<&AppliedMapUpdate>,
+    ) -> Option<ImuPreintegrationFactor> {
+        let state = self.imu_state.as_mut()?;
+        let added_new_keyframe = applied_update
+            .map(|a| a.keyframe_count > 0)
+            .unwrap_or(false);
+        if !added_new_keyframe {
+            return None;
+        }
+        let new_keyframe_id = frame.id;
+        let factor = match state.last_keyframe_id {
+            Some(prev_id) if prev_id != new_keyframe_id => {
+                let delta = state.preintegrator.delta();
+                let factor = ImuPreintegrationFactor {
+                    keyframe_id_from: prev_id,
+                    keyframe_id_to: new_keyframe_id,
+                    delta,
+                    gravity_world: state.config.gravity_world,
+                    weight_position: state.config.weight_position,
+                    weight_velocity: state.config.weight_velocity,
+                    weight_rotation: state.config.weight_rotation,
+                };
+                state.preintegrator.reset();
+                Some(factor)
+            }
+            _ => None,
+        };
+        state.last_keyframe_id = Some(new_keyframe_id);
+
+        // Stale-factor gate. Until the auto-bootstrap stage has fired
+        // (or has given up with `KeepExistingSeed`), factors carry the
+        // caller's placeholder bias linearisation and are discarded
+        // rather than exposed downstream. `discarded_stale_factor_count`
+        // is reported on the `Succeeded` event so callers can audit.
+        // Opt-in `OnlineSlamConfig.keep_pre_promotion_imu_factors`
+        // bypasses the discard so factors still flow into the local
+        // BA's factor history (carrying placeholder biases; the BA's
+        // own iterations are expected to absorb the linearisation
+        // error). `discarded_stale_factor_count` is still incremented
+        // in that branch so auditors can see how many factors were
+        // forwarded with stale biases.
+        if let Some(vi) = self.vi_init_state.as_mut() {
+            if vi.is_active() {
+                if factor.is_some() {
+                    vi.discarded_stale_factor_count += 1;
+                }
+                if !self.config.keep_pre_promotion_imu_factors {
+                    state.pending_factor = None;
+                    return None;
+                }
+            }
+        }
+
+        state.pending_factor = factor.clone();
+        factor
+    }
+
+    /// Run a single try-initialise step on the VI init buffer when a new
+    /// keyframe has just been registered. Returns the state-transition
+    /// event for [`OnlineSlamResult::vi_init`]; `None` when nothing
+    /// changed this frame (no new keyframe, already terminal, or VI init
+    /// disabled).
+    fn run_vi_init_step(
+        &mut self,
+        frame: &Frame,
+        applied_update: Option<&AppliedMapUpdate>,
+    ) -> Option<ViInitializationEvent> {
+        // Cheap pre-checks that don't need to borrow `vi_init_state`
+        // mutably yet.
+        if self
+            .vi_init_state
+            .as_ref()
+            .map(|s| !s.is_active())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        let added_new_keyframe = applied_update
+            .map(|a| a.keyframe_count > 0)
+            .unwrap_or(false);
+        let try_on_every_frame = self
+            .vi_init_state
+            .as_ref()
+            .map(|s| s.config.try_initialize_on_every_frame)
+            .unwrap_or(false);
+        if !added_new_keyframe && !try_on_every_frame {
+            return None;
+        }
+
+        // Try the standalone initialiser. We don't need to mutate
+        // `vi_init_state` for this read, just borrow it.
+        let try_result = {
+            let state = self.vi_init_state.as_ref().unwrap();
+            state.initializer.try_initialize()
+        };
+
+        match try_result {
+            Ok(result) => {
+                // Bind promotion to the just-registered keyframe if there
+                // is one this frame; otherwise (`try_on_every_frame` path
+                // on a non-KF frame) bind to the most recent existing
+                // keyframe so the rotation rewrite + local-VI-BA seed
+                // still target a valid map entry. If the map has no
+                // keyframes yet, promote anchorlessly — Step 3 + 4 in
+                // `promote_vi_init_result` will skip when the binding is
+                // `None`.
+                let binding_keyframe_id = if added_new_keyframe {
+                    Some(frame.id)
+                } else {
+                    self.map.keyframes.keys().copied().max()
+                };
+                Some(self.promote_vi_init_result(binding_keyframe_id, result))
+            }
+            Err(reason) => {
+                // Record the rejection and check whether we've exceeded
+                // a cap; either fall through with `StillBuffering` or
+                // trigger the configured fallback.
+                let vi = self.vi_init_state.as_mut().unwrap();
+                vi.last_rejection = Some(reason.clone());
+                if vi.cap_exceeded() {
+                    Some(self.apply_vi_init_fallback(reason))
+                } else {
+                    Some(ViInitializationEvent::StillBuffering { reason })
+                }
+            }
+        }
+    }
+
+    /// Atomic promotion of a successful VI init result into the
+    /// pipeline's running state. The ordering follows the design
+    /// contract (see `docs/vi_initialization_integration.md`):
+    ///   1. Reset `imu_state.preintegrator` with the new bias linearisation.
+    ///   2. Mirror `imu_state.config.{bias_gyro, bias_acc}`.
+    ///   3. Rewrite the just-registered keyframe's `Pose` (rotation
+    ///      only, camera centre preserved) if requested.
+    ///   4. Seed `local_vi_ba_state.keyframe_state[first_keyframe_id]`
+    ///      with `velocity_world = 0, bias = (b_g, b_a)`.
+    ///   5. Mark `vi_init_state.completed` so the stale-factor gate is
+    ///      lifted from this frame onwards.
+    fn promote_vi_init_result(
+        &mut self,
+        binding_keyframe_id: Option<u64>,
+        result: VisualInertialInitializationResult,
+    ) -> ViInitializationEvent {
+        let bias_gyro = result.bias_gyro;
+        let bias_acc = result.bias_acc;
+        let seed_rotation = result.initial_rotation_body_to_world;
+
+        // Step 1 + 2: reset preintegrator and mirror config biases.
+        if let Some(imu) = self.imu_state.as_mut() {
+            imu.preintegrator = ImuPreintegrator::new_with_bias(bias_gyro, bias_acc);
+            imu.pending_factor = None;
+            imu.config.bias_gyro = bias_gyro;
+            imu.config.bias_acc = bias_acc;
+        }
+        if let Some(imu_cfg) = self.config.imu.as_mut() {
+            imu_cfg.bias_gyro = bias_gyro;
+            imu_cfg.bias_acc = bias_acc;
+        }
+
+        // Step 3: rewrite first keyframe rotation, preserving the
+        // camera centre. `R_w←c = R_w←b · R_b←c`, then
+        // `Pose.rotation = R_c←w = R_w←c^T`, and
+        // `Pose.translation = -R_c←w · C_w_old`. Skipped when promotion
+        // happened on a non-KF frame and the map has no keyframe yet to
+        // bind to (Phase-19 `try_initialize_on_every_frame` path).
+        let seed_first_keyframe_rotation = self
+            .vi_init_state
+            .as_ref()
+            .map(|s| s.config.seed_first_keyframe_rotation)
+            .unwrap_or(false);
+        let body_to_camera = self
+            .vi_init_state
+            .as_ref()
+            .map(|s| s.config.body_to_camera.clone())
+            .unwrap_or_else(SE3::identity);
+        if seed_first_keyframe_rotation {
+            if let Some(first_keyframe_id) = binding_keyframe_id {
+                if let Some(keyframe) = self.map.keyframes.get_mut(&first_keyframe_id) {
+                    if let Some(pose) = keyframe.frame.pose.as_mut() {
+                        let r_wb = seed_rotation;
+                        let r_bc = body_to_camera.rotation;
+                        let r_wc = r_wb * r_bc;
+                        let r_cw_new = r_wc.inverse();
+                        let camera_center_world = -(pose.world_to_camera.rotation.inverse()
+                            * pose.world_to_camera.translation);
+                        let t_cw_new = -(r_cw_new * camera_center_world);
+                        *pose =
+                            visloc_core::geometry::Pose::from_world_to_camera(r_cw_new, t_cw_new);
+                    }
+                }
+            }
+        }
+
+        // Step 4: seed first-keyframe velocity slot in local VI-BA.
+        if let Some(local) = self.local_vi_ba_state.as_mut() {
+            if let Some(first_keyframe_id) = binding_keyframe_id {
+                local
+                    .keyframe_state
+                    .entry(first_keyframe_id)
+                    .or_insert_with(|| crate::online_slam_vi_ba::KeyframeImuState {
+                        velocity_world: Vector3::zeros(),
+                        bias_gyro,
+                        bias_acc,
+                    });
+            }
+            // Also mirror the new bias linearisation onto the local
+            // VI-BA config so subsequent keyframe slots inherit it.
+            local.config.bias_gyro_init = bias_gyro;
+            local.config.bias_acc_init = bias_acc;
+        }
+        if let Some(local_cfg) = self.config.local_vi_ba.as_mut() {
+            local_cfg.bias_gyro_init = bias_gyro;
+            local_cfg.bias_acc_init = bias_acc;
+        }
+
+        // Step 5: mark the stage completed.
+        let discarded_stale_factor_count;
+        {
+            let vi = self.vi_init_state.as_mut().unwrap();
+            vi.completed = Some(result.clone());
+            discarded_stale_factor_count = vi.discarded_stale_factor_count;
+        }
+
+        ViInitializationEvent::Succeeded {
+            result,
+            first_keyframe_id: binding_keyframe_id,
+            discarded_stale_factor_count,
+        }
+    }
+
+    /// Apply the configured fallback after the duration / sample cap
+    /// has been exceeded without a successful `try_initialize`.
+    fn apply_vi_init_fallback(
+        &mut self,
+        last_reason: StationaryRejectionReason,
+    ) -> ViInitializationEvent {
+        let fallback = self
+            .vi_init_state
+            .as_ref()
+            .map(|s| s.config.on_persistent_rejection)
+            .unwrap_or(ViInitFallback::KeepExistingSeed);
+        match fallback {
+            ViInitFallback::KeepExistingSeed => {
+                // Stale gate is lifted by clearing `vi_init_state.gave_up`
+                // -> not active anymore.
+            }
+            ViInitFallback::DisableImuStage => {
+                self.imu_state = None;
+                self.local_vi_ba_state = None;
+                self.config.imu = None;
+                self.config.local_vi_ba = None;
+            }
+        }
+        if let Some(vi) = self.vi_init_state.as_mut() {
+            vi.gave_up = Some(last_reason.clone());
+        }
+        ViInitializationEvent::GaveUp {
+            last_reason,
+            fallback,
+        }
+    }
+
+    /// Run one motion-based VI init step on the current frame. The
+    /// stage:
+    ///
+    /// 1. Banks the freshly-staged IMU factor (if any) onto
+    ///    `vi_motion_init_state.factor_history` so the trigger has a
+    ///    body of factors to optimise against.
+    /// 2. Registers the new keyframe's world-frame camera centre with
+    ///    the inner `MotionBasedViInitializer`.
+    /// 3. Calls `try_initialize` once the inner gates allow it. On
+    ///    success the refined `(velocity, bias)` are mirrored into
+    ///    `local_vi_ba_state.keyframe_state` and `imu_state`'s
+    ///    pre-integrator is reset with the new bias linearisation.
+    ///
+    /// Returns the state-transition event for
+    /// [`OnlineSlamResult::vi_motion_init`]. `None` when:
+    /// * no new keyframe was registered this frame,
+    /// * the motion-based stage is disabled,
+    /// * the static VI init stage has not yet succeeded (the motion-
+    ///   based stage's prerequisite),
+    /// * or the stage has already reached the terminal `Initialised`
+    ///   state.
+    fn run_motion_vi_init_step(
+        &mut self,
+        frame: &Frame,
+        applied_update: Option<&AppliedMapUpdate>,
+        new_imu_factor: Option<&ImuPreintegrationFactor>,
+    ) -> Option<MotionViInitializationEvent> {
+        let added_new_keyframe = applied_update
+            .map(|a| a.keyframe_count > 0)
+            .unwrap_or(false);
+        if !added_new_keyframe {
+            return None;
+        }
+        // Gate on the static stage having completed successfully. The
+        // motion-based stage's `static_seed` is the result we mirror.
+        let static_seed = self
+            .vi_init_state
+            .as_ref()
+            .and_then(|s| s.completed.clone())?;
+        if self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|s| !s.is_active())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+
+        // Bank the new factor + register the keyframe centre.
+        let camera_center = self
+            .map
+            .keyframes
+            .get(&frame.id)
+            .and_then(|kf| kf.frame.pose.as_ref().map(|p| p.camera_center_world()))?;
+        {
+            let state = self.vi_motion_init_state.as_mut().unwrap();
+            if let Some(factor) = new_imu_factor {
+                state.push_factor(factor.clone());
+            }
+            state.initializer.register_keyframe(frame.id, camera_center);
+        }
+
+        // Attempt the solve unconditionally. `try_initialize` itself
+        // performs the keyframe-count + translation gate checks and
+        // returns a structured rejection on miss without touching the
+        // map. Snapshot the factor history first so we don't hold a
+        // borrow into `vi_motion_init_state` while passing `&mut self.map`.
+        let factors_snapshot: Vec<ImuPreintegrationFactor> = self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|s| s.factor_history.iter().cloned().collect())
+            .unwrap_or_default();
+        let outcome = {
+            let state = self.vi_motion_init_state.as_mut().unwrap();
+            match state
+                .initializer
+                .try_initialize(&mut self.map, &factors_snapshot, &static_seed)
+            {
+                Ok(r) => Ok(r.clone()),
+                Err(reason) => {
+                    state.last_rejection = Some(reason.clone());
+                    Err(reason)
+                }
+            }
+        };
+        match outcome {
+            Ok(result) => Some(self.promote_motion_vi_init_result(result)),
+            Err(reason) => Some(MotionViInitializationEvent::StillWaiting { reason }),
+        }
+    }
+
+    /// Mirror a successful motion-VI init result into the pipeline's
+    /// running state.
+    fn promote_motion_vi_init_result(
+        &mut self,
+        result: MotionBasedViInitializationResult,
+    ) -> MotionViInitializationEvent {
+        let mirror_local = self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|s| s.config.mirror_into_local_vi_ba)
+            .unwrap_or(true);
+        let mirror_imu = self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|s| s.config.mirror_into_imu_state)
+            .unwrap_or(true);
+
+        // Step 1: mirror refined per-keyframe states into local VI-BA.
+        if mirror_local {
+            if let Some(local) = self.local_vi_ba_state.as_mut() {
+                for (kf_id, refined) in &result.keyframe_states {
+                    local.keyframe_state.insert(*kf_id, refined.clone());
+                }
+            }
+        }
+
+        // Step 2: mirror refined biases of the latest keyframe onto the
+        // running IMU pre-integrator and config. ORB-SLAM3 uses the most
+        // recent VIBA1-refined bias as the running linearisation point
+        // for the next pre-integration window.
+        if mirror_imu {
+            if let Some((_, latest)) = result.keyframe_states.iter().next_back() {
+                let bg = latest.bias_gyro;
+                let ba = latest.bias_acc;
+                if let Some(imu) = self.imu_state.as_mut() {
+                    imu.preintegrator = ImuPreintegrator::new_with_bias(bg, ba);
+                    imu.pending_factor = None;
+                    imu.config.bias_gyro = bg;
+                    imu.config.bias_acc = ba;
+                }
+                if let Some(imu_cfg) = self.config.imu.as_mut() {
+                    imu_cfg.bias_gyro = bg;
+                    imu_cfg.bias_acc = ba;
+                }
+                if let Some(local) = self.local_vi_ba_state.as_mut() {
+                    local.config.bias_gyro_init = bg;
+                    local.config.bias_acc_init = ba;
+                }
+                if let Some(local_cfg) = self.config.local_vi_ba.as_mut() {
+                    local_cfg.bias_gyro_init = bg;
+                    local_cfg.bias_acc_init = ba;
+                }
+            }
+        }
+
+        // Step 3: mark the stage completed. (`initializer.try_initialize`
+        // already cached the result in its `completed` slot; mirror onto
+        // the state's own `completed` so `is_active()` flips false.)
+        if let Some(state) = self.vi_motion_init_state.as_mut() {
+            state.completed = Some(result.clone());
+            state.last_rejection = None;
+        }
+
+        MotionViInitializationEvent::Succeeded { result }
     }
 
     pub fn reset_sequence_state(&mut self) {
         self.tracker.reset();
         self.mapper.reset();
+        if let Some(state) = self.imu_state.as_mut() {
+            state.reset();
+        }
+        if let Some(state) = self.local_vi_ba_state.as_mut() {
+            state.reset();
+        }
+        if let Some(state) = self.vi_init_state.as_mut() {
+            state.reset();
+        }
+        if let Some(state) = self.vi_motion_init_state.as_mut() {
+            state.reset();
+        }
+        if let Some(state) = self.pose_graph_state.as_mut() {
+            state.reset();
+        }
+        if let Some(state) = self.relocalization_state.as_mut() {
+            state.reset();
+        }
     }
 }
 
@@ -895,8 +2641,53 @@ pub struct OnlineSlamResult {
     pub mapping: Option<LocalMappingResult>,
     pub applied_update: Option<AppliedMapUpdate>,
     pub loop_closure_candidates: Vec<LoopClosureCandidate>,
+    /// IMU pre-integration factor closed against the keyframe registered
+    /// by this `process_frame` call. `Some` only when [`OnlineSlamConfig::imu`]
+    /// is `Some`, this frame produced a new keyframe, and at least one
+    /// previous keyframe exists to anchor the integration window's left
+    /// endpoint. Downstream pose-graph / BA glue consumes the factor; the
+    /// `OnlineSlamPipeline` itself does not optimise against it.
+    pub imu_factor: Option<ImuPreintegrationFactor>,
+    /// Local VI-BA refinement outcome when
+    /// [`OnlineSlamConfig::local_vi_ba`] is enabled and the current
+    /// `process_frame` call triggered the sliding-window solve. `None`
+    /// otherwise (disabled, no new factor, or the window was too short
+    /// to refine).
+    pub local_vi_ba: Option<OnlineSlamLocalBaStats>,
     pub map_keyframe_count: usize,
     pub map_landmark_count: usize,
+    /// State-transition event from the auto-bootstrap stage. `Some`
+    /// only on the frame where the VI initialiser actually changed
+    /// state — `Succeeded`, `StillBuffering`, or `GaveUp`. `None` on
+    /// every other frame (no new keyframe registered, VI init
+    /// disabled, or the stage has already reached a terminal event).
+    /// Durable state is exposed via
+    /// [`OnlineSlamPipeline::vi_initialization_status`].
+    pub vi_init: Option<ViInitializationEvent>,
+    /// State-transition event from the motion-based VI init stage.
+    /// `Some` only on the frame where the motion-based initialiser
+    /// actually changed state (`Succeeded` or `StillWaiting`); `None`
+    /// otherwise (no new keyframe, stage disabled, static seed not yet
+    /// available, or already in the terminal `Initialised` state).
+    /// Durable state is exposed via
+    /// [`OnlineSlamPipeline::motion_vi_initialization_status`].
+    pub vi_motion_init: Option<MotionViInitializationEvent>,
+    /// Per-frame outcome of the online loop-closure + pose-graph
+    /// refinement stage. `Some` only when
+    /// [`OnlineSlamConfig::pose_graph_refinement`] is enabled AND the
+    /// verifier was actually run this frame (i.e. the current frame
+    /// produced a keyframe AND there was at least one candidate). `None`
+    /// otherwise — the stage being disabled, no candidate this frame,
+    /// or no new keyframe to attach the verifier output to.
+    pub pose_graph_refinement: Option<OnlineSlamLoopClosureRefinementStats>,
+    /// Per-frame outcome of the relocalization-on-tracker-death stage.
+    /// `Some` only on frames where primary tracking failed AND the
+    /// stage was enabled — `stats.attempted` is always `true` when this
+    /// field is `Some`, and `stats.succeeded` reflects whether the
+    /// recovery PnP solution cleared the acceptance gates. `None` on
+    /// every other frame (stage disabled, or primary tracking already
+    /// succeeded so no relocalization was needed).
+    pub relocalization: Option<OnlineSlamRelocalizationStats>,
 }
 
 impl OnlineSlamResult {
@@ -1473,6 +3264,24 @@ impl RobustKernel {
     }
 }
 
+/// Linear solver backend used by pose-graph optimizers when the normal
+/// equations `(H + λI) δ = -g` (or the translation-only analogue) are solved.
+///
+/// `Dense` materializes the full SPD matrix as a [`DMatrix`] and uses
+/// nalgebra's dense Cholesky (LU fallback). `Sparse` assembles the same
+/// system as a CSC matrix and solves with `nalgebra_sparse::CscCholesky`.
+/// The two paths produce numerically equivalent solutions on connected,
+/// well-conditioned graphs but the sparse path scales to thousands of
+/// keyframes where the dense path becomes infeasible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinearSolver {
+    /// Dense Cholesky / LU on a [`DMatrix`].
+    #[default]
+    Dense,
+    /// Sparse Cholesky on a [`CscMatrix`] assembled from edge triplets.
+    Sparse,
+}
+
 /// Configuration for [`PoseGraph::optimize_se3_iterative`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphSe3Config {
@@ -1501,6 +3310,11 @@ pub struct PoseGraphSe3Config {
     pub max_lambda: f64,
     /// Lower bound on `λ`. Decreases stop here so `λ` cannot collapse to zero.
     pub min_lambda: f64,
+    /// Linear-solver backend. Defaults to dense Cholesky for parity with the
+    /// pre-sparse solver. Switch to [`LinearSolver::Sparse`] when the graph
+    /// has more than a few hundred nodes so the optimizer scales linearly in
+    /// non-zero edges instead of cubically in node count.
+    pub linear_solver: LinearSolver,
 }
 
 impl Default for PoseGraphSe3Config {
@@ -1515,6 +3329,7 @@ impl Default for PoseGraphSe3Config {
             lambda_decrease_factor: 0.1,
             max_lambda: 1e12,
             min_lambda: 1e-9,
+            linear_solver: LinearSolver::Dense,
         }
     }
 }
@@ -1659,8 +3474,24 @@ impl PoseGraph {
     /// holding rotations fixed. With linear-in-translation residuals the
     /// "single step" is the exact least-squares optimum of the underlying
     /// linear system, not a Newton iteration that needs to be repeated.
+    ///
+    /// Equivalent to [`Self::optimize_translations_once_with`] called with
+    /// [`LinearSolver::Dense`].
     pub fn optimize_translations_once(
         &mut self,
+    ) -> Result<PoseGraphOptimizationStep, PoseGraphError> {
+        self.optimize_translations_once_with(LinearSolver::Dense)
+    }
+
+    /// Variant of [`Self::optimize_translations_once`] that selects the
+    /// linear-solver backend. Use [`LinearSolver::Sparse`] for graphs with
+    /// hundreds-to-thousands of keyframes — the normal-equations matrix is
+    /// block-banded with at most four `3×3` blocks per edge, so
+    /// `nalgebra_sparse::CscCholesky` is much faster than the dense path
+    /// and uses dramatically less memory.
+    pub fn optimize_translations_once_with(
+        &mut self,
+        linear_solver: LinearSolver,
     ) -> Result<PoseGraphOptimizationStep, PoseGraphError> {
         let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
         let anchor_pose = self
@@ -1686,11 +3517,6 @@ impl PoseGraph {
             return Err(PoseGraphError::NoVariables);
         }
 
-        let row_count = self.edges.len() * 3;
-        let column_count = variable_count * 3;
-        let mut a = DMatrix::<f64>::zeros(row_count, column_count);
-        let mut b = DVector::<f64>::zeros(row_count);
-
         for edge in &self.edges {
             if !self.poses.contains_key(&edge.from) {
                 return Err(PoseGraphError::MissingNode(edge.from));
@@ -1702,35 +3528,64 @@ impl PoseGraph {
 
         let cost_before = self.translation_cost();
 
-        for (edge_index, edge) in self.edges.iter().enumerate() {
+        // Assemble the normal equations `A^T A x = A^T b` directly. Each row
+        // of `A` (per edge) has at most two nonzero 3×3 identity-shaped
+        // blocks (`+w · I` at `to`, `-w · I` at `from`), so the contribution
+        // to `A^T A` per edge is also block-structured: `w² · I` at the
+        // `(to, to)` and `(from, from)` diagonal blocks and `-w² · I` at
+        // both off-diagonal blocks. Anchor-incident edges only push to one
+        // diagonal and shift `A^T b` by the anchor center.
+        let dim = variable_count * 3;
+        let mut h_dense = match linear_solver {
+            LinearSolver::Dense => Some(DMatrix::<f64>::zeros(dim, dim)),
+            LinearSolver::Sparse => None,
+        };
+        let mut triplets: Vec<(usize, usize, f64)> = match linear_solver {
+            LinearSolver::Dense => Vec::new(),
+            LinearSolver::Sparse => Vec::with_capacity(self.edges.len() * 36),
+        };
+        let mut atb = DVector::<f64>::zeros(dim);
+
+        for edge in &self.edges {
             let to_pose = &self.poses[&edge.to];
             let displacement = expected_world_displacement(to_pose, &edge.measurement);
             let mut rhs = displacement;
-            let weight = edge.weight.sqrt();
-            let row = edge_index * 3;
+            let w2 = edge.weight;
 
-            if let Some(&j) = node_index.get(&edge.to) {
-                for k in 0..3 {
-                    a[(row + k, j * 3 + k)] += weight;
-                }
-            } else {
+            let i_to = node_index.get(&edge.to).copied();
+            let i_from = node_index.get(&edge.from).copied();
+            if i_to.is_none() {
                 rhs -= anchor_center.coords;
             }
-            if let Some(&i) = node_index.get(&edge.from) {
-                for k in 0..3 {
-                    a[(row + k, i * 3 + k)] -= weight;
-                }
-            } else {
+            if i_from.is_none() {
                 rhs += anchor_center.coords;
             }
-            for k in 0..3 {
-                b[row + k] = weight * rhs[k];
+
+            if let Some(j) = i_to {
+                add_diag_block3(&mut h_dense, &mut triplets, j * 3, w2);
+                for k in 0..3 {
+                    atb[j * 3 + k] += w2 * rhs[k];
+                }
+            }
+            if let Some(i) = i_from {
+                add_diag_block3(&mut h_dense, &mut triplets, i * 3, w2);
+                for k in 0..3 {
+                    atb[i * 3 + k] -= w2 * rhs[k];
+                }
+            }
+            if let (Some(j), Some(i)) = (i_to, i_from) {
+                add_offdiag_block3(&mut h_dense, &mut triplets, j * 3, i * 3, -w2);
+                add_offdiag_block3(&mut h_dense, &mut triplets, i * 3, j * 3, -w2);
             }
         }
 
-        let ata = a.transpose() * &a;
-        let atb = a.transpose() * &b;
-        let solution = ata.lu().solve(&atb).ok_or(PoseGraphError::SingularSystem)?;
+        let solution = match linear_solver {
+            LinearSolver::Dense => {
+                let h = h_dense.expect("dense matrix initialized when LinearSolver::Dense");
+                solve_normal_equations(&h, &atb)?
+            }
+            LinearSolver::Sparse => solve_normal_equations_sparse(&triplets, dim, &atb, 0.0)?,
+        };
 
         let mut total_correction = 0.0;
         let mut max_correction: f64 = 0.0;
@@ -1849,7 +3704,7 @@ impl PoseGraph {
         let dim = variable_count * 6;
 
         for iteration in 0..config.max_iterations {
-            let mut h = DMatrix::<f64>::zeros(dim, dim);
+            let mut builder = NormalEquations6::new(dim, config.linear_solver, self.edges.len());
             let mut g = DVector::<f64>::zeros(dim);
 
             for edge in &self.edges {
@@ -1867,29 +3722,23 @@ impl PoseGraph {
                 let i_to = node_index.get(&edge.to).copied();
 
                 if let Some(j) = i_to {
-                    add_block6(&mut h, j * 6, j * 6, weight, &ata);
+                    builder.add_block6(j * 6, j * 6, weight, &ata);
                     add_segment6(&mut g, j * 6, weight, &atr);
                 }
                 if let Some(i) = i_from {
-                    add_block6(&mut h, i * 6, i * 6, weight, &ata);
+                    builder.add_block6(i * 6, i * 6, weight, &ata);
                     add_segment6(&mut g, i * 6, -weight, &atr);
                 }
                 if let (Some(j), Some(i)) = (i_to, i_from) {
                     let cross = -ata;
                     let cross_t = cross.transpose();
-                    add_block6(&mut h, j * 6, i * 6, weight, &cross);
-                    add_block6(&mut h, i * 6, j * 6, weight, &cross_t);
+                    builder.add_block6(j * 6, i * 6, weight, &cross);
+                    builder.add_block6(i * 6, j * 6, weight, &cross_t);
                 }
             }
 
-            let mut h_damped = h.clone();
-            if lambda > 0.0 {
-                for k in 0..dim {
-                    h_damped[(k, k)] += lambda;
-                }
-            }
             let neg_g = -&g;
-            let delta = solve_normal_equations(&h_damped, &neg_g)?;
+            let delta = builder.solve(lambda, &neg_g)?;
 
             // Tentatively apply the step so we can evaluate the new cost.
             let mut max_step_norm: f64 = 0.0;
@@ -1975,11 +3824,182 @@ impl PoseGraph {
             converged,
         })
     }
+
+    /// Serialize this pose graph to a plain-text format. The format is
+    /// line-oriented and human-readable so it doubles as a debug dump:
+    ///
+    /// ```text
+    /// # visloc-rs PoseGraph v1
+    /// P <id> <qw> <qx> <qy> <qz> <tx> <ty> <tz>
+    /// ...
+    /// A <id>
+    /// E <from> <to> <kind:0|1> <weight> <qw> <qx> <qy> <qz> <tx> <ty> <tz>
+    /// ...
+    /// ```
+    ///
+    /// `kind = 0` is `Sequential`, `kind = 1` is `LoopClosure`. Lines
+    /// starting with `#` and blank lines are ignored on read. Round-trips
+    /// through [`Self::load_text`] without precision loss within `f64`'s
+    /// `{:.17e}` representation.
+    pub fn save_text(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let mut text = String::from("# visloc-rs PoseGraph v1\n");
+        for (id, pose) in self.poses.iter() {
+            let q = pose.world_to_camera.rotation.into_inner();
+            let t = &pose.world_to_camera.translation;
+            text.push_str(&format!(
+                "P {id} {qw:.17e} {qx:.17e} {qy:.17e} {qz:.17e} {tx:.17e} {ty:.17e} {tz:.17e}\n",
+                qw = q.w,
+                qx = q.i,
+                qy = q.j,
+                qz = q.k,
+                tx = t.x,
+                ty = t.y,
+                tz = t.z,
+            ));
+        }
+        if let Some(anchor) = self.anchor {
+            text.push_str(&format!("A {anchor}\n"));
+        }
+        for edge in &self.edges {
+            let kind: u8 = match edge.kind {
+                PoseGraphEdgeKind::Sequential => 0,
+                PoseGraphEdgeKind::LoopClosure => 1,
+            };
+            let q = edge.measurement.rotation.into_inner();
+            let t = &edge.measurement.translation;
+            text.push_str(&format!(
+                "E {from} {to} {kind} {weight:.17e} {qw:.17e} {qx:.17e} {qy:.17e} {qz:.17e} {tx:.17e} {ty:.17e} {tz:.17e}\n",
+                from = edge.from, to = edge.to, weight = edge.weight,
+                qw = q.w, qx = q.i, qy = q.j, qz = q.k, tx = t.x, ty = t.y, tz = t.z,
+            ));
+        }
+        std::fs::write(path, text)
+    }
+
+    /// Inverse of [`Self::save_text`]. Returns `PoseGraphParseError`
+    /// on syntactic problems (unknown line tag, missing column, bad
+    /// number, unrecognised kind tag).
+    pub fn load_text(path: impl AsRef<std::path::Path>) -> Result<Self, PoseGraphParseError> {
+        let text = std::fs::read_to_string(path).map_err(PoseGraphParseError::Io)?;
+        let mut graph = PoseGraph::new();
+        for (lineno, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_ascii_whitespace();
+            let tag = tok.next().ok_or_else(|| PoseGraphParseError::Syntax {
+                line: lineno + 1,
+                reason: "empty line tag".to_string(),
+            })?;
+            match tag {
+                "P" => {
+                    let id = parse_field::<u64>(tok.next(), lineno, "id")?;
+                    let qw = parse_field::<f64>(tok.next(), lineno, "qw")?;
+                    let qx = parse_field::<f64>(tok.next(), lineno, "qx")?;
+                    let qy = parse_field::<f64>(tok.next(), lineno, "qy")?;
+                    let qz = parse_field::<f64>(tok.next(), lineno, "qz")?;
+                    let tx = parse_field::<f64>(tok.next(), lineno, "tx")?;
+                    let ty = parse_field::<f64>(tok.next(), lineno, "ty")?;
+                    let tz = parse_field::<f64>(tok.next(), lineno, "tz")?;
+                    let rot = UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz));
+                    let pose = Pose::from_world_to_camera(rot, Vector3::new(tx, ty, tz));
+                    graph.poses.insert(id, pose);
+                }
+                "A" => {
+                    let id = parse_field::<u64>(tok.next(), lineno, "anchor id")?;
+                    graph.anchor = Some(id);
+                }
+                "E" => {
+                    let from = parse_field::<u64>(tok.next(), lineno, "from")?;
+                    let to = parse_field::<u64>(tok.next(), lineno, "to")?;
+                    let kind_tag = parse_field::<u8>(tok.next(), lineno, "kind")?;
+                    let kind = match kind_tag {
+                        0 => PoseGraphEdgeKind::Sequential,
+                        1 => PoseGraphEdgeKind::LoopClosure,
+                        other => {
+                            return Err(PoseGraphParseError::Syntax {
+                                line: lineno + 1,
+                                reason: format!("unrecognised edge kind tag {other}"),
+                            });
+                        }
+                    };
+                    let weight = parse_field::<f64>(tok.next(), lineno, "weight")?;
+                    let qw = parse_field::<f64>(tok.next(), lineno, "qw")?;
+                    let qx = parse_field::<f64>(tok.next(), lineno, "qx")?;
+                    let qy = parse_field::<f64>(tok.next(), lineno, "qy")?;
+                    let qz = parse_field::<f64>(tok.next(), lineno, "qz")?;
+                    let tx = parse_field::<f64>(tok.next(), lineno, "tx")?;
+                    let ty = parse_field::<f64>(tok.next(), lineno, "ty")?;
+                    let tz = parse_field::<f64>(tok.next(), lineno, "tz")?;
+                    let rot = UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz));
+                    graph.edges.push(PoseGraphEdge {
+                        from,
+                        to,
+                        measurement: SE3::new(rot, Vector3::new(tx, ty, tz)),
+                        kind,
+                        weight,
+                    });
+                }
+                other => {
+                    return Err(PoseGraphParseError::Syntax {
+                        line: lineno + 1,
+                        reason: format!("unknown line tag '{other}'"),
+                    });
+                }
+            }
+        }
+        Ok(graph)
+    }
+}
+
+#[derive(Debug)]
+pub enum PoseGraphParseError {
+    Io(std::io::Error),
+    Syntax { line: usize, reason: String },
+}
+
+impl std::fmt::Display for PoseGraphParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PoseGraphParseError::Io(e) => write!(f, "I/O error reading pose graph: {e}"),
+            PoseGraphParseError::Syntax { line, reason } => {
+                write!(f, "pose graph parse error at line {line}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PoseGraphParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PoseGraphParseError::Io(e) => Some(e),
+            PoseGraphParseError::Syntax { .. } => None,
+        }
+    }
+}
+
+fn parse_field<T: std::str::FromStr>(
+    field: Option<&str>,
+    lineno: usize,
+    name: &str,
+) -> Result<T, PoseGraphParseError>
+where
+    T::Err: std::fmt::Display,
+{
+    let s = field.ok_or_else(|| PoseGraphParseError::Syntax {
+        line: lineno + 1,
+        reason: format!("missing field '{name}'"),
+    })?;
+    s.parse::<T>().map_err(|e| PoseGraphParseError::Syntax {
+        line: lineno + 1,
+        reason: format!("bad {name}: {e}"),
+    })
 }
 
 /// Solve `H · x = b` preferring Cholesky (SPD path) and falling back to LU
 /// for ill-conditioned or rank-deficient systems.
-fn solve_normal_equations(
+pub(crate) fn solve_normal_equations(
     h: &DMatrix<f64>,
     b: &DVector<f64>,
 ) -> Result<DVector<f64>, PoseGraphError> {
@@ -1990,6 +4010,37 @@ fn solve_normal_equations(
         .lu()
         .solve(b)
         .ok_or(PoseGraphError::SingularSystem)
+}
+
+/// Sparse Cholesky solve of `(H + λI) · x = b` where `H` is supplied as
+/// COO triplets and assumed SPD by construction (it is a sum of `wᵀw` block
+/// outer products from edge Jacobians). Triplets may contain duplicates;
+/// they are summed during the COO → CSC conversion.
+///
+/// Returns [`PoseGraphError::SingularSystem`] when the factorization fails
+/// (e.g., disconnected graph). The damping term `λ` is added to the diagonal
+/// before factoring, matching the dense LM path's `H + λI` formulation.
+fn solve_normal_equations_sparse(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    b: &DVector<f64>,
+    lambda: f64,
+) -> Result<DVector<f64>, PoseGraphError> {
+    let mut coo = CooMatrix::<f64>::new(dim, dim);
+    coo.reserve(triplets.len() + dim);
+    for &(r, c, v) in triplets {
+        coo.push(r, c, v);
+    }
+    if lambda > 0.0 {
+        for k in 0..dim {
+            coo.push(k, k, lambda);
+        }
+    }
+    let csc = CscMatrix::from(&coo);
+    let chol = CscCholesky::factor(&csc).map_err(|_| PoseGraphError::SingularSystem)?;
+    let rhs = DMatrix::from_column_slice(dim, 1, b.as_slice());
+    let solution = chol.solve(&rhs);
+    Ok(DVector::from_column_slice(solution.as_slice()))
 }
 
 fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {
@@ -2003,6 +4054,102 @@ fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: 
 fn add_segment6(g: &mut DVector<f64>, start: usize, weight: f64, v: &Vector6<f64>) {
     for k in 0..6 {
         g[start + k] += weight * v[k];
+    }
+}
+
+/// Add `value · I_3` to the `(start, start)` diagonal block of either a
+/// dense `H` matrix or a triplet vector. Used by the translation-only
+/// optimizer where the per-edge contribution to `A^T A` is a scaled
+/// identity on the diagonal blocks.
+fn add_diag_block3(
+    h_dense: &mut Option<DMatrix<f64>>,
+    triplets: &mut Vec<(usize, usize, f64)>,
+    start: usize,
+    value: f64,
+) {
+    if let Some(h) = h_dense {
+        for k in 0..3 {
+            h[(start + k, start + k)] += value;
+        }
+    } else {
+        for k in 0..3 {
+            triplets.push((start + k, start + k, value));
+        }
+    }
+}
+
+/// Add `value · I_3` to the `(row_start, col_start)` off-diagonal block
+/// (off-diagonal in the block-of-3 sense — also used when row != col).
+fn add_offdiag_block3(
+    h_dense: &mut Option<DMatrix<f64>>,
+    triplets: &mut Vec<(usize, usize, f64)>,
+    row_start: usize,
+    col_start: usize,
+    value: f64,
+) {
+    if let Some(h) = h_dense {
+        for k in 0..3 {
+            h[(row_start + k, col_start + k)] += value;
+        }
+    } else {
+        for k in 0..3 {
+            triplets.push((row_start + k, col_start + k, value));
+        }
+    }
+}
+
+/// Storage for the SE(3) Gauss-Newton normal-equations matrix `H` that
+/// dispatches to either a dense [`DMatrix`] or a COO triplet vector backing
+/// a sparse Cholesky solve. The right-hand side `g` is assembled separately
+/// (see callers) so this builder stays focused on `H`.
+enum NormalEquations6 {
+    Dense(DMatrix<f64>),
+    Sparse {
+        triplets: Vec<(usize, usize, f64)>,
+        dim: usize,
+    },
+}
+
+impl NormalEquations6 {
+    fn new(dim: usize, solver: LinearSolver, edge_hint: usize) -> Self {
+        match solver {
+            LinearSolver::Dense => Self::Dense(DMatrix::zeros(dim, dim)),
+            // Each edge contributes up to four 6×6 blocks = 4·36 = 144 entries.
+            LinearSolver::Sparse => Self::Sparse {
+                triplets: Vec::with_capacity(edge_hint * 144),
+                dim,
+            },
+        }
+    }
+
+    fn add_block6(&mut self, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {
+        match self {
+            Self::Dense(h) => add_block6(h, row, col, weight, block),
+            Self::Sparse { triplets, .. } => {
+                for r in 0..6 {
+                    for c in 0..6 {
+                        triplets.push((row + r, col + c, weight * block[(r, c)]));
+                    }
+                }
+            }
+        }
+    }
+
+    fn solve(self, lambda: f64, neg_g: &DVector<f64>) -> Result<DVector<f64>, PoseGraphError> {
+        match self {
+            Self::Dense(mut h) => {
+                if lambda > 0.0 {
+                    let dim = h.nrows();
+                    for k in 0..dim {
+                        h[(k, k)] += lambda;
+                    }
+                }
+                solve_normal_equations(&h, neg_g)
+            }
+            Self::Sparse { triplets, dim } => {
+                solve_normal_equations_sparse(&triplets, dim, neg_g, lambda)
+            }
+        }
     }
 }
 

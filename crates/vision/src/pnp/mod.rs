@@ -6,6 +6,9 @@ use visloc_core::types::Camera;
 pub struct Correspondence2D3D {
     pub point2d: Point2<f64>,
     pub point3d: Point3<f64>,
+    /// Optional matcher confidence for RANSAC sampling. `None` means the
+    /// correspondence has no confidence signal and should be treated uniformly.
+    pub confidence: Option<f32>,
 }
 
 pub trait PoseEstimator {
@@ -283,6 +286,7 @@ mod tests {
                     .project(&pose.transform_world_point(&point3d))
                     .unwrap(),
                 point3d,
+                confidence: None,
             })
             .collect::<Vec<_>>();
 
@@ -317,6 +321,7 @@ mod tests {
                     .project(&true_pose.transform_world_point(&point3d))
                     .unwrap(),
                 point3d,
+                confidence: None,
             })
             .collect::<Vec<_>>();
 

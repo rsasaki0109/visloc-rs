@@ -1,148 +1,227 @@
-# visloc-rs: Visual Localization in Rust
+<h1 align="center">visloc-rs</h1>
 
 <p align="center">
-  <img src="docs/assets/south-building-localization-rich.gif" alt="Feature-rich COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, feature points, pose links, and localized camera path" width="92%">
+  <strong>Visual localization, stereo VO, and visual-inertial SLAM building blocks in Rust.</strong><br>
+  COLMAP/SfM map reuse, PnP + RANSAC localization, KITTI stereo VO,
+  EuRoC visual-inertial SLAM with an empirically documented adaptive
+  IMU/pose tracker, loop-candidate diagnostics, bundle-adjusted
+  trajectory demos, and an opt-in in-Rust SuperPoint ONNX path.
 </p>
 
 <p align="center">
   <a href="https://github.com/rsasaki0109/visloc-rs/actions/workflows/ci.yml"><img src="https://github.com/rsasaki0109/visloc-rs/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
-  <img src="https://img.shields.io/badge/scope-visual%20localization-35d0ba" alt="Scope: visual localization">
-  <img src="https://img.shields.io/badge/deep%20VO%20%2F%20loop%20close-100%25-22c55e" alt="Deep VO / loop close completion: 100%">
+  <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
+  <img src="https://img.shields.io/badge/status-research%20foundation-6f42c1" alt="Research foundation">
 </p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/south-building-localization-rich.gif" alt="Feature-rich COLMAP South Building public dataset time-series visual localization demo with real images, sparse SfM map, feature points, pose links, and localized camera path" width="100%">
+      <br>
+      <strong>COLMAP map localization</strong><br>
+      Real South Building images localized against a reusable sparse SfM map.
+    </td>
+    <td width="50%">
+      <img src="docs/assets/kitti_deep_vo.gif" alt="Deep stereo visual odometry on KITTI 00" width="100%">
+      <br>
+      <strong>KITTI stereo VO</strong><br>
+      Metric stereo visual odometry with confidence-weighted PnP and BA diagnostics.
+    </td>
+  </tr>
+</table>
 
 <p align="center">
-  <img src="docs/assets/kitti_loop_closure.gif" alt="Real-image visual odometry + loop closure on KITTI 00 (1112 keyframes): monocular essential-matrix VO drifts ~548 m, then a single loop-closure edge plus pose-graph SE(3) Gauss-Newton brings the endpoint back to within ~5 m of truth" width="62%">
+  <a href="#try-it"><strong>Try it</strong></a> ·
+  <a href="#demos"><strong>Demos</strong></a> ·
+  <a href="#euroc-characterisation-vs-published-baselines-honest-read"><strong>EuRoC vs ORB-SLAM3</strong></a> ·
+  <a href="#scope"><strong>Scope</strong></a> ·
+  <a href="docs/phase_20_to_27_closeout.md"><strong>EuRoC closeout</strong></a> ·
+  <a href="PLAN.md"><strong>Handoff plan</strong></a>
 </p>
 
-<p align="center">
-  <em>Real-image visual odometry + loop closure on KITTI 00 (1112 keyframes from <code>image_0</code>): Shi-Tomasi corners → essential-matrix RANSAC for every consecutive pair → loop edge from the same pipeline → pose-graph SE(3) Gauss-Newton. Monocular VO drifts ~548&nbsp;m before the loop closure; a single loop edge plus the SE(3) optimizer brings endpoint error to ~5&nbsp;m.</em>
-</p>
+`visloc-rs` is a Rust foundation library for map-based visual localization and
+the building blocks above it: load an existing COLMAP/SfM map, match query
+features to landmarks, estimate camera pose with PnP + RANSAC. Optional
+pipelines grow toward stereo VO, online VI-SLAM with an adaptive IMU/pose
+tracker, loop-candidate reporting, pose-graph optimization, and bundle
+adjustment.
 
-<p align="center">
-  <img src="docs/assets/kitti_loop_closure.png" alt="Three-panel comparison: KITTI 00 ground truth, monocular VO Procrustes-aligned, and corrected trajectory after loop closure + SE(3) Gauss-Newton" width="92%">
-</p>
+The project is built for robotics localization work where you want inspectable
+geometry, explicit diagnostics, reusable trait boundaries, and an honest
+empirical record before committing to a heavy runtime or a full SLAM stack.
 
-`visloc-rs` is a Rust foundation library for map-based visual localization: load an existing COLMAP/SfM visual map, match query image features to 3D landmarks, and estimate the camera pose with PnP + RANSAC.
+## Highlights
 
-It is built for robotics localization work where you want a small, inspectable Rust core before growing into tracking, local mapping, online Visual SLAM, or GNSS/visual-inertial fusion.
+| Area | What works now |
+| --- | --- |
+| Map localization | COLMAP text/binary IO, descriptor stores, 2D-3D correspondence building, DLT PnP, PnP RANSAC, optional Gauss-Newton pose refinement |
+| Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
+| **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint → 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
+| Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, SE(3) pose graph optimization |
+| Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/KITTI/TUM trajectory evaluators |
+| Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
+| Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
 
-## At A Glance
+## Benchmark Snapshot
 
-- **Input:** existing COLMAP/SfM map, landmark descriptors, query features, or image sequences
-- **Output:** `SE3` / `Pose` estimates, inlier counts, reprojection error, tracking diagnostics, and pose trajectories
-- **Works today:** map-based localization, sequence tracking scaffold, COLMAP IO, KITTI-style image-sequence IO, GNSS-prior hooks, demo reports
-- **Extensible:** feature extractors and matchers are trait-based, so learned features such as SuperPoint-style keypoints or LightGlue-style matching can be integrated outside the core
-- **Next targets:** deep visual odometry frontends and loop-closure visualization for a more SLAM-like sequence demo
-- **Deliberately not yet:** full SLAM, global loop-closure optimization, dense mapping, global bundle adjustment, or tightly coupled VIO/GNSS
+These are local public-data development measurements, not official benchmark
+leaderboard submissions.
 
-The first public slice is intentionally narrow: make visual localization solid, observable, and easy to extend instead of hiding an unfinished SLAM stack behind a large API.
+| Demo | Dataset | Result |
+| --- | --- | ---: |
+| COLMAP localization sweep | South Building, 25 map/query pairs | Deep-style descriptors give **+37% to +98%** more verified inliers as viewpoint gap grows |
+| KITTI loop scanner | KITTI 00 start + revisit sandwich | Deep-style frontend raises strongest-pair inliers **57 -> 152** and cross-segment candidates **25 -> 62** |
+| SP/LG stereo VO + BA | KITTI odometry train `00..10`, 260 frames each | `mean_t_rel = 1.2715%`, `mean_max_t_rel = 2.9785%` with tuned SuperPoint/LightGlue + BA |
+| EuRoC VI-SLAM (SuperPoint + strict-stereo) | EuRoC V1_01_easy, Phase-26 #1 strict | rigid ATE **0.0029 m** (sim_scale 1.026 ≈ metric) on 93 surviving frames, coverage 6 % — see *EuRoC characterisation* below |
+| EuRoC VI-SLAM (HOG + ThreePoseSmoother) | EuRoC V2_01_easy, Phase-25 strict | rigid ATE **0.198 m** on 102 surviving frames, coverage 6.8 % |
+| Synthetic loop recovery | 9-keyframe scanner arc | SE(3) PGO recovers drift to **<2 cm** max error |
 
-<p align="center">
-  <img src="docs/assets/localization-flow.svg" alt="visloc-rs localization pipeline" width="92%">
-</p>
+Rough KITTI context: the local SP/LG + BA `mean_t_rel = 1.2715%` would sit
+around **overall rank 70** on the public KITTI odometry table by translation
+error if naively inserted — scale reference, not a leaderboard claim. The
+local run uses training sequences `00..10` and 260-frame subsets; the official
+benchmark ranks hidden test sequences `11..21` with `100..800 m` segment
+evaluation.
 
-## Public Data Localization Demo
+### EuRoC characterisation vs published baselines (honest read)
 
-The README animation uses the public COLMAP South Building dataset. A small 9-image SfM model was rebuilt from the public images with `pycolmap`, producing 9 registered cameras and 1,428 sparse 3D points. The animation plays the 9 real images as a short sequence: each frame is localized against the same reusable visual map, and the estimated camera path advances on the map. This is map-based localization over a sequence, not full SLAM.
+The EuRoC numbers above are from the systematic Phase-{20..27} EuRoC
+visual-inertial workstream documented in
+[`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md).
+The strict-stereo bootstrap visloc-rs uses is **accuracy-favouring rather
+than coverage-favouring**: it gives up tracking on EuRoC cliff regions
+where descriptor / IMU disagreement spikes, rather than admit wrong-scale
+solutions. On the frames it does track, per-frame accuracy is competitive
+with published full-sequence numbers; on full-sequence coverage it is not.
 
-The feature-rich overlay emphasizes the localization signal for README viewing: many cyan points are detected image features, while the highlighted yellow links show pose-constraint visualization between 2D image evidence and the sparse visual map.
+| Method | V1_01_easy ATE | V2_01_easy ATE | Coverage | Stack |
+| --- | --- | --- | --- | --- |
+| ORB-SLAM3 mono-inertial *[Campos et al. 2021]* | 0.038 m | 0.032 m | full sequence | C++, OpenCV/Eigen, manual CMake, full bundle adjustment |
+| ORB-SLAM3 stereo-inertial *[Campos et al. 2021]* | 0.037 m | 0.038 m | full sequence | C++ |
+| VINS-Fusion stereo-inertial *[Qin et al. 2019]* | 0.087 m | 0.150 m | full sequence | C++, Ceres, ROS-tied |
+| **visloc-rs V1_01 strict + SuperPoint** | **0.0029 m†** | — | **6 % of frames** | Rust, no mandatory ML runtime, library-first, sandbox-friendly, no CMake |
+| **visloc-rs V2_01 strict + SuperPoint** | — | **0.201 m†** | **6 % of frames** | Same stack as above; V2_01 strict lands in a wrong-scale regime (sim_scale 1.955) on the pinned binary |
+| **visloc-rs V2_01 strict + HOG (Phase-25)** | — | **0.198 m†** | **6.8 % of frames** | Rust, classical descriptor only |
 
-Data source: the COLMAP official South Building dataset, distributed as [`south-building.zip`](https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip) from the COLMAP example datasets.
+`†` Per-frame rigid-ATE-on-surviving-frames; not directly comparable to
+the full-sequence ATE of the ORB-SLAM3 / VINS-Fusion rows.
+[`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md)
+covers the trade-off (Phase-26 #2 / #2b / #4 honest negatives, Phase-26
+#3c MH_01 decomposition) — recovery PnP on EuRoC cliffs is structurally
+unsalvageable with the tracker-side intervention space tested, so the
+coverage gap vs published full-sequence methods is real and known.
 
-Static view:
+**Use visloc-rs today** if you want a Rust-side foundation library you can
+build your own SLAM-style stack on top of, with the documented empirical
+journey as a guide to what works and what doesn't.
+**Use ORB-SLAM3 / VINS-Fusion today** if you need turnkey full-sequence
+visual-inertial SLAM on the EuRoC profile.
 
-<p align="center">
-  <img src="docs/assets/south-building-localization-rich.png" alt="Feature-rich final frame of South Building time-series visual localization with current image, visual features, pose links, map, and camera trajectory" width="92%">
-</p>
+## Project Boundaries
+
+The first public slice is deliberately narrow: make visual localization solid,
+observable, and easy to extend instead of hiding an unfinished SLAM stack
+behind a large API.
+
+- **Input:** existing COLMAP/SfM maps, landmark descriptors, query features, stereo image sequences, file-backed external deep features/matches, or pre-exported SuperPoint features
+- **Output:** `SE3` / `Pose` estimates, inlier counts, reprojection error, tracking diagnostics, loop-candidate diagnostics, pose trajectories
+- **Extensible:** feature extractors, matchers, pose estimators, priors, and VO frontends are trait-based
+- **Core stays light:** no mandatory OpenCV, PyTorch, ONNX, TensorRT, or GPU runtime in default crates
+- **Not claimed:** production full SLAM, dense mapping, production loop closure, full SfM, tightly coupled VIO/GNSS, or official KITTI leaderboard results
 
 ## Try It
 
-Run the core vertical slice:
-
 ```bash
+# Smallest end-to-end: localize a synthetic query against a 1-landmark map.
 cargo run --example localize_dummy
-```
 
-Run the COLMAP-backed localization example:
+# COLMAP South Building localization (downloads ~100 MB on first run).
+cargo run --features image-io --example deep_localization_demo -- \
+    --root ~/datasets/south-building/south-building \
+    --map-image P1180141.JPG --query-image P1180144.JPG
 
-```bash
-cargo run --example localize_colmap_provider
-```
-
-Run an image-sequence smoke demo with optional image IO:
-
-```bash
+# Image-sequence tracking smoke.
 cargo run --features image-io --example track_image_sequence_from_common_images
-```
 
-Run the full local quality gate:
-
-```bash
+# Full local quality gate (fmt + clippy + test + doc).
 scripts/check.sh
 ```
 
-## Demo Direction
+## Demos
 
-The strongest near-term public demo path is automotive / robotics sequence localization: a moving camera, a reusable sparse visual map, and a pose trajectory that is easy to understand at a glance. UAV localization remains a primary target use case, especially when GNSS/altitude priors are added, but automotive public datasets are a good first showcase because they make sequence motion, relocalization, and map reuse visually obvious.
+Each row points at a runnable example or sweep script; longer walkthroughs
+live under `docs/`.
 
-## Next Technical Targets
+| Demo | Stack | Reference |
+| --- | --- | --- |
+| COLMAP South Building localization | Real images vs sparse SfM map, deep frontend optional | [`examples/deep_localization_demo.rs`](examples/deep_localization_demo.rs), [`docs/public_data_demo.md`](docs/public_data_demo.md) |
+| KITTI stereo VO + BA + loop closure | Rectified stereo → 2D-3D PnP → multi-frame BA → essential-matrix verifier → SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs), [`scripts/run_kitti_deep_vo_smoke.sh`](scripts/run_kitti_deep_vo_smoke.sh) |
+| KITTI 00 sandwich loop detection | Start + revisit slices, appearance scanner with classical or deep frontend | [`examples/kitti_revisit_scanner_demo.rs`](examples/kitti_revisit_scanner_demo.rs), [`scripts/run_kitti_deep_vo_revisit_smoke.sh`](scripts/run_kitti_deep_vo_revisit_smoke.sh) |
+| Synthetic scanner loop closure | 9-keyframe arc, appearance scan → loop edge → SE(3) PGO. `<2 cm` max error recovery | [`examples/scanner_loop_closure_demo.rs`](examples/scanner_loop_closure_demo.rs) |
+| Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a synthetic 30° baseline scene (~30× rot/translation-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
+| SuperPoint/LightGlue VO + multi-frame BA | File-backed SP/LG features → confidence-weighted PnP → BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
+| **EuRoC online VI-SLAM** | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap. SuperPoint optional via offline replay or `--features onnx-inference` | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
+| GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
+| KITTI / TUM trajectory ATE evaluator | Frame-id-matched ATE with `--max-mean / --max-rmse / --min-matched` thresholds | [`examples/evaluate_trajectory_from_kitti_files.rs`](examples/evaluate_trajectory_from_kitti_files.rs), [`examples/evaluate_kitti_odometry_benchmark.rs`](examples/evaluate_kitti_odometry_benchmark.rs) |
+| Binary determinism verification | Three-run protocol on EuRoC V2_01 baseline + SuperPoint configurations | [`scripts/verify_binary_determinism.sh`](scripts/verify_binary_determinism.sh), [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) |
 
-Two roadmap goals should make the project feel more like a SLAM foundation without pretending full SLAM is already solved:
+A walkable index of every example file lives in
+[`docs/demo_strategy.md`](docs/demo_strategy.md); the per-area numbers and
+methodology behind the benchmarks above are in the corresponding `docs/`
+notes.
 
-- **Deep Visual Odometry frontend:** `VisualOdometryFrontend` and `VisualOdometryPriorProvider` now give tracking a two-frame relative-pose boundary and a way to convert it into a pose prior. The target remains SuperPoint/LightGlue-style integration without forcing a heavy ML runtime into `visloc-core`.
-- **Loop-closure visualization:** candidate detection now exists in the online SLAM MVP; next is showing loop candidates clearly in sequence demos before adding pose-graph optimization.
+## EuRoC visual-inertial SLAM (Phase-{20..27})
 
-Current Deep VO / loop-close progress is tracked in [docs/progress.md](docs/progress.md). Development updates use that value as the milestone completion percentage.
+The Phase-{20..27} arc (2026) systematically explored adaptive
+IMU/pose motion modelling, motion-based VI initialization, local VI-BA,
+SuperPoint integration, relocalization, and binary determinism on the
+EuRoC MAV benchmark. The single-source-of-truth synthesis is
+[`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md).
+Major shipped artifacts:
+
+- `pipelines/tracking/src/lib.rs::AdaptiveImuPoseMotionModel` + `ImuVelocityRefreshPolicy` enum (Phase-25, recommended default `ThreePoseSmoother` gave V2_01 strict −25 % rigid ATE).
+- `pipelines/slam/src/lib.rs::OnlineSlamRelocalizationConfig` + `maybe_run_relocalization` (Phase-23 #1, Phase-26 #4 active-frontier submap + IMU sanity check fields).
+- `crates/vision/src/features/superpoint_onnx.rs` opt-in in-Rust SuperPoint ONNX extractor (`--features onnx-inference`, Phase-27). Empirically bit-identical to the existing Python pre-export path; choose based on deployment / latency.
+- `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` (binary determinism mitigation #1, confirmed bit-identical cross-rebuild on every tested configuration).
+
+The closeout doc lists every CLI flag with a justification, the empirical
+headlines per phase, and the known issues (V2_01 strict SP wrong-scale
+regime on the pinned binary; recovery PnP structurally unsalvageable on
+EuRoC cliffs; MH-class accuracy/continuity trade-off).
 
 ## Scope
 
-Implemented now:
+Implemented now: core map/pose types, `SE3`/`SO3` wrappers, brute-force +
+mutual-softmax matchers, DLT PnP, PnP RANSAC with weighted variants and
+optional Gauss-Newton refinement, COLMAP text/binary IO, KITTI calibration
+parsing, image-sequence loaders, validated visual maps, localization pipeline
+with descriptor stores, sequence tracking with motion priors and loss/
+relocalization events, local mapping skeleton with keyframe policies +
+windowed local refinement, online SLAM MVP with loop-candidate diagnostics,
+loose-coupling fusion foundation with GNSS/pose/IMU measurements, rectified-
+stereo VO frontend, Schur-complement bundle adjustment with sparse Cholesky +
+Huber/Cauchy robust kernels, SE(3) pose-graph optimizer with essential-matrix
+/ PnP / hybrid loop-closure verifiers, KITTI/TUM ATE evaluators, and a
+documented EuRoC VI-SLAM workstream (Phase-{20..27}).
 
-- Core map and pose types: `Frame`, `Keyframe`, `VisualMap`, `Landmark`, `Observation`, `Camera`, `Pose`, `LocalizationResult`
-- `SE3` / `SO3` wrappers and reprojection
-- Brute-force descriptor matching with L2 distance, ratio test, cross-check wrapper, and per-match diagnostics
-- Minimal DLT PnP estimator
-- PnP RANSAC with configurable iterations and reprojection threshold
-- Optional Gauss-Newton pose refinement after RANSAC inlier selection
-- Pose-estimator diagnostics in `LocalizationResult`, including refinement status and before/after reprojection error
-- Pose-estimation failure diagnostics for insufficient correspondences and RANSAC failures
-- COLMAP text and binary parsers for cameras, images, and 3D points
-- KITTI-style camera calibration parsing for automotive sequence inputs
-- KITTI-style image sequence loader that combines image frames, optional timestamps, and calibration
-- Visual map validation for structural references and descriptor availability
-- Feature extractor adapters for validated externally supplied features
-- Lightweight grayscale corner feature extractor for dependency-free image-input smoke tests
-- Query feature text parser and file-based localization example
-- Public-data README demo built from COLMAP South Building images and a `pycolmap` sparse reconstruction
-- Localization pipeline over query descriptors and map landmark descriptors, including an external landmark descriptor store
-- Localization-based tracking scaffold with motion priors, lost/relocalized events, and a pose-prior translation quality gate
-- Local mapping skeleton with keyframe policy, local map windows, staged map updates, landmark candidates, linear triangulation, and local refinement hooks
-- Online SLAM MVP composition over tracking and local mapping, including lightweight loop-closure candidate diagnostics but not global optimization
-- Loop-closure candidate reporting based on shared verified landmarks between the current frame and older keyframes
-- Loose-coupling fusion foundation with timestamped frames/poses, GNSS/pose/IMU measurements, covariance types, and external localization-prior tracking hooks
+Not implemented yet: production-grade full SLAM; full SfM; production loop
+closure across long real revisits; dense mapping; full tightly-coupled
+visual-inertial or GNSS/INS fusion.
 
-Not implemented yet:
-
-- Full production Visual SLAM
-- Full SfM
-- Full loop closure with global pose-graph optimization
-- Dense mapping
-- Full bundle adjustment
-- Full tightly-coupled visual-inertial or GNSS/INS fusion
-
-## Why not start with full SLAM?
-
-SLAM combines tracking, mapping, optimization, loop closure, persistence, and recovery logic. Implementing all of that first would make the core geometry and map interfaces harder to validate. `visloc-rs` starts with visual localization because it is the smallest useful slice: a map exists, a query image arrives, and the library estimates a camera pose.
-
-The design keeps the path open for Visual SLAM, SfM map reuse, visual-inertial fusion, and GNSS fusion by separating core data types, geometry, matching, PnP, RANSAC, IO, and pipeline composition.
+`visloc-rs` starts with visual localization because it is the smallest useful
+slice: a map exists, a query image arrives, the library estimates a camera
+pose. The design keeps the path open for Visual SLAM, SfM map reuse, VI
+fusion, and GNSS fusion by separating core data types, geometry, matching,
+PnP, RANSAC, IO, and pipeline composition.
 
 ## Roadmap
 
-The current public release focuses on map-based Visual Localization. Online Visual SLAM is planned, but it will build on this localization core instead of replacing it.
-
-See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
+[`docs/roadmap.md`](docs/roadmap.md) has the staged plan; [`PLAN.md`](PLAN.md)
+is the handoff checklist. Near-term layers:
 
 - Sequential localization and tracking quality improvements
 - Local mapping and lightweight keyframe policies
@@ -151,13 +230,6 @@ See [docs/roadmap.md](docs/roadmap.md) for the staged plan. Planned next layers:
 - Loop-closure candidate detection and visualization
 - Visual-inertial and GNSS priors/fusion
 - Larger public-data evaluation scripts
-
-For a detailed development handoff and next-task checklist, see [PLAN.md](PLAN.md).
-
-See [docs/demo_strategy.md](docs/demo_strategy.md) for the automotive/UAV demo plan.
-See [docs/colmap_compatibility.md](docs/colmap_compatibility.md) for supported COLMAP/SfM map formats and current limitations.
-See [docs/migration.md](docs/migration.md) for the pre-1.0 to v1.0 API migration guidance.
-See [docs/publishing.md](docs/publishing.md) for workspace publish order and package checks.
 
 ## Minimal Example
 
@@ -183,11 +255,9 @@ let query = QueryImage {
 let result = localize(query, map);
 ```
 
-When descriptors live outside the map, use `LandmarkDescriptorStore` and call `localize_with_descriptor_store`.
-
-Applications can start with `visloc_rs::prelude::*` for the common localization, map, IO, tracking, mapping, SLAM, and fusion entry points. Explicit module paths such as `visloc_rs::io::colmap` remain available for narrower imports.
-
-The initial text descriptor format is intentionally simple:
+When descriptors live outside the map, use `LandmarkDescriptorStore` and call
+`localize_with_descriptor_store`. The text descriptor format is intentionally
+simple:
 
 ```text
 # LANDMARK_ID D0 D1 D2 ...
@@ -197,223 +267,36 @@ The initial text descriptor format is intentionally simple:
 
 Load it with `visloc_io::descriptors::read_landmark_descriptors_txt`.
 
-Run the dummy vertical slice:
-
-```bash
-cargo run --example localize_dummy
-```
-
-Run the trajectory-evaluation example:
-
-```bash
-cargo run --example evaluate_trajectory_dummy
-cargo run --example evaluate_trajectory_from_kitti_files
-cargo run --example evaluate_trajectory_from_kitti_files -- --out-dir target/visloc_eval_kitti
-cargo run --example evaluate_trajectory_from_kitti_files -- --align-origin
-cargo run --example evaluate_trajectory_from_tum_files
-cargo run --example evaluate_trajectory_from_tum_files -- --out-dir target/visloc_eval
-cargo run --example evaluate_trajectory_from_tum_files -- --align-origin
-```
-
-The file-based KITTI / TUM evaluators write `translation_errors.csv`, `error_summary.json`, `evaluation_result.json`, and a browser-viewable `trajectory_report.html` when `--out-dir` is provided. They can also enforce benchmark-style thresholds with `--max-mean`, `--max-rmse`, `--max-max`, `--min-matched`, and `--min-match-ratio`; threshold failures exit with a non-zero status.
-
-Automotive-style KITTI calibration files can be used to build a pinhole camera from a projection row:
-
-```rust
-let camera = read_kitti_pinhole_camera("calib.txt", "P2", 1, 1242, 375)?;
-```
-
-With `image-io`, an automotive image sequence can be loaded together with timestamps and calibration:
-
-```rust
-let sequence = read_kitti_image_sequence_dir_with_timestamp_file(
-    "image_2",
-    "times_ns.txt",
-    "calib.txt",
-    "P2",
-    1,
-)?;
-```
-
-Run the KITTI-style image sequence loader smoke example:
-
-```bash
-cargo run --features image-io --example load_kitti_image_sequence
-```
-
-The local and CI smoke checks verify the generated KITTI-style image folder,
-timestamps, calibration file, and loader output:
-
-```bash
-scripts/check_kitti_image_sequence_demo_outputs.sh
-```
-
-See [docs/kitti_image_sequence_demo.md](docs/kitti_image_sequence_demo.md) for the KITTI-style image sequence demo output guide. CI uploads the checked output directory as the `kitti-image-sequence-demo-outputs` artifact.
-
-Run the IO-backed example that loads a COLMAP text map and external descriptor text file:
-
-```bash
-cargo run --example localize_colmap_text
-```
-
-Run the provider-based COLMAP example with map validation and provider diagnostics:
-
-```bash
-cargo run --example localize_colmap_provider
-```
-
-Run the file-based localization example, which reads a COLMAP text model, landmark descriptors, and query features:
-
-```bash
-cargo run --example localize_from_files
-```
-
-Run the dependency-free grayscale corner extractor example, which creates a synthetic marker image, extracts corner features, builds a small descriptor map, and localizes the image:
-
-```bash
-cargo run --example localize_with_corner_extractor
-```
-
-Run the PGM-backed variant, which writes and reads a grayscale image file before extracting features:
-
-```bash
-cargo run --example localize_from_pgm
-```
-
-Enable `image-io` to read common PNG/JPEG inputs through the optional `image` dependency. The example writes a PNG fixture, reloads it as grayscale, extracts corners, and localizes:
-
-```bash
-cargo run --features image-io --example localize_from_common_image
-```
-
-The same feature can load an ordered image directory for sequence tracking:
-
-```bash
-cargo run --features image-io --example track_image_sequence_from_common_images
-```
-
-Timestamped image sequences can also be connected to GNSS-derived localization priors:
-
-```bash
-cargo run --features image-io --example track_timestamped_image_sequence_with_gnss_prior
-```
-
-Timestamp text files use one nanosecond timestamp per non-comment line and can be loaded with `read_timestamp_nanoseconds_txt` or `read_common_image_sequence_dir_with_timestamp_file`.
-GNSS prior logs can be loaded with `read_gnss_measurements_txt`; each non-comment row is `timestamp_ns x y z [horizontal_accuracy] [vertical_accuracy]`, with either whitespace or commas as separators.
-`FramePriorSource::sync_summary` and `FramePriorSyncEvaluationConfig` can check whether external measurements cover the image frame timestamps before tracking starts, and sync evaluation results can be written as JSON.
-See [docs/timestamped_gnss_image_demo.md](docs/timestamped_gnss_image_demo.md) for the timestamped image GNSS-prior demo output guide. CI uploads the checked output directory as the `timestamped-gnss-image-demo-outputs` artifact.
-
-Run the file-based sequence localization example, which tracks multiple query feature files and prints CSV / KITTI / TUM trajectory exports. With `--out-dir`, it also writes `summary.json`, `tracking.csv`, `tracking_summary.json`, `trajectory_report.html`, and `tracking_report.html`:
-
-```bash
-cargo run --example localize_sequence_from_files
-cargo run --example localize_sequence_from_files -- --out-dir target/visloc_sequence_demo
-```
-
-`PoseTrajectory::to_html_report` creates a compact single-trajectory plot and metric table for demos. When reference poses are available, `PoseTrajectory::translation_error_summary_against` reports frame-id matched translation errors with mean, RMSE, max, and missing-pose counts. `TrajectoryAlignment::FirstMatchedTranslation` can remove a simple origin offset before computing errors, and `PoseTrajectory::to_html_report_against` creates a comparison report. This is intentionally a small ATE-style helper for demos and regression checks, not a full benchmark suite.
-
-Run the tracking skeleton example:
-
-```bash
-cargo run --example track_sequence_dummy
-cargo run --example track_sequence_dummy -- --out-dir target/visloc_tracking_demo
-cargo run --example online_slam_loop_candidate_dummy
-cargo run --example online_slam_loop_candidate_dummy -- --out-dir target/visloc_loop_demo
-cargo run --example online_slam_loop_candidate_with_verifier_dummy
-cargo run --example online_slam_loop_candidate_with_verifier_dummy -- --out-dir target/visloc_loop_verifier_demo
-cargo run --example online_slam_pose_graph_loop_demo
-cargo run --example online_slam_pose_graph_loop_demo -- --out-dir target/visloc_pose_graph_loop_demo
-cargo run --example read_two_view_matches_dummy
-cargo run --example two_view_match_vo_prior_dummy
-cargo run --example visual_odometry_prior_dummy
-cargo run --example track_sequence_with_visual_odometry_prior
-cargo run --example track_sequence_with_two_view_match_vo_prior
-cargo run --example track_sequence_with_two_view_match_vo_prior -- --out-dir target/visloc_two_view_match_vo_demo
-cargo run --example two_view_vo_compare
-cargo run --example two_view_vo_compare -- --out-dir target/visloc_two_view_vo_compare_demo
-```
-
-With `--out-dir`, sequence/tracking examples write `tracking.csv`, `tracking_summary.json`, `tracking_report.html` for frame-by-frame state transitions, and `trajectory_report.html` for the estimated pose path. The GNSS-prior demo also writes `tracking_evaluation.json` so success-rate, lost-count, prior-usage, and inlier-quality thresholds can be checked by CI.
-Tracking diagnostics distinguish motion pose priors from external localization priors, so GNSS-derived submap narrowing is visible in the CSV, JSON, and HTML reports.
-The online SLAM loop-candidate example writes `loop_report.html`, a small top-down HTML/SVG view of tracked camera centers and the detected loop-candidate edge.
-The verifier-enhanced loop-candidate example runs the same pipeline on a 12-landmark synthetic sequence and feeds each candidate into `EssentialMatrixLoopClosureVerifier`. Each verified candidate is then lifted into a `LoopClosureConstraint` (`from_keyframe_id`, `to_keyframe_id`, `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`, `score`) printed alongside the candidate diagnostics. The HTML report adds verifier inlier counts, inlier ratio, mean Sampson error, verifier score, an enumerated failure reason for rejected candidates, and a separate Loop Closure Constraints table so the verification + constraint output is visible. The example then builds a `PoseGraph`, injects a small drift into the most recent keyframe, and runs `optimize_translations_once` (a single translation-only Gauss-Newton step that keeps rotations fixed) so the loop drift correction is visible without claiming full SE3 pose-graph optimization.
-The pose-graph loop demo extends the same pipeline to a six-keyframe synthetic loop and runs everything end-to-end: per-frame `OnlineSlamPipeline::process_frame`, `EssentialMatrixLoopClosureVerifier` over the closing pair, `LoopClosureConstraint` extraction, `PoseGraph` construction with five sequential edges plus the verified loop edge, an injected `[0.06, 0.03, -0.05]` drift on the last keyframe, and a single translation-only Gauss-Newton step that brings `cost_before=0.105` down to `cost_after=0.000` and reports each keyframe's post-optimization error against the truth path.
-The visual-odometry-prior tracking example uses a two-frame VO prior to narrow map candidates through the same external-prior path used by GNSS/VIO integrations.
-The two-view match reader example shows the simple text bridge for external learned matchers without making a model runtime a core dependency.
-The two-view match VO prior example turns externally supplied correspondences into a lightweight translation-only VO prior that can be fed through `VisualOdometryPriorProvider`.
-The file-backed two-view match VO sequence example writes per-pair match text files, reads them back with `read_two_view_matches_txt`, builds a `TwoViewMatchVisualOdometryFrontend`, and feeds the resulting pose priors through `track_frame_with_localization_prior_submap_provider` for a short three-frame sequence. With `--out-dir`, it also writes the per-frame text report and stores the generated input match files alongside it.
-The two-view VO comparison example runs both the flow-only `TwoViewMatchVisualOdometryFrontend` and the classical-geometry `EssentialMatrixVisualOdometryFrontend` on the same synthetic three-frame sequence and prints per-frame relative-translation estimates next to the ground-truth values, so the structural difference between a flow heuristic and an essential-matrix RANSAC + cheirality recovery is visible.
-
-Run a moving-camera GNSS-prior tracking example that narrows the visual map before localization and writes an `index.html` dashboard, `manifest.json`, `tracking.csv`, `trajectory.csv`, KITTI/TUM pose exports, synthetic-reference error reports, JSON summaries, and browser-viewable reports:
-
-```bash
-cargo run --example track_sequence_with_gnss_prior
-cargo run --example track_sequence_with_gnss_prior -- --out-dir target/visloc_gnss_tracking_demo
-```
-
-Open `target/visloc_gnss_tracking_demo/index.html` first; it is the dashboard for the tracking, trajectory, and evaluation reports. See [docs/gnss_demo.md](docs/gnss_demo.md) for the file-by-file guide and expected metrics. CI also uploads the checked GNSS demo output directory as the `gnss-demo-outputs` artifact.
-
-Run the full local quality gate:
-
-```bash
-scripts/check.sh
-```
-
-Run only the user-facing examples:
-
-```bash
-scripts/run_examples.sh
-sh scripts/check_gnss_demo_outputs.sh
-```
+Applications can start with `visloc_rs::prelude::*` for the common
+localization, map, IO, tracking, mapping, SLAM, and fusion entry points.
+Explicit module paths such as `visloc_rs::io::colmap` remain available for
+narrower imports.
 
 ## Layout
 
 ```text
-crates/core/              geometry, map types, pose types
-crates/vision/            features, matching, PnP, RANSAC
-crates/io/                COLMAP text model parser
-pipelines/localization/   visual localization composition
-pipelines/tracking/       sequence tracking over localization
-pipelines/mapping/        local mapping skeleton and staged map updates
-pipelines/slam/           online SLAM MVP composition
-pipelines/fusion/         loose-coupling sensor prior foundations
-examples/                 executable examples
-tests/                    integration tests
-docs/                     design notes and interfaces
-docs/assets/              README images and visual explainers
-docs/api_stability.md     public API stability policy toward v1.0
-docs/colmap_compatibility.md COLMAP/SfM map compatibility notes
-docs/demo_strategy.md     public demo strategy for automotive and UAV localization
-docs/gnss_demo.md         GNSS-prior sequence demo output guide
-docs/kitti_image_sequence_demo.md KITTI-style image sequence demo output guide
-docs/timestamped_gnss_image_demo.md timestamped image GNSS-prior demo output guide
-docs/migration.md         pre-1.0 to v1.0 API migration guidance
-docs/publishing.md        workspace publish order and package checks
-docs/public_data_demo.md  public-data demo provenance and reproduction notes
-docs/assets/south-building-query.jpg real query image from COLMAP South Building
-docs/assets/south-building-localization.png public-data localization visualization
-docs/assets/south-building-localization.gif animated public-data localization demo
-docs/assets/south-building-localization-rich.png feature-rich README visualization
-docs/assets/south-building-localization-rich.gif feature-rich animated README demo
-CONTRIBUTING.md          contribution guide and local check expectations
-SECURITY.md              security and safety-critical use policy
-CHANGELOG.md             unreleased changes and release notes
-LICENSE-APACHE           Apache-2.0 license text
-LICENSE-MIT              MIT license text
-docs/release_checklist.md pre-release quality checklist
-scripts/check.sh          local fmt/clippy/test/doc gate
-scripts/check_msrv.sh     Rust 1.82.0 all-targets/all-features check
-scripts/check_docs_links.sh checks local README/docs markdown links and anchors
-scripts/check_release_metadata.sh checks release metadata, docs.rs settings, and CI artifact docs
-scripts/run_examples.sh   runs all user-facing examples
-scripts/check_trajectory_evaluation.sh checks trajectory metric thresholds and exports
-scripts/check_gnss_demo_outputs.sh checks GNSS demo dashboard/export outputs
-scripts/check_timestamped_gnss_image_demo_outputs.sh checks timestamped image GNSS sync outputs
-scripts/check_kitti_image_sequence_demo_outputs.sh checks KITTI-style image sequence outputs
-scripts/package_check.sh  checks package metadata and crate contents
-scripts/build_rich_readme_demo.py regenerates feature-rich README demo assets
-.github/ISSUE_TEMPLATE/   bug report and feature request templates
-.github/pull_request_template.md PR checklist
-.github/dependabot.yml    dependency update configuration
-.github/workflows/ci.yml  GitHub Actions CI gate
+crates/
+  core/                geometry, map types, pose types
+  vision/              features, matching, PnP, RANSAC, SuperPoint ONNX (opt-in)
+  io/                  COLMAP text/binary, KITTI / TUM, external descriptors
+pipelines/
+  localization/        visual localization composition
+  tracking/            sequence tracking, adaptive IMU/pose motion models
+  mapping/             local mapping skeleton, staged updates
+  slam/                online SLAM MVP, BA, PGO, relocalization
+  fusion/              loose-coupling sensor prior foundations
+examples/              executable examples (see Demos table above)
+scripts/               sweep / benchmark / smoke scripts
+docs/                  design notes, demo guides, EuRoC closeout, plan docs
 ```
+
+## Further reading
+
+- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) — single-source-of-truth EuRoC arc synthesis with recommended-config table, per-phase outcomes, known issues, headline ATE evolution.
+- [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) — Phase-27 activation contract, model sourcing, validation plan.
+- [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) — toolchain-pin + verification protocol + empirical ledger.
+- [`docs/motion_based_vi_alignment.md`](docs/motion_based_vi_alignment.md) — narrative log of the motion-based VI alignment workstream (Phase-13 onwards).
+- [`docs/colmap_compatibility.md`](docs/colmap_compatibility.md) — COLMAP/SfM map compatibility notes.
+- [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md), [`docs/timestamped_gnss_image_demo.md`](docs/timestamped_gnss_image_demo.md) — per-demo guides.
+- [`docs/migration.md`](docs/migration.md), [`docs/publishing.md`](docs/publishing.md), [`docs/api_stability.md`](docs/api_stability.md) — release / publish / stability notes.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).

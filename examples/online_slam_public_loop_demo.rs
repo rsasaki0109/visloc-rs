@@ -25,10 +25,10 @@ use visloc_rs::io::colmap::{read_colmap_text_model, write_colmap_text_model};
 use visloc_rs::io::descriptors::read_landmark_descriptors_txt;
 use visloc_rs::{
     loop_closure_constraints_from_candidates, relative_world_to_camera,
-    verify_loop_closure_candidates, EssentialMatrixLoopClosureVerifier, LocalMappingPipeline,
-    LocalizationPipeline, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig,
-    OnlineSlamConfig, OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphSe3Config, Tracker,
-    TrackingConfig,
+    verify_loop_closure_candidates, BaConfig, BaObservation, BundleAdjustment,
+    EssentialMatrixLoopClosureVerifier, LinearSolver, LocalMappingPipeline, LocalizationPipeline,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerifierConfig, OnlineSlamConfig,
+    OnlineSlamPipeline, OnlineSlamResult, PoseGraph, PoseGraphSe3Config, Tracker, TrackingConfig,
 };
 
 const KEYFRAME_COUNT: u64 = 12;
@@ -89,6 +89,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (*id, kf.frame.pose.clone().expect("colmap pose required"))
         })
         .collect();
+    // Snapshot truth landmark positions before anything else mutates them so
+    // the BA pass at the end has a ground-truth reference to compare against.
+    let truth_landmarks: Vec<(u64, Point3<f64>)> = map
+        .landmarks
+        .iter()
+        .map(|(id, lm)| (*id, lm.position))
+        .collect();
+    // Snapshot the per-keyframe observations that COLMAP loaded — the
+    // pipeline's `initial_map` strips them, so capture them now to feed BA
+    // at the end of the demo.
+    let truth_observations: Vec<Observation> = map
+        .keyframes
+        .values()
+        .flat_map(|kf| kf.observations.clone())
+        .collect();
     let frames: Vec<Frame> = keyframe_ids
         .iter()
         .map(|id| frame_from_keyframe(&map.keyframes[id], &descriptors))
@@ -145,6 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_shared_landmark_ratio_percent: 50,
                 ..LoopClosureConfig::default()
             },
+            ..OnlineSlamConfig::default()
         },
     );
     let verifier = EssentialMatrixLoopClosureVerifier {
@@ -282,6 +298,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(error) => println!("pose_graph_se3 error={error}"),
+    }
+
+    // Bundle adjustment pass over the post-PGO graph + truth landmarks.
+    // Inject a 5 cm jitter on every third landmark so the BA cost has work
+    // to do, then run `BundleAdjustment::optimize` with the first two
+    // keyframes fixed (gauge anchor) and report per-landmark recovery.
+    if !truth_landmarks.is_empty() && truth_observations.len() >= 4 {
+        let mut ba = BundleAdjustment::new(camera.clone());
+        for (id, pose) in &truth_poses {
+            // Use the post-PGO pose as the BA initialization. After SE(3) GN
+            // these should be very close to truth, so BA's job here is the
+            // landmark refinement that PGO cannot do.
+            let initial_pose = graph.poses.get(id).cloned().unwrap_or(pose.clone());
+            ba.add_pose(*id, initial_pose);
+        }
+        // Fix the first two keyframes: this removes the SE(3) + scale gauge
+        // for monocular BA on this synthetic fixture.
+        for (id, _) in truth_poses.iter().take(2) {
+            ba.fix_pose(*id);
+        }
+        // Drift a third of the landmarks before adding them to BA.
+        for (i, (id, truth_point)) in truth_landmarks.iter().enumerate() {
+            let drifted = if i % 3 == 0 {
+                let delta = Vector3::new(
+                    0.04 * (i as f64 * 0.7).sin(),
+                    0.05 * (i as f64 * 1.1).cos(),
+                    0.03 * (i as f64 * 0.3).sin(),
+                );
+                *truth_point + delta
+            } else {
+                *truth_point
+            };
+            ba.add_landmark(*id, drifted);
+        }
+        // Use the COLMAP-loaded observations as residual inputs.
+        for obs in &truth_observations {
+            if ba.poses.contains_key(&obs.frame_id) && ba.landmarks.contains_key(&obs.landmark_id) {
+                ba.add_observation(BaObservation {
+                    keyframe_id: obs.frame_id,
+                    landmark_id: obs.landmark_id,
+                    xy: obs.xy,
+                });
+            }
+        }
+        println!(
+            "ba_input poses={} landmarks={} observations={} cost_before={:.3}",
+            ba.poses.len(),
+            ba.landmarks.len(),
+            ba.observations.len(),
+            ba.cost(),
+        );
+        match ba.optimize(&BaConfig {
+            linear_solver: LinearSolver::Sparse,
+            max_iterations: 30,
+            ..BaConfig::default()
+        }) {
+            Ok(result) => {
+                println!(
+                    "bundle_adjustment initial_cost={:.3} final_cost={:.3e} iterations={} converged={}",
+                    result.initial_cost,
+                    result.final_cost,
+                    result.iterations.len(),
+                    result.converged,
+                );
+                let mut max_landmark_err: f64 = 0.0;
+                let mut sum_sq: f64 = 0.0;
+                let mut count: usize = 0;
+                for (id, truth_point) in &truth_landmarks {
+                    if let Some(refined) = ba.landmarks.get(id) {
+                        let err = (refined - truth_point).norm();
+                        if err > max_landmark_err {
+                            max_landmark_err = err;
+                        }
+                        sum_sq += err * err;
+                        count += 1;
+                    }
+                }
+                let rms = if count > 0 {
+                    (sum_sq / count as f64).sqrt()
+                } else {
+                    0.0
+                };
+                println!(
+                    "ba_landmark_recovery max_err={:.3e} rms_err={:.3e} landmark_count={}",
+                    max_landmark_err, rms, count,
+                );
+            }
+            Err(error) => println!("bundle_adjustment error={error}"),
+        }
+    } else {
+        println!(
+            "ba_skipped reason=insufficient_truth_observations observations={}",
+            truth_observations.len(),
+        );
     }
 
     if let Some(out_dir) = args.out_dir {
