@@ -41,6 +41,30 @@ Current Deep VO / loop-closure milestone details are tracked in
 [progress.md](progress.md). Development updates should stay grounded in
 runnable examples, tests, documented APIs, and measured public-data behavior.
 
+## Public Showcase Bets
+
+The next work that is most likely to make the repository easier to understand,
+demo, and share:
+
+- **One-command real-data loop closure.** Keep hardening the KITTI 00 revisit
+  scanner script that fetches the start/revisit windows, runs a quick deep
+  frontend by default, optionally compares classical-vs-deep frontends, renders
+  the strongest cross-segment loop pairs, and writes a short HTML report with
+  exact reproduction commands. The current quick strict run (`50x30`,
+  200 features/frame) produces 41 verified cross-segment candidates with a
+  57/95-inlier strongest pair.
+- **Visual debug reports for every sequence demo.** Standardize the existing
+  report path into thumbnails, correspondence counts, ATE/KITTI curves,
+  accepted/rejected loop edges, and config diffs so users can inspect a run
+  without reading raw logs.
+- **3DGS/NeRF bootstrap path.** Turn the stereo VO COLMAP export into a
+  documented demo: run KITTI or a user stereo sequence, export
+  `cameras/images/points3D`, and load the sparse scene in a downstream
+  Gaussian-splatting or NeRF tool.
+- **Real-data GIF pipeline.** Keep README assets tied to public-data scripts,
+  not hand-built toy scenes. Every front-page visual should have a command that
+  regenerates it from downloaded or user-supplied public data.
+
 ## v0.1: Map-Based Visual Localization
 
 Goal: make the vertical slice solid.
