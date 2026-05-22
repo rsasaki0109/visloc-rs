@@ -19,7 +19,7 @@
 <p align="center">
   <img src="docs/assets/south-building-deep-vs-classical-matches.jpg" alt="Real classical-vs-deep COLMAP South Building localization match overlay: classical pipeline 132 inliers, deep pipeline 289 inliers (+119%)" width="92%">
   <br>
-  <em>Real Rust-pipeline output on the COLMAP South Building map+query pair `P1180141 → P1180144` —
+  <em>Real Rust-pipeline output on the COLMAP South Building map+query pair `P1180141 -> P1180144`:
   classical Corner+BF (top, orange) lands 132 inliers; deep HogLike+MutualSoftmax (bottom, cyan)
   lands 289 (+119 %). Reproduce with the demo command under <a href="#try-it">Try It</a>.</em>
 </p>
@@ -33,20 +33,20 @@
       Metric rectified-stereo VO with confidence-weighted PnP and BA diagnostics.
     </td>
     <td width="50%">
-      <img src="docs/assets/scanner_loop_closure_demo.png" alt="Synthetic scanner-driven loop closure" width="100%">
+      <img src="docs/assets/kitti_revisit_loop_candidate.jpg" alt="KITTI 00 real revisit loop candidate: 41 verified candidates, strongest pair 49 to 4501 with 57 of 95 inliers" width="100%">
       <br>
-      <strong>Loop-candidate recovery</strong><br>
-      Appearance scan, geometric verification, loop edge, and SE(3) pose-graph correction.
+      <strong>KITTI loop candidate</strong><br>
+      Real revisit scan with 41 verified cross-segment candidates and strongest-pair inlier overlay.
     </td>
   </tr>
 </table>
 
 <p align="center">
-  <a href="#try-it"><strong>Try it</strong></a> ·
-  <a href="#demos"><strong>Demos</strong></a> ·
-  <a href="#euroc-characterisation-vs-published-baselines-honest-read"><strong>EuRoC vs ORB-SLAM3</strong></a> ·
-  <a href="#scope"><strong>Scope</strong></a> ·
-  <a href="docs/phase_20_to_27_closeout.md"><strong>EuRoC closeout</strong></a> ·
+  <a href="#try-it"><strong>Try it</strong></a> /
+  <a href="#demos"><strong>Demos</strong></a> /
+  <a href="#euroc-characterisation-vs-published-baselines-honest-read"><strong>EuRoC vs ORB-SLAM3</strong></a> /
+  <a href="#scope"><strong>Scope</strong></a> /
+  <a href="docs/phase_20_to_27_closeout.md"><strong>EuRoC closeout</strong></a> /
   <a href="PLAN.md"><strong>Handoff plan</strong></a>
 </p>
 
@@ -67,7 +67,7 @@ empirical record before committing to a heavy runtime or a full SLAM stack.
 | --- | --- |
 | Map localization | COLMAP text/binary IO, descriptor stores, 2D-3D correspondence building, DLT PnP, PnP RANSAC, optional Gauss-Newton pose refinement |
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
-| **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint → 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
+| **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
 | Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, SE(3) pose graph optimization |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/KITTI/TUM trajectory evaluators |
@@ -82,15 +82,15 @@ leaderboard submissions.
 | Demo | Dataset | Result |
 | --- | --- | ---: |
 | COLMAP localization sweep | South Building, 25 map/query pairs | Deep-style descriptors give **+37% to +98%** more verified inliers as viewpoint gap grows |
-| KITTI loop scanner | KITTI 00 start + revisit sandwich | Deep-style frontend raises strongest-pair inliers **57 -> 152** and cross-segment candidates **25 -> 62** |
+| KITTI loop scanner | KITTI 00 start + revisit sandwich | Quick deep run (`50x30`, 200 features/frame) finds **41** verified cross-segment candidates; strongest pair `49 -> 4501` has **57/95** inliers |
 | SP/LG stereo VO + BA | KITTI odometry train `00..10`, 260 frames each | `mean_t_rel = 1.2715%`, `mean_max_t_rel = 2.9785%` with tuned SuperPoint/LightGlue + BA |
-| EuRoC VI-SLAM (SuperPoint + strict-stereo) | EuRoC V1_01_easy, Phase-26 #1 strict | rigid ATE **0.0029 m** (sim_scale 1.026 ≈ metric) on 93 surviving frames, coverage 6 % — see *EuRoC characterisation* below |
+| EuRoC VI-SLAM (SuperPoint + strict-stereo) | EuRoC V1_01_easy, Phase-26 #1 strict | rigid ATE **0.0029 m** (sim_scale 1.026 ~= metric) on 93 surviving frames, coverage 6 % - see *EuRoC characterisation* below |
 | EuRoC VI-SLAM (HOG + ThreePoseSmoother) | EuRoC V2_01_easy, Phase-25 strict | rigid ATE **0.198 m** on 102 surviving frames, coverage 6.8 % |
-| Synthetic loop recovery | 9-keyframe scanner arc | SE(3) PGO recovers drift to **<2 cm** max error |
+| KITTI stereo VO + PGO | KITTI 00 real stereo image window | README asset run lowers max translation error **2.01 m -> 0.72 m** after pose-graph correction |
 
 Rough KITTI context: the local SP/LG + BA `mean_t_rel = 1.2715%` would sit
 around **overall rank 70** on the public KITTI odometry table by translation
-error if naively inserted — scale reference, not a leaderboard claim. The
+error if naively inserted - scale reference, not a leaderboard claim. The
 local run uses training sequences `00..10` and 260-frame subsets; the official
 benchmark ranks hidden test sequences `11..21` with `100..800 m` segment
 evaluation.
@@ -111,15 +111,15 @@ with published full-sequence numbers; on full-sequence coverage it is not.
 | ORB-SLAM3 mono-inertial *[Campos et al. 2021]* | 0.038 m | 0.032 m | full sequence | C++, OpenCV/Eigen, manual CMake, full bundle adjustment |
 | ORB-SLAM3 stereo-inertial *[Campos et al. 2021]* | 0.037 m | 0.038 m | full sequence | C++ |
 | VINS-Fusion stereo-inertial *[Qin et al. 2019]* | 0.087 m | 0.150 m | full sequence | C++, Ceres, ROS-tied |
-| **visloc-rs V1_01 strict + SuperPoint** | **0.0029 m†** | — | **6 % of frames** | Rust, no mandatory ML runtime, library-first, sandbox-friendly, no CMake |
-| **visloc-rs V2_01 strict + SuperPoint** | — | **0.201 m†** | **6 % of frames** | Same stack as above; V2_01 strict lands in a wrong-scale regime (sim_scale 1.955) on the pinned binary |
-| **visloc-rs V2_01 strict + HOG (Phase-25)** | — | **0.198 m†** | **6.8 % of frames** | Rust, classical descriptor only |
+| **visloc-rs V1_01 strict + SuperPoint** | **0.0029 m\*** | - | **6 % of frames** | Rust, no mandatory ML runtime, library-first, sandbox-friendly, no CMake |
+| **visloc-rs V2_01 strict + SuperPoint** | - | **0.201 m\*** | **6 % of frames** | Same stack as above; V2_01 strict lands in a wrong-scale regime (sim_scale 1.955) on the pinned binary |
+| **visloc-rs V2_01 strict + HOG (Phase-25)** | - | **0.198 m\*** | **6.8 % of frames** | Rust, classical descriptor only |
 
-`†` Per-frame rigid-ATE-on-surviving-frames; not directly comparable to
+`\*` Per-frame rigid-ATE-on-surviving-frames; not directly comparable to
 the full-sequence ATE of the ORB-SLAM3 / VINS-Fusion rows.
 [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md)
 covers the trade-off (Phase-26 #2 / #2b / #4 honest negatives, Phase-26
-#3c MH_01 decomposition) — recovery PnP on EuRoC cliffs is structurally
+#3c MH_01 decomposition) - recovery PnP on EuRoC cliffs is structurally
 unsalvageable with the tracker-side intervention space tested, so the
 coverage gap vs published full-sequence methods is real and known.
 
@@ -155,6 +155,15 @@ cargo run --features image-io --example deep_localization_demo -- \
 # Image-sequence tracking smoke.
 cargo run --features image-io --example track_image_sequence_from_common_images
 
+# Public-data KITTI 00 revisit scanner (downloads start/revisit slices).
+python scripts/run_kitti_deep_vo_revisit_smoke.py
+# Default quick run: deep frontend, 50 start frames, 30 revisit frames,
+# 200 features/frame, writes target/kitti_revisit_deep_smoke/index.html.
+# Add --readme-asset-out docs/assets/kitti_revisit_loop_candidate.jpg to
+# regenerate the verified-inlier README image from the same report.
+# Add --readme-headline-gate to guard the README headline numbers
+# (41 candidates, strongest 49 -> 4501, 57 inliers, ratio 0.600).
+
 # Full local quality gate (fmt + clippy + test + doc).
 scripts/check.sh
 ```
@@ -167,11 +176,11 @@ live under `docs/`.
 | Demo | Stack | Reference |
 | --- | --- | --- |
 | COLMAP South Building localization | Real images vs sparse SfM map, deep frontend optional | [`examples/deep_localization_demo.rs`](examples/deep_localization_demo.rs), [`docs/public_data_demo.md`](docs/public_data_demo.md) |
-| KITTI stereo VO + BA + loop closure | Rectified stereo → 2D-3D PnP → multi-frame BA → essential-matrix verifier → SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs), [`scripts/run_kitti_deep_vo_smoke.sh`](scripts/run_kitti_deep_vo_smoke.sh) |
-| KITTI 00 sandwich loop detection | Start + revisit slices, appearance scanner with classical or deep frontend | [`examples/kitti_revisit_scanner_demo.rs`](examples/kitti_revisit_scanner_demo.rs), [`scripts/run_kitti_deep_vo_revisit_smoke.sh`](scripts/run_kitti_deep_vo_revisit_smoke.sh) |
-| Synthetic scanner loop closure | 9-keyframe arc, appearance scan → loop edge → SE(3) PGO. `<2 cm` max error recovery | [`examples/scanner_loop_closure_demo.rs`](examples/scanner_loop_closure_demo.rs) |
-| Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a synthetic 30° baseline scene (~30× rot/translation-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
-| SuperPoint/LightGlue VO + multi-frame BA | File-backed SP/LG features → confidence-weighted PnP → BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
+| KITTI stereo VO + BA + loop closure | Rectified stereo -> 2D-3D PnP -> multi-frame BA -> essential-matrix verifier -> SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs), [`scripts/run_kitti_deep_vo_smoke.sh`](scripts/run_kitti_deep_vo_smoke.sh) |
+| KITTI 00 sandwich loop detection | Start + revisit slices, quick deep scanner by default; pass `--frontend both` for classical-vs-deep comparison. Cross-platform runner writes `index.html`, strongest-pair verified-inlier overlay SVG, and README asset thumbnails (`41` candidates in the default quick run) | [`examples/kitti_revisit_scanner_demo.rs`](examples/kitti_revisit_scanner_demo.rs), [`scripts/run_kitti_deep_vo_revisit_smoke.py`](scripts/run_kitti_deep_vo_revisit_smoke.py), [`scripts/run_kitti_deep_vo_revisit_smoke.sh`](scripts/run_kitti_deep_vo_revisit_smoke.sh), [`scripts/render_kitti_revisit_report_asset.py`](scripts/render_kitti_revisit_report_asset.py) |
+| Synthetic scanner loop closure | 9-keyframe arc, appearance scan -> loop edge -> SE(3) PGO. `<2 cm` max error recovery | [`examples/scanner_loop_closure_demo.rs`](examples/scanner_loop_closure_demo.rs) |
+| Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a synthetic 30 deg baseline scene (~30x rot/translation-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
+| SuperPoint/LightGlue VO + multi-frame BA | File-backed SP/LG features -> confidence-weighted PnP -> BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
 | **EuRoC online VI-SLAM** | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap. SuperPoint optional via offline replay or `--features onnx-inference` | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
 | KITTI / TUM trajectory ATE evaluator | Frame-id-matched ATE with `--max-mean / --max-rmse / --min-matched` thresholds | [`examples/evaluate_trajectory_from_kitti_files.rs`](examples/evaluate_trajectory_from_kitti_files.rs), [`examples/evaluate_kitti_odometry_benchmark.rs`](examples/evaluate_kitti_odometry_benchmark.rs) |
@@ -191,7 +200,7 @@ EuRoC MAV benchmark. The single-source-of-truth synthesis is
 [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md).
 Major shipped artifacts:
 
-- `pipelines/tracking/src/lib.rs::AdaptiveImuPoseMotionModel` + `ImuVelocityRefreshPolicy` enum (Phase-25, recommended default `ThreePoseSmoother` gave V2_01 strict −25 % rigid ATE).
+- `pipelines/tracking/src/lib.rs::AdaptiveImuPoseMotionModel` + `ImuVelocityRefreshPolicy` enum (Phase-25, recommended default `ThreePoseSmoother` gave V2_01 strict -25 % rigid ATE).
 - `pipelines/slam/src/lib.rs::OnlineSlamRelocalizationConfig` + `maybe_run_relocalization` (Phase-23 #1, Phase-26 #4 active-frontier submap + IMU sanity check fields).
 - `crates/vision/src/features/superpoint_onnx.rs` opt-in in-Rust SuperPoint ONNX extractor (`--features onnx-inference`, Phase-27). Empirically bit-identical to the existing Python pre-export path; choose based on deployment / latency.
 - `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` (binary determinism mitigation #1, confirmed bit-identical cross-rebuild on every tested configuration).
@@ -238,6 +247,13 @@ is the handoff checklist. Near-term layers:
 - Loop-closure candidate detection and visualization
 - Visual-inertial and GNSS priors/fusion
 - Larger public-data evaluation scripts
+
+Public showcase bets that are likely to matter most for new users:
+
+- One-command KITTI revisit demo that fetches the start/revisit slices, runs a quick deep scanner by default, and writes a compact HTML report.
+- Real-data loop-closure gallery: strongest pairs, inlier overlays, trajectory edge, and accepted/rejected verifier diagnostics.
+- Browser-first run reports for sequence demos: thumbnails, match counts, ATE curves, PGO deltas, and exact reproduction commands.
+- 3DGS/NeRF bootstrap export from the stereo VO path, so users can turn a moving-camera sequence into a COLMAP-compatible sparse scene.
 
 ## Minimal Example
 
@@ -300,11 +316,11 @@ docs/                  design notes, demo guides, EuRoC closeout, plan docs
 
 ## Further reading
 
-- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) — single-source-of-truth EuRoC arc synthesis with recommended-config table, per-phase outcomes, known issues, headline ATE evolution.
-- [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) — Phase-27 activation contract, model sourcing, validation plan.
-- [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) — toolchain-pin + verification protocol + empirical ledger.
-- [`docs/motion_based_vi_alignment.md`](docs/motion_based_vi_alignment.md) — narrative log of the motion-based VI alignment workstream (Phase-13 onwards).
-- [`docs/colmap_compatibility.md`](docs/colmap_compatibility.md) — COLMAP/SfM map compatibility notes.
-- [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md), [`docs/timestamped_gnss_image_demo.md`](docs/timestamped_gnss_image_demo.md) — per-demo guides.
-- [`docs/migration.md`](docs/migration.md), [`docs/publishing.md`](docs/publishing.md), [`docs/api_stability.md`](docs/api_stability.md) — release / publish / stability notes.
+- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) - single-source-of-truth EuRoC arc synthesis with recommended-config table, per-phase outcomes, known issues, headline ATE evolution.
+- [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) - Phase-27 activation contract, model sourcing, validation plan.
+- [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) - toolchain-pin + verification protocol + empirical ledger.
+- [`docs/motion_based_vi_alignment.md`](docs/motion_based_vi_alignment.md) - narrative log of the motion-based VI alignment workstream (Phase-13 onwards).
+- [`docs/colmap_compatibility.md`](docs/colmap_compatibility.md) - COLMAP/SfM map compatibility notes.
+- [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md), [`docs/timestamped_gnss_image_demo.md`](docs/timestamped_gnss_image_demo.md) - per-demo guides.
+- [`docs/migration.md`](docs/migration.md), [`docs/publishing.md`](docs/publishing.md), [`docs/api_stability.md`](docs/api_stability.md) - release / publish / stability notes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).
