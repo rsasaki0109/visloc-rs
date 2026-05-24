@@ -161,6 +161,15 @@ nested dissection wins on the wide 3D meshes, taking `torus3D` from
 *no convergence within minutes* to ~42 s and cutting `sphere2500` from ~19 s
 (RCM-only) to ~7 s.
 
+The loader is also robust to the malformed information matrices that real
+scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
+not positive-semidefinite (a rotation sub-block with off-diagonal entries
+dwarfing its diagonal, eigenvalues down to ~-6e6), which would make the
+Gauss-Newton `H` indefinite and the Cholesky factorization fail outright.
+`read_g2o` projects every information matrix onto the PSD cone (clamping
+negative eigenvalues to zero) on load, which is the exact identity on a valid
+matrix, so these datasets optimize instead of aborting.
+
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 `sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):
 
