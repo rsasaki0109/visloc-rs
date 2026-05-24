@@ -1403,6 +1403,90 @@ fn chordal_rotation_init_rejects_degenerate_graphs() {
     );
 }
 
+/// `optimize_se3_iterative` seeds with a chordal rotation init by default, so a
+/// grossly mis-oriented (but internally consistent) 3D loop is rescued straight
+/// to the global optimum. The same solve with `chordal_init: false` is left at
+/// the raw odometry estimate, so seeding can only help — never hurt — the final
+/// cost. `initial_cost` is the pre-seed value either way (the documented
+/// semantics), so the seeded run reports the full reduction.
+#[test]
+fn optimize_se3_seeds_with_chordal_init_by_default() {
+    let truth = [
+        (1u64, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0)),
+        (2, pose_with_yaw(Vector3::new(1.0, 0.0, 0.0), 0.6)),
+        (3, pose_with_yaw(Vector3::new(2.0, 0.0, 0.7), 1.2)),
+        (4, pose_with_yaw(Vector3::new(1.0, 0.0, 1.4), 1.8)),
+    ];
+
+    // Internally consistent full-SE(3) edges around the loop; every non-anchor
+    // node starts at a grossly wrong yaw and a collapsed center.
+    let build = || {
+        let mut graph = PoseGraph::new();
+        for (i, (id, truth_pose)) in truth.iter().enumerate() {
+            if i == 0 {
+                graph.add_pose(*id, truth_pose.clone());
+            } else {
+                graph.add_pose(*id, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), -2.5));
+            }
+        }
+        graph.anchor(1);
+        let edge = |a: usize, b: usize| relative_world_to_camera(&truth[a].1, &truth[b].1);
+        graph.add_sequential_edge(1, 2, edge(0, 1));
+        graph.add_sequential_edge(2, 3, edge(1, 2));
+        graph.add_sequential_edge(3, 4, edge(2, 3));
+        graph.add_sequential_edge(4, 1, edge(3, 0));
+        graph
+    };
+
+    let lm = |chordal_init: bool| PoseGraphSe3Config {
+        initial_lambda: Some(1e-3),
+        max_iterations: 50,
+        linear_solver: LinearSolver::Sparse,
+        chordal_init,
+        ..PoseGraphSe3Config::default()
+    };
+
+    // Default (chordal-seeded) run: lands on the global optimum and recovers the
+    // ground-truth poses, while reporting the pre-seed cost as `initial_cost`.
+    let mut seeded = build();
+    let raw_cost = seeded.se3_cost();
+    let result = seeded
+        .optimize_se3_iterative(&lm(true))
+        .expect("seeded LM must succeed");
+    assert!(result.converged, "seeded solve should converge: {result:?}");
+    assert!(
+        result.final_cost < 1.0e-9,
+        "seeded solve should reach the optimum: {}",
+        result.final_cost
+    );
+    assert!(
+        (result.initial_cost - raw_cost).abs() < 1.0e-9,
+        "initial_cost must be the pre-seed cost: {} vs {raw_cost}",
+        result.initial_cost
+    );
+    for (id, truth_pose) in &truth {
+        let recovered = seeded.poses[id].camera_center_world();
+        let expected = truth_pose.camera_center_world();
+        assert!(
+            (recovered - expected).norm() < 1.0e-6,
+            "node {id} center not recovered: {recovered:?} vs {expected:?}"
+        );
+    }
+
+    // Disabling the seed leaves the same raw start, so its final cost can only be
+    // equal-or-worse than the seeded run's.
+    let mut unseeded = build();
+    let unseeded_result = unseeded
+        .optimize_se3_iterative(&lm(false))
+        .expect("unseeded LM must succeed");
+    assert!(
+        result.final_cost <= unseeded_result.final_cost + 1.0e-9,
+        "chordal seeding must not worsen the final cost: seeded={} unseeded={}",
+        result.final_cost,
+        unseeded_result.final_cost
+    );
+}
+
 /// An identity information matrix must reproduce the legacy isotropic
 /// unit-weight path bit-for-bit: same two conflicting edges, solved both ways,
 /// land the free node in the same place.
@@ -1616,6 +1700,9 @@ fn pose_graph_se3_lm_records_lambda_trajectory() {
         .optimize_se3_iterative(&PoseGraphSe3Config {
             initial_lambda: Some(1e-2),
             max_iterations: 30,
+            // Exercise the LM λ machinery on the raw odometry estimate; chordal
+            // seeding would converge this in a single constant-λ step.
+            chordal_init: false,
             ..PoseGraphSe3Config::default()
         })
         .expect("LM must succeed");

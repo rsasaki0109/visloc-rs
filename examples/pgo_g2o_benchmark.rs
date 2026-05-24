@@ -73,12 +73,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Levenberg-Marquardt with the sparse Cholesky backend: robust on noisy
     // real graphs and linear in the (sparse) edge count rather than cubic in
-    // the vertex count.
+    // the vertex count. The library now seeds with a chordal init by default,
+    // but this benchmark drives that step manually above (gated on the flag)
+    // so its before/after χ² stays a clean, independently-measured comparison;
+    // disabling the in-solver seeding here keeps it from running twice.
     let config = PoseGraphSe3Config {
         max_iterations: 50,
         initial_lambda: Some(1e-3),
         linear_solver: LinearSolver::Sparse,
         robust_kernel: RobustKernel::None,
+        chordal_init: false,
         ..PoseGraphSe3Config::default()
     };
 
