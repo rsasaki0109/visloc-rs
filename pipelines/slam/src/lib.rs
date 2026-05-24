@@ -3626,7 +3626,10 @@ impl PoseGraph {
                 let h = h_dense.expect("dense matrix initialized when LinearSolver::Dense");
                 solve_normal_equations(&h, &atb)?
             }
-            LinearSolver::Sparse => solve_normal_equations_sparse(&triplets, dim, &atb, 0.0, 3)?,
+            LinearSolver::Sparse => {
+                let order = reordering::Reordering::fill_reducing(dim, 3, &triplets);
+                solve_normal_equations_sparse(&triplets, dim, &atb, 0.0, &order)?
+            }
         };
 
         let mut total_correction = 0.0;
@@ -3750,6 +3753,10 @@ impl PoseGraph {
         let mut current_cost = initial_cost;
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let dim = variable_count * 6;
+        // The fill-reducing ordering depends only on the (iteration-invariant)
+        // sparsity pattern, so compute it lazily on the first sparse solve and
+        // reuse it for the rest of the optimization.
+        let mut order_cache: Option<reordering::Reordering> = None;
 
         for iteration in 0..config.max_iterations {
             let mut builder = NormalEquations6::new(dim, config.linear_solver, self.edges.len());
@@ -3802,7 +3809,7 @@ impl PoseGraph {
             }
 
             let neg_g = -&g;
-            let delta = builder.solve(lambda, &neg_g)?;
+            let delta = builder.solve(lambda, &neg_g, &mut order_cache)?;
 
             // Tentatively apply the step so we can evaluate the new cost.
             let mut max_step_norm: f64 = 0.0;
@@ -4082,14 +4089,15 @@ pub(crate) fn solve_normal_equations(
 /// outer products from edge Jacobians). Triplets may contain duplicates;
 /// they are summed during the COO → CSC conversion.
 ///
-/// The system is first symmetrically reordered with Reverse Cuthill–McKee (see
-/// the `reordering` module) at the granularity of `block_size`-dimensional
-/// variables.
+/// The system is solved in the fill-reducing variable order carried by `order`
+/// (see the `reordering` module), applied as a symmetric permutation.
 /// `CscCholesky` applies no fill-reducing permutation itself, so this keeps the
 /// Cholesky factor near-banded and prevents the catastrophic fill-in that makes
 /// poorly-ordered or intrinsically wide 3D pose graphs (e.g. `torus`/`sphere`)
 /// intractable. The permutation is purely structural and deterministic, so the
-/// returned solution is unchanged up to floating-point summation order.
+/// returned solution is unchanged up to floating-point summation order. The
+/// ordering depends only on the sparsity pattern, so callers compute it once and
+/// reuse it across iterations.
 ///
 /// Returns [`PoseGraphError::SingularSystem`] when the factorization fails
 /// (e.g., disconnected graph). The damping term `λ` is added to the diagonal
@@ -4099,9 +4107,8 @@ fn solve_normal_equations_sparse(
     dim: usize,
     b: &DVector<f64>,
     lambda: f64,
-    block_size: usize,
+    order: &reordering::Reordering,
 ) -> Result<DVector<f64>, PoseGraphError> {
-    let order = reordering::Reordering::reverse_cuthill_mckee(dim, block_size, triplets);
     let permuted = order.permute_triplets(triplets);
     let rhs_permuted = order.permute_rhs(b);
 
@@ -4217,7 +4224,15 @@ impl NormalEquations6 {
         }
     }
 
-    fn solve(self, lambda: f64, neg_g: &DVector<f64>) -> Result<DVector<f64>, PoseGraphError> {
+    /// Solve the assembled system. For the sparse backend the fill-reducing
+    /// ordering is computed once into `order_cache` (the sparsity pattern is
+    /// identical across LM iterations) and reused on subsequent calls.
+    fn solve(
+        self,
+        lambda: f64,
+        neg_g: &DVector<f64>,
+        order_cache: &mut Option<reordering::Reordering>,
+    ) -> Result<DVector<f64>, PoseGraphError> {
         match self {
             Self::Dense(mut h) => {
                 if lambda > 0.0 {
@@ -4229,7 +4244,10 @@ impl NormalEquations6 {
                 solve_normal_equations(&h, neg_g)
             }
             Self::Sparse { triplets, dim } => {
-                solve_normal_equations_sparse(&triplets, dim, neg_g, lambda, 6)
+                let order = order_cache.get_or_insert_with(|| {
+                    reordering::Reordering::fill_reducing(dim, 6, &triplets)
+                });
+                solve_normal_equations_sparse(&triplets, dim, neg_g, lambda, order)
             }
         }
     }
