@@ -153,7 +153,7 @@ no ROS.
 | built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** | <0.2 s |
 
 (`solve` is the SE(3) optimization from raw odometry, no chordal seeding; the
-[chordal init](#chordal-rotation-initialization---chordal-init) below converges
+[chordal init](#chordal-rotation-initialization-chordal-init) below converges
 the hard 3D graphs to a far lower chi^2 in even less time.)
 
 The fill-reducing reordering is what makes these tractable at all - solved in the
