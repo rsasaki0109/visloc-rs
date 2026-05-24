@@ -639,6 +639,177 @@ impl KittiOdometryBenchmarkSummary {
     }
 }
 
+/// Configuration for the TUM-style relative pose error (RPE).
+///
+/// RPE (Sturm et al., 2012) measures *local* drift: for each pair of poses a
+/// fixed number of steps apart it compares the relative motion of the estimate
+/// against the reference. Unlike the absolute trajectory error (ATE), RPE needs
+/// no global alignment — a relative motion is invariant to any rigid transform
+/// applied to the whole trajectory — which makes it the canonical companion
+/// metric to ATE for SLAM back-ends and visual odometry front-ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelativePoseErrorConfig {
+    /// Step gap Δ between the two poses of each relative-motion pair, counted in
+    /// matched (frame-id-intersected) trajectory steps. `delta = 1` reports the
+    /// per-step drift; larger values probe drift accumulated over longer
+    /// windows.
+    pub delta: usize,
+    /// Stride between successive start indices. `1` evaluates every pose.
+    pub start_step: usize,
+}
+
+impl Default for RelativePoseErrorConfig {
+    fn default() -> Self {
+        Self {
+            delta: 1,
+            start_step: 1,
+        }
+    }
+}
+
+/// One relative-pose-error sample over a single Δ-spaced pair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelativePoseError {
+    pub first_frame_id: FrameId,
+    pub last_frame_id: FrameId,
+    /// Translational drift of the relative motion, in meters.
+    pub translation_error: f64,
+    /// Rotational drift of the relative motion, in degrees.
+    pub rotation_error_deg: f64,
+}
+
+impl RelativePoseError {
+    pub fn to_csv_record(&self) -> String {
+        format!(
+            "{},{},{},{}",
+            self.first_frame_id,
+            self.last_frame_id,
+            self.translation_error,
+            self.rotation_error_deg
+        )
+    }
+}
+
+/// Distribution statistics for one RPE channel (translation or rotation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativePoseErrorStatistics {
+    /// Root-mean-square error — the headline RPE figure reported in the TUM
+    /// protocol.
+    pub rmse: f64,
+    pub mean: f64,
+    pub median: f64,
+    /// Population standard deviation (`rmse² = mean² + std²`).
+    pub std: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl RelativePoseErrorStatistics {
+    /// Statistics of a non-empty error sample. Returns `None` when `values` is
+    /// empty.
+    fn from_values(values: &[f64]) -> Option<Self> {
+        if values.is_empty() {
+            return None;
+        }
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let sum_sq = values.iter().map(|v| v * v).sum::<f64>();
+        let rmse = (sum_sq / n).sqrt();
+        let std = (sum_sq / n - mean * mean).max(0.0).sqrt();
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let middle = sorted.len() / 2;
+        let median = if sorted.len() % 2 == 1 {
+            sorted[middle]
+        } else {
+            0.5 * (sorted[middle - 1] + sorted[middle])
+        };
+        Some(Self {
+            rmse,
+            mean,
+            median,
+            std,
+            min: sorted[0],
+            max: sorted[sorted.len() - 1],
+        })
+    }
+}
+
+/// Aggregated TUM-style relative pose error over all Δ-spaced pairs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelativePoseErrorSummary {
+    pub estimated_pose_count: usize,
+    pub reference_pose_count: usize,
+    pub matched_pose_count: usize,
+    /// The step gap Δ used (clamped to at least 1).
+    pub delta: usize,
+    pub pair_count: usize,
+    /// Translational error statistics in meters (`None` when no pair exists).
+    pub translation: Option<RelativePoseErrorStatistics>,
+    /// Rotational error statistics in degrees (`None` when no pair exists).
+    pub rotation_deg: Option<RelativePoseErrorStatistics>,
+    pub errors: Vec<RelativePoseError>,
+}
+
+impl RelativePoseErrorSummary {
+    pub fn errors_csv(&self) -> String {
+        let mut output =
+            String::from("first_frame_id,last_frame_id,translation_error,rotation_error_deg\n");
+        for error in &self.errors {
+            output.push_str(&error.to_csv_record());
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn write_errors_csv(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.errors_csv())
+    }
+
+    pub fn to_json(&self) -> String {
+        let mut output = String::new();
+        writeln!(&mut output, "{{").unwrap();
+        writeln!(
+            &mut output,
+            "  \"estimated_pose_count\": {},",
+            self.estimated_pose_count
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "  \"reference_pose_count\": {},",
+            self.reference_pose_count
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "  \"matched_pose_count\": {},",
+            self.matched_pose_count
+        )
+        .unwrap();
+        writeln!(&mut output, "  \"delta\": {},", self.delta).unwrap();
+        writeln!(&mut output, "  \"pair_count\": {},", self.pair_count).unwrap();
+        writeln!(
+            &mut output,
+            "  \"translation_m\": {},",
+            relative_pose_error_statistics_json(self.translation)
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "  \"rotation_deg\": {}",
+            relative_pose_error_statistics_json(self.rotation_deg)
+        )
+        .unwrap();
+        output.push_str("}\n");
+        output
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryEvaluationResult {
     pub passed: bool,
@@ -1331,6 +1502,69 @@ impl PoseTrajectory {
         }
     }
 
+    /// Compute the TUM-style relative pose error (RPE) of this trajectory
+    /// against `reference`.
+    ///
+    /// Poses are matched by frame id; the i-th and (i+Δ)-th matched poses form
+    /// each relative-motion pair, where Δ is `config.delta`. For each pair the
+    /// relative camera motion of the estimate (`ΔP`) and of the reference
+    /// (`ΔQ`) are compared via the residual `E = ΔQ⁻¹ · ΔP`, contributing its
+    /// translation norm (m) and rotation angle (deg). Because relative motion
+    /// is invariant to a global rigid transform of either trajectory, RPE needs
+    /// no prior alignment — its defining advantage over the ATE.
+    pub fn relative_pose_error_against(
+        &self,
+        reference: &PoseTrajectory,
+        config: &RelativePoseErrorConfig,
+    ) -> RelativePoseErrorSummary {
+        let estimated_by_frame_id: HashMap<FrameId, &TrajectorySample> = self
+            .samples
+            .iter()
+            .map(|sample| (sample.frame_id, sample))
+            .collect();
+        let matched: Vec<(&TrajectorySample, &TrajectorySample)> = reference
+            .samples
+            .iter()
+            .filter_map(|reference_sample| {
+                let estimated_sample = estimated_by_frame_id.get(&reference_sample.frame_id)?;
+                Some((*estimated_sample, reference_sample))
+            })
+            .collect();
+
+        let delta = config.delta.max(1);
+        let start_step = config.start_step.max(1);
+        let mut errors = Vec::new();
+        let mut first_index = 0;
+        while first_index + delta < matched.len() {
+            let last_index = first_index + delta;
+            let (estimated_first, reference_first) = matched[first_index];
+            let (estimated_last, reference_last) = matched[last_index];
+            let estimated_delta = relative_camera_to_world(estimated_first, estimated_last);
+            let reference_delta = relative_camera_to_world(reference_first, reference_last);
+            let residual = reference_delta.inverse().compose(&estimated_delta);
+            errors.push(RelativePoseError {
+                first_frame_id: reference_first.frame_id,
+                last_frame_id: reference_last.frame_id,
+                translation_error: residual.translation.norm(),
+                rotation_error_deg: residual.rotation.angle().to_degrees(),
+            });
+            first_index += start_step;
+        }
+
+        let translation_values: Vec<f64> = errors.iter().map(|e| e.translation_error).collect();
+        let rotation_values: Vec<f64> = errors.iter().map(|e| e.rotation_error_deg).collect();
+        RelativePoseErrorSummary {
+            estimated_pose_count: self.len(),
+            reference_pose_count: reference.len(),
+            matched_pose_count: matched.len(),
+            delta,
+            pair_count: errors.len(),
+            translation: RelativePoseErrorStatistics::from_values(&translation_values),
+            rotation_deg: RelativePoseErrorStatistics::from_values(&rotation_values),
+            errors,
+        }
+    }
+
     pub fn mean_reprojection_error(&self) -> Option<f64> {
         let mut sum = 0.0;
         let mut count = 0;
@@ -2020,6 +2254,16 @@ fn optional_usize_json(value: Option<usize>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn relative_pose_error_statistics_json(stats: Option<RelativePoseErrorStatistics>) -> String {
+    match stats {
+        None => "null".to_string(),
+        Some(s) => format!(
+            "{{ \"rmse\": {}, \"mean\": {}, \"median\": {}, \"std\": {}, \"min\": {}, \"max\": {} }}",
+            s.rmse, s.mean, s.median, s.std, s.min, s.max
+        ),
+    }
 }
 
 fn optional_frame_id_json(value: Option<FrameId>) -> String {
@@ -5460,6 +5704,176 @@ mod umeyama_alignment_tests {
             rigid_rmse > 0.1,
             "expected non-trivial residual under rigid alignment of half-scale trajectory, got {rigid_rmse}"
         );
+    }
+
+    fn rpe_sample(frame_id: FrameId, camera_to_world: SE3) -> TrajectorySample {
+        let world_to_camera = camera_to_world.inverse();
+        TrajectorySample {
+            frame_id,
+            pose: Pose::from_world_to_camera(world_to_camera.rotation, world_to_camera.translation),
+            state: TrackingState::Tracking,
+            event: TrackingEvent::Tracked,
+            inlier_count: 0,
+            inlier_ratio: 0.0,
+            reprojection_error: None,
+        }
+    }
+
+    fn rpe_trajectory(poses: &[(FrameId, SE3)]) -> PoseTrajectory {
+        let mut trajectory = PoseTrajectory::new();
+        for (id, camera_to_world) in poses {
+            trajectory.push_sample(rpe_sample(*id, camera_to_world.clone()));
+        }
+        trajectory
+    }
+
+    #[test]
+    fn relative_pose_error_is_zero_when_estimate_matches_reference() {
+        let poses: Vec<(FrameId, SE3)> = (0..8)
+            .map(|i| {
+                let c2w = SE3::new(
+                    UnitQuaternion::from_euler_angles(0.0, 0.0, 0.05 * i as f64),
+                    Vector3::new(i as f64, (i as f64 * 0.3).sin(), 0.0),
+                );
+                (i as FrameId, c2w)
+            })
+            .collect();
+        let trajectory = rpe_trajectory(&poses);
+
+        let summary = trajectory
+            .relative_pose_error_against(&trajectory, &RelativePoseErrorConfig::default());
+
+        assert_eq!(summary.pair_count, 7);
+        let translation = summary.translation.expect("translation stats");
+        let rotation = summary.rotation_deg.expect("rotation stats");
+        assert!(
+            translation.rmse < 1e-9,
+            "translation rmse {}",
+            translation.rmse
+        );
+        assert!(rotation.rmse < 1e-9, "rotation rmse {}", rotation.rmse);
+    }
+
+    #[test]
+    fn relative_pose_error_is_invariant_to_a_global_rigid_transform() {
+        // RPE compares *relative* motion, which is unchanged by left-multiplying
+        // every pose by a fixed rigid transform — so a globally displaced and
+        // rotated estimate scores ~0 RPE while its raw (unaligned) ATE is large.
+        let global = SE3::new(
+            UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3),
+            Vector3::new(7.0, -4.0, 2.0),
+        );
+        let reference_poses: Vec<(FrameId, SE3)> = (0..10)
+            .map(|i| {
+                let c2w = SE3::new(
+                    UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1 * i as f64),
+                    Vector3::new(i as f64, (i as f64).sin(), (i as f64).cos()),
+                );
+                (i as FrameId, c2w)
+            })
+            .collect();
+        let estimated_poses: Vec<(FrameId, SE3)> = reference_poses
+            .iter()
+            .map(|(id, c2w)| (*id, global.compose(c2w)))
+            .collect();
+        let reference = rpe_trajectory(&reference_poses);
+        let estimated = rpe_trajectory(&estimated_poses);
+
+        let summary = estimated.relative_pose_error_against(
+            &reference,
+            &RelativePoseErrorConfig {
+                delta: 2,
+                start_step: 1,
+            },
+        );
+        assert_eq!(summary.delta, 2);
+        let translation = summary.translation.expect("translation stats");
+        let rotation = summary.rotation_deg.expect("rotation stats");
+        assert!(
+            translation.rmse < 1e-9 && rotation.rmse < 1e-9,
+            "RPE should vanish under a global rigid transform, got t={} r={}",
+            translation.rmse,
+            rotation.rmse
+        );
+
+        // Contrast: the unaligned absolute trajectory error is far from zero.
+        let ate = estimated
+            .translation_error_summary_against_with_alignment(&reference, TrajectoryAlignment::None)
+            .rmse_translation_error
+            .expect("ate rmse");
+        assert!(
+            ate > 1.0,
+            "expected large raw ATE for the displaced estimate, got {ate}"
+        );
+    }
+
+    #[test]
+    fn relative_pose_error_recovers_a_constant_per_step_drift() {
+        // Reference advances one meter per step with no rotation. The estimate's
+        // per-step relative motion carries a fixed extra transform `drift`, so
+        // every residual equals `drift`: translation 0.1 m, rotation 5 deg.
+        let step = SE3::new(UnitQuaternion::identity(), Vector3::new(1.0, 0.0, 0.0));
+        let drift = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 5.0_f64.to_radians()),
+            Vector3::new(0.1, 0.0, 0.0),
+        );
+
+        let mut reference_poses = vec![(0u64, SE3::identity())];
+        let mut estimated_poses = vec![(0u64, SE3::identity())];
+        for i in 1..7u64 {
+            let previous_reference = reference_poses[(i - 1) as usize].1.clone();
+            reference_poses.push((i, previous_reference.compose(&step)));
+            let previous_estimate = estimated_poses[(i - 1) as usize].1.clone();
+            estimated_poses.push((i, previous_estimate.compose(&step).compose(&drift)));
+        }
+        let reference = rpe_trajectory(&reference_poses);
+        let estimated = rpe_trajectory(&estimated_poses);
+
+        let summary =
+            estimated.relative_pose_error_against(&reference, &RelativePoseErrorConfig::default());
+        let translation = summary.translation.expect("translation stats");
+        let rotation = summary.rotation_deg.expect("rotation stats");
+        // Tolerances absorb float accumulation through the multi-step compose
+        // chain and quaternion angle extraction.
+        assert!(
+            (translation.mean - 0.1).abs() < 1e-6,
+            "translation mean {}",
+            translation.mean
+        );
+        assert!(
+            translation.std < 1e-6,
+            "translation std {}",
+            translation.std
+        );
+        assert!(
+            (rotation.mean - 5.0).abs() < 1e-6,
+            "rotation mean {}",
+            rotation.mean
+        );
+        assert!(rotation.std < 1e-6, "rotation std {}", rotation.std);
+    }
+
+    #[test]
+    fn relative_pose_error_has_no_pairs_when_delta_exceeds_overlap() {
+        let poses: Vec<(FrameId, SE3)> = (0..3)
+            .map(|i| {
+                (
+                    i as FrameId,
+                    SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64, 0.0, 0.0)),
+                )
+            })
+            .collect();
+        let trajectory = rpe_trajectory(&poses);
+        let summary = trajectory.relative_pose_error_against(
+            &trajectory,
+            &RelativePoseErrorConfig {
+                delta: 5,
+                start_step: 1,
+            },
+        );
+        assert_eq!(summary.pair_count, 0);
+        assert!(summary.translation.is_none());
+        assert!(summary.rotation_deg.is_none());
     }
 
     fn fake_success_tracking_result(frame_id: u64) -> TrackingResult {
