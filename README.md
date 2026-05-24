@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO and automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs) - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), and an optional chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -182,9 +182,41 @@ Gauss-Newton `H` indefinite and the Cholesky factorization fail outright.
 `read_g2o` projects every information matrix onto the PSD cone (clamping
 negative eigenvalues to zero) on load, which is the exact identity on a valid
 matrix, so these datasets optimize instead of aborting. `cubicle` then drives
-down cleanly (**99.91 %**); `rim` is genuinely harder - LM makes early progress
-then stalls (its damping saturates), so the run reflects a partial, honest
-**28.81 %** rather than a tuned number.
+down cleanly (**99.91 %**); `rim`, started from raw odometry, is genuinely
+harder - LM makes early progress then stalls (its damping saturates), reaching
+only **28.81 %** (the table above). That stall is a *basin* problem, not a
+solver bug, and a chordal rotation initialization fixes it (next).
+
+#### Chordal rotation initialization (`--chordal-init`)
+
+On strongly non-convex 3D graphs the SE(3) cost surface has deep local minima in
+rotation, so Levenberg-Marquardt started from odometry settles into a poor basin
+and stalls. Seeding it with a **chordal rotation initialization** (Carlone et
+al., *Initialization Techniques for 3D SLAM*, ICRA 2015) lands it near the global
+optimum. `PoseGraph::initialize_rotations_chordal` relaxes every rotation from
+`SO(3)` to an unconstrained `3x3` matrix, minimizing the Frobenius residual
+`sum_e w_e * ||R_to - R_meas * R_from||^2` as one linear least-squares problem;
+because the relaxation decouples by rotation column, the per-node `9`-vector
+splits into three `3`-vector systems that share *one* `3n x 3n` normal matrix
+(factored once, solved for three right-hand sides), and each relaxed block is
+projected back onto `SO(3)` with an SVD. Translations are then re-derived by the
+existing linear translation solve before the full SE(3) run.
+
+The effect is a uniform win on the hard 3D graphs - never a worse final chi^2,
+always equal-or-faster, and it flips three datasets from non-converged to
+converged:
+
+| Dataset | LM from odometry (final chi^2, time) | **+chordal init** (final chi^2, time) |
+| --- | --- | --- |
+| `sphere2500` | 1.66e3, ~6.8 s | 1.66e3, **~4.0 s** (converges) |
+| `torus3D` | 6.02e4, ~44 s | **2.45e4**, **~20 s** (converges) |
+| `cubicle` | 9.59e3, ~38 s | **4.40e3**, **~14 s** |
+| `rim` | 8.99e7, ~56 s (28.8 %) | **1.16e5**, **~40 s** (**99.9 %**, converges) |
+
+`rim`'s final chi^2 drops by ~775x and it finally converges; `torus3D` and
+`cubicle` reach a ~2x lower chi^2 in ~2x less wall-clock. The chordal solve
+itself is cheap (~0.6 s on `torus3D`, ~1.3 s on `rim`). `parking-garage` is
+already trivial from odometry, so the init leaves it unchanged - no regression.
 
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 `sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):
@@ -192,6 +224,8 @@ Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 ```sh
 scripts/fetch_pgo_g2o_datasets.sh datasets/pgo_g2o
 cargo run --release --example pgo_g2o_benchmark -- datasets/pgo_g2o/parking-garage.g2o
+# hard 3D graphs: seed LM with a chordal rotation initialization
+cargo run --release --example pgo_g2o_benchmark -- --chordal-init datasets/pgo_g2o/rim.g2o
 # or, zero-setup, the built-in deterministic loop graph:
 cargo run --example pgo_g2o_benchmark
 ```
