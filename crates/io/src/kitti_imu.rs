@@ -340,7 +340,7 @@ fn parse_fractional_nanoseconds(fraction: &str) -> Result<u64, String> {
         padded.push_str(&fraction[..9]);
     } else {
         padded.push_str(fraction);
-        padded.extend(std::iter::repeat('0').take(9 - fraction.len()));
+        padded.extend(std::iter::repeat_n('0', 9 - fraction.len()));
     }
     padded
         .parse::<u64>()
@@ -362,7 +362,7 @@ fn days_since_unix_epoch(year: i64, month: u32, day: u32) -> Result<i128, String
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = (y - era * 400) as u32; // [0, 399]
-    let m = u32::from(month);
+    let m = month;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     let days = i128::from(era) * 146_097 + i128::from(doe) - 719_468;

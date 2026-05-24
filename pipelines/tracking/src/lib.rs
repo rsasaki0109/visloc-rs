@@ -2946,10 +2946,10 @@ pub struct ImuPredictiveMotionModelConfig {
     /// approximation but a metric-tight prediction wants the real
     /// extrinsic.
     pub body_to_sensor: SE3,
-    /// When `true`, [`Self::observe`] re-integrates the pending IMU
+    /// When `true`, `observe` re-integrates the pending IMU
     /// samples from the previously-tracked pose to advance
     /// `velocity_world` for the next frame. Without this, the seed
-    /// velocity stays frozen at the last [`Self::set_velocity_world`]
+    /// velocity stays frozen at the last `set_velocity_world`
     /// (i.e., last VI-BA mirror) until the next mirror fires — so on
     /// frames between mirrors, the strapdown integration restarts from
     /// the KF-time velocity rather than the velocity at the just-tracked
@@ -2996,7 +2996,7 @@ impl ImuPredictiveMotionModel {
         accel: nalgebra::Vector3<f64>,
         dt: f64,
     ) {
-        if !(dt > 0.0) {
+        if dt <= 0.0 || dt.is_nan() {
             return;
         }
         self.pending_samples
@@ -3025,7 +3025,7 @@ impl ImuPredictiveMotionModel {
         curr: &Pose,
         dt_seconds: f64,
     ) -> Option<nalgebra::Vector3<f64>> {
-        if !(dt_seconds > 0.0) || !dt_seconds.is_finite() {
+        if dt_seconds <= 0.0 || !dt_seconds.is_finite() {
             return None;
         }
         let body_prev = self
@@ -5308,7 +5308,7 @@ mod umeyama_alignment_tests {
         assert!((transform.scale - 1.0).abs() < 1e-12);
         assert!((transform.translation - translation).norm() < 1e-10);
         assert!(transform.rotation.matrix().relative_eq(
-            &Rotation3::<f64>::identity().matrix(),
+            Rotation3::<f64>::identity().matrix(),
             1e-10,
             1e-10
         ));
@@ -5326,7 +5326,7 @@ mod umeyama_alignment_tests {
         assert!(transform
             .rotation
             .matrix()
-            .relative_eq(&rotation.matrix(), 1e-8, 1e-8));
+            .relative_eq(rotation.matrix(), 1e-8, 1e-8));
         let aligned: Vec<Point3<f64>> = source.iter().map(|p| transform.apply(p)).collect();
         for (a, t) in aligned.iter().zip(target.iter()) {
             assert!((a - t).norm() < 1e-8);
@@ -5346,7 +5346,7 @@ mod umeyama_alignment_tests {
         assert!(transform
             .rotation
             .matrix()
-            .relative_eq(&rotation.matrix(), 1e-8, 1e-8));
+            .relative_eq(rotation.matrix(), 1e-8, 1e-8));
     }
 
     #[test]

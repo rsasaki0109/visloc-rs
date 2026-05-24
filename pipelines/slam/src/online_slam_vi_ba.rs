@@ -868,7 +868,7 @@ pub fn estimate_scale_from_factors(
             .and_then(|kf| kf.frame.pose.as_ref())
             .map(|pose| pose.world_to_camera.rotation)?;
         let dt = factor.delta.delta_time;
-        if !(dt > 0.0) || !dt.is_finite() {
+        if dt <= 0.0 || !dt.is_finite() {
             continue;
         }
         // `world_to_camera.rotation` is `R_c←w`. We need `R_b←w` for the

@@ -407,10 +407,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let window_end_ts = imu_first_ts as i128 + window_ns;
         let mut prev_ts = imu_first_ts;
         for sample in &dataset.imu_samples {
-            if (sample.timestamp_nanoseconds as i128) > window_end_ts {
+            if sample.timestamp_nanoseconds > window_end_ts {
                 break;
             }
-            let dt_ns = sample.timestamp_nanoseconds as i128 - prev_ts as i128;
+            let dt_ns = sample.timestamp_nanoseconds - prev_ts as i128;
             prev_ts = sample.timestamp_nanoseconds;
             if dt_ns <= 0 {
                 continue;
@@ -776,6 +776,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// EuRoC's `gravity_world = (0, 0, -9.81)`: the world z-axis points up so
 /// gravity acceleration adds the −z component to the velocity ODE.
+// Canonical strapdown step: the mutable state (R, v, p), gravity, the two
+// biases, the sample, and dt. Bundling would obscure the integration equations.
+#[allow(clippy::too_many_arguments)]
 fn propagate(
     rotation: &mut UnitQuaternion<f64>,
     velocity: &mut Vector3<f64>,
@@ -797,10 +800,10 @@ fn propagate(
     *position = new_position;
 }
 
-fn nearest_ground_truth<'a>(
-    samples: &'a [EurocGroundTruthSample],
+fn nearest_ground_truth(
+    samples: &[EurocGroundTruthSample],
     target_ts: i128,
-) -> &'a EurocGroundTruthSample {
+) -> &EurocGroundTruthSample {
     let idx = samples
         .binary_search_by_key(&target_ts, |sample| sample.timestamp_nanoseconds)
         .unwrap_or_else(|insert| {

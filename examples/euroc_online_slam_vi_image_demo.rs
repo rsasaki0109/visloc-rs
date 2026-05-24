@@ -1741,11 +1741,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model_path = args.superpoint_onnx_model.as_ref().ok_or(
                 "--feature-extractor superpoint-onnx requires --superpoint-onnx-model <path>",
             )?;
-            let extractor = visloc_vision::features::superpoint_onnx::SuperPointOnnxExtractor::load_from_path(
-                model_path,
-                visloc_vision::features::superpoint_onnx::SuperPointOnnxConfig::default(),
-            )
-            .map_err(|err| format!("SuperPoint ONNX load_from_path failed: {err}"))?;
+            let extractor =
+                visloc_vision::features::superpoint_onnx::SuperPointOnnxExtractor::load_from_path(
+                    model_path,
+                    visloc_vision::features::superpoint_onnx::SuperPointOnnxConfig::default(),
+                )
+                .map_err(|err| format!("SuperPoint ONNX load_from_path failed: {err}"))?;
             println!(
                 "loaded SuperPoint ONNX model from {} (onnx-inference feature: {})",
                 model_path.display(),

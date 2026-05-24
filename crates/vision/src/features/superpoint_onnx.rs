@@ -9,7 +9,7 @@
 //!   `ort` / ONNX Runtime native dependency on every workspace build.
 //!
 //! * **`onnx-inference` enabled** — the extractor wraps an
-//!   [`ort::session::Session`] and runs SuperPoint inference per
+//!   `ort::session::Session` and runs SuperPoint inference per
 //!   frame. The expected I/O contract is the LightGlue-ONNX-style
 //!   pre-baked-postprocessing variant: input `image: (1, 1, H, W) f32`
 //!   in `[0, 1]`; outputs `keypoints: (N, 2) i64`, `scores: (N,) f32`,
@@ -19,7 +19,7 @@
 //!
 //! Empirically, in-Rust ONNX inference and the existing Python
 //! pre-export path (`scripts/export_superpoint_lightglue.py --mono-dir`
-//! consumed via [`SuperPointOfflineExtractor`]) produce bit-identical
+//! consumed via `SuperPointOfflineExtractor`) produce bit-identical
 //! descriptors given the same model weights and the same input image.
 //! Phase-26 #1 V-class breakthrough (V1_01 strict rigid ATE 0.0029 m)
 //! is therefore unchanged between the two paths; Phase-27 is a
@@ -186,15 +186,13 @@ impl DeepFeatureExtractor for SuperPointOnnxExtractor {
             return Err(SuperPointOnnxError::EmptyImage);
         }
 
-        let input = ndarray::Array4::<f32>::from_shape_vec(
-            (1, 1, height, width),
-            image.pixels().to_vec(),
-        )
-        .map_err(|error| SuperPointOnnxError::PreprocessShape {
-            width,
-            height,
-            message: error.to_string(),
-        })?;
+        let input =
+            ndarray::Array4::<f32>::from_shape_vec((1, 1, height, width), image.pixels().to_vec())
+                .map_err(|error| SuperPointOnnxError::PreprocessShape {
+                    width,
+                    height,
+                    message: error.to_string(),
+                })?;
 
         let input_value =
             ort::value::Tensor::from_array(input).map_err(SuperPointOnnxError::from_ort)?;
@@ -237,24 +235,27 @@ fn extract_named_outputs(
     // evaluation diverges from those names the lookup below errors
     // out loudly; the contract is intentionally narrow so postprocess
     // drift is caught at activation time, not silently inferred.
-    let kp_value = outputs.remove("keypoints").ok_or_else(|| {
-        SuperPointOnnxError::OutputShapeMismatch {
-            expected: "output named `keypoints`",
-            actual: "missing".to_string(),
-        }
-    })?;
-    let score_value = outputs.remove("scores").ok_or_else(|| {
-        SuperPointOnnxError::OutputShapeMismatch {
-            expected: "output named `scores`",
-            actual: "missing".to_string(),
-        }
-    })?;
-    let desc_value = outputs.remove("descriptors").ok_or_else(|| {
-        SuperPointOnnxError::OutputShapeMismatch {
-            expected: "output named `descriptors`",
-            actual: "missing".to_string(),
-        }
-    })?;
+    let kp_value =
+        outputs
+            .remove("keypoints")
+            .ok_or_else(|| SuperPointOnnxError::OutputShapeMismatch {
+                expected: "output named `keypoints`",
+                actual: "missing".to_string(),
+            })?;
+    let score_value =
+        outputs
+            .remove("scores")
+            .ok_or_else(|| SuperPointOnnxError::OutputShapeMismatch {
+                expected: "output named `scores`",
+                actual: "missing".to_string(),
+            })?;
+    let desc_value =
+        outputs
+            .remove("descriptors")
+            .ok_or_else(|| SuperPointOnnxError::OutputShapeMismatch {
+                expected: "output named `descriptors`",
+                actual: "missing".to_string(),
+            })?;
 
     let kp_array: ndarray::ArrayD<i64> = kp_value
         .try_extract_array::<i64>()
@@ -277,7 +278,9 @@ fn extract_named_outputs(
 }
 
 #[cfg(feature = "onnx-inference")]
-fn normalise_keypoints(array: ndarray::ArrayD<i64>) -> Result<ndarray::Array2<i64>, SuperPointOnnxError> {
+fn normalise_keypoints(
+    array: ndarray::ArrayD<i64>,
+) -> Result<ndarray::Array2<i64>, SuperPointOnnxError> {
     // Accept (N, 2) or (1, N, 2) (batch dim).
     let shape = array.shape().to_vec();
     let view = if shape.len() == 3 && shape[0] == 1 && shape[2] == 2 {
@@ -304,7 +307,9 @@ fn normalise_keypoints(array: ndarray::ArrayD<i64>) -> Result<ndarray::Array2<i6
 }
 
 #[cfg(feature = "onnx-inference")]
-fn normalise_scores(array: ndarray::ArrayD<f32>) -> Result<ndarray::Array1<f32>, SuperPointOnnxError> {
+fn normalise_scores(
+    array: ndarray::ArrayD<f32>,
+) -> Result<ndarray::Array1<f32>, SuperPointOnnxError> {
     // Accept (N,) or (1, N) (batch dim).
     let shape = array.shape().to_vec();
     let view = if shape.len() == 2 && shape[0] == 1 {
@@ -338,35 +343,35 @@ fn normalise_descriptors(
     const DIM: usize = 256;
     let shape = array.shape().to_vec();
     let two_d = match shape.as_slice() {
-        [n, d] if *d == DIM => array
-            .into_shape_with_order((*n, DIM))
-            .map_err(|e| SuperPointOnnxError::OutputShapeMismatch {
+        [n, d] if *d == DIM => array.into_shape_with_order((*n, DIM)).map_err(|e| {
+            SuperPointOnnxError::OutputShapeMismatch {
                 expected: "(N, 256) descriptors",
                 actual: format!("{shape:?}: {e}"),
-            })?,
+            }
+        })?,
         [d, n] if *d == DIM => {
             // Transpose 256xN -> Nx256.
-            let arr = array
-                .into_shape_with_order((DIM, *n))
-                .map_err(|e| SuperPointOnnxError::OutputShapeMismatch {
+            let arr = array.into_shape_with_order((DIM, *n)).map_err(|e| {
+                SuperPointOnnxError::OutputShapeMismatch {
                     expected: "(256, N) descriptors",
                     actual: format!("{shape:?}: {e}"),
-                })?;
+                }
+            })?;
             arr.t().to_owned()
         }
-        [1, n, d] if *d == DIM => array
-            .into_shape_with_order((*n, DIM))
-            .map_err(|e| SuperPointOnnxError::OutputShapeMismatch {
+        [1, n, d] if *d == DIM => array.into_shape_with_order((*n, DIM)).map_err(|e| {
+            SuperPointOnnxError::OutputShapeMismatch {
                 expected: "(1, N, 256) descriptors",
                 actual: format!("{shape:?}: {e}"),
-            })?,
+            }
+        })?,
         [1, d, n] if *d == DIM => {
-            let arr = array
-                .into_shape_with_order((DIM, *n))
-                .map_err(|e| SuperPointOnnxError::OutputShapeMismatch {
+            let arr = array.into_shape_with_order((DIM, *n)).map_err(|e| {
+                SuperPointOnnxError::OutputShapeMismatch {
                     expected: "(1, 256, N) descriptors",
                     actual: format!("{shape:?}: {e}"),
-                })?;
+                }
+            })?;
             arr.t().to_owned()
         }
         _ => {
@@ -396,9 +401,7 @@ fn postprocess(
     if n_kp != n_score || n_kp != n_desc {
         return Err(SuperPointOnnxError::OutputShapeMismatch {
             expected: "keypoints / scores / descriptors agree on N",
-            actual: format!(
-                "N_keypoints={n_kp} N_scores={n_score} N_descriptors={n_desc}"
-            ),
+            actual: format!("N_keypoints={n_kp} N_scores={n_score} N_descriptors={n_desc}"),
         });
     }
 
@@ -585,13 +588,8 @@ mod tests {
             max_keypoints: 2,
             nms_radius_pixels: 4,
         };
-        let result = postprocess(
-            keypoints.view(),
-            scores.view(),
-            descriptors.view(),
-            &config,
-        )
-        .unwrap();
+        let result =
+            postprocess(keypoints.view(), scores.view(), descriptors.view(), &config).unwrap();
         assert_eq!(result.len(), 2);
         // Top score first: (3, 4) with 0.7? No — (1, 2) with 0.9, then (3, 4) with 0.7.
         assert_eq!(result[0].0, Point2::new(1.0, 2.0));
@@ -608,13 +606,8 @@ mod tests {
         // 3-4-0 vector — norm 5, should normalise to 0.6, 0.8, 0.
         let descriptors = ndarray::array![[3.0_f32, 4.0, 0.0]];
         let config = SuperPointOnnxConfig::default();
-        let result = postprocess(
-            keypoints.view(),
-            scores.view(),
-            descriptors.view(),
-            &config,
-        )
-        .unwrap();
+        let result =
+            postprocess(keypoints.view(), scores.view(), descriptors.view(), &config).unwrap();
         assert_eq!(result.len(), 1);
         let descriptor = &result[0].2;
         let norm = descriptor.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -631,12 +624,7 @@ mod tests {
         let scores = ndarray::array![0.5_f32]; // length mismatch
         let descriptors = ndarray::array![[1.0_f32, 0.0]];
         let config = SuperPointOnnxConfig::default();
-        let result = postprocess(
-            keypoints.view(),
-            scores.view(),
-            descriptors.view(),
-            &config,
-        );
+        let result = postprocess(keypoints.view(), scores.view(), descriptors.view(), &config);
         match result {
             Err(SuperPointOnnxError::OutputShapeMismatch { .. }) => {}
             other => panic!("expected OutputShapeMismatch, got {other:?}"),
@@ -648,23 +636,14 @@ mod tests {
     fn postprocess_skips_nonfinite_and_below_threshold_scores() {
         let keypoints = ndarray::array![[0_i64, 0], [1, 0], [2, 0]];
         let scores = ndarray::array![f32::NAN, 0.001, 0.5];
-        let descriptors = ndarray::array![
-            [1.0_f32, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-        ];
+        let descriptors = ndarray::array![[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0],];
         let config = SuperPointOnnxConfig {
             min_score: 0.01,
             max_keypoints: 10,
             nms_radius_pixels: 4,
         };
-        let result = postprocess(
-            keypoints.view(),
-            scores.view(),
-            descriptors.view(),
-            &config,
-        )
-        .unwrap();
+        let result =
+            postprocess(keypoints.view(), scores.view(), descriptors.view(), &config).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, Point2::new(2.0, 0.0));
     }
