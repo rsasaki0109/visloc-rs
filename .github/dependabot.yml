@@ -11,6 +11,25 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      # nalgebra 0.34+ requires Rust 1.87; the project MSRV is 1.82 (see the
+      # `msrv` CI job and rust-toolchain.toml). Bump deliberately with an MSRV
+      # change, not via Dependabot.
+      - dependency-name: "nalgebra"
+        versions: [">=0.34"]
+      # nalgebra-sparse 0.11+ tracks nalgebra 0.34 (same 1.87 MSRV).
+      - dependency-name: "nalgebra-sparse"
+        versions: [">=0.11"]
+      # rand 0.9 changes RNG output, which would shift RANSAC results and break
+      # the documented binary-determinism gates and README headline numbers.
+      # Upgrade deliberately with a re-baseline, not via Dependabot.
+      - dependency-name: "rand"
+        versions: [">=0.9"]
+      # image is exact-pinned (=0.25.5) on purpose: newer 0.25.x patches pull
+      # transitive deps (e.g. moxcms) that require edition2024 / Rust >= 1.85,
+      # breaking the 1.82 MSRV image-io build. Bump together with an MSRV change.
+      - dependency-name: "image"
+        versions: [">0.25.5"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -19,3 +38,7 @@ updates:
     labels:
       - dependencies
       - github-actions
+    ignore:
+      # The `msrv` CI job pins this action to the declared MSRV (1.82.0) on
+      # purpose; it must not track the latest toolchain release.
+      - dependency-name: "dtolnay/rust-toolchain"
