@@ -230,10 +230,7 @@ fn assemble_blocks<const B: usize>(
         .into_iter()
         .map(|s| s.into_iter().collect())
         .collect();
-    let a_lower = cols
-        .into_iter()
-        .map(|m| m.into_iter().collect())
-        .collect();
+    let a_lower = cols.into_iter().map(|m| m.into_iter().collect()).collect();
     (block_lower, a_lower)
 }
 

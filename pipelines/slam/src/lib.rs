@@ -4002,7 +4002,11 @@ impl PoseGraph {
         // rotation re-derivation already restores translations from the
         // preserved camera centers, so the translation LS is a further refine
         // whose failure is also harmless.
-        if config.chordal_init && self.initialize_rotations_chordal(config.linear_solver).is_ok() {
+        if config.chordal_init
+            && self
+                .initialize_rotations_chordal(config.linear_solver)
+                .is_ok()
+        {
             let _ = self.optimize_translations_once_with(config.linear_solver);
         }
 

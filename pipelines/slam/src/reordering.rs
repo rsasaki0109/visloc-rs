@@ -1,11 +1,11 @@
 //! Fill-reducing reordering for the sparse Cholesky back-end.
 //!
-//! `nalgebra_sparse::CscCholesky` factors the system in its natural variable
-//! order — it performs no fill-reducing permutation of its own. For pose
-//! graphs that arrive in a poor order (or that are intrinsically wide, like the
-//! 3D `torus`/`sphere` benchmarks), the Cholesky factor `L` then acquires far
-//! more nonzeros than the original `H`, and both the factorization time and the
-//! memory blow up super-linearly.
+//! The sparse block Cholesky (see [`crate::block_cholesky`]) factors the system
+//! in the variable order it is handed — it performs no fill-reducing permutation
+//! of its own. For pose graphs that arrive in a poor order (or that are
+//! intrinsically wide, like the 3D `torus`/`sphere` benchmarks), the Cholesky
+//! factor `L` then acquires far more nonzeros than the original `H`, and both
+//! the factorization time and the memory blow up super-linearly.
 //!
 //! A *symmetric* permutation `P` reorders rows and columns identically, so
 //! `PᵀHP` stays symmetric positive-definite and its Cholesky factor solves the
@@ -34,9 +34,9 @@
 //! past that cap do we compute minimum degree and adopt it if it is genuinely
 //! sparser. MD is held back as a rescue rather than always run because its
 //! factor, though it can have *fewer* nonzeros, factorizes *more slowly* than a
-//! healthy geometric ordering in the scalar (non-supernodal) backend — its
-//! elimination tree is deeper and less cache-friendly — so letting it
-//! second-guess a healthy ordering would regress the regular benchmarks.
+//! healthy geometric ordering — its elimination tree is deeper and less
+//! cache-friendly — so letting it second-guess a healthy ordering would regress
+//! the regular benchmarks.
 //!
 //! Everything here is purely structural and fully deterministic (ties broken by
 //! ascending node id), so it preserves the solver's bit-for-bit reproducibility
@@ -60,7 +60,7 @@ const NESTED_DISSECTION_LEAF: usize = 8;
 /// A geometric ordering (RCM / nested dissection) is preferred over minimum
 /// degree as long as its symbolic factor stays within this multiple of minimum
 /// degree's — geometric factors are sparser-structured and factorize faster per
-/// nonzero in the scalar backend, so a modestly larger one still wins. Only when
+/// nonzero, so a modestly larger one still wins. Only when
 /// *both* geometric factors exceed this ratio (a catastrophic blow-up, as on
 /// dense ICP graphs) is the far-sparser minimum-degree ordering used instead.
 const RESCUE_FILL_RATIO: usize = 4;
@@ -111,9 +111,9 @@ impl Reordering {
         let md_nnz = symbolic_cholesky_nnz(&adjacency, &md);
 
         // Prefer the two cheap, BFS-based geometric orderings: their balanced
-        // elimination trees *factorize* faster per nonzero in the scalar (non-
-        // supernodal) backend than minimum degree's deeper, scattered tree, so
-        // a geometric ordering within a few × MD's fill is the better choice.
+        // elimination trees *factorize* faster per nonzero than minimum degree's
+        // deeper, scattered tree, so a geometric ordering within a few × MD's
+        // fill is the better choice.
         // Cap their counts at `RESCUE_FILL_RATIO × md_nnz`; a blown-up factor
         // (dense ICP graphs such as `cubicle`/`rim`) trips the cap cheaply.
         let cap = md_nnz.saturating_mul(RESCUE_FILL_RATIO);
@@ -280,9 +280,8 @@ fn minimum_degree_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
     // linear scan's `min_by_key((degree, id))`. Entries are never deleted in
     // place; a degree change pushes a fresh entry and obsoletes the old one,
     // which is discarded when it surfaces.
-    let mut heap: BinaryHeap<Reverse<(usize, usize)>> = (0..n)
-        .map(|i| Reverse((neighbours[i].len(), i)))
-        .collect();
+    let mut heap: BinaryHeap<Reverse<(usize, usize)>> =
+        (0..n).map(|i| Reverse((neighbours[i].len(), i))).collect();
 
     for _ in 0..n {
         let pivot = loop {
