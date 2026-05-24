@@ -1202,6 +1202,121 @@ fn pose_graph_se3_returns_no_anchor_error_when_unset() {
     );
 }
 
+/// An identity information matrix must reproduce the legacy isotropic
+/// unit-weight path bit-for-bit: same two conflicting edges, solved both ways,
+/// land the free node in the same place.
+#[test]
+fn pose_graph_se3_identity_information_matches_isotropic_weight_one() {
+    use nalgebra::Matrix6;
+    use visloc_slam::PoseGraphEdgeKind;
+
+    let anchor = pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0);
+    let target_a = pose_with_yaw(Vector3::new(1.0, 0.0, 0.0), 0.2);
+    let target_b = pose_with_yaw(Vector3::new(3.0, 0.0, 0.0), -0.1);
+    let edge_a = relative_world_to_camera(&anchor, &target_a);
+    let edge_b = relative_world_to_camera(&anchor, &target_b);
+    let init_20 = pose_with_yaw(Vector3::new(2.0, 0.1, 0.0), 0.0);
+
+    let mut isotropic = PoseGraph::new();
+    isotropic.add_pose(10, anchor.clone());
+    isotropic.add_pose(20, init_20.clone());
+    isotropic.anchor(10);
+    isotropic.add_sequential_edge(10, 20, edge_a.clone());
+    isotropic.add_sequential_edge(10, 20, edge_b.clone());
+    isotropic
+        .optimize_se3_iterative(&PoseGraphSe3Config::default())
+        .expect("isotropic solve");
+
+    let mut info = PoseGraph::new();
+    info.add_pose(10, anchor);
+    info.add_pose(20, init_20);
+    info.anchor(10);
+    info.add_edge_with_information(
+        10,
+        20,
+        edge_a,
+        PoseGraphEdgeKind::Sequential,
+        Matrix6::identity(),
+    );
+    info.add_edge_with_information(
+        10,
+        20,
+        edge_b,
+        PoseGraphEdgeKind::Sequential,
+        Matrix6::identity(),
+    );
+    info.optimize_se3_iterative(&PoseGraphSe3Config::default())
+        .expect("information solve");
+
+    let iso_20 = isotropic.poses[&20].camera_center_world();
+    let inf_20 = info.poses[&20].camera_center_world();
+    assert!(
+        (iso_20 - inf_20).norm() < 1.0e-10,
+        "Ω=I must reproduce isotropic weight-1: iso={iso_20:?} info={inf_20:?}"
+    );
+}
+
+/// A non-uniform information matrix must actually steer the solve: between two
+/// conflicting odometry edges, the free node is pulled toward whichever edge
+/// carries the larger translation information.
+#[test]
+fn pose_graph_se3_information_matrix_steers_solution() {
+    use nalgebra::Matrix6;
+    use visloc_slam::PoseGraphEdgeKind;
+
+    let anchor = pose_at(Vector3::new(0.0, 0.0, 0.0));
+    let target_near = pose_at(Vector3::new(1.0, 0.0, 0.0));
+    let target_far = pose_at(Vector3::new(3.0, 0.0, 0.0));
+    let edge_near = relative_world_to_camera(&anchor, &target_near);
+    let edge_far = relative_world_to_camera(&anchor, &target_far);
+
+    // Anisotropic: strong on the translation block ρ (indices 0..3 in the
+    // [ρ; ω] tangent layout), left weak on rotation.
+    let strong = {
+        let mut m = Matrix6::identity();
+        for k in 0..3 {
+            m[(k, k)] = 50.0;
+        }
+        m
+    };
+    let weak = Matrix6::identity();
+
+    let solve = |near_info: Matrix6<f64>, far_info: Matrix6<f64>| {
+        let mut g = PoseGraph::new();
+        g.add_pose(10, anchor.clone());
+        g.add_pose(20, pose_at(Vector3::new(2.0, 0.0, 0.0)));
+        g.anchor(10);
+        g.add_edge_with_information(
+            10,
+            20,
+            edge_near.clone(),
+            PoseGraphEdgeKind::Sequential,
+            near_info,
+        );
+        g.add_edge_with_information(
+            10,
+            20,
+            edge_far.clone(),
+            PoseGraphEdgeKind::LoopClosure,
+            far_info,
+        );
+        g.optimize_se3_iterative(&PoseGraphSe3Config::default())
+            .expect("solve");
+        g.poses[&20].camera_center_world().x
+    };
+
+    let pulled_near = solve(strong, weak);
+    let pulled_far = solve(weak, strong);
+    assert!(
+        pulled_near < 1.5,
+        "strong near-info should pull toward x=1.0, got {pulled_near}"
+    );
+    assert!(
+        pulled_far > 2.5,
+        "strong far-info should pull toward x=3.0, got {pulled_far}"
+    );
+}
+
 fn build_three_node_loop(third_drift: Vector3<f64>) -> PoseGraph {
     let truth_10 = pose_at(Vector3::new(0.0, 0.0, 0.0));
     let truth_20 = pose_at(Vector3::new(1.0, 0.0, 0.0));

@@ -18,6 +18,9 @@ pub use bundle::{
 pub mod imu_preintegration;
 pub use imu_preintegration::{ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator};
 
+pub mod g2o;
+pub use g2o::{read_g2o, write_g2o, G2oError};
+
 pub mod stereo_vo_ba;
 pub use stereo_vo_ba::{
     parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
@@ -3185,6 +3188,17 @@ pub enum PoseGraphEdgeKind {
 /// Edge in a sparse [`PoseGraph`]. Encodes a measured `previous_to_current`
 /// SE3 between two keyframes plus a positive weight used by translation-only
 /// least squares.
+///
+/// `information` optionally carries a full 6×6 information matrix `Ω`, i.e. the
+/// inverse measurement covariance, ordered `[ρ; ω]` (translation block first,
+/// then rotation) to match [`SE3::log`] and the `.g2o` `EDGE_SE3:QUAT`
+/// convention. When `Some`, the SE(3) solver minimizes the anisotropic
+/// Mahalanobis cost `rᵀ Ω r` for this edge and the scalar `weight` is ignored;
+/// when `None`, the edge falls back to the isotropic `weight · ‖r‖²` behavior.
+/// This lets the graph ingest external constraints (e.g. `.g2o`
+/// `EDGE_SE3:QUAT`) whose blocks couple rotation and translation, without
+/// changing the meaning of the internally-built sequential / loop-closure
+/// edges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphEdge {
     pub from: u64,
@@ -3192,6 +3206,7 @@ pub struct PoseGraphEdge {
     pub measurement: SE3,
     pub kind: PoseGraphEdgeKind,
     pub weight: f64,
+    pub information: Option<Matrix6<f64>>,
 }
 
 /// Single Gauss-Newton step diagnostics.
@@ -3435,6 +3450,7 @@ impl PoseGraph {
             measurement,
             kind: PoseGraphEdgeKind::Sequential,
             weight: 1.0,
+            information: None,
         });
     }
 
@@ -3449,6 +3465,30 @@ impl PoseGraph {
             measurement: constraint.relative_pose.clone(),
             kind: PoseGraphEdgeKind::LoopClosure,
             weight,
+            information: None,
+        });
+    }
+
+    /// Add an edge carrying a full 6×6 information matrix `Ω`, ordered `[ρ; ω]`
+    /// (translation block first, then rotation — the [`SE3::log`] / `.g2o`
+    /// `EDGE_SE3:QUAT` convention). The SE(3) solver minimizes the anisotropic
+    /// `rᵀ Ω r` for this edge; the scalar `weight` is left at `1.0` and unused
+    /// while `information` is `Some`.
+    pub fn add_edge_with_information(
+        &mut self,
+        from: u64,
+        to: u64,
+        measurement: SE3,
+        kind: PoseGraphEdgeKind,
+        information: Matrix6<f64>,
+    ) {
+        self.edges.push(PoseGraphEdge {
+            from,
+            to,
+            measurement,
+            kind,
+            weight: 1.0,
+            information: Some(information),
         });
     }
 
@@ -3646,7 +3686,13 @@ impl PoseGraph {
             };
             let predicted = to.world_to_camera.compose(&from.world_to_camera.inverse());
             let r = edge.measurement.inverse().compose(&predicted).log();
-            total += edge.weight * kernel.cost(r.norm_squared());
+            total += match &edge.information {
+                // Anisotropic: robust kernel operates on the Mahalanobis
+                // distance rᵀΩr; the scalar weight is folded into Ω.
+                Some(omega) => kernel.cost((r.transpose() * omega * r)[(0, 0)]),
+                // Isotropic: weight scales the kernel output, kernel sees ‖r‖².
+                None => edge.weight * kernel.cost(r.norm_squared()),
+            };
         }
         total
     }
@@ -3713,10 +3759,26 @@ impl PoseGraph {
                 let predicted = t_to.compose(&t_from.inverse());
                 let r = edge.measurement.inverse().compose(&predicted).log();
                 let ad_from = t_from.adjoint();
-                let robust_weight = kernel.weight(r.norm_squared());
-                let weight = edge.weight * robust_weight;
-                let ata = ad_from.transpose() * ad_from;
-                let atr = ad_from.transpose() * r;
+                // Build the (robust-weighted) Gauss-Newton blocks. The
+                // isotropic path keeps the legacy semantics bit-for-bit
+                // (`weight` outside the kernel, kernel on ‖r‖²); the
+                // anisotropic path folds Ω into both JᵀJ and Jᵀr and lets the
+                // kernel see the Mahalanobis distance rᵀΩr.
+                let (weight, ata, atr) = match &edge.information {
+                    Some(omega) => {
+                        let robust_weight = kernel.weight((r.transpose() * omega * r)[(0, 0)]);
+                        let oa = ad_from.transpose() * omega;
+                        (robust_weight, oa * ad_from, oa * r)
+                    }
+                    None => {
+                        let robust_weight = kernel.weight(r.norm_squared());
+                        (
+                            edge.weight * robust_weight,
+                            ad_from.transpose() * ad_from,
+                            ad_from.transpose() * r,
+                        )
+                    }
+                };
 
                 let i_from = node_index.get(&edge.from).copied();
                 let i_to = node_index.get(&edge.to).copied();
@@ -3939,6 +4001,7 @@ impl PoseGraph {
                         measurement: SE3::new(rot, Vector3::new(tx, ty, tz)),
                         kind,
                         weight,
+                        information: None,
                     });
                 }
                 other => {
