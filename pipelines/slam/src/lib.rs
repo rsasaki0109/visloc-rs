@@ -23,6 +23,12 @@ pub use g2o::{read_g2o, write_g2o, G2oError};
 
 mod reordering;
 
+pub mod sim3_pose_graph;
+pub use sim3_pose_graph::{
+    Sim3Edge, Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats,
+    Sim3PoseGraphResult,
+};
+
 pub mod stereo_vo_ba;
 pub use stereo_vo_ba::{
     parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
