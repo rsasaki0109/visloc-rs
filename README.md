@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), a block (`BxB`-kernel) Cholesky that is ~3-4x faster than scalar `CscCholesky`, and a default-on chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); a Graduated Non-Convexity (Geman-McClure / truncated-least-squares) solver that rejects wrong loop closures plain IRLS cannot; plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels (plus a Graduated Non-Convexity outlier-robust BA path, `BundleAdjustment::optimize_gnc`, that rejects wrong feature correspondences a local M-estimator cannot), full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), a block (`BxB`-kernel) Cholesky that is ~3-4x faster than scalar `CscCholesky`, and a default-on chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); a Graduated Non-Convexity (Geman-McClure / truncated-least-squares) solver that rejects wrong loop closures plain IRLS cannot; plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -145,7 +145,10 @@ no ROS. For graphs with **wrong** loop closures it also ships
 `PoseGraph::optimize_se3_gnc`, a Graduated Non-Convexity solver (Yang et al.
 2020, Geman-McClure / truncated-least-squares surrogates) that rejects outlier
 constraints a plain Huber/Cauchy IRLS solve cannot (see [Outlier-robust
-PGO](#outlier-robust-pgo-graduated-non-convexity)).
+PGO](#outlier-robust-pgo-graduated-non-convexity)). The same GNC machinery is
+available for bundle adjustment as `BundleAdjustment::optimize_gnc`, rejecting
+wrong feature correspondences per observation (see [Outlier-robust bundle
+adjustment](#outlier-robust-bundle-adjustment-graduated-non-convexity)).
 
 | Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction | solve |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -356,6 +359,34 @@ than `torus3D`'s, so a `c` that is perfect on one over-rejects on the other.
 Truncated-least-squares is the more decisive kernel: its hard verdict drives
 false positives to zero where the smooth Geman-McClure leaves a few borderline
 edges down-weighted.
+
+#### Outlier-robust bundle adjustment (Graduated Non-Convexity)
+
+The same failure mode bites bundle adjustment: a cluster of **wrong feature
+correspondences** (a repeated texture, a mistracked point, a wrong temporal
+match during VO chaining) that the initialisation already believes can capture
+the reconstruction, and a Huber/Cauchy IRLS solve only down-weights them
+*locally*. `BundleAdjustment::optimize_gnc` applies the same Graduated
+Non-Convexity machinery per **observation** instead of per edge: each
+reprojection residual gets a Black-Rangarajan weight `w ∈ [0,1]` that is folded
+into the Schur-complement normal equations, and the control parameter is annealed
+from a convex (least-squares) surrogate toward the true robust cost. Only
+reprojections are reweighted - structural and inertial priors (gravity /
+position / pairwise-pose / IMU) are never switched off - so a wrong
+correspondence is the only thing GNC can reject. `gnc.c` is the inlier
+reprojection scale **in pixels**.
+
+Validated on a rigid, fully-observed scene with injected outlier observations
+(wrong correspondences shifted 70-90 px;
+[`pipelines/slam/tests/gnc_robust_ba.rs`](pipelines/slam/tests/gnc_robust_ba.rs)):
+Geman-McClure drives **every** injected outlier to a vanishing weight (perfect
+recall), separated from the lightest inlier by orders of magnitude; truncated-
+least-squares additionally gives the hard 0/1 verdict - outliers at machine-zero,
+inliers kept at exactly `1.0` - and recovers truth near-exactly (`< 1e-4` pose-
+centre error) where a plain least-squares solve is dragged off by the same
+outliers. As in the pose-graph case TLS is the kernel to reach for: keeping
+inliers fully weighted preserves the weakly-observable monocular depth direction
+that Geman-McClure's fractional weights loosen.
 
 ### EuRoC characterisation vs published baselines (honest read)
 
