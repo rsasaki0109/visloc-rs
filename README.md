@@ -190,7 +190,9 @@ instead: a left-looking Cholesky over the block elimination tree whose "scalars"
 are stack-allocated `BxB` matrices, so each diagonal factorization, triangular
 solve, and trailing update is a single dense `nalgebra` kernel the compiler
 unrolls and vectorizes (the block size is a const generic, fully monomorphized
-for `B = 3` and `B = 6`). On the same fill-reducing order this is **~5x** faster
+for `B = 3` and `B = 6`). The numeric phase scatters each column's trailing
+updates through a precomputed relative-index map rather than a `binary_search`
+per touched block, so on the same fill-reducing order this is **~5.6x** faster
 than scalar `CscCholesky` on a `sphere2500`-scale `6x6` system in isolation, and
 **~3-4x** faster end-to-end at bit-equivalent solutions:
 
