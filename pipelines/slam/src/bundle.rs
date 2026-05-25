@@ -849,13 +849,26 @@ impl BundleAdjustment {
         let initial_cost = self.robust_cost(&kernel_none);
         let n = self.observations.len() + self.stereo_observations.len();
 
-        // GNC inlier scale from the worst current reprojection residual.
-        let s_max = self
-            .reprojection_squared_residuals()
-            .into_iter()
+        // GNC inlier scale: largest residual seeds the convex μ₀; the same
+        // residuals optionally drive the MAD auto-estimate of `c` (with the
+        // configured `c` as a floor) so the pixel threshold tracks the actual
+        // reprojection noise instead of a hand-set value.
+        let squared_residuals = self.reprojection_squared_residuals();
+        let s_max = squared_residuals
+            .iter()
+            .copied()
             .filter(|s| s.is_finite())
             .fold(0.0_f64, f64::max);
-        let mut state = GncState::new(gnc, s_max);
+        let effective_gnc = match gnc.auto_scale {
+            Some(k) => {
+                let c = crate::gnc::estimate_scale_mad(&squared_residuals, k)
+                    .map_or(gnc.c, |est| est.max(gnc.c));
+                GncConfig { c, ..*gnc }
+            }
+            None => *gnc,
+        };
+        let inlier_scale = effective_gnc.c;
+        let mut state = GncState::new(&effective_gnc, s_max);
 
         // Inner solve: a short weighted LM with no M-estimator (the GNC
         // weights are the only robustification) restarted at each μ level.
@@ -919,6 +932,7 @@ impl BundleAdjustment {
             initial_cost,
             final_cost,
             inlier_cost,
+            inlier_scale,
             observation_count: n,
             outer_iterations,
             converged,
@@ -1296,6 +1310,10 @@ pub struct BaGncResult {
     /// Reprojection cost over the classified inliers only (outliers
     /// contribute nothing), using the `0.5` weight threshold.
     pub inlier_cost: f64,
+    /// The inlier scale `c` (pixels) the solve actually used: the configured
+    /// [`GncConfig::c`] verbatim, or — under [`GncConfig::auto_scale`] — the
+    /// MAD estimate (floored at the configured `c`).
+    pub inlier_scale: f64,
     /// Number of reprojection observations (monocular + stereo) the weight
     /// vector covers.
     pub observation_count: usize,
