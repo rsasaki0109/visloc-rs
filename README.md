@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, SE(3) pose graph optimization |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO - runs on the standard `sphere2500`/`torus3D`/`parking-garage` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)) |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -132,6 +132,37 @@ error if naively inserted - scale reference, not a leaderboard claim. The
 local run uses training sequences `00..10` and 260-frame subsets; the official
 benchmark ranks hidden test sequences `11..21` with `100..800 m` segment
 evaluation.
+
+### Pose-graph optimization on the g2o benchmarks
+
+visloc-rs ships a pure-Rust, deterministic SE(3) pose-graph optimizer
+(`PoseGraph::optimize_se3_iterative` - iterative Gauss-Newton / Levenberg-
+Marquardt on the SE(3) manifold, full 6x6 anisotropic information matrices,
+robust kernels, dense or sparse Cholesky) plus `.g2o` `EDGE_SE3:QUAT` read/write
+([`read_g2o`](pipelines/slam/src/g2o.rs)), so it runs directly on the canonical
+pose-graph datasets the SLAM back-end literature reports on - no C++, no Ceres,
+no ROS.
+
+| Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** |
+| built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** |
+
+Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
+`sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):
+
+```sh
+scripts/fetch_pgo_g2o_datasets.sh datasets/pgo_g2o
+cargo run --release --example pgo_g2o_benchmark -- datasets/pgo_g2o/sphere2500.g2o
+# or, zero-setup, the built-in deterministic loop graph:
+cargo run --example pgo_g2o_benchmark
+```
+
+chi^2 is the sum of Mahalanobis edge residuals in visloc-rs's world-frame
+residual convention - it is not bit-comparable to a specific g2o/GTSAM build
+(those use a body-frame residual), so the figure of merit here is the optimizer
+deterministically driving a drifted graph down to a near-consistent optimum,
+not the absolute number.
 
 ### EuRoC characterisation vs published baselines (honest read)
 
