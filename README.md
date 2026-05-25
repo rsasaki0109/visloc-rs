@@ -202,6 +202,15 @@ splits into three `3`-vector systems that share *one* `3n x 3n` normal matrix
 projected back onto `SO(3)` with an SVD. Translations are then re-derived by the
 existing linear translation solve before the full SE(3) run.
 
+`optimize_se3_iterative` runs this seeding **by default** (`PoseGraphSe3Config {
+chordal_init: true, .. }`): the rotation optimum is a fixed point of the
+relaxation, so on an already-consistent graph it leaves the estimate essentially
+unchanged (a cheap extra factorization) while rescuing the hard ones, and the
+step is best-effort (a singular relaxation is silently skipped) so it can never
+turn a solvable problem into a failure. The `pgo_g2o_benchmark` example disables
+the in-solver default and drives the step manually behind `--chordal-init`, so
+its before/after chi^2 below stays a clean, independently-measured comparison.
+
 The effect is a uniform win on the hard 3D graphs - never a worse final chi^2,
 always equal-or-faster, and it flips three datasets from non-converged to
 converged:

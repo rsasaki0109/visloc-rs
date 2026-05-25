@@ -3339,6 +3339,17 @@ pub struct PoseGraphSe3Config {
     /// has more than a few hundred nodes so the optimizer scales linearly in
     /// non-zero edges instead of cubically in node count.
     pub linear_solver: LinearSolver,
+    /// Seed the solve with a chordal rotation initialization
+    /// ([`PoseGraph::initialize_rotations_chordal`]) before the first
+    /// Gauss-Newton step. Defaults to `true`: it is strictly beneficial —
+    /// the rotation optimum is a fixed point of the relaxation, so on an
+    /// already-consistent graph it leaves the estimate essentially unchanged
+    /// (a cheap extra factorization), while on a hard, odometry-initialized 3D
+    /// graph it rescues the solve from a poor basin. The seeding is best-effort:
+    /// if its relaxed system is singular it is silently skipped and the solve
+    /// proceeds from the unmodified estimate, so enabling it can never turn a
+    /// previously-successful optimization into a failure.
+    pub chordal_init: bool,
 }
 
 impl Default for PoseGraphSe3Config {
@@ -3354,6 +3365,7 @@ impl Default for PoseGraphSe3Config {
             max_lambda: 1e12,
             min_lambda: 1e-9,
             linear_solver: LinearSolver::Dense,
+            chordal_init: true,
         }
     }
 }
@@ -3976,11 +3988,29 @@ impl PoseGraph {
         }
 
         let kernel = config.robust_kernel;
+        // `initial_cost` records the true starting point — measured before any
+        // seeding — so the reported reduction reflects the full improvement,
+        // including the (often large) drop the chordal step front-loads.
         let initial_cost = self.robust_se3_cost(&kernel);
+
+        // Optional chordal rotation seeding: solve the relaxed rotation
+        // sub-problem to a globally-consistent orientation and re-derive
+        // translations before the non-convex SE(3) solve. Best-effort — a
+        // singular relaxation is skipped, leaving the unmodified estimate, so
+        // seeding can never turn a solvable problem into a failure. The
+        // rotation re-derivation already restores translations from the
+        // preserved camera centers, so the translation LS is a further refine
+        // whose failure is also harmless.
+        if config.chordal_init && self.initialize_rotations_chordal(config.linear_solver).is_ok() {
+            let _ = self.optimize_translations_once_with(config.linear_solver);
+        }
+
         let mut iterations: Vec<PoseGraphSe3IterationStats> =
             Vec::with_capacity(config.max_iterations);
         let mut converged = false;
-        let mut current_cost = initial_cost;
+        // The LM accept test compares against the *seeded* cost, so the loop
+        // starts from the post-seed state rather than the pre-seed `initial_cost`.
+        let mut current_cost = self.robust_se3_cost(&kernel);
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let dim = variable_count * 6;
         // The fill-reducing ordering depends only on the (iteration-invariant)
