@@ -214,6 +214,19 @@ factorization is one of several costs per iteration, so the gain tracks its
 share). Visual-inertial systems interleave `3`-DOF velocity blocks that break
 the uniform `6x6` tiling and keep the scalar factorization.
 
+The numeric phase is also parallelized across the block elimination tree: columns
+are grouped into independent *levels* (a column depends only on its descendants,
+which sit at strictly lower levels), and each sufficiently heavy level is factored
+on a `rayon` pool while the finished lower levels are read - a topological
+reordering of the sequential sweep, so the factor stays bit-identical (and disabled
+cleanly with `RAYON_NUM_THREADS=1`). The win is bounded by the tree shape - the
+work concentrates in the narrow separator levels near the root while the wide
+levels are cheap leaves - so it helps most on heavy, solve-dominated graphs
+(~1.2x end-to-end on `torus3D`) and stays neutral, never regressing, on small or
+chain-like ones (a per-level work gate keeps `parking-garage` off the parallel
+path). Going further would need intra-separator parallelism, i.e. the
+supernodal/BLAS-3 route nalgebra's untuned backend cannot accelerate.
+
 The loader is also robust to the malformed information matrices that real
 scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
 not positive-semidefinite (a rotation sub-block with off-diagonal entries

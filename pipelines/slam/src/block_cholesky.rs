@@ -42,12 +42,53 @@
 //! dynamic-panel GEMM/Cholesky does not beat the fully-unrolled, heap-free
 //! `SMatrix<B, B>` kernel here, and the panel assembly/scatter is pure overhead.
 //! The per-block left-looking path below is therefore the production path.
+//!
+//! # Parallelism
+//!
+//! The numeric phase is parallelized across the elimination tree. Group the
+//! columns into *levels* — a column's level is one past the deepest level among
+//! its contributors — so every column in a level is mutually independent (a
+//! contributor is always a proper descendant, hence a strictly lower level).
+//! Processing level by level, a whole level is factored on the rayon pool while
+//! the lower levels (already finalized) are read; columns are written back after
+//! the level completes, so the shared read and the mutation never overlap. The
+//! schedule is just a topological reordering of the `0..n` sweep, so the result
+//! is bit-identical to the sequential factor (a test asserts this).
+//!
+//! The win is modest and bounded by the tree shape: in pose-graph / BA factors
+//! the work concentrates in the *narrow* separator levels near the root (where
+//! only a handful of columns are independent), while the *wide* levels are the
+//! cheap leaves — so across-level parallelism can only feed a few cores on the
+//! bulk of the work. End-to-end it helps most on heavy, solve-dominated graphs
+//! (≈1.2× on `torus3D`) and is neutral on small or fast-converging ones. To keep
+//! it from ever regressing the cheap-but-wide leaf levels of chain-like graphs
+//! (e.g. parking-garage), a level is dispatched only when it is both wide enough
+//! ([`PARALLEL_MIN_LEVEL_WIDTH`]) and heavy enough ([`PARALLEL_MIN_LEVEL_WORK`]),
+//! and only for systems past [`PARALLEL_MIN_BLOCKS`]; otherwise it runs inline.
+//! Pushing past this ceiling would need *intra-separator* parallelism (splitting
+//! a single dense separator column across cores), i.e. the supernodal/BLAS-3
+//! route ruled out above.
 
 use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector, SMatrix, SVector};
 
 const NONE: usize = usize::MAX;
+
+/// Below this block count the elimination tree is too small for the thread
+/// pool to pay for itself, so the numeric phase stays single-threaded.
+const PARALLEL_MIN_BLOCKS: usize = 256;
+/// A level (a set of mutually-independent columns) is farmed out to the rayon
+/// pool only when it is at least this wide. The pool is persistent, so the
+/// per-task cost is low and even modestly wide levels of expensive separator
+/// columns pay off; narrower levels — the deep chain near the root — run
+/// sequentially.
+const PARALLEL_MIN_LEVEL_WIDTH: usize = 2;
+/// …and only when the level's estimated work (trailing-update block multiplies,
+/// `Σ_j |contributors(j)|·|rows(j)|`) clears this bar. Cheap-but-wide leaf
+/// levels — common in chain-like graphs (e.g. parking-garage) — would otherwise
+/// lose the rayon dispatch cost, turning the parallel path into a regression.
+const PARALLEL_MIN_LEVEL_WORK: usize = 8192;
 
 /// Solve the SPD system `(A + λI) X = RHS`, where `A` is given by `triplets`
 /// (scalar COO, summed on assembly, symmetric, in the caller's permuted order)
@@ -62,11 +103,44 @@ pub(crate) fn solve_spd_block(
     rhs: &DMatrix<f64>,
     lambda: f64,
 ) -> Result<DMatrix<f64>, ()> {
+    solve_spd_block_inner(
+        triplets,
+        dim,
+        block_size,
+        rhs,
+        lambda,
+        default_thread_count(),
+        PARALLEL_MIN_LEVEL_WORK,
+    )
+}
+
+/// The block size known, dispatch to the monomorphized solver. `threads` caps
+/// the worker threads used to factor independent elimination-tree levels (`1`
+/// forces the sequential path) and `min_level_work` is the per-level work bar
+/// below which a level runs inline — both are knobs the tests and the A/B
+/// benchmark drive directly (e.g. `min_level_work = 0` forces every wide level
+/// onto the pool, exercising the parallel path on a cheap sparse system).
+fn solve_spd_block_inner(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    block_size: usize,
+    rhs: &DMatrix<f64>,
+    lambda: f64,
+    threads: usize,
+    min_level_work: usize,
+) -> Result<DMatrix<f64>, ()> {
     match block_size {
-        3 => solve_dispatch::<3>(triplets, dim, rhs, lambda),
-        6 => solve_dispatch::<6>(triplets, dim, rhs, lambda),
+        3 => solve_dispatch::<3>(triplets, dim, rhs, lambda, threads, min_level_work),
+        6 => solve_dispatch::<6>(triplets, dim, rhs, lambda, threads, min_level_work),
         other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
     }
+}
+
+/// Worker-thread budget for the numeric phase: the size of rayon's global pool
+/// (which honors `RAYON_NUM_THREADS`, so setting it to `1` disables the
+/// parallel path cleanly).
+fn default_thread_count() -> usize {
+    rayon::current_num_threads()
 }
 
 fn solve_dispatch<const B: usize>(
@@ -74,8 +148,10 @@ fn solve_dispatch<const B: usize>(
     dim: usize,
     rhs: &DMatrix<f64>,
     lambda: f64,
+    threads: usize,
+    min_level_work: usize,
 ) -> Result<DMatrix<f64>, ()> {
-    let factor = BlockCholesky::<B>::factor(triplets, dim, lambda)?;
+    let factor = BlockCholesky::<B>::factor(triplets, dim, lambda, threads, min_level_work)?;
     let mut out = DMatrix::<f64>::zeros(dim, rhs.ncols());
     for c in 0..rhs.ncols() {
         let column = DVector::from_column_slice(rhs.column(c).as_slice());
@@ -100,8 +176,15 @@ struct BlockCholesky<const B: usize> {
 }
 
 impl<const B: usize> BlockCholesky<B> {
-    /// Symbolically and numerically factor `(A + λI)`.
-    fn factor(triplets: &[(usize, usize, f64)], dim: usize, lambda: f64) -> Result<Self, ()> {
+    /// Symbolically and numerically factor `(A + λI)`. `threads` caps the worker
+    /// threads used for the numeric phase (`1` = sequential).
+    fn factor(
+        triplets: &[(usize, usize, f64)],
+        dim: usize,
+        lambda: f64,
+        threads: usize,
+        min_level_work: usize,
+    ) -> Result<Self, ()> {
         debug_assert!(dim % B == 0, "dim must be a multiple of the block size");
         let n = dim / B;
 
@@ -120,52 +203,63 @@ impl<const B: usize> BlockCholesky<B> {
             .collect();
         let mut diag_inv = vec![SMatrix::<f64, B, B>::zeros(); n];
 
-        // Reusable relative-index map: `map[i]` is the position of block row `i`
-        // in the column currently being processed. Seeded fresh per column for
-        // exactly that column's rows, so the trailing-update scatter is an O(1)
-        // lookup instead of a `binary_search` per touched block. Stale entries
-        // for rows outside the current column are never read (the fill-path
-        // property guarantees every touched row lies inside the column pattern),
-        // so no reset between columns is needed.
+        // Elimination-tree levels: columns sharing a level have no contributor
+        // edge between them (a contributor is always a proper descendant, hence
+        // a strictly lower level), so a whole level can be factored in parallel
+        // once every lower level is done. Columns are processed in level order
+        // — a valid topological order, so the result is bit-identical to the
+        // plain `0..n` sweep.
+        let levels = build_levels(&contributors, n);
+
+        // Reusable relative-index map for the sequential path: `map[i]` is the
+        // position of block row `i` in the column currently being processed.
+        // Seeded fresh per column for exactly that column's rows, so the
+        // trailing-update scatter is an O(1) lookup instead of a `binary_search`
+        // per touched block. Stale entries for rows outside the current column
+        // are never read (the fill-path property guarantees every touched row
+        // lies inside the column pattern), so no reset between columns is needed.
         let mut map = vec![0usize; n];
 
-        for j in 0..n {
-            let rows = &col_rows[j];
-            let m = rows.len();
-            for (t, &i) in rows.iter().enumerate() {
-                map[i] = t;
-            }
-            // Dense workspace for column j's blocks, indexed by position in
-            // `rows`. Seed it with the original `A` blocks of column j.
-            let mut ws = vec![SMatrix::<f64, B, B>::zeros(); m];
-            for &(i, block) in &a_lower[j] {
-                ws[map[i]] = block;
-            }
-
-            // Left-looking trailing updates: subtract Lᵢₖ·Lⱼₖᵀ for every prior
-            // column k that fills into column j.
-            for &k in &contributors[j] {
-                let k_rows = &col_rows[k];
-                let pj = pos(k_rows, j);
-                let ljk_t = col_vals[k][pj].transpose();
-                for t in pj..k_rows.len() {
-                    let i = k_rows[t];
-                    let update = col_vals[k][t] * ljk_t;
-                    ws[map[i]] -= update;
+        for level in &levels {
+            let parallel = threads > 1
+                && n >= PARALLEL_MIN_BLOCKS
+                && level.len() >= PARALLEL_MIN_LEVEL_WIDTH
+                && level
+                    .iter()
+                    .map(|&j| contributors[j].len() * col_rows[j].len())
+                    .sum::<usize>()
+                    >= min_level_work;
+            if parallel {
+                // Farm the level's independent columns out to the rayon pool,
+                // each worker computing its columns into owned buffers while
+                // reading the (already-finalized) lower levels. Writes back into
+                // `col_vals` happen after the parallel section, so the shared
+                // borrow and the mutation never overlap.
+                let computed = factor_level_parallel::<B>(
+                    level,
+                    n,
+                    &col_rows,
+                    &contributors,
+                    &a_lower,
+                    &col_vals,
+                )?;
+                for (j, vals, inv) in computed {
+                    col_vals[j] = vals;
+                    diag_inv[j] = inv;
                 }
-            }
-
-            // Factor the (updated) diagonal block and record L_jj, L_jj⁻¹.
-            let chol = ws[0].cholesky().ok_or(())?;
-            let ljj = chol.l();
-            let ljj_inv = ljj.try_inverse().ok_or(())?;
-            col_vals[j][0] = ljj;
-            diag_inv[j] = ljj_inv;
-
-            // Lᵢⱼ = Yᵢ · (L_jjᵀ)⁻¹ = Yᵢ · (L_jj⁻¹)ᵀ for the below-diagonal rows.
-            let ljj_inv_t = ljj_inv.transpose();
-            for t in 1..m {
-                col_vals[j][t] = ws[t] * ljj_inv_t;
+            } else {
+                for &j in level {
+                    let (vals, inv) = factor_column::<B>(
+                        j,
+                        &col_rows,
+                        &contributors[j],
+                        &a_lower[j],
+                        &col_vals,
+                        &mut map,
+                    )?;
+                    col_vals[j] = vals;
+                    diag_inv[j] = inv;
+                }
             }
         }
 
@@ -214,6 +308,113 @@ impl<const B: usize> BlockCholesky<B> {
         }
         x
     }
+}
+
+/// Left-looking factorization of a single block column `j`: gather column `j`'s
+/// original blocks, subtract the trailing updates `Lᵢₖ·Lⱼₖᵀ` of every prior
+/// contributor `k`, Cholesky the diagonal, and scale the below-diagonal rows.
+/// Reads only already-finalized columns (`col_vals[k]`, `k` a descendant of
+/// `j`) and writes nothing shared — it returns the column's value blocks (slot
+/// `0` is `L_jj`) and `L_jj⁻¹`, so the caller can run it on a worker thread and
+/// scatter the result afterwards. `map` is a reusable length-`n` scratch buffer
+/// (seeded here for column `j`'s rows).
+#[allow(clippy::type_complexity)]
+fn factor_column<const B: usize>(
+    j: usize,
+    col_rows: &[Vec<usize>],
+    contributors_j: &[usize],
+    a_lower_j: &[(usize, SMatrix<f64, B, B>)],
+    col_vals: &[Vec<SMatrix<f64, B, B>>],
+    map: &mut [usize],
+) -> Result<(Vec<SMatrix<f64, B, B>>, SMatrix<f64, B, B>), ()> {
+    let rows = &col_rows[j];
+    let m = rows.len();
+    for (t, &i) in rows.iter().enumerate() {
+        map[i] = t;
+    }
+    // Dense workspace for column j's blocks, indexed by position in `rows`,
+    // seeded with the original `A` blocks of column j.
+    let mut ws = vec![SMatrix::<f64, B, B>::zeros(); m];
+    for &(i, block) in a_lower_j {
+        ws[map[i]] = block;
+    }
+
+    for &k in contributors_j {
+        let k_rows = &col_rows[k];
+        let pj = pos(k_rows, j);
+        let ljk_t = col_vals[k][pj].transpose();
+        for t in pj..k_rows.len() {
+            let i = k_rows[t];
+            ws[map[i]] -= col_vals[k][t] * ljk_t;
+        }
+    }
+
+    // Factor the (updated) diagonal block and record L_jj, L_jj⁻¹.
+    let chol = ws[0].cholesky().ok_or(())?;
+    let ljj = chol.l();
+    let ljj_inv = ljj.try_inverse().ok_or(())?;
+
+    // Lᵢⱼ = Yᵢ · (L_jjᵀ)⁻¹ = Yᵢ · (L_jj⁻¹)ᵀ for the below-diagonal rows.
+    let ljj_inv_t = ljj_inv.transpose();
+    let mut vals = vec![SMatrix::<f64, B, B>::zeros(); m];
+    vals[0] = ljj;
+    for t in 1..m {
+        vals[t] = ws[t] * ljj_inv_t;
+    }
+    Ok((vals, ljj_inv))
+}
+
+/// Factor every column of one independent level on the rayon pool. Each worker
+/// reuses a private scratch `map` (via `map_init`) and emits its `(j, L column,
+/// L_jj⁻¹)` triples; the shared `col_vals` is borrowed immutably for the whole
+/// parallel section (only lower, finished levels are read), so no
+/// synchronization is needed. The first non-SPD column short-circuits the
+/// collect into `Err`.
+#[allow(clippy::type_complexity)]
+fn factor_level_parallel<const B: usize>(
+    level: &[usize],
+    n: usize,
+    col_rows: &[Vec<usize>],
+    contributors: &[Vec<usize>],
+    a_lower: &[Vec<(usize, SMatrix<f64, B, B>)>],
+    col_vals: &[Vec<SMatrix<f64, B, B>>],
+) -> Result<Vec<(usize, Vec<SMatrix<f64, B, B>>, SMatrix<f64, B, B>)>, ()> {
+    use rayon::prelude::*;
+    level
+        .par_iter()
+        .map_init(
+            || vec![0usize; n],
+            |map, &j| {
+                let (vals, inv) =
+                    factor_column::<B>(j, col_rows, &contributors[j], &a_lower[j], col_vals, map)?;
+                Ok((j, vals, inv))
+            },
+        )
+        .collect()
+}
+
+/// Assign each column to an elimination-tree level — one more than the deepest
+/// level among its contributors — and bucket the columns by level. Columns in
+/// the same bucket are mutually independent (no contributor edge), so a bucket
+/// can be factored in parallel. Contributors are strictly-earlier columns, so a
+/// single forward sweep suffices and each bucket comes out sorted.
+fn build_levels(contributors: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
+    let mut level = vec![0usize; n];
+    let mut max_level = 0;
+    for j in 0..n {
+        let lv = contributors[j]
+            .iter()
+            .map(|&k| level[k] + 1)
+            .max()
+            .unwrap_or(0);
+        level[j] = lv;
+        max_level = max_level.max(lv);
+    }
+    let mut levels = vec![Vec::new(); max_level + 1];
+    for (j, &lv) in level.iter().enumerate() {
+        levels[lv].push(j);
+    }
+    levels
 }
 
 /// Assemble the lower-triangular original block values and the off-diagonal
@@ -567,6 +768,175 @@ mod tests {
             "block{b} {n} blocks (dim {dim}): block {block_ms:.1} ms vs scalar {scalar_ms:.1} ms => {:.2}x",
             scalar_ms / block_ms
         );
+    }
+
+    /// `build_levels` must bucket exactly the columns with no contributor edge
+    /// between them: a contributor sits at a strictly lower level, so same-level
+    /// columns are safe to factor concurrently.
+    #[test]
+    fn build_levels_groups_independent_columns() {
+        // 0,1 are leaves; 2 depends on {0,1}; 3 depends on {2}; 4 is another
+        // leaf; 5 depends on {3,4}.
+        let contributors = vec![vec![], vec![], vec![0, 1], vec![2], vec![], vec![3, 4]];
+        let levels = build_levels(&contributors, 6);
+        assert_eq!(levels, vec![vec![0, 1, 4], vec![2], vec![3], vec![5]]);
+    }
+
+    /// Build the diagonally-dominant SPD triplets of a `side × side` 2D-grid
+    /// block graph at block size `b`, already in the fill-reducing order — the
+    /// mesh regime whose elimination tree has wide independent levels.
+    fn grid_system(side: usize, b: usize) -> (usize, Vec<(usize, usize, f64)>) {
+        use crate::reordering::Reordering;
+        let n = side * side;
+        let dim = n * b;
+        let id = |r: usize, c: usize| r * side + c;
+        let mut rng = Rng(0x5eed);
+        let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
+        let mut push_block = |br: usize, bc: usize, rng: &mut Rng| {
+            for r in 0..b {
+                for c in 0..b {
+                    triplets.push((br * b + r, bc * b + c, 0.1 * rng.next_f64()));
+                }
+            }
+        };
+        for r in 0..side {
+            for c in 0..side {
+                if c + 1 < side {
+                    push_block(id(r, c), id(r, c + 1), &mut rng);
+                    push_block(id(r, c + 1), id(r, c), &mut rng);
+                }
+                if r + 1 < side {
+                    push_block(id(r, c), id(r + 1, c), &mut rng);
+                    push_block(id(r + 1, c), id(r, c), &mut rng);
+                }
+            }
+        }
+        for j in 0..n {
+            for d in 0..b {
+                triplets.push((j * b + d, j * b + d, 10.0));
+            }
+        }
+        let order = Reordering::fill_reducing(dim, b, &triplets);
+        (dim, order.permute_triplets(&triplets))
+    }
+
+    /// The multi-threaded numeric phase must produce a *bit-identical* factor to
+    /// the sequential one: same columns, same arithmetic, only the scheduling
+    /// differs. Forcing the parallel path on a cheap sparse grid
+    /// (`min_level_work = 0`, so every width≥2 level is dispatched) exercises
+    /// `factor_level_parallel` + the result scatter without paying the dense
+    /// arithmetic it would take to clear the production work gate.
+    #[test]
+    fn parallel_factor_matches_sequential() {
+        let side = 24; // 576 blocks > PARALLEL_MIN_BLOCKS, sparse ⇒ debug-fast
+        let b = 6;
+        let (dim, permuted) = grid_system(side, b);
+        let n = dim / b;
+
+        // The forced gate (work bar 0) must still find a wide level to dispatch,
+        // or the parallel run would fall back to sequential and prove nothing.
+        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
+        let (_, contributors) = symbolic(&block_lower, n);
+        assert!(
+            n >= PARALLEL_MIN_BLOCKS
+                && build_levels(&contributors, n)
+                    .iter()
+                    .any(|l| l.len() >= PARALLEL_MIN_LEVEL_WIDTH),
+            "fixture has no wide level to dispatch"
+        );
+
+        let rhs = DMatrix::<f64>::from_fn(dim, 2, |i, c| ((i + c) % 7) as f64 - 3.0);
+        let seq = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0).expect("seq SPD");
+        let par = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 8, 0).expect("par SPD");
+        assert_eq!(
+            seq, par,
+            "parallel factor disagrees with the sequential factor (must be bit-identical)"
+        );
+    }
+
+    /// A/B timing of the numeric phase: single-threaded vs. all-cores, on the
+    /// `sphere2500`-scale 2D grid (the regime with the widest independent
+    /// levels). Reports the achieved speedup. Run with `cargo test -p
+    /// visloc-slam --release -- --ignored --nocapture bench_block_parallel`.
+    #[test]
+    #[ignore]
+    fn bench_block_parallel_scaling() {
+        use std::time::Instant;
+
+        let b = 6;
+        let side = 50; // 2500 blocks ~ sphere2500 scale
+        let (dim, permuted) = grid_system(side, b);
+        let rhs = DMatrix::<f64>::from_fn(dim, 1, |i, _| (i % 7) as f64 - 3.0);
+        let threads = default_thread_count();
+        let reps = 5;
+
+        // Force every wide level onto the pool (`min_level_work = 0`) so this
+        // measures the parallel path's raw scaling — the grid's heavy separators
+        // sit in width-1 levels, so the production work gate would barely fire
+        // here (real wins come from loopy 3D graphs like torus3D; see the
+        // module note). Warm up + correctness cross-check between schedules.
+        let one = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0).expect("seq SPD");
+        let many =
+            solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0).expect("par SPD");
+        assert_eq!(one, many, "parallel/sequential disagree");
+
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let _ = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0).unwrap();
+        }
+        let seq_ms = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let _ = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0).unwrap();
+        }
+        let par_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        let n = dim / b;
+        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
+        let (col_rows, contributors) = symbolic(&block_lower, n);
+        let levels = build_levels(&contributors, n);
+        let widths: Vec<usize> = levels.iter().map(|l| l.len()).collect();
+
+        // Trailing-update block-multiply count per column ≈ the dominant factor
+        // cost. Bucket the work by the *width* of the level the column sits in,
+        // to show where the cost actually lives relative to where the
+        // parallelism (wide levels) is.
+        let col_work = |j: usize| -> u64 {
+            contributors[j]
+                .iter()
+                .map(|&k| (col_rows[k].len() - pos(&col_rows[k], j)) as u64)
+                .sum()
+        };
+        // Bucket the work by level width: parallelism only exists in wide
+        // levels, so seeing the work concentrate in the narrow buckets is the
+        // direct evidence that across-level parallelism cannot pay off here.
+        let mut work_by_bucket = std::collections::BTreeMap::<usize, u64>::new();
+        let mut total = 0u64;
+        for level in &levels {
+            let w: u64 = level.iter().map(|&j| col_work(j)).sum();
+            let bucket = match level.len() {
+                1 => 1,
+                2..=7 => 2,
+                8..=31 => 8,
+                32..=127 => 32,
+                _ => 128,
+            };
+            *work_by_bucket.entry(bucket).or_default() += w;
+            total += w;
+        }
+        let total = total.max(1);
+        println!(
+            "grid {side}x{side} (dim {dim}): seq {seq_ms:.1} ms vs {threads}-thread {par_ms:.1} ms => {:.2}x ({} levels, widest {})",
+            seq_ms / par_ms,
+            widths.len(),
+            widths.iter().max().unwrap(),
+        );
+        let pct: Vec<String> = work_by_bucket
+            .iter()
+            .map(|(&b, &w)| format!("width>={b}: {:.1}%", 100.0 * w as f64 / total as f64))
+            .collect();
+        println!("  factor work by level width — {}", pct.join(", "));
     }
 
     #[test]
