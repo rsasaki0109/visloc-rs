@@ -206,7 +206,7 @@ pub fn write_colmap_text_model(map: &VisualMap, path: impl AsRef<Path>) -> Resul
 ///
 /// - `camera`: shared pinhole intrinsics (the model is replicated as a single
 ///   COLMAP camera id; `camera.params` must already match the COLMAP layout
-///   for [`camera.model`])
+///   for `camera.model`)
 /// - `poses`: per-frame `world_to_camera` SE3 (one COLMAP image entry each)
 /// - `left_features`: left keypoints per frame; only the keypoints that
 ///   participate in a stereo feature are written to the per-image 2D point

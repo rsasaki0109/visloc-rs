@@ -782,6 +782,9 @@ struct Pose3d3dScore {
     mean_residual_m: f64,
 }
 
+// Each parameter is an independent PnP/depth-hypothesis knob; positional args
+// stay closer to the math than an ad-hoc bundling struct would.
+#[allow(clippy::too_many_arguments)]
 fn estimate_pnp_with_depth_hypotheses(
     pnp: &PnPRansac,
     all_corrs: &[Correspondence2D3D],
@@ -1164,24 +1167,16 @@ fn effective_temporal_min_confidence(
     {
         return Some(min_confidence);
     }
-    let Some(curve_min_translation_m) = config
+    let curve_min_translation_m = config
         .temporal_auto_confidence_curve_min_median_translation_m
-        .and_then(finite_positive)
-    else {
-        return None;
-    };
-    let Some(curve_min_rotation_deg) = config
+        .and_then(finite_positive)?;
+    let curve_min_rotation_deg = config
         .temporal_auto_confidence_curve_min_median_rotation_deg
-        .and_then(finite_positive)
-    else {
-        return None;
-    };
+        .and_then(finite_positive)?;
     if recent_translation_median < curve_min_translation_m {
         return None;
     }
-    let Some(recent_rotation_median) = recent_rotation_median else {
-        return None;
-    };
+    let recent_rotation_median = recent_rotation_median?;
     if recent_rotation_median < curve_min_rotation_deg {
         return None;
     }
@@ -1206,6 +1201,9 @@ struct StereoPoseObservation {
     right_px: Point2<f64>,
 }
 
+// Stereo-temporal observation inputs (prev/current stereo, left/right features,
+// matches, camera) are passed positionally to mirror `stereo_pose_observations`.
+#[allow(clippy::too_many_arguments)]
 fn refine_relative_pose_with_current_stereo(
     initial_pose: &Pose,
     prev_stereo: &[StereoFeature],
@@ -1233,6 +1231,9 @@ fn refine_relative_pose_with_current_stereo(
     refine_pose_stereo_reprojection(initial_pose, &observations, camera, baseline)
 }
 
+// Stereo-temporal observation inputs are passed positionally; bundling them
+// would not group more cohesively than this single call site.
+#[allow(clippy::too_many_arguments)]
 fn stereo_pose_observations(
     initial_pose: &Pose,
     prev_stereo: &[StereoFeature],
@@ -2351,6 +2352,9 @@ fn rescue_translation_direction(
     true
 }
 
+// Stereo-pair alignment inputs plus the frontend config; canonical positional
+// signature shared in spirit with the other stereo-temporal helpers above.
+#[allow(clippy::too_many_arguments)]
 fn align_vertical_translation_to_stereo_pairs(
     relative_pose: &mut Pose,
     prev_stereo: &[StereoFeature],
@@ -2563,6 +2567,10 @@ fn is_weak_motion_scale_consensus(
 }
 
 #[cfg(test)]
+// Tests build large `*Config` fixtures by tweaking a handful of fields off
+// `Default::default()`; field-by-field assignment reads more clearly than a
+// struct-update literal here and keeps each gate's relevant knobs together.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::features::FeatureSet;

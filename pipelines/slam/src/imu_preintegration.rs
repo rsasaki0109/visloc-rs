@@ -292,6 +292,9 @@ impl ImuPreintegrationFactor {
     /// corrected residual when both biases equal the linearisation
     /// point. Used by the BA-side IMU factor when biases are part of the
     /// optimisation state.
+    // Canonical IMU-residual signature: the two states (R, p, v at i and j)
+    // plus the gyro/accel biases. Mirrors `residual_corrected_internal` below.
+    #[allow(clippy::too_many_arguments)]
     pub fn residual_with_bias_correction(
         &self,
         r_i: &SO3,

@@ -3567,7 +3567,7 @@ mod online_loop_closure_refinement {
         // least one trigger fired and the pending counter was drained.
         assert!(state.trigger_count >= 1);
         assert_eq!(state.pending_since_last_trigger, 0);
-        assert!(state.verified_constraints.len() >= 1);
+        assert!(!state.verified_constraints.is_empty());
         // Anchor pose must remain identity.
         let anchor_pose = state.graph.poses.get(&10).unwrap();
         let anchor_center = anchor_pose.camera_center_world();

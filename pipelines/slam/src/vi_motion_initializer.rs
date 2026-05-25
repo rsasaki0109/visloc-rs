@@ -29,7 +29,7 @@
 //! Out of scope for this module. Full monocular scale recovery, joint
 //! visual-inertial bundle adjustment over a longer window with re-runs
 //! (VIBA2), and pipeline-level glue mirroring
-//! [`crate::OnlineSlamViInitState`]. The design note enumerates what
+//! `OnlineSlamViInitState`. The design note enumerates what
 //! follow-ups close those gaps.
 
 use std::collections::BTreeMap;
@@ -466,7 +466,7 @@ impl MotionBasedViInitializer {
             let mut worst: Option<(u64, f64)> = None;
             for (kf_id, state) in &result.keyframe_states {
                 let mag = state.velocity_world.norm();
-                if mag > limit && worst.map_or(true, |(_, m)| mag > m) {
+                if mag > limit && worst.is_none_or(|(_, m)| mag > m) {
                     worst = Some((*kf_id, mag));
                 }
             }

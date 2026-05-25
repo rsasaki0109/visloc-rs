@@ -147,14 +147,14 @@ pub struct OnlineSlamConfig {
     /// posture. Empirically on real EuRoC the strict path leaves
     /// local-VI-BA with at most one trigger before the visual tracker
     /// dies on the takeoff transient (see
-    /// [`docs/motion_based_vi_alignment.md`] §Phase-12); flipping the
+    /// `docs/motion_based_vi_alignment.md` §Phase-12); flipping the
     /// flag recovers the 6–7 pre-promotion factors and lets the
     /// Phase-9 mirror update the IMU motion model more frequently.
     pub keep_pre_promotion_imu_factors: bool,
     /// Optional online loop-closure refinement stage. When `Some`, the
     /// pipeline mirrors registered keyframe poses into a running
     /// [`PoseGraph`], runs an [`EssentialMatrixLoopClosureVerifier`] over
-    /// every candidate [`detect_loop_closure_candidates`] produces, and
+    /// every candidate `detect_loop_closure_candidates` produces, and
     /// fires [`PoseGraph::optimize_se3_iterative`] whenever
     /// `trigger_every_new_constraints` fresh verified loop edges have
     /// accumulated since the last solve. On a successful solve the
@@ -385,7 +385,7 @@ pub struct OnlineSlamRelocalizationStats {
 /// [`OnlineSlamConfig::pose_graph_refinement`], the pipeline maintains a
 /// running [`PoseGraph`] mirror of `map.keyframes`, runs an
 /// [`EssentialMatrixLoopClosureVerifier`] on every candidate emitted by
-/// [`detect_loop_closure_candidates`], and folds verified
+/// `detect_loop_closure_candidates`, and folds verified
 /// [`LoopClosureConstraint`]s into the graph. When
 /// `trigger_every_new_constraints` new verified edges have accumulated
 /// since the last solve, [`PoseGraph::optimize_se3_iterative`] runs and
@@ -1657,7 +1657,7 @@ impl<T, M> OnlineSlamPipeline<T, M> {
     /// strictly positive `dt` and silently drops non-positive values so
     /// callers can replay raw IMU streams without pre-filtering.
     pub fn push_imu_measurement(&mut self, gyro: Vector3<f64>, accel: Vector3<f64>, dt: f64) {
-        if !(dt > 0.0) || !dt.is_finite() {
+        if dt <= 0.0 || !dt.is_finite() {
             return;
         }
         if let Some(state) = self.imu_state.as_mut() {
@@ -2026,7 +2026,7 @@ where
             external_localization_prior_radius: tracking.external_localization_prior_radius,
             tracking_failure_reason: None,
             map_landmark_count: tracking.map_landmark_count,
-            map_stats: tracking.map_stats.clone(),
+            map_stats: tracking.map_stats,
             localization: recovered,
             covisibility_local_map_size: tracking.covisibility_local_map_size,
         };

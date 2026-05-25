@@ -13,10 +13,10 @@
 //!    has fired (`vi_init_state.completed = Some(...)`). The motion-based
 //!    stage consumes that static seed as its starting linearisation point.
 //! 2. On every new keyframe, the pipeline calls
-//!    [`OnlineSlamMotionViInitState::register_keyframe`] with the
+//!    `OnlineSlamMotionViInitState::register_keyframe` with the
 //!    keyframe id + world-frame camera centre, and banks the freshly-
 //!    staged [`ImuPreintegrationFactor`] into
-//!    [`OnlineSlamMotionViInitState::factor_history`].
+//!    `OnlineSlamMotionViInitState::factor_history`.
 //! 3. Once both trigger gates (keyframe count + cumulative translation)
 //!    fire, the pipeline calls [`MotionBasedViInitializer::try_initialize`]
 //!    against the banked factors. On success the pipeline atomically:
@@ -57,7 +57,7 @@ pub struct OnlineSlamMotionViInitConfig {
     /// hand-off the static stage performs.
     pub mirror_into_imu_state: bool,
     /// Cap on the number of IMU factors banked in
-    /// [`OnlineSlamMotionViInitState::factor_history`]. Bounds memory on
+    /// `OnlineSlamMotionViInitState::factor_history`. Bounds memory on
     /// long sequences where the trigger never fires. `0` disables the
     /// cap. Default `64`.
     pub max_buffered_factors: usize,

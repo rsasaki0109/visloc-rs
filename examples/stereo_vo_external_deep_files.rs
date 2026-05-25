@@ -643,11 +643,15 @@ fn filter_matches_by_confidence(
         .collect()
 }
 
+/// Rectified stereo intrinsics recovered from a KITTI calib file:
+/// `(fx, fy, cx, cy, baseline_m)`.
+type KittiStereoCalibration = (f64, f64, f64, f64, f64);
+
 fn kitti_stereo_calibration(
     calib_path: &Path,
     projection_left: &str,
     projection_right: &str,
-) -> Result<(f64, f64, f64, f64, f64), Box<dyn std::error::Error>> {
+) -> Result<KittiStereoCalibration, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(calib_path)?;
     let projections = parse_kitti_calibration_txt(&text)?;
     let left = projections

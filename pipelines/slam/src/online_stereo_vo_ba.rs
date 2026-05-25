@@ -451,17 +451,18 @@ mod tests {
     /// landmarks. Each frame translates +z by `step` metres in world.
     /// Features are emitted in *world-landmark order* across frames so
     /// stereo and temporal matches are trivial identity maps.
-    fn build_synthetic_sequence(
-        n_frames: usize,
-        step: f64,
-    ) -> (
+    // (camera, baseline, left features, right features, stereo matches per
+    // frame, temporal matches per pair) for one synthetic forward-motion run.
+    type SyntheticStereoSequence = (
         Camera,
         f64,
         Vec<FeatureSet>,
         Vec<FeatureSet>,
-        Vec<Vec<DescriptorMatch>>, // stereo per frame
-        Vec<Vec<DescriptorMatch>>, // temporal per pair
-    ) {
+        Vec<Vec<DescriptorMatch>>,
+        Vec<Vec<DescriptorMatch>>,
+    );
+
+    fn build_synthetic_sequence(n_frames: usize, step: f64) -> SyntheticStereoSequence {
         let camera = synthetic_camera(640, 480);
         let baseline = 0.5;
         // 24 landmarks scattered in a +z half-space.

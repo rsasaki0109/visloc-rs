@@ -753,7 +753,9 @@ mod tests {
         assert!(pose[0].bias_gyro.is_none());
         // Hamilton quaternion was stored as (qw, qx, qy, qz); nalgebra packs
         // this into its inner `Quaternion::new(w, x, y, z)` constructor.
-        assert!((pose[0].orientation_world.w.abs() - 0.7071).abs() < 1.0e-4);
+        assert!(
+            (pose[0].orientation_world.w.abs() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1.0e-4
+        );
     }
 
     #[test]

@@ -34,8 +34,8 @@
 //! The recovered bootstrap is returned as a
 //! [`VisualInertialInitializationResult`] and consumed by callers
 //! (typically followed by seeding
-//! [`crate::OnlineSlamImuConfig::bias_gyro_linearisation`] /
-//! [`crate::OnlineSlamImuConfig::bias_acc_linearisation`] and the
+//! `OnlineSlamImuConfig::bias_gyro_linearisation` /
+//! `OnlineSlamImuConfig::bias_acc_linearisation` and the
 //! first-keyframe pose). The initialiser itself is appearance-free
 //! and does not touch the SLAM critical path; it lives in
 //! `pipelines/slam` only because it shares the IMU sample
@@ -454,7 +454,13 @@ mod tests {
         // Body tilted 30 degrees about x-axis. Then accel measures
         // R_b←w · (-g_w). With g_w = (0, 0, -9.81), -g_w = (0, 0, 9.81)
         // expressed in body frame is R_b←w · (0, 0, 9.81).
-        let rotation_w_b = Rotation3::from_axis_angle(&Vector3::x_axis(), 0.5236); // 30 deg
+        //
+        // The literal 0.5236 (~30°) is a deliberate test input: the 1e-9 gate
+        // on `delta` below is calibrated to it, and substituting the exact
+        // `FRAC_PI_6` shifts the recovered yaw past that tolerance. Keep the
+        // literal and silence the approx-constant lint here.
+        #[allow(clippy::approx_constant)]
+        let rotation_w_b = Rotation3::from_axis_angle(&Vector3::x_axis(), 0.5236);
         let world_up = Vector3::new(0.0, 0.0, 9.81);
         let accel_body = rotation_w_b.inverse() * world_up;
         for _ in 0..200 {

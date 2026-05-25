@@ -303,6 +303,9 @@ pub struct StereoVoBaRefinement {
 /// pose 0 fixed) plus all long-tracked landmarks. The metric scale is
 /// anchored by the rectified-stereo baseline; no extra gauge fixing is
 /// required.
+// Public entry point: the stereo rig (camera, baseline), the per-frame VO
+// sequence (poses, left/right features, stereo, temporal matches), and config.
+#[allow(clippy::too_many_arguments)]
 pub fn refine_stereo_vo_with_ba(
     camera: &Camera,
     baseline: f64,
@@ -780,8 +783,8 @@ fn build_forward_tracks(
 ) -> Vec<Vec<(usize, usize)>> {
     let mut visited: HashMap<(usize, usize), ()> = HashMap::new();
     let mut tracks: Vec<Vec<(usize, usize)>> = Vec::new();
-    for start_frame in 0..n_frames {
-        for start_idx in 0..left_features[start_frame].keypoints.len() {
+    for (start_frame, start_features) in left_features.iter().enumerate().take(n_frames) {
+        for start_idx in 0..start_features.keypoints.len() {
             if visited.contains_key(&(start_frame, start_idx)) {
                 continue;
             }
@@ -843,6 +846,9 @@ fn initial_landmark_world(
 /// Returns `None` when the track has fewer than 2 stereo-observed frames
 /// (DLT is under-constrained), the SVD fails, or the recovered point fails
 /// cheirality / depth gates at the first observation's frame.
+// Per-track DLT triangulation inputs: the track plus the shared BA frame data
+// (stereo lookup, features, poses, rig). Passed positionally for one call site.
+#[allow(clippy::too_many_arguments)]
 fn initial_landmark_world_dlt(
     track: &[(usize, usize)],
     stereo_lookup: &[HashMap<usize, &StereoFeature>],
@@ -1153,6 +1159,10 @@ pub fn slice_imu_samples_for_keyframes(
 }
 
 #[cfg(test)]
+// Tests build large `*Config` fixtures by tweaking a handful of fields off
+// `Default::default()`; field-by-field assignment reads more clearly than a
+// struct-update literal here and keeps each gate's relevant knobs together.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use nalgebra::{Point3, UnitQuaternion, Vector3};
@@ -2009,18 +2019,15 @@ mod tests {
     fn imu_samples_txt_rejects_bad_lines() {
         // Wrong column count.
         let err = parse_stereo_vo_imu_samples_txt("0.01 0.0 0.0 0.0 2.0 0.0\n")
-            .err()
-            .expect("should fail on 6 columns");
+            .expect_err("should fail on 6 columns");
         assert!(err.contains("7 numbers"));
         // Negative dt.
         let err = parse_stereo_vo_imu_samples_txt("-0.01 0 0 0 0 0 0\n")
-            .err()
-            .expect("should fail on negative dt");
+            .expect_err("should fail on negative dt");
         assert!(err.contains("positive"));
         // Garbage token.
         let err = parse_stereo_vo_imu_samples_txt("foo 0 0 0 0 0 0\n")
-            .err()
-            .expect("should fail on non-numeric");
+            .expect_err("should fail on non-numeric");
         assert!(err.contains("cannot parse"));
     }
 
@@ -2084,8 +2091,7 @@ mod tests {
             &temporal_matches,
             &cfg,
         )
-        .err()
-        .expect("should fail with InvalidImuInput");
+        .expect_err("should fail with InvalidImuInput");
         assert!(matches!(err, StereoVoBaError::InvalidImuInput { .. }));
 
         // Right window count but `window_size` is also set.
@@ -2107,8 +2113,7 @@ mod tests {
             &temporal_matches,
             &cfg,
         )
-        .err()
-        .expect("should fail with InvalidImuInput (sliding window)");
+        .expect_err("should fail with InvalidImuInput (sliding window)");
         assert!(matches!(err, StereoVoBaError::InvalidImuInput { .. }));
     }
 
@@ -2197,20 +2202,17 @@ mod tests {
 
         // Length mismatch.
         let err = slice_imu_samples_for_keyframes(&[0i128, 1, 2], &gyro, &accel, &[0i128, 1])
-            .err()
-            .expect("length mismatch should fail");
+            .expect_err("length mismatch should fail");
         assert!(err.contains("length mismatch"));
 
         // Fewer than two keyframes.
         let err = slice_imu_samples_for_keyframes(&[0i128, 1], &gyro, &accel, &[0i128])
-            .err()
-            .expect("single keyframe should fail");
+            .expect_err("single keyframe should fail");
         assert!(err.contains("at least 2 keyframe"));
 
         // Non-monotonic keyframes.
         let err = slice_imu_samples_for_keyframes(&[0i128, 1], &gyro, &accel, &[1i128, 0])
-            .err()
-            .expect("non-monotonic should fail");
+            .expect_err("non-monotonic should fail");
         assert!(err.contains("keyframe timestamps"));
     }
 }

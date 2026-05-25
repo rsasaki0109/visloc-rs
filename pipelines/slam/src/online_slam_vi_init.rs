@@ -56,8 +56,8 @@ pub struct OnlineSlamViInitConfig {
     /// camera centre is preserved (the stationary-window flavour cannot
     /// observe absolute position).
     pub seed_first_keyframe_rotation: bool,
-    /// Behaviour when [`max_wait_duration_seconds`] or
-    /// [`max_buffered_samples`] is reached without success.
+    /// Behaviour when [`Self::max_wait_duration_seconds`] or
+    /// [`Self::max_buffered_samples`] is reached without success.
     pub on_persistent_rejection: ViInitFallback,
     /// Semantic cap: stop trying once this much wall-clock IMU duration
     /// has been buffered. `0.0` disables the duration cap.

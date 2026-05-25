@@ -144,7 +144,11 @@ mod inner {
             );
         }
 
-        let mut results_with_keypoints: Vec<(ExtractorChoice, LocalizationResult, Vec<Point2<f64>>)> = Vec::with_capacity(FRONTENDS.len());
+        let mut results_with_keypoints: Vec<(
+            ExtractorChoice,
+            LocalizationResult,
+            Vec<Point2<f64>>,
+        )> = Vec::with_capacity(FRONTENDS.len());
         for frontend in FRONTENDS.iter() {
             let mut query_keypoints: Vec<Point2<f64>> = Vec::new();
             let result = run_pipeline(
@@ -228,7 +232,10 @@ mod inner {
             body.push_str(&format!("      \"id\": {:?},\n", frontend.id()));
             body.push_str(&format!("      \"label\": {:?},\n", frontend.label()));
             body.push_str(&format!("      \"match_count\": {},\n", result.match_count));
-            body.push_str(&format!("      \"inlier_count\": {},\n", result.inlier_count));
+            body.push_str(&format!(
+                "      \"inlier_count\": {},\n",
+                result.inlier_count
+            ));
             // For DeepMultiScale the synthetic landmark ids do not
             // appear in `map_xy_by_id` (they are derived from
             // `next_landmark_id`, not from `observation.landmark_id`),
