@@ -3664,7 +3664,8 @@ impl PoseGraph {
             }
             LinearSolver::Sparse => {
                 let order = reordering::Reordering::fill_reducing(dim, 3, &triplets);
-                solve_normal_equations_sparse(&triplets, dim, 3, &atb, 0.0, &order)?
+                // One-shot solve (no LM loop), so the symbolic analysis is not reused.
+                solve_normal_equations_sparse(&triplets, dim, 3, &atb, 0.0, &order, &mut None)?
             }
         };
 
@@ -4022,6 +4023,10 @@ impl PoseGraph {
         // sparsity pattern, so compute it lazily on the first sparse solve and
         // reuse it for the rest of the optimization.
         let mut order_cache: Option<reordering::Reordering> = None;
+        // The normal-equations sparsity pattern is iteration-invariant, so the
+        // block-Cholesky symbolic factorization is analyzed once and reused
+        // alongside the fill-reducing order across all LM iterations.
+        let mut symbolic_cache: Option<block_cholesky::BlockSymbolic> = None;
 
         for iteration in 0..config.max_iterations {
             let mut builder = NormalEquations6::new(dim, config.linear_solver, self.edges.len());
@@ -4074,7 +4079,7 @@ impl PoseGraph {
             }
 
             let neg_g = -&g;
-            let delta = builder.solve(lambda, &neg_g, &mut order_cache)?;
+            let delta = builder.solve(lambda, &neg_g, &mut order_cache, &mut symbolic_cache)?;
 
             // Tentatively apply the step so we can evaluate the new cost.
             let mut max_step_norm: f64 = 0.0;
@@ -4378,12 +4383,23 @@ fn solve_normal_equations_sparse(
     b: &DVector<f64>,
     lambda: f64,
     order: &reordering::Reordering,
+    symbolic_cache: &mut Option<block_cholesky::BlockSymbolic>,
 ) -> Result<DVector<f64>, PoseGraphError> {
     let permuted = order.permute_triplets(triplets);
     let rhs_permuted = order.permute_rhs(b);
     let rhs = DMatrix::from_column_slice(dim, 1, rhs_permuted.as_slice());
-    let solution = block_cholesky::solve_spd_block(&permuted, dim, block_size, &rhs, lambda)
-        .map_err(|_| PoseGraphError::SingularSystem)?;
+    // The permuted sparsity pattern is identical across LM iterations, so the
+    // block-Cholesky symbolic analysis (and the COO→block assembly) is cached
+    // and only the numeric refactorization runs after the first solve.
+    let solution = block_cholesky::solve_spd_block_cached(
+        symbolic_cache,
+        &permuted,
+        dim,
+        block_size,
+        &rhs,
+        lambda,
+    )
+    .map_err(|_| PoseGraphError::SingularSystem)?;
     let solution_permuted = DVector::from_column_slice(solution.as_slice());
     Ok(order.restore_solution(&solution_permuted))
 }
@@ -4592,6 +4608,7 @@ impl NormalEquations6 {
         lambda: f64,
         neg_g: &DVector<f64>,
         order_cache: &mut Option<reordering::Reordering>,
+        symbolic_cache: &mut Option<block_cholesky::BlockSymbolic>,
     ) -> Result<DVector<f64>, PoseGraphError> {
         match self {
             Self::Dense(mut h) => {
@@ -4607,7 +4624,15 @@ impl NormalEquations6 {
                 let order = order_cache.get_or_insert_with(|| {
                     reordering::Reordering::fill_reducing(dim, 6, &triplets)
                 });
-                solve_normal_equations_sparse(&triplets, dim, 6, neg_g, lambda, order)
+                solve_normal_equations_sparse(
+                    &triplets,
+                    dim,
+                    6,
+                    neg_g,
+                    lambda,
+                    order,
+                    symbolic_cache,
+                )
             }
         }
     }
