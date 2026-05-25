@@ -80,7 +80,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use nalgebra::{
-    DMatrix, DVector, Matrix6, Point2, Point3, Quaternion, UnitQuaternion, Vector3, Vector6,
+    DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, Quaternion, Rotation3, UnitQuaternion,
+    Vector3, Vector6,
 };
 use nalgebra_sparse::{factorization::CscCholesky, CooMatrix, CscMatrix};
 use visloc_core::geometry::{Pose, SE3};
@@ -3370,6 +3371,22 @@ pub struct PoseGraphSe3IterationStats {
     pub step_accepted: bool,
 }
 
+/// Diagnostics from [`PoseGraph::initialize_rotations_chordal`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChordalRotationInit {
+    pub anchor_id: u64,
+    pub edge_count: usize,
+    pub variable_count: usize,
+    /// Chordal rotation cost (see [`PoseGraph::chordal_rotation_cost`]) before
+    /// the relaxation was solved.
+    pub cost_before: f64,
+    /// Chordal rotation cost after replacing every node rotation with the
+    /// SVD-projected chordal solution.
+    pub cost_after: f64,
+    /// Largest per-node geodesic rotation change (degrees) applied by the init.
+    pub max_rotation_update_deg: f64,
+}
+
 /// Result of a full SE(3) Gauss-Newton run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphSe3Result {
@@ -3706,6 +3723,213 @@ impl PoseGraph {
             };
         }
         total
+    }
+
+    /// Chordal (Frobenius-relaxed) cost of the current node rotations:
+    /// `Σ_e w_e · ‖R_to − R_meas_e · R_from‖_F²`, where `R_*` is the rotation
+    /// of each node's `world_to_camera` and `R_meas_e` the rotation of the
+    /// edge measurement. This is the objective minimized by
+    /// [`Self::initialize_rotations_chordal`]; unlike [`Self::se3_cost`] it
+    /// ignores translation and uses the chordal (embedded-Euclidean) metric on
+    /// SO(3) rather than the geodesic one, so it is a convex function of the
+    /// relaxed (unconstrained 3×3) rotation variables.
+    pub fn chordal_rotation_cost(&self) -> f64 {
+        let mut total = 0.0;
+        for edge in &self.edges {
+            let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
+            else {
+                continue;
+            };
+            let r_from = from
+                .world_to_camera
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
+            let r_to = to
+                .world_to_camera
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
+            let r_meas = edge.measurement.rotation.to_rotation_matrix().into_inner();
+            total += chordal_rotation_weight(edge) * (r_to - r_meas * r_from).norm_squared();
+        }
+        total
+    }
+
+    /// Initialize node rotations by solving the *chordal relaxation* of the
+    /// rotation-only sub-problem (Carlone et al., "Initialization Techniques
+    /// for 3D SLAM", ICRA 2015). On hard 3D datasets the SE(3) cost surface is
+    /// strongly non-convex in rotation, so a full solve started from raw
+    /// odometry stalls in a poor basin; seeding it with the chordal solution
+    /// lands it near the global optimum.
+    ///
+    /// Each edge contributes the residual `R_to − R_meas · R_from` measured in
+    /// the embedded-Euclidean (Frobenius) metric. Relaxing every `R_i` from
+    /// `SO(3)` to an unconstrained `3×3` matrix makes the objective a single
+    /// linear least-squares problem; the per-node `9`-vector splits into three
+    /// independent `3`-vector systems (one per rotation column) that share the
+    /// *same* `3n × 3n` normal matrix — so this factors once and solves three
+    /// right-hand sides. Each relaxed `3×3` block is then projected back onto
+    /// `SO(3)` with an SVD (`R = U·diag(1,1,det(UVᵀ))·Vᵀ`).
+    ///
+    /// The anchor's rotation is held fixed (it fixes the global gauge). Each
+    /// node's camera *center* is preserved — only its orientation is replaced —
+    /// so this is safe to call standalone, though the intended flow is
+    /// chordal-rotation → [`Self::optimize_translations_once_with`] →
+    /// [`Self::optimize_se3_iterative`].
+    pub fn initialize_rotations_chordal(
+        &mut self,
+        linear_solver: LinearSolver,
+    ) -> Result<ChordalRotationInit, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        let anchor_pose = self
+            .poses
+            .get(&anchor_id)
+            .ok_or(PoseGraphError::MissingNode(anchor_id))?;
+        let r_anchor = anchor_pose
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        for edge in &self.edges {
+            if !self.poses.contains_key(&edge.from) {
+                return Err(PoseGraphError::MissingNode(edge.from));
+            }
+            if !self.poses.contains_key(&edge.to) {
+                return Err(PoseGraphError::MissingNode(edge.to));
+            }
+        }
+
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+
+        let cost_before = self.chordal_rotation_cost();
+
+        // Assemble the shared 3n×3n normal matrix and three right-hand sides
+        // (the three columns of the stacked rotation matrices). The matrix is
+        // identical across columns because it depends only on the (orthonormal)
+        // measured rotations and the edge weights; each anchor-incident edge
+        // shifts one column's right-hand side by that column of R_anchor.
+        let dim = variable_count * 3;
+        let mut h_dense = match linear_solver {
+            LinearSolver::Dense => Some(DMatrix::<f64>::zeros(dim, dim)),
+            LinearSolver::Sparse => None,
+        };
+        let mut triplets: Vec<(usize, usize, f64)> = match linear_solver {
+            LinearSolver::Dense => Vec::new(),
+            LinearSolver::Sparse => Vec::with_capacity(self.edges.len() * 36),
+        };
+        let mut rhs = DMatrix::<f64>::zeros(dim, 3);
+
+        for edge in &self.edges {
+            let r_meas = edge.measurement.rotation.to_rotation_matrix().into_inner();
+            let w = chordal_rotation_weight(edge);
+
+            let i_to = node_index.get(&edge.to).copied();
+            let i_from = node_index.get(&edge.from).copied();
+
+            if let Some(j) = i_to {
+                add_diag_block3(&mut h_dense, &mut triplets, j * 3, w);
+            }
+            if let Some(i) = i_from {
+                add_diag_block3(&mut h_dense, &mut triplets, i * 3, w);
+            }
+            match (i_to, i_from) {
+                (Some(j), Some(i)) => {
+                    // Both endpoints free: off-diagonal coupling -w·R_meas.
+                    add_dense_block3(&mut h_dense, &mut triplets, j * 3, i * 3, &(-w * r_meas));
+                    add_dense_block3(
+                        &mut h_dense,
+                        &mut triplets,
+                        i * 3,
+                        j * 3,
+                        &(-w * r_meas.transpose()),
+                    );
+                }
+                (Some(j), None) => {
+                    // `from` is the anchor: g_to += w · R_meas · col(R_anchor).
+                    let contribution = w * r_meas * r_anchor;
+                    for c in 0..3 {
+                        for k in 0..3 {
+                            rhs[(j * 3 + k, c)] += contribution[(k, c)];
+                        }
+                    }
+                }
+                (None, Some(i)) => {
+                    // `to` is the anchor: g_from += w · R_measᵀ · col(R_anchor).
+                    let contribution = w * r_meas.transpose() * r_anchor;
+                    for c in 0..3 {
+                        for k in 0..3 {
+                            rhs[(i * 3 + k, c)] += contribution[(k, c)];
+                        }
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+
+        let solution = match linear_solver {
+            LinearSolver::Dense => {
+                let h = h_dense.expect("dense matrix initialized when LinearSolver::Dense");
+                let chol = h.clone().cholesky().ok_or(PoseGraphError::SingularSystem)?;
+                chol.solve(&rhs)
+            }
+            LinearSolver::Sparse => {
+                let order = reordering::Reordering::fill_reducing(dim, 3, &triplets);
+                solve_normal_equations_sparse_multi(&triplets, dim, &rhs, &order)?
+            }
+        };
+
+        // Reshape each node's solved columns into a 3×3, project onto SO(3),
+        // and replace the node's orientation while keeping its camera center.
+        let mut max_rotation_update_rad: f64 = 0.0;
+        for (&id, &i) in &node_index {
+            let mut block = Matrix3::<f64>::zeros();
+            for c in 0..3 {
+                for k in 0..3 {
+                    block[(k, c)] = solution[(i * 3 + k, c)];
+                }
+            }
+            let projected = project_to_so3(&block).ok_or(PoseGraphError::SingularSystem)?;
+            let new_rotation =
+                UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(projected));
+
+            let pose = self
+                .poses
+                .get_mut(&id)
+                .ok_or(PoseGraphError::MissingNode(id))?;
+            let center = pose.camera_center_world();
+            let delta = new_rotation
+                .rotation_to(&pose.world_to_camera.rotation)
+                .angle();
+            max_rotation_update_rad = max_rotation_update_rad.max(delta);
+            pose.world_to_camera.rotation = new_rotation;
+            // Re-derive translation from the preserved center: t = -R·center.
+            pose.world_to_camera.translation = -(projected * center.coords);
+        }
+
+        let cost_after = self.chordal_rotation_cost();
+        Ok(ChordalRotationInit {
+            anchor_id,
+            edge_count: self.edges.len(),
+            variable_count,
+            cost_before,
+            cost_after,
+            max_rotation_update_deg: max_rotation_update_rad.to_degrees(),
+        })
     }
 
     /// Run a full SE(3) Gauss-Newton optimization with right-perturbation
@@ -4138,6 +4362,40 @@ fn solve_normal_equations_sparse(
     Ok(order.restore_solution(&solution_permuted))
 }
 
+/// Multi-right-hand-side variant of [`solve_normal_equations_sparse`]: factor
+/// the SPD matrix once and solve every column of `rhs` against it. The chordal
+/// rotation initializer assembles one normal matrix shared by all three
+/// rotation columns, so a single factorization amortizes over the three solves.
+/// The fill-reducing `order` is applied as a symmetric permutation exactly as
+/// in the single-RHS path; each column is permuted in, solved, and restored.
+fn solve_normal_equations_sparse_multi(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    rhs: &DMatrix<f64>,
+    order: &reordering::Reordering,
+) -> Result<DMatrix<f64>, PoseGraphError> {
+    let permuted = order.permute_triplets(triplets);
+    let mut coo = CooMatrix::<f64>::new(dim, dim);
+    coo.reserve(permuted.len());
+    for (r, c, v) in permuted {
+        coo.push(r, c, v);
+    }
+    let csc = CscMatrix::from(&coo);
+    let chol = CscCholesky::factor(&csc).map_err(|_| PoseGraphError::SingularSystem)?;
+
+    let cols = rhs.ncols();
+    let mut out = DMatrix::<f64>::zeros(dim, cols);
+    for c in 0..cols {
+        let column = DVector::from_column_slice(rhs.column(c).as_slice());
+        let rhs_permuted = order.permute_rhs(&column);
+        let solved = chol.solve(&DMatrix::from_column_slice(dim, 1, rhs_permuted.as_slice()));
+        let solved_permuted = DVector::from_column_slice(solved.as_slice());
+        let restored = order.restore_solution(&solved_permuted);
+        out.set_column(c, &restored);
+    }
+    Ok(out)
+}
+
 fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {
     for r in 0..6 {
         for c in 0..6 {
@@ -4191,6 +4449,75 @@ fn add_offdiag_block3(
             triplets.push((row_start + k, col_start + k, value));
         }
     }
+}
+
+/// Add a full (possibly dense) 3×3 `block` at the `(row_start, col_start)`
+/// position of either a dense `H` or a triplet vector. Used by the chordal
+/// rotation initializer, whose off-diagonal coupling `-w·R_meas` is a dense
+/// rotation matrix rather than a scaled identity. Zero entries are skipped in
+/// the sparse path so the rotation matrices contribute only their nonzeros.
+fn add_dense_block3(
+    h_dense: &mut Option<DMatrix<f64>>,
+    triplets: &mut Vec<(usize, usize, f64)>,
+    row_start: usize,
+    col_start: usize,
+    block: &Matrix3<f64>,
+) {
+    if let Some(h) = h_dense {
+        for r in 0..3 {
+            for c in 0..3 {
+                h[(row_start + r, col_start + c)] += block[(r, c)];
+            }
+        }
+    } else {
+        for r in 0..3 {
+            for c in 0..3 {
+                let v = block[(r, c)];
+                if v != 0.0 {
+                    triplets.push((row_start + r, col_start + c, v));
+                }
+            }
+        }
+    }
+}
+
+/// Scalar edge weight used by the chordal rotation initializer. For an
+/// isotropic edge this is just `edge.weight`; for an edge carrying a full 6×6
+/// information matrix `Ω` (ordered `[ρ; ω]`) it is the mean of the rotational
+/// diagonal `(Ω₃₃ + Ω₄₄ + Ω₅₅)/3`, i.e. the confidence g2o assigned to the
+/// rotation block. Negative or non-finite results are clamped to a tiny
+/// positive weight so the relaxed normal matrix stays positive definite.
+fn chordal_rotation_weight(edge: &PoseGraphEdge) -> f64 {
+    let w = match &edge.information {
+        Some(omega) => (omega[(3, 3)] + omega[(4, 4)] + omega[(5, 5)]) / 3.0,
+        None => edge.weight,
+    };
+    if w.is_finite() && w > 0.0 {
+        w
+    } else {
+        1e-9
+    }
+}
+
+/// Project a 3×3 matrix onto the nearest rotation in `SO(3)` (Frobenius sense)
+/// via its SVD: `R = U·diag(1, 1, det(UVᵀ))·Vᵀ`. The determinant correction
+/// guarantees `det(R) = +1` (a proper rotation, never a reflection). Returns
+/// `None` only when the SVD fails to converge.
+fn project_to_so3(m: &Matrix3<f64>) -> Option<Matrix3<f64>> {
+    let svd = m.svd(true, true);
+    let u = svd.u?;
+    let v_t = svd.v_t?;
+    let mut r = u * v_t;
+    if r.determinant() < 0.0 {
+        // Flip the sign of the smallest singular direction (the last column of
+        // U) to turn the reflection into a proper rotation.
+        let mut u_fixed = u;
+        for k in 0..3 {
+            u_fixed[(k, 2)] = -u_fixed[(k, 2)];
+        }
+        r = u_fixed * v_t;
+    }
+    Some(r)
 }
 
 /// Storage for the SE(3) Gauss-Newton normal-equations matrix `H` that

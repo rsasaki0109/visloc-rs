@@ -1202,6 +1202,207 @@ fn pose_graph_se3_returns_no_anchor_error_when_unset() {
     );
 }
 
+/// Ground truth is a fixed point of the chordal relaxation: the truth
+/// rotations already achieve zero chordal cost and the relaxed minimizer is
+/// unique, so initializing from truth must leave the rotations untouched.
+#[test]
+fn chordal_rotation_init_keeps_ground_truth_rotations() {
+    let truth_10 = pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0);
+    let truth_20 = pose_with_yaw(Vector3::new(1.5, 0.0, 0.5), 0.4);
+    let truth_30 = pose_with_yaw(Vector3::new(0.3, 0.0, 0.2), 0.9);
+
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, truth_10.clone());
+    graph.add_pose(20, truth_20.clone());
+    graph.add_pose(30, truth_30.clone());
+    graph.anchor(10);
+    graph.add_sequential_edge(10, 20, relative_world_to_camera(&truth_10, &truth_20));
+    graph.add_sequential_edge(20, 30, relative_world_to_camera(&truth_20, &truth_30));
+    graph.add_sequential_edge(10, 30, relative_world_to_camera(&truth_10, &truth_30));
+
+    assert!(graph.chordal_rotation_cost() < 1.0e-15);
+    let stats = graph
+        .initialize_rotations_chordal(LinearSolver::Dense)
+        .expect("chordal init must succeed");
+    assert_eq!(stats.variable_count, 2);
+    assert_eq!(stats.edge_count, 3);
+    assert!(stats.max_rotation_update_deg < 1.0e-6, "{stats:?}");
+    assert!(stats.cost_after < 1.0e-12, "{stats:?}");
+
+    for (id, truth) in [(20u64, &truth_20), (30, &truth_30)] {
+        let r_truth = truth
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        let r_now = graph.poses[&id]
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        assert!(
+            (r_truth - r_now).norm() < 1.0e-9,
+            "node {id} rotation drifted"
+        );
+    }
+}
+
+/// Starting from deliberately wrong rotations, the chordal init must recover
+/// the truth orientations of a consistent loop (the relaxation has a unique
+/// zero-cost minimizer) and emit only valid proper rotations.
+#[test]
+fn chordal_rotation_init_recovers_rotations_from_a_bad_start() {
+    use nalgebra::Matrix3;
+
+    let truth = [
+        (1u64, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0)),
+        (2, pose_with_yaw(Vector3::new(1.0, 0.0, 0.0), 0.6)),
+        (3, pose_with_yaw(Vector3::new(2.0, 0.0, 0.7), 1.2)),
+        (4, pose_with_yaw(Vector3::new(1.0, 0.0, 1.4), 1.8)),
+    ];
+
+    let mut graph = PoseGraph::new();
+    for (i, (id, truth_pose)) in truth.iter().enumerate() {
+        if i == 0 {
+            graph.add_pose(*id, truth_pose.clone());
+        } else {
+            // A grossly wrong yaw so the relaxed blocks are far from rotations.
+            graph.add_pose(*id, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), -2.5));
+        }
+    }
+    graph.anchor(1);
+    let edge = |a: usize, b: usize| relative_world_to_camera(&truth[a].1, &truth[b].1);
+    graph.add_sequential_edge(1, 2, edge(0, 1));
+    graph.add_sequential_edge(2, 3, edge(1, 2));
+    graph.add_sequential_edge(3, 4, edge(2, 3));
+    // Closing edge of the loop (kind is cosmetic for rotation init).
+    graph.add_sequential_edge(4, 1, edge(3, 0));
+
+    let cost_before = graph.chordal_rotation_cost();
+    assert!(
+        cost_before > 1.0,
+        "bad init should be costly: {cost_before}"
+    );
+
+    let stats = graph
+        .initialize_rotations_chordal(LinearSolver::Sparse)
+        .expect("chordal init must succeed");
+    assert!(
+        stats.cost_after < 1.0e-9,
+        "consistent loop => near-zero: {stats:?}"
+    );
+    assert!(stats.cost_after < cost_before);
+    assert!(
+        stats.max_rotation_update_deg > 10.0,
+        "should move a lot: {stats:?}"
+    );
+
+    for (id, truth_pose) in truth.iter().skip(1) {
+        let r_truth = truth_pose
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        let r_now = graph.poses[id]
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        assert!((r_truth - r_now).norm() < 1.0e-6, "node {id} not recovered");
+        // Projection must yield a proper orthonormal rotation.
+        assert!((r_now * r_now.transpose() - Matrix3::identity()).norm() < 1.0e-9);
+        assert!((r_now.determinant() - 1.0).abs() < 1.0e-9);
+    }
+}
+
+/// The dense and sparse backends assemble the same normal equations, so they
+/// must land on identical rotations.
+#[test]
+fn chordal_rotation_init_dense_and_sparse_agree() {
+    let truth_1 = pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 0.0);
+    let truth_2 = pose_with_yaw(Vector3::new(1.0, 0.0, 0.3), 0.5);
+    let truth_3 = pose_with_yaw(Vector3::new(0.4, 0.0, 1.1), 1.1);
+
+    let build = || {
+        let mut g = PoseGraph::new();
+        g.add_pose(1, truth_1.clone());
+        g.add_pose(2, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), -1.0));
+        g.add_pose(3, pose_with_yaw(Vector3::new(0.0, 0.0, 0.0), 2.0));
+        g.anchor(1);
+        g.add_sequential_edge(1, 2, relative_world_to_camera(&truth_1, &truth_2));
+        g.add_sequential_edge(2, 3, relative_world_to_camera(&truth_2, &truth_3));
+        g.add_sequential_edge(1, 3, relative_world_to_camera(&truth_1, &truth_3));
+        g
+    };
+
+    let mut dense = build();
+    let mut sparse = build();
+    dense
+        .initialize_rotations_chordal(LinearSolver::Dense)
+        .expect("dense");
+    sparse
+        .initialize_rotations_chordal(LinearSolver::Sparse)
+        .expect("sparse");
+
+    for id in [2u64, 3] {
+        let rd = dense.poses[&id]
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        let rs = sparse.poses[&id]
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        assert!((rd - rs).norm() < 1.0e-9, "backends disagree on node {id}");
+    }
+}
+
+/// Chordal init must reject the same degenerate graphs the SE(3) solver does.
+#[test]
+fn chordal_rotation_init_rejects_degenerate_graphs() {
+    use visloc_core::geometry::SE3;
+
+    let a = pose_at(Vector3::zeros());
+    let b = pose_at(Vector3::new(1.0, 0.0, 0.0));
+
+    let mut no_anchor = PoseGraph::new();
+    no_anchor.add_pose(1, a.clone());
+    no_anchor.add_pose(2, b.clone());
+    no_anchor.add_sequential_edge(1, 2, relative_world_to_camera(&a, &b));
+    assert_eq!(
+        no_anchor.initialize_rotations_chordal(LinearSolver::Sparse),
+        Err(PoseGraphError::NoAnchor)
+    );
+
+    let mut no_edges = PoseGraph::new();
+    no_edges.add_pose(1, a.clone());
+    no_edges.anchor(1);
+    assert_eq!(
+        no_edges.initialize_rotations_chordal(LinearSolver::Sparse),
+        Err(PoseGraphError::NoEdges)
+    );
+
+    let mut missing = PoseGraph::new();
+    missing.add_pose(1, a.clone());
+    missing.anchor(1);
+    missing.add_sequential_edge(1, 99, SE3::identity());
+    assert_eq!(
+        missing.initialize_rotations_chordal(LinearSolver::Sparse),
+        Err(PoseGraphError::MissingNode(99))
+    );
+
+    let mut anchor_only = PoseGraph::new();
+    anchor_only.add_pose(1, a);
+    anchor_only.anchor(1);
+    anchor_only.add_sequential_edge(1, 1, SE3::identity());
+    assert_eq!(
+        anchor_only.initialize_rotations_chordal(LinearSolver::Sparse),
+        Err(PoseGraphError::NoVariables)
+    );
+}
+
 /// An identity information matrix must reproduce the legacy isotropic
 /// unit-weight path bit-for-bit: same two conflicting edges, solved both ways,
 /// land the free node in the same place.

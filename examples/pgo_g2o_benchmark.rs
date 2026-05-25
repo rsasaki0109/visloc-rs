@@ -12,6 +12,11 @@
 //! # Real benchmark dataset (download a .g2o first, e.g. sphere2500):
 //! cargo run --release --example pgo_g2o_benchmark -- path/to/sphere2500.g2o
 //!
+//! # Seed the SE(3) solve with a chordal rotation initialization (Carlone et
+//! # al.) — essential for hard 3D graphs (e.g. `rim`) where odometry-initialized
+//! # Levenberg-Marquardt stalls in a poor basin:
+//! cargo run --release --example pgo_g2o_benchmark -- --chordal-init path/to/rim.g2o
+//!
 //! # No argument: a built-in deterministic synthetic loop graph, so the demo
 //! # runs end-to-end in CI without any external data.
 //! cargo run --example pgo_g2o_benchmark
@@ -27,8 +32,15 @@ use visloc_slam::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let arg = std::env::args().nth(1);
-    let (mut graph, source) = match arg {
+    let mut chordal_init = false;
+    let mut path: Option<String> = None;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--chordal-init" => chordal_init = true,
+            _ => path = Some(arg),
+        }
+    }
+    let (mut graph, source) = match path {
         Some(path) => (read_g2o(&path)?, path),
         None => (
             build_synthetic_loop_graph(),
@@ -40,6 +52,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  source        : {source}");
     println!("  vertices      : {}", graph.poses.len());
     println!("  edges         : {}", graph.edges.len());
+    println!("  chordal init  : {chordal_init}");
+
+    // Optional chordal rotation initialization: solve the relaxed rotation
+    // sub-problem and re-derive translations before the full SE(3) solve. On
+    // strongly non-convex 3D graphs this reseeds LM near the global optimum.
+    if chordal_init {
+        let started = Instant::now();
+        let rot = graph.initialize_rotations_chordal(LinearSolver::Sparse)?;
+        graph.optimize_translations_once_with(LinearSolver::Sparse)?;
+        let elapsed = started.elapsed();
+        println!(
+            "  chordal rot   : {:.6e} -> {:.6e} (max Δrot {:.1}°, {:.1} ms)",
+            rot.cost_before,
+            rot.cost_after,
+            rot.max_rotation_update_deg,
+            elapsed.as_secs_f64() * 1e3,
+        );
+    }
 
     // Levenberg-Marquardt with the sparse Cholesky backend: robust on noisy
     // real graphs and linear in the (sparse) edge count rather than cubic in
