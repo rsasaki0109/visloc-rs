@@ -21,6 +21,8 @@ pub use imu_preintegration::{ImuPreintegratedDelta, ImuPreintegrationFactor, Imu
 pub mod g2o;
 pub use g2o::{read_g2o, write_g2o, G2oError};
 
+mod reordering;
+
 pub mod stereo_vo_ba;
 pub use stereo_vo_ba::{
     parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
@@ -3624,7 +3626,7 @@ impl PoseGraph {
                 let h = h_dense.expect("dense matrix initialized when LinearSolver::Dense");
                 solve_normal_equations(&h, &atb)?
             }
-            LinearSolver::Sparse => solve_normal_equations_sparse(&triplets, dim, &atb, 0.0)?,
+            LinearSolver::Sparse => solve_normal_equations_sparse(&triplets, dim, &atb, 0.0, 3)?,
         };
 
         let mut total_correction = 0.0;
@@ -4080,6 +4082,15 @@ pub(crate) fn solve_normal_equations(
 /// outer products from edge Jacobians). Triplets may contain duplicates;
 /// they are summed during the COO → CSC conversion.
 ///
+/// The system is first symmetrically reordered with Reverse Cuthill–McKee (see
+/// the `reordering` module) at the granularity of `block_size`-dimensional
+/// variables.
+/// `CscCholesky` applies no fill-reducing permutation itself, so this keeps the
+/// Cholesky factor near-banded and prevents the catastrophic fill-in that makes
+/// poorly-ordered or intrinsically wide 3D pose graphs (e.g. `torus`/`sphere`)
+/// intractable. The permutation is purely structural and deterministic, so the
+/// returned solution is unchanged up to floating-point summation order.
+///
 /// Returns [`PoseGraphError::SingularSystem`] when the factorization fails
 /// (e.g., disconnected graph). The damping term `λ` is added to the diagonal
 /// before factoring, matching the dense LM path's `H + λI` formulation.
@@ -4088,12 +4099,19 @@ fn solve_normal_equations_sparse(
     dim: usize,
     b: &DVector<f64>,
     lambda: f64,
+    block_size: usize,
 ) -> Result<DVector<f64>, PoseGraphError> {
+    let order = reordering::Reordering::reverse_cuthill_mckee(dim, block_size, triplets);
+    let permuted = order.permute_triplets(triplets);
+    let rhs_permuted = order.permute_rhs(b);
+
     let mut coo = CooMatrix::<f64>::new(dim, dim);
-    coo.reserve(triplets.len() + dim);
-    for &(r, c, v) in triplets {
+    coo.reserve(permuted.len() + dim);
+    for (r, c, v) in permuted {
         coo.push(r, c, v);
     }
+    // λI is permutation-invariant (the diagonal maps to the diagonal), so we
+    // add it directly in the reordered space.
     if lambda > 0.0 {
         for k in 0..dim {
             coo.push(k, k, lambda);
@@ -4101,9 +4119,10 @@ fn solve_normal_equations_sparse(
     }
     let csc = CscMatrix::from(&coo);
     let chol = CscCholesky::factor(&csc).map_err(|_| PoseGraphError::SingularSystem)?;
-    let rhs = DMatrix::from_column_slice(dim, 1, b.as_slice());
+    let rhs = DMatrix::from_column_slice(dim, 1, rhs_permuted.as_slice());
     let solution = chol.solve(&rhs);
-    Ok(DVector::from_column_slice(solution.as_slice()))
+    let solution_permuted = DVector::from_column_slice(solution.as_slice());
+    Ok(order.restore_solution(&solution_permuted))
 }
 
 fn add_block6(h: &mut DMatrix<f64>, row: usize, col: usize, weight: f64, block: &Matrix6<f64>) {
@@ -4210,7 +4229,7 @@ impl NormalEquations6 {
                 solve_normal_equations(&h, neg_g)
             }
             Self::Sparse { triplets, dim } => {
-                solve_normal_equations_sparse(&triplets, dim, neg_g, lambda)
+                solve_normal_equations_sparse(&triplets, dim, neg_g, lambda, 6)
             }
         }
     }
