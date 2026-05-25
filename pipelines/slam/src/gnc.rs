@@ -188,6 +188,61 @@ impl GncState {
     }
 }
 
+/// Estimate the GNC inlier scale `c` from the residual distribution itself,
+/// so it need not be hand-tuned per dataset.
+///
+/// The right `c` is the boundary between the inlier residual cluster and the
+/// outliers, and that boundary moves with the noise level: a `c` that is
+/// perfect on a tight graph over-rejects a noisier one. This computes the
+/// classic robust outlier cutoff (Iglewicz & Hoaglin's modified z-score) on
+/// the residual *norms* `ρ = √s`:
+///
+/// ```text
+/// c = median(ρ) + k · 1.4826 · MAD(ρ),   MAD(ρ) = median |ρ − median(ρ)|
+/// ```
+///
+/// `1.4826` makes the MAD a consistent estimator of the Gaussian σ, so
+/// `1.4826·MAD` is a breakdown-robust (≈ 50 % outliers) standard deviation and
+/// `median + k·σ̂` is the upper edge of the inlier band. Because both the
+/// median and the MAD are themselves medians, a handful of gross outliers
+/// cannot inflate the estimate — the failure mode of using the mean / RMS.
+///
+/// `squared_residuals` are the (whitened) squared residuals the optimizer
+/// sees, in the **same units as [`GncConfig::c`]**; `NaN` / negative entries
+/// (e.g. un-evaluable bundle-adjustment observations) are ignored. Returns
+/// `None` if fewer than two residuals are finite. Estimate this at the
+/// least-squares (chordal-seeded) starting point, where inlier residuals
+/// already reflect both the measurement noise and the optimizer's transient
+/// displacement, so the band is wide enough not to clip inliers mid-anneal.
+pub fn estimate_scale_mad(squared_residuals: &[f64], k: f64) -> Option<f64> {
+    let mut norms: Vec<f64> = squared_residuals
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(f64::sqrt)
+        .collect();
+    if norms.len() < 2 {
+        return None;
+    }
+    let median = median_in_place(&mut norms);
+    let mut deviations: Vec<f64> = norms.iter().map(|r| (r - median).abs()).collect();
+    let mad = median_in_place(&mut deviations);
+    let sigma = 1.4826 * mad;
+    Some(median + k * sigma)
+}
+
+/// Median of a non-empty slice, sorting it in place (NaN-free by construction
+/// at the call sites).
+fn median_in_place(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        0.5 * (values[n / 2 - 1] + values[n / 2])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +352,75 @@ mod tests {
         // No residual exceeds c² ⇒ nothing to reject ⇒ start at the hard cost.
         let state = GncState::new(&cfg(GncKernel::TruncatedLeastSquares), 0.3);
         assert!(state.is_terminal());
+    }
+
+    #[test]
+    fn mad_scale_brackets_inliers_below_outliers() {
+        // Inlier norms tightly clustered near 1.0 (squared ≈ 1.0), plus a few
+        // gross outliers. The estimate must sit above every inlier and well
+        // below the outlier cluster so it lands in the separating gap.
+        let mut squared = Vec::new();
+        for i in 0..200 {
+            let rho = 0.9 + 0.2 * (i as f64 / 199.0); // norms in [0.9, 1.1]
+            squared.push(rho * rho);
+        }
+        for &rho in &[20.0, 25.0, 30.0, 50.0] {
+            squared.push(rho * rho);
+        }
+        let c = estimate_scale_mad(&squared, 3.5).expect("enough residuals");
+        assert!(c > 1.1, "c = {c} should clear the inlier norms (≤ 1.1)");
+        assert!(
+            c < 20.0,
+            "c = {c} should stay below the outlier cluster (≥ 20)"
+        );
+    }
+
+    #[test]
+    fn mad_scale_is_robust_to_outlier_magnitude() {
+        // The breakdown property that a mean / RMS scale lacks: with a fixed
+        // outlier count, pushing the outliers 100× farther out does not move
+        // the estimate at all, because both the median and the MAD are
+        // determined by the inlier-dominated middle of the sorted set.
+        let inliers: Vec<f64> = (0..100).map(|i| (1.0 + 0.01 * i as f64).powi(2)).collect();
+        let with_moderate = {
+            let mut v = inliers.clone();
+            v.extend(std::iter::repeat(50.0_f64.powi(2)).take(20));
+            v
+        };
+        let with_extreme = {
+            let mut v = inliers.clone();
+            v.extend(std::iter::repeat(5000.0_f64.powi(2)).take(20));
+            v
+        };
+        let c_moderate = estimate_scale_mad(&with_moderate, 3.5).unwrap();
+        let c_extreme = estimate_scale_mad(&with_extreme, 3.5).unwrap();
+        assert!(
+            (c_moderate - c_extreme).abs() < 1e-9,
+            "outlier magnitude changed the estimate: {c_moderate} vs {c_extreme}"
+        );
+    }
+
+    #[test]
+    fn mad_scale_ignores_nan_and_needs_two_finite() {
+        assert!(estimate_scale_mad(&[], 3.5).is_none());
+        assert!(estimate_scale_mad(&[f64::NAN, 4.0], 3.5).is_none());
+        // Two finite residuals (norms 3 and 4): median 3.5, MAD 0.5.
+        let c = estimate_scale_mad(&[9.0, 16.0, f64::NAN], 2.0).unwrap();
+        assert!((c - (3.5 + 2.0 * 1.4826 * 0.5)).abs() < 1e-12, "c = {c}");
+    }
+
+    #[test]
+    fn mad_scale_grows_with_noise_level() {
+        // The whole point: a noisier graph yields a proportionally larger c,
+        // so a single auto setting adapts where a fixed c would not transfer.
+        let tight: Vec<f64> = (0..100).map(|i| (0.3 + 0.002 * i as f64).powi(2)).collect();
+        let loose: Vec<f64> = (0..100).map(|i| (2.4 + 0.016 * i as f64).powi(2)).collect();
+        let c_tight = estimate_scale_mad(&tight, 3.5).unwrap();
+        let c_loose = estimate_scale_mad(&loose, 3.5).unwrap();
+        assert!(
+            c_loose > 5.0 * c_tight,
+            "c should scale with noise: {c_tight} vs {c_loose}"
+        );
     }
 
     #[test]
