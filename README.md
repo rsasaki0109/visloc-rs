@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO and automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection, chosen by symbolic factor size) - runs on the standard `sphere2500`/`torus3D`/`parking-garage` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO and automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs) - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -148,18 +148,31 @@ no ROS.
 | `parking-garage` | 1661 | 6275 | 1.68e4 | 1.27e0 | **99.99 %** | ~0.9 s |
 | `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** | ~6.8 s |
 | `torus3D` | 5000 | 9048 | 4.75e6 | 6.02e4 | **98.73 %** | ~42 s |
+| `cubicle` | 5750 | 16869 | 1.09e7 | 9.59e3 | **99.91 %** | ~34 s |
+| `rim` | 10195 | 29743 | 1.26e8 | 8.99e7 | 28.81 % | ~55 s |
 | built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** | <0.2 s |
 
-The sparse Cholesky back-end is what makes these tractable at all
-(`nalgebra_sparse`'s `CscCholesky` applies no fill-reducing permutation of its
-own, so the factor fills in catastrophically). For each graph it computes both a
+The fill-reducing reordering is what makes these tractable at all
+(`nalgebra_sparse`'s `CscCholesky` applies no permutation of its own, so the
+factor fills in catastrophically). For each graph it picks the cheaper of a
 Reverse Cuthill-McKee (band-minimizing) and a nested-dissection (separator)
-ordering, then keeps whichever has the smaller symbolic Cholesky factor, and -
-since the sparsity pattern is identical across iterations - computes that
-ordering just once. RCM wins on the near-banded `parking-garage` corridor;
-nested dissection wins on the wide 3D meshes, taking `torus3D` from
-*no convergence within minutes* to ~42 s and cutting `sphere2500` from ~19 s
-(RCM-only) to ~7 s.
+ordering by symbolic Cholesky factor size, and - since the sparsity pattern is
+identical across iterations - computes that ordering just once. RCM wins on the
+near-banded `parking-garage` corridor; nested dissection wins on the wide 3D
+meshes, taking `torus3D` from *no convergence within minutes* to ~42 s and
+cutting `sphere2500` from ~19 s (RCM-only) to ~7 s.
+
+The dense ICP graphs `cubicle` and `rim` defeat *both* geometric orderings - the
+factor blows up past the dense-matrix size, so even *counting* it dominates the
+solve. A **minimum-degree** rescue ordering (the local heuristic behind
+AMD/SuiteSparse) is held in reserve for exactly this case: the symbolic count is
+capped at a small multiple of the minimum-degree factor, so a blown-up geometric
+ordering is abandoned cheaply and the rescue ordering is adopted, taking
+`cubicle` from a >10-minute timeout to ~34 s. It is *only* used on that
+catastrophic blow-up - minimum degree's factor, though it has fewer nonzeros,
+factorizes more slowly than a balanced geometric ordering in the scalar
+backend, so it never second-guesses a healthy ordering (e.g. it leaves `torus3D`
+on nested dissection).
 
 The loader is also robust to the malformed information matrices that real
 scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
@@ -168,7 +181,10 @@ dwarfing its diagonal, eigenvalues down to ~-6e6), which would make the
 Gauss-Newton `H` indefinite and the Cholesky factorization fail outright.
 `read_g2o` projects every information matrix onto the PSD cone (clamping
 negative eigenvalues to zero) on load, which is the exact identity on a valid
-matrix, so these datasets optimize instead of aborting.
+matrix, so these datasets optimize instead of aborting. `cubicle` then drives
+down cleanly (**99.91 %**); `rim` is genuinely harder - LM makes early progress
+then stalls (its damping saturates), so the run reflects a partial, honest
+**28.81 %** rather than a tuned number.
 
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 `sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):

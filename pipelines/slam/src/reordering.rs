@@ -9,25 +9,41 @@
 //!
 //! A *symmetric* permutation `P` reorders rows and columns identically, so
 //! `PᵀHP` stays symmetric positive-definite and its Cholesky factor solves the
-//! same system — only the sparsity of `L` changes. We compute two candidate
-//! orderings over the *block-adjacency* graph of the variables and keep the one
-//! whose symbolic Cholesky has fewer nonzeros:
+//! same system — only the sparsity of `L` changes. [`Reordering::fill_reducing`]
+//! considers two cheap geometric orderings of the *block-adjacency* graph plus a
+//! minimum-degree *rescue*:
 //!
 //! - [Reverse Cuthill–McKee][rcm] (RCM): a band-minimizing breadth-first
 //!   ordering. Near-optimal for "thin" graphs (chains, corridors) whose factor
 //!   stays banded — e.g. the `parking-garage` benchmark.
 //! - [Nested dissection][nd] (George's automatic, BFS-level-separator variant):
 //!   recursively splits the graph by a small vertex separator and orders that
-//!   separator *last*. This is what tames intrinsically wide graphs (2D/3D
-//!   meshes such as `torus3D`), where a band ordering cannot avoid large fill.
+//!   separator *last*. Wins on wide, regular meshes such as `sphere2500`/`torus`.
+//! - [Minimum degree][md] (MD): greedily eliminate the lowest-degree vertex,
+//!   the local heuristic at the heart of AMD/SuiteSparse. It is the *rescue*
+//!   ordering for dense, irregular graphs (ICP pose graphs such as
+//!   `cubicle`/`rim`) where both geometric orderings explode — there MD cuts the
+//!   factor from intractable to ~10⁵ blocks and the solve from a >10-minute
+//!   timeout to tens of seconds.
 //!
-//! The two are complementary, so [`Reordering::fill_reducing`] builds both and
-//! selects the cheaper by an exact symbolic factorization count (see
-//! [`symbolic_cholesky_nnz`]). Everything here is purely structural and fully
-//! deterministic (ties broken by ascending node id), so it preserves the
-//! solver's bit-for-bit reproducibility while leaving the numerical answer
-//! unchanged up to floating-point summation order within the factorization.
+//! We pick the cheaper of RCM and nested dissection by an exact symbolic factor
+//! count (`symbolic_cholesky_nnz`). A poorly-ordered factor can have
+//! *catastrophic* fill — counting it in full would itself dominate the solve —
+//! so the count (`symbolic_cholesky_nnz_capped`) abandons a candidate once it
+//! exceeds the dense-factor cap `n²`. Only when *both* geometric orderings blow
+//! past that cap do we compute minimum degree and adopt it if it is genuinely
+//! sparser. MD is held back as a rescue rather than always run because its
+//! factor, though it can have *fewer* nonzeros, factorizes *more slowly* than a
+//! healthy geometric ordering in the scalar (non-supernodal) backend — its
+//! elimination tree is deeper and less cache-friendly — so letting it
+//! second-guess a healthy ordering would regress the regular benchmarks.
 //!
+//! Everything here is purely structural and fully deterministic (ties broken by
+//! ascending node id), so it preserves the solver's bit-for-bit reproducibility
+//! while leaving the numerical answer unchanged up to floating-point summation
+//! order within the factorization.
+//!
+//! [md]: https://en.wikipedia.org/wiki/Minimum_degree_algorithm
 //! [rcm]: https://en.wikipedia.org/wiki/Cuthill%E2%80%93McKee_algorithm
 //! [nd]: https://en.wikipedia.org/wiki/Nested_dissection
 
@@ -40,6 +56,14 @@ use nalgebra::DVector;
 /// instead of being dissected further — their factor is small enough that a
 /// separator buys nothing, and stopping early bounds the recursion overhead.
 const NESTED_DISSECTION_LEAF: usize = 8;
+
+/// A geometric ordering (RCM / nested dissection) is preferred over minimum
+/// degree as long as its symbolic factor stays within this multiple of minimum
+/// degree's — geometric factors are sparser-structured and factorize faster per
+/// nonzero in the scalar backend, so a modestly larger one still wins. Only when
+/// *both* geometric factors exceed this ratio (a catastrophic blow-up, as on
+/// dense ICP graphs) is the far-sparser minimum-degree ordering used instead.
+const RESCUE_FILL_RATIO: usize = 4;
 
 /// A symmetric permutation of an `n`-dimensional linear system, computed at the
 /// granularity of fixed-size variable blocks (6 for SE(3) poses, 3 for
@@ -59,9 +83,10 @@ impl Reordering {
     /// is given by `triplets`, treating each contiguous run of `block_size`
     /// dimensions as one graph node (`dim` must be a multiple of `block_size`).
     ///
-    /// Computes both a Reverse Cuthill–McKee and a nested-dissection ordering
-    /// and returns whichever yields the smaller symbolic Cholesky factor. The
-    /// pattern alone determines the result, so callers compute this once and
+    /// Picks the cheaper of the nested-dissection and Reverse Cuthill–McKee
+    /// orderings by symbolic Cholesky factor size, falling back to a
+    /// minimum-degree ordering only when both blow past the dense-factor cap.
+    /// The pattern alone determines the result, so callers compute this once and
     /// reuse it across solver iterations (the values change, the pattern does
     /// not).
     pub(crate) fn fill_reducing(
@@ -77,14 +102,37 @@ impl Reordering {
         let n = dim / block_size;
         let adjacency = block_adjacency(n, block_size, triplets);
 
-        let rcm = reverse_cuthill_mckee_order(&adjacency);
+        // Minimum degree is cheap to compute and reliably keeps its factor
+        // sparse, so cost it first and use it both as a baseline and to bound
+        // the costing of the others: a catastrophically bad geometric factor is
+        // then abandoned after only a few × MD's worth of counting instead of
+        // running to its full (e.g. `cubicle`-sized) blow-up.
+        let md = minimum_degree_order(&adjacency);
+        let md_nnz = symbolic_cholesky_nnz(&adjacency, &md);
+
+        // Prefer the two cheap, BFS-based geometric orderings: their balanced
+        // elimination trees *factorize* faster per nonzero in the scalar (non-
+        // supernodal) backend than minimum degree's deeper, scattered tree, so
+        // a geometric ordering within a few × MD's fill is the better choice.
+        // Cap their counts at `RESCUE_FILL_RATIO × md_nnz`; a blown-up factor
+        // (dense ICP graphs such as `cubicle`/`rim`) trips the cap cheaply.
+        let cap = md_nnz.saturating_mul(RESCUE_FILL_RATIO);
         let nested = nested_dissection_order(&adjacency);
-        let chosen = if symbolic_cholesky_nnz(&adjacency, &nested)
-            <= symbolic_cholesky_nnz(&adjacency, &rcm)
-        {
-            nested
+        let rcm = reverse_cuthill_mckee_order(&adjacency);
+        let nested_nnz = symbolic_cholesky_nnz_capped(&adjacency, &nested, cap);
+        let rcm_nnz = symbolic_cholesky_nnz_capped(&adjacency, &rcm, cap);
+
+        // Use the cheaper geometric ordering when it stays within the rescue
+        // ratio; otherwise both blew past it and minimum degree is the rescue.
+        let best_geometric = nested_nnz.min(rcm_nnz);
+        let chosen = if best_geometric <= cap {
+            if nested_nnz <= rcm_nnz {
+                nested
+            } else {
+                rcm
+            }
         } else {
-            rcm
+            md
         };
         Self::from_block_order(&chosen, dim, block_size)
     }
@@ -195,6 +243,55 @@ fn reverse_cuthill_mckee_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
     // Reversing the Cuthill–McKee order is what makes it *Reverse* CM, which
     // empirically yields less fill than plain CM at no extra cost.
     order.reverse();
+    order
+}
+
+/// Minimum-degree elimination order: repeatedly eliminate the live vertex of
+/// smallest current degree, adding a fill clique among its remaining neighbours,
+/// until the graph is empty. This is the greedy local heuristic at the heart of
+/// AMD/SuiteSparse and is typically the strongest of the three on the *irregular*
+/// graphs that band (RCM) and balanced-separator (nested dissection) orderings
+/// handle poorly — e.g. ICP pose graphs such as `cubicle`/`rim`. Ties break by
+/// ascending id, keeping the result deterministic.
+///
+/// The degree-minimum is found by a linear scan (`O(n)` per step), and neighbour
+/// sets are updated exactly rather than via AMD's approximate quotient-graph
+/// bound — simpler, and adequate because minimum degree keeps the working graph
+/// sparse on exactly the graphs where it is the right ordering.
+fn minimum_degree_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
+    let n = adjacency.len();
+    let mut neighbours: Vec<HashSet<usize>> = adjacency
+        .iter()
+        .map(|row| row.iter().copied().collect())
+        .collect();
+    let mut eliminated = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+
+    for _ in 0..n {
+        let pivot = (0..n)
+            .filter(|&i| !eliminated[i])
+            .min_by_key(|&i| (neighbours[i].len(), i))
+            .expect("a non-eliminated vertex remains");
+        eliminated[pivot] = true;
+        order.push(pivot);
+
+        let live: Vec<usize> = neighbours[pivot]
+            .iter()
+            .copied()
+            .filter(|&u| !eliminated[u])
+            .collect();
+        for &u in &live {
+            neighbours[u].remove(&pivot);
+        }
+        // The eliminated pivot couples all its live neighbours: add the fill
+        // clique among them.
+        for a in 0..live.len() {
+            for b in (a + 1)..live.len() {
+                neighbours[live[a]].insert(live[b]);
+                neighbours[live[b]].insert(live[a]);
+            }
+        }
+    }
     order
 }
 
@@ -356,10 +453,25 @@ fn bfs_levels(start: usize, adjacency: &[Vec<usize>], in_set: &HashSet<usize>) -
 
 /// Exact nonzero count of the Cholesky factor `L` for `adjacency` eliminated in
 /// `block_order`, via the elimination tree and per-column counts (the standard
-/// Gilbert–Ng–Peyton symbolic factorization). Used only to pick between the two
-/// candidate orderings, so it counts blocks, not scalars — block sizes are
-/// uniform, so the ranking is the same.
+/// Gilbert–Ng–Peyton symbolic factorization). Used only to rank candidate
+/// orderings, so it counts blocks, not scalars — block sizes are uniform, so the
+/// ranking is the same. This uncapped form costs the minimum-degree baseline
+/// (whose fill is reliably small); the others are costed with the capped form.
 fn symbolic_cholesky_nnz(adjacency: &[Vec<usize>], block_order: &[usize]) -> usize {
+    symbolic_cholesky_nnz_capped(adjacency, block_order, usize::MAX)
+}
+
+/// Like [`symbolic_cholesky_nnz`] but abandons counting as soon as the running
+/// total exceeds `cap`, returning some value `> cap`. A bad ordering's factor
+/// can have *catastrophic* fill (hundreds of millions of blocks on dense ICP
+/// graphs like `cubicle`), so an uncapped count of it would itself be the
+/// bottleneck. Costing the cheap minimum-degree ordering first and capping the
+/// others by it bounds the selection's total work to roughly the best fill.
+fn symbolic_cholesky_nnz_capped(
+    adjacency: &[Vec<usize>],
+    block_order: &[usize],
+    cap: usize,
+) -> usize {
     let n = adjacency.len();
 
     // Relabel the pattern into elimination-index space, where eliminating in
@@ -399,8 +511,13 @@ fn symbolic_cholesky_nnz(adjacency: &[Vec<usize>], block_order: &[usize]) -> usi
 
     // Column counts: for each row i, the nonzeros of L below the diagonal are
     // the union of the etree paths from each original lower neighbour up to i.
-    // Marking each path once per row counts every L entry exactly once.
-    let mut column_count = vec![1usize; n]; // diagonal entries
+    // Marking each path once per row counts every L entry exactly once. We
+    // accumulate the running total (`n` diagonal entries plus one per marked
+    // path step) so we can bail the moment it exceeds `cap`.
+    let mut total = n;
+    if total > cap {
+        return total;
+    }
     let mut mark = vec![usize::MAX; n];
     for (i, row) in pattern.iter().enumerate() {
         mark[i] = i;
@@ -410,7 +527,10 @@ fn symbolic_cholesky_nnz(adjacency: &[Vec<usize>], block_order: &[usize]) -> usi
             }
             let mut k = j;
             while mark[k] != i {
-                column_count[k] += 1;
+                total += 1;
+                if total > cap {
+                    return total;
+                }
                 mark[k] = i;
                 match parent[k] {
                     usize::MAX => break,
@@ -419,7 +539,7 @@ fn symbolic_cholesky_nnz(adjacency: &[Vec<usize>], block_order: &[usize]) -> usi
             }
         }
     }
-    column_count.iter().sum()
+    total
 }
 
 #[cfg(test)]
@@ -513,7 +633,8 @@ mod tests {
             let natural: Vec<usize> = (0..n).collect();
             let rcm = reverse_cuthill_mckee_order(&adjacency);
             let nested = nested_dissection_order(&adjacency);
-            for order in [&natural, &rcm, &nested] {
+            let md = minimum_degree_order(&adjacency);
+            for order in [&natural, &rcm, &nested, &md] {
                 assert_eq!(
                     symbolic_cholesky_nnz(&adjacency, order),
                     brute_force_fill(&adjacency, order),
@@ -521,6 +642,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn minimum_degree_order_is_a_valid_permutation() {
+        let adjacency = grid_adjacency(7, 9);
+        let order = minimum_degree_order(&adjacency);
+        let mut seen = vec![false; adjacency.len()];
+        for &node in &order {
+            assert!(!seen[node], "node {node} appears twice");
+            seen[node] = true;
+        }
+        assert!(seen.into_iter().all(|s| s), "order must cover every node");
+    }
+
+    #[test]
+    fn minimum_degree_beats_the_natural_order_on_an_arrow() {
+        // An "arrow": a hub connected to every spoke. Eliminating the hub first
+        // (natural order) fills in the entire spoke clique; minimum degree
+        // eliminates the degree-1 spokes first and leaves the factor sparse.
+        let n = 40;
+        let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+        for spoke in 1..n {
+            sets[0].insert(spoke);
+            sets[spoke].insert(0);
+        }
+        let adjacency: Vec<Vec<usize>> =
+            sets.into_iter().map(|s| s.into_iter().collect()).collect();
+        let natural: Vec<usize> = (0..n).collect();
+        let md = minimum_degree_order(&adjacency);
+        assert!(
+            symbolic_cholesky_nnz(&adjacency, &md) < symbolic_cholesky_nnz(&adjacency, &natural),
+            "minimum degree should avoid the arrow's hub-first fill"
+        );
+    }
+
+    #[test]
+    fn symbolic_count_cap_aborts_above_the_budget() {
+        // The hub-first arrow order has a large factor; capping below it returns
+        // a sentinel above the cap, while the uncapped count is exact.
+        let n = 30;
+        let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+        for spoke in 1..n {
+            sets[0].insert(spoke);
+            sets[spoke].insert(0);
+        }
+        let adjacency: Vec<Vec<usize>> =
+            sets.into_iter().map(|s| s.into_iter().collect()).collect();
+        let natural: Vec<usize> = (0..n).collect();
+        let exact = symbolic_cholesky_nnz(&adjacency, &natural);
+        let cap = exact / 2;
+        let capped = symbolic_cholesky_nnz_capped(&adjacency, &natural, cap);
+        assert!(
+            capped > cap,
+            "capped count must signal exceeding the budget"
+        );
+        assert_eq!(
+            symbolic_cholesky_nnz_capped(&adjacency, &natural, exact),
+            exact,
+            "a cap at the exact total must return the exact total"
+        );
     }
 
     #[test]
@@ -538,21 +719,27 @@ mod tests {
     }
 
     #[test]
-    fn fill_reducing_keeps_the_cheaper_candidate() {
+    fn fill_reducing_prefers_the_cheaper_geometric_ordering_on_a_healthy_graph() {
+        // A regular grid is "healthy": neither geometric factor blows past the
+        // rescue ratio, so `fill_reducing` keeps the cheaper of RCM / nested
+        // dissection rather than reaching for minimum degree.
         let triplets = grid_triplets(10, 10, 1);
         let adjacency = block_adjacency(100, 1, &triplets);
-        let rcm = reverse_cuthill_mckee_order(&adjacency);
-        let nested = nested_dissection_order(&adjacency);
-        let best =
-            symbolic_cholesky_nnz(&adjacency, &rcm).min(symbolic_cholesky_nnz(&adjacency, &nested));
+        let rcm_nnz = symbolic_cholesky_nnz(&adjacency, &reverse_cuthill_mckee_order(&adjacency));
+        let nd_nnz = symbolic_cholesky_nnz(&adjacency, &nested_dissection_order(&adjacency));
+        let md_nnz = symbolic_cholesky_nnz(&adjacency, &minimum_degree_order(&adjacency));
+        let best_geometric = rcm_nnz.min(nd_nnz);
+        assert!(
+            best_geometric <= md_nnz * RESCUE_FILL_RATIO,
+            "the grid should not trip the minimum-degree rescue"
+        );
 
-        // Reconstruct the chosen ordering's block sequence and score it.
         let order = Reordering::fill_reducing(100, 1, &triplets);
         let chosen_blocks: Vec<usize> = order.old_of_new.clone();
         assert_eq!(
             symbolic_cholesky_nnz(&adjacency, &chosen_blocks),
-            best,
-            "fill_reducing must keep whichever candidate has the smaller factor"
+            best_geometric,
+            "fill_reducing must keep the cheaper geometric ordering on a healthy graph"
         );
     }
 
