@@ -90,7 +90,9 @@
 //! those contributors — embarrassingly parallel, since each contributor is an
 //! already-finalized descendant. A column that did not go out with its level
 //! (above all the width-1 chain) but has at least [`INTRA_MIN_CONTRIB`]
-//! contributors is therefore factored by reducing that sum on the rayon pool (see
+//! contributors *and* enough trailing-update work ([`INTRA_MIN_WORK`], so the
+//! rayon dispatch is amortized — a column with many contributors but few rows is
+//! left inline) is therefore factored by reducing that sum on the rayon pool (see
 //! [`factor_column_intra`]). This is pure-Rust *intra-separator* parallelism at
 //! block granularity — note it is **not** the dense-GEMM/BLAS-3 split dismissed
 //! under "Why not supernodal?": it parallelizes *across contributors* (the
@@ -104,7 +106,11 @@
 //! Together the two axes help most on heavy, solve-dominated graphs (≈1.4× on
 //! `torus3D`, ≈1.26× on `rim` — up from ≈1.17× / ≈1.09× with across-level alone)
 //! and are neutral on small or fast-converging ones, with no regression on
-//! chain-like graphs.
+//! chain-like graphs. The [`INTRA_MIN_WORK`] bar is what keeps the dense 3D
+//! graphs (`cubicle`, `sphere2500`) neutral: their separators clear the
+//! contributor count but are too light to amortize an intra dispatch, so a
+//! bare-count gate regressed them — gating on work recovers that and adds
+//! ≈5 % end-to-end on `torus3D`/`rim`.
 
 use std::collections::BTreeSet;
 
@@ -134,6 +140,18 @@ const PARALLEL_MIN_LEVEL_WORK: usize = 8192;
 /// columns have hundreds, so their trailing-update reduction (`Σ_k Lᵢₖ·Lⱼₖᵀ`)
 /// fills the pool on exactly the columns the level scheme cannot.
 const INTRA_MIN_CONTRIB: usize = 64;
+/// …and only when that column's trailing-update work (block multiplies,
+/// `|contributors|·|rows|`) clears this bar. A high contributor count alone is
+/// not enough: a column with many contributors but few rows does little
+/// arithmetic per contributor, so the rayon dispatch and the per-chunk dense
+/// delta dominate and the intra path runs *slower* than the inline column. The
+/// bar admits only the genuinely heavy separators (where intra wins big) and
+/// leaves the cheap-but-tall ones inline. Measured to-rounding-identical at any
+/// threshold; `12000` is where the per-column win crosses the dispatch overhead
+/// across the SE-Sync 3D graphs (it lifts the dense `cubicle`/`sphere2500`
+/// factor from ~1.06× to neutral-or-better while keeping the `torus3D`/`rim`
+/// gains, ~+5 % end-to-end). Mirrors [`PARALLEL_MIN_LEVEL_WORK`].
+const INTRA_MIN_WORK: usize = 12000;
 /// Contributors per rayon task in the intra-column reduction. Fixed (not keyed
 /// to the thread count) so the fold order — hence the result — is the same on
 /// any number of threads; a heavy column has enough contributors to make many
@@ -162,6 +180,7 @@ pub(crate) fn solve_spd_block(
         default_thread_count(),
         PARALLEL_MIN_LEVEL_WORK,
         INTRA_MIN_CONTRIB,
+        INTRA_MIN_WORK,
     )
 }
 
@@ -195,6 +214,7 @@ pub(crate) fn solve_spd_block_cached(
             threads,
             PARALLEL_MIN_LEVEL_WORK,
             INTRA_MIN_CONTRIB,
+            INTRA_MIN_WORK,
         ),
         6 => solve_with_symbolic::<6>(
             sym,
@@ -204,6 +224,7 @@ pub(crate) fn solve_spd_block_cached(
             threads,
             PARALLEL_MIN_LEVEL_WORK,
             INTRA_MIN_CONTRIB,
+            INTRA_MIN_WORK,
         ),
         other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
     }
@@ -212,12 +233,15 @@ pub(crate) fn solve_spd_block_cached(
 /// The block size known, dispatch to the monomorphized solver. `threads` caps
 /// the worker threads used for the numeric phase (`1` forces the sequential
 /// path); `min_level_work` is the per-level work bar below which a level is not
-/// farmed out across its columns; `min_intra_contrib` is the contributor count
-/// above which a column that stayed inline is instead factored in parallel over
-/// its contributors. All three are knobs the tests and the A/B benchmark drive
+/// farmed out across its columns; `min_intra_contrib` and `min_intra_work` gate
+/// the intra-column path — a column that stayed inline is factored in parallel
+/// over its contributors only when it has at least `min_intra_contrib` of them
+/// *and* its trailing-update work (`|contributors|·|rows|`) clears
+/// `min_intra_work`. All four are knobs the tests and the A/B benchmark drive
 /// directly to isolate one path — e.g. `min_level_work = 0` forces the across-
 /// level (bit-identical) path, while `min_level_work = usize::MAX` with a small
-/// `min_intra_contrib` forces the intra-column (deterministic, to-rounding) one.
+/// `min_intra_contrib` and `min_intra_work = 0` forces the intra-column
+/// (deterministic, to-rounding) one.
 #[allow(clippy::too_many_arguments)]
 fn solve_spd_block_inner(
     triplets: &[(usize, usize, f64)],
@@ -228,6 +252,7 @@ fn solve_spd_block_inner(
     threads: usize,
     min_level_work: usize,
     min_intra_contrib: usize,
+    min_intra_work: usize,
 ) -> Result<DMatrix<f64>, ()> {
     match block_size {
         3 => solve_dispatch::<3>(
@@ -238,6 +263,7 @@ fn solve_spd_block_inner(
             threads,
             min_level_work,
             min_intra_contrib,
+            min_intra_work,
         ),
         6 => solve_dispatch::<6>(
             triplets,
@@ -247,6 +273,7 @@ fn solve_spd_block_inner(
             threads,
             min_level_work,
             min_intra_contrib,
+            min_intra_work,
         ),
         other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
     }
@@ -259,6 +286,7 @@ fn default_thread_count() -> usize {
     rayon::current_num_threads()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_dispatch<const B: usize>(
     triplets: &[(usize, usize, f64)],
     dim: usize,
@@ -267,6 +295,7 @@ fn solve_dispatch<const B: usize>(
     threads: usize,
     min_level_work: usize,
     min_intra_contrib: usize,
+    min_intra_work: usize,
 ) -> Result<DMatrix<f64>, ()> {
     // Uncached: analyze the pattern then refactor+solve in one shot.
     let sym = analyze(triplets, dim, B);
@@ -278,6 +307,7 @@ fn solve_dispatch<const B: usize>(
         threads,
         min_level_work,
         min_intra_contrib,
+        min_intra_work,
     )
 }
 
@@ -345,6 +375,7 @@ fn solve_with_symbolic<const B: usize>(
     threads: usize,
     min_level_work: usize,
     min_intra_contrib: usize,
+    min_intra_work: usize,
 ) -> Result<DMatrix<f64>, ()> {
     debug_assert_eq!(sym.block_size, B);
     let (col_vals, diag_inv) = refactor_numeric::<B>(
@@ -354,6 +385,7 @@ fn solve_with_symbolic<const B: usize>(
         threads,
         min_level_work,
         min_intra_contrib,
+        min_intra_work,
     )?;
     let mut out = DMatrix::<f64>::zeros(sym.n * B, rhs.ncols());
     for c in 0..rhs.ncols() {
@@ -370,7 +402,7 @@ fn solve_with_symbolic<const B: usize>(
 /// `col_vals` and `diag_inv`. Bit-for-bit equivalent to factoring the same
 /// `triplets` from scratch: duplicate triplets are summed in input order and the
 /// diagonal `λ` is added afterwards, exactly as the one-shot path did.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn refactor_numeric<const B: usize>(
     sym: &BlockSymbolic,
     triplets: &[(usize, usize, f64)],
@@ -378,6 +410,7 @@ fn refactor_numeric<const B: usize>(
     threads: usize,
     min_level_work: usize,
     min_intra_contrib: usize,
+    min_intra_work: usize,
 ) -> Result<(Vec<Vec<SMatrix<f64, B, B>>>, Vec<SMatrix<f64, B, B>>), ()> {
     let n = sym.n;
     let col_rows = &sym.col_rows;
@@ -446,9 +479,18 @@ fn refactor_numeric<const B: usize>(
         } else {
             // Narrow / light level: its heavy columns (the serial separator
             // chain) go parallel over their contributors, the rest run inline.
+            // The intra path carries a fixed per-column overhead (a rayon
+            // dispatch plus a per-chunk dense delta), so it only pays on columns
+            // whose trailing-update work (`|contributors|·|rows|`) clears
+            // `min_intra_work`; a high contributor count with few rows is cheap
+            // enough to lose that race and is left inline. (Mirrors the
+            // `min_level_work` bar on the across-level path.)
             let intra = threads > 1 && n >= PARALLEL_MIN_BLOCKS;
             for &j in level {
-                let (vals, inv) = if intra && contributors[j].len() >= min_intra_contrib {
+                let (vals, inv) = if intra
+                    && contributors[j].len() >= min_intra_contrib
+                    && contributors[j].len() * col_rows[j].len() >= min_intra_work
+                {
                     factor_column_intra::<B>(j, col_rows, &contributors[j], &a_lower[j], &col_vals)?
                 } else {
                     factor_column::<B>(
@@ -1118,9 +1160,9 @@ mod tests {
         // intra-column path (`min_intra_contrib = usize::MAX`) so this isolates
         // the across-level schedule, whose only difference from sequential is
         // column order — hence bit-identical.
-        let seq = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, usize::MAX)
+        let seq = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, usize::MAX, 0)
             .expect("seq SPD");
-        let par = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 8, 0, usize::MAX)
+        let par = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 8, 0, usize::MAX, 0)
             .expect("par SPD");
         assert_eq!(
             seq, par,
@@ -1157,11 +1199,11 @@ mod tests {
         // production threshold.
         let force_seq = usize::MAX;
         let mic = INTRA_MIN_CONTRIB;
-        let seq = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, force_seq, mic)
+        let seq = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, force_seq, mic, 0)
             .expect("seq SPD");
-        let par8 = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 8, force_seq, mic)
+        let par8 = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 8, force_seq, mic, 0)
             .expect("intra SPD");
-        let par4 = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 4, force_seq, mic)
+        let par4 = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 4, force_seq, mic, 0)
             .expect("intra SPD");
 
         // Deterministic across thread counts (chunking is keyed to a constant,
@@ -1237,9 +1279,10 @@ mod tests {
         // parallelism alone leaves serial. Warm up + cross-check the schedules
         // (only to rounding — the intra path is not bit-identical).
         let mic = INTRA_MIN_CONTRIB;
-        let one = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, mic).expect("seq SPD");
-        let many =
-            solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0, mic).expect("par SPD");
+        let one =
+            solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, mic, 0).expect("seq SPD");
+        let many = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0, mic, 0)
+            .expect("par SPD");
         assert!(
             (&one - &many).norm() / one.norm().max(1.0) < 1e-9,
             "parallel/sequential disagree"
@@ -1247,13 +1290,14 @@ mod tests {
 
         let t0 = Instant::now();
         for _ in 0..reps {
-            let _ = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, mic).unwrap();
+            let _ = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, 1, 0, mic, 0).unwrap();
         }
         let seq_ms = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
 
         let t1 = Instant::now();
         for _ in 0..reps {
-            let _ = solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0, mic).unwrap();
+            let _ =
+                solve_spd_block_inner(&permuted, dim, b, &rhs, 1e-3, threads, 0, mic, 0).unwrap();
         }
         let par_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
 
