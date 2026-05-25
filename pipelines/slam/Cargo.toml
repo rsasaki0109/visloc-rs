@@ -18,6 +18,7 @@ all-features = true
 [dependencies]
 nalgebra = { workspace = true }
 nalgebra-sparse = "0.10"
+rayon = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-localization = { path = "../localization", version = "0.1.0" }
 visloc-mapping = { path = "../mapping", version = "0.1.0" }
