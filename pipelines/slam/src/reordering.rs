@@ -47,8 +47,8 @@
 //! [rcm]: https://en.wikipedia.org/wiki/Cuthill%E2%80%93McKee_algorithm
 //! [nd]: https://en.wikipedia.org/wiki/Nested_dissection
 
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeSet, BinaryHeap, HashSet, VecDeque};
 
 use nalgebra::DVector;
 
@@ -254,10 +254,19 @@ fn reverse_cuthill_mckee_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
 /// handle poorly — e.g. ICP pose graphs such as `cubicle`/`rim`. Ties break by
 /// ascending id, keeping the result deterministic.
 ///
-/// The degree-minimum is found by a linear scan (`O(n)` per step), and neighbour
-/// sets are updated exactly rather than via AMD's approximate quotient-graph
-/// bound — simpler, and adequate because minimum degree keeps the working graph
-/// sparse on exactly the graphs where it is the right ordering.
+/// The degree-minimum is found with a lazy binary min-heap keyed by `(degree,
+/// id)` rather than the naive `O(n)`-per-step linear scan (`O(n²)` total, the
+/// bottleneck on large graphs): each eliminated pivot only changes the degree of
+/// its live neighbours, so we push a refreshed entry for each of those and skip
+/// stale entries on pop (a popped entry is stale when its node is already
+/// eliminated or its recorded degree no longer equals the node's live degree).
+/// Because every live node always retains an entry carrying its *current*
+/// degree, the smallest non-stale entry popped is exactly the global minimum the
+/// linear scan would have found — the result is bit-for-bit identical, only the
+/// selection cost drops to `O((n + fill) log n)`. Neighbour sets are updated
+/// exactly rather than via AMD's approximate quotient-graph bound — simpler, and
+/// adequate because minimum degree keeps the working graph sparse on exactly the
+/// graphs where it is the right ordering.
 fn minimum_degree_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
     let n = adjacency.len();
     let mut neighbours: Vec<HashSet<usize>> = adjacency
@@ -267,11 +276,25 @@ fn minimum_degree_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
     let mut eliminated = vec![false; n];
     let mut order = Vec::with_capacity(n);
 
+    // Lazy min-heap of `(degree, id)`: ties break by ascending id, matching the
+    // linear scan's `min_by_key((degree, id))`. Entries are never deleted in
+    // place; a degree change pushes a fresh entry and obsoletes the old one,
+    // which is discarded when it surfaces.
+    let mut heap: BinaryHeap<Reverse<(usize, usize)>> = (0..n)
+        .map(|i| Reverse((neighbours[i].len(), i)))
+        .collect();
+
     for _ in 0..n {
-        let pivot = (0..n)
-            .filter(|&i| !eliminated[i])
-            .min_by_key(|&i| (neighbours[i].len(), i))
-            .expect("a non-eliminated vertex remains");
+        let pivot = loop {
+            let Reverse((degree, node)) = heap
+                .pop()
+                .expect("a live, current-degree entry remains for each elimination");
+            // Skip stale entries: an already-eliminated node, or one whose
+            // recorded degree predates a later insert/remove.
+            if !eliminated[node] && neighbours[node].len() == degree {
+                break node;
+            }
+        };
         eliminated[pivot] = true;
         order.push(pivot);
 
@@ -290,6 +313,11 @@ fn minimum_degree_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
                 neighbours[live[a]].insert(live[b]);
                 neighbours[live[b]].insert(live[a]);
             }
+        }
+        // Every live neighbour's degree may have changed (pivot removed, clique
+        // edges added); push a refreshed entry so the heap holds its new degree.
+        for &u in &live {
+            heap.push(Reverse((neighbours[u].len(), u)));
         }
     }
     order
@@ -654,6 +682,99 @@ mod tests {
             seen[node] = true;
         }
         assert!(seen.into_iter().all(|s| s), "order must cover every node");
+    }
+
+    #[test]
+    fn lazy_heap_minimum_degree_matches_the_linear_scan() {
+        // The heap-based selection must reproduce the previous `O(n²)`
+        // linear-scan ordering bit-for-bit (same `(degree, id)` tie-breaking) on
+        // a spread of structures: thin/wide grids, the fill-heavy arrow hub, and
+        // several deterministic pseudo-random graphs of varying density.
+        let mut graphs: Vec<Vec<Vec<usize>>> = vec![
+            grid_adjacency(1, 12),
+            grid_adjacency(7, 9),
+            grid_adjacency(13, 11),
+            arrow_adjacency(40),
+        ];
+        for seed in 0..6u64 {
+            graphs.push(random_adjacency(60, 3 + seed as usize, seed));
+        }
+        for adjacency in &graphs {
+            assert_eq!(
+                minimum_degree_order(adjacency),
+                minimum_degree_order_linear_scan(adjacency),
+                "lazy-heap minimum degree must match the linear scan"
+            );
+        }
+    }
+
+    /// The previous `O(n²)` minimum-degree selection, kept here as the reference
+    /// the lazy-heap implementation must match exactly.
+    fn minimum_degree_order_linear_scan(adjacency: &[Vec<usize>]) -> Vec<usize> {
+        let n = adjacency.len();
+        let mut neighbours: Vec<HashSet<usize>> = adjacency
+            .iter()
+            .map(|row| row.iter().copied().collect())
+            .collect();
+        let mut eliminated = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        for _ in 0..n {
+            let pivot = (0..n)
+                .filter(|&i| !eliminated[i])
+                .min_by_key(|&i| (neighbours[i].len(), i))
+                .expect("a non-eliminated vertex remains");
+            eliminated[pivot] = true;
+            order.push(pivot);
+            let live: Vec<usize> = neighbours[pivot]
+                .iter()
+                .copied()
+                .filter(|&u| !eliminated[u])
+                .collect();
+            for &u in &live {
+                neighbours[u].remove(&pivot);
+            }
+            for a in 0..live.len() {
+                for b in (a + 1)..live.len() {
+                    neighbours[live[a]].insert(live[b]);
+                    neighbours[live[b]].insert(live[a]);
+                }
+            }
+        }
+        order
+    }
+
+    /// Adjacency of an "arrow": node 0 is a hub joined to every other node.
+    fn arrow_adjacency(n: usize) -> Vec<Vec<usize>> {
+        let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+        for spoke in 1..n {
+            sets[0].insert(spoke);
+            sets[spoke].insert(0);
+        }
+        sets.into_iter().map(|s| s.into_iter().collect()).collect()
+    }
+
+    /// A deterministic pseudo-random undirected graph on `n` nodes: each unordered
+    /// pair is joined when a splitmix64-derived bit fires roughly `1/density` of
+    /// the time. Self-loops are excluded; neighbour lists are sorted.
+    fn random_adjacency(n: usize, density: usize, seed: u64) -> Vec<Vec<usize>> {
+        let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut next = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if (next() as usize) % density == 0 {
+                    sets[a].insert(b);
+                    sets[b].insert(a);
+                }
+            }
+        }
+        sets.into_iter().map(|s| s.into_iter().collect()).collect()
     }
 
     #[test]
