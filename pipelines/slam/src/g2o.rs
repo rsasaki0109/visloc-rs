@@ -188,8 +188,9 @@ fn read_se3<'a, I: Iterator<Item = &'a str>>(tok: &mut I, lineno: usize) -> Resu
     Ok(SE3::new(rotation, Vector3::new(x, y, z)))
 }
 
-/// Read the 21 upper-triangular entries of the 6×6 information matrix and
-/// mirror them into a symmetric matrix.
+/// Read the 21 upper-triangular entries of the 6×6 information matrix, mirror
+/// them into a symmetric matrix, and project the result onto the
+/// positive-semidefinite cone (see `project_to_psd`).
 fn read_information<'a, I: Iterator<Item = &'a str>>(
     tok: &mut I,
     lineno: usize,
@@ -202,7 +203,36 @@ fn read_information<'a, I: Iterator<Item = &'a str>>(
             omega[(col, row)] = value;
         }
     }
-    Ok(omega)
+    Ok(project_to_psd(omega))
+}
+
+/// Project a symmetric matrix onto the positive-semidefinite cone by clamping
+/// its eigenvalues at zero (`V·max(Λ, 0)·Vᵀ`).
+///
+/// An information matrix (inverse covariance) must be PSD, but real `.g2o`
+/// datasets derived from scan matching — notably `cubicle` and `rim` — ship
+/// edges whose information matrices are *not* PSD (e.g. a rotation sub-block
+/// with off-diagonal entries far larger than its diagonal). Fed straight into
+/// the Gauss-Newton normal equations such an `Ω` makes the assembled `H`
+/// indefinite, so the Cholesky factorization fails outright (no amount of
+/// Levenberg damping rescues a matrix with a large negative eigenvalue).
+///
+/// Clamping the negative eigenvalues to zero discards only the spurious
+/// negative-curvature directions while preserving the well-posed part of the
+/// constraint, and is exactly the identity on a genuine information matrix.
+fn project_to_psd(omega: Matrix6<f64>) -> Matrix6<f64> {
+    // Symmetrize defensively before decomposing (guards against round-off; the
+    // parser already mirrors the entries).
+    let symmetric = (omega + omega.transpose()) * 0.5;
+    let eigen = symmetric.symmetric_eigen();
+    if eigen.eigenvalues.iter().all(|&lambda| lambda >= 0.0) {
+        // Already PSD: return the symmetrized matrix untouched so valid data
+        // round-trips bit-for-bit (no reconstruction round-off).
+        return symmetric;
+    }
+    let clamped = eigen.eigenvalues.map(|lambda| lambda.max(0.0));
+    let v = eigen.eigenvectors;
+    v * Matrix6::from_diagonal(&clamped) * v.transpose()
 }
 
 fn next_u64<'a, I: Iterator<Item = &'a str>>(
@@ -446,5 +476,47 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_to_psd_is_identity_on_a_valid_information_matrix() {
+        // A diagonal PD matrix and a non-trivially-correlated PD matrix must
+        // both pass through untouched.
+        let mut omega = Matrix6::identity();
+        omega[(0, 0)] = 25.0;
+        omega[(3, 3)] = 4.0;
+        let projected = project_to_psd(omega);
+        assert!((projected - omega).norm() < 1e-12);
+
+        // Symmetric PD with off-diagonal coupling (small enough to stay PD).
+        let mut coupled = Matrix6::identity() * 10.0;
+        coupled[(0, 1)] = 1.0;
+        coupled[(1, 0)] = 1.0;
+        let projected = project_to_psd(coupled);
+        assert!((projected - coupled).norm() < 1e-12);
+    }
+
+    #[test]
+    fn project_to_psd_clamps_an_indefinite_information_matrix() {
+        // A rotation-style sub-block with off-diagonal mass dwarfing the
+        // diagonal, mirroring the pathological `cubicle` edges.
+        let mut omega = Matrix6::identity() * 10.0;
+        omega[(2, 3)] = 84_022.3;
+        omega[(3, 2)] = 84_022.3;
+        omega[(2, 4)] = 132_748.0;
+        omega[(4, 2)] = 132_748.0;
+        assert!(
+            omega.symmetric_eigen().eigenvalues.min() < 0.0,
+            "test fixture must start indefinite"
+        );
+
+        let projected = project_to_psd(omega);
+        let min_eig = projected.symmetric_eigen().eigenvalues.min();
+        assert!(
+            min_eig >= -1e-9,
+            "projected matrix must be PSD, min eig {min_eig}"
+        );
+        // The projection is symmetric.
+        assert!((projected - projected.transpose()).norm() < 1e-9);
     }
 }
