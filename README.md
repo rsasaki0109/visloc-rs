@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO - runs on the standard `sphere2500`/`torus3D`/`parking-garage` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)) |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO and Reverse Cuthill-McKee fill-reducing reordering - runs on the standard `sphere2500`/`parking-garage` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)) |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -143,17 +143,26 @@ robust kernels, dense or sparse Cholesky) plus `.g2o` `EDGE_SE3:QUAT` read/write
 pose-graph datasets the SLAM back-end literature reports on - no C++, no Ceres,
 no ROS.
 
-| Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** |
-| built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** |
+| Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction | solve |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `parking-garage` | 1661 | 6275 | 1.68e4 | 1.27e0 | **99.99 %** | ~1.1 s |
+| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** | ~19 s |
+| built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** | <0.2 s |
+
+The sparse Cholesky back-end applies a deterministic Reverse Cuthill-McKee
+fill-reducing reordering before factoring (`nalgebra_sparse`'s `CscCholesky`
+does none of its own), which is what makes `parking-garage` tractable at all -
+its corridor topology is near-banded once reordered, taking it from
+*no convergence within minutes* to ~1 s. The intrinsically wide 3D graphs
+(`torus3D`, `cubicle`) still cost far more because RCM is a bandwidth reducer,
+not a nested-dissection ordering; lifting them is future work.
 
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 `sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):
 
 ```sh
 scripts/fetch_pgo_g2o_datasets.sh datasets/pgo_g2o
-cargo run --release --example pgo_g2o_benchmark -- datasets/pgo_g2o/sphere2500.g2o
+cargo run --release --example pgo_g2o_benchmark -- datasets/pgo_g2o/parking-garage.g2o
 # or, zero-setup, the built-in deterministic loop graph:
 cargo run --example pgo_g2o_benchmark
 ```
