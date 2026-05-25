@@ -29,29 +29,45 @@
 //! the demo accepts independent paths so a future user can compare
 //! across recalibrated splits.
 
+// Submodules live in the `kitti_revisit/` subdirectory so Cargo does not try to
+// build each one as a standalone example binary (only top-level `examples/*.rs`
+// and `examples/*/main.rs` are auto-discovered). They stay direct children of
+// this example crate root via `#[path]`, so their `super::` references resolve.
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_cli.rs"]
 mod kitti_revisit_cli;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_config.rs"]
 mod kitti_revisit_config;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_data.rs"]
 mod kitti_revisit_data;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_format.rs"]
 mod kitti_revisit_format;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_frontend.rs"]
 mod kitti_revisit_frontend;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_overlay.rs"]
 mod kitti_revisit_overlay;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_report.rs"]
 mod kitti_revisit_report;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_report_csv.rs"]
 mod kitti_revisit_report_csv;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_report_html.rs"]
 mod kitti_revisit_report_html;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_report_html_parts.rs"]
 mod kitti_revisit_report_html_parts;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_report_html_template.rs"]
 mod kitti_revisit_report_html_template;
 #[cfg(feature = "image-io")]
+#[path = "kitti_revisit/kitti_revisit_summary.rs"]
 mod kitti_revisit_summary;
 
 #[cfg(feature = "image-io")]
