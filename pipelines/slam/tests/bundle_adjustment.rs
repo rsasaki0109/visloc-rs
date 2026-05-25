@@ -2258,6 +2258,127 @@ fn bias_random_walk_propagates_observable_bias_to_neighbor() {
     );
 }
 
+/// End-to-end BA timing on a large, covisibility-rich synthetic scene whose
+/// Schur-reduced pose system is big and fairly dense — the regime where the
+/// reduced-system factorization dominates each LM iteration. Synthetic is
+/// deliberate: this measures *solver* time (the block vs scalar Cholesky
+/// back-end behind `LinearSolver::Sparse`), not reconstruction quality, so it
+/// needs a controllable problem size, not a real dataset.
+///
+/// `#[ignore]` so it never runs in CI; invoke explicitly with
+/// `cargo test -p visloc-slam --release --test bundle_adjustment \
+///   bench_ba_sparse_solver -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_ba_sparse_solver() {
+    use std::time::Instant;
+
+    let camera = pinhole();
+    const KEYFRAMES: usize = 120;
+    const WINDOW: usize = 40; // each landmark seen across this many keyframes
+    const LM_PER_STEP: usize = 6;
+
+    // Truth trajectory: a gentle forward arc with a slow yaw.
+    let truth_poses: Vec<(u64, Pose)> = (0..KEYFRAMES)
+        .map(|i| {
+            let center = Vector3::new(0.3 * i as f64, 0.0, 0.04 * i as f64);
+            (10 + i as u64 * 10, pose_with_yaw(center, 0.01 * i as f64))
+        })
+        .collect();
+
+    // Landmarks tied to the trajectory so a window of consecutive keyframes
+    // co-observes each one (banded → dense-ish Schur as WINDOW grows).
+    let mut truth_landmarks: Vec<(u64, Point3<f64>)> = Vec::new();
+    for i in 0..KEYFRAMES {
+        for k in 0..LM_PER_STEP {
+            let id = (i * LM_PER_STEP + k) as u64 + 1;
+            let phase = (i * LM_PER_STEP + k) as f64;
+            let x = 0.3 * i as f64 - 1.5 + 0.7 * (k as f64);
+            let y = -1.0 + 0.5 * (k as f64 % 3.0) + 0.2 * phase.sin();
+            let z = 5.0 + 0.4 * phase.cos();
+            truth_landmarks.push((id, Point3::new(x, y, z)));
+        }
+    }
+
+    let mut truth_ba = BundleAdjustment::new(camera.clone());
+    for (id, pose) in &truth_poses {
+        truth_ba.add_pose(*id, pose.clone());
+    }
+    for (id, point) in &truth_landmarks {
+        truth_ba.add_landmark(*id, *point);
+    }
+    let mut observation_count = 0usize;
+    for (li, (lm_id, point)) in truth_landmarks.iter().enumerate() {
+        let first_kf = li / LM_PER_STEP;
+        for (kf_id, pose) in truth_poses.iter().skip(first_kf).take(WINDOW) {
+            let xc = pose.transform_world_point(point);
+            if xc.z <= 0.0 {
+                continue;
+            }
+            if let Some(uv) = camera.project(&xc) {
+                truth_ba.add_observation(BaObservation {
+                    keyframe_id: *kf_id,
+                    landmark_id: *lm_id,
+                    xy: uv,
+                });
+                observation_count += 1;
+            }
+        }
+    }
+
+    // Drift the poses (gauge-fix the first two) and a slice of landmarks.
+    let mut ba = truth_ba.clone();
+    ba.fix_pose(truth_poses[0].0);
+    ba.fix_pose(truth_poses[1].0);
+    for (i, (id, _)) in truth_poses.iter().enumerate().skip(2) {
+        let truth = ba.poses[id].clone();
+        let drift = Vector3::new(
+            0.02 * (i as f64 * 0.7).sin(),
+            0.015 * (i as f64 * 1.1).cos(),
+            0.02 * (i as f64 * 0.3).sin(),
+        );
+        let center = truth.camera_center_world().coords + drift;
+        let yaw = truth.world_to_camera.rotation.scaled_axis().y + 0.01 * (i as f64 * 0.5).sin();
+        ba.add_pose(*id, pose_with_yaw(center, yaw));
+    }
+    for (i, (id, truth_point)) in truth_landmarks.iter().enumerate() {
+        if i % 4 != 0 {
+            continue;
+        }
+        let delta = Vector3::new(
+            0.03 * (i as f64 * 0.7).sin(),
+            0.04 * (i as f64 * 1.1).cos(),
+            0.05 * (i as f64 * 0.3).sin(),
+        );
+        ba.add_landmark(*id, *truth_point + delta);
+    }
+
+    let free_poses = KEYFRAMES - 2;
+    println!(
+        "scene keyframes={KEYFRAMES} (free={free_poses}, Schur dim={}) landmarks={} observations={observation_count}",
+        free_poses * 6,
+        truth_landmarks.len(),
+    );
+
+    let start = Instant::now();
+    let result = ba
+        .optimize(&BaConfig {
+            linear_solver: LinearSolver::Sparse,
+            max_iterations: 20,
+            ..BaConfig::default()
+        })
+        .expect("BA converges");
+    let elapsed = start.elapsed();
+    println!(
+        "sparse BA: {:.3} s, {} iters, initial_cost={:.3e} final_cost={:.3e} converged={}",
+        elapsed.as_secs_f64(),
+        result.iterations.len(),
+        result.initial_cost,
+        result.final_cost,
+        result.converged,
+    );
+}
+
 #[test]
 fn ba_refiner_skips_when_no_observations_align() {
     let camera = pinhole();
