@@ -47,7 +47,7 @@ pub use visloc_tracking as tracking;
 pub use visloc_vision as vision;
 
 pub use visloc_core::geometry;
-pub use visloc_core::geometry::{reproject, Pose, SE3, SO3};
+pub use visloc_core::geometry::{reproject, Pose, Sim3, Sim3Tangent, SE3, SO3};
 pub use visloc_core::types;
 pub use visloc_core::types::{
     Camera, CameraId, CameraModel, Frame, FrameId, Keyframe, Landmark, LandmarkDescriptorStore,
@@ -265,8 +265,8 @@ pub mod prelude {
         PoseTrajectory, PositionCovariance, PriorConfig, PriorSubmapSelector,
         ProvidedFeatureExtractor, QueryImage, RadiusLandmarkSelector, RadiusSubmapSelector,
         RansacReport, RelativePoseError, RelativePoseErrorConfig, RelativePoseErrorStatistics,
-        RelativePoseErrorSummary, RobustPoseEstimator, SelectableMapProvider, SimpleKeyframePolicy,
-        StagedMapUpdate, StationaryRejectionReason, StereoRelativePoseMode,
+        RelativePoseErrorSummary, RobustPoseEstimator, SelectableMapProvider, Sim3, Sim3Tangent,
+        SimpleKeyframePolicy, StagedMapUpdate, StationaryRejectionReason, StereoRelativePoseMode,
         StereoVoPairDiagnostics, SubmapSelector, TimeDelta, Timed, TimedFrame, TimedMeasurement,
         TimedPose, Timestamp, Tracker, TrackingConfig, TrackingEvaluationConfig,
         TrackingEvaluationFailure, TrackingEvaluationResult, TrackingEvent, TrackingFailureReason,
