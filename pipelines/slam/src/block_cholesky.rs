@@ -25,6 +25,23 @@
 //! by construction (a sum of `JᵀΩJ` edge outer products plus an optional `λI`).
 //! A non-positive-definite diagonal block aborts the factorization with `Err`,
 //! matching the scalar path's `SingularSystem` behavior.
+//!
+//! # Why not supernodal?
+//!
+//! Classic high-performance sparse Cholesky (CHOLMOD et al.) is *supernodal*: it
+//! amalgamates columns of identical structure into dense panels and runs the
+//! trailing updates as BLAS-3 panel products. That win comes from turning a
+//! *scalar* factorization into dense kernels — but this factorization is already
+//! dense at `B×B` block granularity, so the bulk of that benefit is captured.
+//! Amalgamating the `B×B` blocks into still-wider panels was implemented and
+//! measured (see the `supernode_width_distribution` test): on a `sphere2500`-
+//! scale 2D grid the supernodes are mostly width-1 leaves with a handful of wide
+//! separators, and routing those separators through dynamic `DMatrix` panels was
+//! *slower* than the per-block path at every width threshold tried — even for the
+//! single widest (≈450×450) separator. nalgebra has no tuned BLAS backend, so a
+//! dynamic-panel GEMM/Cholesky does not beat the fully-unrolled, heap-free
+//! `SMatrix<B, B>` kernel here, and the panel assembly/scatter is pure overhead.
+//! The per-block left-looking path below is therefore the production path.
 
 use std::collections::BTreeSet;
 
@@ -559,5 +576,102 @@ mod tests {
         let dim = 9;
         let rhs = DMatrix::<f64>::zeros(dim, 1);
         assert!(solve_spd_block(&[], dim, 3, &rhs, 0.0).is_err());
+    }
+
+    /// Group consecutive block columns into fundamental supernodes: column `j+1`
+    /// joins `j`'s supernode iff its row pattern equals `j`'s with `j`'s own
+    /// diagonal removed (so they share one dense panel below). Returns
+    /// `(start, width)` per supernode. Used only by the measurement below — see
+    /// the module's "Why not supernodal?" note for why amalgamation is not on
+    /// the production path.
+    fn detect_supernodes(col_rows: &[Vec<usize>]) -> Vec<(usize, usize)> {
+        let n = col_rows.len();
+        let mut out = Vec::new();
+        let mut j = 0;
+        while j < n {
+            let start = j;
+            while j + 1 < n
+                && col_rows[j].len() == col_rows[j + 1].len() + 1
+                && col_rows[j][1..] == col_rows[j + 1][..]
+            {
+                j += 1;
+            }
+            out.push((start, j - start + 1));
+            j += 1;
+        }
+        out
+    }
+
+    /// Records the supernode-width distribution of the factor on a `sphere2500`-
+    /// scale 2D-grid graph (the mesh-like regime that produces the *widest*
+    /// panels) in the production fill-reducing order. The takeaway — most
+    /// supernodes are width-1 leaves, with only a handful of wide separators — is
+    /// the evidence behind the module's decision not to go supernodal. Run with
+    /// `cargo test -p visloc-slam --release -- --ignored --nocapture
+    /// supernode_width_distribution`.
+    #[test]
+    #[ignore]
+    fn supernode_width_distribution() {
+        use crate::reordering::Reordering;
+
+        let b = 6;
+        let side = 50;
+        let n = side * side;
+        let dim = n * b;
+        let id = |r: usize, c: usize| r * side + c;
+        let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
+        let mut push_block = |br: usize, bc: usize| {
+            for r in 0..b {
+                for c in 0..b {
+                    triplets.push((br * b + r, bc * b + c, if r == c { 1.0 } else { 0.2 }));
+                }
+            }
+        };
+        for r in 0..side {
+            for c in 0..side {
+                if c + 1 < side {
+                    push_block(id(r, c), id(r, c + 1));
+                    push_block(id(r, c + 1), id(r, c));
+                }
+                if r + 1 < side {
+                    push_block(id(r, c), id(r + 1, c));
+                    push_block(id(r + 1, c), id(r, c));
+                }
+            }
+        }
+        for j in 0..n {
+            for d in 0..b {
+                triplets.push((j * b + d, j * b + d, 10.0));
+            }
+        }
+
+        let order = Reordering::fill_reducing(dim, b, &triplets);
+        let permuted = order.permute_triplets(&triplets);
+        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
+        let (col_rows, _) = symbolic(&block_lower, n);
+
+        let supers = detect_supernodes(&col_rows);
+        let widths: Vec<usize> = supers.iter().map(|&(_, w)| w).collect();
+        let singletons = widths.iter().filter(|&&w| w == 1).count();
+        let max_w = *widths.iter().max().unwrap();
+        let total_cols: usize = widths.iter().sum();
+        let in_wide: usize = widths.iter().filter(|&&w| w >= 4).copied().sum();
+        let mut hist = std::collections::BTreeMap::<usize, usize>::new();
+        for &w in &widths {
+            let bucket = match w {
+                1 => 1,
+                2..=3 => 2,
+                4..=7 => 4,
+                8..=15 => 8,
+                _ => 16,
+            };
+            *hist.entry(bucket).or_default() += 1;
+        }
+        println!(
+            "grid {side}x{side} ({n} blocks): {} supernodes, {singletons} singletons, max width {max_w}, {:.1}% of columns in width>=4 panels",
+            supers.len(),
+            100.0 * in_wide as f64 / total_cols as f64,
+        );
+        println!("  width bucket (>=) -> supernode count: {hist:?}");
     }
 }
