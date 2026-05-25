@@ -42,6 +42,7 @@
 </table>
 
 <p align="center">
+  <a href="#why-visloc-rs"><strong>Why visloc-rs</strong></a> /
   <a href="#try-it"><strong>Try it</strong></a> /
   <a href="#demos"><strong>Demos</strong></a> /
   <a href="#euroc-characterisation-vs-published-baselines-honest-read"><strong>EuRoC vs ORB-SLAM3</strong></a> /
@@ -60,6 +61,43 @@ adjustment.
 The project is built for robotics localization work where you want inspectable
 geometry, explicit diagnostics, reusable trait boundaries, and an honest
 empirical record before committing to a heavy runtime or a full SLAM stack.
+
+## Why visloc-rs?
+
+Most open visual-SLAM and SfM stacks are mature C++ projects that pull in heavy
+runtimes (OpenCV, Pangolin, Ceres, CUDA) and hand you a finished pipeline.
+`visloc-rs` takes the opposite bet: a **pure-Rust, dependency-light, trait-based
+foundation** you can read, extend, and trust - with an honest empirical record
+instead of leaderboard claims. There is no established pure-Rust visual
+localization / VI-SLAM stack today; this is meant to be that building-block layer.
+
+- **Pure Rust, memory-safe** - no C++ toolchain, no OpenCV / Pangolin / Ceres to build.
+- **No mandatory ML runtime** - default crates need no PyTorch / ONNX / CUDA; learned
+  frontends (SuperPoint / LightGlue, in-Rust ONNX) are strictly opt-in behind features.
+- **Inspectable geometry & diagnostics** - every stage exposes inlier counts,
+  reprojection error, and tracking / loop diagnostics instead of a black box.
+- **Trait-based, replaceable frontends** - feature extractors, matchers, pose
+  estimators, priors, and VO frontends are swap-in trait boundaries.
+- **Reproducible by construction** - a toolchain pin plus a 3-run determinism
+  protocol confirms bit-identical rebuilds across tested configurations.
+
+| | visloc-rs | ORB-SLAM3 | COLMAP |
+| --- | --- | --- | --- |
+| Language | **Rust** | C++ | C++ |
+| Mandatory heavy runtime | none (opt-in ONNX) | OpenCV, Pangolin | OpenCV, Ceres |
+| Primary focus | map-reuse localization + VO / VI building blocks | real-time VI-SLAM | offline SfM / MVS |
+| Maturity | young foundation (v0.1) | research / production | production |
+| License | MIT OR Apache-2.0 | GPLv3 | BSD |
+
+`visloc-rs` is deliberately **not** a finished SLAM system (see
+[Project Boundaries](#project-boundaries)); it is the layer you reach for when you
+want to compose and understand the pipeline, not just run a black box.
+
+**30-second taste** - no dataset download, no extra features:
+
+```bash
+cargo run --example localize_dummy
+```
 
 ## Highlights
 
