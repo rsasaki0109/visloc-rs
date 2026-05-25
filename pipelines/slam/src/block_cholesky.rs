@@ -103,14 +103,26 @@ impl<const B: usize> BlockCholesky<B> {
             .collect();
         let mut diag_inv = vec![SMatrix::<f64, B, B>::zeros(); n];
 
+        // Reusable relative-index map: `map[i]` is the position of block row `i`
+        // in the column currently being processed. Seeded fresh per column for
+        // exactly that column's rows, so the trailing-update scatter is an O(1)
+        // lookup instead of a `binary_search` per touched block. Stale entries
+        // for rows outside the current column are never read (the fill-path
+        // property guarantees every touched row lies inside the column pattern),
+        // so no reset between columns is needed.
+        let mut map = vec![0usize; n];
+
         for j in 0..n {
             let rows = &col_rows[j];
             let m = rows.len();
+            for (t, &i) in rows.iter().enumerate() {
+                map[i] = t;
+            }
             // Dense workspace for column j's blocks, indexed by position in
             // `rows`. Seed it with the original `A` blocks of column j.
             let mut ws = vec![SMatrix::<f64, B, B>::zeros(); m];
             for &(i, block) in &a_lower[j] {
-                ws[pos(rows, i)] = block;
+                ws[map[i]] = block;
             }
 
             // Left-looking trailing updates: subtract Lᵢₖ·Lⱼₖᵀ for every prior
@@ -122,7 +134,7 @@ impl<const B: usize> BlockCholesky<B> {
                 for t in pj..k_rows.len() {
                     let i = k_rows[t];
                     let update = col_vals[k][t] * ljk_t;
-                    ws[pos(rows, i)] -= update;
+                    ws[map[i]] -= update;
                 }
             }
 
