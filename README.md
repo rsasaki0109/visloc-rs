@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), and an optional chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), a block (`BxB`-kernel) Cholesky that is ~3-4x faster than scalar `CscCholesky`, and a default-on chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -145,22 +145,25 @@ no ROS.
 
 | Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction | solve |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `parking-garage` | 1661 | 6275 | 1.68e4 | 1.27e0 | **99.99 %** | ~0.9 s |
-| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** | ~6.8 s |
-| `torus3D` | 5000 | 9048 | 4.75e6 | 6.02e4 | **98.73 %** | ~42 s |
-| `cubicle` | 5750 | 16869 | 1.09e7 | 9.59e3 | **99.91 %** | ~34 s |
-| `rim` | 10195 | 29743 | 1.26e8 | 8.99e7 | 28.81 % | ~55 s |
+| `parking-garage` | 1661 | 6275 | 1.68e4 | 1.27e0 | **99.99 %** | ~0.3 s |
+| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** | ~1.8 s |
+| `torus3D` | 5000 | 9048 | 4.75e6 | 6.02e4 | **98.73 %** | ~9.7 s |
+| `cubicle` | 5750 | 16869 | 1.09e7 | 9.59e3 | **99.91 %** | ~10 s |
+| `rim` | 10195 | 29743 | 1.26e8 | 8.99e7 | 28.81 % | ~15 s |
 | built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** | <0.2 s |
 
-The fill-reducing reordering is what makes these tractable at all
-(`nalgebra_sparse`'s `CscCholesky` applies no permutation of its own, so the
-factor fills in catastrophically). For each graph it picks the cheaper of a
-Reverse Cuthill-McKee (band-minimizing) and a nested-dissection (separator)
-ordering by symbolic Cholesky factor size, and - since the sparsity pattern is
-identical across iterations - computes that ordering just once. RCM wins on the
-near-banded `parking-garage` corridor; nested dissection wins on the wide 3D
-meshes, taking `torus3D` from *no convergence within minutes* to ~42 s and
-cutting `sphere2500` from ~19 s (RCM-only) to ~7 s.
+(`solve` is the SE(3) optimization from raw odometry, no chordal seeding; the
+[chordal init](#chordal-rotation-initialization---chordal-init) below converges
+the hard 3D graphs to a far lower chi^2 in even less time.)
+
+The fill-reducing reordering is what makes these tractable at all - solved in the
+natural variable order, the Cholesky factor fills in catastrophically. For each
+graph it picks the cheaper of a Reverse Cuthill-McKee (band-minimizing) and a
+nested-dissection (separator) ordering by symbolic Cholesky factor size, and -
+since the sparsity pattern is identical across iterations - computes that
+ordering just once. RCM wins on the near-banded `parking-garage` corridor;
+nested dissection wins on the wide 3D meshes, taking `torus3D` from *no
+convergence within minutes* to seconds.
 
 The dense ICP graphs `cubicle` and `rim` defeat *both* geometric orderings - the
 factor blows up past the dense-matrix size, so even *counting* it dominates the
@@ -168,11 +171,36 @@ solve. A **minimum-degree** rescue ordering (the local heuristic behind
 AMD/SuiteSparse) is held in reserve for exactly this case: the symbolic count is
 capped at a small multiple of the minimum-degree factor, so a blown-up geometric
 ordering is abandoned cheaply and the rescue ordering is adopted, taking
-`cubicle` from a >10-minute timeout to ~34 s. It is *only* used on that
+`cubicle` from a >10-minute timeout to ~10 s. It is *only* used on that
 catastrophic blow-up - minimum degree's factor, though it has fewer nonzeros,
-factorizes more slowly than a balanced geometric ordering in the scalar
-backend, so it never second-guesses a healthy ordering (e.g. it leaves `torus3D`
-on nested dissection).
+factorizes more slowly than a balanced geometric ordering (its elimination tree
+is deeper and less cache-friendly), so it never second-guesses a healthy
+ordering (e.g. it leaves `torus3D` on nested dissection). The minimum-degree
+pivot is selected with a lazy binary heap rather than an `O(n^2)` linear scan.
+
+#### Block Cholesky factorization
+
+The pose-graph normal matrix is not an arbitrary sparse matrix: every variable
+is a fixed-size block (`6x6` for an SE(3) pose, `3x3` for a rotation column or a
+translation center), and an edge couples two *blocks*, never two stray scalars.
+A scalar sparse Cholesky (such as `nalgebra_sparse`'s `CscCholesky`) ignores
+that and factors one scalar column at a time, paying the sparse gather/scatter
+bookkeeping `b^2` times per block. visloc-rs factors at block granularity
+instead: a left-looking Cholesky over the block elimination tree whose "scalars"
+are stack-allocated `BxB` matrices, so each diagonal factorization, triangular
+solve, and trailing update is a single dense `nalgebra` kernel the compiler
+unrolls and vectorizes (the block size is a const generic, fully monomorphized
+for `B = 3` and `B = 6`). On the same fill-reducing order this is **~5x** faster
+than scalar `CscCholesky` on a `sphere2500`-scale `6x6` system in isolation, and
+**~3-4x** faster end-to-end at bit-equivalent solutions:
+
+| Dataset | scalar `CscCholesky` | **block Cholesky** | speedup |
+| --- | ---: | ---: | ---: |
+| `parking-garage` | ~0.9 s | **~0.3 s** | ~2.9x |
+| `sphere2500` | ~6.8 s | **~1.8 s** | ~3.7x |
+| `torus3D` | ~42 s | **~9.7 s** | ~4.3x |
+| `cubicle` | ~34 s | **~10 s** | ~3.4x |
+| `rim` | ~55 s | **~15 s** | ~3.8x |
 
 The loader is also robust to the malformed information matrices that real
 scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
@@ -215,16 +243,18 @@ The effect is a uniform win on the hard 3D graphs - never a worse final chi^2,
 always equal-or-faster, and it flips three datasets from non-converged to
 converged:
 
+(times below use the block Cholesky throughout):
+
 | Dataset | LM from odometry (final chi^2, time) | **+chordal init** (final chi^2, time) |
 | --- | --- | --- |
-| `sphere2500` | 1.66e3, ~6.8 s | 1.66e3, **~4.0 s** (converges) |
-| `torus3D` | 6.02e4, ~44 s | **2.45e4**, **~20 s** (converges) |
-| `cubicle` | 9.59e3, ~38 s | **4.40e3**, **~14 s** |
-| `rim` | 8.99e7, ~56 s (28.8 %) | **1.16e5**, **~40 s** (**99.9 %**, converges) |
+| `sphere2500` | 1.66e3, ~1.8 s | 1.66e3, **~1.1 s** |
+| `torus3D` | 6.02e4, ~9.7 s | **2.45e4**, **~5.5 s** (converges) |
+| `cubicle` | 9.59e3, ~10 s | **4.40e3**, **~4.0 s** |
+| `rim` | 8.99e7, ~15 s (28.8 %) | **1.16e5**, **~10 s** (**99.9 %**, converges) |
 
 `rim`'s final chi^2 drops by ~775x and it finally converges; `torus3D` and
 `cubicle` reach a ~2x lower chi^2 in ~2x less wall-clock. The chordal solve
-itself is cheap (~0.6 s on `torus3D`, ~1.3 s on `rim`). `parking-garage` is
+itself is cheap (~0.4 s on `torus3D`, ~0.8 s on `rim`). `parking-garage` is
 already trivial from odometry, so the init leaves it unchanged - no regression.
 
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
