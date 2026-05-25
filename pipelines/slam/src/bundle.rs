@@ -2029,23 +2029,42 @@ fn solve_step(
             Err(_) => return Err(BaError::SingularSystem),
         },
         LinearSolver::Sparse => {
-            // Build CSC from S directly (its sparsity pattern is dictated
-            // by which pose pairs share a landmark observation).
-            use nalgebra_sparse::{factorization::CscCholesky, CooMatrix, CscMatrix};
             let dim = total_dim;
-            let mut coo = CooMatrix::<f64>::new(dim, dim);
-            for r in 0..dim {
-                for c in 0..dim {
+            // Collect the structural nonzeros of the reduced system once. Both
+            // back-ends consume the same triplet list; its sparsity pattern is
+            // dictated by which pose pairs share a landmark observation.
+            let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
+            for c in 0..dim {
+                for r in 0..dim {
                     let v = s[(r, c)];
                     if v != 0.0 {
-                        coo.push(r, c, v);
+                        triplets.push((r, c, v));
                     }
                 }
             }
-            let csc = CscMatrix::from(&coo);
-            let chol = CscCholesky::factor(&csc).map_err(|_| BaError::SingularSystem)?;
             let rhs = DMatrix::from_column_slice(dim, 1, b_reduced.as_slice());
-            let sol = chol.solve(&rhs);
+
+            // Pose and IMU-bias variables are 6×6 diagonal blocks, so when the
+            // system carries no 3-DOF velocity blocks (the common pure-visual
+            // BA case) the reduced matrix tiles cleanly into 6×6 blocks and the
+            // block Cholesky back-end — the same one the pose graph uses —
+            // factors it without the scalar gather/scatter bookkeeping. λ is
+            // already folded into `s`, so we pass `lambda = 0`. Visual-inertial
+            // systems interleave 3-DOF velocities, breaking the uniform tiling,
+            // so they fall back to the scalar `CscCholesky` factorization.
+            let sol = if v_count == 0 {
+                crate::block_cholesky::solve_spd_block(&triplets, dim, 6, &rhs, 0.0)
+                    .map_err(|_| BaError::SingularSystem)?
+            } else {
+                use nalgebra_sparse::{factorization::CscCholesky, CooMatrix, CscMatrix};
+                let mut coo = CooMatrix::<f64>::new(dim, dim);
+                for &(r, c, v) in &triplets {
+                    coo.push(r, c, v);
+                }
+                let csc = CscMatrix::from(&coo);
+                let chol = CscCholesky::factor(&csc).map_err(|_| BaError::SingularSystem)?;
+                chol.solve(&rhs)
+            };
             DVector::from_column_slice(sol.as_slice())
         }
     };

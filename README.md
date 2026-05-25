@@ -202,6 +202,16 @@ than scalar `CscCholesky` on a `sphere2500`-scale `6x6` system in isolation, and
 | `cubicle` | ~34 s | **~10 s** | ~3.4x |
 | `rim` | ~55 s | **~15 s** | ~3.8x |
 
+The same back-end factors the **bundle-adjustment** Schur complement. After the
+landmarks are eliminated, the reduced camera system is itself block-structured
+(`6x6` pose blocks), so visual BA routes it through the identical `B = 6` block
+Cholesky rather than scalar `CscCholesky` - bit-comparable to the dense solve
+(an integration test cross-checks `Sparse` against `Dense`) and ~1.4x faster
+end-to-end on a covisibility-dense 120-keyframe synthetic scene (the reduced
+factorization is one of several costs per iteration, so the gain tracks its
+share). Visual-inertial systems interleave `3`-DOF velocity blocks that break
+the uniform `6x6` tiling and keep the scalar factorization.
+
 The loader is also robust to the malformed information matrices that real
 scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
 not positive-semidefinite (a rotation sub-block with off-diagonal entries
