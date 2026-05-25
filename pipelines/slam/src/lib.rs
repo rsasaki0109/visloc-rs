@@ -3740,6 +3740,78 @@ impl PoseGraph {
         total
     }
 
+    /// Assemble the Gauss-Newton normal equations `(H, g)` for the SE(3) pose
+    /// graph: the robust-weighted `H = Σ Jᵀ Ω J` and gradient `g = Σ Jᵀ Ω r`
+    /// over all edges, in the `node_index` variable layout (`dim = 6 · #vars`).
+    ///
+    /// Extracted from [`Self::optimize_se3_iterative`] so both the plain
+    /// optimizer and the GNC driver share one assembly. `gnc_weights` is an
+    /// optional per-edge multiplier (indexed by edge position): `None`
+    /// reproduces the plain assembly bit-for-bit; `Some(w)` scales each edge's
+    /// contribution by `wᵢ ∈ [0, 1]` for the GNC inner solve (see
+    /// [`crate::gnc`]). The isotropic path keeps the legacy semantics
+    /// (`weight` outside the kernel, kernel on `‖r‖²`); the anisotropic path
+    /// folds `Ω` into both `JᵀJ` and `Jᵀr` and lets the kernel see the
+    /// Mahalanobis distance `rᵀΩr`.
+    fn assemble_se3_system(
+        &self,
+        node_index: &BTreeMap<u64, usize>,
+        dim: usize,
+        kernel: &RobustKernel,
+        gnc_weights: Option<&[f64]>,
+        linear_solver: LinearSolver,
+    ) -> (NormalEquations6, DVector<f64>) {
+        let mut builder = NormalEquations6::new(dim, linear_solver, self.edges.len());
+        let mut g = DVector::<f64>::zeros(dim);
+
+        for (idx, edge) in self.edges.iter().enumerate() {
+            let t_from = &self.poses[&edge.from].world_to_camera;
+            let t_to = &self.poses[&edge.to].world_to_camera;
+            let predicted = t_to.compose(&t_from.inverse());
+            let r = edge.measurement.inverse().compose(&predicted).log();
+            let ad_from = t_from.adjoint();
+            let (weight, ata, atr) = match &edge.information {
+                Some(omega) => {
+                    let robust_weight = kernel.weight((r.transpose() * omega * r)[(0, 0)]);
+                    let oa = ad_from.transpose() * omega;
+                    (robust_weight, oa * ad_from, oa * r)
+                }
+                None => {
+                    let robust_weight = kernel.weight(r.norm_squared());
+                    (
+                        edge.weight * robust_weight,
+                        ad_from.transpose() * ad_from,
+                        ad_from.transpose() * r,
+                    )
+                }
+            };
+            // GNC reweighting: a multiplier in [0, 1] (1.0 when not running
+            // GNC) that scales the whole edge contribution, rejecting outliers
+            // as `wᵢ → 0`.
+            let weight = weight * gnc_weights.map_or(1.0, |w| w[idx]);
+
+            let i_from = node_index.get(&edge.from).copied();
+            let i_to = node_index.get(&edge.to).copied();
+
+            if let Some(j) = i_to {
+                builder.add_block6(j * 6, j * 6, weight, &ata);
+                add_segment6(&mut g, j * 6, weight, &atr);
+            }
+            if let Some(i) = i_from {
+                builder.add_block6(i * 6, i * 6, weight, &ata);
+                add_segment6(&mut g, i * 6, -weight, &atr);
+            }
+            if let (Some(j), Some(i)) = (i_to, i_from) {
+                let cross = -ata;
+                let cross_t = cross.transpose();
+                builder.add_block6(j * 6, i * 6, weight, &cross);
+                builder.add_block6(i * 6, j * 6, weight, &cross_t);
+            }
+        }
+
+        (builder, g)
+    }
+
     /// Chordal (Frobenius-relaxed) cost of the current node rotations:
     /// `Σ_e w_e · ‖R_to − R_meas_e · R_from‖_F²`, where `R_*` is the rotation
     /// of each node's `world_to_camera` and `R_meas_e` the rotation of the
@@ -4030,54 +4102,8 @@ impl PoseGraph {
         let mut symbolic_cache: Option<block_cholesky::BlockSymbolic> = None;
 
         for iteration in 0..config.max_iterations {
-            let mut builder = NormalEquations6::new(dim, config.linear_solver, self.edges.len());
-            let mut g = DVector::<f64>::zeros(dim);
-
-            for edge in &self.edges {
-                let t_from = &self.poses[&edge.from].world_to_camera;
-                let t_to = &self.poses[&edge.to].world_to_camera;
-                let predicted = t_to.compose(&t_from.inverse());
-                let r = edge.measurement.inverse().compose(&predicted).log();
-                let ad_from = t_from.adjoint();
-                // Build the (robust-weighted) Gauss-Newton blocks. The
-                // isotropic path keeps the legacy semantics bit-for-bit
-                // (`weight` outside the kernel, kernel on ‖r‖²); the
-                // anisotropic path folds Ω into both JᵀJ and Jᵀr and lets the
-                // kernel see the Mahalanobis distance rᵀΩr.
-                let (weight, ata, atr) = match &edge.information {
-                    Some(omega) => {
-                        let robust_weight = kernel.weight((r.transpose() * omega * r)[(0, 0)]);
-                        let oa = ad_from.transpose() * omega;
-                        (robust_weight, oa * ad_from, oa * r)
-                    }
-                    None => {
-                        let robust_weight = kernel.weight(r.norm_squared());
-                        (
-                            edge.weight * robust_weight,
-                            ad_from.transpose() * ad_from,
-                            ad_from.transpose() * r,
-                        )
-                    }
-                };
-
-                let i_from = node_index.get(&edge.from).copied();
-                let i_to = node_index.get(&edge.to).copied();
-
-                if let Some(j) = i_to {
-                    builder.add_block6(j * 6, j * 6, weight, &ata);
-                    add_segment6(&mut g, j * 6, weight, &atr);
-                }
-                if let Some(i) = i_from {
-                    builder.add_block6(i * 6, i * 6, weight, &ata);
-                    add_segment6(&mut g, i * 6, -weight, &atr);
-                }
-                if let (Some(j), Some(i)) = (i_to, i_from) {
-                    let cross = -ata;
-                    let cross_t = cross.transpose();
-                    builder.add_block6(j * 6, i * 6, weight, &cross);
-                    builder.add_block6(i * 6, j * 6, weight, &cross_t);
-                }
-            }
+            let (builder, g) =
+                self.assemble_se3_system(&node_index, dim, &kernel, None, config.linear_solver);
 
             let neg_g = -&g;
             let delta = builder.solve(lambda, &neg_g, &mut order_cache, &mut symbolic_cache)?;
