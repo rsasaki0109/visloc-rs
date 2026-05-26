@@ -173,12 +173,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut inject = 10usize;
     let mut c = 3.0;
     let mut seed = 1u64;
+    // `None` = use the fixed `c`; `Some(k)` = MAD auto-estimate the inlier scale
+    // with multiplier `k` (floored at `c`). `--auto-c` uses the recommended k.
+    let mut auto_scale: Option<f64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--inject" => inject = args.next().and_then(|s| s.parse().ok()).unwrap_or(inject),
             "--c" => c = args.next().and_then(|s| s.parse().ok()).unwrap_or(c),
             "--seed" => seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(seed),
+            "--auto-c" => auto_scale = Some(visloc_slam::gnc::AUTO_SCALE_K),
+            "--auto-c-k" => {
+                let k = args.next().and_then(|s| s.parse().ok());
+                auto_scale = Some(k.unwrap_or(visloc_slam::gnc::AUTO_SCALE_K));
+            }
             other => path = Some(other.to_string()),
         }
     }
@@ -197,7 +205,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  vertices       : {}", clean.poses.len());
     println!("  original edges : {original_edges}");
     println!("  injected       : {inject} wrong loop closures (seed {seed})");
-    println!("  inlier scale c : {c}");
+    match auto_scale {
+        Some(k) => println!("  inlier scale c : auto (MAD, k={k}, floor {c})"),
+        None => println!("  inlier scale c : {c} (fixed)"),
+    }
     println!();
 
     // Outlier-free baseline: the target inlier-edge χ² a robust method should
@@ -217,8 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let injected_set: std::collections::HashSet<usize> = injected.iter().copied().collect();
 
     println!(
-        "  {:<10} {:>14} {:>14} {:>22}",
-        "method", "inlier χ²", "ratio×base", "outliers (recall / FP)"
+        "  {:<10} {:>14} {:>14} {:>22} {:>8}",
+        "method", "inlier χ²", "ratio×base", "outliers (recall / FP)", "c used"
     );
 
     // 1. Plain L2.
@@ -246,6 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &injected_set,
         GncKernel::GemanMcClure,
         c,
+        auto_scale,
     )?;
     run_gnc(
         "GNC-TLS",
@@ -255,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &injected_set,
         GncKernel::TruncatedLeastSquares,
         c,
+        auto_scale,
     )?;
 
     Ok(())
@@ -275,15 +288,17 @@ fn run_plain(
     graph.optimize_se3_iterative(&config)?;
     let chi2 = chi2_over(&graph, original_edges);
     println!(
-        "  {:<10} {:>14.6e} {:>14} {:>22}",
+        "  {:<10} {:>14.6e} {:>14} {:>22} {:>8}",
         name,
         chi2,
         ratio_str(chi2, baseline_chi2),
+        "-",
         "-"
     );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gnc(
     name: &str,
     corrupted: &PoseGraph,
@@ -292,14 +307,14 @@ fn run_gnc(
     injected: &std::collections::HashSet<usize>,
     kernel: GncKernel,
     c: f64,
+    auto_scale: Option<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = corrupted.clone();
     let gnc = GncConfig {
         kernel,
         c,
-        anneal_factor: 1.4,
-        max_outer: 100,
-        inner_iterations: 5,
+        auto_scale,
+        ..GncConfig::default()
     };
     let result = graph.optimize_se3_gnc(&base_config(), &gnc)?;
     let chi2 = chi2_over(&graph, original_edges);
@@ -321,11 +336,12 @@ fn run_gnc(
         false_positives
     );
     println!(
-        "  {:<10} {:>14.6e} {:>14} {:>22}",
+        "  {:<10} {:>14.6e} {:>14} {:>22} {:>8.3}",
         name,
         chi2,
         ratio_str(chi2, baseline_chi2),
-        recall
+        recall,
+        result.inlier_scale,
     );
     Ok(())
 }

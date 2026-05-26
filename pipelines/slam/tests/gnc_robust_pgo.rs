@@ -10,7 +10,7 @@
 
 use nalgebra::{Matrix6, UnitQuaternion, Vector3};
 use visloc_core::geometry::{Pose, SE3};
-use visloc_slam::gnc::{GncConfig, GncKernel};
+use visloc_slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
 use visloc_slam::{
     relative_world_to_camera, LinearSolver, PoseGraph, PoseGraphEdgeKind, PoseGraphSe3Config,
 };
@@ -117,9 +117,8 @@ fn gnc_rejects_outlier_loop_closure_and_recovers_truth() {
     let gnc = GncConfig {
         kernel: GncKernel::GemanMcClure,
         c: 0.3,
-        anneal_factor: 1.4,
-        max_outer: 100,
         inner_iterations: 10,
+        ..GncConfig::default()
     };
 
     let result = graph
@@ -200,9 +199,8 @@ fn gnc_truncated_least_squares_also_rejects_outlier() {
     let gnc = GncConfig {
         kernel: GncKernel::TruncatedLeastSquares,
         c: 0.3,
-        anneal_factor: 1.4,
-        max_outer: 100,
         inner_iterations: 10,
+        ..GncConfig::default()
     };
     let result = graph
         .optimize_se3_gnc(&no_chordal_config(), &gnc)
@@ -224,9 +222,8 @@ fn gnc_on_clean_graph_keeps_every_edge_and_recovers_truth() {
     let gnc = GncConfig {
         kernel: GncKernel::GemanMcClure,
         c: 0.3,
-        anneal_factor: 1.4,
-        max_outer: 100,
         inner_iterations: 10,
+        ..GncConfig::default()
     };
     let result = graph
         .optimize_se3_gnc(&no_chordal_config(), &gnc)
@@ -241,6 +238,104 @@ fn gnc_on_clean_graph_keeps_every_edge_and_recovers_truth() {
     assert_eq!(result.outlier_count(0.5), 0);
     assert!(max_center_error(&graph, &truth) < 1.0e-6);
     assert!(result.inlier_cost < 1.0e-9);
+}
+
+/// Like [`graph_at_truth`] but every inlier edge measurement carries a small
+/// deterministic perturbation, so the graph has a realistic nonzero noise
+/// floor — the inlier spread `auto_scale` estimates the inlier `c` from. The
+/// gross outlier chord `1 -> 3` is added on top. Returns the graph and the
+/// outlier edge index.
+fn noisy_graph_with_outlier(truth: &[(u64, Pose)]) -> (PoseGraph, usize) {
+    let mut graph = PoseGraph::new();
+    for (id, pose) in truth {
+        graph.add_pose(*id, pose.clone());
+    }
+    graph.anchor(truth[0].0);
+    // Deterministic per-edge perturbation ~0.05 (rad / m): a believable inlier
+    // noise floor, far below the 3 m outlier displacement.
+    let noise = |i: usize| -> SE3 {
+        let f = i as f64;
+        let a = 0.04 * (1.7 * f).sin();
+        let t = Vector3::new(0.05 * f.cos(), 0.04 * (0.7 * f).sin(), 0.03);
+        SE3::new(UnitQuaternion::from_euler_angles(a, -0.5 * a, 0.3 * a), t)
+    };
+    let mut edge_i = 0usize;
+    for pair in truth.windows(2) {
+        let (from, a) = &pair[0];
+        let (to, b) = &pair[1];
+        let measurement = relative_world_to_camera(a, b).compose(&noise(edge_i));
+        graph.add_edge_with_information(
+            *from,
+            *to,
+            measurement,
+            PoseGraphEdgeKind::Sequential,
+            Matrix6::identity(),
+        );
+        edge_i += 1;
+    }
+    let last = truth.len() - 1;
+    let loop_meas = relative_world_to_camera(&truth[last].1, &truth[0].1).compose(&noise(edge_i));
+    graph.add_edge_with_information(
+        truth[last].0,
+        truth[0].0,
+        loop_meas,
+        PoseGraphEdgeKind::LoopClosure,
+        Matrix6::identity(),
+    );
+    graph.add_edge_with_information(
+        1,
+        3,
+        outlier_chord(truth),
+        PoseGraphEdgeKind::LoopClosure,
+        Matrix6::identity(),
+    );
+    let outlier_idx = graph.edges.len() - 1;
+    (graph, outlier_idx)
+}
+
+#[test]
+fn gnc_auto_scale_adapts_to_inlier_noise_and_rejects_outlier() {
+    // A noisy graph: the inlier edges disagree at the ~0.05 level, so a
+    // hand-set `c = 0.01` floor is far too tight and would over-reject. With
+    // `auto_scale` the inlier `c` is estimated from the residual distribution,
+    // raising it to match the noise — then the gross outlier is the only thing
+    // rejected, with no inlier false positives.
+    let truth = truth_chain();
+    let (mut graph, outlier_idx) = noisy_graph_with_outlier(&truth);
+
+    let gnc = GncConfig {
+        kernel: GncKernel::TruncatedLeastSquares,
+        c: 0.01,
+        auto_scale: Some(AUTO_SCALE_K),
+        inner_iterations: 10,
+        ..GncConfig::default()
+    };
+    let config = PoseGraphSe3Config {
+        linear_solver: LinearSolver::Dense,
+        ..PoseGraphSe3Config::default()
+    };
+    let result = graph
+        .optimize_se3_gnc(&config, &gnc)
+        .expect("GNC-TLS auto-scale solve must succeed");
+
+    // Auto-scale raised the inlier `c` well above the 0.01 floor to match the
+    // injected noise — the whole point of the estimator.
+    assert!(
+        result.inlier_scale > 0.05,
+        "auto-scale c = {} should track the inlier noise, not the floor",
+        result.inlier_scale
+    );
+    // The 3 m outlier chord is rejected; every inlier survives (no FP).
+    assert!(
+        result.edge_weights[outlier_idx] < 0.5,
+        "outlier weight = {}",
+        result.edge_weights[outlier_idx]
+    );
+    assert_eq!(
+        result.outlier_count(0.5),
+        1,
+        "exactly the one injected outlier should be rejected"
+    );
 }
 
 #[test]

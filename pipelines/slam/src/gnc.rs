@@ -62,7 +62,21 @@ pub struct GncConfig {
     pub max_outer: usize,
     /// Inner weighted-least-squares iterations to run at each fixed `μ` level.
     pub inner_iterations: usize,
+    /// Robust auto-estimation of the inlier scale. `Some(k)` derives `c` from
+    /// the residual distribution at the start of the solve via
+    /// [`estimate_scale_mad`] (`median + k·1.4826·MAD`), using the literal
+    /// [`Self::c`] only as a *floor*; `None` (the default) uses `c` as given.
+    /// Auto mode adapts the inlier/outlier boundary to each graph's noise level
+    /// so a single setting transfers across datasets where a fixed `c` would
+    /// over- or under-reject. [`AUTO_SCALE_K`] is the recommended `k`.
+    pub auto_scale: Option<f64>,
 }
+
+/// Recommended multiplier for [`GncConfig::auto_scale`]. `3.5` is the
+/// Iglewicz-Hoaglin modified-z-score outlier cutoff; with the typical
+/// one-to-few-percent outlier fractions in robust SLAM it lands in the gap
+/// between the inlier residual cluster and the outliers.
+pub const AUTO_SCALE_K: f64 = 3.5;
 
 impl Default for GncConfig {
     fn default() -> Self {
@@ -72,6 +86,7 @@ impl Default for GncConfig {
             anneal_factor: 1.4,
             max_outer: 100,
             inner_iterations: 5,
+            auto_scale: None,
         }
     }
 }
@@ -250,10 +265,7 @@ mod tests {
     fn cfg(kernel: GncKernel) -> GncConfig {
         GncConfig {
             kernel,
-            c: 1.0,
-            anneal_factor: 1.4,
-            max_outer: 100,
-            inner_iterations: 5,
+            ..GncConfig::default()
         }
     }
 
@@ -384,12 +396,12 @@ mod tests {
         let inliers: Vec<f64> = (0..100).map(|i| (1.0 + 0.01 * i as f64).powi(2)).collect();
         let with_moderate = {
             let mut v = inliers.clone();
-            v.extend(std::iter::repeat(50.0_f64.powi(2)).take(20));
+            v.extend((0..20).map(|_| 50.0_f64.powi(2)));
             v
         };
         let with_extreme = {
             let mut v = inliers.clone();
-            v.extend(std::iter::repeat(5000.0_f64.powi(2)).take(20));
+            v.extend((0..20).map(|_| 5000.0_f64.powi(2)));
             v
         };
         let c_moderate = estimate_scale_mad(&with_moderate, 3.5).unwrap();

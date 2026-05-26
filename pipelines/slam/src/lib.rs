@@ -3435,6 +3435,11 @@ pub struct PoseGraphGncResult {
     /// above the inlier `threshold` passed to the solve — the cost GNC actually
     /// drove down once outliers were rejected.
     pub inlier_cost: f64,
+    /// The inlier scale `c` the solve actually used: the configured
+    /// [`gnc::GncConfig::c`] verbatim, or — under
+    /// [`gnc::GncConfig::auto_scale`] — the MAD estimate (floored at the
+    /// configured `c`).
+    pub inlier_scale: f64,
     /// Number of outer `μ` levels executed.
     pub outer_iterations: usize,
     /// Whether the `μ` schedule reached the true robust cost (terminal `μ`).
@@ -4365,12 +4370,21 @@ impl PoseGraph {
         }
 
         // Convex first surrogate: initialize μ from the largest seeded residual.
-        let s_max = self
-            .edge_squared_residuals()
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max);
-        let mut state = gnc::GncState::new(gnc, s_max);
+        // The same seeded residuals optionally drive the MAD auto-estimate of
+        // the inlier scale `c` (with `gnc.c` as a floor), so the inlier/outlier
+        // boundary tracks this graph's noise level instead of a hand-set value.
+        let squared_residuals = self.edge_squared_residuals();
+        let s_max = squared_residuals.iter().copied().fold(0.0_f64, f64::max);
+        let effective_gnc = match gnc.auto_scale {
+            Some(k) => {
+                let c = gnc::estimate_scale_mad(&squared_residuals, k)
+                    .map_or(gnc.c, |est| est.max(gnc.c));
+                gnc::GncConfig { c, ..*gnc }
+            }
+            None => *gnc,
+        };
+        let inlier_scale = effective_gnc.c;
+        let mut state = gnc::GncState::new(&effective_gnc, s_max);
         let mut gnc_weights = vec![1.0_f64; self.edges.len()];
 
         // The sparsity pattern is μ-invariant, so the fill-reducing order and
@@ -4481,6 +4495,7 @@ impl PoseGraph {
             initial_cost,
             final_cost,
             inlier_cost,
+            inlier_scale,
             outer_iterations,
             converged,
             edge_weights: gnc_weights,
