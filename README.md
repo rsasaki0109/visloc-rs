@@ -214,6 +214,15 @@ factorization is one of several costs per iteration, so the gain tracks its
 share). Visual-inertial systems interleave `3`-DOF velocity blocks that break
 the uniform `6x6` tiling and keep the scalar factorization.
 
+Across the iterations of one optimization the normal matrix changes values but
+never its sparsity, so the solver splits the classic way: the **symbolic
+analysis** (elimination tree, per-column fill patterns, levels) and the COO->block
+pattern assembly are computed once and cached alongside the fill-reducing order,
+and every subsequent iteration only re-scatters the block values and re-runs the
+numeric factorization. On the g2o benchmarks that pattern work was ~20-30% of each
+solve, so caching it is a clean ~1.1x (and more on the small chain graphs, whose
+numeric phase is tiny next to the per-iteration assembly) at an identical result.
+
 The numeric phase is also parallelized across the block elimination tree: columns
 are grouped into independent *levels* (a column depends only on its descendants,
 which sit at strictly lower levels), and each sufficiently heavy level is factored

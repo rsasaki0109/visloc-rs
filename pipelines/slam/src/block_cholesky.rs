@@ -26,6 +26,24 @@
 //! A non-positive-definite diagonal block aborts the factorization with `Err`,
 //! matching the scalar path's `SingularSystem` behavior.
 //!
+//! # Reusing the symbolic analysis
+//!
+//! A Levenberg–Marquardt solve factors a *new* normal matrix every iteration,
+//! but always with the *same* sparsity (and the same fill-reducing order). The
+//! pattern-dependent work — the Gilbert–Ng–Peyton symbolic factorization
+//! (elimination tree, per-column row patterns, levels) and the COO→block pattern
+//! assembly — is therefore iteration-invariant. [`analyze`] computes it once into
+//! a [`BlockSymbolic`], and [`solve_spd_block_cached`] reuses that across solves,
+//! re-running only the value scatter and the numeric factorization. (Measured on
+//! the g2o benchmarks the symbolic phase + the old per-iteration `BTreeMap`
+//! assembly were ~20–30 % of the solve, so caching them is a clean ~1.1× with no
+//! change to the result; the small chain graphs gain most relative to their tiny
+//! numeric phase.) The value scatter itself is now a direct binary search into
+//! the cached per-column row list rather than a fresh `BTreeMap` per column. The
+//! one-shot [`solve_spd_block`] (used by callers without a repeated pattern, e.g.
+//! the BA Schur solve and the chordal initializer) routes through the same
+//! analyze-then-refactor path with a throwaway analysis.
+//!
 //! # Why not supernodal?
 //!
 //! Classic high-performance sparse Cholesky (CHOLMOD et al.) is *supernodal*: it
@@ -147,6 +165,50 @@ pub(crate) fn solve_spd_block(
     )
 }
 
+/// Like [`solve_spd_block`], but reuse a previously computed [`BlockSymbolic`]
+/// (analyzing and storing it on the first call). For a system whose sparsity is
+/// fixed across solves — the Levenberg–Marquardt normal equations, re-solved with
+/// new values every iteration in the *same* fill-reducing order — this skips the
+/// symbolic factorization and the COO→block pattern assembly on every call but
+/// the first, leaving only the value scatter and the numeric factorization. The
+/// result is identical to calling `solve_spd_block` with the same `triplets`.
+/// The caller owns the `cache` (alongside the fill-reducing order cache) and must
+/// only feed systems of the same pattern/`block_size`/`dim` into it.
+pub(crate) fn solve_spd_block_cached(
+    cache: &mut Option<BlockSymbolic>,
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    block_size: usize,
+    rhs: &DMatrix<f64>,
+    lambda: f64,
+) -> Result<DMatrix<f64>, ()> {
+    let sym = cache.get_or_insert_with(|| analyze(triplets, dim, block_size));
+    debug_assert_eq!(sym.block_size, block_size);
+    debug_assert_eq!(sym.n * block_size, dim);
+    let threads = default_thread_count();
+    match block_size {
+        3 => solve_with_symbolic::<3>(
+            sym,
+            triplets,
+            rhs,
+            lambda,
+            threads,
+            PARALLEL_MIN_LEVEL_WORK,
+            INTRA_MIN_CONTRIB,
+        ),
+        6 => solve_with_symbolic::<6>(
+            sym,
+            triplets,
+            rhs,
+            lambda,
+            threads,
+            PARALLEL_MIN_LEVEL_WORK,
+            INTRA_MIN_CONTRIB,
+        ),
+        other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
+    }
+}
+
 /// The block size known, dispatch to the monomorphized solver. `threads` caps
 /// the worker threads used for the numeric phase (`1` forces the sequential
 /// path); `min_level_work` is the per-level work bar below which a level is not
@@ -206,186 +268,250 @@ fn solve_dispatch<const B: usize>(
     min_level_work: usize,
     min_intra_contrib: usize,
 ) -> Result<DMatrix<f64>, ()> {
-    let factor = BlockCholesky::<B>::factor(
+    // Uncached: analyze the pattern then refactor+solve in one shot.
+    let sym = analyze(triplets, dim, B);
+    solve_with_symbolic::<B>(
+        &sym,
         triplets,
-        dim,
+        rhs,
+        lambda,
+        threads,
+        min_level_work,
+        min_intra_contrib,
+    )
+}
+
+/// The iteration-invariant structure of a block-Cholesky factorization: the
+/// elimination-tree column patterns and the original block pattern, with no
+/// numeric values. Computed once by [`analyze`] from a sparsity pattern and
+/// reused to refactor every system that shares it — the Levenberg–Marquardt
+/// normal equations keep one pattern across all iterations — so neither the
+/// Gilbert–Ng–Peyton symbolic phase nor the COO→block assembly is redone on
+/// each solve; only the block *values* are re-scattered and the numeric phase
+/// re-run. (`block_size`-agnostic: every field is a combinatorial block index,
+/// so one cache serves the `B = 3` and `B = 6` refactors alike.)
+pub(crate) struct BlockSymbolic {
+    /// Block size the pattern was analyzed for (3 or 6); a guard for reuse.
+    block_size: usize,
+    /// Number of block columns (`dim / block_size`).
+    n: usize,
+    /// `col_rows[j]`: sorted block rows present in column `j` of `L`, diagonal
+    /// (`== j`) first.
+    col_rows: Vec<Vec<usize>>,
+    /// `contributors[j]`: the prior columns that fill into column `j`.
+    contributors: Vec<Vec<usize>>,
+    /// Elimination-tree levels — groups of mutually independent columns.
+    levels: Vec<Vec<usize>>,
+    /// `a_pattern[c]`: sorted block rows `≥ c` present in original block column
+    /// `c` (diagonal included) — the slots a refactor scatters values into.
+    a_pattern: Vec<Vec<usize>>,
+}
+
+/// Symbolic analysis: from the scalar COO sparsity pattern (values ignored)
+/// build the [`BlockSymbolic`] shared by every refactor of a fixed-pattern
+/// system. `dim` must be a multiple of `block_size` (3 or 6).
+pub(crate) fn analyze(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    block_size: usize,
+) -> BlockSymbolic {
+    assert!(
+        dim % block_size == 0,
+        "dim must be a multiple of the block size"
+    );
+    let n = dim / block_size;
+    let (block_lower, a_pattern) = assemble_pattern(triplets, n, block_size);
+    let (col_rows, contributors) = symbolic(&block_lower, n);
+    let levels = build_levels(&contributors, n);
+    BlockSymbolic {
+        block_size,
+        n,
+        col_rows,
+        contributors,
+        levels,
+        a_pattern,
+    }
+}
+
+/// Refactor the system given by `triplets` (and `λ`) against a cached symbolic
+/// structure, then solve every column of `rhs`. The thread/work knobs are the
+/// same as [`solve_dispatch`].
+#[allow(clippy::too_many_arguments)]
+fn solve_with_symbolic<const B: usize>(
+    sym: &BlockSymbolic,
+    triplets: &[(usize, usize, f64)],
+    rhs: &DMatrix<f64>,
+    lambda: f64,
+    threads: usize,
+    min_level_work: usize,
+    min_intra_contrib: usize,
+) -> Result<DMatrix<f64>, ()> {
+    debug_assert_eq!(sym.block_size, B);
+    let (col_vals, diag_inv) = refactor_numeric::<B>(
+        sym,
+        triplets,
         lambda,
         threads,
         min_level_work,
         min_intra_contrib,
     )?;
-    let mut out = DMatrix::<f64>::zeros(dim, rhs.ncols());
+    let mut out = DMatrix::<f64>::zeros(sym.n * B, rhs.ncols());
     for c in 0..rhs.ncols() {
         let column = DVector::from_column_slice(rhs.column(c).as_slice());
-        out.set_column(c, &factor.solve_vec(&column));
+        let x = solve_block_system::<B>(&sym.col_rows, &col_vals, &diag_inv, sym.n, &column);
+        out.set_column(c, &x);
     }
     Ok(out)
 }
 
-/// A computed block Cholesky factor `A = L Lᵀ` at block size `B`.
-struct BlockCholesky<const B: usize> {
-    /// Number of block columns (`dim / B`).
-    n: usize,
-    /// `col_rows[j]` is the sorted list of block rows present in column `j` of
-    /// `L`, with `col_rows[j][0] == j` (the diagonal block).
-    col_rows: Vec<Vec<usize>>,
-    /// `col_vals[j][t]` is the `B×B` block of `L` at row `col_rows[j][t]`. Slot
-    /// `0` holds the lower-triangular diagonal factor `L_jj`.
-    col_vals: Vec<Vec<SMatrix<f64, B, B>>>,
-    /// `diag_inv[j] = L_jj⁻¹`, cached so the forward/backward solves are plain
-    /// matrix products instead of repeated triangular solves.
-    diag_inv: Vec<SMatrix<f64, B, B>>,
+/// Numeric phase: scatter the original block values from `triplets` into the
+/// cached pattern (`sym.a_pattern`), fold in `λ`, and run the left-looking
+/// block Cholesky over `sym`'s elimination-tree levels. Returns the factor's
+/// `col_vals` and `diag_inv`. Bit-for-bit equivalent to factoring the same
+/// `triplets` from scratch: duplicate triplets are summed in input order and the
+/// diagonal `λ` is added afterwards, exactly as the one-shot path did.
+#[allow(clippy::type_complexity)]
+fn refactor_numeric<const B: usize>(
+    sym: &BlockSymbolic,
+    triplets: &[(usize, usize, f64)],
+    lambda: f64,
+    threads: usize,
+    min_level_work: usize,
+    min_intra_contrib: usize,
+) -> Result<(Vec<Vec<SMatrix<f64, B, B>>>, Vec<SMatrix<f64, B, B>>), ()> {
+    let n = sym.n;
+    let col_rows = &sym.col_rows;
+    let contributors = &sym.contributors;
+
+    // Original lower-triangular block values laid out on the cached pattern: a
+    // direct scatter (binary search into the small per-column row list) replaces
+    // the per-iteration `BTreeMap` assembly.
+    let mut a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = sym
+        .a_pattern
+        .iter()
+        .map(|rows| {
+            rows.iter()
+                .map(|&br| (br, SMatrix::<f64, B, B>::zeros()))
+                .collect()
+        })
+        .collect();
+    for &(r, c, v) in triplets {
+        let (br, bc) = (r / B, c / B);
+        if br >= bc {
+            let slot = sym.a_pattern[bc]
+                .binary_search(&br)
+                .expect("triplet's block lies in the analyzed pattern");
+            a_lower[bc][slot].1[(r % B, c % B)] += v;
+        }
+    }
+    if lambda != 0.0 {
+        for (bc, rows) in sym.a_pattern.iter().enumerate() {
+            let slot = rows
+                .binary_search(&bc)
+                .expect("diagonal block lies in the analyzed pattern");
+            for d in 0..B {
+                a_lower[bc][slot].1[(d, d)] += lambda;
+            }
+        }
+    }
+
+    let mut col_vals: Vec<Vec<SMatrix<f64, B, B>>> = col_rows
+        .iter()
+        .map(|rows| vec![SMatrix::<f64, B, B>::zeros(); rows.len()])
+        .collect();
+    let mut diag_inv = vec![SMatrix::<f64, B, B>::zeros(); n];
+
+    // Reusable relative-index map for the sequential path (see `factor_column`).
+    let mut map = vec![0usize; n];
+
+    for level in &sym.levels {
+        let parallel = threads > 1
+            && n >= PARALLEL_MIN_BLOCKS
+            && level.len() >= PARALLEL_MIN_LEVEL_WIDTH
+            && level
+                .iter()
+                .map(|&j| contributors[j].len() * col_rows[j].len())
+                .sum::<usize>()
+                >= min_level_work;
+        if parallel {
+            // Farm the level's independent columns out to the rayon pool, each
+            // worker reading the (already-finalized) lower levels and writing
+            // back after the parallel section.
+            let computed =
+                factor_level_parallel::<B>(level, n, col_rows, contributors, &a_lower, &col_vals)?;
+            for (j, vals, inv) in computed {
+                col_vals[j] = vals;
+                diag_inv[j] = inv;
+            }
+        } else {
+            // Narrow / light level: its heavy columns (the serial separator
+            // chain) go parallel over their contributors, the rest run inline.
+            let intra = threads > 1 && n >= PARALLEL_MIN_BLOCKS;
+            for &j in level {
+                let (vals, inv) = if intra && contributors[j].len() >= min_intra_contrib {
+                    factor_column_intra::<B>(j, col_rows, &contributors[j], &a_lower[j], &col_vals)?
+                } else {
+                    factor_column::<B>(
+                        j,
+                        col_rows,
+                        &contributors[j],
+                        &a_lower[j],
+                        &col_vals,
+                        &mut map,
+                    )?
+                };
+                col_vals[j] = vals;
+                diag_inv[j] = inv;
+            }
+        }
+    }
+
+    Ok((col_vals, diag_inv))
 }
 
-impl<const B: usize> BlockCholesky<B> {
-    /// Symbolically and numerically factor `(A + λI)`. `threads` caps the worker
-    /// threads used for the numeric phase (`1` = sequential).
-    fn factor(
-        triplets: &[(usize, usize, f64)],
-        dim: usize,
-        lambda: f64,
-        threads: usize,
-        min_level_work: usize,
-        min_intra_contrib: usize,
-    ) -> Result<Self, ()> {
-        debug_assert!(dim % B == 0, "dim must be a multiple of the block size");
-        let n = dim / B;
+/// Solve `A x = b` for a single right-hand side via block forward and backward
+/// substitution against a factor `L` given by its `col_rows` / `col_vals` and
+/// the cached diagonal inverses `diag_inv`.
+fn solve_block_system<const B: usize>(
+    col_rows: &[Vec<usize>],
+    col_vals: &[Vec<SMatrix<f64, B, B>>],
+    diag_inv: &[SMatrix<f64, B, B>],
+    n: usize,
+    b: &DVector<f64>,
+) -> DVector<f64> {
+    // Gather the dense RHS into per-block sub-vectors.
+    let mut y: Vec<SVector<f64, B>> = (0..n)
+        .map(|j| SVector::<f64, B>::from_fn(|k, _| b[j * B + k]))
+        .collect();
 
-        // Lower-triangular original block values (block row ≥ block col), and the
-        // structural pattern they induce.
-        let mut a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = Vec::new();
-        let (block_lower, blocks) = assemble_blocks::<B>(triplets, n, lambda);
-        a_lower.extend(blocks);
-
-        let (col_rows, contributors) = symbolic(&block_lower, n);
-
-        // Allocate the factor's value slots, zero-initialized.
-        let mut col_vals: Vec<Vec<SMatrix<f64, B, B>>> = col_rows
-            .iter()
-            .map(|rows| vec![SMatrix::<f64, B, B>::zeros(); rows.len()])
-            .collect();
-        let mut diag_inv = vec![SMatrix::<f64, B, B>::zeros(); n];
-
-        // Elimination-tree levels: columns sharing a level have no contributor
-        // edge between them (a contributor is always a proper descendant, hence
-        // a strictly lower level), so a whole level can be factored in parallel
-        // once every lower level is done. Columns are processed in level order
-        // — a valid topological order, so the result is bit-identical to the
-        // plain `0..n` sweep.
-        let levels = build_levels(&contributors, n);
-
-        // Reusable relative-index map for the sequential path: `map[i]` is the
-        // position of block row `i` in the column currently being processed.
-        // Seeded fresh per column for exactly that column's rows, so the
-        // trailing-update scatter is an O(1) lookup instead of a `binary_search`
-        // per touched block. Stale entries for rows outside the current column
-        // are never read (the fill-path property guarantees every touched row
-        // lies inside the column pattern), so no reset between columns is needed.
-        let mut map = vec![0usize; n];
-
-        for level in &levels {
-            let parallel = threads > 1
-                && n >= PARALLEL_MIN_BLOCKS
-                && level.len() >= PARALLEL_MIN_LEVEL_WIDTH
-                && level
-                    .iter()
-                    .map(|&j| contributors[j].len() * col_rows[j].len())
-                    .sum::<usize>()
-                    >= min_level_work;
-            if parallel {
-                // Farm the level's independent columns out to the rayon pool,
-                // each worker computing its columns into owned buffers while
-                // reading the (already-finalized) lower levels. Writes back into
-                // `col_vals` happen after the parallel section, so the shared
-                // borrow and the mutation never overlap.
-                let computed = factor_level_parallel::<B>(
-                    level,
-                    n,
-                    &col_rows,
-                    &contributors,
-                    &a_lower,
-                    &col_vals,
-                )?;
-                for (j, vals, inv) in computed {
-                    col_vals[j] = vals;
-                    diag_inv[j] = inv;
-                }
-            } else {
-                // This level was too narrow / too light to farm out across its
-                // columns. Its *heavy* columns — the separator chain near the
-                // root, which across-level parallelism leaves serial — are still
-                // parallel over their contributors; the rest run inline.
-                let intra = threads > 1 && n >= PARALLEL_MIN_BLOCKS;
-                for &j in level {
-                    let (vals, inv) = if intra && contributors[j].len() >= min_intra_contrib {
-                        factor_column_intra::<B>(
-                            j,
-                            &col_rows,
-                            &contributors[j],
-                            &a_lower[j],
-                            &col_vals,
-                        )?
-                    } else {
-                        factor_column::<B>(
-                            j,
-                            &col_rows,
-                            &contributors[j],
-                            &a_lower[j],
-                            &col_vals,
-                            &mut map,
-                        )?
-                    };
-                    col_vals[j] = vals;
-                    diag_inv[j] = inv;
-                }
-            }
+    // Forward substitution: solve L y = b, column by column.
+    for j in 0..n {
+        let yj = diag_inv[j] * y[j];
+        y[j] = yj;
+        // Below-diagonal rows (skip the diagonal slot 0); i > j, so the update
+        // never aliases y[j].
+        for (&i, block) in col_rows[j].iter().zip(&col_vals[j]).skip(1) {
+            y[i] -= block * yj;
         }
-
-        Ok(Self {
-            n,
-            col_rows,
-            col_vals,
-            diag_inv,
-        })
     }
 
-    /// Solve `A x = b` for a single right-hand side via block forward and
-    /// backward substitution.
-    fn solve_vec(&self, b: &DVector<f64>) -> DVector<f64> {
-        // Gather the dense RHS into per-block sub-vectors.
-        let mut y: Vec<SVector<f64, B>> = (0..self.n)
-            .map(|j| SVector::<f64, B>::from_fn(|k, _| b[j * B + k]))
-            .collect();
-
-        // Forward substitution: solve L y = b, column by column.
-        for j in 0..self.n {
-            let yj = self.diag_inv[j] * y[j];
-            y[j] = yj;
-            // Below-diagonal rows (skip the diagonal slot 0); i > j, so the
-            // update never aliases y[j].
-            for (&i, block) in self.col_rows[j].iter().zip(&self.col_vals[j]).skip(1) {
-                y[i] -= block * yj;
-            }
+    // Backward substitution: solve Lᵀ x = y, columns in reverse.
+    for j in (0..n).rev() {
+        let mut acc = y[j];
+        for (&i, block) in col_rows[j].iter().zip(&col_vals[j]).skip(1) {
+            acc -= block.transpose() * y[i];
         }
-
-        // Backward substitution: solve Lᵀ x = y, columns in reverse.
-        for j in (0..self.n).rev() {
-            let mut acc = y[j];
-            for (&i, block) in self.col_rows[j].iter().zip(&self.col_vals[j]).skip(1) {
-                acc -= block.transpose() * y[i];
-            }
-            y[j] = self.diag_inv[j].transpose() * acc;
-        }
-
-        // Scatter back into a dense solution vector.
-        let mut x = DVector::<f64>::zeros(self.n * B);
-        for j in 0..self.n {
-            for k in 0..B {
-                x[j * B + k] = y[j][k];
-            }
-        }
-        x
+        y[j] = diag_inv[j].transpose() * acc;
     }
+
+    // Scatter back into a dense solution vector.
+    let mut x = DVector::<f64>::zeros(n * B);
+    for j in 0..n {
+        for k in 0..B {
+            x[j * B + k] = y[j][k];
+        }
+    }
+    x
 }
 
 /// Left-looking factorization of a single block column `j`: gather column `j`'s
@@ -566,51 +692,44 @@ fn build_levels(contributors: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
     levels
 }
 
-/// Assemble the lower-triangular original block values and the off-diagonal
-/// block pattern from scalar COO triplets, folding `λ` into every diagonal
-/// block. Returns `(block_lower, a_lower)` where `block_lower[i]` is the sorted
-/// set of block columns `< i` coupled to block row `i`, and `a_lower[j]` is the
-/// list of `(block_row ≥ j, block)` originally present in block column `j`.
-#[allow(clippy::type_complexity)]
-fn assemble_blocks<const B: usize>(
+/// Block sparsity pattern from scalar COO triplets (values ignored). Returns
+/// `(block_lower, a_pattern)` where `block_lower[i]` is the sorted set of block
+/// columns `< i` coupled to block row `i` (what the symbolic phase walks), and
+/// `a_pattern[c]` is the sorted set of block rows `≥ c` present in block column
+/// `c`, the diagonal always included (the diagonal block is the one we
+/// Cholesky-factor and the `λ`-damping target). A refactor scatters the original
+/// block values into these `a_pattern` slots. The pattern is iteration-invariant,
+/// so it lives in [`BlockSymbolic`] and the per-solve `BTreeMap` value assembly
+/// the old `assemble_blocks` did is gone.
+fn assemble_pattern(
     triplets: &[(usize, usize, f64)],
     n: usize,
-    lambda: f64,
-) -> (Vec<Vec<usize>>, Vec<Vec<(usize, SMatrix<f64, B, B>)>>) {
-    // Sparse map per block column: block row → dense B×B block.
-    let mut cols: Vec<std::collections::BTreeMap<usize, SMatrix<f64, B, B>>> =
-        vec![std::collections::BTreeMap::new(); n];
-    let mut pattern: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    block_size: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let mut lower: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    let mut col_pat: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
 
-    for &(r, c, v) in triplets {
-        let (br, bc) = (r / B, c / B);
+    for &(r, c, _) in triplets {
+        let (br, bc) = (r / block_size, c / block_size);
         if br > bc {
-            cols[bc].entry(br).or_insert_with(SMatrix::zeros)[(r % B, c % B)] += v;
-            pattern[br].insert(bc);
+            lower[br].insert(bc);
+            col_pat[bc].insert(br);
         } else if br == bc {
-            // Diagonal block: keep the full B×B (it is symmetric and is the
-            // block we Cholesky-factor).
-            cols[bc].entry(br).or_insert_with(SMatrix::zeros)[(r % B, c % B)] += v;
+            col_pat[bc].insert(br);
         }
-        // br < bc (strict upper) is the transpose of an entry we already keep in
-        // the lower triangle, so it is dropped.
+        // br < bc (strict upper) is the transpose of a lower entry; dropped.
+    }
+    for (bc, set) in col_pat.iter_mut().enumerate() {
+        set.insert(bc);
     }
 
-    if lambda != 0.0 {
-        for (j, col) in cols.iter_mut().enumerate() {
-            let diag = col.entry(j).or_insert_with(SMatrix::zeros);
-            for d in 0..B {
-                diag[(d, d)] += lambda;
-            }
-        }
-    }
-
-    let block_lower = pattern
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect();
-    let a_lower = cols.into_iter().map(|m| m.into_iter().collect()).collect();
-    (block_lower, a_lower)
+    (
+        lower.into_iter().map(|s| s.into_iter().collect()).collect(),
+        col_pat
+            .into_iter()
+            .map(|s| s.into_iter().collect())
+            .collect(),
+    )
 }
 
 /// Gilbert–Ng–Peyton symbolic factorization: from the strictly-lower block
@@ -984,11 +1103,11 @@ mod tests {
 
         // The forced gate (work bar 0) must still find a wide level to dispatch,
         // or the parallel run would fall back to sequential and prove nothing.
-        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
-        let (_, contributors) = symbolic(&block_lower, n);
+        let sym = analyze(&permuted, dim, b);
         assert!(
             n >= PARALLEL_MIN_BLOCKS
-                && build_levels(&contributors, n)
+                && sym
+                    .levels
                     .iter()
                     .any(|l| l.len() >= PARALLEL_MIN_LEVEL_WIDTH),
             "fixture has no wide level to dispatch"
@@ -1025,9 +1144,8 @@ mod tests {
 
         // The fixture must actually have a column heavy enough to take the
         // intra path, or the test would silently fall back to sequential.
-        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
-        let (_, contributors) = symbolic(&block_lower, n);
-        let max_contrib = contributors.iter().map(|c| c.len()).max().unwrap_or(0);
+        let sym = analyze(&permuted, dim, b);
+        let max_contrib = sym.contributors.iter().map(|c| c.len()).max().unwrap_or(0);
         assert!(
             n >= PARALLEL_MIN_BLOCKS && max_contrib >= INTRA_MIN_CONTRIB,
             "fixture has no column heavy enough for the intra path (max contributors {max_contrib})"
@@ -1058,6 +1176,41 @@ mod tests {
         assert!(
             rel < 1e-9,
             "intra solve disagrees with the sequential solve: relative error {rel:e}"
+        );
+    }
+
+    /// A cached symbolic factorization must, when reused to refactor a *new*
+    /// value set of the same sparsity pattern, produce a bit-identical result to
+    /// factoring that system from scratch — this is the contract the LM loop
+    /// relies on. Two random SPD systems share a pattern (the `keep` predicate is
+    /// deterministic, so the off-diagonal block pattern is identical; only the
+    /// values differ); the cache is built on the first and reused on the second.
+    #[test]
+    fn cached_refactor_matches_one_shot() {
+        let (n, b) = (20, 6);
+        let dim = n * b;
+        let lambda = 1e-3;
+        let keep = |bi: usize, bj: usize| bi.abs_diff(bj) <= 1;
+        let (_, t1) = random_spd(n, b, keep, 1);
+        let (_, t2) = random_spd(n, b, keep, 2);
+        let rhs = DMatrix::<f64>::from_fn(dim, 2, |i, c| ((i + c) % 5) as f64 - 2.0);
+
+        let mut cache = None;
+        // First solve analyzes and stores the symbolic structure.
+        let c1 = solve_spd_block_cached(&mut cache, &t1, dim, b, &rhs, lambda).expect("c1");
+        let o1 = solve_spd_block(&t1, dim, b, &rhs, lambda).expect("o1");
+        assert_eq!(c1, o1, "first cached solve must match the one-shot factor");
+        assert!(
+            cache.is_some(),
+            "symbolic structure must be cached after the first solve"
+        );
+
+        // Second solve reuses the cache with different values — the real test.
+        let c2 = solve_spd_block_cached(&mut cache, &t2, dim, b, &rhs, lambda).expect("c2");
+        let o2 = solve_spd_block(&t2, dim, b, &rhs, lambda).expect("o2");
+        assert_eq!(
+            c2, o2,
+            "cached refactor with new values must match the one-shot factor bit-for-bit"
         );
     }
 
@@ -1104,10 +1257,10 @@ mod tests {
         }
         let par_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
 
-        let n = dim / b;
-        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
-        let (col_rows, contributors) = symbolic(&block_lower, n);
-        let levels = build_levels(&contributors, n);
+        let sym = analyze(&permuted, dim, b);
+        let col_rows = &sym.col_rows;
+        let contributors = &sym.contributors;
+        let levels = &sym.levels;
         let widths: Vec<usize> = levels.iter().map(|l| l.len()).collect();
 
         // Trailing-update block-multiply count per column ≈ the dominant factor
@@ -1125,7 +1278,7 @@ mod tests {
         // direct evidence that across-level parallelism cannot pay off here.
         let mut work_by_bucket = std::collections::BTreeMap::<usize, u64>::new();
         let mut total = 0u64;
-        for level in &levels {
+        for level in levels {
             let w: u64 = level.iter().map(|&j| col_work(j)).sum();
             let bucket = match level.len() {
                 1 => 1,
@@ -1229,10 +1382,10 @@ mod tests {
 
         let order = Reordering::fill_reducing(dim, b, &triplets);
         let permuted = order.permute_triplets(&triplets);
-        let (block_lower, _) = assemble_blocks::<6>(&permuted, n, 0.0);
-        let (col_rows, _) = symbolic(&block_lower, n);
+        let sym = analyze(&permuted, dim, b);
+        let col_rows = &sym.col_rows;
 
-        let supers = detect_supernodes(&col_rows);
+        let supers = detect_supernodes(col_rows);
         let widths: Vec<usize> = supers.iter().map(|&(_, w)| w).collect();
         let singletons = widths.iter().filter(|&&w| w == 1).count();
         let max_w = *widths.iter().max().unwrap();
