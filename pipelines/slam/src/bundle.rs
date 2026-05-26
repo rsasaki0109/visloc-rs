@@ -828,9 +828,9 @@ impl BundleAdjustment {
     /// (every observation trusted — ordinary least squares) toward the true
     /// non-convex robust cost, recomputing the per-observation
     /// Black-Rangarajan weight `w ∈ [0,1]` at each level. Each level is a
-    /// bounded weighted-LS solve reusing [`Self::optimize_weighted`] with
-    /// `RobustKernel::None` (GNC supersedes the M-estimator). See
-    /// [`crate::gnc`] for the surrogate math.
+    /// bounded weighted-LS solve reusing the same Schur-complement assembly
+    /// as [`Self::optimize`] with `RobustKernel::None` (GNC supersedes the
+    /// M-estimator). See [`crate::gnc`] for the surrogate math.
     ///
     /// `config` drives the inner LM solve (linear solver, λ schedule);
     /// `config.robust_kernel` is ignored — GNC sets the weights. `gnc.c` is
