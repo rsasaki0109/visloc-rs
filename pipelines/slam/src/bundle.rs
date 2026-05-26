@@ -32,6 +32,7 @@ use visloc_mapping::{
     LocalMapWindow, LocalRefinementReason, LocalRefinementResult, LocalRefiner, StagedMapUpdate,
 };
 
+use crate::gnc::{GncConfig, GncState};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
 
@@ -757,10 +758,172 @@ impl BundleAdjustment {
         }
     }
 
+    /// Per-observation squared reprojection residual `s = ‖r‖²` (pixel²),
+    /// evaluated at the current state and aligned to the GNC weight layout
+    /// used everywhere in this file: monocular observations first
+    /// (`0 .. observations.len()`), then stereo. An observation that cannot
+    /// be evaluated now (missing pose / landmark, behind the camera, or
+    /// non-projectable, or — for stereo — no usable baseline) is reported
+    /// as `f64::NAN`, so it neither sets the GNC inlier scale nor is
+    /// classified as an inlier or outlier.
+    fn reprojection_squared_residuals(&self) -> Vec<f64> {
+        let n = self.observations.len() + self.stereo_observations.len();
+        let mut out = Vec::with_capacity(n);
+        let Some(intrinsics) = self.intrinsics() else {
+            out.resize(n, f64::NAN);
+            return out;
+        };
+        for obs in &self.observations {
+            let s = (|| {
+                let pose = self.poses.get(&obs.keyframe_id)?;
+                let point = self.landmarks.get(&obs.landmark_id)?;
+                let xc = pose.transform_world_point(point);
+                if xc.z <= 0.0 {
+                    return None;
+                }
+                let predicted = project_pinhole(&intrinsics, &xc)?;
+                let r = predicted - obs.xy;
+                Some(r.x * r.x + r.y * r.y)
+            })();
+            out.push(s.unwrap_or(f64::NAN));
+        }
+        let baseline = match self.stereo_baseline {
+            Some(b) if b.is_finite() && b > 0.0 => Some(b),
+            _ => None,
+        };
+        let (fx, _, _, _) = intrinsics;
+        for obs in &self.stereo_observations {
+            let s = baseline.and_then(|baseline| {
+                let pose = self.poses.get(&obs.keyframe_id)?;
+                let point = self.landmarks.get(&obs.landmark_id)?;
+                let xc = pose.transform_world_point(point);
+                if xc.z <= 0.0 {
+                    return None;
+                }
+                let predicted = project_pinhole(&intrinsics, &xc)?;
+                let u_r_pred = predicted.x - fx * baseline / xc.z;
+                let dx = predicted.x - obs.xy.x;
+                let dy = predicted.y - obs.xy.y;
+                let dr = u_r_pred - obs.u_right;
+                Some(dx * dx + dy * dy + dr * dr)
+            });
+            out.push(s.unwrap_or(f64::NAN));
+        }
+        out
+    }
+
     /// Run Levenberg-Marquardt bundle adjustment with Schur-complement
     /// landmark elimination. Returns iteration trace and final cost.
     pub fn optimize(&mut self, config: &BaConfig) -> Result<BaResult, BaError> {
         self.optimize_weighted(config, None)
+    }
+
+    /// Outlier-robust bundle adjustment via Graduated Non-Convexity (GNC).
+    ///
+    /// A local M-estimator (`RobustKernel::Huber` / `Cauchy`) only
+    /// down-weights gross reprojection errors *near* the current estimate,
+    /// so a cluster of wrong correspondences that the initialisation
+    /// already believes can capture the solution in a bad basin. GNC
+    /// instead anneals a control parameter `μ` from a convex surrogate
+    /// (every observation trusted — ordinary least squares) toward the true
+    /// non-convex robust cost, recomputing the per-observation
+    /// Black-Rangarajan weight `w ∈ [0,1]` at each level. Each level is a
+    /// bounded weighted-LS solve reusing [`Self::optimize_weighted`] with
+    /// `RobustKernel::None` (GNC supersedes the M-estimator). See
+    /// [`crate::gnc`] for the surrogate math.
+    ///
+    /// `config` drives the inner LM solve (linear solver, λ schedule);
+    /// `config.robust_kernel` is ignored — GNC sets the weights. `gnc.c` is
+    /// the inlier reprojection scale **in pixels** (so `c²` is the squared-
+    /// residual band): pick it from the expected inlier reprojection error,
+    /// e.g. `c ≈ 3` for ~1 px noise. The returned
+    /// [`BaGncResult::observation_weights`] gives the final per-observation
+    /// weight (monocular-first then stereo, `NaN` for un-evaluable
+    /// observations); near-zero entries are the rejected outliers.
+    pub fn optimize_gnc(
+        &mut self,
+        config: &BaConfig,
+        gnc: &GncConfig,
+    ) -> Result<BaGncResult, BaError> {
+        let kernel_none = RobustKernel::None;
+        let initial_cost = self.robust_cost(&kernel_none);
+        let n = self.observations.len() + self.stereo_observations.len();
+
+        // GNC inlier scale from the worst current reprojection residual.
+        let s_max = self
+            .reprojection_squared_residuals()
+            .into_iter()
+            .filter(|s| s.is_finite())
+            .fold(0.0_f64, f64::max);
+        let mut state = GncState::new(gnc, s_max);
+
+        // Inner solve: a short weighted LM with no M-estimator (the GNC
+        // weights are the only robustification) restarted at each μ level.
+        let mut inner = *config;
+        inner.robust_kernel = RobustKernel::None;
+        inner.max_iterations = gnc.inner_iterations.max(1);
+
+        let mut weights = vec![1.0_f64; n];
+        let mut converged = false;
+        let mut outer_iterations = 0usize;
+        for _ in 0..gnc.max_outer.max(1) {
+            outer_iterations += 1;
+            // The terminal level (μ at its recovered extreme) reproduces the
+            // true robust cost; we run it, then stop.
+            let terminal_level = state.is_terminal();
+            let residuals = self.reprojection_squared_residuals();
+            for (w, &s) in weights.iter_mut().zip(residuals.iter()) {
+                *w = if s.is_finite() { state.weight(s) } else { 1.0 };
+            }
+            self.optimize_weighted(&inner, Some(&weights))?;
+            if terminal_level {
+                converged = true;
+                break;
+            }
+            state.anneal();
+        }
+
+        // Final per-observation weights at the recovered estimate (NaN for
+        // observations that cannot be evaluated, matching the result
+        // contract and skipped by the weighted cost anyway).
+        let residuals = self.reprojection_squared_residuals();
+        for (w, &s) in weights.iter_mut().zip(residuals.iter()) {
+            *w = if s.is_finite() {
+                state.weight(s)
+            } else {
+                f64::NAN
+            };
+        }
+        let final_cost = self.robust_cost_weighted(&kernel_none, Some(&weights));
+
+        // Inlier-only cost: hard 0/1 mask at the classification threshold,
+        // so the reported cost reflects what survives outlier rejection.
+        const INLIER_THRESHOLD: f64 = 0.5;
+        let inlier_mask: Vec<f64> = weights
+            .iter()
+            .map(|&w| {
+                if w.is_finite() {
+                    if w >= INLIER_THRESHOLD {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+        let inlier_cost = self.robust_cost_weighted(&kernel_none, Some(&inlier_mask));
+
+        Ok(BaGncResult {
+            initial_cost,
+            final_cost,
+            inlier_cost,
+            observation_count: n,
+            outer_iterations,
+            converged,
+            observation_weights: weights,
+        })
     }
 
     /// Levenberg-Marquardt bundle adjustment with optional per-observation
@@ -1120,6 +1283,50 @@ pub struct BaResult {
     pub final_cost: f64,
     pub iterations: Vec<BaIterationStats>,
     pub converged: bool,
+}
+
+/// Result of [`BundleAdjustment::optimize_gnc`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaGncResult {
+    /// Non-robust reprojection cost at the input estimate.
+    pub initial_cost: f64,
+    /// GNC-weighted reprojection cost at the recovered estimate (every
+    /// observation scaled by its final `w`).
+    pub final_cost: f64,
+    /// Reprojection cost over the classified inliers only (outliers
+    /// contribute nothing), using the `0.5` weight threshold.
+    pub inlier_cost: f64,
+    /// Number of reprojection observations (monocular + stereo) the weight
+    /// vector covers.
+    pub observation_count: usize,
+    /// GNC outer (μ) levels actually executed.
+    pub outer_iterations: usize,
+    /// Whether the μ schedule reached its terminal level.
+    pub converged: bool,
+    /// Final per-observation Black-Rangarajan weight `w ∈ [0,1]`, indexed
+    /// monocular-first then stereo. `NaN` marks an observation that could
+    /// not be evaluated at the recovered estimate. Near-zero finite entries
+    /// are the rejected outliers.
+    pub observation_weights: Vec<f64>,
+}
+
+impl BaGncResult {
+    /// Count of observations classified as inliers (`w ≥ threshold`).
+    /// `NaN` (un-evaluable) observations are excluded from both counts.
+    pub fn inlier_count(&self, threshold: f64) -> usize {
+        self.observation_weights
+            .iter()
+            .filter(|w| w.is_finite() && **w >= threshold)
+            .count()
+    }
+
+    /// Count of observations classified as outliers (`w < threshold`).
+    pub fn outlier_count(&self, threshold: f64) -> usize {
+        self.observation_weights
+            .iter()
+            .filter(|w| w.is_finite() && **w < threshold)
+            .count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

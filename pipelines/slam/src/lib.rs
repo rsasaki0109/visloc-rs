@@ -9,7 +9,7 @@
 
 pub mod bundle;
 pub use bundle::{
-    BaConfig, BaError, BaIterationStats, BaObservation, BaResult, BaStereoObservation,
+    BaConfig, BaError, BaGncResult, BaIterationStats, BaObservation, BaResult, BaStereoObservation,
     BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner, GravityPrior,
     PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior,
     PositionPriorObservation,
