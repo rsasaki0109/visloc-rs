@@ -22,6 +22,7 @@ pub mod g2o;
 pub use g2o::{read_g2o, write_g2o, G2oError};
 
 mod block_cholesky;
+pub mod gnc;
 mod reordering;
 
 pub mod sim3_pose_graph;
