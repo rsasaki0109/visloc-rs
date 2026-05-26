@@ -356,7 +356,18 @@ corrupted (5-89× the baseline); both GNC variants recover the outlier-free
 solution and reject every injected outlier. `c` is the inlier residual scale and
 must match the graph's noise level - `sphere2500`'s residuals are ~8× tighter
 than `torus3D`'s, so a `c` that is perfect on one over-rejects on the other.
-Truncated-least-squares is the more decisive kernel: its hard verdict drives
+
+That coupling is exactly what `GncConfig::auto_scale` removes: instead of a
+hand-set `c`, it estimates the inlier scale from the residual distribution at
+the start of the solve - the Iglewicz-Hoaglin robust cutoff
+`median(ρ) + k·1.4826·MAD(ρ)` on the residual norms `ρ` (breakdown-robust to
+~50 % outliers; `--auto-c` in the benchmark). It adapts per graph with no tuning:
+on `sphere2500` it picks `c ≈ 16` and recovers exactly (`30/30`, 0 FP); on
+`torus3D` it picks `c ≈ 10` and matches the *best* fixed `c` available at that
+seed (`torus3D` is c-insensitive across `c ∈ [6, 10]` - its residual floor is an
+intrinsic hard-graph property, not a scale-tuning gap). The same `auto_scale`
+field drives the bundle-adjustment GNC solver. Truncated-least-squares is the
+more decisive kernel: its hard verdict drives
 false positives to zero where the smooth Geman-McClure leaves a few borderline
 edges down-weighted.
 
@@ -374,7 +385,8 @@ from a convex (least-squares) surrogate toward the true robust cost. Only
 reprojections are reweighted - structural and inertial priors (gravity /
 position / pairwise-pose / IMU) are never switched off - so a wrong
 correspondence is the only thing GNC can reject. `gnc.c` is the inlier
-reprojection scale **in pixels**.
+reprojection scale **in pixels** (or set `gnc.auto_scale` to estimate it from
+the residual MAD, as for the pose-graph solver).
 
 Validated on a rigid, fully-observed scene with injected outlier observations
 (wrong correspondences shifted 70-90 px;
