@@ -573,12 +573,27 @@ impl BundleAdjustment {
     /// where `u_r_pred = u_l_pred − fx · b / Z` (rectified-stereo assumption,
     /// see [`BaStereoObservation`]).
     pub fn robust_cost(&self, kernel: &RobustKernel) -> f64 {
+        self.robust_cost_weighted(kernel, None)
+    }
+
+    /// Like [`Self::robust_cost`] but multiplies each reprojection
+    /// observation's contribution by an external per-observation weight
+    /// (the Graduated Non-Convexity Black-Rangarajan weight `w ∈ [0,1]`).
+    /// `gnc_weights` is indexed monocular-observations-first
+    /// (`0 .. observations.len()`) then stereo
+    /// (`observations.len() .. + stereo_observations.len()`). `None`
+    /// reproduces [`Self::robust_cost`] exactly. Structural and inertial
+    /// terms (gravity / position priors, pairwise pose, bias random-walk,
+    /// IMU) are never reweighted — only outlier-prone feature
+    /// reprojections are, so a wrong correspondence is the only thing GNC
+    /// can switch off.
+    fn robust_cost_weighted(&self, kernel: &RobustKernel, gnc_weights: Option<&[f64]>) -> f64 {
         let intrinsics = match self.intrinsics() {
             Some(k) => k,
             None => return 0.0,
         };
         let mut total = 0.0;
-        for obs in &self.observations {
+        for (obs_idx, obs) in self.observations.iter().enumerate() {
             let (Some(pose), Some(point)) = (
                 self.poses.get(&obs.keyframe_id),
                 self.landmarks.get(&obs.landmark_id),
@@ -592,13 +607,15 @@ impl BundleAdjustment {
             if let Some(predicted) = project_pinhole(&intrinsics, &xc) {
                 let r = predicted - obs.xy;
                 let s = r.x * r.x + r.y * r.y;
-                total += kernel.cost(s);
+                let w = gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
+                total += w * kernel.cost(s);
             }
         }
         if let Some(baseline) = self.stereo_baseline {
             if baseline.is_finite() && baseline > 0.0 {
                 let (fx, _fy, _cx, _cy) = intrinsics;
-                for obs in &self.stereo_observations {
+                let stereo_offset = self.observations.len();
+                for (st_idx, obs) in self.stereo_observations.iter().enumerate() {
                     let (Some(pose), Some(point)) = (
                         self.poses.get(&obs.keyframe_id),
                         self.landmarks.get(&obs.landmark_id),
@@ -615,7 +632,8 @@ impl BundleAdjustment {
                         let dy = predicted.y - obs.xy.y;
                         let dr = u_r_pred - obs.u_right;
                         let s = dx * dx + dy * dy + dr * dr;
-                        total += kernel.cost(s);
+                        let w = gnc_weights.map_or(1.0, |gw| gw[stereo_offset + st_idx]);
+                        total += w * kernel.cost(s);
                     }
                 }
             }
@@ -742,6 +760,23 @@ impl BundleAdjustment {
     /// Run Levenberg-Marquardt bundle adjustment with Schur-complement
     /// landmark elimination. Returns iteration trace and final cost.
     pub fn optimize(&mut self, config: &BaConfig) -> Result<BaResult, BaError> {
+        self.optimize_weighted(config, None)
+    }
+
+    /// Levenberg-Marquardt bundle adjustment with optional per-observation
+    /// GNC weights folded into every reprojection contribution. `None`
+    /// runs standard (optionally `RobustKernel`-IRLS) BA, bit-identical to
+    /// the public [`Self::optimize`]; `Some(weights)` is the inner solve of
+    /// [`Self::optimize_gnc`], where `weights` are the current
+    /// Graduated-Non-Convexity surrogate weights and the cost used for the
+    /// LM accept / reject test is correspondingly reweighted. `weights` is
+    /// indexed monocular-first then stereo (see
+    /// [`Self::robust_cost_weighted`]).
+    fn optimize_weighted(
+        &mut self,
+        config: &BaConfig,
+        gnc_weights: Option<&[f64]>,
+    ) -> Result<BaResult, BaError> {
         let intrinsics = self.intrinsics().ok_or(BaError::UnsupportedCameraModel)?;
         if self.poses.is_empty() {
             return Err(BaError::NoPoses);
@@ -856,7 +891,7 @@ impl BundleAdjustment {
         }
 
         let kernel = config.robust_kernel;
-        let initial_cost = self.robust_cost(&kernel);
+        let initial_cost = self.robust_cost_weighted(&kernel, gnc_weights);
         let mut iterations: Vec<BaIterationStats> = Vec::with_capacity(config.max_iterations);
         let mut current_cost = initial_cost;
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
@@ -871,6 +906,7 @@ impl BundleAdjustment {
                 &velocity_index,
                 &bias_index,
                 &kernel,
+                gnc_weights,
             );
 
             // Build the reduced (Schur-complement) camera system. λ is added
@@ -967,7 +1003,7 @@ impl BundleAdjustment {
                 *pt = Point3::from(pt.coords + v);
             }
 
-            let cost_after = self.robust_cost(&kernel);
+            let cost_after = self.robust_cost_weighted(&kernel, gnc_weights);
             let step_accepted = match config.initial_lambda {
                 None => true, // Pure GN: accept unconditionally.
                 Some(_) => cost_after < cost_before,
@@ -1155,6 +1191,7 @@ struct NormalEquationsBa {
     landmarks: Vec<LandmarkBlock>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_normal_equations(
     ba: &BundleAdjustment,
     intrinsics: &(f64, f64, f64, f64),
@@ -1163,6 +1200,7 @@ fn build_normal_equations(
     velocity_index: &BTreeMap<u64, usize>,
     bias_index: &BTreeMap<u64, usize>,
     kernel: &RobustKernel,
+    gnc_weights: Option<&[f64]>,
 ) -> NormalEquationsBa {
     let p_count = pose_index.len();
     let l_count = landmark_index.len();
@@ -1188,7 +1226,7 @@ fn build_normal_equations(
         })
         .collect();
 
-    for obs in &ba.observations {
+    for (obs_idx, obs) in ba.observations.iter().enumerate() {
         let pose = &ba.poses[&obs.keyframe_id];
         let point = &ba.landmarks[&obs.landmark_id];
         let r_mat = pose
@@ -1236,7 +1274,7 @@ fn build_normal_equations(
         // Huber / Cauchy the weight shrinks for large residuals so a
         // single bad observation cannot dominate the normal equations.
         let s = residual.x * residual.x + residual.y * residual.y;
-        let w = kernel.weight(s);
+        let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
 
         let i_pose = pose_index.get(&obs.keyframe_id).copied();
         let i_lm = landmark_index.get(&obs.landmark_id).copied();
@@ -1277,7 +1315,8 @@ fn build_normal_equations(
         if let Some(baseline) = ba.stereo_baseline {
             if baseline.is_finite() && baseline > 0.0 {
                 let (fx, fy, _, _) = *intrinsics;
-                for obs in &ba.stereo_observations {
+                let stereo_offset = ba.observations.len();
+                for (st_idx, obs) in ba.stereo_observations.iter().enumerate() {
                     let pose = &ba.poses[&obs.keyframe_id];
                     let point = &ba.landmarks[&obs.landmark_id];
                     let r_mat = pose
@@ -1320,7 +1359,8 @@ fn build_normal_equations(
                     let j_lm: Matrix3<f64> = j_pi * r_mat;
 
                     let s = residual.norm_squared();
-                    let w = kernel.weight(s);
+                    let w =
+                        kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[stereo_offset + st_idx]);
 
                     let i_pose = pose_index.get(&obs.keyframe_id).copied();
                     let i_lm = landmark_index.get(&obs.landmark_id).copied();
