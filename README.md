@@ -107,7 +107,7 @@ cargo run --example localize_dummy
 | Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
 | **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), a block (`BxB`-kernel) Cholesky that is ~3-4x faster than scalar `CscCholesky`, and a default-on chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
+| Optimization | Sparse Cholesky bundle adjustment, Huber/Cauchy robust kernels, full SE(3) pose-graph optimization (GN/LM, 6x6 anisotropic information matrices) with `.g2o` `EDGE_SE3:QUAT` IO, automatic fill-reducing reordering (Reverse Cuthill-McKee vs. nested dissection by symbolic factor size, with a minimum-degree rescue for dense ICP graphs), a block (`BxB`-kernel) Cholesky that is ~3-4x faster than scalar `CscCholesky`, and a default-on chordal rotation initialization that takes the hard 3D graphs from stalled to converged - runs on the standard `sphere2500`/`torus3D`/`parking-garage`/`cubicle`/`rim` benchmarks (see [Benchmark Snapshot](#benchmark-snapshot)); a Graduated Non-Convexity (Geman-McClure / truncated-least-squares) solver that rejects wrong loop closures plain IRLS cannot; plus a 7-DOF Sim(3) pose graph for monocular scale-drift correction |
 | Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
 | Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
 | Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations (baseline corner + SP+strict V1_01 / V2_01) |
@@ -141,7 +141,11 @@ Marquardt on the SE(3) manifold, full 6x6 anisotropic information matrices,
 robust kernels, dense or sparse Cholesky) plus `.g2o` `EDGE_SE3:QUAT` read/write
 ([`read_g2o`](pipelines/slam/src/g2o.rs)), so it runs directly on the canonical
 pose-graph datasets the SLAM back-end literature reports on - no C++, no Ceres,
-no ROS.
+no ROS. For graphs with **wrong** loop closures it also ships
+`PoseGraph::optimize_se3_gnc`, a Graduated Non-Convexity solver (Yang et al.
+2020, Geman-McClure / truncated-least-squares surrogates) that rejects outlier
+constraints a plain Huber/Cauchy IRLS solve cannot (see [Outlier-robust
+PGO](#outlier-robust-pgo-graduated-non-convexity)).
 
 | Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction | solve |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -320,6 +324,39 @@ residual convention - it is not bit-comparable to a specific g2o/GTSAM build
 deterministically driving a drifted graph down to a near-consistent optimum,
 not the absolute number.
 
+#### Outlier-robust PGO (Graduated Non-Convexity)
+
+Real loop closures are sometimes **wrong** (perceptual aliasing, place-recognition
+false positives), and a single bad one pulls a least-squares solve - or even a
+Huber/Cauchy IRLS solve, whose influence function is non-convex so it only finds
+a local minimum - into a corrupted basin. `PoseGraph::optimize_se3_gnc` adds
+**Graduated Non-Convexity** (Yang et al. 2020, the engine behind Kimera-RPGO and
+TEASER++): it anneals a control parameter from a convex surrogate that trusts
+every edge toward the true robust cost that rejects outliers, so it is shepherded
+into the inlier basin *before* the cost turns non-convex. Two surrogates ship -
+Geman-McClure (smooth) and truncated-least-squares (hard inlier/outlier verdict).
+
+Injecting random wrong loop closures into a real `.g2o` graph (the standard
+robust-PGO protocol) and measuring the chi^2 over the **original** edges only -
+the cost a solver should recover if it rejects the outliers -
+([`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs)):
+
+| Graph (+ injected outliers) | L2 | Huber | GNC-GM | GNC-TLS |
+| --- | ---: | ---: | ---: | ---: |
+| `sphere2500` + 30 (`c=3`) | 89.1× | 51.0× | **1.0×** (30/30, 0 FP) | **1.0×** (30/30, 0 FP) |
+| `torus3D` + 40 (`c=6`) | 5.7× | 1.9× | **1.0×** (40/40, 19 FP) | **1.0×** (40/40, 0 FP) |
+
+Numbers are the inlier-edge chi^2 as a multiple of the outlier-free baseline
+(`1.0×` = full recovery); `(recall, false positives)` is the outlier
+classification from the final per-edge GNC weights. L2 and Huber are badly
+corrupted (5-89× the baseline); both GNC variants recover the outlier-free
+solution and reject every injected outlier. `c` is the inlier residual scale and
+must match the graph's noise level - `sphere2500`'s residuals are ~8× tighter
+than `torus3D`'s, so a `c` that is perfect on one over-rejects on the other.
+Truncated-least-squares is the more decisive kernel: its hard verdict drives
+false positives to zero where the smooth Geman-McClure leaves a few borderline
+edges down-weighted.
+
 ### EuRoC characterisation vs published baselines (honest read)
 
 The EuRoC numbers above are from the systematic Phase-{20..27} EuRoC
@@ -405,6 +442,7 @@ live under `docs/`.
 | KITTI 00 sandwich loop detection | Start + revisit slices, quick deep scanner by default; pass `--frontend both` for classical-vs-deep comparison. Cross-platform runner writes `index.html`, strongest-pair verified-inlier overlay SVG, and README asset thumbnails (`41` candidates in the default quick run) | [`examples/kitti_revisit_scanner_demo.rs`](examples/kitti_revisit_scanner_demo.rs), [`scripts/run_kitti_deep_vo_revisit_smoke.py`](scripts/run_kitti_deep_vo_revisit_smoke.py), [`scripts/run_kitti_deep_vo_revisit_smoke.sh`](scripts/run_kitti_deep_vo_revisit_smoke.sh), [`scripts/render_kitti_revisit_report_asset.py`](scripts/render_kitti_revisit_report_asset.py) |
 | Synthetic scanner loop closure | 9-keyframe arc, appearance scan -> loop edge -> SE(3) PGO. `<2 cm` max error recovery | [`examples/scanner_loop_closure_demo.rs`](examples/scanner_loop_closure_demo.rs) |
 | Sim(3) scale-drift correction | 24-node monocular loop with a compounding 3 %/keyframe scale shrink; a Sim(3) pose graph drives the loop closure to recover ground truth: worst `\|scale-1\|` **0.50 -> 0**, mean position error **1.49 m -> 0 m** | [`examples/sim3_scale_drift_pgo_demo.rs`](examples/sim3_scale_drift_pgo_demo.rs) |
+| Outlier-robust PGO (GNC) | Injects random wrong loop closures into a real `.g2o` graph and compares L2/Huber/GNC. `sphere2500` +30 outliers: L2 **89x** baseline, GNC **1.0x** (30/30 rejected, 0 FP) | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
 | Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a synthetic 30 deg baseline scene (~30x rot/translation-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
 | SuperPoint/LightGlue VO + multi-frame BA | File-backed SP/LG features -> confidence-weighted PnP -> BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
 | **EuRoC online VI-SLAM** | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap. SuperPoint optional via offline replay or `--features onnx-inference` | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
