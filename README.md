@@ -219,13 +219,19 @@ are grouped into independent *levels* (a column depends only on its descendants,
 which sit at strictly lower levels), and each sufficiently heavy level is factored
 on a `rayon` pool while the finished lower levels are read - a topological
 reordering of the sequential sweep, so the factor stays bit-identical (and disabled
-cleanly with `RAYON_NUM_THREADS=1`). The win is bounded by the tree shape - the
-work concentrates in the narrow separator levels near the root while the wide
-levels are cheap leaves - so it helps most on heavy, solve-dominated graphs
-(~1.2x end-to-end on `torus3D`) and stays neutral, never regressing, on small or
-chain-like ones (a per-level work gate keeps `parking-garage` off the parallel
-path). Going further would need intra-separator parallelism, i.e. the
-supernodal/BLAS-3 route nalgebra's untuned backend cannot accelerate.
+cleanly with `RAYON_NUM_THREADS=1`). Across-level parallelism alone is bounded by
+the tree shape - the work concentrates in the narrow separator levels near the root
+while the wide levels are cheap leaves, leaving the width-1 separator chain serial.
+That chain is attacked by a second, orthogonal axis: a heavy separator column's
+trailing update is a sum over its hundreds of (already-finished) contributors, so
+when a column stays off the level path it is instead factored by reducing that sum
+across the pool. This is pure-Rust *intra-separator* parallelism - it splits the
+left-looking updates across contributors, not a dense panel across cores, so unlike
+the supernodal/BLAS-3 route it needs no tuned BLAS (it trades exact bit-identity for
+a deterministic, agrees-to-rounding factor). Together the two axes reach ~1.4x
+end-to-end on `torus3D` and ~1.26x on `rim` (up from ~1.17x / ~1.09x with across-level
+alone), staying neutral and never regressing on small or chain-like graphs (a
+per-level work gate keeps `parking-garage` off the parallel path).
 
 The loader is also robust to the malformed information matrices that real
 scan-matching datasets ship: `cubicle` and `rim` contain edges whose `Omega` is
