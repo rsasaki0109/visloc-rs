@@ -3413,6 +3413,51 @@ pub struct PoseGraphSe3Result {
     pub converged: bool,
 }
 
+/// Outcome of [`PoseGraph::optimize_se3_gnc`], the outlier-robust SE(3)
+/// pose-graph solve driven by Graduated Non-Convexity (see [`crate::gnc`]).
+///
+/// Beyond the usual cost/convergence summary it reports the **final per-edge
+/// GNC weight** (`edge_weights`, indexed by edge position, each in `[0, 1]`):
+/// an edge annealed to a weight near zero was rejected as an outlier, so this
+/// vector doubles as a loop-closure inlier/outlier classification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoseGraphGncResult {
+    pub anchor_id: u64,
+    pub edge_count: usize,
+    pub variable_count: usize,
+    /// Plain (non-robust) least-squares cost at the seeded starting point.
+    pub initial_cost: f64,
+    /// Plain (non-robust) least-squares cost over all edges at the final
+    /// estimate. Outlier edges still contribute their (large) residual here;
+    /// use [`Self::inlier_cost`] for the cost over retained edges only.
+    pub final_cost: f64,
+    /// Plain least-squares cost summed over edges whose final weight is at or
+    /// above the inlier `threshold` passed to the solve — the cost GNC actually
+    /// drove down once outliers were rejected.
+    pub inlier_cost: f64,
+    /// Number of outer `μ` levels executed.
+    pub outer_iterations: usize,
+    /// Whether the `μ` schedule reached the true robust cost (terminal `μ`).
+    pub converged: bool,
+    /// Final GNC weight per edge, indexed by edge position, in `[0, 1]`.
+    pub edge_weights: Vec<f64>,
+}
+
+impl PoseGraphGncResult {
+    /// Number of edges GNC kept as inliers: final weight `≥ threshold`.
+    pub fn inlier_count(&self, threshold: f64) -> usize {
+        self.edge_weights
+            .iter()
+            .filter(|&&w| w >= threshold)
+            .count()
+    }
+
+    /// Number of edges GNC rejected as outliers: final weight `< threshold`.
+    pub fn outlier_count(&self, threshold: f64) -> usize {
+        self.edge_count - self.inlier_count(threshold)
+    }
+}
+
 /// Errors returned by [`PoseGraph::optimize_translations_once`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoseGraphError {
@@ -3738,6 +3783,56 @@ impl PoseGraph {
             };
         }
         total
+    }
+
+    /// Robust SE(3) cost with an optional per-edge multiplier (`gnc_weights`,
+    /// indexed by edge position). Identical to [`Self::robust_se3_cost`] when
+    /// `gnc_weights` is `None`; with weights it is the *weighted* objective
+    /// `Σ wᵢ · ρ(sᵢ)` that the Graduated Non-Convexity driver minimizes at a
+    /// fixed `μ` level (the Black-Rangarajan inner problem), where `wᵢ` is the
+    /// closed-form GNC weight and the kernel is [`RobustKernel::None`] (GNC
+    /// supersedes the M-estimator). See [`crate::gnc`] and
+    /// [`Self::optimize_se3_gnc`].
+    fn robust_se3_cost_weighted(&self, kernel: &RobustKernel, gnc_weights: Option<&[f64]>) -> f64 {
+        let mut total = 0.0;
+        for (idx, edge) in self.edges.iter().enumerate() {
+            let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
+            else {
+                continue;
+            };
+            let predicted = to.world_to_camera.compose(&from.world_to_camera.inverse());
+            let r = edge.measurement.inverse().compose(&predicted).log();
+            let gw = gnc_weights.map_or(1.0, |w| w[idx]);
+            total += gw
+                * match &edge.information {
+                    Some(omega) => kernel.cost((r.transpose() * omega * r)[(0, 0)]),
+                    None => edge.weight * kernel.cost(r.norm_squared()),
+                };
+        }
+        total
+    }
+
+    /// Per-edge (whitened) squared residual `sᵢ`, indexed by edge position —
+    /// the same quantity the [`RobustKernel`] sees: the Mahalanobis distance
+    /// `rᵀΩr` for an edge carrying a full information matrix, else `‖r‖²`.
+    /// Edges referencing a missing node contribute `0.0` so the vector stays
+    /// aligned with [`Self::edges`]. Used by the GNC driver to reweight edges.
+    fn edge_squared_residuals(&self) -> Vec<f64> {
+        self.edges
+            .iter()
+            .map(|edge| {
+                let (Some(from), Some(to)) = (self.poses.get(&edge.from), self.poses.get(&edge.to))
+                else {
+                    return 0.0;
+                };
+                let predicted = to.world_to_camera.compose(&from.world_to_camera.inverse());
+                let r = edge.measurement.inverse().compose(&predicted).log();
+                match &edge.information {
+                    Some(omega) => (r.transpose() * omega * r)[(0, 0)],
+                    None => r.norm_squared(),
+                }
+            })
+            .collect()
     }
 
     /// Assemble the Gauss-Newton normal equations `(H, g)` for the SE(3) pose
@@ -4190,6 +4285,205 @@ impl PoseGraph {
             final_cost: current_cost,
             iterations,
             converged,
+        })
+    }
+
+    /// Outlier-robust SE(3) pose-graph optimization via Graduated Non-Convexity
+    /// (GNC; see [`crate::gnc`]). Use this instead of [`Self::optimize_se3_iterative`]
+    /// when loop closures may be **wrong** (perceptual aliasing, place-recognition
+    /// false positives): a single bad loop closure pulls a plain least-squares —
+    /// or even a Huber/Cauchy IRLS — solve into a corrupted basin, whereas GNC
+    /// anneals from a convex surrogate that trusts every edge to the true robust
+    /// cost that rejects outliers, recovering the inlier trajectory.
+    ///
+    /// `config` supplies the same SE(3) LM settings as
+    /// [`Self::optimize_se3_iterative`] (linear solver, `λ` schedule,
+    /// tolerances, chordal seeding); its `robust_kernel` is ignored — GNC
+    /// supersedes the M-estimator and the inner solve runs on the GNC-weighted
+    /// least-squares cost. `gnc` selects the surrogate family, the inlier scale
+    /// `c`, the `μ` annealing factor, the outer-level cap, and the number of
+    /// inner LM iterations per level.
+    ///
+    /// Each outer level reweights every edge by its closed-form GNC weight at
+    /// the current `μ`, runs a bounded weighted-LS solve, then sharpens `μ` one
+    /// geometric step. The fill-reducing order and block-Cholesky symbolic
+    /// factorization are `μ`-invariant and reused across all levels. The
+    /// returned [`PoseGraphGncResult::edge_weights`] is the final per-edge
+    /// inlier/outlier classification.
+    pub fn optimize_se3_gnc(
+        &mut self,
+        config: &PoseGraphSe3Config,
+        gnc: &gnc::GncConfig,
+    ) -> Result<PoseGraphGncResult, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if !self.poses.contains_key(&anchor_id) {
+            return Err(PoseGraphError::MissingNode(anchor_id));
+        }
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        for edge in &self.edges {
+            if !self.poses.contains_key(&edge.from) {
+                return Err(PoseGraphError::MissingNode(edge.from));
+            }
+            if !self.poses.contains_key(&edge.to) {
+                return Err(PoseGraphError::MissingNode(edge.to));
+            }
+        }
+
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+        let dim = variable_count * 6;
+
+        // GNC replaces the M-estimator, so the inner solve is plain weighted
+        // least squares (kernel `None`); the GNC weights carry the robustness.
+        let kernel = RobustKernel::None;
+        // Report the pre-seed plain L2 cost so the reduction reflects the full
+        // improvement, mirroring `optimize_se3_iterative`.
+        let initial_cost = self.robust_se3_cost(&kernel);
+
+        // Optional chordal rotation seeding (best-effort). GNC's first surrogate
+        // is convex (trusts every edge), so seeding from the all-edge rotation
+        // least squares is consistent with it; as μ sharpens, outliers are
+        // down-weighted and the estimate moves off any seed they corrupted.
+        if config.chordal_init
+            && self
+                .initialize_rotations_chordal(config.linear_solver)
+                .is_ok()
+        {
+            let _ = self.optimize_translations_once_with(config.linear_solver);
+        }
+
+        // Convex first surrogate: initialize μ from the largest seeded residual.
+        let s_max = self
+            .edge_squared_residuals()
+            .iter()
+            .copied()
+            .fold(0.0_f64, f64::max);
+        let mut state = gnc::GncState::new(gnc, s_max);
+        let mut gnc_weights = vec![1.0_f64; self.edges.len()];
+
+        // The sparsity pattern is μ-invariant, so the fill-reducing order and
+        // block-Cholesky symbolic factorization are analyzed once and reused.
+        let mut order_cache: Option<reordering::Reordering> = None;
+        let mut symbolic_cache: Option<block_cholesky::BlockSymbolic> = None;
+
+        let mut converged = false;
+        let mut outer_iterations = 0usize;
+        let max_outer = gnc.max_outer.max(1);
+
+        for _ in 0..max_outer {
+            outer_iterations += 1;
+            // A level entered already-terminal is solving at the true robust
+            // cost — run it, then stop (guarantees one solve at terminal μ).
+            let terminal_level = state.is_terminal();
+
+            // Black-Rangarajan weight update at the current μ.
+            let residuals = self.edge_squared_residuals();
+            for (i, &s) in residuals.iter().enumerate() {
+                gnc_weights[i] = state.weight(s);
+            }
+
+            // Inner weighted-LS solve at fixed weights (a few LM steps).
+            let mut lambda = config.initial_lambda.unwrap_or(0.0);
+            let mut current_cost = self.robust_se3_cost_weighted(&kernel, Some(&gnc_weights));
+            for _ in 0..gnc.inner_iterations.max(1) {
+                let (builder, g) = self.assemble_se3_system(
+                    &node_index,
+                    dim,
+                    &kernel,
+                    Some(&gnc_weights),
+                    config.linear_solver,
+                );
+                let neg_g = -&g;
+                let delta = builder.solve(lambda, &neg_g, &mut order_cache, &mut symbolic_cache)?;
+
+                let saved_poses = if config.initial_lambda.is_some() {
+                    Some(self.poses.clone())
+                } else {
+                    None
+                };
+                let mut max_step_norm: f64 = 0.0;
+                for (&id, &i) in &node_index {
+                    let block = i * 6;
+                    let mut xi = Vector6::<f64>::zeros();
+                    for k in 0..6 {
+                        xi[k] = delta[block + k];
+                    }
+                    max_step_norm = max_step_norm.max(xi.norm());
+                    let pose = self
+                        .poses
+                        .get_mut(&id)
+                        .ok_or(PoseGraphError::MissingNode(id))?;
+                    pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&xi));
+                }
+
+                let cost_after = self.robust_se3_cost_weighted(&kernel, Some(&gnc_weights));
+                let accepted = match config.initial_lambda {
+                    None => true,
+                    Some(_) => cost_after < current_cost,
+                };
+                if !accepted {
+                    if let Some(saved) = saved_poses {
+                        self.poses = saved;
+                    }
+                    lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                    if lambda >= config.max_lambda {
+                        break;
+                    }
+                    continue;
+                }
+                current_cost = cost_after;
+                if config.initial_lambda.is_some() {
+                    lambda = (lambda * config.lambda_decrease_factor).max(config.min_lambda);
+                }
+                if max_step_norm < config.step_tolerance {
+                    break;
+                }
+            }
+
+            if terminal_level {
+                converged = true;
+                break;
+            }
+            state.anneal();
+        }
+
+        // Final per-edge classification at the converged estimate and μ.
+        let residuals = self.edge_squared_residuals();
+        for (i, &s) in residuals.iter().enumerate() {
+            gnc_weights[i] = state.weight(s);
+        }
+        let final_cost = self.robust_se3_cost(&kernel);
+        // Plain L2 over retained inliers: binarize the weights at the inlier
+        // cutoff and reuse the weighted cost.
+        const INLIER_THRESHOLD: f64 = 0.5;
+        let inlier_mask: Vec<f64> = gnc_weights
+            .iter()
+            .map(|&w| if w >= INLIER_THRESHOLD { 1.0 } else { 0.0 })
+            .collect();
+        let inlier_cost = self.robust_se3_cost_weighted(&kernel, Some(&inlier_mask));
+
+        Ok(PoseGraphGncResult {
+            anchor_id,
+            edge_count: self.edges.len(),
+            variable_count,
+            initial_cost,
+            final_cost,
+            inlier_cost,
+            outer_iterations,
+            converged,
+            edge_weights: gnc_weights,
         })
     }
 
