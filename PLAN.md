@@ -9,15 +9,27 @@ Repository:
 
 - GitHub: `rsasaki0109/visloc-rs`
 - Main branch is the active development branch.
-- Latest functional milestone before this handoff: COLMAP South Building deep-frontend
-  localization sweep (`deep_localization_demo --sweep`) now emits classical,
-  single-scale deep, and `deep-ms` rows across 25 (map, query) pairs; the
-  documented measured table still reflects the historical 2-frontend run.
-- Current active workstream: file-backed SuperPoint/LightGlue stereo VO on
-  local KITTI odometry training subsets. The tuned SP/LG run now beats the
-  current HOG/MutualSoftmax reference on local 00-10 / 260-frame aggregate
+- Latest functional milestone (2026-05-26): **GNC outlier-robust back-end
+  trilogy** complete on `main` with green CI — Graduated Non-Convexity for
+  pose-graph optimization (`PoseGraph::optimize_se3_gnc`), for bundle
+  adjustment (`BundleAdjustment::optimize_gnc`), and MAD auto-estimation of
+  the inlier scale (`GncConfig::auto_scale`), all reusing one `gnc.rs` math
+  core. See §"SLAM Optimization Back-End Workstream".
+- Current active workstream: the **SLAM optimization back-end** — making the
+  SE(3) PGO / Schur-BA solver both fast (block Cholesky + fill-reducing
+  reordering + rayon level/intra-column parallelism + symbolic caching, ~3–4×
+  over scalar `CscCholesky`) and robust (chordal init, Sim(3) scale drift, GNC
+  outlier rejection). The factorization-perf vein is at its Amdahl ceiling, so
+  recent work is capability-side (the GNC trilogy above). Detailed running log
+  in the auto-memory roadmap `project-visloc-slam-benchmark-roadmap`.
+- Parallel / prior workstream: file-backed SuperPoint/LightGlue stereo VO on
+  local KITTI odometry training subsets. The tuned SP/LG run beats the
+  HOG/MutualSoftmax reference on local 00-10 / 260-frame aggregate
   `mean_t_rel` and `mean_max_t_rel`, but seq08 remains the dominant
-  worst-window outlier.
+  worst-window outlier. (See §"Current KITTI Stereo VO Drift Tuning Handoff".)
+- Earlier functional milestone: COLMAP South Building deep-frontend
+  localization sweep (`deep_localization_demo --sweep`) emits classical,
+  single-scale deep, and `deep-ms` rows across 25 (map, query) pairs.
 - Rust MSRV: 1.82
 - Unsafe code is forbidden.
 - Main math dependency: `nalgebra`
@@ -820,6 +832,190 @@ Remaining candidates after the Phase-27 plan-doc closeout:
    that ties tracker, vi-init, motion-vi-init, local-VI-BA, and the
    mirror together. All CLI flags Phase-7 onward live here.
 5. `target/euroc_phase??_*/summary.txt` for prior phase outputs.
+
+### SLAM Optimization Back-End Workstream
+
+This is the second active workstream (parallel to the EuRoC VI thread
+above): making the SE(3) pose-graph and bundle-adjustment back-end
+**competitive on the canonical SLAM benchmarks** — both *fast* (block
+Cholesky + fill-reducing reordering + parallelism + symbolic caching)
+and *robust* (chordal init, Sim(3) scale drift, and Graduated
+Non-Convexity outlier rejection). The standing directive is "do
+技術的に面白い開発 on the SLAM back-end"; the specific feature choice is
+delegated, advanced by short proceed signals (each endorses picking AND
+executing the next step). The detailed running log is the auto-memory
+roadmap `project-visloc-slam-benchmark-roadmap`; this section is the
+PLAN-level handoff snapshot.
+
+The work splits into two arcs, both shipped to `main` with green CI.
+
+#### Arc A — solver performance (the factorization stack)
+
+Profiling `optimize_se3_iterative` showed the **linear solve dominates
+(83–91 % of each LM iteration)**; per-edge `JᵀΩJ`/`JᵀΩr` assembly is only
+6–15 % and cost eval 1–2 %. So the perf work is all in the solve. Shipped
+incrementally, each a focused commit, each measured by clean *same-process
+interleaved A/B* (cross-process env sweeps proved untrustworthy — load
+noise inflated absolutes ~40 % and even flipped a sign):
+
+| Step | What | Measured win |
+|------|------|--------------|
+| Fill-reducing reordering | RCM + nested-dissection, auto-selected by symbolic factor size, with a minimum-degree *rescue* when both geometric orders blow up | cubicle >10 min timeout → ~34 s; rim now completes |
+| Lazy-heap min-degree (`d9f7f3a`) | replaced the O(n²) linear-scan pivot pick with a lazy binary min-heap; bit-identical output | selection O((n+fill)·log n) |
+| Chordal rotation init, default-on (`8dc0ee6`) | relax SO(3)→3×3, solve a linear rotation LLS, re-derive translations; seeds the LM loop in the right basin | rim final χ² 8.99e7 → 1.16e5 (~775× lower, now converges); torus3D 44 s → 20 s; uniform win, never worse |
+| Block Cholesky (`aa20f46`) | simplicial *block* Cholesky on stack-allocated `SMatrix<B,B>` kernels (B ∈ {3,6}), replacing `nalgebra_sparse::CscCholesky` on both `Sparse` paths; bit-equivalent | **~3–4× end-to-end**: sphere2500 6.8 → 1.8 s, torus3D 42 → 9.7 s, rim 55 → 15 s |
+| BA Schur block Cholesky (`44a8f6c`) | routed the pure-visual reduced camera system through the block solver | ~4.7× per-factorization, ~1.4× end-to-end (Schur reduction dominates) |
+| Scatter-map numeric phase (`b3b6036`) | reusable relative-index map replaces per-touch `binary_search`; bit-identical | b=6 isolation ~4.7× → ~5.6× vs scalar |
+| Supernodal amalgamation (`9258d03`) | **evaluated and REJECTED** — the factor is already dense at B×B granularity and nalgebra has no tuned BLAS, so dynamic dense panels can't beat the unrolled `SMatrix` kernel. Kept `detect_supernodes` + a "Why not supernodal?" doc note | n/a (negative result, documented so it isn't reopened) |
+| Across-level rayon parallelism | bucket columns by elimination-tree level (same-level columns independent), factor each heavy level on the rayon pool; bit-identical; work-gated so cheap wide leaf levels don't pay dispatch cost | torus3D ~1.18×, rim ~1.09× on 20 cores (bounded by the serial separator chain near the root) |
+| Intra-column parallelism | a heavy separator column's trailing update is a sum over hundreds of contributors → reduce it on the pool (`par_chunks`); pure-Rust intra-separator parallelism, NOT the ruled-out BLAS panel split; agrees-to-rounding (not bit-identical), deterministic across thread counts | torus3D ~1.17× → ~1.4×, rim ~1.09× → ~1.26× |
+| Symbolic caching across LM iters | split `BlockSymbolic::analyze()` (pattern, once) from `refactor_numeric::<B>` (values, per iter); the etree/levels/COO→block pattern was 19–31 % of the solve, recomputed every iteration | torus3D ~1.14×, parking-garage ~1.3× (its BTreeMap assembly was big vs a tiny solve) |
+| Work-gated intra-column (`ca9b9e6`) | the intra gate fired on contributor *count*, admitting columns with many contributors but few rows (little arithmetic, pure dispatch overhead) → gate on per-column *work* `|contributors|·|rows|` (`INTRA_MIN_WORK`=12000) | torus3D +6.2 %, rim +4.5 %, cubicle/sphere no longer regressed |
+
+A nested "intra-inside-across" experiment was tried and **reverted** (the
+per-column task + alloc overhead outweighed the core-fill benefit — torus3D
+~8 % slower). The factorization stack is now at its practical Amdahl ceiling
+(the serial root-separator chain); further solver gains would need a
+different hotspot or a tuned BLAS dependency (against the pure-Rust grain).
+
+#### Arc B — robustness and capability (chordal, Sim(3), GNC)
+
+Once the perf vein was tapped out, the work stepped up to capabilities the
+back-end *lacked*:
+
+- **TUM-style RPE metric** (`relative_pose_error_against`) and **Sim(3)
+  scale-drift correction** — `Sim3` Lie group in
+  `crates/core/src/geometry/sim3.rs` (exp/log via the W-Jacobian) +
+  `Sim3PoseGraph` in `pipelines/slam/src/sim3_pose_graph.rs` (7-DOF LM,
+  reuses the SE(3) dense solver) + `examples/sim3_scale_drift_pgo_demo.rs`.
+  For monocular scale drift.
+- **GNC outlier-robust PGO** (`a3fbc1a..1b16c1f`) — the headline capability.
+  The existing Huber/Cauchy IRLS is a local M-estimator with a non-convex
+  influence function, so a wrong loop closure can capture it. **Graduated
+  Non-Convexity** (Yang et al. 2020, the Kimera-RPGO / TEASER++ engine)
+  anneals a control parameter `μ` from a convex surrogate (trusts every
+  edge = least squares) to the true non-convex robust cost (rejects
+  outliers), shepherding the optimizer into the inlier basin *before* the
+  cost turns non-convex. By Black-Rangarajan duality each surrogate solve
+  is weighted least squares with closed-form weights `w ∈ [0,1]`, so GNC
+  drops into the existing weighted normal-equation assembly. Two surrogates:
+  Geman-McClure (smooth, `μ` large→1) and Truncated-Least-Squares (TEASER++
+  default, hard 0/1 verdict, `μ` small→band-collapse).
+  `PoseGraph::optimize_se3_gnc(config, gnc)`; the pure math is in `gnc.rs`
+  (no `PoseGraph` dep, unit-tested in isolation).
+- **GNC outlier-robust bundle adjustment** (`e62857c..f850e10`) — the same
+  Black-Rangarajan weighting per *observation* (wrong feature
+  correspondences) instead of per edge. `BundleAdjustment::optimize_gnc`.
+  The cost/assembly were generalized to `robust_cost_weighted` /
+  `optimize_weighted` taking an optional per-observation weight slice
+  (`None` is bit-identical — the 42 BA tests prove it); only reprojections
+  are reweighted, never the gravity/position/pairwise/IMU priors. Reuses
+  the `gnc.rs` core verbatim (no new surrogate math).
+- **MAD auto-estimation of the inlier scale** (`015cdd8..3d6b953`) — removes
+  the one fragile hand-tuned knob, shared by both GNC solvers.
+  `gnc::estimate_scale_mad` is the Iglewicz-Hoaglin robust cutoff
+  `median(ρ) + k·1.4826·MAD(ρ)` on the residual norms (breakdown-robust to
+  ~50 % outliers); `GncConfig::auto_scale: Option<f64>` enables it with the
+  literal `c` as a floor. `PoseGraphGncResult` / `BaGncResult` report the
+  `inlier_scale` actually used.
+
+**Measured on real SE-Sync `.g2o`** (inject N random wrong loop closures —
+the standard robust-PGO protocol — and measure inlier-edge χ² as ×baseline +
+outlier recall/FP; `examples/pgo_g2o_robust_benchmark.rs`):
+
+- `sphere2500` +30: L2 **~89–95×** baseline, Huber ~51×, **GNC-GM/TLS 1.0×**
+  (30/30 rejected, 0 FP). Auto-scale picks `c ≈ 16` and recovers exactly
+  with zero tuning.
+- `torus3D` +40: L2 ~5.7–6.4×, Huber ~1.9–4.2×, **GNC-TLS** 40/40 recall.
+
+**Honest findings (baked into tests/README/memory):**
+
+- `c` is the inlier residual scale and must match the graph's noise — for a
+  *fixed* `c`, sphere's residuals are ~8× tighter than torus's. `auto_scale`
+  is exactly the fix for this coupling.
+- **TLS > GM for decisiveness** — TLS's hard 0/1 verdict drives FP→0 and gives
+  exact recovery; GM is smooth so it leaves borderline edges down-weighted
+  (near-exact, never hard-zero). In BA, GM's fractional inlier weights even
+  loosen the weakly-observable monocular depth direction (it is for outlier
+  *identification*; TLS for *exact recovery*).
+- **`inner_iterations` is a GNC knob, not just a convergence setting** — too
+  many inner iterations over-commits the convex phase to the outlier-trusting
+  solution (an outlier reached weight 0.99, un-rejected); `inner=5` is correct
+  (each μ level solved *partially* so annealing can still steer).
+- **`torus3D` at seed 1 is c-insensitive across `c ∈ [6, 9.88]`** (all give
+  TLS 4 FP / 1.6×) — its residual floor is an intrinsic hard-graph / seed
+  property, not a scale gap, and auto-scale (c≈10) matches the best fixed `c`.
+  An older "torus c=6 → 0 FP" figure was a *different seed*; **always pin the
+  same seed when comparing robust-PGO numbers** (torus robustness is
+  seed-variable).
+- GM fails on an *ambiguous leaf* outlier (a node with only one other
+  constraint) — needs a rigid/over-determined graph.
+
+#### Key files for the back-end workstream
+
+- `pipelines/slam/src/gnc.rs` — GNC surrogate math (`GncKernel`, `GncConfig`,
+  `GncState`) + `estimate_scale_mad`; pure, no `PoseGraph` dep; 12 unit tests.
+- `pipelines/slam/src/lib.rs` — `PoseGraph::optimize_se3_gnc`,
+  `optimize_se3_iterative`, chordal init, `PoseGraphGncResult`; the
+  reordering / block-Cholesky / symbolic-cache plumbing threads through here.
+- `pipelines/slam/src/bundle.rs` — `BundleAdjustment::optimize` /
+  `optimize_gnc`, `build_normal_equations`, Schur complement, `BaGncResult`.
+- `pipelines/slam/src/block_cholesky.rs` — simplicial block Cholesky,
+  `BlockSymbolic` analyze/refactor split, rayon across-level + intra-column,
+  the "Why not supernodal?" note.
+- `pipelines/slam/src/reordering.rs` — RCM / nested dissection / min-degree.
+- `pipelines/slam/src/sim3_pose_graph.rs` — 7-DOF Sim(3) PGO.
+- Tests: `pipelines/slam/tests/gnc_robust_pgo.rs` (5),
+  `gnc_robust_ba.rs` (5); plus the in-crate solver-equivalence tests.
+- Examples: `examples/pgo_g2o_benchmark.rs` (accuracy/speed, `--chordal-init`),
+  `examples/pgo_g2o_robust_benchmark.rs` (outlier robustness, `--inject N`,
+  `--c VAL`, `--auto-c`, `--auto-c-k VAL`, `--seed`).
+
+#### Reproducing the benchmarks
+
+```bash
+# Fetch the SE-Sync .g2o datasets into datasets/pgo_g2o/ (git-ignored).
+scripts/fetch_pgo_g2o_datasets.sh
+
+# Accuracy / speed (chordal A/B):
+cargo run --release --example pgo_g2o_benchmark -- --chordal-init datasets/pgo_g2o/torus3D.g2o
+
+# Outlier robustness with MAD auto-scale:
+cargo run --release --example pgo_g2o_robust_benchmark -- \
+  --inject 30 --auto-c datasets/pgo_g2o/sphere2500.g2o
+```
+
+#### Next candidates for the back-end (need a fresh proceed signal)
+
+- **Expose GNC through the online-SLAM loop-closure path** — the last
+  untouched GNC integration point, so verified-but-wrong closures are
+  caught at the back-end inside `process_frame` (the
+  `OnlineSlamConfig::pose_graph_refinement` stage currently runs plain
+  `optimize_se3_iterative`).
+- **Real-data labeled-outlier BA benchmark** — the BA analogue of
+  `pgo_g2o_robust_benchmark`. No standalone BAL loader fits the pinhole
+  model (BAL's -Z projection + radial distortion don't map cleanly), so it
+  needs the image frontend; the real KITTI stereo BA already exists inside
+  `examples/online_slam_stereo_vo_kitti_demo.rs` (real tracks, already
+  Huber-robust against VO-chaining outliers). A local KITTI stereo subset is
+  at `~/datasets/kitti_seq00_stereo_subset` (100 frames).
+- **Adaptive per-μ-level `auto_scale`** — SHIPPED for BA
+  (`GncConfig::auto_scale_readapt`, demo `--ba-gnc-readapt`): re-estimating the
+  scale each μ level tightens the inflated one-shot estimate and makes GNC beat
+  Huber at high contamination on the real KITTI BA chain (ba-ATE 17.08 → 11.23 m
+  at +21 %). But it is a BA-only win — measured HARMFUL on PGO
+  (`pgo_g2o_robust_benchmark --readapt`): TLS's hard rejection collapses inlier
+  residuals so the re-estimate over-tightens `c` and over-rejects real edges
+  (sphere2500 +300 GNC-TLS χ² 121.6× one-shot → 925.2× readapt-floor-12). So it
+  is gated behind the flag, not a default. No further PGO readapt work planned.
+- Lower-ROI solver-perf leftovers: multifrontal subtree parallelism (same
+  Amdahl ceiling as level-parallel, marginal over the current two-axis
+  scheme); tune `INTRA_CONTRIB_CHUNK`; a BLAS-backed feature flag if dense
+  BA/PGO ever needs it.
+
+**Recurring gotcha:** every `git push origin main` requires explicit
+authorization each time (a generic proceed signal is NOT push authorization);
+the user has consistently chosen "main に直接 push" when asked.
 
 ### Fusion Foundation
 
