@@ -176,6 +176,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `None` = use the fixed `c`; `Some(k)` = MAD auto-estimate the inlier scale
     // with multiplier `k` (floored at `c`). `--auto-c` uses the recommended k.
     let mut auto_scale: Option<f64> = None;
+    // Re-estimate the auto scale every μ level instead of once. Only meaningful
+    // with an auto scale, so `--readapt` implies `--auto-c` if none was set.
+    //
+    // WARNING — this is a BA feature, not a PGO one. Re-adapting helps bundle
+    // adjustment (where the one-shot MAD scale *inflates* on the contaminated
+    // VO-chain init, so tightening it per μ level recovers recall — see the
+    // `--ba-gnc-readapt` results in online_slam_stereo_vo_kitti_demo). On PGO it
+    // is HARMFUL: TLS's hard 0/1 rejection drives the inlier residuals down each
+    // μ level, so the MAD re-estimate keeps shrinking `c`, the inlier band
+    // over-tightens, and real edges get over-rejected (FP explodes, the graph
+    // shatters). Measured on sphere2500 +300 (6 % contamination, seed 1) the
+    // GNC-TLS inlier-χ² goes 121.6× (one-shot, c≈30) → 4338.8× (readapt, floor
+    // 3, c collapses to the floor) → 925.2× (readapt, floor 12) — every readapt
+    // variant loses badly to one-shot. The loose one-shot `c` is *correct* for
+    // PGO; being loose protects real-edge recall. Kept only for A/B diagnosis.
+    let mut readapt = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -187,8 +203,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let k = args.next().and_then(|s| s.parse().ok());
                 auto_scale = Some(k.unwrap_or(visloc_slam::gnc::AUTO_SCALE_K));
             }
+            "--readapt" => readapt = true,
             other => path = Some(other.to_string()),
         }
+    }
+    if readapt && auto_scale.is_none() {
+        auto_scale = Some(visloc_slam::gnc::AUTO_SCALE_K);
     }
 
     let (clean, source) = match &path {
@@ -206,7 +226,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  original edges : {original_edges}");
     println!("  injected       : {inject} wrong loop closures (seed {seed})");
     match auto_scale {
-        Some(k) => println!("  inlier scale c : auto (MAD, k={k}, floor {c})"),
+        Some(k) => println!(
+            "  inlier scale c : auto (MAD, k={k}, floor {c}){}",
+            if readapt {
+                ", re-adapted per μ level"
+            } else {
+                ""
+            }
+        ),
         None => println!("  inlier scale c : {c} (fixed)"),
     }
     println!();
@@ -258,6 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GncKernel::GemanMcClure,
         c,
         auto_scale,
+        readapt,
     )?;
     run_gnc(
         "GNC-TLS",
@@ -268,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GncKernel::TruncatedLeastSquares,
         c,
         auto_scale,
+        readapt,
     )?;
 
     Ok(())
@@ -308,12 +337,14 @@ fn run_gnc(
     kernel: GncKernel,
     c: f64,
     auto_scale: Option<f64>,
+    auto_scale_readapt: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = corrupted.clone();
     let gnc = GncConfig {
         kernel,
         c,
         auto_scale,
+        auto_scale_readapt,
         ..GncConfig::default()
     };
     let result = graph.optimize_se3_gnc(&base_config(), &gnc)?;
