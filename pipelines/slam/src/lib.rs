@@ -4629,6 +4629,68 @@ impl PoseGraph {
         })
     }
 
+    /// Recover the marginal covariance of every non-anchor pose from the
+    /// information matrix `Λ = JᵀΩJ` assembled at the *current* estimate (run a
+    /// solve first so this is the covariance at the optimum). Uses the
+    /// Takahashi sparse-inverse recursion ([`crate::covariance`]) so the dense
+    /// `Λ⁻¹` is never formed. Each `Matrix6` is the covariance of that pose in
+    /// its local SE(3) tangent (the `[ω | ρ]` ordering of
+    /// [`SE3::log`](visloc_core::geometry::SE3::log)); the gauge-fixed anchor
+    /// has no free covariance and is omitted from the result.
+    ///
+    /// Useful for loop-closure gating (gate a candidate on the relative
+    /// uncertainty between its endpoints) and uncertainty-aware fusion. Errors
+    /// mirror the solvers: [`PoseGraphError::NoAnchor`] / `NoEdges` /
+    /// `NoVariables`, and [`PoseGraphError::SingularSystem`] when `Λ` is not
+    /// positive-definite (a rank-deficient / disconnected graph).
+    pub fn pose_marginal_covariances(&self) -> Result<BTreeMap<u64, Matrix6<f64>>, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if !self.poses.contains_key(&anchor_id) {
+            return Err(PoseGraphError::MissingNode(anchor_id));
+        }
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        // Free-variable indexing (anchor excluded), identical to the solvers.
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+        let dim = variable_count * 6;
+
+        // Assemble the dense information matrix at the current estimate (plain
+        // L2 — kernel `None`, no GNC weights). Forcing the dense backend so the
+        // 6×6-block recursion reads `Λ` directly.
+        let (builder, _g) = self.assemble_se3_system(
+            &node_index,
+            dim,
+            &RobustKernel::None,
+            None,
+            LinearSolver::Dense,
+        );
+        let lambda = match builder {
+            NormalEquations6::Dense(h) => h,
+            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        };
+
+        let blocks = covariance::marginal_block_covariances(&lambda, 6)
+            .ok_or(PoseGraphError::SingularSystem)?;
+        let mut out = BTreeMap::new();
+        for (&id, &idx) in &node_index {
+            let block = &blocks[idx];
+            out.insert(id, Matrix6::from_fn(|r, c| block[(r, c)]));
+        }
+        Ok(out)
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///
