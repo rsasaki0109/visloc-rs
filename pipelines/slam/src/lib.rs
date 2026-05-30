@@ -436,6 +436,19 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// `auto_scale_readapt` here (it is a BA-only win and over-rejects real
     /// edges on pose graphs).
     pub gnc: Option<gnc::GncConfig>,
+    /// Optional Pairwise Consistency Maximization *front-end* screen
+    /// ([`crate::pcm`]). `None` (default) admits every verified loop closure;
+    /// `Some(cfg)` screens each newly-verified closure for geometric
+    /// consistency with the already-admitted set BEFORE it enters the graph,
+    /// so a perceptual-aliasing false positive never corrupts the
+    /// (non-robust) initializer or the solve. A closure is admitted when it is
+    /// individually consistent with the odometry (current graph poses) and
+    /// pairwise-consistent with a strict majority of the established
+    /// closures. This is complementary to `gnc`: PCM removes the gross
+    /// outliers up front, GNC catches the borderline ones the residual gate
+    /// admits. Rejections are reported on
+    /// [`OnlineSlamLoopClosureRefinementStats::loop_closures_pcm_rejected`].
+    pub pcm: Option<pcm::PcmConfig>,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -522,6 +535,10 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// verified-but-wrong closures caught and rejected at the back-end.
     /// Always `0` on the plain iterative path (`gnc` unset).
     pub loop_closures_rejected: usize,
+    /// Number of verified loop closures the PCM front-end screen rejected this
+    /// frame *before* they entered the graph (geometrically inconsistent with
+    /// the established set). Always `0` when `pcm` is unset.
+    pub loop_closures_pcm_rejected: usize,
     /// Number of `map.keyframes[id].frame.pose` slots overwritten with
     /// the optimised pose after PGO. Zero unless a solve fired this frame
     /// (`pose_graph_result.is_some()` or `gnc_result.is_some()`).
@@ -2155,6 +2172,31 @@ where
                 &state.config.camera,
                 &verifier,
             );
+            // PCM front-end screen (optional): snapshot the current odometry
+            // (graph poses) and the already-admitted closures once, then admit
+            // a new closure only if it is geometrically consistent with the
+            // established set — so a wrong closure never enters the graph.
+            let pcm_cfg = state.config.pcm;
+            let odometry: BTreeMap<u64, SE3> = if pcm_cfg.is_some() {
+                state
+                    .graph
+                    .poses
+                    .iter()
+                    .map(|(id, p)| (*id, p.world_to_camera.clone()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+            let mut admitted: Vec<pcm::LoopMeasurement> = if pcm_cfg.is_some() {
+                state
+                    .verified_constraints
+                    .iter()
+                    .map(loop_measurement_of)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             for candidate in loop_closure_candidates.iter() {
                 let Some(constraint) = LoopClosureConstraint::from_verified_candidate(candidate)
                 else {
@@ -2165,6 +2207,14 @@ where
                 // matched keyframe must already exist in the graph.
                 if !state.graph.poses.contains_key(&constraint.from_keyframe_id) {
                     continue;
+                }
+                if let Some(cfg) = &pcm_cfg {
+                    let m = loop_measurement_of(&constraint);
+                    if !pcm_admits_loop(&m, &admitted, &odometry, cfg) {
+                        stats.loop_closures_pcm_rejected += 1;
+                        continue;
+                    }
+                    admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
                 state.verified_constraints.push(constraint);
@@ -5057,6 +5107,50 @@ pub fn relative_world_to_camera(from_pose: &Pose, to_pose: &Pose) -> SE3 {
     to_pose
         .world_to_camera
         .compose(&from_pose.world_to_camera.inverse())
+}
+
+/// The PCM [`pcm::LoopMeasurement`] view of a verified loop-closure constraint.
+fn loop_measurement_of(c: &LoopClosureConstraint) -> pcm::LoopMeasurement {
+    pcm::LoopMeasurement {
+        from: c.from_keyframe_id,
+        to: c.to_keyframe_id,
+        relative: c.relative_pose.clone(),
+    }
+}
+
+/// PCM admission test for a single newly-verified loop closure (the online,
+/// incremental variant of [`pcm::maximum_consistent_set`]). Admits `new` when it
+/// is individually consistent with the odometry (if
+/// [`pcm::PcmConfig::require_individual`]) and pairwise-consistent with a strict
+/// majority of the already-`admitted` closures — so a perceptual-aliasing false
+/// positive, inconsistent with the established consensus, is rejected before it
+/// enters the graph. The first closure (empty `admitted`) is admitted on the
+/// individual check alone.
+fn pcm_admits_loop(
+    new: &pcm::LoopMeasurement,
+    admitted: &[pcm::LoopMeasurement],
+    odometry: &BTreeMap<u64, SE3>,
+    cfg: &pcm::PcmConfig,
+) -> bool {
+    if cfg.require_individual {
+        match pcm::individual_residual(new, odometry) {
+            Some(r) if r <= cfg.threshold => {}
+            _ => return false,
+        }
+    }
+    if admitted.is_empty() {
+        return true;
+    }
+    let consistent = admitted
+        .iter()
+        .filter(|a| {
+            pcm::pairwise_residual(new, a, odometry)
+                .map(|r| r <= cfg.threshold)
+                .unwrap_or(false)
+        })
+        .count();
+    // Strict majority of the established set agrees with the new closure.
+    consistent * 2 > admitted.len()
 }
 
 /// Translation-only constraint on camera centers in world coordinates implied
