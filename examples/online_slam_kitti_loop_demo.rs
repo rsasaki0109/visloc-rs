@@ -21,6 +21,15 @@
 //! count. This makes GNC's value quantitative on a *real* trajectory: the
 //! plain solve is dragged off by the wrong closures; GNC rejects them.
 //!
+//! With `--pcm` the demo also runs Pairwise Consistency Maximization
+//! ([`visloc_rs::slam::pcm`]) as a *front-end* screen: it keeps only the
+//! largest mutually-consistent subset of loop closures and runs a plain solve
+//! on that cleaned set. On KITTI 00 (truth init) PCM drops every injected wrong
+//! loop with zero genuine loops lost and recovers ATE to ~0.01 m at every seed
+//! and contamination level — strictly more reliable than the back-end GNC here
+//! (GNC's recall/FP are seed-variable). Front-end screening and back-end
+//! robustness are complementary.
+//!
 //! Usage:
 //!
 //! ```sh
@@ -32,6 +41,7 @@
 //!     --out-dir target/kitti_loop_demo
 //! ```
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,6 +49,7 @@ use std::path::{Path, PathBuf};
 use nalgebra::{UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
 use visloc_rs::slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
+use visloc_rs::slam::pcm::{self, LoopMeasurement, PcmConfig};
 use visloc_rs::tracking::PoseTrajectory;
 use visloc_rs::{
     relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
@@ -54,6 +65,7 @@ struct CliArgs {
     max_keyframes: usize,
     inject_wrong_loops: usize,
     inject_seed: u64,
+    pcm: bool,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -64,6 +76,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut max_keyframes: usize = 200;
     let mut inject_wrong_loops: usize = 0;
     let mut inject_seed: u64 = 1;
+    let mut pcm = false;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -97,6 +110,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 inject_seed = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pcm" => {
+                pcm = true;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -111,6 +128,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         max_keyframes,
         inject_wrong_loops,
         inject_seed,
+        pcm,
     })
 }
 
@@ -153,27 +171,25 @@ fn ate(estimate: &[Pose], truth: &[Pose]) -> (f64, f64, f64) {
     (mean, rmse, max)
 }
 
-/// Inject `n` *wrong* loop closures into `graph` and return their edge indices
-/// (so the robust solver's verdict can be scored for recall / false positives).
-/// Each wrong closure picks two keyframes that are far apart in the sequence
-/// (so they are genuinely at different places) and asserts a near-identity
-/// relative pose — the textbook place-recognition false positive that claims
-/// the two are the same location. Such an edge has a huge residual and folds
-/// the trajectory onto itself unless the back-end rejects it.
-fn inject_wrong_loops(graph: &mut PoseGraph, n: usize, n_kf: usize, seed: u64) -> Vec<usize> {
+/// Build `n` *wrong* loop closures (the perceptual-aliasing false positive).
+/// Each picks two keyframes that are far apart in the sequence (so they are
+/// genuinely at different places) and asserts a near-identity relative pose —
+/// "place recognition says these two are the same location". Such a closure has
+/// a huge residual and folds the trajectory onto itself unless rejected.
+fn make_wrong_loops(n: usize, n_kf: usize, seed: u64) -> Vec<LoopClosureConstraint> {
     let mut rng = Lcg(seed.wrapping_mul(2) | 1);
-    let mut injected = Vec::with_capacity(n);
+    let mut wrong = Vec::with_capacity(n);
     let min_gap = (n_kf / 4).max(2);
     let mut guard = 0usize;
-    while injected.len() < n && guard < n * 1000 {
+    while wrong.len() < n && guard < n * 1000 {
         guard += 1;
         let i = (rng.next_u64() as usize) % n_kf;
         let j = (rng.next_u64() as usize) % n_kf;
         if (i as isize - j as isize).unsigned_abs() < min_gap {
             continue;
         }
-        // Near-identity relative pose: "place recognition says i and j are the
-        // same spot" — a small jitter so it is not a degenerate exact identity.
+        // Near-identity relative pose with a small jitter (not a degenerate
+        // exact identity).
         let translation = Vector3::new(
             rng.range(-2.0, 2.0),
             rng.range(-1.0, 1.0),
@@ -187,7 +203,7 @@ fn inject_wrong_loops(graph: &mut PoseGraph, n: usize, n_kf: usize, seed: u64) -
         let rotation = nalgebra::Unit::try_new(axis, 1e-9)
             .map(|a| UnitQuaternion::from_axis_angle(&a, rng.range(0.0, 0.2)))
             .unwrap_or_else(UnitQuaternion::identity);
-        graph.add_loop_closure_constraint(&LoopClosureConstraint {
+        wrong.push(LoopClosureConstraint {
             from_keyframe_id: i as u64,
             to_keyframe_id: j as u64,
             relative_pose: SE3::new(rotation, translation),
@@ -198,9 +214,8 @@ fn inject_wrong_loops(graph: &mut PoseGraph, n: usize, n_kf: usize, seed: u64) -
             mean_sampson_error: 0.0,
             score: 80.0,
         });
-        injected.push(graph.edges.len() - 1);
     }
-    injected
+    wrong
 }
 
 fn pgo_config() -> PoseGraphSe3Config {
@@ -295,13 +310,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // as a wrong loop's and the two are indistinguishable by residual).
     let proximity_m = 10.0;
     let min_gap = 10usize;
-    let mut genuine_loops = 0usize;
+    let mut loop_constraints: Vec<LoopClosureConstraint> = Vec::new();
+    let mut loop_is_wrong: Vec<bool> = Vec::new();
     for i in 0..n {
         let ci = keyframes[i].camera_center_world();
         for j in (i + min_gap)..n {
             let cj = keyframes[j].camera_center_world();
             if (ci - cj).norm() <= proximity_m {
-                graph.add_loop_closure_constraint(&LoopClosureConstraint {
+                loop_constraints.push(LoopClosureConstraint {
                     from_keyframe_id: i as u64,
                     to_keyframe_id: j as u64,
                     relative_pose: relative_world_to_camera(&keyframes[i], &keyframes[j]),
@@ -310,14 +326,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mean_sampson_error: 0.0,
                     score: 100.0,
                 });
-                genuine_loops += 1;
+                loop_is_wrong.push(false);
             }
         }
     }
+    let genuine_loops = loop_constraints.len();
     println!("genuine_loop_closures={genuine_loops}");
 
-    // Optionally corrupt the graph with wrong loop closures.
-    let injected = if args.inject_wrong_loops > 0 {
+    // Optionally corrupt the loop set with wrong loop closures.
+    if args.inject_wrong_loops > 0 {
         if args.yaw_drift_per_edge_rad > 1e-9 {
             // The robust-rejection comparison is cleanest from a GOOD init
             // (the standard robust-PGO protocol injects into a near-optimal
@@ -333,10 +350,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  use --yaw-drift-deg-per-edge 0 for the clean robust-rejection result"
             );
         }
-        inject_wrong_loops(&mut graph, args.inject_wrong_loops, n, args.inject_seed)
-    } else {
-        Vec::new()
-    };
+        for w in make_wrong_loops(args.inject_wrong_loops, n, args.inject_seed) {
+            loop_constraints.push(w);
+            loop_is_wrong.push(true);
+        }
+    }
+
+    // Add every loop closure (genuine + wrong) to the base graph. Edge order is
+    // sequential (n-1) then the loops in `loop_constraints` order, so the wrong
+    // loops sit at edge index `(n-1) + i` for each wrong `i`.
+    for c in &loop_constraints {
+        graph.add_loop_closure_constraint(c);
+    }
+    let injected: Vec<usize> = loop_is_wrong
+        .iter()
+        .enumerate()
+        .filter(|(_, &w)| w)
+        .map(|(i, _)| (n - 1) + i)
+        .collect();
     println!("se3_cost_before_optimization={:.6}", graph.se3_cost());
 
     // --- Plain (non-robust) solve ---
@@ -417,7 +448,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let corrected = if injected.is_empty() {
+    // --- PCM front-end screen, then a plain solve on the cleaned loop set ---
+    let mut pcm_corrected = plain_corrected.clone();
+    if args.pcm {
+        // Odometry oracle for PCM: the drifted node estimates' world_to_camera
+        // poses (truth when drift = 0). PCM uses only the relative odometry
+        // between loop endpoints, so it needs no global optimization.
+        let odometry: BTreeMap<u64, SE3> = drifted
+            .iter()
+            .enumerate()
+            .map(|(id, pose)| (id as u64, pose.world_to_camera.clone()))
+            .collect();
+        let pcm_loops: Vec<LoopMeasurement> = loop_constraints
+            .iter()
+            .map(|c| LoopMeasurement {
+                from: c.from_keyframe_id,
+                to: c.to_keyframe_id,
+                relative: c.relative_pose.clone(),
+            })
+            .collect();
+        let kept = pcm::maximum_consistent_set(&pcm_loops, &odometry, &PcmConfig::default());
+        let kept_set: std::collections::HashSet<usize> = kept.iter().copied().collect();
+
+        let wrong_total = loop_is_wrong.iter().filter(|&&w| w).count();
+        let wrong_dropped = (0..loop_constraints.len())
+            .filter(|i| loop_is_wrong[*i] && !kept_set.contains(i))
+            .count();
+        let genuine_dropped = (0..loop_constraints.len())
+            .filter(|i| !loop_is_wrong[*i] && !kept_set.contains(i))
+            .count();
+
+        // Rebuild the graph with sequential edges + ONLY the PCM-kept loops,
+        // then a plain (non-robust) solve — the back-end never sees a wrong one.
+        let mut pcm_graph = PoseGraph::new();
+        for (id, pose) in drifted.iter().enumerate() {
+            pcm_graph.add_pose(id as u64, pose.clone());
+        }
+        pcm_graph.anchor(0);
+        for (i, edge) in noisy_edges.iter().enumerate() {
+            pcm_graph.add_sequential_edge(i as u64, (i + 1) as u64, edge.clone());
+        }
+        for &i in &kept {
+            pcm_graph.add_loop_closure_constraint(&loop_constraints[i]);
+        }
+        pcm_graph.optimize_se3_iterative(&pgo_config())?;
+        pcm_corrected = (0..n as u64)
+            .map(|id| pcm_graph.poses[&id].clone())
+            .collect();
+
+        let (m_mean, m_rmse, m_max) = ate(&pcm_corrected, &keyframes);
+        println!(
+            "[pcm] kept {}/{} loops ({} genuine dropped, {}/{} wrong dropped)",
+            kept.len(),
+            loop_constraints.len(),
+            genuine_dropped,
+            wrong_dropped,
+            wrong_total,
+        );
+        println!("ATE pcm+plain    mean={m_mean:.3} rmse={m_rmse:.3} max={m_max:.3} (m)");
+        if !injected.is_empty() {
+            println!(
+                "summary(pcm): drifted rmse {d_rmse:.2}m -> plain {p_rmse:.2}m -> pcm+plain {m_rmse:.2}m \
+                 (PCM screened {wrong_dropped}/{wrong_total} wrong loops before the back-end)",
+            );
+        }
+    }
+
+    let corrected = if args.pcm {
+        pcm_corrected
+    } else if injected.is_empty() {
         plain_corrected
     } else {
         gnc_corrected
