@@ -70,6 +70,17 @@ pub struct GncConfig {
     /// so a single setting transfers across datasets where a fixed `c` would
     /// over- or under-reject. [`AUTO_SCALE_K`] is the recommended `k`.
     pub auto_scale: Option<f64>,
+    /// Re-estimate the [`auto_scale`](Self::auto_scale) inlier scale at the
+    /// start of every outer `μ` level from the *current* residuals, instead of
+    /// once at the (least-squares) start. Ignored unless `auto_scale` is
+    /// `Some`. The one-shot estimate is computed on the pre-solve residuals,
+    /// where every observation — inlier or outlier — has a large residual, so a
+    /// heavily contaminated problem inflates the scale and the classification
+    /// loses recall exactly when robustness matters. Re-adapting lets the scale
+    /// contract as the surrogate down-weights outliers and the inlier residuals
+    /// shrink, tracking the true inlier-noise floor. The configured
+    /// [`c`](Self::c) remains a floor at every level.
+    pub auto_scale_readapt: bool,
 }
 
 /// Recommended multiplier for [`GncConfig::auto_scale`]. `3.5` is the
@@ -87,6 +98,7 @@ impl Default for GncConfig {
             max_outer: 100,
             inner_iterations: 5,
             auto_scale: None,
+            auto_scale_readapt: false,
         }
     }
 }
@@ -146,6 +158,17 @@ impl GncState {
     /// Current control parameter `μ`.
     pub fn mu(&self) -> f64 {
         self.mu
+    }
+
+    /// Replace the inlier scale `c` (updating the stored `c²`) while leaving the
+    /// annealing position `μ` untouched. Used by the adaptive-scale drivers
+    /// ([`GncConfig::auto_scale_readapt`]) to re-tighten the inlier band as the
+    /// solve cleans up the residuals. Safe to call mid-schedule: both the
+    /// [`anneal`](Self::anneal) step and the [`is_terminal`](Self::is_terminal)
+    /// test are functions of `μ` only, so re-scaling `c²` rescales the weight
+    /// band without disturbing convergence to the terminal level.
+    pub fn set_inlier_scale(&mut self, c: f64) {
+        self.c2 = c * c;
     }
 
     /// Black-Rangarajan weight `w ∈ [0, 1]` for an edge whose (whitened) squared
@@ -449,5 +472,42 @@ mod tests {
             trace
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn set_inlier_scale_rescales_band_without_moving_mu() {
+        // The adaptive-scale drivers call `set_inlier_scale` mid-schedule. It
+        // must (a) leave μ untouched so annealing/termination are unaffected and
+        // (b) shrink the inlier band: at a fixed μ, a residual that was an inlier
+        // under a loose `c` becomes a rejected outlier under a tight `c`.
+        let mut state = GncState::new(
+            &GncConfig {
+                kernel: GncKernel::TruncatedLeastSquares,
+                c: 30.0,
+                ..GncConfig::default()
+            },
+            // s_max large enough that μ starts below terminal.
+            10_000.0,
+        );
+        // Anneal a few steps to a non-trivial interior μ.
+        for _ in 0..5 {
+            state.anneal();
+        }
+        let mu_before = state.mu();
+        // A residual whose norm (≈22px, s≈484) sits inside a c=30 band.
+        let s = 22.0_f64 * 22.0;
+        let w_loose = state.weight(s);
+        assert!(
+            w_loose > 0.5,
+            "should be an inlier under loose c=30: {w_loose}"
+        );
+
+        state.set_inlier_scale(8.0);
+        assert_eq!(state.mu(), mu_before, "μ must not move");
+        let w_tight = state.weight(s);
+        assert!(
+            w_tight < w_loose,
+            "tightening c must lower the weight: {w_tight} !< {w_loose}"
+        );
     }
 }

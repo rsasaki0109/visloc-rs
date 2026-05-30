@@ -867,7 +867,7 @@ impl BundleAdjustment {
             }
             None => *gnc,
         };
-        let inlier_scale = effective_gnc.c;
+        let mut inlier_scale = effective_gnc.c;
         let mut state = GncState::new(&effective_gnc, s_max);
 
         // Inner solve: a short weighted LM with no M-estimator (the GNC
@@ -885,6 +885,19 @@ impl BundleAdjustment {
             // true robust cost; we run it, then stop.
             let terminal_level = state.is_terminal();
             let residuals = self.reprojection_squared_residuals();
+            // Adaptive inlier scale: re-derive `c` from the current residuals
+            // each level (configured `c` as a floor). Level 0 reproduces the
+            // one-shot estimate; later levels tighten as the surrogate
+            // suppresses outliers and inlier residuals shrink.
+            if gnc.auto_scale_readapt {
+                if let Some(k) = gnc.auto_scale {
+                    if let Some(est) = crate::gnc::estimate_scale_mad(&residuals, k) {
+                        let c = est.max(gnc.c);
+                        state.set_inlier_scale(c);
+                        inlier_scale = c;
+                    }
+                }
+            }
             for (w, &s) in weights.iter_mut().zip(residuals.iter()) {
                 *w = if s.is_finite() { state.weight(s) } else { 1.0 };
             }
