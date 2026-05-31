@@ -3797,6 +3797,7 @@ mod online_loop_closure_refinement {
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
+                    covariance_gate: None,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4043,6 +4044,7 @@ mod online_loop_closure_refinement {
                         ..GncConfig::default()
                     }),
                     pcm: None,
+                    covariance_gate: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4139,6 +4141,7 @@ mod online_loop_closure_refinement {
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: Some(PcmConfig::default()),
+                    covariance_gate: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4179,6 +4182,79 @@ mod online_loop_closure_refinement {
         assert!(loop_edges >= 1, "the admitted loop is present in the graph");
     }
 
+    /// With the covariance gate configured, a legitimate loop closure (small
+    /// innovation versus the estimate's prediction) must PASS the gate so it
+    /// still enters the graph and the solve fires — the wiring guard for the
+    /// online covariance gate. The gate's rejection of an implausible
+    /// innovation is proven directly in `tests/pose_graph_covariance.rs`.
+    #[test]
+    fn covariance_gate_admits_a_legitimate_loop_closure() {
+        use visloc_slam::covariance::CHI2_95_6DOF;
+        use visloc_slam::PoseGraphEdgeKind;
+
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = OnlineSlamPipeline::new(
+            map.clone(),
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 15,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera: camera.clone(),
+                    verifier_config: LoopClosureVerifierConfig {
+                        min_inliers: 8,
+                        min_inlier_ratio: 0.5,
+                        max_mean_sampson_error: 5.0e-3,
+                        default_translation_scale: 0.05 * std::f64::consts::SQRT_2,
+                    },
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
+                    pcm: None,
+                    covariance_gate: Some(CHI2_95_6DOF),
+                    trigger_every_new_constraints: 1,
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded() && r2.map_was_updated());
+
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(stats.accepted_count >= 1, "the legitimate loop is admitted");
+        assert_eq!(
+            stats.loop_closures_covariance_rejected, 0,
+            "the covariance gate must not reject a legitimate loop closure"
+        );
+        assert!(
+            stats.pose_graph_result.is_some(),
+            "PGO fired on the admitted loop"
+        );
+        let state = slam.pose_graph_state.as_ref().unwrap();
+        let loop_edges = state
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == PoseGraphEdgeKind::LoopClosure)
+            .count();
+        assert!(loop_edges >= 1, "the admitted loop is present in the graph");
+    }
+
     #[test]
     fn pose_graph_refinement_skipped_when_no_keyframe_registered() {
         let camera = camera();
@@ -4199,6 +4275,7 @@ mod online_loop_closure_refinement {
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
+                    covariance_gate: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
