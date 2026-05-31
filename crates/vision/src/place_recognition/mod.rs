@@ -19,9 +19,18 @@
 //! Arandjelović & Zisserman, "All about VLAD" (2013) — so cosine similarity of two
 //! VLADs is a meaningful appearance similarity.
 //!
-//! Everything here is deterministic (a fixed-seed LCG for k-means++), pure
-//! `f32`/`Vec`, no image or external-model dependency, so it is unit-testable on
-//! controlled descriptors.
+//! The vocabulary, VLAD, and retrieval are deterministic (a fixed-seed LCG for
+//! k-means++), pure `f32`/`Vec`, no image or external-model dependency, so they
+//! are unit-testable on controlled descriptors. [`propose_bridges`] then composes
+//! retrieval with the crate's existing local matching and two-view geometry to
+//! turn appearance matches into pose-bearing bridge proposals end-to-end.
+
+use visloc_core::geometry::SE3;
+use visloc_core::types::Camera;
+
+use crate::features::FeatureSet;
+use crate::matching::Matcher;
+use crate::two_view::{EssentialMatrixEstimator, RelativePoseEstimator, TwoViewCorrespondence};
 
 /// A visual vocabulary: `k` cluster centroids over the local-descriptor space,
 /// used to assign each local descriptor to its nearest visual word for VLAD.
@@ -288,6 +297,115 @@ pub fn retrieve_mutual(
     pairs
 }
 
+/// Configuration for [`propose_bridges`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BridgeProposalConfig {
+    /// Minimum VLAD cosine similarity for a retrieved pair to be geometrically
+    /// verified (passed to [`retrieve_mutual`]).
+    pub min_similarity: f32,
+    /// Minimum two-view inlier count for a verified pair to become a proposal.
+    pub min_inliers: usize,
+}
+
+impl Default for BridgeProposalConfig {
+    fn default() -> Self {
+        Self {
+            min_similarity: 0.5,
+            min_inliers: 12,
+        }
+    }
+}
+
+/// A pose-bearing cross-set bridge proposal: appearance retrieval said `query`
+/// and `db` are the same place, and two-view geometry recovered a relative pose
+/// supported by `inlier_count` correspondences.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BridgeProposal {
+    /// Index into the `query` image set.
+    pub query: usize,
+    /// Index into the `db` image set.
+    pub db: usize,
+    /// VLAD appearance similarity that proposed the pair.
+    pub similarity: f32,
+    /// Relative pose taking the `query` camera frame to the `db` camera frame.
+    ///
+    /// **Monocular caveat:** recovered from the essential matrix, so the
+    /// translation is only up to scale (its magnitude is the estimator's
+    /// `default_translation_scale`, not metric). The rotation and translation
+    /// *direction* are metric. A metric bridge needs a scale source (stereo /
+    /// depth, the sessions' own metric scale, or joint scale solving in the
+    /// merge) — see the module note.
+    pub query_to_db: SE3,
+    /// Number of two-view inliers supporting the pose.
+    pub inlier_count: usize,
+    /// Mean Sampson error of the inliers (px-normalized).
+    pub mean_sampson_error: f64,
+}
+
+/// End-to-end appearance → geometry bridge proposal across two image sets (e.g.
+/// two SLAM sessions' keyframes): VLAD-retrieve the same-place pairs, match their
+/// local descriptors, and recover a two-view relative pose for each — the input
+/// to PCM screening (`visloc-slam`'s `consistent_session_bridges`) and
+/// `PoseGraph::merge_session`.
+///
+/// `query`/`db` are per-image [`FeatureSet`]s (keypoints + local descriptors); the
+/// returned proposals index into them. Sorted by descending appearance similarity.
+/// See [`BridgeProposal::query_to_db`] for the monocular up-to-scale caveat.
+pub fn propose_bridges<M, E>(
+    query: &[FeatureSet],
+    db: &[FeatureSet],
+    vocab: &Vocabulary,
+    matcher: &M,
+    estimator: &RelativePoseEstimator<E>,
+    camera: &Camera,
+    config: &BridgeProposalConfig,
+) -> Vec<BridgeProposal>
+where
+    M: Matcher,
+    E: EssentialMatrixEstimator,
+{
+    let query_globals: Vec<Vec<f32>> = query.iter().map(|f| vlad(&f.descriptors, vocab)).collect();
+    let db_globals: Vec<Vec<f32>> = db.iter().map(|f| vlad(&f.descriptors, vocab)).collect();
+    let retrieved = retrieve_mutual(&query_globals, &db_globals, config.min_similarity);
+
+    let mut proposals = Vec::new();
+    for r in retrieved {
+        let (q, d) = (&query[r.query], &db[r.db]);
+        let matches = matcher.match_descriptors(&q.descriptors, &d.descriptors);
+        let correspondences: Vec<TwoViewCorrespondence> = matches
+            .iter()
+            .filter_map(|m| {
+                Some(TwoViewCorrespondence::new(
+                    *q.keypoints.get(m.query_index)?,
+                    *d.keypoints.get(m.train_index)?,
+                ))
+            })
+            .collect();
+        let Some(pose) = estimator.estimate(&correspondences, camera) else {
+            continue;
+        };
+        if pose.inliers.len() < config.min_inliers {
+            continue;
+        }
+        proposals.push(BridgeProposal {
+            query: r.query,
+            db: r.db,
+            similarity: r.similarity,
+            query_to_db: pose.previous_to_current,
+            inlier_count: pose.inliers.len(),
+            mean_sampson_error: pose.mean_sampson_error,
+        });
+    }
+    proposals.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.query.cmp(&b.query))
+            .then(a.db.cmp(&b.db))
+    });
+    proposals
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +556,170 @@ mod tests {
         let v = vlad(&[], &vocab);
         assert_eq!(v.len(), vocab.k() * vocab.dim());
         assert!(v.iter().all(|&x| x == 0.0));
+    }
+
+    // --- End-to-end driver test: synthetic projected geometry --------------
+
+    use crate::matching::BruteForceMatcher;
+    use crate::two_view::RelativePoseEstimator;
+    use nalgebra::{Point3, UnitQuaternion, Vector3};
+    use visloc_core::geometry::Pose;
+    use visloc_core::types::Camera;
+
+    fn synthetic_camera() -> Camera {
+        Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0)
+    }
+
+    /// `world_to_camera` for a camera at world centre `c` with rotation `r`
+    /// (world→camera): `t = −r·c`.
+    fn keyframe_pose(r: UnitQuaternion<f64>, c: Vector3<f64>) -> Pose {
+        Pose::from_world_to_camera(r, -(r * c))
+    }
+
+    /// A unique-per-point local descriptor (dim 16), deterministic in `id`.
+    fn point_descriptor(id: usize) -> Vec<f32> {
+        let mut rng = Lcg(0x9E37_79B9 ^ id as u64);
+        (0..16).map(|_| (rng.unit() as f32) - 0.5).collect()
+    }
+
+    /// Build a [`FeatureSet`] for a camera observing `points` (world 3D + their
+    /// global descriptor id), keeping only those that project in front, and adding
+    /// small descriptor jitter so the two sessions' views are not byte-identical.
+    fn observe(
+        pose: &Pose,
+        camera: &Camera,
+        points: &[(Point3<f64>, usize)],
+        jitter_seed: u64,
+    ) -> FeatureSet {
+        let mut rng = Lcg(jitter_seed);
+        let mut keypoints = Vec::new();
+        let mut descriptors = Vec::new();
+        for (p, id) in points {
+            let cam = pose.transform_world_point(p);
+            if cam.z <= 0.0 {
+                continue;
+            }
+            if let Some(px) = camera.project(&cam) {
+                keypoints.push(px);
+                descriptors.push(
+                    point_descriptor(*id)
+                        .iter()
+                        .map(|&x| x + ((rng.unit() as f32) - 0.5) * 0.02)
+                        .collect(),
+                );
+            }
+        }
+        FeatureSet {
+            keypoints,
+            descriptors,
+        }
+    }
+
+    /// A cloud of `n` world points around `center`, with global descriptor ids
+    /// `id_base..id_base+n`.
+    fn place(
+        center: Vector3<f64>,
+        n: usize,
+        id_base: usize,
+        seed: u64,
+    ) -> Vec<(Point3<f64>, usize)> {
+        let mut rng = Lcg(seed);
+        (0..n)
+            .map(|j| {
+                let p = Point3::new(
+                    center.x + (rng.unit() - 0.5) * 6.0,
+                    center.y + (rng.unit() - 0.5) * 4.0,
+                    center.z + (rng.unit() - 0.5) * 4.0,
+                );
+                (p, id_base + j)
+            })
+            .collect()
+    }
+
+    /// Full pipeline: two sessions each observe two distinct places from different
+    /// poses. VLAD retrieval must pair same-place views across sessions, and
+    /// two-view geometry must recover each bridge's relative pose (rotation +
+    /// translation direction; magnitude is up to scale). Mismatched places must
+    /// not produce a proposal.
+    #[test]
+    fn propose_bridges_recovers_cross_session_pose_for_same_place_views() {
+        let camera = synthetic_camera();
+        let place0 = place(Vector3::new(0.0, 0.0, 12.0), 24, 0, 1);
+        let place1 = place(Vector3::new(40.0, 0.0, 12.0), 24, 100, 2);
+
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.04);
+        // Session A: A0 at place0 (origin), A1 at place1.
+        let a0 = keyframe_pose(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let a1 = keyframe_pose(UnitQuaternion::identity(), Vector3::new(40.0, 0.0, 0.0));
+        // Session B: B0/B1 view the same places from a sideways-shifted, yawed pose.
+        let b0 = keyframe_pose(yaw, Vector3::new(0.6, 0.0, 0.0));
+        let b1 = keyframe_pose(yaw, Vector3::new(40.6, 0.0, 0.0));
+
+        let query = vec![
+            observe(&a0, &camera, &place0, 10),
+            observe(&a1, &camera, &place1, 11),
+        ];
+        let db = vec![
+            observe(&b0, &camera, &place0, 20),
+            observe(&b1, &camera, &place1, 21),
+        ];
+
+        // Vocabulary over all point descriptors of both places.
+        let mut pool: Vec<Vec<f32>> = Vec::new();
+        for id in 0..24 {
+            pool.push(point_descriptor(id));
+        }
+        for id in 100..124 {
+            pool.push(point_descriptor(id));
+        }
+        let refs: Vec<&[f32]> = pool.iter().map(|v| v.as_slice()).collect();
+        let vocab = Vocabulary::build(&refs, 8, 25, 7).unwrap();
+
+        let proposals = propose_bridges(
+            &query,
+            &db,
+            &vocab,
+            &BruteForceMatcher { ratio: None },
+            &RelativePoseEstimator::default(),
+            &camera,
+            &BridgeProposalConfig {
+                min_similarity: 0.3,
+                min_inliers: 10,
+            },
+        );
+
+        // One proposal per same-place pair, none cross-place.
+        assert!(
+            proposals.iter().any(|p| p.query == 0 && p.db == 0),
+            "A0↔B0 (place 0) must be proposed; got {proposals:?}"
+        );
+        assert!(
+            proposals.iter().any(|p| p.query == 1 && p.db == 1),
+            "A1↔B1 (place 1) must be proposed; got {proposals:?}"
+        );
+        assert!(
+            proposals.iter().all(|p| p.query == p.db),
+            "no cross-place proposal should survive; got {proposals:?}"
+        );
+
+        // The A0↔B0 bridge: A0 is at identity, so the true relative pose is B0's
+        // world_to_camera. Rotation must match; translation direction must match
+        // (magnitude is up to scale).
+        let bridge = proposals.iter().find(|p| p.query == 0).unwrap();
+        let truth = b0.world_to_camera.clone();
+        let rot_err = bridge
+            .query_to_db
+            .rotation
+            .rotation_to(&truth.rotation)
+            .angle()
+            .abs();
+        assert!(rot_err < 1e-2, "bridge rotation error {rot_err} rad");
+        let dir = bridge.query_to_db.translation.normalize();
+        let truth_dir = truth.translation.normalize();
+        let cos = dir.dot(&truth_dir).abs();
+        assert!(
+            cos > 0.99,
+            "bridge translation direction must match truth (|cos|={cos})"
+        );
     }
 }
