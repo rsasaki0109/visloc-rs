@@ -3799,11 +3799,97 @@ mod online_loop_closure_refinement {
                     pcm: None,
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
+                    marginalization_window: None,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
             },
         )
+    }
+
+    fn pipeline_with_window(
+        map: VisualMap,
+        camera: Camera,
+        trigger_every_new_constraints: usize,
+        window: usize,
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 5,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera,
+                    verifier_config: LoopClosureVerifierConfig {
+                        min_inliers: 8,
+                        min_inlier_ratio: 0.5,
+                        max_mean_sampson_error: 5.0e-3,
+                        default_translation_scale: 1.0,
+                    },
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
+                    pcm: None,
+                    covariance_gate: None,
+                    pcm_batch_rescreen: false,
+                    marginalization_window: Some(window),
+                    trigger_every_new_constraints,
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        )
+    }
+
+    /// With a fixed-lag window of 2, the loop-closing solve on the third
+    /// keyframe must marginalize the oldest non-anchor pose (KF#20) into a prior,
+    /// leaving the graph bounded to {anchor KF#10, KF#30}.
+    #[test]
+    fn marginalization_window_bounds_the_online_graph() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_window(map.clone(), camera.clone(), 1, 2);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats on the loop-closing frame");
+        // A solve fired on the loop, so the window bound was applied.
+        assert!(stats.pose_graph_result.is_some(), "PGO fired on the loop");
+        assert_eq!(
+            stats.poses_marginalized,
+            vec![20],
+            "the oldest non-anchor pose is marginalized to enforce the window"
+        );
+
+        let state = slam.pose_graph_state.as_ref().unwrap();
+        assert_eq!(state.graph.poses.len(), 2, "graph bounded to the window");
+        assert!(state.graph.poses.contains_key(&10), "anchor retained");
+        assert!(state.graph.poses.contains_key(&30), "most recent retained");
+        assert!(!state.graph.poses.contains_key(&20), "oldest marginalized");
+        assert_eq!(
+            state.graph.priors.len(),
+            1,
+            "marginalization left one prior"
+        );
+        // Anchor stays at the origin through marginalization.
+        assert!(
+            state.graph.poses[&10].camera_center_world().coords.norm() < 1e-9,
+            "anchor unmoved"
+        );
     }
 
     #[test]
@@ -4047,6 +4133,7 @@ mod online_loop_closure_refinement {
                     pcm: None,
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
+                    marginalization_window: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4145,6 +4232,7 @@ mod online_loop_closure_refinement {
                     pcm: Some(PcmConfig::default()),
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
+                    marginalization_window: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4223,6 +4311,7 @@ mod online_loop_closure_refinement {
                     pcm: None,
                     covariance_gate: Some(CHI2_95_6DOF),
                     pcm_batch_rescreen: false,
+                    marginalization_window: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4281,6 +4370,7 @@ mod online_loop_closure_refinement {
                     pcm: None,
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
+                    marginalization_window: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
