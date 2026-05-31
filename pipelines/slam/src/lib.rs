@@ -459,8 +459,9 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// metric counterpart to the combinatorial `pcm` screen: it rejects a
     /// confident-but-wrong closure whose implied correction is statistically
     /// implausible given the trajectory's uncertainty. Recovering the relative
-    /// covariance is dense/`O(n³)`, so enable this when the per-loop cost is
-    /// acceptable. Rejections are reported on
+    /// covariance solves two block-columns of `Σ` against the sparse block
+    /// factor (`O(nnz(L))` per loop, no dense inverse), cheap enough for the
+    /// online path. Rejections are reported on
     /// [`OnlineSlamLoopClosureRefinementStats::loop_closures_covariance_rejected`].
     pub covariance_gate: Option<f64>,
     /// Minimum number of *new* verified loop-closure constraints that
