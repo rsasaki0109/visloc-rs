@@ -5113,6 +5113,24 @@ impl PoseGraph {
     /// free variable); [`PoseGraphError::SingularSystem`] if `id`'s information
     /// block is rank-deficient (an unconstrained pose cannot be marginalized).
     pub fn marginalize_pose(&mut self, id: u64) -> Result<(), PoseGraphError> {
+        self.marginalize_pose_impl(id, false)
+    }
+
+    /// Like [`Self::marginalize_pose`], but **sparsify** the resulting blanket
+    /// prior with the KL-optimal Chow-Liu tree
+    /// ([`crate::sparsification::sparsify_chow_liu`]) instead of keeping the dense
+    /// clique. The Schur complement couples every blanket pose to every other; the
+    /// tree approximation keeps only the `N−1` strongest (highest mutual
+    /// information) couplings, preserving each pose's marginal and the tree-edge
+    /// pairwise marginals exactly, so a window that marginalizes repeatedly does
+    /// not accumulate dense priors. Identical to the dense prior when the blanket
+    /// has ≤ 2 poses (a 2-clique already *is* a tree). Same errors as
+    /// [`Self::marginalize_pose`].
+    pub fn marginalize_pose_sparsified(&mut self, id: u64) -> Result<(), PoseGraphError> {
+        self.marginalize_pose_impl(id, true)
+    }
+
+    fn marginalize_pose_impl(&mut self, id: u64, sparsify: bool) -> Result<(), PoseGraphError> {
         let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
         if id == anchor_id || !self.poses.contains_key(&id) {
             return Err(PoseGraphError::MissingNode(id));
@@ -5195,14 +5213,27 @@ impl PoseGraph {
             .collect();
         let (lambda_prime, b_prime) = marginalization::marginalize(&h_sub, &g_sub, &keep_dims)
             .ok_or(PoseGraphError::SingularSystem)?;
+        // Optionally sparsify the dense blanket clique to its Chow-Liu tree. The
+        // prior is in the right-perturbation tangent basis at `linearization`;
+        // sparsification is a pure transform of (Λ', b') that preserves the
+        // minimizer e* = −Λ'⁻¹b' (so the linearization is unchanged). Falls back to
+        // the dense prior if the tree build fails (a well-formed SPD prior won't).
+        let (information, gradient) = if sparsify {
+            match crate::sparsification::sparsify_chow_liu(&lambda_prime, &b_prime, 6) {
+                Some(sp) => (sp.lambda, sp.eta),
+                None => (lambda_prime, b_prime),
+            }
+        } else {
+            (lambda_prime, b_prime)
+        };
         let linearization: Vec<SE3> = b
             .iter()
             .map(|bid| self.poses[bid].world_to_camera.clone())
             .collect();
         self.priors.push(GaussianPrior {
             ids: b,
-            information: lambda_prime,
-            gradient: b_prime,
+            information,
+            gradient,
             linearization,
         });
         Ok(())
