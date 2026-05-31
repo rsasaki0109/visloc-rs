@@ -10,10 +10,12 @@
 //! synthetic ingredient being the simulated per-session odometry drift and
 //! frame offset that give the two sessions something to correct):
 //!
-//!   1. **Two sessions from one stereo run.** A single KITTI stereo sequence is
-//!      subsampled into keyframes, then INTERLEAVED into session A (even
-//!      keyframes) and session B (odd keyframes) — two runs of the same route at
-//!      an offset sampling. Each session integrates its own drifted odometry
+//!   1. **Two sessions from one stereo run.** At each base keyframe position `p`
+//!      (every `--keyframe-stride` frames), session A takes frame `p` and session
+//!      B takes frame `p + --session-offset` — two runs of the SAME route a couple
+//!      of frames apart, so every A/B keyframe pair is a strong same-place revisit
+//!      a stereo PnP can metrically bridge (a wide gap starves the correspondence
+//!      set and the PnP fails). Each session integrates its own drifted odometry
 //!      (per-edge yaw perturbation); session B additionally lives in its **own
 //!      arbitrary world frame** (right-multiplied by a fixed offset `g`), so it
 //!      shares no gauge with A and cannot be scored against ground truth until
@@ -358,7 +360,10 @@ mod imp {
         camera: &visloc_rs::core::types::Camera,
         baseline: f64,
     ) -> MetricKeyframe {
-        let left_to_right = SE3::new(UnitQuaternion::identity(), Vector3::new(-baseline, 0.0, 0.0));
+        let left_to_right = SE3::new(
+            UnitQuaternion::identity(),
+            Vector3::new(-baseline, 0.0, 0.0),
+        );
         let stereo = bootstrap_stereo_landmarks(
             camera,
             camera,
@@ -370,8 +375,7 @@ mod imp {
                 ..StereoBootstrapConfig::default()
             },
         );
-        let mut landmarks: Vec<Option<nalgebra::Point3<f64>>> =
-            vec![None; left.keypoints.len()];
+        let mut landmarks: Vec<Option<nalgebra::Point3<f64>>> = vec![None; left.keypoints.len()];
         for lm in &stereo {
             landmarks[lm.left_keypoint_index] = Some(lm.point_left_camera_frame);
         }
@@ -412,9 +416,9 @@ mod imp {
             .iter()
             .find(|p| p.label == args.projection_right)
             .ok_or_else(|| format!("calib missing {}", args.projection_right))?;
-        let baseline = p_right.stereo_baseline_from(p_left).ok_or(
-            "calib pair did not yield a positive stereo baseline (intrinsics mismatch?)",
-        )?;
+        let baseline = p_right
+            .stereo_baseline_from(p_left)
+            .ok_or("calib pair did not yield a positive stereo baseline (intrinsics mismatch?)")?;
 
         // Ground-truth poses, subsampled to keyframes alongside the images.
         let gt = PoseTrajectory::read_kitti_poses(&args.kitti_poses)?;
@@ -453,15 +457,16 @@ mod imp {
         );
 
         // Helper: extract a left/right FeatureSet pair and a GT pose for frame `f`.
-        let load = |f: usize| -> Result<(FeatureSet, FeatureSet, Pose), Box<dyn std::error::Error>> {
-            let left = extractor.extract(&left_seq.frames[f].image)?;
-            let right = extractor.extract(&right_seq.frames[f].image)?;
-            let pose = gt_samples
-                .get(f)
-                .map(|s| s.pose.clone())
-                .ok_or_else(|| format!("GT pose missing for frame {f}"))?;
-            Ok((left, right, pose))
-        };
+        let load =
+            |f: usize| -> Result<(FeatureSet, FeatureSet, Pose), Box<dyn std::error::Error>> {
+                let left = extractor.extract(&left_seq.frames[f].image)?;
+                let right = extractor.extract(&right_seq.frames[f].image)?;
+                let pose = gt_samples
+                    .get(f)
+                    .map(|s| s.pose.clone())
+                    .ok_or_else(|| format!("GT pose missing for frame {f}"))?;
+                Ok((left, right, pose))
+            };
 
         // Session A: metric stereo keyframes (3D landmarks) at the base frames.
         let mut a_metric: Vec<MetricKeyframe> = Vec::with_capacity(na);
@@ -514,7 +519,10 @@ mod imp {
                 .iter()
                 .map(|k| vlad(&k.features.descriptors, &vocab))
                 .collect();
-            let bg: Vec<Vec<f32>> = b_feats.iter().map(|f| vlad(&f.descriptors, &vocab)).collect();
+            let bg: Vec<Vec<f32>> = b_feats
+                .iter()
+                .map(|f| vlad(&f.descriptors, &vocab))
+                .collect();
             let ret = retrieve_mutual(&aq, &bg, 0.0);
             eprintln!("[debug] retrieved mutual pairs = {}", ret.len());
             let matcher = BruteForceMatcher { ratio: Some(0.85) };
@@ -543,7 +551,12 @@ mod imp {
                 let err = rep.as_ref().map(|rp| rp.mean_reprojection_error);
                 eprintln!(
                     "[debug] A[{}]↔B[{}] sim={:.3} matches={} pnp_inliers={:?} reproj={:?}",
-                    r.query, r.db, r.similarity, corr.len(), inl, err,
+                    r.query,
+                    r.db,
+                    r.similarity,
+                    corr.len(),
+                    inl,
+                    err,
                 );
             }
         }
@@ -569,9 +582,11 @@ mod imp {
             },
         );
         if proposals.is_empty() {
-            return Err("no metric bridges proposed (try lowering --min-similarity / \
+            return Err(
+                "no metric bridges proposed (try lowering --min-similarity / \
                         --min-inliers, or raising --max-features)"
-                .into());
+                    .into(),
+            );
         }
 
         // Bridges → cross-session loop constraints (from = A id, to = B id). Label
@@ -675,7 +690,11 @@ mod imp {
 
         // --- PCM screening at the fair (zero-GT-wrong) operating point ---
         let mean_edge_len = {
-            let total: f64 = a_edges.iter().chain(b_edges.iter()).map(|e| e.translation.norm()).sum();
+            let total: f64 = a_edges
+                .iter()
+                .chain(b_edges.iter())
+                .map(|e| e.translation.norm())
+                .sum();
             total / (a_edges.len() + b_edges.len()).max(1) as f64
         };
         let d = args.yaw_drift_per_edge_rad.max(1e-3);
@@ -703,7 +722,9 @@ mod imp {
                 }
             }
             let recall = best.iter().filter(|&&i| !is_wrong[i]).count();
-            println!("[pcm {label}] best zero-wrong recall = {recall}/{genuine_total} genuine bridges");
+            println!(
+                "[pcm {label}] best zero-wrong recall = {recall}/{genuine_total} genuine bridges"
+            );
             (best, recall)
         };
         let (kept_iso, iso_recall) = sweep("isotropic  ", None);
@@ -732,11 +753,14 @@ mod imp {
         } else {
             let merged =
                 merge_and_optimize(&session_a, &session_b, na as u64, &bridges, &genuine_idx)?;
-            let traj: Vec<Pose> = (0..(na + nb) as u64).map(|id| merged.poses[&id].clone()).collect();
+            let traj: Vec<Pose> = (0..(na + nb) as u64)
+                .map(|id| merged.poses[&id].clone())
+                .collect();
             Some(ate(&traj, &merged_truth))
         };
 
-        let merged_screened = merge_and_optimize(&session_a, &session_b, na as u64, &bridges, &kept)?;
+        let merged_screened =
+            merge_and_optimize(&session_a, &session_b, na as u64, &bridges, &kept)?;
         let screened_traj: Vec<Pose> = (0..(na + nb) as u64)
             .map(|id| merged_screened.poses[&id].clone())
             .collect();
@@ -745,18 +769,24 @@ mod imp {
         let naive_ate = if wrong_total > 0 {
             let all: Vec<usize> = (0..bridges.len()).collect();
             let merged = merge_and_optimize(&session_a, &session_b, na as u64, &bridges, &all)?;
-            let traj: Vec<Pose> = (0..(na + nb) as u64).map(|id| merged.poses[&id].clone()).collect();
+            let traj: Vec<Pose> = (0..(na + nb) as u64)
+                .map(|id| merged.poses[&id].clone())
+                .collect();
             Some(ate(&traj, &merged_truth))
         } else {
             None
         };
 
         println!();
-        println!("ATE B unbridged (own frame `g`)  mean={u_mean:.3} rmse={u_rmse:.3} max={u_max:.3} (m)");
+        println!(
+            "ATE B unbridged (own frame `g`)  mean={u_mean:.3} rmse={u_rmse:.3} max={u_max:.3} (m)"
+        );
         if let Some((o_mean, o_rmse, o_max)) = oracle_ate {
             println!("ATE merged + all-genuine (oracle) mean={o_mean:.3} rmse={o_rmse:.3} max={o_max:.3} (m)");
         }
-        println!("ATE merged + PCM screening       mean={s_mean:.3} rmse={s_rmse:.3} max={s_max:.3} (m)");
+        println!(
+            "ATE merged + PCM screening       mean={s_mean:.3} rmse={s_rmse:.3} max={s_max:.3} (m)"
+        );
         if let Some((nv_mean, nv_rmse, nv_max)) = naive_ate {
             println!("ATE merged + ALL bridges (naive) mean={nv_mean:.3} rmse={nv_rmse:.3} max={nv_max:.3} (m)");
         }
