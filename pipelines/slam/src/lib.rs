@@ -3431,22 +3431,29 @@ pub struct PoseGraphEdge {
 /// sliding-window smoother re-adds when it marginalizes states out of the graph
 /// (see [`crate::marginalization`] and [`PoseGraph::marginalize_pose`]).
 ///
-/// It penalizes `½ eᵀ Ω e` where `e` stacks each pose's right-tangent error from
-/// its linearization point, `eᵢ = log(T₀ᵢ⁻¹ ∘ Tᵢ)` (so `∂eᵢ/∂δᵢ = I` under the
-/// solver's `T ← T ∘ exp(δ)` update, and the prior contributes `Ω` to `H` and
-/// `Ω·e` to `g` with an identity Jacobian). `information` is the `6k × 6k`
-/// matrix `Ω` in the same `[ρ; ω]` SE(3)-tangent basis the edges use, and
-/// `linearization[i]` is `T₀ᵢ`, the estimate of pose `ids[i]` when the prior was
-/// formed. A prior id that is the gauge-fixed anchor (or absent) contributes a
-/// zero tangent error and no variable block, dropping out cleanly.
+/// It penalizes the quadratic `½ eᵀ Ω e + bᵀ e` where `e` stacks each pose's
+/// right-tangent error from its linearization point, `eᵢ = log(T₀ᵢ⁻¹ ∘ Tᵢ)` (so
+/// `∂eᵢ/∂δᵢ = I` under the solver's `T ← T ∘ exp(δ)` update). The prior therefore
+/// contributes `Ω` to `H` and `Ω·e + b` to `g` with an identity Jacobian. `Ω`
+/// (`information`) is the `6k × 6k` curvature and `b` (`gradient`) the linear
+/// term, both in the `[ρ; ω]` SE(3)-tangent basis the edges use; `linearization[i]`
+/// is `T₀ᵢ`, pose `ids[i]`'s estimate when the prior was formed. The linear term
+/// `b` is the gradient of the marginalized factors at `T₀` and is what keeps the
+/// linearization point a stationary point of the reduced problem — a pure
+/// quadratic (`b = 0`) would wrongly assert the prior's mean is `T₀`. A prior id
+/// that is the gauge-fixed anchor (or absent) contributes a zero tangent error
+/// and no variable block, dropping out cleanly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GaussianPrior {
-    /// The poses this prior constrains, indexing `information`'s `6×6` blocks
-    /// and `linearization` in the same order.
+    /// The poses this prior constrains, indexing `information`'s `6×6` blocks,
+    /// `gradient`'s `6`-segments, and `linearization` in the same order.
     pub ids: Vec<u64>,
-    /// The `6k × 6k` information (inverse-covariance) matrix `Ω` over the stacked
-    /// tangent error, `k = ids.len()`.
+    /// The `6k × 6k` information (inverse-covariance / curvature) matrix `Ω` over
+    /// the stacked tangent error, `k = ids.len()`.
     pub information: DMatrix<f64>,
+    /// The `6k` linear term `b` (the marginalized factors' gradient at `T₀`).
+    /// Zero for a pure quadratic prior pinned at its linearization point.
+    pub gradient: DVector<f64>,
     /// Linearization point `T₀ᵢ` (world-to-camera) per id, the estimate at which
     /// the prior was formed; the residual is measured relative to it.
     pub linearization: Vec<SE3>,
@@ -4045,15 +4052,16 @@ impl PoseGraph {
         e
     }
 
-    /// Total Gaussian-prior cost `Σ eᵀ Ω e` (the marginalization factors), on the
-    /// same `2×` scale as the edge cost `rᵀΩr` so the LM accept test sees one
-    /// consistent objective. Zero when the graph carries no priors.
+    /// Total Gaussian-prior cost `Σ (eᵀ Ω e + 2 bᵀ e)` (the marginalization
+    /// factors), on the same `2×` scale as the edge cost `rᵀΩr` so the LM accept
+    /// test sees one consistent objective (the dropped constant cancels in
+    /// `cost_after − cost_before`). Zero when the graph carries no priors.
     fn prior_cost(&self) -> f64 {
         self.priors
             .iter()
             .map(|prior| {
                 let e = self.prior_tangent_error(prior);
-                (e.transpose() * &prior.information * &e)[(0, 0)]
+                (e.transpose() * &prior.information * &e)[(0, 0)] + 2.0 * prior.gradient.dot(&e)
             })
             .sum()
     }
@@ -4184,7 +4192,7 @@ impl PoseGraph {
         // block, so it drops out — leaving the kept poses' coupling intact.
         for prior in &self.priors {
             let e = self.prior_tangent_error(prior);
-            let ge = &prior.information * &e; // Ω·e  (length 6k)
+            let ge = &prior.information * &e + &prior.gradient; // Ω·e + b  (length 6k)
             for (pi, &id_i) in prior.ids.iter().enumerate() {
                 let Some(vi) = node_index.get(&id_i).copied() else {
                     continue;
@@ -5055,6 +5063,121 @@ impl PoseGraph {
         let (lambda_prime, _eta_prime) = marginalization::marginalize(&lambda, &eta, &keep_dims)
             .ok_or(PoseGraphError::SingularSystem)?;
         Ok(lambda_prime)
+    }
+
+    /// Marginalize pose `id` out of the graph, replacing it with a dense
+    /// [`GaussianPrior`] over its Markov blanket — the bounded-cost step of a
+    /// fixed-lag / sliding-window smoother. The blanket `B` is the set of
+    /// non-anchor poses sharing an edge or an existing prior with `id`. The new
+    /// prior is the Schur complement of `id` out of the sub-system built from
+    /// **only the `id`-incident factors** (edges and priors), so the factors
+    /// *not* incident to `id` stay in the graph and their information is never
+    /// double-counted; the prior carries both the curvature `Λ'` and the linear
+    /// term `b'` (the incident factors' gradient at the current estimate), so the
+    /// current estimate remains a stationary point of the reduced problem.
+    ///
+    /// Linearizes at the *current* estimate, so run a solve first (marginalizing
+    /// at a converged estimate is exact to first order). Removes `id`'s pose and
+    /// every edge/prior incident to it. A pose whose only neighbour is the anchor
+    /// (empty blanket) is simply dropped (its information was purely relative to
+    /// the fixed gauge). Errors: [`PoseGraphError::NoAnchor`];
+    /// [`PoseGraphError::MissingNode`] if `id` is absent or is the anchor (not a
+    /// free variable); [`PoseGraphError::SingularSystem`] if `id`'s information
+    /// block is rank-deficient (an unconstrained pose cannot be marginalized).
+    pub fn marginalize_pose(&mut self, id: u64) -> Result<(), PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if id == anchor_id || !self.poses.contains_key(&id) {
+            return Err(PoseGraphError::MissingNode(id));
+        }
+
+        // Markov blanket: non-anchor poses sharing an edge or a prior with `id`.
+        let mut blanket: HashSet<u64> = HashSet::new();
+        for e in &self.edges {
+            if e.from == id && e.to != anchor_id {
+                blanket.insert(e.to);
+            }
+            if e.to == id && e.from != anchor_id {
+                blanket.insert(e.from);
+            }
+        }
+        for p in &self.priors {
+            if p.ids.contains(&id) {
+                for &pid in &p.ids {
+                    if pid != id && pid != anchor_id {
+                        blanket.insert(pid);
+                    }
+                }
+            }
+        }
+        blanket.remove(&id);
+        let mut b: Vec<u64> = blanket.into_iter().collect();
+        b.sort_unstable();
+
+        // Sub-system over {anchor, id} ∪ B carrying ONLY the id-incident factors,
+        // assembled at the current estimate; `id` indexed first (its 6 dims are
+        // the ones marginalized), B after (the kept dims).
+        let mut sub = PoseGraph::new();
+        sub.add_pose(anchor_id, self.poses[&anchor_id].clone());
+        sub.anchor(anchor_id);
+        sub.add_pose(id, self.poses[&id].clone());
+        for &bid in &b {
+            sub.add_pose(bid, self.poses[&bid].clone());
+        }
+        for e in &self.edges {
+            if e.from == id || e.to == id {
+                sub.edges.push(e.clone());
+            }
+        }
+        for p in &self.priors {
+            if p.ids.contains(&id) {
+                sub.priors.push(p.clone());
+            }
+        }
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        node_index.insert(id, 0);
+        for (k, &bid) in b.iter().enumerate() {
+            node_index.insert(bid, k + 1);
+        }
+        let dim = (1 + b.len()) * 6;
+        let (builder, g_sub) = sub.assemble_se3_system(
+            &node_index,
+            dim,
+            &RobustKernel::None,
+            None,
+            LinearSolver::Dense,
+        );
+        let h_sub = match builder {
+            NormalEquations6::Dense(h) => h,
+            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        };
+
+        // Drop `id` and its incident factors before re-attaching the prior.
+        self.poses.remove(&id);
+        self.edges.retain(|e| e.from != id && e.to != id);
+        self.priors.retain(|p| !p.ids.contains(&id));
+
+        if b.is_empty() {
+            // The state only touched the fixed anchor — nothing to preserve.
+            return Ok(());
+        }
+
+        // Keep B's dims (indices 6..), marginalize `id`'s dims (0..6).
+        let keep_dims: Vec<usize> = (0..b.len())
+            .flat_map(|k| (0..6).map(move |d| (k + 1) * 6 + d))
+            .collect();
+        let (lambda_prime, b_prime) = marginalization::marginalize(&h_sub, &g_sub, &keep_dims)
+            .ok_or(PoseGraphError::SingularSystem)?;
+        let linearization: Vec<SE3> = b
+            .iter()
+            .map(|bid| self.poses[bid].world_to_camera.clone())
+            .collect();
+        self.priors.push(GaussianPrior {
+            ids: b,
+            information: lambda_prime,
+            gradient: b_prime,
+            linearization,
+        });
+        Ok(())
     }
 
     /// Serialize this pose graph to a plain-text format. The format is

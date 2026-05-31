@@ -3,8 +3,8 @@
 //! and — once `marginalize_pose` lands — that a windowed solve equals the batch
 //! solve on the retained poses.
 
-use nalgebra::{DMatrix, UnitQuaternion, Vector3};
-use visloc_core::geometry::Pose;
+use nalgebra::{DMatrix, Matrix6, UnitQuaternion, Vector3, Vector6};
+use visloc_core::geometry::{Pose, SE3};
 use visloc_slam::{
     relative_world_to_camera, GaussianPrior, PoseGraph, PoseGraphEdgeKind, PoseGraphSe3Config,
 };
@@ -46,6 +46,7 @@ fn a_prior_pulls_a_free_pose_to_its_linearization_point() {
     graph.priors.push(GaussianPrior {
         ids: vec![2],
         information: DMatrix::<f64>::identity(6, 6) * 1.0e3,
+        gradient: nalgebra::DVector::zeros(6),
         linearization: vec![target.world_to_camera.clone()],
     });
 
@@ -101,6 +102,7 @@ fn a_zero_residual_prior_at_the_estimate_does_not_move_the_solve() {
     with_prior.priors.push(GaussianPrior {
         ids: vec![1, 2],
         information: DMatrix::<f64>::identity(12, 12) * 10.0,
+        gradient: nalgebra::DVector::zeros(12),
         linearization: vec![
             with_prior.poses[&1].world_to_camera.clone(),
             with_prior.poses[&2].world_to_camera.clone(),
@@ -120,4 +122,108 @@ fn a_zero_residual_prior_at_the_estimate_does_not_move_the_solve() {
             "a zero-residual prior at the estimate must not move pose {id}: {d}"
         );
     }
+}
+
+/// The fixed-lag correctness gate: marginalizing an interior pose at the batch
+/// optimum, then re-solving the windowed graph, must leave the retained poses at
+/// the batch optimum. This is exact only if the prior carries BOTH the curvature
+/// Λ' AND the linear term b' (the marginalized edges' gradient) and is built from
+/// only the id-incident factors — a missing b' or a double-counted edge would
+/// shift the windowed optimum. The inconsistent loop closure makes the optimum
+/// carry distributed residual, so any such error is detectable.
+#[test]
+fn windowed_solve_matches_batch_after_marginalizing_an_interior_pose() {
+    let build = || {
+        let mut g = PoseGraph::new();
+        for i in 0..5 {
+            g.add_pose(i, pose_at(i as f64));
+        }
+        g.anchor(0);
+        let info = Matrix6::identity() * 50.0;
+        for i in 0..4 {
+            g.add_edge_with_information(
+                i,
+                i + 1,
+                relative_world_to_camera(&pose_at(i as f64), &pose_at((i + 1) as f64)),
+                PoseGraphEdgeKind::Sequential,
+                info,
+            );
+        }
+        // Inconsistent loop 0→4: the truth-relative pose twisted by a small δ, so
+        // the optimum cannot satisfy every edge and residual spreads over the chain.
+        let twist = SE3::exp(&Vector6::new(0.1, -0.05, 0.08, 0.1, 0.0, -0.1));
+        let loop_meas = relative_world_to_camera(&pose_at(0.0), &pose_at(4.0)).compose(&twist);
+        g.add_edge_with_information(0, 4, loop_meas, PoseGraphEdgeKind::LoopClosure, info);
+        g
+    };
+
+    let mut batch = build();
+    batch.optimize_se3_iterative(&config()).unwrap();
+
+    // Start the windowed solve from the batch optimum, then marginalize pose 2.
+    let mut windowed = batch.clone();
+    windowed.marginalize_pose(2).unwrap();
+    assert!(!windowed.poses.contains_key(&2), "pose 2 must be removed");
+    assert_eq!(
+        windowed.priors.len(),
+        1,
+        "one prior over the blanket {{1,3}}"
+    );
+    assert_eq!(windowed.priors[0].ids, vec![1, 3]);
+    // The id-incident edges (1-2, 2-3) are gone; 0-1, 3-4, 0-4 remain.
+    assert!(windowed.edges.iter().all(|e| e.from != 2 && e.to != 2));
+
+    windowed.optimize_se3_iterative(&config()).unwrap();
+
+    for id in [1u64, 3, 4] {
+        let d = batch.poses[&id]
+            .world_to_camera
+            .inverse()
+            .compose(&windowed.poses[&id].world_to_camera)
+            .log()
+            .norm();
+        assert!(
+            d < 1e-6,
+            "windowed pose {id} must equal the batch optimum (prior preserves the marginal): err {d}"
+        );
+    }
+}
+
+/// Marginalizing a leaf pose whose only neighbour is the anchor just drops it
+/// (its information was purely relative to the fixed gauge) — no prior added.
+#[test]
+fn marginalizing_an_anchor_only_leaf_adds_no_prior() {
+    let mut g = PoseGraph::new();
+    g.add_pose(0, pose_at(0.0));
+    g.add_pose(1, pose_at(1.0));
+    g.anchor(0);
+    g.add_edge_with_information(
+        0,
+        1,
+        relative_world_to_camera(&pose_at(0.0), &pose_at(1.0)),
+        PoseGraphEdgeKind::Sequential,
+        Matrix6::identity() * 50.0,
+    );
+    g.marginalize_pose(1).unwrap();
+    assert!(!g.poses.contains_key(&1));
+    assert!(g.priors.is_empty(), "anchor-only leaf leaves no prior");
+    assert!(g.edges.is_empty(), "its only edge is removed");
+}
+
+#[test]
+fn marginalize_pose_rejects_the_anchor_and_absent_ids() {
+    use visloc_slam::PoseGraphError;
+    let mut g = PoseGraph::new();
+    g.add_pose(0, pose_at(0.0));
+    g.add_pose(1, pose_at(1.0));
+    g.anchor(0);
+    g.add_edge_with_information(
+        0,
+        1,
+        relative_world_to_camera(&pose_at(0.0), &pose_at(1.0)),
+        PoseGraphEdgeKind::Sequential,
+        Matrix6::identity() * 50.0,
+    );
+    assert_eq!(g.marginalize_pose(0), Err(PoseGraphError::MissingNode(0)));
+    assert_eq!(g.marginalize_pose(9), Err(PoseGraphError::MissingNode(9)));
 }
