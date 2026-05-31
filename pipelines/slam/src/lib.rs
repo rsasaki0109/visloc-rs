@@ -450,6 +450,19 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// admits. Rejections are reported on
     /// [`OnlineSlamLoopClosureRefinementStats::loop_closures_pcm_rejected`].
     pub pcm: Option<pcm::PcmConfig>,
+    /// Optional covariance-based *metric* gate (a χ² threshold such as
+    /// [`covariance::CHI2_95_6DOF`]). `None` (default) applies no metric gate;
+    /// `Some(threshold)` admits a verified closure only when the squared
+    /// Mahalanobis distance of its innovation — the measured relative pose
+    /// versus the estimate's prediction — under the relative-pose covariance
+    /// ([`PoseGraph::relative_pose_covariance`]) is `<= threshold`. This is the
+    /// metric counterpart to the combinatorial `pcm` screen: it rejects a
+    /// confident-but-wrong closure whose implied correction is statistically
+    /// implausible given the trajectory's uncertainty. Recovering the relative
+    /// covariance is dense/`O(n³)`, so enable this when the per-loop cost is
+    /// acceptable. Rejections are reported on
+    /// [`OnlineSlamLoopClosureRefinementStats::loop_closures_covariance_rejected`].
+    pub covariance_gate: Option<f64>,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -540,6 +553,11 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// frame *before* they entered the graph (geometrically inconsistent with
     /// the established set). Always `0` when `pcm` is unset.
     pub loop_closures_pcm_rejected: usize,
+    /// Number of verified loop closures the covariance gate rejected this frame
+    /// *before* they entered the graph (innovation statistically implausible
+    /// under the relative-pose covariance). Always `0` when `covariance_gate`
+    /// is unset.
+    pub loop_closures_covariance_rejected: usize,
     /// Number of `map.keyframes[id].frame.pose` slots overwritten with
     /// the optimised pose after PGO. Zero unless a solve fired this frame
     /// (`pose_graph_result.is_some()` or `gnc_result.is_some()`).
@@ -2209,12 +2227,23 @@ where
                 if !state.graph.poses.contains_key(&constraint.from_keyframe_id) {
                     continue;
                 }
-                if let Some(cfg) = &pcm_cfg {
+                // Front-end screens (both before the closure enters the graph):
+                // PCM combinatorial consistency, then the covariance metric gate.
+                let pcm_measurement = pcm_cfg.as_ref().map(|cfg| {
                     let m = loop_measurement_of(&constraint);
-                    if !pcm_admits_loop(&m, &admitted, &odometry, cfg) {
-                        stats.loop_closures_pcm_rejected += 1;
+                    (pcm_admits_loop(&m, &admitted, &odometry, cfg), m)
+                });
+                if let Some((false, _)) = pcm_measurement {
+                    stats.loop_closures_pcm_rejected += 1;
+                    continue;
+                }
+                if let Some(threshold) = state.config.covariance_gate {
+                    if !covariance_gate_admits(&state.graph, &constraint, threshold) {
+                        stats.loop_closures_covariance_rejected += 1;
                         continue;
                     }
+                }
+                if let Some((_, m)) = pcm_measurement {
                     admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
@@ -5293,6 +5322,37 @@ fn pcm_admits_loop(
         .count();
     // Strict majority of the established set agrees with the new closure.
     consistent * 2 > admitted.len()
+}
+
+/// Covariance gate for a single verified loop closure: admit it only when the
+/// squared Mahalanobis distance of its innovation (measured relative pose vs the
+/// estimate's prediction) under the relative-pose covariance is `<= threshold`.
+/// Conservatively *admits* when the covariance cannot be recovered (singular
+/// system) or an endpoint pose is missing, rather than dropping a closure on a
+/// numerical failure.
+fn covariance_gate_admits(
+    graph: &PoseGraph,
+    constraint: &LoopClosureConstraint,
+    threshold: f64,
+) -> bool {
+    let (a, b) = (constraint.from_keyframe_id, constraint.to_keyframe_id);
+    let cov = match graph.relative_pose_covariance(a, b) {
+        Ok(cov) => cov,
+        Err(_) => return true,
+    };
+    let (Some(pa), Some(pb)) = (graph.poses.get(&a), graph.poses.get(&b)) else {
+        return true;
+    };
+    let z_hat = relative_world_to_camera(pa, pb);
+    let innovation = constraint.relative_pose.compose(&z_hat.inverse()).log();
+    let cov_d = DMatrix::from_fn(6, 6, |r, c| cov[(r, c)]);
+    match covariance::mahalanobis_distance_sq(
+        &DVector::from_column_slice(innovation.as_slice()),
+        &cov_d,
+    ) {
+        Some(m) => m <= threshold,
+        None => true,
+    }
 }
 
 /// Translation-only constraint on camera centers in world coordinates implied

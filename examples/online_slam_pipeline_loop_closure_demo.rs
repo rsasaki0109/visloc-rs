@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pose_graph_config: PoseGraphSe3Config::default(),
                 gnc: None,
                 pcm: None,
+                covariance_gate: None,
                 trigger_every_new_constraints: 1,
             }),
             ..OnlineSlamConfig::default()
