@@ -584,4 +584,54 @@ mod tests {
             genuine_pairs.len()
         );
     }
+
+    /// Precision under the Mahalanobis test: span-scaled covariance does NOT let a
+    /// subtly-corrupted bridge slip through when a genuine consensus surrounds it.
+    /// A corrupted loop whose endpoints sit ONE edge from a genuine loop's induces
+    /// a near-zero-span cycle against it, so its covariance there is tiny and the
+    /// corruption (a 3 m relative-pose offset) is caught — it cannot join the
+    /// genuine clique even though its cycles against the FAR genuine loops have
+    /// large, forgiving covariance. This is the demo's corrupted-bridge stress in
+    /// miniature: covariance inflation lifts recall without costing precision when
+    /// the outlier is bracketed by nearby genuine measurements.
+    #[test]
+    fn mahalanobis_rejects_a_corrupted_bridge_bracketed_by_genuine_consensus() {
+        let (odo, truth) = drifted_odometry(40, 0.008);
+        let genuine = |a, b| LoopMeasurement {
+            from: a,
+            to: b,
+            relative: odometry_relative(&truth, a, b).unwrap(),
+        };
+        // Four genuine loops form the consensus clique.
+        let mut loops = vec![
+            genuine(0, 20),
+            genuine(4, 24),
+            genuine(8, 28),
+            genuine(16, 36),
+        ];
+        // A corrupted loop: endpoints (9, 29) sit one edge from genuine (8, 28),
+        // but the reported relative pose is offset by 3 m.
+        let offset = SE3::new(UnitQuaternion::identity(), Vector3::new(3.0, 0.0, 0.0));
+        loops.push(LoopMeasurement {
+            from: 9,
+            to: 29,
+            relative: offset.compose(&odometry_relative(&truth, 9, 29).unwrap()),
+        });
+
+        let noise = PcmNoiseModel::isotropic(2e-3, 8e-2, 1e-8, 1e-8);
+        let kept = maximum_consistent_set(
+            &loops,
+            &odo,
+            &PcmConfig {
+                threshold: 4.0,
+                require_individual: false,
+                noise: Some(noise),
+            },
+        );
+        assert_eq!(
+            kept,
+            vec![0, 1, 2, 3],
+            "the four genuine loops are kept and the corrupted bridge (index 4) is dropped"
+        );
+    }
 }
