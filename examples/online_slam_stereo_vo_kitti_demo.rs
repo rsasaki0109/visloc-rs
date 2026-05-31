@@ -59,6 +59,45 @@ use visloc_rs::io::calibration::parse_kitti_calibration_txt;
 #[cfg(feature = "image-io")]
 use visloc_rs::io::kitti::read_kitti_image_sequence_dir;
 #[cfg(feature = "image-io")]
+use visloc_rs::slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
+
+/// Deterministic distinct-index sampler (inline LCG, no `rand` dependency —
+/// the same convention as `pgo_g2o_robust_benchmark`). Returns `k` distinct
+/// indices in `0..n` reproducibly from `seed`, so an outlier-injection run is
+/// bit-identical across the Huber and GNC invocations being compared.
+#[cfg(feature = "image-io")]
+fn sample_distinct_indices(n: usize, k: usize, seed: u64) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    if n == 0 {
+        return out;
+    }
+    let target = k.min(n);
+    let mut state = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    while out.len() < target {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        out.insert(((state >> 33) as usize) % n);
+    }
+    out
+}
+
+/// GNC outlier-rejection report for the stereo BA. The injected-* fields are
+/// populated only when `--ba-inject-outliers` is active and give the recall /
+/// false-positive of the GNC classification against the known injected labels.
+#[cfg(feature = "image-io")]
+struct GncBaReport {
+    inlier_scale: f64,
+    inliers: usize,
+    outliers: usize,
+    observations: usize,
+    injected_total: usize,
+    injected_rejected: usize,
+    clean_rejected: usize,
+}
+#[cfg(feature = "image-io")]
 use visloc_rs::vision::features::{
     FeatureSet, GrayscaleImage, HogLikeFeatureConfig, HogLikeFeatureExtractor,
 };
@@ -100,6 +139,38 @@ struct CliArgs {
     frame_stride: usize,
     min_pnp_inliers: usize,
     run_stereo_ba: bool,
+    /// Run the stereo BA refinement with Graduated Non-Convexity outlier
+    /// rejection (`BundleAdjustment::optimize_gnc`) instead of the default
+    /// Huber M-estimator. GNC anneals from a convex (all-inlier) surrogate to
+    /// the true robust cost, so wrong VO-chaining correspondences are switched
+    /// off at the back-end rather than merely down-weighted.
+    ba_gnc: bool,
+    /// GNC surrogate family when `--ba-gnc` is set: truncated-least-squares
+    /// (hard 0/1 verdict, exact inlier recovery — the default) or Geman-McClure
+    /// (smooth weights, decisive identification but loosens weak directions).
+    ba_gnc_kernel: GncKernel,
+    /// GNC inlier scale `c` in pixels (reprojection-residual threshold). Under
+    /// `--ba-gnc-auto-c` this is only a floor; otherwise it is used verbatim.
+    ba_gnc_c: f64,
+    /// Auto-estimate the GNC inlier scale from the residual MAD
+    /// (`GncConfig::auto_scale`) so the pixel threshold tracks the run's own
+    /// reprojection-noise spread instead of a hand-set value.
+    ba_gnc_auto_c: bool,
+    /// Re-estimate the GNC auto inlier scale at every μ level instead of once
+    /// (`GncConfig::auto_scale_readapt`). Implies `--ba-gnc-auto-c`. Lets the
+    /// scale contract as outliers are suppressed, recovering recall on heavily
+    /// contaminated data where the one-shot estimate inflates.
+    ba_gnc_readapt: bool,
+    /// Inject this many gross outliers into the stereo BA observations before
+    /// optimizing (controlled contamination of the real KITTI tracks). `0`
+    /// disables injection. Deterministic in `--ba-inject-seed`, so the Huber
+    /// and GNC runs being compared see identical corruption.
+    ba_inject_outliers: usize,
+    /// Seed for the deterministic outlier-injection sampler.
+    ba_inject_seed: u64,
+    /// Pixel offset applied to each injected outlier (added to the left `u`
+    /// and the right `u`), simulating a gross wrong temporal data association.
+    ba_inject_offset_px: f64,
     /// Optional KITTI ground-truth poses file (e.g. `dataset/poses/00.txt`).
     /// Used only for ATE evaluation; subsampled to match the frame indices
     /// the demo actually consumes.
@@ -206,6 +277,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut frame_stride: usize = 4;
     let mut min_pnp_inliers: usize = 12;
     let mut run_stereo_ba = true;
+    let mut ba_gnc = false;
+    let mut ba_gnc_kernel = GncKernel::TruncatedLeastSquares;
+    let mut ba_gnc_c: f64 = 4.0;
+    let mut ba_gnc_auto_c = false;
+    let mut ba_gnc_readapt = false;
+    let mut ba_inject_outliers: usize = 0;
+    let mut ba_inject_seed: u64 = 1;
+    let mut ba_inject_offset_px: f64 = 60.0;
     let mut gt_poses: Option<PathBuf> = None;
     let mut gt_original_stride: usize = 1;
     let mut run_synthetic_loop_closure = false;
@@ -277,6 +356,51 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--no-stereo-ba" => {
                 run_stereo_ba = false;
+                args.remove(i);
+            }
+            "--ba-gnc" => {
+                ba_gnc = true;
+                args.remove(i);
+            }
+            "--ba-gnc-kernel" => {
+                let value = args.remove(i + 1);
+                args.remove(i);
+                ba_gnc_kernel = match value.to_ascii_lowercase().as_str() {
+                    "tls" | "truncated" | "truncated-least-squares" => {
+                        GncKernel::TruncatedLeastSquares
+                    }
+                    "gm" | "geman-mcclure" | "gemanmcclure" => GncKernel::GemanMcClure,
+                    other => {
+                        return Err(format!(
+                            "unknown --ba-gnc-kernel '{other}' (expected tls or gm)"
+                        )
+                        .into());
+                    }
+                };
+            }
+            "--ba-gnc-c" => {
+                ba_gnc_c = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--ba-gnc-auto-c" => {
+                ba_gnc_auto_c = true;
+                args.remove(i);
+            }
+            "--ba-gnc-readapt" => {
+                ba_gnc_readapt = true;
+                ba_gnc_auto_c = true;
+                args.remove(i);
+            }
+            "--ba-inject-outliers" => {
+                ba_inject_outliers = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--ba-inject-seed" => {
+                ba_inject_seed = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--ba-inject-offset-px" => {
+                ba_inject_offset_px = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
             "--gt-poses" => {
@@ -413,6 +537,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         frame_stride,
         min_pnp_inliers,
         run_stereo_ba,
+        ba_gnc,
+        ba_gnc_kernel,
+        ba_gnc_c,
+        ba_gnc_auto_c,
+        ba_gnc_readapt,
+        ba_inject_outliers,
+        ba_inject_seed,
+        ba_inject_offset_px,
         gt_poses,
         gt_original_stride,
         run_synthetic_loop_closure,
@@ -719,6 +851,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // frame-i's camera frame, so they need to be lifted into the world
     // frame using vo_poses[i]^{-1} before being added as landmarks.
     let mut ba_summary: Option<(f64, f64, usize)> = None;
+    // GNC-only stats, populated when `--ba-gnc` is set. `None` for Huber.
+    let mut ba_gnc_summary: Option<GncBaReport> = None;
     let mut ba_poses: Option<Vec<Pose>> = None;
     if args.run_stereo_ba {
         let mut ba = BundleAdjustment::new(camera.clone());
@@ -770,18 +904,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             track_lengths.iter().copied().max().unwrap_or(0),
         );
 
+        // Collect every stereo observation first so the optional outlier
+        // injection can address them by their insertion index — which, because
+        // the demo adds no monocular observations, equals the index into the
+        // GNC `observation_weights` vector. That alignment is what lets us score
+        // the GNC classification against the known injected labels below.
+        let mut stereo_obs: Vec<BaStereoObservation> = Vec::new();
         for (lm_id, track) in (0_u64..).zip(long_tracks.iter()) {
             ba.add_landmark(lm_id, track.landmark_world);
             for obs in &track.observations {
                 let l = left_features[obs.frame_index].keypoints[obs.left_index];
                 let r = right_features[obs.frame_index].keypoints[obs.right_index];
-                ba.add_stereo_observation(BaStereoObservation {
+                stereo_obs.push(BaStereoObservation {
                     keyframe_id: obs.frame_index as u64,
                     landmark_id: lm_id,
                     xy: Point2::new(l.x, l.y),
                     u_right: r.x,
                 });
             }
+        }
+
+        // Optional controlled contamination: corrupt N randomly-chosen stereo
+        // observations by a large fixed pixel offset on both the left `u` and
+        // the right `u`, simulating gross wrong temporal data associations. The
+        // sampler is deterministic in the seed, so the Huber and GNC runs being
+        // compared see *identical* corruption — the standard robust-SLAM
+        // protocol (cf. `pgo_g2o_robust_benchmark`), here on real KITTI tracks.
+        let injected: std::collections::HashSet<usize> =
+            if args.ba_inject_outliers > 0 && !stereo_obs.is_empty() {
+                let set = sample_distinct_indices(
+                    stereo_obs.len(),
+                    args.ba_inject_outliers,
+                    args.ba_inject_seed,
+                );
+                for &idx in &set {
+                    let o = &mut stereo_obs[idx];
+                    o.xy.coords.x += args.ba_inject_offset_px;
+                    o.u_right += args.ba_inject_offset_px;
+                }
+                println!(
+                    "BA outlier injection: corrupted {} / {} stereo observations \
+                     (offset={:.1}px seed={})",
+                    set.len(),
+                    stereo_obs.len(),
+                    args.ba_inject_offset_px,
+                    args.ba_inject_seed,
+                );
+                set
+            } else {
+                std::collections::HashSet::new()
+            };
+
+        for o in stereo_obs {
+            ba.add_stereo_observation(o);
         }
 
         // Sparse Cholesky scales to the n_frames × stereo_per_frame size.
@@ -798,14 +973,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // is dominated by the Schur reduction over (pose-pair, landmark)
         // cross blocks; 5 iterations consume most of the cost reduction
         // but BA still has work to do on rotation drift.
-        let result = ba.optimize(&BaConfig {
+        let ba_config = BaConfig {
             max_iterations: 15,
             linear_solver: LinearSolver::Sparse,
             robust_kernel: RobustKernel::Huber { delta: 4.0 },
             ..BaConfig::default()
-        });
-        match result {
-            Ok(r) => {
+        };
+
+        // Both back-ends mutate `ba.poses` in place, so the pose read-back and
+        // ATE/CSV plumbing below is shared. Normalize the two result types to
+        // one tuple: (initial_cost, final_cost, iterations, converged, GNC
+        // extras). The Huber path keeps `RobustKernel::Huber`; the GNC path
+        // ignores `ba_config.robust_kernel` and anneals its own surrogate, so
+        // wrong VO-chaining correspondences are switched off, not down-weighted.
+        let outcome: Result<(f64, f64, usize, bool, Option<GncBaReport>), _> = if args.ba_gnc {
+            let gnc_cfg = GncConfig {
+                kernel: args.ba_gnc_kernel,
+                c: args.ba_gnc_c,
+                auto_scale: if args.ba_gnc_auto_c {
+                    Some(AUTO_SCALE_K)
+                } else {
+                    None
+                },
+                auto_scale_readapt: args.ba_gnc_readapt,
+                ..GncConfig::default()
+            };
+            println!(
+                "stereo BA back-end: GNC (kernel={:?} c={:.2}px auto_c={} readapt={})",
+                gnc_cfg.kernel, gnc_cfg.c, args.ba_gnc_auto_c, args.ba_gnc_readapt,
+            );
+            ba.optimize_gnc(&ba_config, &gnc_cfg).map(|r| {
+                let inliers = r.inlier_count(0.5);
+                let outliers = r.outlier_count(0.5);
+                // `observation_weights` is monocular-first then stereo; the demo
+                // adds no monocular observations, so weight index i maps to the
+                // i-th injected/clean stereo observation. Score the w<0.5
+                // rejections against the known injected labels.
+                let mut injected_rejected = 0usize;
+                let mut clean_rejected = 0usize;
+                for (i, w) in r.observation_weights.iter().enumerate() {
+                    if w.is_finite() && *w < 0.5 {
+                        if injected.contains(&i) {
+                            injected_rejected += 1;
+                        } else {
+                            clean_rejected += 1;
+                        }
+                    }
+                }
+                (
+                    r.initial_cost,
+                    r.final_cost,
+                    r.outer_iterations,
+                    r.converged,
+                    Some(GncBaReport {
+                        inlier_scale: r.inlier_scale,
+                        inliers,
+                        outliers,
+                        observations: r.observation_count,
+                        injected_total: injected.len(),
+                        injected_rejected,
+                        clean_rejected,
+                    }),
+                )
+            })
+        } else {
+            ba.optimize(&ba_config).map(|r| {
+                (
+                    r.initial_cost,
+                    r.final_cost,
+                    r.iterations.len(),
+                    r.converged,
+                    None,
+                )
+            })
+        };
+        match outcome {
+            Ok((initial_cost, final_cost, iters, converged, gnc_extra)) => {
                 let refined_centers: Vec<nalgebra::Point3<f64>> = (0..vo_poses.len())
                     .map(|i| ba.poses[&(i as u64)].camera_center_world())
                     .collect();
@@ -815,14 +1058,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .sum();
                 println!(
                     "stereo BA: cost {:.2} → {:.2} ({} iter, converged={}); length {:.2} m",
-                    r.initial_cost,
-                    r.final_cost,
-                    r.iterations.len(),
-                    r.converged,
-                    refined_length,
+                    initial_cost, final_cost, iters, converged, refined_length,
                 );
+                if let Some(rep) = &gnc_extra {
+                    println!(
+                        "stereo BA GNC: inlier_scale={:.2}px inliers={}/{} outliers={} \
+                         ({:.1}% rejected)",
+                        rep.inlier_scale,
+                        rep.inliers,
+                        rep.observations,
+                        rep.outliers,
+                        if rep.observations > 0 {
+                            100.0 * rep.outliers as f64 / rep.observations as f64
+                        } else {
+                            0.0
+                        },
+                    );
+                    if rep.injected_total > 0 {
+                        let clean = rep.observations.saturating_sub(rep.injected_total);
+                        println!(
+                            "stereo BA GNC outlier benchmark: injected={} \
+                             recall={}/{} ({:.1}%) false_positives={}/{} ({:.2}%)",
+                            rep.injected_total,
+                            rep.injected_rejected,
+                            rep.injected_total,
+                            100.0 * rep.injected_rejected as f64 / rep.injected_total as f64,
+                            rep.clean_rejected,
+                            clean,
+                            if clean > 0 {
+                                100.0 * rep.clean_rejected as f64 / clean as f64
+                            } else {
+                                0.0
+                            },
+                        );
+                    }
+                }
+                ba_gnc_summary = gnc_extra;
                 write_trajectory_csv(&args.out_dir.join("ba.csv"), &refined_centers)?;
-                ba_summary = Some((r.initial_cost, r.final_cost, r.iterations.len()));
+                ba_summary = Some((initial_cost, final_cost, iters));
                 let refined_poses: Vec<Pose> = (0..vo_poses.len())
                     .map(|i| ba.poses[&(i as u64)].clone())
                     .collect();
@@ -847,6 +1120,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.push_str(&format!(
             "stereo_ba_cost_initial={c0:.2} stereo_ba_cost_final={c1:.2} stereo_ba_iterations={iters}\n",
         ));
+    }
+    if let Some(rep) = &ba_gnc_summary {
+        summary.push_str(&format!(
+            "stereo_ba_gnc_inlier_scale_px={:.4} stereo_ba_gnc_inliers={} \
+             stereo_ba_gnc_outliers={} stereo_ba_gnc_observations={}\n",
+            rep.inlier_scale, rep.inliers, rep.outliers, rep.observations,
+        ));
+        if rep.injected_total > 0 {
+            let clean = rep.observations.saturating_sub(rep.injected_total);
+            summary.push_str(&format!(
+                "stereo_ba_gnc_injected={} stereo_ba_gnc_injected_rejected={} \
+                 stereo_ba_gnc_clean_rejected={} stereo_ba_gnc_clean_total={}\n",
+                rep.injected_total, rep.injected_rejected, rep.clean_rejected, clean,
+            ));
+        }
     }
 
     // Optional ATE evaluation against KITTI ground truth. Both estimated
