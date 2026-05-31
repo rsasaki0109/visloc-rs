@@ -74,6 +74,11 @@ path = "examples/multi_session_place_recognition_kitti_demo.rs"
 required-features = ["image-io"]
 
 [[example]]
+name = "multi_session_stereo_metric_merge_kitti_demo"
+path = "examples/multi_session_stereo_metric_merge_kitti_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
 name = "localize_from_common_image"
 path = "examples/localize_from_common_image.rs"
 required-features = ["image-io"]
