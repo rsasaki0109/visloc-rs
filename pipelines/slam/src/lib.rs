@@ -3427,6 +3427,31 @@ pub struct PoseGraphEdge {
     pub information: Option<Matrix6<f64>>,
 }
 
+/// A dense Gaussian *prior* over a set of poses — the factor a fixed-lag /
+/// sliding-window smoother re-adds when it marginalizes states out of the graph
+/// (see [`crate::marginalization`] and [`PoseGraph::marginalize_pose`]).
+///
+/// It penalizes `½ eᵀ Ω e` where `e` stacks each pose's right-tangent error from
+/// its linearization point, `eᵢ = log(T₀ᵢ⁻¹ ∘ Tᵢ)` (so `∂eᵢ/∂δᵢ = I` under the
+/// solver's `T ← T ∘ exp(δ)` update, and the prior contributes `Ω` to `H` and
+/// `Ω·e` to `g` with an identity Jacobian). `information` is the `6k × 6k`
+/// matrix `Ω` in the same `[ρ; ω]` SE(3)-tangent basis the edges use, and
+/// `linearization[i]` is `T₀ᵢ`, the estimate of pose `ids[i]` when the prior was
+/// formed. A prior id that is the gauge-fixed anchor (or absent) contributes a
+/// zero tangent error and no variable block, dropping out cleanly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GaussianPrior {
+    /// The poses this prior constrains, indexing `information`'s `6×6` blocks
+    /// and `linearization` in the same order.
+    pub ids: Vec<u64>,
+    /// The `6k × 6k` information (inverse-covariance) matrix `Ω` over the stacked
+    /// tangent error, `k = ids.len()`.
+    pub information: DMatrix<f64>,
+    /// Linearization point `T₀ᵢ` (world-to-camera) per id, the estimate at which
+    /// the prior was formed; the residual is measured relative to it.
+    pub linearization: Vec<SE3>,
+}
+
 /// Single Gauss-Newton step diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphOptimizationStep {
@@ -3719,6 +3744,10 @@ pub struct PoseGraph {
     pub poses: BTreeMap<u64, Pose>,
     /// Edges in insertion order.
     pub edges: Vec<PoseGraphEdge>,
+    /// Dense Gaussian priors (marginalization factors). Empty for a plain graph,
+    /// so the solver and cost are bit-identical until a [`Self::marginalize_pose`]
+    /// folds a state into one.
+    pub priors: Vec<GaussianPrior>,
     /// Anchor keyframe id; its pose is held fixed during optimization.
     pub anchor: Option<u64>,
 }
@@ -3995,7 +4024,38 @@ impl PoseGraph {
                 None => edge.weight * kernel.cost(r.norm_squared()),
             };
         }
-        total
+        total + self.prior_cost()
+    }
+
+    /// Stacked right-tangent error of a prior's poses from their linearization:
+    /// `eᵢ = log(T₀ᵢ⁻¹ ∘ Tᵢ)`, one 6-vector per id, in `ids` order (`[ρ; ω]`
+    /// SE(3) tangent). A pose absent from the graph — or pinned at its
+    /// linearization, like the anchor — contributes a zero block. Length
+    /// `6 · ids.len()`.
+    fn prior_tangent_error(&self, prior: &GaussianPrior) -> DVector<f64> {
+        let mut e = DVector::<f64>::zeros(prior.ids.len() * 6);
+        for (i, (&id, t0)) in prior.ids.iter().zip(&prior.linearization).enumerate() {
+            if let Some(pose) = self.poses.get(&id) {
+                let err = t0.inverse().compose(&pose.world_to_camera).log();
+                for k in 0..6 {
+                    e[i * 6 + k] = err[k];
+                }
+            }
+        }
+        e
+    }
+
+    /// Total Gaussian-prior cost `Σ eᵀ Ω e` (the marginalization factors), on the
+    /// same `2×` scale as the edge cost `rᵀΩr` so the LM accept test sees one
+    /// consistent objective. Zero when the graph carries no priors.
+    fn prior_cost(&self) -> f64 {
+        self.priors
+            .iter()
+            .map(|prior| {
+                let e = self.prior_tangent_error(prior);
+                (e.transpose() * &prior.information * &e)[(0, 0)]
+            })
+            .sum()
     }
 
     /// Robust SE(3) cost with an optional per-edge multiplier (`gnc_weights`,
@@ -4022,7 +4082,7 @@ impl PoseGraph {
                     None => edge.weight * kernel.cost(r.norm_squared()),
                 };
         }
-        total
+        total + self.prior_cost()
     }
 
     /// Per-edge (whitened) squared residual `sᵢ`, indexed by edge position —
@@ -4114,6 +4174,35 @@ impl PoseGraph {
                 let cross_t = cross.transpose();
                 builder.add_block6(j * 6, i * 6, weight, &cross);
                 builder.add_block6(i * 6, j * 6, weight, &cross_t);
+            }
+        }
+
+        // Gaussian (marginalization) priors: the factor `½ eᵀ Ω e` with
+        // `eᵢ = log(T₀ᵢ⁻¹ ∘ Tᵢ)` and identity Jacobian (`∂eᵢ/∂δᵢ = I`), so it
+        // contributes `Ω` to `H` and `Ω·e` to `g` on the variable blocks. A
+        // prior id that is the anchor (or absent) has `eᵢ ≈ 0` and no variable
+        // block, so it drops out — leaving the kept poses' coupling intact.
+        for prior in &self.priors {
+            let e = self.prior_tangent_error(prior);
+            let ge = &prior.information * &e; // Ω·e  (length 6k)
+            for (pi, &id_i) in prior.ids.iter().enumerate() {
+                let Some(vi) = node_index.get(&id_i).copied() else {
+                    continue;
+                };
+                add_segment6(
+                    &mut g,
+                    vi * 6,
+                    1.0,
+                    &Vector6::from_fn(|k, _| ge[pi * 6 + k]),
+                );
+                for (pj, &id_j) in prior.ids.iter().enumerate() {
+                    let Some(vj) = node_index.get(&id_j).copied() else {
+                        continue;
+                    };
+                    let block =
+                        Matrix6::from_fn(|r, c| prior.information[(pi * 6 + r, pj * 6 + c)]);
+                    builder.add_block6(vi * 6, vj * 6, 1.0, &block);
+                }
             }
         }
 
