@@ -80,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     default_translation_scale: loop_translation_scale,
                 },
                 pose_graph_config: PoseGraphSe3Config::default(),
+                gnc: None,
                 trigger_every_new_constraints: 1,
             }),
             ..OnlineSlamConfig::default()

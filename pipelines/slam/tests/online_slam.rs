@@ -3795,6 +3795,7 @@ mod online_loop_closure_refinement {
                         default_translation_scale: 1.0,
                     },
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
@@ -3980,6 +3981,126 @@ mod online_loop_closure_refinement {
         );
     }
 
+    /// Same three-keyframe orbit as the iterative test above, but with the
+    /// back-end configured to run GNC (`OnlineSlamLoopClosureRefinementConfig::gnc`).
+    /// Asserts the wiring: the GNC robust solver fires instead of the plain
+    /// M-estimator (`gnc_result` populated, `pose_graph_result` empty), the
+    /// optimised poses are still written back into the map, the anchor stays
+    /// fixed, and — crucially — the *legitimate* loop closure is NOT
+    /// false-rejected (`loop_closures_rejected == 0`, the loop edge keeps an
+    /// inlier weight). The outlier-rejection capability itself is proven
+    /// directly on the pose graph in `gnc_robust_pgo.rs`; this test guards the
+    /// pipeline integration point.
+    #[test]
+    fn gnc_back_end_fires_and_keeps_a_legitimate_loop_closure() {
+        use visloc_slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
+        use visloc_slam::PoseGraphEdgeKind;
+
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = OnlineSlamPipeline::new(
+            map.clone(),
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    // Gap 15 so only the (KF#10, KF#30) pair (id gap 20)
+                    // generates a loop candidate — the (10,20) / (20,30)
+                    // pairs (gap 10) are suppressed. With a single loop edge
+                    // there is no multi-edge translation-scale conflict (the
+                    // essential-matrix verifier fixes every loop edge's
+                    // magnitude to `default_translation_scale`, which cannot
+                    // match three different true displacements at once).
+                    min_frame_id_gap: 15,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera: camera.clone(),
+                    verifier_config: LoopClosureVerifierConfig {
+                        min_inliers: 8,
+                        min_inlier_ratio: 0.5,
+                        max_mean_sampson_error: 5.0e-3,
+                        // Match the true |C30 - C10| = ‖(0.05, 0, 0.05)‖ so the
+                        // single (10,30) loop edge is geometrically consistent
+                        // (the verifier pins every loop edge's translation
+                        // magnitude to this constant).
+                        default_translation_scale: 0.05 * std::f64::consts::SQRT_2,
+                    },
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    // TLS with a MAD auto-scaled inlier band (the band tracks
+                    // the live graph's noise); no re-adapt — it is a BA-only
+                    // win and over-rejects real edges on pose graphs.
+                    gnc: Some(GncConfig {
+                        kernel: GncKernel::TruncatedLeastSquares,
+                        c: 1.0e-3,
+                        auto_scale: Some(AUTO_SCALE_K),
+                        auto_scale_readapt: false,
+                        ..GncConfig::default()
+                    }),
+                    trigger_every_new_constraints: 1,
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        // KF#30 returns near the origin (~0.07 m baseline to KF#10) — enough
+        // parallax for essential-matrix RANSAC, and far enough from KF#20
+        // (~1.45 m) to register as a fresh keyframe. The verifier's
+        // `default_translation_scale` is set to this baseline so the loop edge
+        // is geometrically consistent — a legitimate closure GNC should keep.
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded() && r2.map_was_updated());
+
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(stats.accepted_count >= 1, "the legitimate loop is accepted");
+        // The GNC path fired, not the plain iterative one.
+        let gnc = stats
+            .gnc_result
+            .as_ref()
+            .expect("the GNC solver fires when `gnc` is configured");
+        assert!(
+            stats.pose_graph_result.is_none(),
+            "the iterative result must be empty on the GNC path"
+        );
+        assert_eq!(gnc.anchor_id, 10);
+        assert!(gnc.variable_count >= 2);
+        assert!(
+            stats.keyframes_updated >= 2,
+            "GNC writes back at least the two non-anchor keyframe poses"
+        );
+        let state = slam.pose_graph_state.as_ref().unwrap();
+        // The good loop closure is kept, not false-rejected.
+        assert_eq!(
+            stats.loop_closures_rejected, 0,
+            "GNC must not reject a legitimate loop closure"
+        );
+        let loop_edges_inlier = state
+            .graph
+            .edges
+            .iter()
+            .zip(&gnc.edge_weights)
+            .filter(|(e, _)| e.kind == PoseGraphEdgeKind::LoopClosure)
+            .all(|(_, &w)| w >= 0.5);
+        assert!(
+            loop_edges_inlier,
+            "every legitimate loop edge keeps an inlier weight"
+        );
+        // Anchor pose must remain at the origin.
+        let anchor_center = state.graph.poses.get(&10).unwrap().camera_center_world();
+        assert!(anchor_center.coords.norm() < 1.0e-9);
+    }
+
     #[test]
     fn pose_graph_refinement_skipped_when_no_keyframe_registered() {
         let camera = camera();
@@ -3998,6 +4119,7 @@ mod online_loop_closure_refinement {
                     camera: camera.clone(),
                     verifier_config: LoopClosureVerifierConfig::default(),
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()

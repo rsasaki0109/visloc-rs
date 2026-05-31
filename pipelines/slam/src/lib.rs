@@ -416,8 +416,25 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// the [`EssentialMatrixLoopClosureVerifier`] every frame.
     pub verifier_config: LoopClosureVerifierConfig,
     /// SE(3) Gauss-Newton settings consumed by
-    /// [`PoseGraph::optimize_se3_iterative`] when the trigger fires.
+    /// [`PoseGraph::optimize_se3_iterative`] (or, when `gnc` is `Some`, the
+    /// shared SE(3) settings consumed by [`PoseGraph::optimize_se3_gnc`])
+    /// when the trigger fires.
     pub pose_graph_config: PoseGraphSe3Config,
+    /// Optional Graduated Non-Convexity outlier rejection for the back-end
+    /// solve. `None` (default) runs the plain
+    /// [`PoseGraph::optimize_se3_iterative`] M-estimator. `Some(gnc)` runs
+    /// [`PoseGraph::optimize_se3_gnc`] instead, so a *verified-but-wrong*
+    /// loop closure — a perceptual-aliasing match that still passed
+    /// essential-matrix verification — is annealed down to a vanishing
+    /// weight at the back-end before it can drag the whole trajectory into a
+    /// corrupted basin. This is the last untouched GNC integration point;
+    /// the local M-estimator alone cannot escape a basin a confident wrong
+    /// closure captures. The rejected closures are reported on
+    /// [`OnlineSlamLoopClosureRefinementStats`]. Use `auto_scale` so the
+    /// inlier band tracks the live graph's noise; do NOT use
+    /// `auto_scale_readapt` here (it is a BA-only win and over-rejects real
+    /// edges on pose graphs).
+    pub gnc: Option<gnc::GncConfig>,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -489,11 +506,24 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// the running graph has no node for it.
     pub accepted_count: usize,
     /// `Some` when [`PoseGraph::optimize_se3_iterative`] fired on this
-    /// frame; `None` when no new constraint arrived or the new-
-    /// constraint trigger threshold was not yet reached.
+    /// frame; `None` when no new constraint arrived, the new-constraint
+    /// trigger threshold was not yet reached, or the GNC robust solver ran
+    /// instead (see `gnc_result`).
     pub pose_graph_result: Option<PoseGraphSe3Result>,
+    /// `Some` when the GNC robust solver ([`PoseGraph::optimize_se3_gnc`])
+    /// fired this frame instead of the plain iterative one — i.e. when
+    /// [`OnlineSlamLoopClosureRefinementConfig::gnc`] is set and the trigger
+    /// threshold was met. Its `edge_weights` classify every graph edge as
+    /// inlier/outlier; `pose_graph_result` is `None` on this path.
+    pub gnc_result: Option<PoseGraphGncResult>,
+    /// Number of *loop-closure* edges the GNC solver drove below the inlier
+    /// threshold (weight `< 0.5`) on the solve fired this frame — the
+    /// verified-but-wrong closures caught and rejected at the back-end.
+    /// Always `0` on the plain iterative path (`gnc` unset).
+    pub loop_closures_rejected: usize,
     /// Number of `map.keyframes[id].frame.pose` slots overwritten with
-    /// the optimised pose after PGO. Zero unless `pose_graph_result.is_some()`.
+    /// the optimised pose after PGO. Zero unless a solve fired this frame
+    /// (`pose_graph_result.is_some()` or `gnc_result.is_some()`).
     pub keyframes_updated: usize,
 }
 
@@ -2148,10 +2178,43 @@ where
         let trigger_threshold = state.config.trigger_every_new_constraints.max(1);
         if state.pending_since_last_trigger >= trigger_threshold {
             let pgo_config = state.config.pose_graph_config.clone();
-            let pgo_result = state.graph.optimize_se3_iterative(&pgo_config);
             state.pending_since_last_trigger = 0;
             state.trigger_count += 1;
-            if let Ok(result) = pgo_result {
+            // When GNC is configured, run the robust solver so a
+            // verified-but-wrong loop closure is annealed out at the
+            // back-end; otherwise the plain M-estimator. Both paths write
+            // the optimised poses back into the map, so a wrong closure
+            // GNC rejected never reaches subsequent tracking / local-VI-BA.
+            let solved = if let Some(gnc_config) = state.config.gnc {
+                match state.graph.optimize_se3_gnc(&pgo_config, &gnc_config) {
+                    Ok(result) => {
+                        // Count the loop-closure edges driven below the
+                        // inlier band — the rejected wrong closures.
+                        // `edge_weights` is in `graph.edges` order.
+                        stats.loop_closures_rejected = state
+                            .graph
+                            .edges
+                            .iter()
+                            .zip(&result.edge_weights)
+                            .filter(|(edge, &w)| {
+                                edge.kind == PoseGraphEdgeKind::LoopClosure && w < 0.5
+                            })
+                            .count();
+                        stats.gnc_result = Some(result);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                match state.graph.optimize_se3_iterative(&pgo_config) {
+                    Ok(result) => {
+                        stats.pose_graph_result = Some(result);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            };
+            if solved {
                 // Write optimised poses back into the map so subsequent
                 // tracking / local-VI-BA passes see the refined frame.
                 let mut updated = 0usize;
@@ -2162,7 +2225,6 @@ where
                     }
                 }
                 stats.keyframes_updated = updated;
-                stats.pose_graph_result = Some(result);
             }
         }
 
