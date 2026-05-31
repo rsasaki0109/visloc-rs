@@ -36,16 +36,67 @@
 
 use std::collections::BTreeMap;
 
+use nalgebra::{Matrix6, Vector6};
 use visloc_core::geometry::SE3;
+
+/// First-order SE(3) covariance model for the **Mahalanobis** PCM test. When
+/// supplied via [`PcmConfig::noise`], the cycle residual is normalized by the
+/// covariance compounded along the cycle's legs — the textbook PCM χ² test
+/// (Mangelson et al.) — instead of the raw isotropic SE(3)-tangent norm.
+///
+/// This directly lifts **recall under drift**: a genuine cycle that spans many
+/// drifted odometry edges has a large raw residual *but also a large expected
+/// covariance*, so its Mahalanobis distance stays small and it passes; a wrong
+/// loop's residual is inconsistent with even that inflated covariance and is
+/// still rejected. The isotropic-norm test (no noise model) instead drops the
+/// long-span genuine cycles, the failure mode seen on KITTI cross-session
+/// screening.
+///
+/// Covariances are 6×6 in the SE(3) tangent layout `[ρ; ω]` (translation first,
+/// rotation second — matching [`SE3::log`] / [`SE3::adjoint`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcmNoiseModel {
+    /// Covariance contributed by a single odometry edge. An odometry leg
+    /// spanning `n` sequential keyframes accumulates `n ×` this (an isotropic
+    /// random-walk model: the within-leg adjoint rotation between consecutive
+    /// edges is neglected, while the dominant between-leg adjoints of the full
+    /// four-leg cycle *are* applied). Assumes contiguous sequential keyframe ids
+    /// so the edge count of `odo(x→y)` is `|x − y|`.
+    pub odometry_per_edge: Matrix6<f64>,
+    /// Covariance of one loop-closure measurement `z` (a direct observation, so
+    /// independent of how far apart its endpoints are in the sequence).
+    pub loop_measurement: Matrix6<f64>,
+}
+
+impl PcmNoiseModel {
+    /// Isotropic model: per-edge odometry variance `(odo_rot, odo_trans)` and
+    /// per-measurement variance `(loop_rot, loop_trans)` (rotation rad², trans
+    /// length²), as diagonal `[ρ; ω]` covariances.
+    pub fn isotropic(odo_rot: f64, odo_trans: f64, loop_rot: f64, loop_trans: f64) -> Self {
+        let diag = |rot: f64, trans: f64| {
+            let mut m = Matrix6::zeros();
+            for i in 0..3 {
+                m[(i, i)] = trans;
+                m[(i + 3, i + 3)] = rot;
+            }
+            m
+        };
+        Self {
+            odometry_per_edge: diag(odo_rot, odo_trans),
+            loop_measurement: diag(loop_rot, loop_trans),
+        }
+    }
+}
 
 /// Configuration for [`maximum_consistent_set`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PcmConfig {
-    /// Maximum SE(3)-tangent norm `‖log(cycle)‖` for two measurements to count
-    /// as consistent. Mixes rotation (rad) and translation (in the trajectory's
-    /// length unit); pick it a few × the expected odometry+measurement noise of
-    /// a genuine cycle. A Mahalanobis χ² threshold with per-edge covariance is
-    /// the textbook choice; this isotropic norm is the simplification used here.
+    /// Consistency threshold. Without [`Self::noise`] it is the maximum
+    /// SE(3)-tangent norm `‖log(cycle)‖` (mixes rotation rad and translation
+    /// length — pick it a few × the expected noise of a genuine cycle). With a
+    /// noise model it is instead a unitless **Mahalanobis distance** bound
+    /// `√(ξᵀ Σ⁻¹ ξ)`, i.e. `√` of a χ²(6) quantile (e.g. `√16.8 ≈ 4.1` for the
+    /// 0.99 quantile) — scale-free, so it no longer conflates rad with metres.
     pub threshold: f64,
     /// Also require every kept loop to be individually consistent with the
     /// odometry (the single-loop cycle `z ⊖ odo`). When the odometry between a
@@ -53,6 +104,10 @@ pub struct PcmConfig {
     /// pre-filter; with large accumulated drift it would reject genuine loops,
     /// so disable it and rely on pairwise consistency alone.
     pub require_individual: bool,
+    /// When set, use the covariance-aware Mahalanobis cycle test instead of the
+    /// isotropic SE(3)-tangent norm — see [`PcmNoiseModel`]. `None` preserves the
+    /// original isotropic behaviour.
+    pub noise: Option<PcmNoiseModel>,
 }
 
 impl Default for PcmConfig {
@@ -60,6 +115,7 @@ impl Default for PcmConfig {
         Self {
             threshold: 1.0,
             require_individual: true,
+            noise: None,
         }
     }
 }
@@ -105,6 +161,87 @@ pub fn pairwise_residual(
     Some(cycle.log().norm())
 }
 
+/// Edge count of an odometry leg `x → y`, assuming contiguous sequential
+/// keyframe ids (so the number of sequential edges traversed is `|x − y|`).
+/// Clamped to ≥ 1 so even an adjacent leg carries one edge of covariance.
+fn leg_edges(x: u64, y: u64) -> f64 {
+    ((x as i64 - y as i64).unsigned_abs() as f64).max(1.0)
+}
+
+/// First-order covariance compounding of a cycle expressed as an ordered product
+/// of legs `legs[0] ∘ legs[1] ∘ … ∘ legs[L-1]`, each `(mean, cov)` with `cov` in
+/// the leg's own right-tangent. Returns `(cycle_mean, cycle_cov)`.
+///
+/// For `T = A ∘ B` with right-perturbations `T = T̄ exp(ξ)`, `ξ_T = Ad(B̄⁻¹) ξ_A +
+/// ξ_B`, so each leg's covariance is rotated by the adjoint of the inverse of
+/// everything to its right. Accumulating right-to-left:
+/// `Σ += Ad(R⁻¹) Σ_leg Ad(R⁻¹)ᵀ`, `R ← leg ∘ R`.
+fn compound_cycle(legs: &[(SE3, Matrix6<f64>)]) -> (SE3, Matrix6<f64>) {
+    let mut cov = Matrix6::zeros();
+    let mut right = SE3::identity();
+    for (mean, leg_cov) in legs.iter().rev() {
+        let ad = right.inverse().adjoint();
+        cov += ad * leg_cov * ad.transpose();
+        right = mean.compose(&right);
+    }
+    (right, cov)
+}
+
+/// Mahalanobis distance `√(ξᵀ Σ⁻¹ ξ)` of a compounded cycle (`ξ = log(mean)`),
+/// with a tiny diagonal jitter for numerical safety. `None` if `Σ` is singular.
+fn mahalanobis(mean: &SE3, cov: &Matrix6<f64>) -> Option<f64> {
+    let xi: Vector6<f64> = mean.log();
+    let regularized = cov + Matrix6::identity() * 1e-12;
+    let inv = regularized.try_inverse()?;
+    let d2 = (xi.transpose() * inv * xi)[(0, 0)];
+    Some(d2.max(0.0).sqrt())
+}
+
+/// Mahalanobis residual of the single-loop cycle `a → b → a`, with the odometry
+/// leg's covariance scaled by the number of edges it spans. `None` if the
+/// odometry lacks either endpoint.
+pub fn individual_mahalanobis(
+    m: &LoopMeasurement,
+    odometry: &BTreeMap<u64, SE3>,
+    noise: &PcmNoiseModel,
+) -> Option<f64> {
+    let odo_ba = odometry_relative(odometry, m.to, m.from)?;
+    // cycle = odo(b→a) ∘ z   (G1 = odo_ba, G2 = z).
+    let legs = [
+        (odo_ba, noise.odometry_per_edge * leg_edges(m.to, m.from)),
+        (m.relative.clone(), noise.loop_measurement),
+    ];
+    let (mean, cov) = compound_cycle(&legs);
+    mahalanobis(&mean, &cov)
+}
+
+/// Mahalanobis residual of the two-loop cycle `a → b → d → c → a`, with each
+/// odometry leg's covariance scaled by its edge span and the inverted-measurement
+/// leg's covariance carried through its adjoint. `None` if any endpoint is
+/// missing from the odometry.
+pub fn pairwise_mahalanobis(
+    k: &LoopMeasurement,
+    l: &LoopMeasurement,
+    odometry: &BTreeMap<u64, SE3>,
+    noise: &PcmNoiseModel,
+) -> Option<f64> {
+    let odo_bd = odometry_relative(odometry, k.to, l.to)?;
+    let odo_ca = odometry_relative(odometry, l.from, k.from)?;
+    // For z_l⁻¹: if z_l = z̄_l exp(ξ) with cov Σ, then z_l⁻¹ = z̄_l⁻¹ exp(−Ad(z̄_l)ξ),
+    // so its covariance is Ad(z_l) Σ Ad(z_l)ᵀ.
+    let ad_l = l.relative.adjoint();
+    let cov_l_inv = ad_l * noise.loop_measurement * ad_l.transpose();
+    // Legs in composition order: odo_ca ∘ z_l⁻¹ ∘ odo_bd ∘ z_k.
+    let legs = [
+        (odo_ca, noise.odometry_per_edge * leg_edges(l.from, k.from)),
+        (l.relative.inverse(), cov_l_inv),
+        (odo_bd, noise.odometry_per_edge * leg_edges(k.to, l.to)),
+        (k.relative.clone(), noise.loop_measurement),
+    ];
+    let (mean, cov) = compound_cycle(&legs);
+    mahalanobis(&mean, &cov)
+}
+
 /// Run PCM: return the indices (into `loops`) of the maximum mutually-consistent
 /// subset. Loops whose endpoints are missing from `odometry` are dropped. When
 /// [`PcmConfig::require_individual`] is set, loops that fail the odometry
@@ -123,7 +260,11 @@ pub fn maximum_consistent_set(
                 return false;
             }
             if config.require_individual {
-                match individual_residual(m, odometry) {
+                let residual = match &config.noise {
+                    Some(n) => individual_mahalanobis(m, odometry, n),
+                    None => individual_residual(m, odometry),
+                };
+                match residual {
                     Some(r) => r <= config.threshold,
                     None => false,
                 }
@@ -143,10 +284,12 @@ pub fn maximum_consistent_set(
     let mut adj = vec![vec![false; m]; m];
     for a in 0..m {
         for b in (a + 1)..m {
-            let consistent =
-                pairwise_residual(&loops[candidates[a]], &loops[candidates[b]], odometry)
-                    .map(|r| r <= config.threshold)
-                    .unwrap_or(false);
+            let (ka, kb) = (&loops[candidates[a]], &loops[candidates[b]]);
+            let residual = match &config.noise {
+                Some(n) => pairwise_mahalanobis(ka, kb, odometry, n),
+                None => pairwise_residual(ka, kb, odometry),
+            };
+            let consistent = residual.map(|r| r <= config.threshold).unwrap_or(false);
             adj[a][b] = consistent;
             adj[b][a] = consistent;
         }
@@ -303,6 +446,7 @@ mod tests {
         let config = PcmConfig {
             threshold: 1.0,
             require_individual: false,
+            noise: None,
         };
         let kept = maximum_consistent_set(&loops, &odo, &config);
         // The three genuine loops form the largest mutually-consistent clique;
@@ -334,5 +478,110 @@ mod tests {
         ];
         let kept = maximum_consistent_set(&loops, &odo, &PcmConfig::default());
         assert_eq!(kept, vec![0]);
+    }
+
+    /// A straight trajectory whose odometry estimate accumulates a constant yaw
+    /// drift per edge: `odo` is the drifted `world_to_camera`, `truth` the exact
+    /// one. Returns `(drifted_odo, truth_odo)`.
+    fn drifted_odometry(n: u64, yaw_per_edge: f64) -> (BTreeMap<u64, SE3>, BTreeMap<u64, SE3>) {
+        let truth = straight_odometry(n);
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw_per_edge);
+        let mut drifted = BTreeMap::new();
+        drifted.insert(0, truth[&0].clone());
+        for i in 1..n {
+            // Truth relative edge (i-1 → i), yaw-perturbed, integrated forward.
+            let edge = odometry_relative(&truth, i - 1, i).unwrap();
+            let noisy = SE3::new(yaw * edge.rotation, edge.translation);
+            let prev = drifted[&(i - 1)].clone();
+            drifted.insert(i, noisy.compose(&prev));
+        }
+        (drifted, truth)
+    }
+
+    /// With zero noise the Mahalanobis residual is just `‖log(cycle)‖` scaled by
+    /// the (isotropic) inverse covariance — so a genuine cycle is ~0 and a wrong
+    /// one is large, like the plain residual but unitless.
+    #[test]
+    fn mahalanobis_on_exact_odometry_separates_genuine_from_wrong() {
+        let odo = straight_odometry(12);
+        let noise = PcmNoiseModel::isotropic(1e-4, 1e-3, 1e-6, 1e-6);
+        let g1 = genuine(&odo, 0, 6);
+        let g2 = genuine(&odo, 1, 7);
+        let wrong = LoopMeasurement {
+            from: 2,
+            to: 11,
+            relative: SE3::new(UnitQuaternion::identity(), Vector3::new(0.2, 0.0, 0.0)),
+        };
+        assert!(pairwise_mahalanobis(&g1, &g2, &odo, &noise).unwrap() < 1e-3);
+        assert!(pairwise_mahalanobis(&g1, &wrong, &odo, &noise).unwrap() > 5.0);
+    }
+
+    /// The headline: with accumulated odometry drift, two genuine loops whose
+    /// endpoints are spread several edges apart induce a pairwise cycle that spans
+    /// many drifted edges — its raw `‖log(cycle)‖` exceeds an isotropic threshold,
+    /// so the isotropic test drops part of the genuine clique. The Mahalanobis
+    /// test inflates the cycle covariance by the edge span, so the same genuine
+    /// pairs stay consistent and the full clique is kept, while the wrong loop
+    /// (whose residual is inconsistent with even the inflated covariance) is
+    /// dropped. This is the cross-session-merge recall fix, in miniature.
+    #[test]
+    fn mahalanobis_keeps_drift_spanning_genuine_loops_the_isotropic_norm_drops() {
+        let (odo, truth) = drifted_odometry(40, 0.008);
+        // Genuine loops, truth-relative, with starts 8 edges apart. The two
+        // adjacent pairs induce an 8-edge cycle (raw residual ≈ 1.28); the outer
+        // pair (0,20)-(16,36) induces a 16-edge cycle (raw ≈ 2.56) — double the
+        // drift, so a single isotropic threshold cannot admit all three at once.
+        let genuine_pairs = [(0u64, 20u64), (8, 28), (16, 36)];
+        let mut loops: Vec<LoopMeasurement> = genuine_pairs
+            .iter()
+            .map(|&(a, b)| LoopMeasurement {
+                from: a,
+                to: b,
+                relative: odometry_relative(&truth, a, b).unwrap(),
+            })
+            .collect();
+        // A wrong loop: frames 2 and 38 (36 m apart) asserted near-coincident.
+        loops.push(LoopMeasurement {
+            from: 2,
+            to: 38,
+            relative: SE3::new(UnitQuaternion::identity(), Vector3::new(0.1, 0.0, 0.0)),
+        });
+
+        // Isotropic norm, threshold between the 8-edge (≈1.28) and 16-edge
+        // (≈2.56) cycle residuals: the outer pair is cut, so the genuine
+        // consistency graph is a path 0—1—2 missing the 0—2 edge → max clique 2.
+        let iso = maximum_consistent_set(
+            &loops,
+            &odo,
+            &PcmConfig {
+                threshold: 1.5,
+                require_individual: false,
+                noise: None,
+            },
+        );
+        assert!(
+            iso.len() < genuine_pairs.len(),
+            "isotropic norm drops a drift-spanning genuine loop, kept {iso:?}"
+        );
+
+        // Mahalanobis: each cycle's covariance scales with its edge span, so the
+        // 16-edge pair is as consistent as the 8-edge ones — all three genuine
+        // loops form the clique and the wrong loop is still rejected.
+        let noise = PcmNoiseModel::isotropic(2e-3, 8e-2, 1e-8, 1e-8);
+        let maha = maximum_consistent_set(
+            &loops,
+            &odo,
+            &PcmConfig {
+                threshold: 4.0,
+                require_individual: false,
+                noise: Some(noise),
+            },
+        );
+        assert_eq!(
+            maha,
+            vec![0, 1, 2],
+            "Mahalanobis keeps all {} genuine loops, drops the wrong one",
+            genuine_pairs.len()
+        );
     }
 }

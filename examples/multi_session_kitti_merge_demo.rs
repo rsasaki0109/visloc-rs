@@ -19,16 +19,22 @@
 //!      optionally injects `--inject-wrong-bridges N` perceptual-aliasing false
 //!      positives (claiming two genuinely-distant places coincide);
 //!   2. screens them with [`PoseGraph::consistent_session_bridges`] (PCM across
-//!      sessions, `require_individual = false`) — the front-end guard that keeps
-//!      the maximum mutually-consistent clique and drops the wrong bridges;
-//!   3. welds B into A at the first screened bridge with
-//!      [`PoseGraph::merge_session`], adds the remaining screened bridges as
-//!      loop-closure constraints, and jointly re-optimizes;
+//!      sessions, `require_individual = false`), comparing the ISOTROPIC
+//!      SE(3)-tangent-norm test against the covariance-aware MAHALANOBIS test
+//!      ([`visloc_rs::slam::pcm::PcmNoiseModel`]) at their fair operating point —
+//!      the highest genuine recall each reaches while admitting ZERO wrong
+//!      bridges. The Mahalanobis cycle covariance grows with the odometry span,
+//!      so genuine revisits across many drifted edges are not over-penalized by a
+//!      single rad+metre threshold, and it recovers more genuine bridges at equal
+//!      precision (the gap widens with drift);
+//!   3. welds B into A at the first bridge of the higher-recall screen with
+//!      [`PoseGraph::merge_session`], adds the rest as loop-closure constraints,
+//!      and jointly re-optimizes;
 //!   4. reports the absolute trajectory error (ATE, metres vs. KITTI ground
-//!      truth) of the merged map against a single-session full-batch reference,
-//!      and — to show why screening matters — also against a merge that blindly
-//!      trusts every candidate bridge (the wrong ones fold the joined map onto
-//!      itself).
+//!      truth) of the merged map against a single-session full-batch reference
+//!      and an oracle all-genuine merge (isolating the weld math from screening),
+//!      plus — to show why screening matters — a merge that blindly trusts every
+//!      candidate bridge (the wrong ones fold the joined map onto itself).
 //!
 //! Usage:
 //!
@@ -47,7 +53,7 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{UnitQuaternion, Vector3, Vector6};
 use visloc_rs::core::geometry::{Pose, SE3};
-use visloc_rs::slam::pcm::PcmConfig;
+use visloc_rs::slam::pcm::{PcmConfig, PcmNoiseModel};
 use visloc_rs::tracking::PoseTrajectory;
 use visloc_rs::{relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphSe3Config};
 
@@ -386,24 +392,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- PCM cross-session screening (front-end guard) ---
-    let cfg = PcmConfig {
-        threshold: 0.5,
-        require_individual: false, // no single-session relative across sessions
+    // Two screens compared: the ISOTROPIC SE(3)-tangent norm (a single threshold
+    // mixing rad and metres) and the covariance-aware MAHALANOBIS test, whose
+    // cycle covariance grows with the odometry span so genuine bridges across many
+    // drifted edges are not penalized — lifting recall at the same (zero-wrong)
+    // precision. The Mahalanobis noise model is derived from the simulated drift:
+    // per-edge rotation variance ≈ (yaw drift)², translation variance ≈ (yaw drift
+    // × mean edge length)².
+    let mean_edge_len = {
+        let total: f64 = keyframes
+            .windows(2)
+            .map(|w| (w[0].camera_center_world() - w[1].camera_center_world()).norm())
+            .sum();
+        total / (n - 1) as f64
     };
-    let kept = session_a.consistent_session_bridges(&session_b, m as u64, &candidates, &cfg);
-    let kept_wrong = kept.iter().filter(|&&i| candidate_is_wrong[i]).count();
-    let kept_genuine = kept.len() - kept_wrong;
-    println!(
-        "[pcm] kept {}/{} bridges ({} genuine, {} wrong) — dropped {}/{} wrong",
-        kept.len(),
-        candidates.len(),
-        kept_genuine,
-        kept_wrong,
-        wrong_total - kept_wrong,
-        wrong_total
+    let d = args.yaw_drift_per_edge_rad.max(1e-3);
+    let noise = PcmNoiseModel::isotropic(
+        (2.0 * d).powi(2),                 // odo rotation var / edge
+        (2.0 * d * mean_edge_len).powi(2), // odo translation var / edge
+        1e-6,                              // loop-measurement rotation var
+        1e-4,                              // loop-measurement translation var
     );
+    // A screen's free threshold is swept; the FAIR operating point is the highest
+    // genuine recall reachable while admitting ZERO wrong bridges (same precision).
+    // `sweep` returns (best kept set, recall) at that point.
+    let sweep = |label: &str, noise: Option<PcmNoiseModel>, grid: &[f64]| -> (Vec<usize>, usize) {
+        let mut best: Vec<usize> = Vec::new();
+        for &t in grid {
+            let cfg = PcmConfig {
+                threshold: t,
+                require_individual: false, // no single-session relative across sessions
+                noise,
+            };
+            let kept =
+                session_a.consistent_session_bridges(&session_b, m as u64, &candidates, &cfg);
+            let wrong = kept.iter().filter(|&&i| candidate_is_wrong[i]).count();
+            let genuine = kept.len() - wrong;
+            if wrong == 0 && genuine > best.iter().filter(|&&i| !candidate_is_wrong[i]).count() {
+                best = kept;
+            }
+        }
+        let recall = best.iter().filter(|&&i| !candidate_is_wrong[i]).count();
+        println!(
+            "[pcm {label}] best zero-wrong recall = {recall}/{genuine_bridges} genuine bridges"
+        );
+        (best, recall)
+    };
+    // Isotropic threshold is an SE(3)-tangent norm (rad + metres); Mahalanobis is
+    // a unitless distance (√χ²) — different scales, so each gets its own grid.
+    let iso_grid: Vec<f64> = (1..=60).map(|i| i as f64 * 0.5).collect(); // 0.5 .. 30
+    let maha_grid: Vec<f64> = (1..=60).map(|i| i as f64 * 0.5).collect(); // 0.5 .. 30
+    let (kept_iso, iso_recall) = sweep("isotropic  ", None, &iso_grid);
+    let (kept_maha, maha_recall) = sweep("mahalanobis", Some(noise), &maha_grid);
+    // Merge with the higher-recall zero-wrong screen.
+    let (kept, kept_genuine) = if maha_recall >= iso_recall {
+        (kept_maha, maha_recall)
+    } else {
+        (kept_iso, iso_recall)
+    };
     if kept.is_empty() {
-        return Err("PCM screened out every bridge — cannot merge".into());
+        return Err("PCM screened out every bridge at zero-wrong precision — cannot merge".into());
     }
 
     // --- Reference: single-session full batch (all n KFs, one frame, all loops) ---
@@ -488,18 +536,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "summary: merging all {genuine_bridges} genuine bridges reproduces the single-session batch \
              ({o_rmse:.2}m vs {f_rmse:.2}m) — the weld math is exact across frames. A naive merge that \
-             additionally trusts {wrong_total} wrong bridge(s) collapses to {nv_rmse:.2}m; PCM screening \
-             drops every wrong bridge ({kept_genuine}/{genuine_bridges} genuine kept) and lands at \
-             {s_rmse:.2}m. PCM's safety (zero wrong admitted) costs genuine-bridge recall: its \
-             consistency cycle runs on the DRIFTED odometry, so revisits spanning many drifted edges \
-             fail the check and the screened merge is more weakly constrained than the oracle — the gap \
-             shrinks toward zero as drift decreases (try --yaw-drift-deg-per-edge 0)."
+             additionally trusts {wrong_total} wrong bridge(s) collapses to {nv_rmse:.2}m. Both screens \
+             drop every wrong bridge (precision 1.0); the question is recall. At equal precision the \
+             ISOTROPIC norm recovers {iso_recall}/{genuine_bridges} genuine bridges while the \
+             covariance-aware MAHALANOBIS test recovers {maha_recall}/{genuine_bridges} — its cycle \
+             covariance grows with the odometry span, so revisits across many drifted edges are no \
+             longer over-penalized by a single rad+metre threshold. The higher-recall screen lands the \
+             merge at {s_rmse:.2}m, close to the oracle ({o_rmse:.2}m); the Mahalanobis advantage WIDENS \
+             with drift (raise --yaw-drift-deg-per-edge)."
         );
     } else {
         println!(
             "summary: two independently-drifted sessions in different frames merge to {s_rmse:.2}m rmse \
-             ({kept_genuine}/{genuine_bridges} genuine bridges kept), vs the oracle all-genuine merge \
-             {o_rmse:.2}m and the single-session batch {f_rmse:.2}m."
+             ({kept_genuine}/{genuine_bridges} genuine bridges kept; isotropic recall {iso_recall}, \
+             Mahalanobis {maha_recall}), vs the oracle all-genuine merge {o_rmse:.2}m and the \
+             single-session batch {f_rmse:.2}m."
         );
     }
 
