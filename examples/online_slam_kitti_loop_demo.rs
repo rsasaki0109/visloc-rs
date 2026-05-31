@@ -66,6 +66,7 @@ struct CliArgs {
     inject_wrong_loops: usize,
     inject_seed: u64,
     pcm: bool,
+    marginalize_window: Option<usize>,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -77,6 +78,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut inject_wrong_loops: usize = 0;
     let mut inject_seed: u64 = 1;
     let mut pcm = false;
+    let mut marginalize_window: Option<usize> = None;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -114,6 +116,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pcm = true;
                 args.remove(i);
             }
+            "--marginalize-window" => {
+                marginalize_window = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -129,6 +135,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         inject_wrong_loops,
         inject_seed,
         pcm,
+        marginalize_window,
     })
 }
 
@@ -169,6 +176,73 @@ fn ate(estimate: &[Pose], truth: &[Pose]) -> (f64, f64, f64) {
     let rmse = (errs.iter().map(|e| e * e).sum::<f64>() / n).sqrt();
     let max = errs.iter().copied().fold(0.0_f64, f64::max);
     (mean, rmse, max)
+}
+
+/// Simulate an incremental fixed-lag / sliding-window smoother over the
+/// keyframes: add each keyframe (drifted pose + sequential edge) plus any loop
+/// closures whose *earlier* endpoint is still in the active window, solve the
+/// bounded window, then [`PoseGraph::marginalize_oldest`] back to `window`
+/// poses. The gauge anchor (keyframe 0) is always retained, so revisits to the
+/// origin survive even at a small window; a loop whose earlier endpoint has
+/// already been marginalized is *dropped* (its node has left the graph) — the
+/// fundamental fixed-lag trade-off: bounded per-solve cost at the price of
+/// losing loop closures that span more than the window.
+///
+/// Returns `(trajectory, loops_applied, loops_dropped, max_active_poses)`. Each
+/// keyframe's reported pose is its estimate at the last solve before it was
+/// marginalized (frozen), or the final estimate if still active.
+#[allow(clippy::type_complexity)]
+fn windowed_fixed_lag(
+    drifted: &[Pose],
+    noisy_edges: &[SE3],
+    loops: &[LoopClosureConstraint],
+    window: usize,
+    n: usize,
+) -> Result<(Vec<Pose>, usize, usize, usize), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+    // Loops grouped by their later (`to`) endpoint — the step at which both
+    // endpoints first exist.
+    let mut loops_by_to: BTreeMap<u64, Vec<&LoopClosureConstraint>> = BTreeMap::new();
+    for c in loops {
+        loops_by_to.entry(c.to_keyframe_id).or_default().push(c);
+    }
+
+    let mut graph = PoseGraph::new();
+    let mut trajectory: Vec<Pose> = drifted.to_vec();
+    let (mut applied, mut dropped, mut max_active) = (0usize, 0usize, 0usize);
+
+    for k in 0..n {
+        let id = k as u64;
+        graph.add_pose(id, drifted[k].clone());
+        if k == 0 {
+            graph.anchor(0);
+        } else {
+            graph.add_sequential_edge((k - 1) as u64, id, noisy_edges[k - 1].clone());
+        }
+        if let Some(cs) = loops_by_to.get(&id) {
+            for c in cs {
+                if graph.poses.contains_key(&c.from_keyframe_id) {
+                    graph.add_loop_closure_constraint(c);
+                    applied += 1;
+                } else {
+                    dropped += 1; // earlier endpoint already marginalized away
+                }
+            }
+        }
+        // Solve once there is at least one edge (the first keyframe is the lone
+        // anchor with nothing to optimize).
+        if !graph.edges.is_empty() {
+            graph.optimize_se3_iterative(&pgo_config())?;
+        }
+        // Freeze the current estimate of every active pose (marginalized ones
+        // keep their last write).
+        for (&pid, pose) in graph.poses.iter() {
+            trajectory[pid as usize] = pose.clone();
+        }
+        max_active = max_active.max(graph.poses.len());
+        graph.marginalize_oldest(window)?;
+    }
+    Ok((trajectory, applied, dropped, max_active))
 }
 
 /// Build `n` *wrong* loop closures (the perceptual-aliasing false positive).
@@ -393,6 +467,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (p_mean, p_rmse, p_max) = ate(&plain_corrected, &keyframes);
     println!("ATE drifted      mean={d_mean:.3} rmse={d_rmse:.3} max={d_max:.3} (m)");
     println!("ATE plain-PGO    mean={p_mean:.3} rmse={p_rmse:.3} max={p_max:.3} (m)");
+
+    // --- Fixed-lag / sliding-window smoother (incremental) ---
+    // Demonstrates the trade-off on a REAL loopy sequence: a bounded window caps
+    // the per-solve cost but drops loop closures that span more than the window
+    // (their earlier endpoint has been marginalized). The anchor is always kept,
+    // so revisits to the origin still close. Compared against the full batch.
+    if let Some(window) = args.marginalize_window {
+        let (windowed, applied, dropped, max_active) =
+            windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n)?;
+        let (w_mean, w_rmse, w_max) = ate(&windowed, &keyframes);
+        println!(
+            "[fixed-lag] window={window} max_active_poses={max_active} (of {n}) loops_applied={applied} loops_dropped={dropped}"
+        );
+        println!("ATE fixed-lag    mean={w_mean:.3} rmse={w_rmse:.3} max={w_max:.3} (m)");
+        println!(
+            "NOTE: fixed-lag caps the active set to {max_active}/{n} poses; the {dropped} dropped \
+             loop(s) span more than the window, so on a loopy sequence its ATE trades off against \
+             batch — widen the window to recover loops, at higher per-solve cost."
+        );
+    }
 
     // --- Robust (GNC) solve, only meaningful when outliers were injected ---
     let mut gnc_corrected = plain_corrected.clone();
