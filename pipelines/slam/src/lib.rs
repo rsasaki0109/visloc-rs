@@ -4691,6 +4691,85 @@ impl PoseGraph {
         Ok(out)
     }
 
+    /// Covariance of the *relative* pose `a → b` implied by the current estimate
+    /// — the joint marginal of the two pose blocks reduced to their difference
+    /// (`Σ_aa + Σ_bb − Σ_ab − Σ_abᵀ`, the first-order tangent approximation; see
+    /// [`covariance::relative_covariance`]). A gauge-fixed anchor endpoint
+    /// contributes a zero block (its frame is certain), so the relative
+    /// covariance to the anchor is just the other pose's marginal.
+    ///
+    /// This is the prediction covariance a loop-closure innovation is gated
+    /// against: a candidate asserting a relative pose far outside this
+    /// uncertainty (a confident-but-wrong place recognition between two
+    /// well-localized frames) is statistically implausible. Recovers the full
+    /// `Σ` to read the cross-block, so it is dense/`O(n³)` for now — fine for the
+    /// occasional gate, not a per-edge inner loop. Errors mirror
+    /// [`Self::pose_marginal_covariances`]; also
+    /// [`PoseGraphError::MissingNode`] when `a` or `b` is absent.
+    pub fn relative_pose_covariance(&self, a: u64, b: u64) -> Result<Matrix6<f64>, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if !self.poses.contains_key(&anchor_id) {
+            return Err(PoseGraphError::MissingNode(anchor_id));
+        }
+        if !self.poses.contains_key(&a) {
+            return Err(PoseGraphError::MissingNode(a));
+        }
+        if !self.poses.contains_key(&b) {
+            return Err(PoseGraphError::MissingNode(b));
+        }
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+        let dim = variable_count * 6;
+        let (builder, _g) = self.assemble_se3_system(
+            &node_index,
+            dim,
+            &RobustKernel::None,
+            None,
+            LinearSolver::Dense,
+        );
+        let lambda = match builder {
+            NormalEquations6::Dense(h) => h,
+            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        };
+        // Full covariance (the a↔b cross-block may be off the factor pattern);
+        // a fixed-anchor endpoint reads a zero block.
+        let sigma =
+            covariance::sparse_inverse(&lambda, 0.0).ok_or(PoseGraphError::SingularSystem)?;
+        let ia = node_index.get(&a);
+        let ib = node_index.get(&b);
+        // Assemble the 12×12 joint [[Σaa, Σab], [Σba, Σbb]] (anchor → zeros).
+        let mut joint = DMatrix::<f64>::zeros(12, 12);
+        let mut copy_block =
+            |dst_r: usize, dst_c: usize, ir: Option<&usize>, ic: Option<&usize>| {
+                if let (Some(&ri), Some(&ci)) = (ir, ic) {
+                    for r in 0..6 {
+                        for c in 0..6 {
+                            joint[(dst_r + r, dst_c + c)] = sigma[(ri * 6 + r, ci * 6 + c)];
+                        }
+                    }
+                }
+            };
+        copy_block(0, 0, ia, ia); // Σaa
+        copy_block(6, 6, ib, ib); // Σbb
+        copy_block(0, 6, ia, ib); // Σab
+        copy_block(6, 0, ib, ia); // Σba
+        let rel = covariance::relative_covariance(&joint, 6);
+        Ok(Matrix6::from_fn(|r, c| rel[(r, c)]))
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///

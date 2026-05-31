@@ -7,9 +7,13 @@
 //! agreement of the underlying Takahashi recursion with the dense inverse is
 //! covered by `visloc_slam::covariance`'s unit tests.
 
-use nalgebra::{UnitQuaternion, Vector3};
-use visloc_core::geometry::Pose;
-use visloc_slam::{relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphSe3Config};
+use nalgebra::{DMatrix, DVector, Matrix6, UnitQuaternion, Vector3};
+use visloc_core::geometry::{Pose, SE3};
+use visloc_slam::covariance::{mahalanobis_distance_sq, CHI2_95_6DOF};
+use visloc_slam::{
+    relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
+    PoseGraphSe3Config,
+};
 
 fn pose_at(x: f64) -> Pose {
     // Pure translation along +x, no rotation.
@@ -25,11 +29,17 @@ fn chain(n: usize) -> (PoseGraph, Vec<Pose>) {
         graph.add_pose(i as u64, p.clone());
     }
     graph.anchor(0);
+    // Confident odometry (information 50·I₆): each step adds little uncertainty,
+    // so the relative covariance between two frames stays far below the gross
+    // error of a perceptual-aliasing wrong loop — the realistic SLAM regime.
+    let information = Matrix6::identity() * 50.0;
     for i in 0..n - 1 {
-        graph.add_sequential_edge(
+        graph.add_edge_with_information(
             i as u64,
             (i + 1) as u64,
             relative_world_to_camera(&poses[i], &poses[i + 1]),
+            PoseGraphEdgeKind::Sequential,
+            information,
         );
     }
     (graph, poses)
@@ -107,6 +117,71 @@ fn loop_closure_tightens_the_far_pose_covariance() {
     assert!(
         looped_trace < open_trace,
         "a loop closure must tighten the far pose covariance: open={open_trace} looped={looped_trace}"
+    );
+}
+
+#[test]
+fn relative_covariance_to_anchor_equals_the_pose_marginal() {
+    let (mut graph, _) = chain(5);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    let marginals = graph.pose_marginal_covariances().unwrap();
+    // The anchor frame is certain, so the relative covariance from the anchor
+    // to pose 3 is exactly pose 3's own marginal.
+    let rel = graph.relative_pose_covariance(0, 3).unwrap();
+    let diff = (rel - marginals[&3]).abs().max();
+    assert!(
+        diff < 1e-9,
+        "rel-to-anchor must equal the pose marginal: {diff}"
+    );
+}
+
+#[test]
+fn relative_covariance_grows_with_endpoint_separation() {
+    let (mut graph, _) = chain(8);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    let near = graph.relative_pose_covariance(2, 3).unwrap().trace();
+    let far = graph.relative_pose_covariance(1, 7).unwrap().trace();
+    assert!(
+        far > near,
+        "relative uncertainty grows with endpoint separation: near={near} far={far}"
+    );
+}
+
+/// The covariance gate: the squared Mahalanobis distance of a loop-closure
+/// innovation under the relative-pose covariance separates a genuine closure
+/// (consistent with the trajectory's uncertainty) from a perceptual-aliasing
+/// false positive (a near-identity claim between two well-localized, far-apart
+/// frames) — the metric counterpart to PCM's combinatorial consistency.
+#[test]
+fn covariance_gate_rejects_a_wrong_loop_and_accepts_a_genuine_one() {
+    let (mut graph, poses) = chain(8);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    let (a, b) = (1u64, 6u64);
+    let cov = graph.relative_pose_covariance(a, b).unwrap();
+    let cov_d = DMatrix::from_fn(6, 6, |r, c| cov[(r, c)]);
+
+    // Predicted relative pose from the current estimate.
+    let z_hat = relative_world_to_camera(&graph.poses[&a], &graph.poses[&b]);
+
+    // Genuine closure: measures the true relative pose → ~zero innovation.
+    let z_good = relative_world_to_camera(&poses[a as usize], &poses[b as usize]);
+    let e_good = z_good.compose(&z_hat.inverse()).log();
+    let m_good =
+        mahalanobis_distance_sq(&DVector::from_column_slice(e_good.as_slice()), &cov_d).unwrap();
+    assert!(
+        m_good <= CHI2_95_6DOF,
+        "genuine loop must pass the gate: maha²={m_good}"
+    );
+
+    // Wrong closure: claims poses 1 and 6 are co-located (near-identity) →
+    // innovation ≈ the true 5 m displacement, far outside the relative
+    // uncertainty of a well-localized chain.
+    let e_bad = SE3::identity().compose(&z_hat.inverse()).log();
+    let m_bad =
+        mahalanobis_distance_sq(&DVector::from_column_slice(e_bad.as_slice()), &cov_d).unwrap();
+    assert!(
+        m_bad > CHI2_95_6DOF,
+        "wrong loop must fail the gate: maha²={m_bad}"
     );
 }
 
