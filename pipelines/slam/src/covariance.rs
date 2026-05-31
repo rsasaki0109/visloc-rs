@@ -27,6 +27,8 @@
 //! block-sparse work), no [`crate::PoseGraph`] dependency, mirroring
 //! [`crate::gnc`] / [`crate::pcm`].
 
+use std::collections::HashMap;
+
 use nalgebra::{DMatrix, DVector};
 
 /// χ² 0.95 quantile for 6 degrees of freedom — the default acceptance gate for a
@@ -94,6 +96,93 @@ pub fn sparse_inverse(lambda: &DMatrix<f64>, zero_tol: f64) -> Option<DMatrix<f6
         }
     }
     Some(sigma)
+}
+
+/// Look up the on-pattern covariance block `Σ_{a,b}` in the lower-triangle store
+/// `sig` (`sig[col]` maps a row `≥ col` to `Σ_{row,col}`), using the symmetry
+/// `Σ_{a,b} = Σ_{b,a}ᵀ`. `None` if the block is not on the stored pattern.
+fn fetch_block(sig: &[HashMap<usize, DMatrix<f64>>], a: usize, b: usize) -> Option<DMatrix<f64>> {
+    if a >= b {
+        sig[b].get(&a).cloned()
+    } else {
+        sig[a].get(&b).map(|m| m.transpose())
+    }
+}
+
+/// Diagonal blocks of `Σ = Λ⁻¹` recovered by the *block* Takahashi /
+/// Erisman–Tinney recursion directly on a block-Cholesky factor `Λ = L Lᵀ`,
+/// given the factor's per-column block pattern and values — `O(nnz(L))`, never
+/// forming a dense `Λ` or `Λ⁻¹`. This is the scalable counterpart to
+/// [`marginal_block_covariances`] (which densifies `Λ` to factor it).
+///
+/// `col_rows[j]` lists the block rows present in column `j` of `L`, the diagonal
+/// (`== j`) first then the strictly-below rows ascending; `col_vals[j]` holds the
+/// matching `B×B` blocks (`col_vals[j][0] == L_jj`); `diag_inv[j] == L_jj⁻¹`.
+/// (This is exactly the factor representation [`crate::block_cholesky`] produces.)
+/// Returns one `B×B` covariance per block column, in column order. `None` if the
+/// inputs disagree in length or a required on-pattern block is missing (a
+/// malformed factor).
+///
+/// The recursion, with `i` decreasing so every referenced block is already
+/// finalized, and `S_ij = Σ_{k>i, on pattern} L_kiᵀ · Σ_kj`:
+///
+/// ```text
+///   Σ_ij = −L_ii⁻ᵀ · S_ij                 (j > i, off-diagonal)
+///   Σ_ii =  L_ii⁻ᵀ · (L_ii⁻¹ − S_ii)      (the marginal block)
+/// ```
+///
+/// processed with the off-diagonal rows of column `i` before its diagonal, so the
+/// diagonal's `S_ii` (which reads those off-diagonals) sees them finalized.
+pub fn block_takahashi_diagonals(
+    col_rows: &[Vec<usize>],
+    col_vals: &[Vec<DMatrix<f64>>],
+    diag_inv: &[DMatrix<f64>],
+) -> Option<Vec<DMatrix<f64>>> {
+    let n = col_rows.len();
+    if col_vals.len() != n || diag_inv.len() != n {
+        return None;
+    }
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    let b = diag_inv[0].nrows();
+
+    // On-pattern Σ blocks, lower triangle: `sig[col]` maps a row `≥ col` to the
+    // block `Σ_{row,col}`. The recursion is closed on the factor pattern, so this
+    // holds every block any later step reads.
+    let mut sig: Vec<HashMap<usize, DMatrix<f64>>> = vec![HashMap::new(); n];
+
+    for i in (0..n).rev() {
+        let rows = &col_rows[i];
+        if rows.is_empty() || rows[0] != i || col_vals[i].len() != rows.len() {
+            return None;
+        }
+        let dinv = &diag_inv[i];
+        let dinv_t = dinv.transpose();
+        // Column i's rows from the largest down to the diagonal (`rows[0] == i`,
+        // visited last) so the diagonal's sum reads finalized off-diagonals.
+        for (slot_j, &j) in rows.iter().enumerate().rev() {
+            let _ = slot_j;
+            // S = Σ_{k>i on pattern} L_kiᵀ · Σ_kj, k the strictly-below rows.
+            let mut s = DMatrix::<f64>::zeros(b, b);
+            for (slot_k, &k) in rows.iter().enumerate().skip(1) {
+                let skj = fetch_block(&sig, k, j)?;
+                s += col_vals[i][slot_k].transpose() * skj;
+            }
+            let block = if j == i {
+                &dinv_t * (dinv - &s)
+            } else {
+                -(s.transpose() * dinv)
+            };
+            sig[i].insert(j, block);
+        }
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for (i, col) in sig.iter().enumerate() {
+        out.push(col.get(&i)?.clone());
+    }
+    Some(out)
 }
 
 /// Per-block marginal covariances: the `block × block` diagonal blocks of
@@ -318,6 +407,62 @@ mod tests {
         assert!(mahalanobis_distance_sq(&DVector::from_row_slice(&[1.0]), &cov).is_none());
         let indef = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 2.0, 1.0]);
         assert!(mahalanobis_distance_sq(&r, &indef).is_none());
+    }
+
+    #[test]
+    fn block_takahashi_diagonals_match_the_dense_inverse() {
+        // Block-tridiagonal (chain) information matrix: 5 blocks of 3×3, only
+        // adjacent blocks coupled — the pose-graph odometry-chain structure the
+        // block factor sees in natural order.
+        let nb = 5;
+        let b = 3;
+        let n = nb * b;
+        let mut lambda = DMatrix::zeros(n, n);
+        for i in 0..nb {
+            for r in 0..b {
+                for c in 0..b {
+                    lambda[(i * b + r, i * b + c)] = if r == c { 5.0 } else { 0.5 };
+                }
+            }
+            if i + 1 < nb {
+                for r in 0..b {
+                    lambda[(i * b + r, (i + 1) * b + r)] = -1.0;
+                    lambda[((i + 1) * b + r, i * b + r)] = -1.0;
+                }
+            }
+        }
+
+        // Factor the dense Λ to obtain L, then hand the block factor (column
+        // patterns, blocks, diagonal inverses) to the block Takahashi recursion.
+        let l = lambda.clone().cholesky().unwrap().l();
+        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); nb];
+        let mut col_vals: Vec<Vec<DMatrix<f64>>> = vec![Vec::new(); nb];
+        let mut diag_inv: Vec<DMatrix<f64>> = Vec::with_capacity(nb);
+        for j in 0..nb {
+            for i in j..nb {
+                let block = l.view((i * b, j * b), (b, b)).into_owned();
+                if block.iter().any(|v: &f64| v.abs() > 1e-12) {
+                    col_rows[j].push(i);
+                    col_vals[j].push(block);
+                }
+            }
+            // Diagonal block is first by construction (i starts at j).
+            let ljj = &col_vals[j][0];
+            diag_inv.push(ljj.clone().try_inverse().unwrap());
+        }
+
+        let diagonals = block_takahashi_diagonals(&col_rows, &col_vals, &diag_inv).unwrap();
+        let reference = dense_inverse(&lambda).unwrap();
+        assert_eq!(diagonals.len(), nb);
+        for (i, cov) in diagonals.iter().enumerate() {
+            let r = i * b;
+            let truth = reference.view((r, r), (b, b)).into_owned();
+            assert!(
+                max_abs_diff(cov, &truth) < 1e-9,
+                "block {i} marginal mismatch: {}",
+                max_abs_diff(cov, &truth)
+            );
+        }
     }
 
     #[test]
