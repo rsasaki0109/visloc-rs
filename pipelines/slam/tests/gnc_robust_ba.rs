@@ -11,7 +11,7 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
-use visloc_slam::gnc::{GncConfig, GncKernel};
+use visloc_slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
 use visloc_slam::{BaConfig, BaError, BaObservation, BundleAdjustment, LinearSolver};
 
 fn pinhole() -> Camera {
@@ -230,5 +230,67 @@ fn gnc_propagates_bundle_validation_errors() {
     assert_eq!(
         empty.optimize_gnc(&ba_config(), &gnc_config(GncKernel::GemanMcClure)),
         Err(BaError::NoPoses)
+    );
+}
+
+/// Re-adapting the auto inlier scale (`GncConfig::auto_scale_readapt`) must
+/// contract the scale as the solve cleans up the residuals, versus the
+/// one-shot estimate computed on the noisy starting point. We reproduce the
+/// inflation regime by perturbing the free poses' initial values so *every*
+/// observation starts with a large residual — there the one-shot MAD estimate
+/// is loose; re-adapting tightens it as BA fits the inliers, so it never
+/// rejects fewer injected outliers.
+#[test]
+fn gnc_readapt_tightens_inlier_scale_vs_one_shot() {
+    let outliers = [7usize, 18, 33, 41, 52];
+
+    // Replace the free poses (11, 12, 13 — 10 and 14 are gauge-fixed) with an
+    // off-truth initial guess so the starting reprojection residuals are large.
+    let perturb = |ba: &mut BundleAdjustment| {
+        for id in [11u64, 12, 13] {
+            let truth = truth_poses().into_iter().find(|(i, _)| *i == id).unwrap().1;
+            let c = truth.camera_center_world();
+            // Mild perturbation: starting residuals tens of px (loose one-shot
+            // estimate) but well under the 80 px injected outliers, so the
+            // convex phase still cleans up the inliers and re-adapting can
+            // contract the scale.
+            ba.poses.insert(
+                id,
+                pose_with_yaw(Vector3::new(c.x + 0.12, c.y, c.z + 0.05), 0.02),
+            );
+        }
+    };
+    let auto = |readapt: bool| GncConfig {
+        kernel: GncKernel::TruncatedLeastSquares,
+        c: 2.0,
+        auto_scale: Some(AUTO_SCALE_K),
+        auto_scale_readapt: readapt,
+        ..GncConfig::default()
+    };
+    let rejected = |w: &[f64]| outliers.iter().filter(|&&i| w[i] < 0.5).count();
+
+    let (mut ba_one, _) = build_with_outliers(&outliers, 80.0);
+    perturb(&mut ba_one);
+    let one = ba_one
+        .optimize_gnc(&ba_config(), &auto(false))
+        .expect("one-shot GNC must succeed");
+
+    let (mut ba_re, _) = build_with_outliers(&outliers, 80.0);
+    perturb(&mut ba_re);
+    let re = ba_re
+        .optimize_gnc(&ba_config(), &auto(true))
+        .expect("readapt GNC must succeed");
+
+    assert!(
+        re.inlier_scale < one.inlier_scale,
+        "readapt should contract the inlier scale: readapt={} one_shot={}",
+        re.inlier_scale,
+        one.inlier_scale
+    );
+    assert!(
+        rejected(&re.observation_weights) >= rejected(&one.observation_weights),
+        "readapt must not reject fewer injected outliers: readapt={} one_shot={}",
+        rejected(&re.observation_weights),
+        rejected(&one.observation_weights)
     );
 }

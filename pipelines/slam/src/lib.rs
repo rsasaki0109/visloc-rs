@@ -4383,7 +4383,7 @@ impl PoseGraph {
             }
             None => *gnc,
         };
-        let inlier_scale = effective_gnc.c;
+        let mut inlier_scale = effective_gnc.c;
         let mut state = gnc::GncState::new(&effective_gnc, s_max);
         let mut gnc_weights = vec![1.0_f64; self.edges.len()];
 
@@ -4404,6 +4404,19 @@ impl PoseGraph {
 
             // Black-Rangarajan weight update at the current μ.
             let residuals = self.edge_squared_residuals();
+            // Adaptive inlier scale: re-derive `c` from the current residuals
+            // each level (configured `c` as a floor). Level 0 reproduces the
+            // one-shot estimate; later levels tighten as outliers are
+            // suppressed and inlier residuals shrink.
+            if gnc.auto_scale_readapt {
+                if let Some(k) = gnc.auto_scale {
+                    if let Some(est) = gnc::estimate_scale_mad(&residuals, k) {
+                        let c = est.max(gnc.c);
+                        state.set_inlier_scale(c);
+                        inlier_scale = c;
+                    }
+                }
+            }
             for (i, &s) in residuals.iter().enumerate() {
                 gnc_weights[i] = state.weight(s);
             }
