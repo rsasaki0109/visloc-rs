@@ -27,6 +27,7 @@ pub mod gnc;
 pub mod marginalization;
 pub mod pcm;
 mod reordering;
+pub mod sparsification;
 
 pub mod sim3_pose_graph;
 pub use sim3_pose_graph::{
