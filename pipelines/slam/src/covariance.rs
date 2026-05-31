@@ -27,7 +27,13 @@
 //! block-sparse work), no [`crate::PoseGraph`] dependency, mirroring
 //! [`crate::gnc`] / [`crate::pcm`].
 
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
+
+/// χ² 0.95 quantile for 6 degrees of freedom — the default acceptance gate for a
+/// 6-DOF SE(3) loop-closure innovation. A residual whose Mahalanobis distance²
+/// (see [`mahalanobis_distance_sq`]) exceeds this is statistically implausible
+/// at the 5 % level given the relative-pose uncertainty.
+pub const CHI2_95_6DOF: f64 = 12.591_587_243_743_977;
 
 /// Dense reference inverse `Σ = Λ⁻¹` via Cholesky. `None` if `Λ` is not
 /// symmetric-positive-definite. `O(n³)` — used as the ground truth in tests and
@@ -144,6 +150,33 @@ pub fn joint_block_covariance(
     joint
 }
 
+/// Covariance of the *relative* pose between two variable blocks `a` and `b`,
+/// from their `2·block × 2·block` joint covariance (see
+/// [`joint_block_covariance`]): the first-order tangent approximation
+/// `Σ_rel = Σ_aa + Σ_bb − Σ_ab − Σ_abᵀ`. This is the uncertainty of the
+/// relative transform `a → b` implied by the current estimate — the prediction
+/// covariance a loop-closure innovation is gated against. (The SE(3) adjoint
+/// Jacobians are dropped, the standard small-uncertainty gating approximation.)
+pub fn relative_covariance(joint: &DMatrix<f64>, block: usize) -> DMatrix<f64> {
+    let saa = joint.view((0, 0), (block, block));
+    let sbb = joint.view((block, block), (block, block));
+    let sab = joint.view((0, block), (block, block));
+    saa + sbb - sab - sab.transpose()
+}
+
+/// Squared Mahalanobis distance `rᵀ Σ⁻¹ r` of a residual `r` under covariance
+/// `Σ`, computed by a Cholesky solve (no explicit inverse). `None` if `Σ` is not
+/// positive-definite or the dimensions disagree. The acceptance test for a
+/// loop-closure innovation is `mahalanobis_distance_sq(r, Σ) <= threshold` with
+/// `threshold` a χ² quantile such as [`CHI2_95_6DOF`].
+pub fn mahalanobis_distance_sq(residual: &DVector<f64>, cov: &DMatrix<f64>) -> Option<f64> {
+    if cov.nrows() != cov.ncols() || cov.nrows() != residual.len() {
+        return None;
+    }
+    let y = cov.clone().cholesky()?.solve(residual);
+    Some(residual.dot(&y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +282,42 @@ mod tests {
         );
         // Joint covariance must itself be symmetric positive-definite.
         assert!(joint.clone().cholesky().is_some());
+    }
+
+    #[test]
+    fn relative_covariance_of_independent_blocks_is_the_sum() {
+        // Block-diagonal joint (no cross-covariance) → Σ_rel = Σ_aa + Σ_bb.
+        let block = 2;
+        let mut joint = DMatrix::zeros(4, 4);
+        joint[(0, 0)] = 1.0;
+        joint[(1, 1)] = 2.0;
+        joint[(2, 2)] = 3.0;
+        joint[(3, 3)] = 4.0;
+        let rel = relative_covariance(&joint, block);
+        assert!((rel[(0, 0)] - 4.0).abs() < 1e-12); // 1 + 3
+        assert!((rel[(1, 1)] - 6.0).abs() < 1e-12); // 2 + 4
+                                                    // Positive cross-covariance shrinks the relative uncertainty.
+        let mut correlated = joint.clone();
+        correlated[(0, 2)] = 0.5;
+        correlated[(2, 0)] = 0.5;
+        let rel_c = relative_covariance(&correlated, block);
+        assert!(
+            rel_c[(0, 0)] < rel[(0, 0)],
+            "shared error cancels in the difference"
+        );
+    }
+
+    #[test]
+    fn mahalanobis_distance_matches_explicit_inverse() {
+        let cov = DMatrix::from_row_slice(2, 2, &[4.0, 1.0, 1.0, 3.0]);
+        let r = DVector::from_row_slice(&[2.0, -1.0]);
+        let got = mahalanobis_distance_sq(&r, &cov).unwrap();
+        let expected = (r.transpose() * cov.clone().try_inverse().unwrap() * &r)[(0, 0)];
+        assert!((got - expected).abs() < 1e-12);
+        // Dimension mismatch and non-PD covariance are rejected.
+        assert!(mahalanobis_distance_sq(&DVector::from_row_slice(&[1.0]), &cov).is_none());
+        let indef = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 2.0, 1.0]);
+        assert!(mahalanobis_distance_sq(&r, &indef).is_none());
     }
 
     #[test]
