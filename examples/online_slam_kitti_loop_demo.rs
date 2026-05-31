@@ -1,14 +1,25 @@
-//! KITTI loop-closure pose-graph demo on real public-data ground-truth poses.
+//! KITTI loop-closure pose-graph demo on real public-data ground-truth poses,
+//! with optional outlier-robust back-end evaluation.
 //!
 //! Loads a KITTI odometry ground-truth pose file (e.g.,
 //! `<dataset>/poses/00.txt`), subsamples it to a manageable keyframe set,
 //! fabricates a realistic odometry drift by perturbing each sequential edge's
-//! yaw, and adds a single truth-relative loop-closure constraint between the
-//! first and last keyframes (KITTI 00 returns close to its starting pose).
-//! The full SE(3) Levenberg-Marquardt + Cholesky solver
-//! (`PoseGraph::optimize_se3_iterative`) is then run on the resulting graph
-//! and the truth / drifted / corrected trajectories are written as CSV files
-//! for downstream visualization (`scripts/build_kitti_loop_asset.py`).
+//! yaw, and adds truth-relative loop-closure constraints for every revisit
+//! (temporally-distant keyframe pairs that are spatially close in the ground
+//! truth — KITTI 00 is the canonical loopy sequence). The full SE(3)
+//! Levenberg-Marquardt + Cholesky solver (`PoseGraph::optimize_se3_iterative`)
+//! is then run on the resulting graph and the truth / drifted / corrected
+//! trajectories are written as CSV files for downstream visualization
+//! (`scripts/build_kitti_loop_asset.py`).
+//!
+//! With `--inject-wrong-loops N` the demo additionally injects `N` *wrong*
+//! loop closures (the perceptual-aliasing failure: a place-recognition false
+//! positive claims two far-apart keyframes are co-located) and runs BOTH the
+//! plain solve and a Graduated-Non-Convexity robust solve on the corrupted
+//! graph, reporting the absolute trajectory error (ATE, in metres against the
+//! KITTI ground truth) of each plus GNC's outlier recall / false-positive
+//! count. This makes GNC's value quantitative on a *real* trajectory: the
+//! plain solve is dragged off by the wrong closures; GNC rejects them.
 //!
 //! Usage:
 //!
@@ -17,6 +28,7 @@
 //!     --kitti-poses /path/to/KITTI_odometry/poses/00.txt \
 //!     --keyframe-stride 30 \
 //!     --yaw-drift-deg-per-edge 0.45 \
+//!     --inject-wrong-loops 5 \
 //!     --out-dir target/kitti_loop_demo
 //! ```
 
@@ -26,8 +38,12 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
+use visloc_rs::slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
 use visloc_rs::tracking::PoseTrajectory;
-use visloc_rs::{relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphSe3Config};
+use visloc_rs::{
+    relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
+    PoseGraphSe3Config,
+};
 
 #[derive(Debug)]
 struct CliArgs {
@@ -36,6 +52,8 @@ struct CliArgs {
     yaw_drift_per_edge_rad: f64,
     out_dir: PathBuf,
     max_keyframes: usize,
+    inject_wrong_loops: usize,
+    inject_seed: u64,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -44,6 +62,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut yaw_drift_deg: f64 = 0.45;
     let mut out_dir: PathBuf = PathBuf::from("target/kitti_loop_demo");
     let mut max_keyframes: usize = 200;
+    let mut inject_wrong_loops: usize = 0;
+    let mut inject_seed: u64 = 1;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -69,6 +89,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 max_keyframes = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--inject-wrong-loops" => {
+                inject_wrong_loops = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--inject-seed" => {
+                inject_seed = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -81,7 +109,114 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         yaw_drift_per_edge_rad: yaw_drift_deg.to_radians(),
         out_dir,
         max_keyframes,
+        inject_wrong_loops,
+        inject_seed,
     })
+}
+
+/// Small deterministic linear-congruential RNG (no `rand` dependency, so the
+/// injected wrong loops are reproducible across runs and platforms).
+struct Lcg(u64);
+
+impl Lcg {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0
+    }
+
+    fn unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.unit()
+    }
+}
+
+/// Absolute trajectory error (mean / RMSE / max of per-keyframe camera-centre
+/// error, in metres). No Umeyama alignment: the anchor (keyframe 0) is
+/// gauge-fixed and the truth poses live in the same world frame, so the
+/// estimate and truth are directly comparable.
+fn ate(estimate: &[Pose], truth: &[Pose]) -> (f64, f64, f64) {
+    let errs: Vec<f64> = estimate
+        .iter()
+        .zip(truth)
+        .map(|(e, t)| (e.camera_center_world() - t.camera_center_world()).norm())
+        .collect();
+    let n = errs.len().max(1) as f64;
+    let mean = errs.iter().sum::<f64>() / n;
+    let rmse = (errs.iter().map(|e| e * e).sum::<f64>() / n).sqrt();
+    let max = errs.iter().copied().fold(0.0_f64, f64::max);
+    (mean, rmse, max)
+}
+
+/// Inject `n` *wrong* loop closures into `graph` and return their edge indices
+/// (so the robust solver's verdict can be scored for recall / false positives).
+/// Each wrong closure picks two keyframes that are far apart in the sequence
+/// (so they are genuinely at different places) and asserts a near-identity
+/// relative pose — the textbook place-recognition false positive that claims
+/// the two are the same location. Such an edge has a huge residual and folds
+/// the trajectory onto itself unless the back-end rejects it.
+fn inject_wrong_loops(graph: &mut PoseGraph, n: usize, n_kf: usize, seed: u64) -> Vec<usize> {
+    let mut rng = Lcg(seed.wrapping_mul(2) | 1);
+    let mut injected = Vec::with_capacity(n);
+    let min_gap = (n_kf / 4).max(2);
+    let mut guard = 0usize;
+    while injected.len() < n && guard < n * 1000 {
+        guard += 1;
+        let i = (rng.next_u64() as usize) % n_kf;
+        let j = (rng.next_u64() as usize) % n_kf;
+        if (i as isize - j as isize).unsigned_abs() < min_gap {
+            continue;
+        }
+        // Near-identity relative pose: "place recognition says i and j are the
+        // same spot" — a small jitter so it is not a degenerate exact identity.
+        let translation = Vector3::new(
+            rng.range(-2.0, 2.0),
+            rng.range(-1.0, 1.0),
+            rng.range(-2.0, 2.0),
+        );
+        let axis = Vector3::new(
+            rng.range(-1.0, 1.0),
+            rng.range(-1.0, 1.0),
+            rng.range(-1.0, 1.0),
+        );
+        let rotation = nalgebra::Unit::try_new(axis, 1e-9)
+            .map(|a| UnitQuaternion::from_axis_angle(&a, rng.range(0.0, 0.2)))
+            .unwrap_or_else(UnitQuaternion::identity);
+        graph.add_loop_closure_constraint(&LoopClosureConstraint {
+            from_keyframe_id: i as u64,
+            to_keyframe_id: j as u64,
+            relative_pose: SE3::new(rotation, translation),
+            // High inlier count → trusted like a verified closure (the whole
+            // point: it passed verification but is wrong).
+            inlier_count: 80,
+            inlier_ratio: 0.9,
+            mean_sampson_error: 0.0,
+            score: 80.0,
+        });
+        injected.push(graph.edges.len() - 1);
+    }
+    injected
+}
+
+fn pgo_config() -> PoseGraphSe3Config {
+    PoseGraphSe3Config {
+        initial_lambda: Some(1.0e-3),
+        max_iterations: 50,
+        // The drifted odometry is a usable seed and the genuine loops are
+        // truth-relative, so skip chordal init: chordal rotation least-squares
+        // is NOT robust, and even a few wrong loops (claiming a near-identity
+        // rotation between truly far-apart frames) dominate the linear average
+        // and corrupt the seed, inflating the MAD auto-scale until GNC can no
+        // longer tell the wrong loops apart. GNC's own convex-first annealing
+        // is the robust initializer here.
+        chordal_init: false,
+        ..PoseGraphSe3Config::default()
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,12 +227,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("KITTI pose file is empty".into());
     }
     println!(
-        "kitti_poses={} total_samples={} stride={} max_keyframes={} yaw_drift_per_edge={:.4} rad",
+        "kitti_poses={} total_samples={} stride={} max_keyframes={} yaw_drift_per_edge={:.4} rad inject_wrong_loops={}",
         args.kitti_poses.display(),
         samples.len(),
         args.keyframe_stride,
         args.max_keyframes,
         args.yaw_drift_per_edge_rad,
+        args.inject_wrong_loops,
     );
 
     // Subsample with stride; cap at max_keyframes.
@@ -139,11 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Loop closure: KITTI 00 returns close to origin, so add a single
-    // truth-relative constraint between the first and last keyframes.
-    let loop_edge = relative_world_to_camera(&keyframes[0], &keyframes[n - 1]);
-
-    // Build the pose graph from the drifted state.
+    // Build the base pose graph from the drifted state.
     let mut graph = PoseGraph::new();
     for (id, pose) in drifted.iter().enumerate() {
         graph.add_pose(id as u64, pose.clone());
@@ -152,64 +284,150 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, edge) in noisy_edges.iter().enumerate() {
         graph.add_sequential_edge(i as u64, (i + 1) as u64, edge.clone());
     }
-    graph.add_loop_closure_constraint(&LoopClosureConstraint {
-        from_keyframe_id: 0,
-        to_keyframe_id: (n - 1) as u64,
-        relative_pose: loop_edge,
-        inlier_count: 100,
-        inlier_ratio: 1.0,
-        mean_sampson_error: 0.0,
-        score: 100.0,
-    });
 
+    // Genuine loop closures: every temporally-distant pair of keyframes that
+    // is *spatially* close in the ground truth is a real revisit (KITTI 00 is
+    // the canonical loopy sequence). Add a truth-relative constraint for each.
+    // A dense set of genuine loops forms a strong consensus, so chordal init
+    // and the GNC convex phase are dominated by the inliers — that consensus
+    // is exactly what lets GNC separate the wrong loops from the real ones
+    // (with a single genuine loop, its drift-correcting residual is as large
+    // as a wrong loop's and the two are indistinguishable by residual).
+    let proximity_m = 10.0;
+    let min_gap = 10usize;
+    let mut genuine_loops = 0usize;
+    for i in 0..n {
+        let ci = keyframes[i].camera_center_world();
+        for j in (i + min_gap)..n {
+            let cj = keyframes[j].camera_center_world();
+            if (ci - cj).norm() <= proximity_m {
+                graph.add_loop_closure_constraint(&LoopClosureConstraint {
+                    from_keyframe_id: i as u64,
+                    to_keyframe_id: j as u64,
+                    relative_pose: relative_world_to_camera(&keyframes[i], &keyframes[j]),
+                    inlier_count: 100,
+                    inlier_ratio: 1.0,
+                    mean_sampson_error: 0.0,
+                    score: 100.0,
+                });
+                genuine_loops += 1;
+            }
+        }
+    }
+    println!("genuine_loop_closures={genuine_loops}");
+
+    // Optionally corrupt the graph with wrong loop closures.
+    let injected = if args.inject_wrong_loops > 0 {
+        if args.yaw_drift_per_edge_rad > 1e-9 {
+            // The robust-rejection comparison is cleanest from a GOOD init
+            // (the standard robust-PGO protocol injects into a near-optimal
+            // graph). With large odometry drift on top, the genuine loop
+            // closures that must correct the drift carry residuals as large as
+            // the wrong loops' — they become indistinguishable by residual, so
+            // GNC can only fall back to the (uncorrected) odometry estimate.
+            // Run with `--yaw-drift-deg-per-edge 0` for the clean rejection
+            // demonstration; this is a documented hard regime, not a bug.
+            println!(
+                "NOTE: --inject-wrong-loops with yaw-drift > 0 is the HARD regime \
+                 (drift-correcting genuine loops look like outliers); \
+                 use --yaw-drift-deg-per-edge 0 for the clean robust-rejection result"
+            );
+        }
+        inject_wrong_loops(&mut graph, args.inject_wrong_loops, n, args.inject_seed)
+    } else {
+        Vec::new()
+    };
     println!("se3_cost_before_optimization={:.6}", graph.se3_cost());
 
-    let result = graph.optimize_se3_iterative(&PoseGraphSe3Config {
-        initial_lambda: Some(1.0e-3),
-        max_iterations: 50,
-        ..PoseGraphSe3Config::default()
-    })?;
+    // --- Plain (non-robust) solve ---
+    let mut plain_graph = graph.clone();
+    let plain_result = plain_graph.optimize_se3_iterative(&pgo_config())?;
+    let plain_corrected: Vec<Pose> = (0..n as u64)
+        .map(|id| plain_graph.poses[&id].clone())
+        .collect();
 
     println!(
-        "result anchor={} edges={} variables={} initial_cost={:.4} final_cost={:.4} iterations={} converged={}",
-        result.anchor_id,
-        result.edge_count,
-        result.variable_count,
-        result.initial_cost,
-        result.final_cost,
-        result.iterations.len(),
-        result.converged,
+        "[plain] anchor={} edges={} variables={} initial_cost={:.4} final_cost={:.4} iterations={} converged={}",
+        plain_result.anchor_id,
+        plain_result.edge_count,
+        plain_result.variable_count,
+        plain_result.initial_cost,
+        plain_result.final_cost,
+        plain_result.iterations.len(),
+        plain_result.converged,
     );
-    for stats in result.iterations.iter().take(8) {
+
+    // --- Trajectory accuracy (ATE in metres, anchor-fixed gauge) ---
+    let (d_mean, d_rmse, d_max) = ate(&drifted, &keyframes);
+    let (p_mean, p_rmse, p_max) = ate(&plain_corrected, &keyframes);
+    println!("ATE drifted      mean={d_mean:.3} rmse={d_rmse:.3} max={d_max:.3} (m)");
+    println!("ATE plain-PGO    mean={p_mean:.3} rmse={p_rmse:.3} max={p_max:.3} (m)");
+
+    // --- Robust (GNC) solve, only meaningful when outliers were injected ---
+    let mut gnc_corrected = plain_corrected.clone();
+    if !injected.is_empty() {
+        let gnc = GncConfig {
+            kernel: GncKernel::TruncatedLeastSquares,
+            // Tiny floor; the MAD auto-scale lifts the inlier band to the
+            // graph's own (drift-induced) residual spread. NO readapt — it
+            // over-rejects real edges on pose graphs (a BA-only win).
+            c: 0.1,
+            auto_scale: Some(AUTO_SCALE_K),
+            auto_scale_readapt: false,
+            ..GncConfig::default()
+        };
+        let mut gnc_graph = graph.clone();
+        let gnc_result = gnc_graph.optimize_se3_gnc(&pgo_config(), &gnc)?;
+        gnc_corrected = (0..n as u64)
+            .map(|id| gnc_graph.poses[&id].clone())
+            .collect();
+
+        // Score the verdict: a wrong loop is "rejected" at weight < 0.5.
+        let injected_rejected = injected
+            .iter()
+            .filter(|&&e| gnc_result.edge_weights[e] < 0.5)
+            .count();
+        // Genuine (sequential + the one true loop) edges wrongly rejected.
+        let genuine_rejected = gnc_graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(e, edge)| {
+                !injected.contains(e)
+                    && (edge.kind == PoseGraphEdgeKind::Sequential
+                        || edge.kind == PoseGraphEdgeKind::LoopClosure)
+                    && gnc_result.edge_weights[*e] < 0.5
+            })
+            .count();
+
+        let (g_mean, g_rmse, g_max) = ate(&gnc_corrected, &keyframes);
         println!(
-            "  iter={} cost_before={:.4} cost_after={:.4} max_step={:.4} lambda={:.2e} accepted={}",
-            stats.iteration,
-            stats.cost_before,
-            stats.cost_after,
-            stats.max_step_norm,
-            stats.lambda,
-            stats.step_accepted,
+            "[gnc] kernel=TLS inlier_scale={:.4} outer_iters={} converged={}",
+            gnc_result.inlier_scale, gnc_result.outer_iterations, gnc_result.converged,
+        );
+        println!("ATE gnc-PGO      mean={g_mean:.3} rmse={g_rmse:.3} max={g_max:.3} (m)");
+        println!(
+            "gnc outlier recall = {injected_rejected}/{} wrong loops rejected; false positives = {genuine_rejected} genuine edges rejected",
+            injected.len(),
+        );
+        println!(
+            "summary: drifted rmse {d_rmse:.2}m -> plain {p_rmse:.2}m -> gnc {g_rmse:.2}m \
+             (with {} wrong loop closures)",
+            injected.len(),
         );
     }
 
-    let corrected: Vec<Pose> = (0..n as u64).map(|id| graph.poses[&id].clone()).collect();
+    let corrected = if injected.is_empty() {
+        plain_corrected
+    } else {
+        gnc_corrected
+    };
 
     fs::create_dir_all(&args.out_dir)?;
     write_xz_csv(&args.out_dir.join("truth.csv"), &keyframes)?;
     write_xz_csv(&args.out_dir.join("drifted.csv"), &drifted)?;
     write_xz_csv(&args.out_dir.join("corrected.csv"), &corrected)?;
 
-    let truth_last = keyframes[n - 1].camera_center_world();
-    let drifted_last = drifted[n - 1].camera_center_world();
-    let corrected_last = corrected[n - 1].camera_center_world();
-    println!(
-        "trajectory_endpoint_drift truth=[{:.3}, {:.3}, {:.3}] drifted_err={:.3} corrected_err={:.3}",
-        truth_last.x,
-        truth_last.y,
-        truth_last.z,
-        (drifted_last - truth_last).norm(),
-        (corrected_last - truth_last).norm(),
-    );
     println!("trajectories written to {}", args.out_dir.display());
     Ok(())
 }
