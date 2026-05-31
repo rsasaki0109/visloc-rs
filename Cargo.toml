@@ -69,6 +69,11 @@ visloc-slam = { path = "pipelines/slam", version = "0.1.0" }
 visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
 
 [[example]]
+name = "multi_session_place_recognition_kitti_demo"
+path = "examples/multi_session_place_recognition_kitti_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
 name = "localize_from_common_image"
 path = "examples/localize_from_common_image.rs"
 required-features = ["image-io"]
