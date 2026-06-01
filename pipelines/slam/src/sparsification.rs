@@ -160,6 +160,76 @@ pub fn sparsify_chow_liu(
     })
 }
 
+/// Approximate the dense prior with the maximum-entropy **block-diagonal**
+/// Gaussian: keep every node's marginal covariance exactly but assume the nodes
+/// are mutually **independent** — drop every cross-block correlation. This is the
+/// naive "drop the correlations" sparsifier and the zero-edge contestant against
+/// the Chow-Liu tree: same per-node marginal guarantee, but `0` off-diagonal
+/// blocks instead of `N−1`. Being the empty-graph member of the tree family, its
+/// KL to the dense prior is an **upper bound** on Chow-Liu's (which optimizes over
+/// all trees, the empty graph included), so a head-to-head [`kl_divergence`]
+/// quantifies exactly what the tree's `N−1` retained couplings buy.
+///
+/// Each block is `Λ_ii := (Σ_ii)⁻¹` (the node's *marginal* information, not the
+/// dense conditional block `Λ`'s diagonal), off-diagonals zero, mean preserved via
+/// `η = Λ_diag μ`. Returns `None` on the same shape / non-SPD failures as
+/// [`sparsify_chow_liu`].
+pub fn sparsify_diagonal(
+    lambda: &DMatrix<f64>,
+    eta: &DVector<f64>,
+    block_dim: usize,
+) -> Option<SparsifiedPrior> {
+    let n = lambda.nrows();
+    if block_dim == 0 || lambda.ncols() != n || eta.len() != n || n % block_dim != 0 {
+        return None;
+    }
+    let num_nodes = n / block_dim;
+
+    let chol = lambda.clone().cholesky()?;
+    let sigma = chol.inverse();
+    let mu = chol.solve(eta);
+
+    let mut lambda_diag = DMatrix::<f64>::zeros(n, n);
+    for i in 0..num_nodes {
+        let sigma_ii = sigma
+            .view((i * block_dim, i * block_dim), (block_dim, block_dim))
+            .into_owned();
+        let lambda_ii = sigma_ii.cholesky()?.inverse();
+        add_block(&mut lambda_diag, i, i, &lambda_ii, 1.0);
+    }
+    // Symmetrize against round-off and preserve the mean exactly.
+    lambda_diag = 0.5 * (&lambda_diag + lambda_diag.transpose());
+    let eta_diag = &lambda_diag * &mu;
+
+    Some(SparsifiedPrior {
+        lambda: lambda_diag,
+        eta: eta_diag,
+        edges: Vec::new(),
+    })
+}
+
+/// KL divergence `D( N(μ, Λp⁻¹) ‖ N(μ, Λq⁻¹) )` between two Gaussians given in
+/// **information form** that share a mean (every sparsifier here preserves `μ`),
+/// so the mean term vanishes:
+///
+/// ```text
+///   ½ ( tr(Λq Σp) − n + ln|Λp| − ln|Λq| ),   Σp = Λp⁻¹.
+/// ```
+///
+/// The standard sparsification-quality metric: how far the approximation `q` sits
+/// from the exact dense prior `p` — `0` iff identical, larger is worse. Pass the
+/// dense prior as `p` and a sparsifier's `lambda` as `q` to score it. `None` if
+/// either matrix is not SPD or the dimensions disagree.
+pub fn kl_divergence(p_lambda: &DMatrix<f64>, q_lambda: &DMatrix<f64>) -> Option<f64> {
+    let n = p_lambda.nrows();
+    if p_lambda.ncols() != n || q_lambda.nrows() != n || q_lambda.ncols() != n {
+        return None;
+    }
+    let sigma_p = p_lambda.clone().cholesky()?.inverse();
+    let tr = (q_lambda * &sigma_p).trace();
+    Some(0.5 * (tr - n as f64 + logdet_spd(p_lambda)? - logdet_spd(q_lambda)?))
+}
+
 /// The `2·block_dim × 2·block_dim` joint covariance of nodes `i` and `j`.
 fn joint_block(sigma: &DMatrix<f64>, i: usize, j: usize, b: usize) -> DMatrix<f64> {
     let mut joint = DMatrix::<f64>::zeros(2 * b, 2 * b);
@@ -246,14 +316,9 @@ mod tests {
         m.transpose() * m + DMatrix::identity(n, n) * (n as f64)
     }
 
-    /// KL divergence `D( N(μ_p,Λ_p⁻¹) ‖ N(μ_q,Λ_q⁻¹) )` between two Gaussians given
-    /// in information form, sharing the same mean (so the mean term vanishes):
-    /// `½( tr(Λ_q Σ_p) − n + ln det Λ_p − ln det Λ_q )`.
+    /// Thin wrapper over the public [`kl_divergence`] scorer for the tests.
     fn kl_same_mean(lambda_p: &DMatrix<f64>, lambda_q: &DMatrix<f64>) -> f64 {
-        let n = lambda_p.nrows();
-        let sigma_p = lambda_p.clone().cholesky().unwrap().inverse();
-        let tr = (lambda_q * &sigma_p).trace();
-        0.5 * (tr - n as f64 + logdet_spd(lambda_p).unwrap() - logdet_spd(lambda_q).unwrap())
+        kl_divergence(lambda_p, lambda_q).unwrap()
     }
 
     fn node_block(m: &DMatrix<f64>, i: usize, j: usize, b: usize) -> DMatrix<f64> {
@@ -417,6 +482,109 @@ mod tests {
             }
         }
         0.5 * (&lam + lam.transpose())
+    }
+
+    /// The diagonal sparsifier preserves every NODE marginal exactly (same
+    /// guarantee as Chow-Liu) but zeros every off-diagonal block and preserves the
+    /// mean. The zero-edge contestant.
+    #[test]
+    fn diagonal_preserves_node_marginals_and_drops_all_correlations() {
+        let b = 2;
+        let n = 8; // 4 nodes × 2
+        let lambda = spd(&DMatrix::from_fn(n, n, |i, j| {
+            ((i * 7 + j * 3) % 11) as f64 * 0.13 - 0.4
+        }));
+        let eta = DVector::from_fn(n, |i, _| 0.3 * i as f64 - 1.0);
+
+        let sp = sparsify_diagonal(&lambda, &eta, b).unwrap();
+        assert!(sp.edges.is_empty(), "diagonal sparsifier keeps no edges");
+
+        let sigma = lambda.clone().cholesky().unwrap().inverse();
+        let sigma_d = sp.lambda.clone().cholesky().unwrap().inverse();
+        for i in 0..4 {
+            // node marginal preserved
+            let d = (node_block(&sigma_d, i, i, b) - node_block(&sigma, i, i, b))
+                .abs()
+                .max();
+            assert!(d < 1e-9, "node {i} marginal not preserved: {d}");
+            for j in 0..4 {
+                if i != j {
+                    // every off-diagonal information block is exactly zero
+                    assert!(
+                        node_block(&sp.lambda, i, j, b).abs().max() < 1e-12,
+                        "off-diagonal block ({i},{j}) must be zero"
+                    );
+                }
+            }
+        }
+        // Mean preserved: Λ_diag⁻¹ η_diag == Λ⁻¹ η.
+        let mu = lambda.clone().cholesky().unwrap().solve(&eta);
+        let mu_d = sp.lambda.clone().cholesky().unwrap().solve(&sp.eta);
+        assert!((mu - mu_d).norm() < 1e-9, "mean not preserved");
+    }
+
+    /// The head-to-head: on a genuinely correlated dense prior the Chow-Liu tree's
+    /// KL to the dense prior is STRICTLY smaller than the diagonal (independence)
+    /// sparsifier's — the `N−1` retained couplings strictly help — while the dense
+    /// prior itself scores `0`. This is the ordering the sparsification shootout
+    /// rests on (`0 = dense < Chow-Liu < diagonal`), and it follows from Chow-Liu
+    /// optimizing over all trees, the edgeless one (= the diagonal) included.
+    #[test]
+    fn chow_liu_strictly_beats_diagonal_on_a_correlated_prior() {
+        let b = 2;
+        let n = 8;
+        let lambda = spd(&DMatrix::from_fn(n, n, |i, j| {
+            ((i * 5 + j * 2) % 9) as f64 * 0.17 - 0.5
+        }));
+        let eta = DVector::from_fn(n, |i, _| 0.2 * i as f64 - 0.7);
+
+        let clt = sparsify_chow_liu(&lambda, &eta, b).unwrap();
+        let diag = sparsify_diagonal(&lambda, &eta, b).unwrap();
+
+        let kl_dense = kl_divergence(&lambda, &lambda).unwrap();
+        let kl_clt = kl_divergence(&lambda, &clt.lambda).unwrap();
+        let kl_diag = kl_divergence(&lambda, &diag.lambda).unwrap();
+
+        assert!(
+            kl_dense.abs() < 1e-12,
+            "dense scores zero KL, got {kl_dense}"
+        );
+        assert!(kl_clt >= -1e-12, "KL is non-negative, got {kl_clt}");
+        assert!(
+            kl_clt + 1e-9 < kl_diag,
+            "Chow-Liu KL {kl_clt} must strictly beat diagonal KL {kl_diag}"
+        );
+        // Sparsity ordering: 0 edges < N−1 tree edges < N(N−1)/2 dense.
+        assert_eq!(diag.edges.len(), 0);
+        assert_eq!(clt.edges.len(), 3);
+    }
+
+    /// When the dense prior is ALREADY block-diagonal (independent nodes), the
+    /// diagonal sparsifier — and Chow-Liu — recover it exactly (KL 0): there is no
+    /// correlation to keep, so all three contestants coincide.
+    #[test]
+    fn diagonal_is_exact_when_prior_is_already_independent() {
+        let b = 2;
+        let num = 3;
+        let n = b * num;
+        let mut lambda = DMatrix::<f64>::zeros(n, n);
+        for i in 0..num {
+            let diag = DMatrix::from_fn(b, b, |r, c| if r == c { 3.0 + i as f64 } else { 0.4 });
+            add_block(&mut lambda, i, i, &diag, 1.0);
+        }
+        lambda = 0.5 * (&lambda + lambda.transpose());
+        let eta = DVector::from_fn(n, |i, _| 0.1 * i as f64);
+
+        let diag = sparsify_diagonal(&lambda, &eta, b).unwrap();
+        let kl = kl_divergence(&lambda, &diag.lambda).unwrap();
+        assert!(
+            kl < 1e-9,
+            "independent prior must be recovered exactly, KL={kl}"
+        );
+        assert!(
+            (&lambda - &diag.lambda).abs().max() < 1e-9,
+            "Λ_diag must equal the original block-diagonal Λ"
+        );
     }
 
     #[test]
