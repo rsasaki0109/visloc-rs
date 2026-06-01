@@ -5,6 +5,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3, Vector6};
 use visloc_core::geometry::{Pose, SE3};
+use visloc_slam::pcm::PcmConfig;
 use visloc_slam::{
     relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
     PoseGraphSe3Config,
@@ -146,6 +147,54 @@ fn merged_then_optimized_matches_a_single_full_graph_solve() {
             "merged-then-optimized node {i} must match the full-graph optimum: {d}"
         );
     }
+}
+
+/// Cross-session PCM bridge screening: two sessions revisit the same path (the
+/// second in a different world frame). Several genuine same-place bridges are
+/// mutually consistent; a wrong bridge (claiming two different places coincide)
+/// is not — `consistent_session_bridges` must keep the genuine clique and drop
+/// the wrong one, even though the sessions live in different frames.
+#[test]
+fn consistent_session_bridges_drops_a_wrong_cross_session_match() {
+    let truth: Vec<Pose> = (0..4).map(|i| pose_at(i as f64)).collect();
+
+    // Session A traverses the path at truth; session B re-traverses the SAME
+    // path in an arbitrary world frame `g`.
+    let a = chain_graph(&truth);
+    let g = SE3::exp(&Vector6::new(-0.2, 0.4, 0.1, 0.3, 0.15, -0.2));
+    let b_poses: Vec<Pose> = truth
+        .iter()
+        .map(|p| Pose {
+            world_to_camera: p.world_to_camera.compose(&g),
+        })
+        .collect();
+    let b = chain_graph(&b_poses);
+
+    // Genuine bridges: A node i ↔ B node i are the SAME place → the relative
+    // camera pose is identity (frame-invariant). Three of them form a consensus.
+    let identity = relative_world_to_camera(&truth[0], &truth[0]);
+    let mut candidates: Vec<LoopClosureConstraint> =
+        (0..3).map(|i| bridge(i, i, identity.clone())).collect();
+    // A wrong bridge: A node 0 ↔ B node 3 claimed co-located (identity) — but
+    // they are different places, so it is inconsistent with the genuine clique.
+    candidates.push(bridge(0, 3, identity.clone()));
+
+    let cfg = PcmConfig {
+        threshold: 0.5,
+        require_individual: false, // no single-session relative across sessions
+    };
+    let kept = a.consistent_session_bridges(&b, 4, &candidates, &cfg);
+
+    assert_eq!(
+        kept,
+        vec![0, 1, 2],
+        "the genuine consensus is kept, wrong dropped"
+    );
+
+    // Merging with a screened genuine bridge welds B onto the shared frame.
+    let mut merged = a.clone();
+    merged.merge_session(&b, 4, &candidates[kept[0]]).unwrap();
+    assert_eq!(merged.poses.len(), 8);
 }
 
 #[test]

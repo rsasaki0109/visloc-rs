@@ -5323,6 +5323,53 @@ impl PoseGraph {
         Ok(())
     }
 
+    /// Screen a set of candidate cross-session bridges for mutual consistency
+    /// before merging, returning the indices (into `candidates`) of the maximum
+    /// mutually-consistent subset — PCM ([`crate::pcm::maximum_consistent_set`])
+    /// applied across two sessions, the front-end guard against a wrong
+    /// cross-session place-recognition match.
+    ///
+    /// `candidates[i].from_keyframe_id` is a node of `self`,
+    /// `candidates[i].to_keyframe_id` a node of `other` (its original, pre-offset
+    /// id), `relative_pose` the measured `a → b`. Consistency is the PCM cycle
+    /// `a_k →z_k→ b_k →(other odometry)→ b_l →z_l⁻¹→ a_l →(self odometry)→ a_k ≈
+    /// I`, evaluated over a *combined* odometry map (this graph's poses ∪
+    /// `other`'s relabeled by `id_offset`); each leg is a frame-invariant relative
+    /// pose, so the cycle is well-defined even though the two sessions live in
+    /// different world frames.
+    ///
+    /// Use `cfg.require_individual = false`: the individual odometry self-check is
+    /// meaningless across sessions (a self node and an other node have no
+    /// single-session relative pose), so screening rests on pairwise consistency
+    /// and needs ≥ 2 candidates to bite. A lone candidate is always kept.
+    pub fn consistent_session_bridges(
+        &self,
+        other: &PoseGraph,
+        id_offset: u64,
+        candidates: &[LoopClosureConstraint],
+        cfg: &pcm::PcmConfig,
+    ) -> Vec<usize> {
+        if candidates.len() <= 1 {
+            return (0..candidates.len()).collect();
+        }
+        let mut odometry: BTreeMap<u64, SE3> = BTreeMap::new();
+        for (&id, p) in &self.poses {
+            odometry.insert(id, p.world_to_camera.clone());
+        }
+        for (&id, p) in &other.poses {
+            odometry.insert(id + id_offset, p.world_to_camera.clone());
+        }
+        let measurements: Vec<pcm::LoopMeasurement> = candidates
+            .iter()
+            .map(|c| pcm::LoopMeasurement {
+                from: c.from_keyframe_id,
+                to: c.to_keyframe_id + id_offset,
+                relative: c.relative_pose.clone(),
+            })
+            .collect();
+        pcm::maximum_consistent_set(&measurements, &odometry, cfg)
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///
