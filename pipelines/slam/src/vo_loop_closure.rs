@@ -73,6 +73,12 @@ pub struct VoLoopClosureConfig {
     /// Keep at most this many earlier frames per query frame as candidates
     /// (strongest similarity first).
     pub max_candidates_per_frame: usize,
+    /// Optional global cap on how many candidates reach PnP verification, taken
+    /// in descending appearance similarity. Bounds the cost of the dominant
+    /// stage — per-pair brute-force descriptor matching is `O(N_kp² · dim)` — on
+    /// long sequences where appearance alone proposes thousands of (mostly
+    /// redundant) pairs. `None` verifies every candidate.
+    pub max_verifications: Option<usize>,
     /// Lowe-ratio for the loop-pair descriptor matcher.
     pub match_ratio: Option<f32>,
     /// PnP loop-closure verifier thresholds.
@@ -95,6 +101,7 @@ impl Default for VoLoopClosureConfig {
             min_frame_gap: 50,
             min_similarity: 0.20,
             max_candidates_per_frame: 3,
+            max_verifications: Some(400),
             match_ratio: Some(0.8),
             verifier: PnPLoopClosureVerifierConfig::default(),
             ransac: PnPRansac::default(),
@@ -348,8 +355,21 @@ pub fn close_loops_on_vo_trajectory(
         ratio: config.match_ratio,
     };
     let verifier = PnPLoopClosureVerifier::new(config.ransac, config.verifier);
+
+    // Verify in descending appearance similarity so a `max_verifications` cap
+    // spends the (expensive) geometric stage on the most promising pairs first.
+    let mut to_verify: Vec<&LoopCandidatePair> = candidates.iter().collect();
+    to_verify.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(cap) = config.max_verifications {
+        to_verify.truncate(cap);
+    }
+
     let mut loop_constraints = Vec::new();
-    for candidate in &candidates {
+    for candidate in to_verify {
         if let Some(constraint) = verify_loop_candidate(
             camera,
             poses,
