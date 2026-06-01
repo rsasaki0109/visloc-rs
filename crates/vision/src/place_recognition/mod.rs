@@ -25,11 +25,14 @@
 //! retrieval with the crate's existing local matching and two-view geometry to
 //! turn appearance matches into pose-bearing bridge proposals end-to-end.
 
+use nalgebra::Point3;
 use visloc_core::geometry::SE3;
 use visloc_core::types::Camera;
 
 use crate::features::FeatureSet;
 use crate::matching::Matcher;
+use crate::pnp::Correspondence2D3D;
+use crate::ransac::RobustPoseEstimator;
 use crate::two_view::{EssentialMatrixEstimator, RelativePoseEstimator, TwoViewCorrespondence};
 
 /// A visual vocabulary: `k` cluster centroids over the local-descriptor space,
@@ -406,6 +409,141 @@ where
     proposals
 }
 
+/// A query-side keyframe carrying its full 2D [`FeatureSet`] **and** a metric 3D
+/// point for the keypoints whose depth is known (e.g. stereo-triangulated via
+/// [`crate::stereo_bootstrap`]). This is the input that lifts a bridge from
+/// up-to-scale (monocular essential) to metric (PnP against known depth).
+///
+/// Retrieval and descriptor matching use the full feature set (so a sparse depth
+/// map does not starve appearance retrieval), while only the keypoints with a
+/// `Some(point)` contribute a 3D–2D correspondence to the PnP solve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricKeyframe {
+    /// Full 2D features (keypoints + local descriptors) of this keyframe.
+    pub features: FeatureSet,
+    /// Metric 3D point for each keypoint in this keyframe's (left) camera frame,
+    /// or `None` where no depth is available. `landmarks[i]` corresponds to
+    /// `features.keypoints[i]`; the vector is the same length as the keypoints.
+    pub landmarks: Vec<Option<Point3<f64>>>,
+}
+
+/// Configuration for [`propose_metric_bridges`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetricBridgeConfig {
+    /// Minimum VLAD cosine similarity for a retrieved pair to be PnP-verified.
+    pub min_similarity: f32,
+    /// Minimum PnP inlier count for a verified pair to become a proposal.
+    pub min_inliers: usize,
+}
+
+impl Default for MetricBridgeConfig {
+    fn default() -> Self {
+        Self {
+            min_similarity: 0.5,
+            min_inliers: 12,
+        }
+    }
+}
+
+/// A **metric** pose-bearing cross-set bridge proposal: appearance retrieval said
+/// `query` and `db` are the same place, and PnP of the `db` image against the
+/// `query` keyframe's 3D landmarks recovered a fully-scaled relative pose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricBridgeProposal {
+    /// Index into the `query` keyframe set.
+    pub query: usize,
+    /// Index into the `db` keyframe set.
+    pub db: usize,
+    /// VLAD appearance similarity that proposed the pair.
+    pub similarity: f32,
+    /// Relative pose taking the `query` camera frame to the `db` camera frame.
+    ///
+    /// Unlike [`BridgeProposal::query_to_db`], the translation is **metric**: it
+    /// is solved by PnP against the query keyframe's metric 3D landmarks, so its
+    /// magnitude is in the same (metre) units as the landmarks. This is the
+    /// bridge that can weld two metric SLAM sessions without an external scale.
+    pub query_to_db: SE3,
+    /// Number of PnP inliers supporting the pose.
+    pub inlier_count: usize,
+    /// Mean reprojection error of the inliers (pixels).
+    pub mean_reprojection_error: f64,
+}
+
+/// End-to-end appearance → **metric** geometry bridge proposal across two
+/// keyframe sets. The `query` set carries metric 3D landmarks ([`MetricKeyframe`],
+/// e.g. stereo-triangulated); the `db` set is plain 2D [`FeatureSet`]s. For each
+/// VLAD-retrieved same-place pair this matches local descriptors and runs PnP
+/// (`pnp`) of the db image against the query keyframe's 3D points, yielding a
+/// metric `query → db` relative pose — the input to PCM screening
+/// (`visloc-slam`'s `consistent_session_bridges`) and `PoseGraph::merge_session`
+/// **without** the monocular up-to-scale caveat of [`propose_bridges`].
+///
+/// Sorted by descending appearance similarity.
+pub fn propose_metric_bridges<M, R>(
+    query: &[MetricKeyframe],
+    db: &[FeatureSet],
+    vocab: &Vocabulary,
+    matcher: &M,
+    pnp: &R,
+    camera: &Camera,
+    config: &MetricBridgeConfig,
+) -> Vec<MetricBridgeProposal>
+where
+    M: Matcher,
+    R: RobustPoseEstimator,
+{
+    let query_globals: Vec<Vec<f32>> = query
+        .iter()
+        .map(|k| vlad(&k.features.descriptors, vocab))
+        .collect();
+    let db_globals: Vec<Vec<f32>> = db.iter().map(|f| vlad(&f.descriptors, vocab)).collect();
+    let retrieved = retrieve_mutual(&query_globals, &db_globals, config.min_similarity);
+
+    let mut proposals = Vec::new();
+    for r in retrieved {
+        let (q, d) = (&query[r.query], &db[r.db]);
+        let matches = matcher.match_descriptors(&q.features.descriptors, &d.descriptors);
+        // 3D (query landmark) ↔ 2D (db pixel) correspondences for PnP — only the
+        // matched query keypoints that carry a metric 3D point participate.
+        let correspondences: Vec<Correspondence2D3D> = matches
+            .iter()
+            .filter_map(|m| {
+                let point3d = (*q.landmarks.get(m.query_index)?)?;
+                Some(Correspondence2D3D {
+                    point3d,
+                    point2d: *d.keypoints.get(m.train_index)?,
+                    confidence: None,
+                })
+            })
+            .collect();
+        let Some(report) = pnp.estimate(&correspondences, camera) else {
+            continue;
+        };
+        if report.inliers.len() < config.min_inliers {
+            continue;
+        }
+        // PnP solves the db camera's pose in the query landmark frame, i.e. the
+        // transform mapping a query-frame point to the db camera frame — exactly
+        // the query → db relative pose.
+        proposals.push(MetricBridgeProposal {
+            query: r.query,
+            db: r.db,
+            similarity: r.similarity,
+            query_to_db: report.pose.world_to_camera.clone(),
+            inlier_count: report.inliers.len(),
+            mean_reprojection_error: report.mean_reprojection_error,
+        });
+    }
+    proposals.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.query.cmp(&b.query))
+            .then(a.db.cmp(&b.db))
+    });
+    proposals
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,5 +859,135 @@ mod tests {
             cos > 0.99,
             "bridge translation direction must match truth (|cos|={cos})"
         );
+    }
+
+    // --- Metric bridge driver test: PnP against stereo-style 3D landmarks -----
+
+    use crate::ransac::PnPRansac;
+
+    /// A [`MetricKeyframe`] for a camera at `pose` observing `points`: each point
+    /// is projected to its left pixel and transformed into the camera frame (the
+    /// metric depth a stereo rig would triangulate), kept only if it lies in
+    /// front and projects in-image, and tagged with its per-point descriptor
+    /// (small jitter so the two sessions' descriptors are not byte-identical).
+    fn observe_metric(
+        pose: &Pose,
+        camera: &Camera,
+        points: &[(Point3<f64>, usize)],
+        jitter_seed: u64,
+    ) -> MetricKeyframe {
+        let mut rng = Lcg(jitter_seed);
+        let mut keypoints = Vec::new();
+        let mut descriptors = Vec::new();
+        let mut landmarks = Vec::new();
+        for (p, id) in points {
+            let cam = pose.transform_world_point(p);
+            if cam.z <= 0.0 {
+                continue;
+            }
+            if let Some(px) = camera.project(&cam) {
+                keypoints.push(px);
+                descriptors.push(
+                    point_descriptor(*id)
+                        .iter()
+                        .map(|&x| x + ((rng.unit() as f32) - 0.5) * 0.02)
+                        .collect(),
+                );
+                landmarks.push(Some(cam));
+            }
+        }
+        MetricKeyframe {
+            features: FeatureSet::new(keypoints, descriptors).unwrap(),
+            landmarks,
+        }
+    }
+
+    /// Full metric pipeline: the query session carries stereo-triangulated 3D
+    /// landmarks, the db session is plain 2D features of the same two places from
+    /// shifted/yawed poses. PnP must recover each bridge's relative pose with the
+    /// correct **metric translation** (not just direction), and mismatched places
+    /// must not produce a proposal.
+    #[test]
+    fn propose_metric_bridges_recovers_scaled_cross_session_pose() {
+        let camera = synthetic_camera();
+        let place0 = place(Vector3::new(0.0, 0.0, 12.0), 30, 0, 1);
+        let place1 = place(Vector3::new(40.0, 0.0, 12.0), 30, 100, 2);
+
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.04);
+        // Query session A: A0 at place0 (origin), A1 at place1. Each keyframe's 3D
+        // landmarks are expressed in its own camera frame.
+        let a0 = keyframe_pose(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let a1 = keyframe_pose(UnitQuaternion::identity(), Vector3::new(40.0, 0.0, 0.0));
+        // Db session B: same places, sideways-shifted (0.6 m) and yawed.
+        let b0 = keyframe_pose(yaw, Vector3::new(0.6, 0.0, 0.0));
+        let b1 = keyframe_pose(yaw, Vector3::new(40.6, 0.0, 0.0));
+
+        let query = vec![
+            observe_metric(&a0, &camera, &place0, 10),
+            observe_metric(&a1, &camera, &place1, 11),
+        ];
+        let db = vec![
+            observe(&b0, &camera, &place0, 20),
+            observe(&b1, &camera, &place1, 21),
+        ];
+
+        let mut pool: Vec<Vec<f32>> = Vec::new();
+        for id in 0..30 {
+            pool.push(point_descriptor(id));
+        }
+        for id in 100..130 {
+            pool.push(point_descriptor(id));
+        }
+        let refs: Vec<&[f32]> = pool.iter().map(|v| v.as_slice()).collect();
+        let vocab = Vocabulary::build(&refs, 8, 25, 7).unwrap();
+
+        let proposals = propose_metric_bridges(
+            &query,
+            &db,
+            &vocab,
+            &BruteForceMatcher { ratio: None },
+            &PnPRansac::default(),
+            &camera,
+            &MetricBridgeConfig {
+                min_similarity: 0.3,
+                min_inliers: 8,
+            },
+        );
+
+        assert!(
+            proposals.iter().any(|p| p.query == 0 && p.db == 0),
+            "A0↔B0 metric bridge must be proposed; got {proposals:?}"
+        );
+        assert!(
+            proposals.iter().any(|p| p.query == 1 && p.db == 1),
+            "A1↔B1 metric bridge must be proposed; got {proposals:?}"
+        );
+        assert!(
+            proposals.iter().all(|p| p.query == p.db),
+            "no cross-place metric proposal should survive; got {proposals:?}"
+        );
+
+        // For each bridge the truth is `B.world_to_camera ∘ A.world_to_camera⁻¹`
+        // (query landmarks live in A's camera frame). Both rotation AND the full
+        // metric translation must match — this is the property monocular essential
+        // cannot give.
+        for (qi, a, b) in [(0usize, &a0, &b0), (1, &a1, &b1)] {
+            let bridge = proposals.iter().find(|p| p.query == qi).unwrap();
+            let truth = b.world_to_camera.compose(&a.world_to_camera.inverse());
+            let rot_err = bridge
+                .query_to_db
+                .rotation
+                .rotation_to(&truth.rotation)
+                .angle()
+                .abs();
+            assert!(rot_err < 1e-2, "bridge {qi} rotation error {rot_err} rad");
+            let trans_err = (bridge.query_to_db.translation - truth.translation).norm();
+            assert!(
+                trans_err < 1e-2,
+                "bridge {qi} METRIC translation error {trans_err} m (est={:?} truth={:?})",
+                bridge.query_to_db.translation,
+                truth.translation,
+            );
+        }
     }
 }
