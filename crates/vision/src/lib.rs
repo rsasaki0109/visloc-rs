@@ -9,6 +9,7 @@
 pub mod distortion;
 pub mod features;
 pub mod matching;
+pub mod place_recognition;
 pub mod pnp;
 pub mod ransac;
 pub mod stereo;
