@@ -48,15 +48,36 @@
 //!     30 PnP inliers / 0.8 px, merged 5.3 m ATE.
 //!   - *Separate B source (`--image-left-b` + `--start-frame-b`):* B is a DIFFERENT
 //!     pass over the same place (e.g. a genuine KITTI-00 loop revisit ~4500 frames
-//!     later). The true Atlas multi-map case. **Honest finding (classical corner
-//!     features): VLAD retrieval correctly ranks the genuine revisit pair first
-//!     (A48↔B4500, sim 0.33), but the wide-baseline viewpoint change so
-//!     contaminates the classical-descriptor matches that stereo PnP cannot reach
-//!     a 6-point inlier consensus — no metric bridge is verified.** The metric
-//!     bridge holds in the small-baseline regime; a genuine wide-baseline revisit
-//!     needs a viewpoint-robust descriptor (SuperPoint/NetVLAD, the codebase's
-//!     `--feature-extractor superpoint-onnx`). The separate-B wiring is correct
-//!     and ready for that; classical features just don't carry PnP across the gap.
+//!     later). The true Atlas multi-map case. The descriptor choice decides
+//!     whether it works:
+//!       - *Classical corners (default):* VLAD retrieval correctly ranks the
+//!         genuine revisit pair first (A48↔B4500, sim 0.33), but the wide-baseline
+//!         viewpoint change so contaminates the classical-descriptor matches that
+//!         stereo PnP cannot reach a 6-point inlier consensus (≤1 inlier of ~32) —
+//!         no metric bridge is verified. (The empty-proposals path prints this.)
+//!       - *SuperPoint (`--features-*` offline dirs):* the viewpoint-robust
+//!         256-d descriptors carry PnP across the gap. On the genuine KITTI-00
+//!         revisit (A frames 0-49, B frames 4500-4529, ~5 m apart) the revisit
+//!         pair A49↔B4500 gets **212 matches → 147 PnP inliers**, a metric bridge
+//!         (rot 0.33° / trans 0.31 m vs GT), and the welded map lands at
+//!         **1.34 m ATE rmse** (B unbridged 31.6 m). Stereo landmarks/keyframe
+//!         also jump 44 → 565. This is the genuine wide-baseline revisit that
+//!         classical features cannot do.
+//!
+//! **Offline SuperPoint features.** Pre-extract per-frame SuperPoint descriptors
+//! (no in-Rust ONNX runtime needed) with the repo's exporter, then point the demo
+//! at the output dirs:
+//!
+//! ```sh
+//! python3 scripts/export_superpoint_lightglue.py --mono-dir <A image_0> --out-dir sp/a_left  --frames 50
+//! python3 scripts/export_superpoint_lightglue.py --mono-dir <A image_1> --out-dir sp/a_right --frames 50
+//! python3 scripts/export_superpoint_lightglue.py --mono-dir <B image_0> --out-dir sp/b_left
+//! ```
+//!
+//! Each writes `frame_NNNNNN_features.txt` (`X Y SCORE D0…D255`), loaded per
+//! keyframe via `--features-a-left sp/a_left --features-a-right sp/a_right
+//! --features-b-left sp/b_left`. Without those flags the demo uses classical
+//! corner features.
 //!
 //! Usage:
 //!
@@ -93,6 +114,7 @@ mod imp {
     use nalgebra::{UnitQuaternion, Vector3, Vector6};
     use visloc_rs::core::geometry::{Pose, SE3};
     use visloc_rs::io::calibration::parse_kitti_calibration_txt;
+    use visloc_rs::io::external_deep::read_external_deep_features_txt;
     use visloc_rs::io::kitti::read_kitti_image_sequence_dir;
     use visloc_rs::slam::pcm::{PcmConfig, PcmNoiseModel};
     use visloc_rs::tracking::PoseTrajectory;
@@ -114,6 +136,9 @@ mod imp {
         image_left: PathBuf,
         image_right: PathBuf,
         image_left_b: Option<PathBuf>,
+        features_a_left: Option<PathBuf>,
+        features_a_right: Option<PathBuf>,
+        features_b_left: Option<PathBuf>,
         calib: PathBuf,
         kitti_poses: PathBuf,
         projection_left: String,
@@ -138,6 +163,9 @@ mod imp {
         let mut image_left: Option<PathBuf> = None;
         let mut image_right: Option<PathBuf> = None;
         let mut image_left_b: Option<PathBuf> = None;
+        let mut features_a_left: Option<PathBuf> = None;
+        let mut features_a_right: Option<PathBuf> = None;
+        let mut features_b_left: Option<PathBuf> = None;
         let mut calib: Option<PathBuf> = None;
         let mut kitti_poses: Option<PathBuf> = None;
         let mut projection_left = String::from("P0");
@@ -175,6 +203,18 @@ mod imp {
                 }
                 "--start-frame-b" => {
                     start_frame_b = args.remove(i + 1).parse()?;
+                    args.remove(i);
+                }
+                "--features-a-left" => {
+                    features_a_left = Some(PathBuf::from(args.remove(i + 1)));
+                    args.remove(i);
+                }
+                "--features-a-right" => {
+                    features_a_right = Some(PathBuf::from(args.remove(i + 1)));
+                    args.remove(i);
+                }
+                "--features-b-left" => {
+                    features_b_left = Some(PathBuf::from(args.remove(i + 1)));
                     args.remove(i);
                 }
                 "--calib" => {
@@ -252,6 +292,9 @@ mod imp {
             image_left: image_left.ok_or("--image-left <KITTI image_0 dir> is required")?,
             image_right: image_right.ok_or("--image-right <KITTI image_1 dir> is required")?,
             image_left_b,
+            features_a_left,
+            features_a_right,
+            features_b_left,
             calib: calib.ok_or("--calib <path/to/calib.txt> is required")?,
             kitti_poses: kitti_poses.ok_or("--kitti-poses <path/to/poses/SS.txt> is required")?,
             projection_left,
@@ -540,13 +583,40 @@ mod imp {
                 .ok_or_else(|| format!("GT pose missing for frame {f}").into())
         };
 
+        // Feature source: classical corners from the image, OR — when an offline
+        // feature directory is supplied (`--features-*`, e.g. SuperPoint exported
+        // by scripts/export_superpoint_lightglue.py --mono-dir) — the pre-extracted
+        // descriptors for `frame_{dir:06}_features.txt`. SuperPoint's
+        // viewpoint-robust descriptors are what carry PnP across a genuine
+        // wide-baseline revisit, where classical corners cannot (see module note).
+        let offline = args.features_a_left.is_some();
+        if offline {
+            println!("feature source: OFFLINE SuperPoint (a_left/a_right/b_left dirs)");
+        }
+        let load_feats = |dir_opt: &Option<PathBuf>,
+                          dir_index: usize,
+                          image: &dyn Fn() -> Result<FeatureSet, Box<dyn std::error::Error>>|
+         -> Result<FeatureSet, Box<dyn std::error::Error>> {
+            match dir_opt {
+                Some(d) => {
+                    let path = d.join(format!("frame_{dir_index:06}_features.txt"));
+                    Ok(read_external_deep_features_txt(&path)?.into_feature_set()?)
+                }
+                None => image(),
+            }
+        };
+
         // Session A: metric stereo keyframes (3D landmarks).
         let mut a_metric: Vec<MetricKeyframe> = Vec::with_capacity(na);
         let mut a_truth: Vec<Pose> = Vec::with_capacity(na);
         let mut a_left: Vec<FeatureSet> = Vec::with_capacity(na);
         for &(dir, gt_f) in &a_plan {
-            let left = extractor.extract(&left_seq.frames[dir].image)?;
-            let right = extractor.extract(&right_seq.frames[dir].image)?;
+            let left = load_feats(&args.features_a_left, dir, &|| {
+                Ok(extractor.extract(&left_seq.frames[dir].image)?)
+            })?;
+            let right = load_feats(&args.features_a_right, dir, &|| {
+                Ok(extractor.extract(&right_seq.frames[dir].image)?)
+            })?;
             a_metric.push(stereo_keyframe(&left, &right, &camera, baseline));
             a_left.push(left);
             a_truth.push(pose_at(gt_f)?);
@@ -555,7 +625,9 @@ mod imp {
         let mut b_feats: Vec<FeatureSet> = Vec::with_capacity(nb);
         let mut b_truth: Vec<Pose> = Vec::with_capacity(nb);
         for &(dir, gt_f) in &b_plan {
-            b_feats.push(extractor.extract(&left_seq_b.frames[dir].image)?);
+            b_feats.push(load_feats(&args.features_b_left, dir, &|| {
+                Ok(extractor.extract(&left_seq_b.frames[dir].image)?)
+            })?);
             b_truth.push(pose_at(gt_f)?);
         }
         let median_landmarks = {
