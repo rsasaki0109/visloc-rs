@@ -5236,6 +5236,93 @@ impl PoseGraph {
         Ok(removed)
     }
 
+    /// Merge another session's pose graph into this one, welding the two
+    /// trajectories at a cross-session `bridge` constraint — the core of
+    /// multi-session / multi-map SLAM (an ORB-SLAM3-Atlas-style weld). `other`'s
+    /// nodes are relabeled by `id_offset` (which must exceed this graph's largest
+    /// id so the two id spaces stay disjoint) and rigidly transformed into this
+    /// graph's world frame, then its edges are spliced in and the `bridge` is
+    /// added as a loop-closure edge. A joint [`Self::optimize_se3_iterative`]
+    /// afterwards re-welds the seam.
+    ///
+    /// `bridge.from_keyframe_id` is a node of `self`; `bridge.to_keyframe_id` is a
+    /// node of `other` (its *original*, pre-offset id); `bridge.relative_pose` is
+    /// the measured relative pose `a → b` (the same `relative_world_to_camera`
+    /// convention as every edge), e.g. from a cross-session place-recognition
+    /// match. The alignment is computed so `other`'s bridge node lands exactly at
+    /// the bridge prediction: each `other` pose `Tₙ` becomes `Tₙ ∘ (T_b⁻¹ ∘ z ∘
+    /// T_a)`, a right-multiply under which every relative edge measurement is
+    /// invariant (so `other`'s edges carry over unchanged, only relabeled).
+    ///
+    /// This graph's anchor is kept as the merged gauge. Errors:
+    /// [`PoseGraphError::NoAnchor`] if either graph lacks an anchor;
+    /// [`PoseGraphError::MissingNode`] if a bridge endpoint is absent or a
+    /// relabeled id would collide with an existing node. `other` must carry no
+    /// [`GaussianPrior`]s (a fresh session); priors are not transformed.
+    pub fn merge_session(
+        &mut self,
+        other: &PoseGraph,
+        id_offset: u64,
+        bridge: &LoopClosureConstraint,
+    ) -> Result<(), PoseGraphError> {
+        self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        other.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        let a = bridge.from_keyframe_id;
+        let b = bridge.to_keyframe_id;
+        let t_a = self
+            .poses
+            .get(&a)
+            .ok_or(PoseGraphError::MissingNode(a))?
+            .world_to_camera
+            .clone();
+        let t_b = other
+            .poses
+            .get(&b)
+            .ok_or(PoseGraphError::MissingNode(b))?
+            .world_to_camera
+            .clone();
+
+        // Right-multiply alignment: Tₙ_new = Tₙ ∘ (T_b⁻¹ ∘ z ∘ T_a). For the
+        // bridge node b this gives z ∘ T_a, i.e. exactly the bridge prediction.
+        let rhs = t_b.inverse().compose(&bridge.relative_pose.compose(&t_a));
+
+        // Splice the relabeled, transformed nodes (id collision is an error).
+        for (&id, pose) in &other.poses {
+            let new_id = id + id_offset;
+            if self.poses.contains_key(&new_id) {
+                return Err(PoseGraphError::MissingNode(new_id));
+            }
+            self.poses.insert(
+                new_id,
+                Pose {
+                    world_to_camera: pose.world_to_camera.compose(&rhs),
+                },
+            );
+        }
+        // Edge measurements are invariant under the right-multiply, so carry them
+        // over verbatim, only relabeling endpoints.
+        for edge in &other.edges {
+            self.edges.push(PoseGraphEdge {
+                from: edge.from + id_offset,
+                to: edge.to + id_offset,
+                measurement: edge.measurement.clone(),
+                kind: edge.kind,
+                weight: edge.weight,
+                information: edge.information,
+            });
+        }
+        // The weld: a loop-closure edge a → (b + offset) carrying the bridge.
+        self.edges.push(PoseGraphEdge {
+            from: a,
+            to: b + id_offset,
+            measurement: bridge.relative_pose.clone(),
+            kind: PoseGraphEdgeKind::LoopClosure,
+            weight: (bridge.inlier_count as f64).max(1.0),
+            information: None,
+        });
+        Ok(())
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///
