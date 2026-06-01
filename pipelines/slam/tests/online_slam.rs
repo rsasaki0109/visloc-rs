@@ -3798,6 +3798,7 @@ mod online_loop_closure_refinement {
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
+                    pcm_batch_rescreen: false,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4045,6 +4046,7 @@ mod online_loop_closure_refinement {
                     }),
                     pcm: None,
                     covariance_gate: None,
+                    pcm_batch_rescreen: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4142,6 +4144,7 @@ mod online_loop_closure_refinement {
                     gnc: None,
                     pcm: Some(PcmConfig::default()),
                     covariance_gate: None,
+                    pcm_batch_rescreen: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4219,6 +4222,7 @@ mod online_loop_closure_refinement {
                     gnc: None,
                     pcm: None,
                     covariance_gate: Some(CHI2_95_6DOF),
+                    pcm_batch_rescreen: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4276,6 +4280,7 @@ mod online_loop_closure_refinement {
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
+                    pcm_batch_rescreen: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()

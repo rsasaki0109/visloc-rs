@@ -464,6 +464,21 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// online path. Rejections are reported on
     /// [`OnlineSlamLoopClosureRefinementStats::loop_closures_covariance_rejected`].
     pub covariance_gate: Option<f64>,
+    /// When `pcm` is set, also run a *batch* re-screen each frame that admits
+    /// loop closures: over the full history of essential-verified closures (the
+    /// ones in the graph plus the ones the incremental screen deferred),
+    /// recompute the maximum mutually-consistent set
+    /// ([`pcm::maximum_consistent_set`], order-independent) and reconcile the
+    /// graph's loop edges to it — *promoting* a closure the incremental,
+    /// order-dependent admission wrongly deferred and *evicting* one it wrongly
+    /// admitted. This self-heals the cold-start failure of the purely
+    /// incremental screen: a perceptual-aliasing closure admitted first (against
+    /// the empty set, so unconditionally) then poisons every genuine closure
+    /// checked against it. `false` (default) keeps the purely incremental
+    /// behavior; ignored when `pcm` is `None`. Promotions/evictions are reported
+    /// on [`OnlineSlamLoopClosureRefinementStats`] and bump the trigger counter
+    /// so a reconciled graph is re-solved.
+    pub pcm_batch_rescreen: bool,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -486,8 +501,17 @@ pub struct OnlineSlamLoopClosureRefinementState {
     /// entry is the [`PoseGraph::anchor`]; subsequent entries form the
     /// sequential edge chain.
     pub keyframe_order: Vec<u64>,
-    /// All verified loop-closure constraints accumulated to date.
+    /// Essential-verified loop closures currently admitted into the graph (one
+    /// loop-closure edge each). With the incremental PCM screen this is the
+    /// admitted set; with `pcm_batch_rescreen` it is the latest batch
+    /// maximum-consistent set.
     pub verified_constraints: Vec<LoopClosureConstraint>,
+    /// Essential-verified loop closures the incremental PCM screen *deferred*
+    /// (not in the graph), retained so the batch re-screen
+    /// ([`OnlineSlamLoopClosureRefinementConfig::pcm_batch_rescreen`]) can
+    /// promote one later if it joins the consensus. Empty when batch re-screen
+    /// is off.
+    pub pcm_deferred: Vec<LoopClosureConstraint>,
     /// New verified constraints since the last successful PGO trigger.
     /// Reset to `0` after each fired solve.
     pub pending_since_last_trigger: usize,
@@ -505,6 +529,7 @@ impl OnlineSlamLoopClosureRefinementState {
             graph: PoseGraph::new(),
             keyframe_order: Vec::new(),
             verified_constraints: Vec::new(),
+            pcm_deferred: Vec::new(),
             pending_since_last_trigger: 0,
             trigger_count: 0,
         }
@@ -514,6 +539,7 @@ impl OnlineSlamLoopClosureRefinementState {
         self.graph = PoseGraph::new();
         self.keyframe_order.clear();
         self.verified_constraints.clear();
+        self.pcm_deferred.clear();
         self.pending_since_last_trigger = 0;
         self.trigger_count = 0;
     }
@@ -559,6 +585,16 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// under the relative-pose covariance). Always `0` when `covariance_gate`
     /// is unset.
     pub loop_closures_covariance_rejected: usize,
+    /// Number of deferred loop closures the batch PCM re-screen *promoted* into
+    /// the graph this frame (they joined the maximum-consistent consensus the
+    /// incremental, order-dependent screen had wrongly excluded). Always `0`
+    /// unless `pcm_batch_rescreen` is set.
+    pub loop_closures_pcm_promoted: usize,
+    /// Number of admitted loop closures the batch PCM re-screen *evicted* from
+    /// the graph this frame (inconsistent with the larger consensus — e.g. a
+    /// perceptual-aliasing closure admitted first against the empty set). Always
+    /// `0` unless `pcm_batch_rescreen` is set.
+    pub loop_closures_pcm_evicted: usize,
     /// Number of `map.keyframes[id].frame.pose` slots overwritten with
     /// the optimised pose after PGO. Zero unless a solve fired this frame
     /// (`pose_graph_result.is_some()` or `gnc_result.is_some()`).
@@ -2236,6 +2272,11 @@ where
                 });
                 if let Some((false, _)) = pcm_measurement {
                     stats.loop_closures_pcm_rejected += 1;
+                    // Hold a deferred-but-verified closure for the batch
+                    // re-screen, which may promote it once a consensus forms.
+                    if state.config.pcm_batch_rescreen {
+                        state.pcm_deferred.push(constraint);
+                    }
                     continue;
                 }
                 if let Some(threshold) = state.config.covariance_gate {
@@ -2251,6 +2292,28 @@ where
                 state.verified_constraints.push(constraint);
                 state.pending_since_last_trigger += 1;
                 stats.accepted_count += 1;
+            }
+
+            // Batch PCM self-heal (optional): the incremental admission above is
+            // order-dependent — a wrong closure admitted first (against the
+            // empty set) poisons the genuine ones checked against it. Recompute
+            // the order-independent maximum-consistent set over the full history
+            // (admitted ∪ deferred) and reconcile the graph's loop edges to it,
+            // promoting/evicting as the consensus dictates.
+            if state.config.pcm_batch_rescreen {
+                if let Some(cfg) = pcm_cfg {
+                    let (promoted, evicted) = pcm_batch_reconcile(
+                        &mut state.graph,
+                        &mut state.verified_constraints,
+                        &mut state.pcm_deferred,
+                        &odometry,
+                        &cfg,
+                    );
+                    stats.loop_closures_pcm_promoted = promoted;
+                    stats.loop_closures_pcm_evicted = evicted;
+                    // A changed loop-edge set must be re-solved.
+                    state.pending_since_last_trigger += promoted + evicted;
+                }
             }
         }
 
@@ -5350,6 +5413,57 @@ fn pcm_admits_loop(
     consistent * 2 > admitted.len()
 }
 
+/// Batch PCM reconcile: recompute the order-independent maximum mutually-
+/// consistent set ([`pcm::maximum_consistent_set`]) over the union of the
+/// currently-admitted (`verified`) and `deferred` loop closures, then reconcile
+/// `graph`'s loop edges to it — *promote* a deferred closure that joins the
+/// consensus (add its edge) and *evict* an admitted closure that leaves it
+/// (drop its edge). This heals the cold-start failure of the incremental,
+/// order-dependent screen, where a perceptual-aliasing closure admitted first
+/// (against the empty set) then poisons every genuine closure checked against
+/// it. `verified` / `deferred` are rewritten to the new partition; returns
+/// `(promoted, evicted)`.
+fn pcm_batch_reconcile(
+    graph: &mut PoseGraph,
+    verified: &mut Vec<LoopClosureConstraint>,
+    deferred: &mut Vec<LoopClosureConstraint>,
+    odometry: &BTreeMap<u64, SE3>,
+    cfg: &pcm::PcmConfig,
+) -> (usize, usize) {
+    let admitted_n = verified.len();
+    // Union, admitted first so index `< admitted_n` ⇔ currently in the graph.
+    let mut union: Vec<LoopClosureConstraint> = Vec::with_capacity(admitted_n + deferred.len());
+    union.append(verified);
+    union.append(deferred);
+    let measurements: Vec<pcm::LoopMeasurement> = union.iter().map(loop_measurement_of).collect();
+    let keep: std::collections::HashSet<usize> =
+        pcm::maximum_consistent_set(&measurements, odometry, cfg)
+            .into_iter()
+            .collect();
+
+    let (mut promoted, mut evicted) = (0usize, 0usize);
+    for (i, constraint) in union.into_iter().enumerate() {
+        let was_admitted = i < admitted_n;
+        if keep.contains(&i) {
+            if !was_admitted {
+                graph.add_loop_closure_constraint(&constraint);
+                promoted += 1;
+            }
+            verified.push(constraint);
+        } else {
+            if was_admitted {
+                let (f, t) = (constraint.from_keyframe_id, constraint.to_keyframe_id);
+                graph.edges.retain(|e| {
+                    !(e.kind == PoseGraphEdgeKind::LoopClosure && e.from == f && e.to == t)
+                });
+                evicted += 1;
+            }
+            deferred.push(constraint);
+        }
+    }
+    (promoted, evicted)
+}
+
 /// Covariance gate for a single verified loop closure: admit it only when the
 /// squared Mahalanobis distance of its innovation (measured relative pose vs the
 /// estimate's prediction) under the relative-pose covariance is `<= threshold`.
@@ -5391,4 +5505,134 @@ fn expected_world_displacement(to_pose: &Pose, measurement: &SE3) -> nalgebra::V
         .to_rotation_matrix()
         .into_inner();
     -(rotation_matrix.transpose() * measurement.translation)
+}
+
+#[cfg(test)]
+mod pcm_batch_reconcile_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn pose_at(x: f64) -> Pose {
+        Pose::from_world_to_camera(
+            UnitQuaternion::identity(),
+            -nalgebra::Vector3::new(x, 0.0, 0.0),
+        )
+    }
+
+    fn loop_constraint(from: u64, to: u64, relative: SE3) -> LoopClosureConstraint {
+        LoopClosureConstraint {
+            from_keyframe_id: from,
+            to_keyframe_id: to,
+            relative_pose: relative,
+            inlier_count: 100,
+            inlier_ratio: 1.0,
+            mean_sampson_error: 0.0,
+            score: 100.0,
+        }
+    }
+
+    fn is_loop_edge(graph: &PoseGraph, from: u64, to: u64) -> bool {
+        graph
+            .edges
+            .iter()
+            .any(|e| e.kind == PoseGraphEdgeKind::LoopClosure && e.from == from && e.to == to)
+    }
+
+    /// The poisoning scenario: a wrong closure was admitted first (against the
+    /// empty set), then two genuine closures were deferred because they
+    /// disagreed with it. The batch re-screen must recover the genuine
+    /// consensus — evict the wrong one, promote the two genuine ones.
+    #[test]
+    fn batch_rescreen_evicts_the_poisoning_closure_and_promotes_the_consensus() {
+        let poses: Vec<Pose> = (0..4).map(|i| pose_at(i as f64)).collect();
+        let odometry: BTreeMap<u64, SE3> = poses
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u64, p.world_to_camera.clone()))
+            .collect();
+
+        // Two genuine, truth-relative closures (mutually + odometry consistent).
+        let g1 = loop_constraint(0, 3, relative_world_to_camera(&poses[0], &poses[3]));
+        let g2 = loop_constraint(1, 3, relative_world_to_camera(&poses[1], &poses[3]));
+        // A perceptual-aliasing closure claiming frames 0 and 2 are co-located.
+        let wrong = loop_constraint(0, 2, SE3::identity());
+
+        // State after the incremental screen poisoned itself: `wrong` admitted
+        // (and in the graph), the genuine pair deferred.
+        let mut graph = PoseGraph::new();
+        for (i, p) in poses.iter().enumerate() {
+            graph.add_pose(i as u64, p.clone());
+        }
+        graph.add_loop_closure_constraint(&wrong);
+        let mut verified = vec![wrong];
+        let mut deferred = vec![g1, g2];
+
+        let cfg = pcm::PcmConfig {
+            threshold: 0.5,
+            require_individual: true,
+        };
+        let (promoted, evicted) =
+            pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);
+
+        assert_eq!(
+            (promoted, evicted),
+            (2, 1),
+            "promote both genuine, evict wrong"
+        );
+        // The admitted set is now the genuine consensus; the wrong one deferred.
+        assert_eq!(verified.len(), 2);
+        assert!(verified
+            .iter()
+            .any(|c| (c.from_keyframe_id, c.to_keyframe_id) == (0, 3)));
+        assert!(verified
+            .iter()
+            .any(|c| (c.from_keyframe_id, c.to_keyframe_id) == (1, 3)));
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(
+            (deferred[0].from_keyframe_id, deferred[0].to_keyframe_id),
+            (0, 2)
+        );
+        // Graph loop edges match: genuine present, wrong gone.
+        assert!(is_loop_edge(&graph, 0, 3));
+        assert!(is_loop_edge(&graph, 1, 3));
+        assert!(
+            !is_loop_edge(&graph, 0, 2),
+            "wrong loop edge must be evicted"
+        );
+    }
+
+    /// When the admitted set is already the consensus, the re-screen is a no-op:
+    /// nothing promoted, nothing evicted, the graph unchanged.
+    #[test]
+    fn batch_rescreen_is_a_noop_when_already_consistent() {
+        let poses: Vec<Pose> = (0..4).map(|i| pose_at(i as f64)).collect();
+        let odometry: BTreeMap<u64, SE3> = poses
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u64, p.world_to_camera.clone()))
+            .collect();
+        let g1 = loop_constraint(0, 3, relative_world_to_camera(&poses[0], &poses[3]));
+        let g2 = loop_constraint(1, 3, relative_world_to_camera(&poses[1], &poses[3]));
+
+        let mut graph = PoseGraph::new();
+        for (i, p) in poses.iter().enumerate() {
+            graph.add_pose(i as u64, p.clone());
+        }
+        graph.add_loop_closure_constraint(&g1);
+        graph.add_loop_closure_constraint(&g2);
+        let mut verified = vec![g1, g2];
+        let mut deferred: Vec<LoopClosureConstraint> = Vec::new();
+
+        let cfg = pcm::PcmConfig {
+            threshold: 0.5,
+            require_individual: true,
+        };
+        let (promoted, evicted) =
+            pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);
+
+        assert_eq!((promoted, evicted), (0, 0));
+        assert_eq!(verified.len(), 2);
+        assert!(deferred.is_empty());
+        assert!(is_loop_edge(&graph, 0, 3) && is_loop_edge(&graph, 1, 3));
+    }
 }

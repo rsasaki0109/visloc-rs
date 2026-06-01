@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gnc: None,
                 pcm: None,
                 covariance_gate: None,
+                pcm_batch_rescreen: false,
                 trigger_every_new_constraints: 1,
             }),
             ..OnlineSlamConfig::default()
