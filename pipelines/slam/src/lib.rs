@@ -5180,6 +5180,35 @@ impl PoseGraph {
         Ok(())
     }
 
+    /// Sliding-window / fixed-lag driver: [`Self::marginalize_pose`] the oldest
+    /// non-anchor poses (lowest ids) until at most `window_size` poses remain
+    /// (the gauge-fixed anchor always among them), keeping the graph — and so the
+    /// per-solve cost — bounded as keyframes accumulate. Returns the ids
+    /// marginalized, in removal order (oldest first).
+    ///
+    /// Marginalize at a converged estimate (run a solve first): each step is
+    /// then exact, and because the optimum stays stationary after each removal
+    /// the chained marginalizations compose without drift — a windowed re-solve
+    /// reproduces the batch estimate on the retained poses (a test asserts this).
+    /// No-op when already within the window. Stops early if only the anchor is
+    /// left. `window_size` is clamped to at least `1` (the anchor). Errors mirror
+    /// [`Self::marginalize_pose`].
+    pub fn marginalize_oldest(&mut self, window_size: usize) -> Result<Vec<u64>, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        let target = window_size.max(1);
+        let mut removed = Vec::new();
+        while self.poses.len() > target {
+            // Oldest non-anchor pose: the lowest id that is not the anchor
+            // (`poses` is a `BTreeMap`, so `keys()` ascends).
+            let Some(&oldest) = self.poses.keys().find(|&&id| id != anchor_id) else {
+                break; // only the anchor remains
+            };
+            self.marginalize_pose(oldest)?;
+            removed.push(oldest);
+        }
+        Ok(removed)
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///
