@@ -3800,6 +3800,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
                     marginalization_window: None,
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
@@ -3839,6 +3840,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
                     marginalization_window: Some(window),
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4134,6 +4136,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
                     marginalization_window: None,
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4233,6 +4236,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
                     marginalization_window: None,
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4312,6 +4316,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: Some(CHI2_95_6DOF),
                     pcm_batch_rescreen: false,
                     marginalization_window: None,
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
@@ -4371,6 +4376,7 @@ mod online_loop_closure_refinement {
                     covariance_gate: None,
                     pcm_batch_rescreen: false,
                     marginalization_window: None,
+                    marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                 }),
                 ..OnlineSlamConfig::default()
