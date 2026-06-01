@@ -24,6 +24,7 @@ pub use g2o::{read_g2o, write_g2o, G2oError};
 mod block_cholesky;
 pub mod covariance;
 pub mod gnc;
+pub mod marginalization;
 pub mod pcm;
 mod reordering;
 
