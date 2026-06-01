@@ -189,6 +189,121 @@ fn windowed_solve_matches_batch_after_marginalizing_an_interior_pose() {
     }
 }
 
+/// With a 2-pose blanket (an interior chain pose), the dense Schur prior is
+/// already a 2-clique = a tree, so `marginalize_pose_sparsified` must be
+/// bit-identical to the dense `marginalize_pose` (Chow-Liu has nothing to drop).
+#[test]
+fn sparsified_marginalize_is_exact_for_a_two_pose_blanket() {
+    let build = || {
+        let mut g = PoseGraph::new();
+        for i in 0..5 {
+            g.add_pose(i, pose_at(i as f64));
+        }
+        g.anchor(0);
+        let info = Matrix6::identity() * 50.0;
+        for i in 0..4 {
+            g.add_edge_with_information(
+                i,
+                i + 1,
+                relative_world_to_camera(&pose_at(i as f64), &pose_at((i + 1) as f64)),
+                PoseGraphEdgeKind::Sequential,
+                info,
+            );
+        }
+        let twist = SE3::exp(&Vector6::new(0.1, -0.05, 0.08, 0.1, 0.0, -0.1));
+        let loop_meas = relative_world_to_camera(&pose_at(0.0), &pose_at(4.0)).compose(&twist);
+        g.add_edge_with_information(0, 4, loop_meas, PoseGraphEdgeKind::LoopClosure, info);
+        g.optimize_se3_iterative(&config()).unwrap();
+        g
+    };
+    let mut dense = build();
+    let mut sparse = dense.clone();
+    dense.marginalize_pose(2).unwrap();
+    sparse.marginalize_pose_sparsified(2).unwrap();
+
+    assert_eq!(dense.priors[0].ids, sparse.priors[0].ids);
+    let d = (&dense.priors[0].information - &sparse.priors[0].information)
+        .abs()
+        .max();
+    assert!(
+        d < 1e-12,
+        "2-clique prior must be unchanged by sparsification: {d}"
+    );
+    let dg = (&dense.priors[0].gradient - &sparse.priors[0].gradient)
+        .abs()
+        .max();
+    assert!(dg < 1e-12, "gradient must be unchanged: {dg}");
+}
+
+/// With a ≥3-pose blanket the dense Schur prior is a full clique; sparsification
+/// drops it to the Chow-Liu tree. Marginalizing the centre of a 3-leaf star
+/// leaves a 3-clique prior over the leaves; the sparsified prior must (a) zero
+/// exactly one of the three leaf-pair couplings (tree keeps 2 of 3 edges) and
+/// (b) preserve every leaf's marginal covariance exactly.
+#[test]
+fn sparsified_marginalize_drops_to_a_tree_and_preserves_node_marginals() {
+    use nalgebra::DMatrix;
+    // Star: centre 10 connected to anchor 0 and three leaves 1,2,3, with distinct
+    // edge stiffnesses so the three leaf-pair mutual informations differ (no MST
+    // tie) and the dropped edge is well-defined.
+    let mut g = PoseGraph::new();
+    g.add_pose(0, pose_at(0.0));
+    g.add_pose(10, pose_at(1.0));
+    g.add_pose(1, pose_at(2.0));
+    g.add_pose(2, pose_at(1.0));
+    g.add_pose(3, pose_at(0.5));
+    g.anchor(0);
+    let edge = |g: &mut PoseGraph, a: u64, b: u64, xa: f64, xb: f64, w: f64| {
+        g.add_edge_with_information(
+            a,
+            b,
+            relative_world_to_camera(&pose_at(xa), &pose_at(xb)),
+            PoseGraphEdgeKind::Sequential,
+            Matrix6::identity() * w,
+        );
+    };
+    edge(&mut g, 0, 10, 0.0, 1.0, 40.0);
+    edge(&mut g, 10, 1, 1.0, 2.0, 60.0);
+    edge(&mut g, 10, 2, 1.0, 1.0, 30.0);
+    edge(&mut g, 10, 3, 1.0, 0.5, 90.0);
+    g.optimize_se3_iterative(&config()).unwrap();
+
+    let mut dense = g.clone();
+    let mut sparse = g.clone();
+    dense.marginalize_pose(10).unwrap();
+    sparse.marginalize_pose_sparsified(10).unwrap();
+
+    assert_eq!(sparse.priors[0].ids, vec![1, 2, 3]);
+    let block = |m: &DMatrix<f64>, i: usize, j: usize| m.view((i * 6, j * 6), (6, 6)).into_owned();
+    // Sparse prior: exactly one of the three off-diagonal leaf-pairs is zero.
+    let info = &sparse.priors[0].information;
+    let zero_pairs = [(0usize, 1usize), (0, 2), (1, 2)]
+        .iter()
+        .filter(|&&(i, j)| block(info, i, j).abs().max() < 1e-10)
+        .count();
+    assert_eq!(
+        zero_pairs, 1,
+        "Chow-Liu tree of a 3-clique drops exactly one edge"
+    );
+    // The dense prior couples all three pairs (none zero).
+    let dinfo = &dense.priors[0].information;
+    assert!(
+        [(0usize, 1usize), (0, 2), (1, 2)]
+            .iter()
+            .all(|&(i, j)| block(dinfo, i, j).abs().max() > 1e-10),
+        "the dense clique prior couples every leaf pair"
+    );
+    // Node marginals preserved: per-leaf 6×6 covariance equals the dense prior's.
+    let cov_dense = dinfo.clone().cholesky().unwrap().inverse();
+    let cov_sparse = info.clone().cholesky().unwrap().inverse();
+    for i in 0..3 {
+        let d = (block(&cov_dense, i, i) - block(&cov_sparse, i, i))
+            .abs()
+            .max();
+        assert!(d < 1e-9, "leaf {i} marginal covariance not preserved: {d}");
+    }
+}
+
 /// Marginalizing a leaf pose whose only neighbour is the anchor just drops it
 /// (its information was purely relative to the fixed gauge) — no prior added.
 #[test]

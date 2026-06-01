@@ -410,10 +410,10 @@ mod tests {
             add_block(&mut lam, j, i, &sub(&info, 1, 0, b), 1.0);
             add_block(&mut lam, j, j, &sub(&info, 1, 1, b), 1.0);
         }
-        for i in 0..num {
-            if degree[i] > 1 {
+        for (i, &deg) in degree.iter().enumerate() {
+            if deg > 1 {
                 let li = node_block(sigma, i, i, b).cholesky().unwrap().inverse();
-                add_block(&mut lam, i, i, &li, -((degree[i] - 1) as f64));
+                add_block(&mut lam, i, i, &li, -((deg - 1) as f64));
             }
         }
         0.5 * (&lam + lam.transpose())
