@@ -57,12 +57,18 @@
 //!         no metric bridge is verified. (The empty-proposals path prints this.)
 //!       - *SuperPoint (`--features-*` offline dirs):* the viewpoint-robust
 //!         256-d descriptors carry PnP across the gap. On the genuine KITTI-00
-//!         revisit (A frames 0-49, B frames 4500-4529, ~5 m apart) the revisit
-//!         pair A49↔B4500 gets **212 matches → 147 PnP inliers**, a metric bridge
-//!         (rot 0.33° / trans 0.31 m vs GT), and the welded map lands at
-//!         **1.34 m ATE rmse** (B unbridged 31.6 m). Stereo landmarks/keyframe
-//!         also jump 44 → 565. This is the genuine wide-baseline revisit that
-//!         classical features cannot do.
+//!         loop the two passes run PARALLEL through the whole revisit (B frames
+//!         4500-4529 track A frames ~54-96, all within ~0.5 m, same heading), so
+//!         with A keyframes covering the overlap (frames 0-119) the demo finds
+//!         **29 genuine metric bridges automatically**, each ~450-573 PnP inliers,
+//!         recovered pose 0.08-0.37° / 0.24-0.34 m vs GT. PCM keeps all 29 and
+//!         rejects 2 injected wrong bridges; the welded map lands at **2.17 m ATE
+//!         rmse** (== oracle; B unbridged 23 m; a naive merge trusting the wrong
+//!         bridges collapses to 55 m). Stereo landmarks/keyframe jump 44 → 604.
+//!         This is the genuine wide-baseline Atlas revisit merge that classical
+//!         features cannot do. (Export A's SuperPoint features over the overlap —
+//!         `--frames 120` — not just the first few, or only the single grazing
+//!         pair at A's end is found.)
 //!
 //! **Offline SuperPoint features.** Pre-extract per-frame SuperPoint descriptors
 //! (no in-Rust ONNX runtime needed) with the repo's exporter, then point the demo
