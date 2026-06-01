@@ -48,6 +48,12 @@ pub use online_stereo_vo_ba::{
     OnlineBaTriggerStats, OnlineStereoVoBa, OnlineStereoVoBaConfig,
 };
 
+pub mod vo_loop_closure;
+pub use vo_loop_closure::{
+    close_loops_on_vo_trajectory, detect_loop_candidates, LoopCandidatePair, VoLoopClosureConfig,
+    VoLoopClosureError, VoLoopClosureResult,
+};
+
 pub mod online_slam_vi_ba;
 pub use online_slam_vi_ba::{
     estimate_scale_from_factors, run_inertial_only_vi_ba, run_local_vi_ba,
