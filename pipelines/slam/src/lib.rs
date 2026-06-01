@@ -6052,6 +6052,7 @@ mod pcm_batch_reconcile_tests {
         let cfg = pcm::PcmConfig {
             threshold: 0.5,
             require_individual: true,
+            noise: None,
         };
         let (promoted, evicted) =
             pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);
@@ -6108,6 +6109,7 @@ mod pcm_batch_reconcile_tests {
         let cfg = pcm::PcmConfig {
             threshold: 0.5,
             require_individual: true,
+            noise: None,
         };
         let (promoted, evicted) =
             pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);

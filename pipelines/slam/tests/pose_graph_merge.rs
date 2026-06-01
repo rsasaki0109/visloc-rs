@@ -182,6 +182,7 @@ fn consistent_session_bridges_drops_a_wrong_cross_session_match() {
     let cfg = PcmConfig {
         threshold: 0.5,
         require_individual: false, // no single-session relative across sessions
+        noise: None,
     };
     let kept = a.consistent_session_bridges(&b, 4, &candidates, &cfg);
 
