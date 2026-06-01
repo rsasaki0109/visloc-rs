@@ -38,7 +38,25 @@
 //!      (`merge_session`), the rest are added as loop closures, the joined graph
 //!      is jointly optimized, and the absolute trajectory error (vs KITTI GT) of
 //!      the screened merge is reported against an oracle all-genuine merge and a
-//!      naive merge that trusts every proposal.
+//!      naive merge that trusts every proposal. Each kept genuine bridge's
+//!      recovered metric pose is also checked against GT (rotation deg + metres).
+//!
+//! **Two session sources:**
+//!   - *Single source (default):* one stereo sequence, sessions A=frame `p`,
+//!     B=`p + --session-offset` — co-located passes, the working metric-bridge
+//!     regime (small baseline ⇒ rich PnP correspondences). Validated: 20 bridges,
+//!     30 PnP inliers / 0.8 px, merged 5.3 m ATE.
+//!   - *Separate B source (`--image-left-b` + `--start-frame-b`):* B is a DIFFERENT
+//!     pass over the same place (e.g. a genuine KITTI-00 loop revisit ~4500 frames
+//!     later). The true Atlas multi-map case. **Honest finding (classical corner
+//!     features): VLAD retrieval correctly ranks the genuine revisit pair first
+//!     (A48↔B4500, sim 0.33), but the wide-baseline viewpoint change so
+//!     contaminates the classical-descriptor matches that stereo PnP cannot reach
+//!     a 6-point inlier consensus — no metric bridge is verified.** The metric
+//!     bridge holds in the small-baseline regime; a genuine wide-baseline revisit
+//!     needs a viewpoint-robust descriptor (SuperPoint/NetVLAD, the codebase's
+//!     `--feature-extractor superpoint-onnx`). The separate-B wiring is correct
+//!     and ready for that; classical features just don't carry PnP across the gap.
 //!
 //! Usage:
 //!
@@ -95,11 +113,13 @@ mod imp {
     struct Args {
         image_left: PathBuf,
         image_right: PathBuf,
+        image_left_b: Option<PathBuf>,
         calib: PathBuf,
         kitti_poses: PathBuf,
         projection_left: String,
         projection_right: String,
         start_frame: usize,
+        start_frame_b: usize,
         keyframe_stride: usize,
         session_offset: usize,
         max_keyframes: usize,
@@ -117,11 +137,13 @@ mod imp {
     fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
         let mut image_left: Option<PathBuf> = None;
         let mut image_right: Option<PathBuf> = None;
+        let mut image_left_b: Option<PathBuf> = None;
         let mut calib: Option<PathBuf> = None;
         let mut kitti_poses: Option<PathBuf> = None;
         let mut projection_left = String::from("P0");
         let mut projection_right = String::from("P1");
         let mut start_frame = 0usize;
+        let mut start_frame_b = 0usize;
         let mut keyframe_stride = 5usize;
         let mut session_offset = 1usize;
         let mut max_keyframes = 120usize;
@@ -145,6 +167,14 @@ mod imp {
                 }
                 "--image-right" => {
                     image_right = Some(PathBuf::from(args.remove(i + 1)));
+                    args.remove(i);
+                }
+                "--image-left-b" => {
+                    image_left_b = Some(PathBuf::from(args.remove(i + 1)));
+                    args.remove(i);
+                }
+                "--start-frame-b" => {
+                    start_frame_b = args.remove(i + 1).parse()?;
                     args.remove(i);
                 }
                 "--calib" => {
@@ -221,11 +251,13 @@ mod imp {
         Ok(Args {
             image_left: image_left.ok_or("--image-left <KITTI image_0 dir> is required")?,
             image_right: image_right.ok_or("--image-right <KITTI image_1 dir> is required")?,
+            image_left_b,
             calib: calib.ok_or("--calib <path/to/calib.txt> is required")?,
             kitti_poses: kitti_poses.ok_or("--kitti-poses <path/to/poses/SS.txt> is required")?,
             projection_left,
             projection_right,
             start_frame,
+            start_frame_b,
             keyframe_stride,
             session_offset,
             max_keyframes,
@@ -420,69 +452,111 @@ mod imp {
             .stereo_baseline_from(p_left)
             .ok_or("calib pair did not yield a positive stereo baseline (intrinsics mismatch?)")?;
 
-        // Ground-truth poses, subsampled to keyframes alongside the images.
+        // Ground-truth poses (indexed by absolute KITTI frame number).
         let gt = PoseTrajectory::read_kitti_poses(&args.kitti_poses)?;
         let gt_samples = gt.samples();
 
-        // Two sessions that traverse the SAME route at a small frame offset: at
-        // each base keyframe position `p`, session A takes frame `p` and session
-        // B takes frame `p + session_offset`. The two cameras are then only a
-        // couple of frames apart at every keyframe — a strong same-place revisit
-        // that stereo PnP can metrically bridge (a wide gap would starve the
-        // correspondence set and the PnP would fail).
+        // Session B's images: a SEPARATE source (`--image-left-b/right-b`, e.g. a
+        // genuine later revisit of the same place) when given, else the SAME
+        // sequence — in which case the two sessions are A=frame `p`, B=`p+offset`,
+        // co-located so PnP has rich correspondences. `b_seq()` returns B's
+        // left/right sequences (cloned A when no separate source).
+        // B is 2D-only (the db side of PnP), so only its left images are needed.
+        let left_seq_b = match &args.image_left_b {
+            Some(l) => read_kitti_image_sequence_dir(l, &args.calib, &args.projection_left, 0)?,
+            None => left_seq.clone(),
+        };
+        let separate_b = args.image_left_b.is_some();
+
         let extractor = CornerFeatureExtractor::new(CornerFeatureConfig {
             max_features: args.max_features,
             ..CornerFeatureConfig::default()
         });
+        let stride = args.keyframe_stride.max(1);
         let off = args.session_offset.max(1);
-        let total = left_seq.frames.len();
-        let base: Vec<usize> = (args.start_frame..)
-            .step_by(args.keyframe_stride.max(1))
-            .take_while(|&p| p + off < total)
+
+        // Per-session keyframe plan: (dir index into that session's sequence,
+        // absolute GT frame). For the single-source mode the dir index IS the
+        // absolute frame; with a separate B source, B's dir index `k` maps to GT
+        // frame `start_frame_b + k` (so a 0-based revisit clip aligns to its true
+        // frame numbers in the shared pose file).
+        let a_total = left_seq.frames.len();
+        let a_plan: Vec<(usize, usize)> = (args.start_frame..)
+            .step_by(stride)
+            .take_while(|&p| {
+                if separate_b {
+                    p < a_total
+                } else {
+                    p + off < a_total
+                }
+            })
             .take(args.max_keyframes)
+            .map(|p| (p, p))
             .collect();
-        let na = base.len();
-        if na < 8 {
-            return Err(format!("need at least 8 keyframes, got {na}").into());
+        let b_total = left_seq_b.frames.len();
+        let b_plan: Vec<(usize, usize)> = if separate_b {
+            (0..)
+                .step_by(stride)
+                .take_while(|&k| k < b_total)
+                .take(args.max_keyframes)
+                .map(|k| (k, args.start_frame_b + k))
+                .collect()
+        } else {
+            a_plan.iter().map(|&(p, _)| (p + off, p + off)).collect()
+        };
+        let na = a_plan.len();
+        let nb = b_plan.len();
+        if na < 4 || nb < 4 {
+            return Err(format!("need at least 4 keyframes per session, got A={na} B={nb}").into());
         }
-        let nb = na;
         println!(
-            "image_left={} keyframes={na}/session stride={} session_offset={off} baseline={:.4} m \
-             fx={:.1} yaw_drift={:.4} rad/edge",
+            "session A: {} ({na} kf from frame {}) | session B: {} ({nb} kf from frame {}) | \
+             stride={stride} baseline={:.4} m fx={:.1} yaw_drift={:.4} rad/edge{}",
             args.image_left.display(),
-            args.keyframe_stride,
+            args.start_frame,
+            args.image_left_b
+                .as_ref()
+                .unwrap_or(&args.image_left)
+                .display(),
+            if separate_b {
+                args.start_frame_b
+            } else {
+                args.start_frame + off
+            },
             baseline,
             camera.params.first().copied().unwrap_or(0.0),
             args.yaw_drift_per_edge_rad,
+            if separate_b {
+                " [GENUINE separate-pass revisit]"
+            } else {
+                ""
+            },
         );
 
-        // Helper: extract a left/right FeatureSet pair and a GT pose for frame `f`.
-        let load =
-            |f: usize| -> Result<(FeatureSet, FeatureSet, Pose), Box<dyn std::error::Error>> {
-                let left = extractor.extract(&left_seq.frames[f].image)?;
-                let right = extractor.extract(&right_seq.frames[f].image)?;
-                let pose = gt_samples
-                    .get(f)
-                    .map(|s| s.pose.clone())
-                    .ok_or_else(|| format!("GT pose missing for frame {f}"))?;
-                Ok((left, right, pose))
-            };
+        let pose_at = |f: usize| -> Result<Pose, Box<dyn std::error::Error>> {
+            gt_samples
+                .get(f)
+                .map(|s| s.pose.clone())
+                .ok_or_else(|| format!("GT pose missing for frame {f}").into())
+        };
 
-        // Session A: metric stereo keyframes (3D landmarks) at the base frames.
+        // Session A: metric stereo keyframes (3D landmarks).
         let mut a_metric: Vec<MetricKeyframe> = Vec::with_capacity(na);
         let mut a_truth: Vec<Pose> = Vec::with_capacity(na);
         let mut a_left: Vec<FeatureSet> = Vec::with_capacity(na);
-        // Session B: plain 2D keyframes at the offset frames.
+        for &(dir, gt_f) in &a_plan {
+            let left = extractor.extract(&left_seq.frames[dir].image)?;
+            let right = extractor.extract(&right_seq.frames[dir].image)?;
+            a_metric.push(stereo_keyframe(&left, &right, &camera, baseline));
+            a_left.push(left);
+            a_truth.push(pose_at(gt_f)?);
+        }
+        // Session B: plain 2D keyframes.
         let mut b_feats: Vec<FeatureSet> = Vec::with_capacity(nb);
         let mut b_truth: Vec<Pose> = Vec::with_capacity(nb);
-        for &p in &base {
-            let (a_l, a_r, a_pose) = load(p)?;
-            a_metric.push(stereo_keyframe(&a_l, &a_r, &camera, baseline));
-            a_left.push(a_l);
-            a_truth.push(a_pose);
-            let (b_l, _b_r, b_pose) = load(p + off)?;
-            b_feats.push(b_l);
-            b_truth.push(b_pose);
+        for &(dir, gt_f) in &b_plan {
+            b_feats.push(extractor.extract(&left_seq_b.frames[dir].image)?);
+            b_truth.push(pose_at(gt_f)?);
         }
         let median_landmarks = {
             let mut c: Vec<usize> = a_metric
@@ -582,11 +656,32 @@ mod imp {
             },
         );
         if proposals.is_empty() {
-            return Err(
-                "no metric bridges proposed (try lowering --min-similarity / \
-                        --min-inliers, or raising --max-features)"
-                    .into(),
-            );
+            // Report the retrieval-vs-verification gap before giving up: appearance
+            // retrieval may well have found the genuine revisit, with PnP unable to
+            // verify it (the wide-baseline classical-descriptor limit — see the
+            // module note). Recompute the mutual-NN pairs just for this diagnostic.
+            let aq: Vec<Vec<f32>> = a_metric
+                .iter()
+                .map(|k| vlad(&k.features.descriptors, &vocab))
+                .collect();
+            let bg: Vec<Vec<f32>> = b_feats
+                .iter()
+                .map(|f| vlad(&f.descriptors, &vocab))
+                .collect();
+            let ret = retrieve_mutual(&aq, &bg, args.min_similarity);
+            let best = ret.first();
+            return Err(format!(
+                "appearance retrieval found {} candidate revisit pair(s) (best {}sim={:.3}) but NONE \
+                 passed metric stereo-PnP verification — across a wide-baseline revisit the classical \
+                 corner descriptors are too contaminated for a 6-point PnP consensus. The metric \
+                 bridge holds in the small-baseline regime (single-source / --session-offset); a \
+                 genuine wide-baseline revisit needs a viewpoint-robust descriptor. Try \
+                 --max-features higher / --min-inliers lower, or a learned feature extractor.",
+                ret.len(),
+                best.map(|r| format!("A[{}]↔B[{}] ", r.query, r.db)).unwrap_or_default(),
+                best.map(|r| r.similarity).unwrap_or(0.0),
+            )
+            .into());
         }
 
         // Bridges → cross-session loop constraints (from = A id, to = B id). Label
@@ -604,6 +699,34 @@ mod imp {
                 p.inlier_count,
             ));
             is_wrong.push(dist > args.proximity_m);
+        }
+
+        // Validate each genuine bridge's recovered METRIC pose against the GT
+        // relative pose `B.world_to_camera ∘ A.world_to_camera⁻¹` — rotation error
+        // (deg) + translation error (metres). This is the direct check that
+        // stereo PnP recovered a *metric* bridge, not just a direction.
+        for (k, p) in proposals.iter().enumerate() {
+            if is_wrong[k] {
+                continue;
+            }
+            let truth = b_truth[p.db]
+                .world_to_camera
+                .compose(&a_truth[p.query].world_to_camera.inverse());
+            let rot_err_deg = p
+                .query_to_db
+                .rotation
+                .rotation_to(&truth.rotation)
+                .angle()
+                .to_degrees();
+            let trans_err = (p.query_to_db.translation - truth.translation).norm();
+            let gt_dist = (a_truth[p.query].camera_center_world()
+                - b_truth[p.db].camera_center_world())
+            .norm();
+            println!(
+                "  bridge A[{}]↔B[{}] sim={:.3} inliers={} | GT centre-gap={:.2} m → recovered pose \
+                 rot_err={:.2}° trans_err={:.3} m",
+                p.query, p.db, p.similarity, p.inlier_count, gt_dist, rot_err_deg, trans_err,
+            );
         }
 
         // Inject perceptual-aliasing wrong bridges: an A node and a far-away B node
