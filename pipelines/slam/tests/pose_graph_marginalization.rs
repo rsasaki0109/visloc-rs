@@ -402,3 +402,50 @@ fn marginalize_oldest_keeps_a_bounded_window_matching_batch() {
         );
     }
 }
+
+/// The sparsified sliding-window driver: `marginalize_oldest_sparsified` keeps the
+/// same bounded window and removal order, and on a chain (every blanket ≤ 2 poses,
+/// so the Chow-Liu tree is exact) leaves the retained poses at the batch optimum —
+/// proving the driver is correctly wired to the sparsified per-pose step.
+#[test]
+fn sparsified_marginalize_oldest_keeps_a_bounded_window_matching_batch() {
+    let mut g = PoseGraph::new();
+    for i in 0..8 {
+        g.add_pose(i, pose_at(i as f64));
+    }
+    g.anchor(0);
+    let info = Matrix6::identity() * 50.0;
+    for i in 0..7 {
+        g.add_edge_with_information(
+            i,
+            i + 1,
+            relative_world_to_camera(&pose_at(i as f64), &pose_at((i + 1) as f64)),
+            PoseGraphEdgeKind::Sequential,
+            info,
+        );
+    }
+    let twist = SE3::exp(&Vector6::new(0.06, -0.04, 0.05, 0.08, 0.02, -0.07));
+    let loop_meas = relative_world_to_camera(&pose_at(0.0), &pose_at(7.0)).compose(&twist);
+    g.add_edge_with_information(0, 7, loop_meas, PoseGraphEdgeKind::LoopClosure, info);
+    g.optimize_se3_iterative(&config()).unwrap();
+
+    let batch = g.clone();
+    let mut windowed = g.clone();
+    let removed = windowed.marginalize_oldest_sparsified(4).unwrap();
+    assert_eq!(removed, vec![1, 2, 3, 4]);
+    assert_eq!(windowed.poses.len(), 4, "window bounded to 4 poses");
+
+    windowed.optimize_se3_iterative(&config()).unwrap();
+    for id in [5u64, 6, 7] {
+        let d = batch.poses[&id]
+            .world_to_camera
+            .inverse()
+            .compose(&windowed.poses[&id].world_to_camera)
+            .log()
+            .norm();
+        assert!(
+            d < 1e-6,
+            "sparsified windowed pose {id} must match the batch optimum (≤2-pose blankets are exact): err {d}"
+        );
+    }
+}

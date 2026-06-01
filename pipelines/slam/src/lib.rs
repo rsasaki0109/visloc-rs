@@ -494,6 +494,14 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// first-order exact. Marginalized pose ids are reported on
     /// [`OnlineSlamLoopClosureRefinementStats::poses_marginalized`].
     pub marginalization_window: Option<usize>,
+    /// When `marginalization_window` is set, **sparsify** each marginalized
+    /// blanket prior to its Chow-Liu tree
+    /// ([`PoseGraph::marginalize_oldest_sparsified`]) instead of keeping the dense
+    /// clique. Default `false` (dense, bit-identical to before). Set it so a
+    /// long-running window does not accumulate dense priors as it slides —
+    /// trading an exact marginal for a sparse, KL-optimal tree approximation that
+    /// preserves every kept pose's marginal.
+    pub marginalization_sparsify: bool,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -2395,7 +2403,12 @@ where
                 // Runs at the just-solved estimate, so it is first-order exact;
                 // the marginalized keyframes keep their written-back pose.
                 if let Some(window) = state.config.marginalization_window {
-                    if let Ok(removed) = state.graph.marginalize_oldest(window) {
+                    let result = if state.config.marginalization_sparsify {
+                        state.graph.marginalize_oldest_sparsified(window)
+                    } else {
+                        state.graph.marginalize_oldest(window)
+                    };
+                    if let Ok(removed) = result {
                         stats.poses_marginalized = removed;
                     }
                 }
@@ -5253,6 +5266,25 @@ impl PoseGraph {
     /// left. `window_size` is clamped to at least `1` (the anchor). Errors mirror
     /// [`Self::marginalize_pose`].
     pub fn marginalize_oldest(&mut self, window_size: usize) -> Result<Vec<u64>, PoseGraphError> {
+        self.marginalize_oldest_impl(window_size, false)
+    }
+
+    /// Like [`Self::marginalize_oldest`], but **sparsify** each blanket prior with
+    /// its Chow-Liu tree ([`Self::marginalize_pose_sparsified`]) so a long-running
+    /// window does not accumulate dense priors as it slides — the bounded *and*
+    /// sparse fixed-lag smoother. Same removal order and errors.
+    pub fn marginalize_oldest_sparsified(
+        &mut self,
+        window_size: usize,
+    ) -> Result<Vec<u64>, PoseGraphError> {
+        self.marginalize_oldest_impl(window_size, true)
+    }
+
+    fn marginalize_oldest_impl(
+        &mut self,
+        window_size: usize,
+        sparsify: bool,
+    ) -> Result<Vec<u64>, PoseGraphError> {
         let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
         let target = window_size.max(1);
         let mut removed = Vec::new();
@@ -5262,7 +5294,7 @@ impl PoseGraph {
             let Some(&oldest) = self.poses.keys().find(|&&id| id != anchor_id) else {
                 break; // only the anchor remains
             };
-            self.marginalize_pose(oldest)?;
+            self.marginalize_pose_impl(oldest, sparsify)?;
             removed.push(oldest);
         }
         Ok(removed)
