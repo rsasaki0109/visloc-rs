@@ -230,6 +230,58 @@ pub(crate) fn solve_spd_block_cached(
     }
 }
 
+/// Factor the SPD system `A` (given by `triplets`, scalar COO, symmetric, in the
+/// caller's order) at block size `block_size` and return the block factor `L` of
+/// `A = L Lᵀ` as plain `nalgebra` data: `(col_rows, col_vals, diag_inv)`, where
+/// `col_rows[j]` are the block rows present in column `j` of `L` (diagonal `== j`
+/// first, then strictly-below rows ascending), `col_vals[j]` the matching
+/// `block_size × block_size` blocks (`col_vals[j][0] == L_jj`), and `diag_inv[j]
+/// == L_jj⁻¹`. `Err(())` when a diagonal block is not positive-definite.
+///
+/// This exposes the factor for covariance recovery (the block Takahashi recursion
+/// in [`crate::covariance`] reads exactly this representation) without forming a
+/// dense `A`. No fill-reducing permutation is applied — the factor is in the
+/// caller's variable order, so block column `j` maps straight back to variable
+/// `j` (more fill than the reordered solve, but covariance recovery is not the
+/// per-iteration hot path and the natural order keeps the index mapping trivial).
+/// `block_size` must be 3 or 6.
+#[allow(clippy::type_complexity)]
+pub(crate) fn factor_blocks(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+    block_size: usize,
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<DMatrix<f64>>>, Vec<DMatrix<f64>>), ()> {
+    match block_size {
+        3 => factor_blocks_inner::<3>(triplets, dim),
+        6 => factor_blocks_inner::<6>(triplets, dim),
+        other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn factor_blocks_inner<const B: usize>(
+    triplets: &[(usize, usize, f64)],
+    dim: usize,
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<DMatrix<f64>>>, Vec<DMatrix<f64>>), ()> {
+    let sym = analyze(triplets, dim, B);
+    let (col_vals, diag_inv) = refactor_numeric::<B>(
+        &sym,
+        triplets,
+        0.0,
+        default_thread_count(),
+        PARALLEL_MIN_LEVEL_WORK,
+        INTRA_MIN_CONTRIB,
+        INTRA_MIN_WORK,
+    )?;
+    let to_dyn = |m: &SMatrix<f64, B, B>| DMatrix::from_column_slice(B, B, m.as_slice());
+    let col_vals_dyn = col_vals
+        .iter()
+        .map(|col| col.iter().map(to_dyn).collect())
+        .collect();
+    let diag_inv_dyn = diag_inv.iter().map(to_dyn).collect();
+    Ok((sym.col_rows.clone(), col_vals_dyn, diag_inv_dyn))
+}
+
 /// The block size known, dispatch to the monomorphized solver. `threads` caps
 /// the worker threads used for the numeric phase (`1` forces the sequential
 /// path); `min_level_work` is the per-level work bar below which a level is not

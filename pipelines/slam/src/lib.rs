@@ -4695,22 +4695,28 @@ impl PoseGraph {
         }
         let dim = variable_count * 6;
 
-        // Assemble the dense information matrix at the current estimate (plain
-        // L2 — kernel `None`, no GNC weights). Forcing the dense backend so the
-        // 6×6-block recursion reads `Λ` directly.
+        // Assemble the *sparse* information matrix at the current estimate (plain
+        // L2 — kernel `None`, no GNC weights) as COO triplets, in the same
+        // free-variable order as `node_index`.
         let (builder, _g) = self.assemble_se3_system(
             &node_index,
             dim,
             &RobustKernel::None,
             None,
-            LinearSolver::Dense,
+            LinearSolver::Sparse,
         );
-        let lambda = match builder {
-            NormalEquations6::Dense(h) => h,
-            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        let (triplets, dim) = match builder {
+            NormalEquations6::Sparse { triplets, dim } => (triplets, dim),
+            NormalEquations6::Dense(_) => unreachable!("forced the sparse backend above"),
         };
 
-        let blocks = covariance::marginal_block_covariances(&lambda, 6)
+        // Factor `Λ = L Lᵀ` at 6×6 block granularity in natural order (so block
+        // column `idx` maps straight back to `node_index`), then recover the
+        // per-pose marginal blocks with the block Takahashi recursion — `O(nnz)`,
+        // no dense `Λ` or `Λ⁻¹` ([`crate::covariance::block_takahashi_diagonals`]).
+        let (col_rows, col_vals, diag_inv) = block_cholesky::factor_blocks(&triplets, dim, 6)
+            .map_err(|_| PoseGraphError::SingularSystem)?;
+        let blocks = covariance::block_takahashi_diagonals(&col_rows, &col_vals, &diag_inv)
             .ok_or(PoseGraphError::SingularSystem)?;
         let mut out = BTreeMap::new();
         for (&id, &idx) in &node_index {
