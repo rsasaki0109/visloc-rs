@@ -480,6 +480,19 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// on [`OnlineSlamLoopClosureRefinementStats`] and bump the trigger counter
     /// so a reconciled graph is re-solved.
     pub pcm_batch_rescreen: bool,
+    /// Optional fixed-lag / sliding-window bound on the pose graph. `None`
+    /// (default) keeps the full graph and re-solves it batch every trigger.
+    /// `Some(w)` runs [`PoseGraph::marginalize_oldest`] after each solve to keep
+    /// at most `w` poses (the anchor among them), marginalizing the oldest into a
+    /// dense Gaussian prior so the per-solve cost stays bounded as keyframes
+    /// accumulate — the marginalized keyframes' optimised poses are frozen in the
+    /// map at marginalization time, and loop closures to them are no longer
+    /// admitted (their node has left the graph). Choose `w` ≥ a few so the
+    /// sequential chain and recent loop closures stay in the window;
+    /// marginalization runs at the just-solved (converged) estimate, so it is
+    /// first-order exact. Marginalized pose ids are reported on
+    /// [`OnlineSlamLoopClosureRefinementStats::poses_marginalized`].
+    pub marginalization_window: Option<usize>,
     /// Minimum number of *new* verified loop-closure constraints that
     /// must accumulate before a fresh pose-graph solve runs. Clamped to
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
@@ -600,6 +613,10 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// the optimised pose after PGO. Zero unless a solve fired this frame
     /// (`pose_graph_result.is_some()` or `gnc_result.is_some()`).
     pub keyframes_updated: usize,
+    /// Pose ids the fixed-lag `marginalization_window` marginalized out of the
+    /// graph this frame (oldest first), folded into a dense Gaussian prior.
+    /// Empty unless `marginalization_window` is set and the graph exceeded it.
+    pub poses_marginalized: Vec<u64>,
 }
 
 /// Per-session IMU integration parameters consumed by
@@ -2371,6 +2388,16 @@ where
                     }
                 }
                 stats.keyframes_updated = updated;
+
+                // Fixed-lag bound: marginalize the oldest poses past the window
+                // into a dense prior, keeping the graph (and next solve) bounded.
+                // Runs at the just-solved estimate, so it is first-order exact;
+                // the marginalized keyframes keep their written-back pose.
+                if let Some(window) = state.config.marginalization_window {
+                    if let Ok(removed) = state.graph.marginalize_oldest(window) {
+                        stats.poses_marginalized = removed;
+                    }
+                }
             }
         }
 
