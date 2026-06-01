@@ -185,6 +185,78 @@ fn covariance_gate_rejects_a_wrong_loop_and_accepts_a_genuine_one() {
     );
 }
 
+/// The information-form dual: marginalizing every other pose out of `Λ` leaves
+/// a single pose's marginal *information*, whose inverse is exactly that pose's
+/// marginal *covariance* — cross-checking [`PoseGraph::marginal_information`]
+/// against [`PoseGraph::pose_marginal_covariances`] (two independent code paths:
+/// Schur complement vs Takahashi recovery).
+#[test]
+fn marginal_information_inverts_to_the_pose_marginal_covariance() {
+    let (mut graph, _) = chain(7);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    let cov = graph.pose_marginal_covariances().unwrap();
+
+    for id in 1..7u64 {
+        let info = graph.marginal_information(&[id]).unwrap();
+        let info_inv = info.cholesky().expect("marginal information SPD").inverse();
+        let marg_cov = Matrix6::from_fn(|r, c| info_inv[(r, c)]);
+        let diff = (marg_cov - cov[&id]).abs().max();
+        assert!(
+            diff < 1e-7,
+            "marginal_information([{id}])⁻¹ must equal the pose marginal covariance: {diff}"
+        );
+    }
+}
+
+/// The two-pose marginal information inverts to the pair's 12×12 joint
+/// covariance, whose tangent reduction `Σ_aa+Σ_bb−Σ_ab−Σ_ba` is the relative
+/// covariance — so the Schur-complement information and the block-solve
+/// relative covariance agree.
+#[test]
+fn two_pose_marginal_information_matches_the_relative_covariance() {
+    let (mut graph, _) = chain(8);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    let (a, b) = (2u64, 6u64);
+
+    let info = graph.marginal_information(&[a, b]).unwrap();
+    let joint = info.cholesky().expect("joint information SPD").inverse();
+    // Tangent reduction of the 12×12 joint covariance to the relative block.
+    let saa = joint.view((0, 0), (6, 6));
+    let sbb = joint.view((6, 6), (6, 6));
+    let sab = joint.view((0, 6), (6, 6));
+    let sba = joint.view((6, 0), (6, 6));
+    let rel_from_info = Matrix6::from_fn(|r, c| (saa + sbb - sab - sba)[(r, c)]);
+
+    let rel = graph.relative_pose_covariance(a, b).unwrap();
+    let diff = (rel_from_info - rel).abs().max();
+    assert!(
+        diff < 1e-7,
+        "two-pose marginal information must reduce to the relative covariance: {diff}"
+    );
+}
+
+#[test]
+fn marginal_information_rejects_anchor_and_absent_ids() {
+    let (mut graph, _) = chain(5);
+    graph.optimize_se3_iterative(&config()).unwrap();
+    use visloc_slam::PoseGraphError;
+    // The anchor (id 0) is gauge-fixed, not a free variable.
+    assert_eq!(
+        graph.marginal_information(&[0]),
+        Err(PoseGraphError::MissingNode(0))
+    );
+    // An id absent from the graph.
+    assert_eq!(
+        graph.marginal_information(&[99]),
+        Err(PoseGraphError::MissingNode(99))
+    );
+    // Empty keep set.
+    assert_eq!(
+        graph.marginal_information(&[]),
+        Err(PoseGraphError::NoVariables)
+    );
+}
+
 #[test]
 fn errors_when_no_anchor_or_no_edges() {
     use visloc_slam::PoseGraphError;

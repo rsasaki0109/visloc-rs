@@ -4889,6 +4889,85 @@ impl PoseGraph {
         Ok(saa + sbb - sab - sba)
     }
 
+    /// Marginal *information* (inverse-covariance) of the pose set `keep_ids`:
+    /// the joint Gaussian information `Λ'` over those poses after marginalizing
+    /// every other non-anchor pose out of the full information matrix
+    /// `Λ = JᵀΩJ` (Schur complement, [`crate::marginalization::marginalize`]).
+    /// The blocks are ordered as `keep_ids`, each a 6-DOF SE(3) tangent block
+    /// in the same right-perturbation basis the solver uses
+    /// (`T ← T ∘ exp(δ)`), so `Λ'` is exactly the prior a fixed-lag / sliding-
+    /// window smoother re-adds when it drops the marginalized states. The
+    /// gauge-fixed anchor is held (excluded from the variables), so `Λ'`
+    /// encodes the kept poses' information relative to it.
+    ///
+    /// This is the information-form dual of [`Self::pose_marginal_covariances`]:
+    /// `marginal_information([id])⁻¹` equals pose `id`'s marginal covariance,
+    /// and the two-pose block inverts to the pair's joint covariance. (Assembles
+    /// `Λ` densely and Schur-complements it, `O(n³)` — a building block for the
+    /// windowed smoother, not a per-edge inner loop; the smoother itself will
+    /// marginalize only the *leaving* states' Markov blanket to stay sparse.)
+    /// Errors mirror [`Self::pose_marginal_covariances`], plus
+    /// [`PoseGraphError::MissingNode`] for an absent or anchor `keep` id, and
+    /// [`PoseGraphError::NoVariables`] when `keep_ids` is empty.
+    pub fn marginal_information(&self, keep_ids: &[u64]) -> Result<DMatrix<f64>, PoseGraphError> {
+        let anchor_id = self.anchor.ok_or(PoseGraphError::NoAnchor)?;
+        if !self.poses.contains_key(&anchor_id) {
+            return Err(PoseGraphError::MissingNode(anchor_id));
+        }
+        if self.edges.is_empty() {
+            return Err(PoseGraphError::NoEdges);
+        }
+        if keep_ids.is_empty() {
+            return Err(PoseGraphError::NoVariables);
+        }
+        // Free-variable indexing (anchor excluded), identical to the solvers.
+        let mut node_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if id == anchor_id {
+                continue;
+            }
+            let next = node_index.len();
+            node_index.insert(id, next);
+        }
+        let variable_count = node_index.len();
+        if variable_count == 0 {
+            return Err(PoseGraphError::NoVariables);
+        }
+        let dim = variable_count * 6;
+
+        // Scalar dimensions of the kept poses (each pose → its 6 tangent dims),
+        // in `keep_ids` order — an anchor or absent id is an error.
+        let mut keep_dims: Vec<usize> = Vec::with_capacity(keep_ids.len() * 6);
+        for &id in keep_ids {
+            let idx = node_index
+                .get(&id)
+                .copied()
+                .ok_or(PoseGraphError::MissingNode(id))?;
+            for k in 0..6 {
+                keep_dims.push(idx * 6 + k);
+            }
+        }
+
+        // Dense `Λ` at the current estimate (plain L2), then Schur-complement
+        // the complement of `keep_dims` out. `η` is unused for the information
+        // block, so pass zeros.
+        let (builder, _g) = self.assemble_se3_system(
+            &node_index,
+            dim,
+            &RobustKernel::None,
+            None,
+            LinearSolver::Dense,
+        );
+        let lambda = match builder {
+            NormalEquations6::Dense(h) => h,
+            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        };
+        let eta = DVector::<f64>::zeros(dim);
+        let (lambda_prime, _eta_prime) = marginalization::marginalize(&lambda, &eta, &keep_dims)
+            .ok_or(PoseGraphError::SingularSystem)?;
+        Ok(lambda_prime)
+    }
+
     /// Serialize this pose graph to a plain-text format. The format is
     /// line-oriented and human-readable so it doubles as a debug dump:
     ///
