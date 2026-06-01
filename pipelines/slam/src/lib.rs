@@ -4730,9 +4730,11 @@ impl PoseGraph {
     /// This is the prediction covariance a loop-closure innovation is gated
     /// against: a candidate asserting a relative pose far outside this
     /// uncertainty (a confident-but-wrong place recognition between two
-    /// well-localized frames) is statistically implausible. Recovers the full
-    /// `Σ` to read the cross-block, so it is dense/`O(n³)` for now — fine for the
-    /// occasional gate, not a per-edge inner loop. Errors mirror
+    /// well-localized frames) is statistically implausible. Recovers only the
+    /// two block-columns `Σ[:, a]` and `Σ[:, b]` it needs by solving
+    /// `Λ Y = [E_a | E_b]` with the sparse block Cholesky (back-substitution,
+    /// `O(nnz(L))` per column) — the dense `Λ⁻¹` is never formed, so it stays
+    /// cheap enough for the online gate. Errors mirror
     /// [`Self::pose_marginal_covariances`]; also
     /// [`PoseGraphError::MissingNode`] when `a` or `b` is absent.
     pub fn relative_pose_covariance(&self, a: u64, b: u64) -> Result<Matrix6<f64>, PoseGraphError> {
@@ -4762,41 +4764,58 @@ impl PoseGraph {
             return Err(PoseGraphError::NoVariables);
         }
         let dim = variable_count * 6;
+
+        // Assemble the *sparse* normal equations (COO triplets) at the current
+        // estimate, in the same free-variable order the solvers use.
         let (builder, _g) = self.assemble_se3_system(
             &node_index,
             dim,
             &RobustKernel::None,
             None,
-            LinearSolver::Dense,
+            LinearSolver::Sparse,
         );
-        let lambda = match builder {
-            NormalEquations6::Dense(h) => h,
-            NormalEquations6::Sparse { .. } => unreachable!("forced the dense backend above"),
+        let (triplets, dim) = match builder {
+            NormalEquations6::Sparse { triplets, dim } => (triplets, dim),
+            NormalEquations6::Dense(_) => unreachable!("forced the sparse backend above"),
         };
-        // Full covariance (the a↔b cross-block may be off the factor pattern);
-        // a fixed-anchor endpoint reads a zero block.
-        let sigma =
-            covariance::sparse_inverse(&lambda, 0.0).ok_or(PoseGraphError::SingularSystem)?;
-        let ia = node_index.get(&a);
-        let ib = node_index.get(&b);
-        // Assemble the 12×12 joint [[Σaa, Σab], [Σba, Σbb]] (anchor → zeros).
-        let mut joint = DMatrix::<f64>::zeros(12, 12);
-        let mut copy_block =
-            |dst_r: usize, dst_c: usize, ir: Option<&usize>, ic: Option<&usize>| {
-                if let (Some(&ri), Some(&ci)) = (ir, ic) {
-                    for r in 0..6 {
-                        for c in 0..6 {
-                            joint[(dst_r + r, dst_c + c)] = sigma[(ri * 6 + r, ci * 6 + c)];
-                        }
-                    }
-                }
-            };
-        copy_block(0, 0, ia, ia); // Σaa
-        copy_block(6, 6, ib, ib); // Σbb
-        copy_block(0, 6, ia, ib); // Σab
-        copy_block(6, 0, ib, ia); // Σba
-        let rel = covariance::relative_covariance(&joint, 6);
-        Ok(Matrix6::from_fn(|r, c| rel[(r, c)]))
+
+        // Recover only the two block-columns of `Σ = Λ⁻¹` we actually need —
+        // columns `a` and `b` — by solving `Λ Y = [E_a | E_b]` with the block
+        // Cholesky (back-substitution is `O(nnz(L))` per right-hand side),
+        // instead of forming the dense inverse. `Y[:, 0..6] = Σ[:, a]` and
+        // `Y[:, 6..12] = Σ[:, b]`, so every block we need (`Σaa`, `Σbb`, `Σab`,
+        // `Σba`) is a slice of `Y`. A gauge-fixed anchor endpoint is absent from
+        // the free variables, so its selector columns stay zero → a zero
+        // covariance block (its frame is certain), reproducing the dense path.
+        let ia = node_index.get(&a).copied();
+        let ib = node_index.get(&b).copied();
+        let mut selector = DMatrix::<f64>::zeros(dim, 12);
+        if let Some(idx) = ia {
+            for k in 0..6 {
+                selector[(idx * 6 + k, k)] = 1.0;
+            }
+        }
+        if let Some(idx) = ib {
+            for k in 0..6 {
+                selector[(idx * 6 + k, 6 + k)] = 1.0;
+            }
+        }
+        let order = reordering::Reordering::fill_reducing(dim, 6, &triplets);
+        let sigma_cols = solve_normal_equations_sparse_multi(&triplets, dim, 6, &selector, &order)?;
+
+        // Read the four 6×6 blocks (anchor endpoint → zero block) and reduce to
+        // the relative covariance `Σ_rel = Σaa + Σbb − Σab − Σba`.
+        let read = |rows: Option<usize>, col0: usize| -> Matrix6<f64> {
+            match rows {
+                Some(idx) => Matrix6::from_fn(|r, c| sigma_cols[(idx * 6 + r, col0 + c)]),
+                None => Matrix6::zeros(),
+            }
+        };
+        let saa = read(ia, 0);
+        let sba = read(ib, 0);
+        let sab = read(ia, 6);
+        let sbb = read(ib, 6);
+        Ok(saa + sbb - sab - sba)
     }
 
     /// Serialize this pose graph to a plain-text format. The format is
