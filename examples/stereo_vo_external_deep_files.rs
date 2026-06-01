@@ -72,6 +72,8 @@ struct CliArgs {
     online_ba: bool,
     online_ba_window: usize,
     online_ba_trigger_every: usize,
+    final_global_ba: bool,
+    final_global_ba_iterations: usize,
     ba_gravity_prior_weight: Option<f64>,
     ba_per_pose_gravity_prior_observations: Option<PathBuf>,
     ba_per_pose_gravity_prior_weight: f64,
@@ -172,6 +174,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(
             "--online-ba-imu-csv requires --online-ba (the CSV captures the per-trigger IMU state \
              produced by streaming sliding-window BA)"
+                .into(),
+        );
+    }
+    if args.final_global_ba && args.enable_ba {
+        return Err(
+            "--final-global-ba and --enable-ba are both global one-shot passes: --enable-ba \
+             already runs a single dense global BA. Use --final-global-ba together with \
+             --online-ba (a streaming windowed sweep followed by one final dense global pass), \
+             or use --enable-ba on its own."
                 .into(),
         );
     }
@@ -395,7 +406,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.min_temporal_confidence,
             ))
         };
-        if args.enable_ba {
+        if args.enable_ba || args.final_global_ba {
             if let Some(ref tm) = temporal_matches {
                 all_temporal_matches.push(tm.clone());
             }
@@ -528,6 +539,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rows,
                 csv_path.display(),
             );
+        }
+    }
+    // Final dense global BA pass: after the streaming windowed sweep
+    // (`--online-ba`) has produced a locally-consistent trajectory, run one
+    // joint bundle adjustment over EVERY pose and landmark at once
+    // (`window_size: None`). The windowed sweep keeps drift small frame-to-
+    // frame but never couples distant frames; this global pass closes the
+    // residual long-range error the per-window BA cannot see.
+    if args.final_global_ba {
+        let global_cfg = StereoVoBaConfig {
+            min_track_length: args.ba_min_track_length,
+            max_initial_depth_m: args.ba_max_initial_depth_m,
+            max_seed_row_fraction: args.ba_max_seed_row_fraction,
+            max_init_residual_px: args.ba_max_init_residual_px,
+            min_temporal_confidence: args.ba_min_temporal_confidence,
+            min_track_count: args.ba_min_track_count,
+            landmark_init: args.ba_landmark_init,
+            window_size: None,
+            gravity_prior: gravity_prior.clone(),
+            position_prior: position_prior.clone(),
+            per_pose_gravity_prior: per_pose_gravity_prior.clone(),
+            imu_input: None,
+            ba_config: BaConfig {
+                max_iterations: args.final_global_ba_iterations,
+                robust_kernel: RobustKernel::Huber {
+                    delta: args.ba_huber_delta_px,
+                },
+                linear_solver: LinearSolver::Sparse,
+                ..BaConfig::default()
+            },
+        };
+        println!(
+            "running FINAL GLOBAL BA pass: poses={} temporal_match_sets={} max_iterations={} \
+             huber_delta={}px",
+            online_runner.frontend.poses.len(),
+            all_temporal_matches.len(),
+            args.final_global_ba_iterations,
+            args.ba_huber_delta_px,
+        );
+        match refine_stereo_vo_with_ba(
+            &online_runner.frontend.camera,
+            online_runner.frontend.baseline,
+            &online_runner.frontend.poses,
+            &online_runner.frontend.left_features,
+            &online_runner.frontend.right_features,
+            &online_runner.frontend.stereo_per_frame,
+            &all_temporal_matches,
+            &global_cfg,
+        ) {
+            Ok(refinement) => {
+                println!(
+                    "FINAL GLOBAL BA: tracks={} observations={} cost {:.6} -> {:.6} ({} iters, \
+                     converged={})",
+                    refinement.track_count,
+                    refinement.observation_count,
+                    refinement.ba_result.initial_cost,
+                    refinement.ba_result.final_cost,
+                    refinement.ba_result.iterations.len(),
+                    refinement.ba_result.converged,
+                );
+                online_runner.frontend.poses = refinement.refined_poses;
+            }
+            Err(err) => {
+                eprintln!("FINAL GLOBAL BA skipped: {err}");
+            }
         }
     }
     if let Some(path) = &args.post_ba_position_projection_poses {
@@ -953,6 +1029,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut online_ba: bool = false;
     let mut online_ba_window: usize = 30;
     let mut online_ba_trigger_every: usize = 10;
+    let mut final_global_ba: bool = false;
+    let mut final_global_ba_iterations: usize = 30;
     let mut ba_gravity_prior_weight: Option<f64> = None;
     let mut ba_per_pose_gravity_prior_observations: Option<PathBuf> = None;
     let mut ba_per_pose_gravity_prior_weight: f64 = 1.0;
@@ -1131,6 +1209,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 online_ba_trigger_every = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--final-global-ba" => {
+                final_global_ba = true;
+                args.remove(i);
+            }
+            "--final-global-ba-iterations" => {
+                final_global_ba_iterations = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--ba-gravity-prior-weight" => {
                 let w: f64 = args.remove(i + 1).parse()?;
                 ba_gravity_prior_weight = if w > 0.0 { Some(w) } else { None };
@@ -1295,6 +1381,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         online_ba,
         online_ba_window,
         online_ba_trigger_every,
+        final_global_ba,
+        final_global_ba_iterations,
         ba_gravity_prior_weight,
         ba_per_pose_gravity_prior_observations,
         ba_per_pose_gravity_prior_weight,
@@ -1404,6 +1492,13 @@ fn print_usage() {
          [--imu-bias-random-walk-weight w]   inter-keyframe bias tie weight (default off)\n \
          [--imu-fix-first-bias on|off]       gauge-fix first bias (default on)\n \
          [--imu-fix-first-velocity on|off]   pin first velocity (default off)\n \
+         \n  Final dense global BA (chains after --online-ba):\n \
+         [--final-global-ba]  after the streaming windowed BA sweep, run ONE \
+         joint bundle adjustment over every pose+landmark (window_size=None) to \
+         close residual long-range drift the per-window passes cannot see; \
+         mutually exclusive with --enable-ba (which is already a global one-shot)\n \
+         [--final-global-ba-iterations <n>]  max LM iterations for that pass \
+         (default 30)\n \
          \n  3DGS / NeRF export (after VO + optional BA):\n \
          [--colmap-export <dir>]      write COLMAP cameras.txt / images.txt / \
          points3D.txt under <dir>, suitable for gaussian-splatting / nerfstudio \
