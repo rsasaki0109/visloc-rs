@@ -26,7 +26,12 @@
 //!      bridges. The Mahalanobis cycle covariance grows with the odometry span,
 //!      so genuine revisits across many drifted edges are not over-penalized by a
 //!      single rad+metre threshold, and it recovers more genuine bridges at equal
-//!      precision (the gap widens with drift);
+//!      precision (the gap widens with drift). `--inject-corrupted-bridges N
+//!      --corruption-m M` adds the PRECISION stress: bridges at genuine revisit
+//!      locations but with an M-metre-wrong relative pose — harder to reject than
+//!      gross outliers, yet caught because their cycles against nearby genuine
+//!      bridges span few edges (small covariance), so Mahalanobis keeps its recall
+//!      lead without admitting them;
 //!   3. welds B into A at the first bridge of the higher-recall screen with
 //!      [`PoseGraph::merge_session`], adds the rest as loop-closure constraints,
 //!      and jointly re-optimizes;
@@ -65,6 +70,8 @@ struct CliArgs {
     split_fraction: f64,
     proximity_m: f64,
     inject_wrong_bridges: usize,
+    inject_corrupted_bridges: usize,
+    corruption_m: f64,
     inject_seed: u64,
     max_keyframes: usize,
     out_dir: PathBuf,
@@ -77,6 +84,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut split_fraction: f64 = 0.5;
     let mut proximity_m: f64 = 10.0;
     let mut inject_wrong_bridges: usize = 2;
+    let mut inject_corrupted_bridges: usize = 0;
+    let mut corruption_m: f64 = 8.0;
     let mut inject_seed: u64 = 1;
     let mut max_keyframes: usize = 200;
     let mut out_dir: PathBuf = PathBuf::from("target/multi_session_merge_demo");
@@ -109,6 +118,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 inject_wrong_bridges = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--inject-corrupted-bridges" => {
+                inject_corrupted_bridges = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--corruption-m" => {
+                corruption_m = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--inject-seed" => {
                 inject_seed = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -134,6 +151,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         split_fraction,
         proximity_m,
         inject_wrong_bridges,
+        inject_corrupted_bridges,
+        corruption_m,
         inject_seed,
         max_keyframes,
         out_dir,
@@ -383,12 +402,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             candidate_is_wrong.push(true);
         }
     }
+
+    // Inject CORRUPTED bridges (the precision stress test): take genuine
+    // cross-revisit pairs — so the endpoints sit at real revisit locations, with
+    // nearby genuine bridges — but report a relative pose offset by `corruption_m`
+    // metres (a place-recognition match to the right area with a wrong relative
+    // estimate). These are HARDER to reject than the gross wrong bridges above:
+    // their cycles against neighbouring genuine bridges span few odometry edges,
+    // so the Mahalanobis covariance there is small and cannot mask the corruption
+    // — the test that covariance inflation does not cost precision when a dense
+    // genuine consensus surrounds the outlier.
+    if args.inject_corrupted_bridges > 0 && !cross.is_empty() {
+        let step = (cross.len() / args.inject_corrupted_bridges.max(1)).max(1);
+        for k in 0..args.inject_corrupted_bridges {
+            let src = &cross[(k * step) % cross.len()];
+            let offset = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(args.corruption_m, 0.0, 0.0),
+            );
+            candidates.push(LoopClosureConstraint {
+                from_keyframe_id: src.from_keyframe_id,
+                to_keyframe_id: src.to_keyframe_id,
+                relative_pose: offset.compose(&src.relative_pose),
+                inlier_count: 90,
+                inlier_ratio: 0.95,
+                mean_sampson_error: 0.0,
+                score: 90.0,
+            });
+            candidate_is_wrong.push(true);
+        }
+    }
     let wrong_total = candidate_is_wrong.iter().filter(|&&w| w).count();
     println!(
-        "candidate bridges: {} ({} genuine + {} wrong)",
+        "candidate bridges: {} ({} genuine + {} gross-wrong + {} corrupted by {:.1} m)",
         candidates.len(),
         genuine_bridges,
-        wrong_total
+        args.inject_wrong_bridges.min(wrong_total),
+        args.inject_corrupted_bridges,
+        args.corruption_m,
     );
 
     // --- PCM cross-session screening (front-end guard) ---
@@ -444,6 +495,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maha_grid: Vec<f64> = (1..=60).map(|i| i as f64 * 0.5).collect(); // 0.5 .. 30
     let (kept_iso, iso_recall) = sweep("isotropic  ", None, &iso_grid);
     let (kept_maha, maha_recall) = sweep("mahalanobis", Some(noise), &maha_grid);
+    if args.inject_corrupted_bridges > 0 {
+        println!(
+            "NOTE: both recalls are at ZERO admitted wrong, so the {} corrupted bridge(s) are \
+             rejected by each — precision holds. The corrupted bridges sit at genuine revisit \
+             locations, so their cycles against nearby genuine bridges span few edges (small \
+             Mahalanobis covariance) and the {:.1} m corruption is caught; covariance inflation \
+             lifts recall without masking outliers bracketed by consensus.",
+            args.inject_corrupted_bridges, args.corruption_m,
+        );
+    }
     // Merge with the higher-recall zero-wrong screen.
     let (kept, kept_genuine) = if maha_recall >= iso_recall {
         (kept_maha, maha_recall)
