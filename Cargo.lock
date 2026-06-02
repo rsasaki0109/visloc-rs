@@ -750,7 +750,9 @@ dependencies = [
 name = "visloc-rs"
 version = "0.1.0"
 dependencies = [
+ "image",
  "nalgebra",
+ "rayon",
  "visloc-core",
  "visloc-fusion",
  "visloc-io",

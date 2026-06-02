@@ -107,3 +107,15 @@ required-features = ["image-io"]
 name = "euroc_online_slam_vi_image_demo"
 path = "examples/euroc_online_slam_vi_image_demo.rs"
 required-features = ["image-io"]
+
+[[example]]
+name = "relocalization_7scenes_demo"
+path = "examples/relocalization_7scenes_demo.rs"
+required-features = ["image-io"]
+
+[dev-dependencies]
+# 7-Scenes relocalization benchmark needs raw 16-bit depth PNGs (mm); the io
+# crate's grayscale loader normalizes to [0,1] and loses metric depth, so the
+# example reads depth directly. Pinned to the io crate's image version.
+image = { version = "=0.25.5", default-features = false, features = ["png"] }
+rayon = "1"
