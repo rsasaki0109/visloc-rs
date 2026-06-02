@@ -112,12 +112,19 @@ def main() -> int:
     with open(f"{out}/calib.txt", "w") as f:
         f.write(f"P0: {_kitti_p_line(p0)}\nP1: {_kitti_p_line(p1)}\n")
 
-    left = sorted(os.listdir(f"{m}/cam0/data"))
-    right = sorted(os.listdir(f"{m}/cam1/data"))
-    if len(left) != len(right):
-        print(f"ERROR cam0/cam1 frame count mismatch: {len(left)} vs {len(right)}",
-              file=sys.stderr)
-        return 1
+    # Some EuRoC sequences (e.g. V2_03_difficult) have unequal cam0/cam1 frame
+    # counts. cam0 and cam1 are hardware-synced, so valid stereo pairs share an
+    # identical timestamp (= filename); intersect on filename and keep only the
+    # frames present in both, in time order.
+    left_set = set(os.listdir(f"{m}/cam0/data"))
+    right_set = set(os.listdir(f"{m}/cam1/data"))
+    common = sorted(left_set & right_set)
+    dropped = (len(left_set) - len(common)) + (len(right_set) - len(common))
+    if dropped:
+        print(f"NOTE cam0/cam1 frame counts differ ({len(left_set)} vs "
+              f"{len(right_set)}); using {len(common)} timestamp-matched pairs "
+              f"(dropped {dropped} unpaired frames)", flush=True)
+    left = right = common
 
     with open(f"{out}/timestamps.txt", "w") as ts:
         for i, (a, b) in enumerate(zip(left, right)):
