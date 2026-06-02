@@ -312,4 +312,5 @@ priors and fusion, and larger public-data evaluation.
 - [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) - Phase-27 activation contract, model sourcing, validation plan.
 - [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) - toolchain-pin + verification protocol + empirical ledger.
 - [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md) - per-demo guides.
+- **SLAM analysis kit** (`scripts/`): [`analyze_slam_trajectory.py`](scripts/analyze_slam_trajectory.py) (per-run coverage / tracking-continuity / jitter / ATE-over-time report), [`compare_slam_runs.py`](scripts/compare_slam_runs.py) (rank every run by coverage and accuracy, best-per-sequence), [`animate_euroc_match_track.py`](scripts/animate_euroc_match_track.py) / [`animate_euroc_slam.py`](scripts/animate_euroc_slam.py) (trajectory + feature-match GIFs).
 - [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).
