@@ -409,10 +409,6 @@ impl BlockSymbolic {
     /// is `O(1)`, the heart of the incremental win; a change near the root
     /// touches little, a change at a leaf-of-a-deep-tree touches its whole
     /// ancestor chain.
-    // Exercised by the incremental-refactor tests/bench below; wired into the
-    // online incremental smoother in a follow-up (mirrors gnc.rs landing as a
-    // verified primitive before its driver).
-    #[allow(dead_code)]
     pub(crate) fn affected_columns(&self, changed: &[usize]) -> Vec<usize> {
         let mut marked = vec![false; self.n];
         for &c in changed {
@@ -447,7 +443,6 @@ impl BlockSymbolic {
     /// produce the same factor.
     ///
     /// `edges_to` must contain only indices `< n`; duplicates are ignored.
-    #[allow(dead_code)]
     pub(crate) fn append_variable(&mut self, edges_to: &[usize]) -> Vec<usize> {
         let n = self.n;
         let mut neighbours: Vec<usize> = edges_to.to_vec();
@@ -725,9 +720,6 @@ fn refactor_numeric<const B: usize>(
 /// `triplets` whose block column lies in `affected` are read, so for an
 /// `O(affected)` update the caller passes just the changed columns' entries (the
 /// delta), not the whole graph — passing the full system is correct but scans it.
-// Wired into the online incremental smoother in a follow-up; exercised now by
-// `incremental_refactor_matches_full*` and the `bench_incremental_vs_full` A/B.
-#[allow(dead_code)]
 fn refactor_incremental<const B: usize>(
     sym: &BlockSymbolic,
     triplets: &[(usize, usize, f64)],
@@ -792,6 +784,109 @@ fn refactor_incremental<const B: usize>(
         diag_inv[j] = inv;
     }
     Ok(())
+}
+
+/// A block-Cholesky factor that is maintained *incrementally* across edits — the
+/// usable bundle of the two incremental primitives behind one handle, for an
+/// iSAM-style pose-graph smoother that grows and re-solves a graph keyframe by
+/// keyframe instead of refactoring it whole each time.
+///
+/// It owns the symbolic structure ([`BlockSymbolic`]) and the numeric factor
+/// (`col_vals` / `diag_inv`) of an SPD system `A = L Lᵀ`, and supports:
+/// - [`Self::append_variable`] — grow by one block variable (a new keyframe),
+/// - [`Self::update_columns`] — re-factor the columns a value change touches (a
+///   loop closure between existing variables, or a relinearization),
+///
+/// then [`Self::solve`] to back-substitute a right-hand side. Both edits reuse
+/// the untouched part of the factor, so they cost `O(affected)` rather than
+/// `O(n)`. Sequential throughout (no `λ` damping — Levenberg–Marquardt's
+/// per-iteration `λ` would perturb every diagonal and defeat incrementality, so
+/// the smoother runs Gauss–Newton), which keeps every result a deterministic,
+/// bit-identical match to a from-scratch sequential factor of the same system.
+// Consumed by the incremental pose-graph smoother in a follow-up; its primitives
+// (append_variable / refactor_incremental / solve_block_system) are exercised by
+// this module's tests now.
+#[allow(dead_code)]
+pub(crate) struct BlockIncrementalSolver<const B: usize> {
+    sym: BlockSymbolic,
+    col_vals: Vec<Vec<SMatrix<f64, B, B>>>,
+    diag_inv: Vec<SMatrix<f64, B, B>>,
+}
+
+#[allow(dead_code)]
+impl<const B: usize> BlockIncrementalSolver<B> {
+    /// Factor the SPD system given by `triplets` (scalar COO, symmetric, in the
+    /// caller's natural order — no fill-reducing permutation, so a later append
+    /// of the highest variable stays a cheap top-of-tree edit). `Err(())` if a
+    /// diagonal block is not positive-definite.
+    pub(crate) fn factor(triplets: &[(usize, usize, f64)], dim: usize) -> Result<Self, ()> {
+        let sym = analyze(triplets, dim, B);
+        let (col_vals, diag_inv) =
+            refactor_numeric::<B>(&sym, triplets, 0.0, 1, usize::MAX, usize::MAX, usize::MAX)?;
+        Ok(Self {
+            sym,
+            col_vals,
+            diag_inv,
+        })
+    }
+
+    /// Number of block columns currently in the factor.
+    pub(crate) fn blocks(&self) -> usize {
+        self.sym.n
+    }
+
+    /// Re-factor in place after the values in block columns `changed` changed.
+    /// `delta` must carry the new values for every column in
+    /// `affected_columns(changed)` (passing the whole system is correct but
+    /// scans it); see [`refactor_incremental`].
+    pub(crate) fn update_columns(
+        &mut self,
+        changed: &[usize],
+        delta: &[(usize, usize, f64)],
+    ) -> Result<(), ()> {
+        let affected = self.sym.affected_columns(changed);
+        refactor_incremental::<B>(
+            &self.sym,
+            delta,
+            0.0,
+            &affected,
+            &mut self.col_vals,
+            &mut self.diag_inv,
+        )
+    }
+
+    /// Grow the factor by the new highest block variable, coupled to the existing
+    /// columns `edges_to`. `delta` must carry the new values for every affected
+    /// column (the new column plus the fill path; see [`BlockSymbolic::append_variable`]).
+    pub(crate) fn append_variable(
+        &mut self,
+        edges_to: &[usize],
+        delta: &[(usize, usize, f64)],
+    ) -> Result<(), ()> {
+        let affected = self.sym.append_variable(edges_to);
+        self.col_vals.push(Vec::new());
+        self.diag_inv.push(SMatrix::<f64, B, B>::zeros());
+        refactor_incremental::<B>(
+            &self.sym,
+            delta,
+            0.0,
+            &affected,
+            &mut self.col_vals,
+            &mut self.diag_inv,
+        )
+    }
+
+    /// Solve `A x = b` against the current factor (block forward/backward
+    /// substitution, `O(nnz(L))`).
+    pub(crate) fn solve(&self, b: &DVector<f64>) -> DVector<f64> {
+        solve_block_system::<B>(
+            &self.sym.col_rows,
+            &self.col_vals,
+            &self.diag_inv,
+            self.sym.n,
+            b,
+        )
+    }
 }
 
 /// Solve `A x = b` for a single right-hand side via block forward and backward
@@ -1929,7 +2024,7 @@ mod tests {
         let lambda = 1e-3;
         let mut rng = Rng(0x9a73);
         // Symmetric off-diagonal block + a strong block-diagonal, appended to `t`.
-        let mut couple = |t: &mut Vec<(usize, usize, f64)>, bi: usize, bj: usize, rng: &mut Rng| {
+        let couple = |t: &mut Vec<(usize, usize, f64)>, bi: usize, bj: usize, rng: &mut Rng| {
             for r in 0..b {
                 for c in 0..b {
                     let v = 0.05 * rng.next_f64();
@@ -1989,6 +2084,69 @@ mod tests {
         assert!(
             cv == cvf && di == dif,
             "incremental append+factor must match a full analyze+refactor bit-for-bit"
+        );
+    }
+
+    /// The [`BlockIncrementalSolver`] handle must, after a value update and a
+    /// variable append, hold the exact factor of the edited system — i.e. solve
+    /// identically to a from-scratch factor of the final system. Exercises the
+    /// full bundle (`factor` → `update_columns` → `append_variable` → `solve`)
+    /// against an independent reference built by [`BlockIncrementalSolver::factor`]
+    /// on the final triplets.
+    #[test]
+    fn incremental_solver_handle_tracks_a_full_factor() {
+        let b = 6usize;
+        let mut rng = Rng(0x1213);
+        let couple = |t: &mut Vec<(usize, usize, f64)>, bi: usize, bj: usize, rng: &mut Rng| {
+            for r in 0..b {
+                for c in 0..b {
+                    let v = 0.05 * rng.next_f64();
+                    t.push((bi * b + r, bj * b + c, v));
+                    t.push((bj * b + c, bi * b + r, v));
+                }
+            }
+        };
+        let diag = |t: &mut Vec<(usize, usize, f64)>, bj: usize, d0: f64| {
+            for d in 0..b {
+                t.push((bj * b + d, bj * b + d, d0));
+            }
+        };
+
+        // Base chain of 8 blocks.
+        let n0 = 8usize;
+        let mut t: Vec<(usize, usize, f64)> = Vec::new();
+        for j in 0..n0 {
+            diag(&mut t, j, 20.0);
+        }
+        for j in 0..n0 - 1 {
+            couple(&mut t, j, j + 1, &mut rng);
+        }
+        let mut solver = BlockIncrementalSolver::<6>::factor(&t, n0 * b).expect("base SPD");
+
+        // (1) Value update: strengthen column 3's diagonal (a relinearization /
+        // a re-weighted existing edge). Pass the full system as the delta.
+        for d in 0..b {
+            t.push((3 * b + d, 3 * b + d, 5.0));
+        }
+        solver.update_columns(&[3], &t).expect("update SPD");
+
+        // (2) Append var 8 with a chain edge to 7 and a loop edge back to 1.
+        diag(&mut t, 8, 20.0);
+        couple(&mut t, 8, 7, &mut rng);
+        couple(&mut t, 8, 1, &mut rng);
+        solver.append_variable(&[7, 1], &t).expect("append SPD");
+
+        assert_eq!(solver.blocks(), 9);
+
+        // Reference: factor the final system from scratch and compare solves.
+        let reference = BlockIncrementalSolver::<6>::factor(&t, 9 * b).expect("ref SPD");
+        let rhs = DVector::<f64>::from_fn(9 * b, |i, _| ((i % 7) as f64 - 3.0) * 0.5);
+        let got = solver.solve(&rhs);
+        let want = reference.solve(&rhs);
+        assert!(
+            (&got - &want).norm() < 1e-12,
+            "incrementally maintained factor must solve identically to a full factor: err {}",
+            (&got - &want).norm()
         );
     }
 
