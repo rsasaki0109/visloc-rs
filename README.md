@@ -43,8 +43,8 @@
 </table>
 
 <p align="center">
-  🌐 <a href="https://rsasaki0109.github.io/visloc-rs/kitti3d/"><strong>Explore the KITTI trajectories in interactive 3D</strong></a>
-  — ground-truth vs drifted-VO vs loop-corrected, and real SuperPoint/LightGlue stereo VO + BA, orbit/zoom in the browser.
+  🌐 <a href="https://rsasaki0109.github.io/visloc-rs/kitti3d/"><strong>Explore the trajectories in interactive 3D</strong></a>
+  — KITTI (car): loop-closure before/after and SuperPoint/LightGlue stereo VO + BA; EuRoC (UAV): online VI-SLAM with real altitude. Orbit/zoom in the browser.
 </p>
 
 <p align="center">

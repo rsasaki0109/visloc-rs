@@ -28,11 +28,12 @@
 </head>
 <body>
 <header>
-  <h1><span class="accent">visloc-rs</span> &mdash; KITTI trajectories in 3D</h1>
+  <h1><span class="accent">visloc-rs</span> &mdash; trajectories in 3D</h1>
   <div class="sub">
-    Interactive 3D camera trajectories from the pure-Rust VO / pose-graph stack.
-    Drag to orbit, scroll to zoom, click legend entries to toggle traces.
-    Estimates are rigidly aligned to ground truth (the reported ATE convention).
+    Interactive 3D camera trajectories from the pure-Rust GPS-denied stack &mdash;
+    KITTI (car) and EuRoC MAV (UAV, with real altitude). Drag to orbit, scroll to
+    zoom, click legend entries to toggle traces. Estimates are rigidly aligned to
+    ground truth (the reported ATE convention).
   </div>
 </header>
 <div class="controls">
@@ -62,7 +63,7 @@ function buildTraces(ds) {
   for (const t of ds.traces) {
     traces.push({
       type: "scatter3d", mode: "lines", name: t.name,
-      x: t.x, y: t.y, z: t.z,
+      x: t.x, y: t.y, z: t.z, connectgaps: false,
       line: { color: t.color, width: 4, dash: t.dash || "solid" },
       hovertemplate: t.name + "<br>x %{x:.1f}  y %{y:.1f}  z %{z:.1f} m<extra></extra>",
     });
@@ -84,7 +85,7 @@ const layout = {
             x: 0.01, y: 0.99 },
   scene: {
     aspectmode: "data",
-    xaxis: axis("x [m] (right)"), yaxis: axis("z [m] (forward)"), zaxis: axis("up [m]"),
+    xaxis: axis("X [m]"), yaxis: axis("Y [m]"), zaxis: axis("Z up [m]"),
     camera: { eye: { x: 1.3, y: 1.3, z: 1.1 } },
   },
 };
