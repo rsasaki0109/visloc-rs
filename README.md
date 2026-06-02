@@ -47,9 +47,12 @@
   <br>
   <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU). Left: the
   SuperPoint frontend matching features frame to frame on the cam0 image.
-  Right: the online VI-SLAM estimate (red) tracking ground truth (black) in 2D,
-  grown frame by frame &mdash; rigidly aligned, ~0.20 m rigid ATE over 176
-  tracked frames. Regenerate with <code>scripts/animate_euroc_match_track.py</code>.</em>
+  Right: an online VI-SLAM trajectory estimate on the same sequence (red)
+  tracking ground truth (black) in 2D, grown frame by frame &mdash; rigidly
+  aligned, ~0.06 m rigid ATE over 142 continuously-tracked frames (the drone
+  holds position, then maneuvers). Regenerate with
+  <code>scripts/animate_euroc_match_track.py</code>; inspect any run's tracking
+  continuity / jitter / ATE with <code>scripts/analyze_slam_trajectory.py</code>.</em>
 </p>
 
 <p align="center">
