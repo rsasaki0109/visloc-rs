@@ -67,6 +67,7 @@ struct CliArgs {
     inject_seed: u64,
     pcm: bool,
     marginalize_window: Option<usize>,
+    covisibility_radius: usize,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -79,6 +80,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut inject_seed: u64 = 1;
     let mut pcm = false;
     let mut marginalize_window: Option<usize> = None;
+    let mut covisibility_radius: usize = 0;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -120,6 +122,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 marginalize_window = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--covisibility-radius" => {
+                covisibility_radius = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -136,6 +142,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         inject_seed,
         pcm,
         marginalize_window,
+        covisibility_radius,
     })
 }
 
@@ -188,9 +195,15 @@ fn ate(estimate: &[Pose], truth: &[Pose]) -> (f64, f64, f64) {
 /// fundamental fixed-lag trade-off: bounded per-solve cost at the price of
 /// losing loop closures that span more than the window.
 ///
-/// Returns `(trajectory, loops_applied, loops_dropped, max_active_poses)`. Each
-/// keyframe's reported pose is its estimate at the last solve before it was
-/// marginalized (frozen), or the final estimate if still active.
+/// With `sparsify`, each marginalized blanket prior is replaced by its KL-optimal
+/// Chow-Liu tree ([`PoseGraph::marginalize_oldest_sparsified`]) so a window with
+/// in-window loop closures (which give a marginalized pose ≥3 neighbours → a dense
+/// clique prior) stays sparse instead of accumulating fill-in.
+///
+/// Returns `(trajectory, loops_applied, loops_dropped, max_active_poses,
+/// peak_prior_offdiag_blocks, elapsed)`. Each keyframe's reported pose is its
+/// estimate at the last solve before it was marginalized (frozen), or the final
+/// estimate if still active.
 #[allow(clippy::type_complexity)]
 fn windowed_fixed_lag(
     drifted: &[Pose],
@@ -198,8 +211,11 @@ fn windowed_fixed_lag(
     loops: &[LoopClosureConstraint],
     window: usize,
     n: usize,
-) -> Result<(Vec<Pose>, usize, usize, usize), Box<dyn std::error::Error>> {
+    sparsify: bool,
+) -> Result<(Vec<Pose>, usize, usize, usize, usize, std::time::Duration), Box<dyn std::error::Error>>
+{
     use std::collections::BTreeMap;
+    let start = std::time::Instant::now();
     // Loops grouped by their later (`to`) endpoint — the step at which both
     // endpoints first exist.
     let mut loops_by_to: BTreeMap<u64, Vec<&LoopClosureConstraint>> = BTreeMap::new();
@@ -210,6 +226,7 @@ fn windowed_fixed_lag(
     let mut graph = PoseGraph::new();
     let mut trajectory: Vec<Pose> = drifted.to_vec();
     let (mut applied, mut dropped, mut max_active) = (0usize, 0usize, 0usize);
+    let mut peak_prior_blocks = 0usize;
 
     for k in 0..n {
         let id = k as u64;
@@ -240,9 +257,42 @@ fn windowed_fixed_lag(
             trajectory[pid as usize] = pose.clone();
         }
         max_active = max_active.max(graph.poses.len());
-        graph.marginalize_oldest(window)?;
+        if sparsify {
+            graph.marginalize_oldest_sparsified(window)?;
+        } else {
+            graph.marginalize_oldest(window)?;
+        }
+        // Fill-in carried in the window: total nonzero off-diagonal 6×6 prior
+        // blocks across all current priors (a dense clique prior over m poses has
+        // m(m−1)/2; its Chow-Liu tree has m−1).
+        peak_prior_blocks = peak_prior_blocks.max(count_offdiag_prior_blocks(&graph));
     }
-    Ok((trajectory, applied, dropped, max_active))
+    Ok((
+        trajectory,
+        applied,
+        dropped,
+        max_active,
+        peak_prior_blocks,
+        start.elapsed(),
+    ))
+}
+
+/// Total number of nonzero off-diagonal 6×6 blocks across all of `graph`'s
+/// Gaussian priors — the marginalization fill-in carried in the window.
+fn count_offdiag_prior_blocks(graph: &PoseGraph) -> usize {
+    let mut total = 0usize;
+    for p in &graph.priors {
+        let m = p.ids.len();
+        for i in 0..m {
+            for j in (i + 1)..m {
+                let blk = p.information.view((i * 6, j * 6), (6, 6));
+                if blk.iter().any(|&v| v.abs() > 1e-9) {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
 }
 
 /// Build `n` *wrong* loop closures (the perceptual-aliasing false positive).
@@ -404,8 +454,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Optional genuine COVISIBILITY edges: every keyframe to its near neighbours
+    // `i ↔ i+d` for `d` in `2..=radius` (the GT relative pose). These are
+    // short-span, so both endpoints coexist inside a fixed-lag window — giving a
+    // marginalized pose ≥3 neighbours, hence a DENSE clique prior. This is the
+    // realistic covisibility-graph connectivity where marginalization fill-in
+    // (and so Chow-Liu sparsification) actually matters; the long-range genuine
+    // loops above are dropped by a bounded window before both endpoints coexist.
+    for i in 0..n {
+        for d in 2..=args.covisibility_radius {
+            let j = i + d;
+            if j >= n {
+                break;
+            }
+            loop_constraints.push(LoopClosureConstraint {
+                from_keyframe_id: i as u64,
+                to_keyframe_id: j as u64,
+                relative_pose: relative_world_to_camera(&keyframes[i], &keyframes[j]),
+                inlier_count: 100,
+                inlier_ratio: 1.0,
+                mean_sampson_error: 0.0,
+                score: 100.0,
+            });
+            loop_is_wrong.push(false);
+        }
+    }
     let genuine_loops = loop_constraints.len();
-    println!("genuine_loop_closures={genuine_loops}");
+    println!(
+        "genuine_loop_closures={genuine_loops} (covisibility_radius={})",
+        args.covisibility_radius
+    );
 
     // Optionally corrupt the loop set with wrong loop closures.
     if args.inject_wrong_loops > 0 {
@@ -474,17 +552,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (their earlier endpoint has been marginalized). The anchor is always kept,
     // so revisits to the origin still close. Compared against the full batch.
     if let Some(window) = args.marginalize_window {
-        let (windowed, applied, dropped, max_active) =
-            windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n)?;
-        let (w_mean, w_rmse, w_max) = ate(&windowed, &keyframes);
+        // Run the same window DENSE and SPARSE (Chow-Liu) and compare the
+        // marginalization fill-in, wall time, and ATE. Sparsification preserves
+        // each kept pose's marginal, so the ATE should match while the prior
+        // density (and re-solve cost) drops wherever an in-window loop closure
+        // made a marginalized pose's blanket a clique.
+        let (dense, applied, dropped, max_active, dense_blocks, dense_t) =
+            windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n, false)?;
+        let (sparse, _, _, _, sparse_blocks, sparse_t) =
+            windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n, true)?;
+        let (d_mean, d_rmse, d_max) = ate(&dense, &keyframes);
+        let (s_mean, s_rmse, s_max) = ate(&sparse, &keyframes);
         println!(
             "[fixed-lag] window={window} max_active_poses={max_active} (of {n}) loops_applied={applied} loops_dropped={dropped}"
         );
-        println!("ATE fixed-lag    mean={w_mean:.3} rmse={w_rmse:.3} max={w_max:.3} (m)");
+        println!(
+            "  dense  : peak_prior_offdiag_blocks={dense_blocks} time={:.0}ms ATE mean={d_mean:.3} rmse={d_rmse:.3} max={d_max:.3} (m)",
+            dense_t.as_secs_f64() * 1e3,
+        );
+        println!(
+            "  sparse : peak_prior_offdiag_blocks={sparse_blocks} time={:.0}ms ATE mean={s_mean:.3} rmse={s_rmse:.3} max={s_max:.3} (m)",
+            sparse_t.as_secs_f64() * 1e3,
+        );
         println!(
             "NOTE: fixed-lag caps the active set to {max_active}/{n} poses; the {dropped} dropped \
-             loop(s) span more than the window, so on a loopy sequence its ATE trades off against \
-             batch — widen the window to recover loops, at higher per-solve cost."
+             loop(s) span more than the window. Chow-Liu sparsification cuts the prior fill-in \
+             {dense_blocks}→{sparse_blocks} off-diagonal blocks (a marginalized covisibility \
+             clique → its spanning tree; the gap grows ~quadratically with the covisibility \
+             radius) at near-equal ATE ({d_rmse:.3}→{s_rmse:.3} m). The benefit here is STRUCTURAL \
+             (density/memory): on this small window the per-marginalization Chow-Liu overhead \
+             roughly cancels the solve saving, so wall-time is ~flat — the time win needs a larger \
+             window where the dense O(m²) fill dominates the solve. With covisibility_radius=0 the \
+             windowed graph is a chain (≤2-pose blankets), so dense==sparse and there is nothing to \
+             sparsify — the long-range KITTI loops are dropped before both endpoints share the \
+             window."
         );
     }
 
