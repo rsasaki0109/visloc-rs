@@ -44,6 +44,14 @@
 //! recall for precision is a `--retrieve-topk` / `--ratio` / `--min-inliers`
 //! frontier (e.g. topk25/ratio0.95/min8 → ~48% localized but a looser median).
 //!
+//! To benchmark a learned matcher (LightGlue) against the in-Rust BruteForce
+//! baseline under identical pose estimation, pass `--correspondences-dir`: the
+//! matcher is run out-of-process (`scripts/hloc_lightglue_7scenes.py`) and emits
+//! per-query 2D-3D correspondences ("x y X Y Z conf"); this mode skips the map
+//! build and only exercises the Rust PnP+RANSAC. LightGlue roughly doubles
+//! recall (e.g. ~68% vs ~34% localized) but the 5cm/5deg fraction plateaus
+//! because accuracy is then limited by the raw (unregistered) 7-Scenes depth.
+//!
 //! Run (after extracting chess.zip and its inner seq-*.zip):
 //!   cargo run --release --features image-io --example relocalization_7scenes_demo -- \
 //!       --dataset /path/to/7scenes/chess --sp-features-dir /tmp/sp7_chess \
@@ -78,6 +86,7 @@ struct Args {
     ratio: f32,
     reproj: f64,
     merged_submap: bool,
+    correspondences_dir: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -104,6 +113,7 @@ impl Default for Args {
             ratio: 0.8,
             reproj: 4.0,
             merged_submap: false,
+            correspondences_dir: None,
         }
     }
 }
@@ -186,6 +196,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--ratio" => args.ratio = val()?.parse()?,
             "--reproj" => args.reproj = val()?.parse()?,
             "--merged-submap" => args.merged_submap = true,
+            "--correspondences-dir" => args.correspondences_dir = Some(PathBuf::from(val()?)),
             other => return Err(format!("unknown flag: {other}").into()),
         }
     }
@@ -209,6 +220,32 @@ fn read_pose(path: &Path) -> Result<(Matrix3<f64>, Vector3<f64>), Box<dyn Error>
     let r = Matrix3::new(v[0], v[1], v[2], v[4], v[5], v[6], v[8], v[9], v[10]);
     let t = Vector3::new(v[3], v[7], v[11]);
     Ok((r, t))
+}
+
+/// Parse a per-query correspondence file: lines "x y X Y Z [confidence]" where
+/// (x,y) is a query pixel and (X,Y,Z) the matched world point. Produced by an
+/// external matcher (e.g. LightGlue) so only Rust pose estimation is exercised.
+fn read_correspondences(path: &Path) -> Result<Vec<Correspondence2D3D>, Box<dyn Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let t: Vec<f64> = line
+            .split_whitespace()
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if t.len() < 5 {
+            continue;
+        }
+        out.push(Correspondence2D3D {
+            point2d: Point2::new(t[0], t[1]),
+            point3d: Point3::new(t[2], t[3], t[4]),
+            confidence: t.get(5).map(|&c| c as f32),
+        });
+    }
+    Ok(out)
 }
 
 fn frame_base(dataset: &Path, seq: u32, idx: usize) -> PathBuf {
@@ -282,6 +319,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut train_keyframes = 0usize;
     let mut keyframe_index: Vec<KeyframeIndex> = Vec::new();
 
+    // In --correspondences-dir mode the 2D-3D matches are supplied externally, so
+    // the in-process map / descriptor matching is not needed at all.
+    if args.correspondences_dir.is_none() {
     for &seq in &args.train_seqs {
         for idx in (0..args.frames_per_seq).step_by(args.train_stride.max(1)) {
             let base = frame_base(&args.dataset, seq, idx);
@@ -336,6 +376,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    }
     println!(
         "map built: {train_keyframes} train keyframes -> {} landmarks",
         map.landmarks.len()
@@ -366,14 +407,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     let outcomes: Vec<Option<(bool, f64, f64, usize)>> = jobs
         .par_iter()
         .map(|&(seq, idx)| {
-            let (keypoints, descriptors) = frame_features(&args, &extractor, seq, idx).ok()??;
             let base = frame_base(&args.dataset, seq, idx);
             let (r_cw_gt, t_cw_gt) = read_pose(&base.with_extension("pose.txt")).ok()?;
+            let estimator = PnPRansac {
+                reprojection_threshold: args.reproj,
+                iterations: 256,
+                ..PnPRansac::default()
+            };
 
             // Localize. Returns the estimated world->camera pose and inlier count.
-            let localized_pose: Option<(Pose, usize)> = if args.retrieve_topk > 0
-                && !keyframe_index.is_empty()
+            let localized_pose: Option<(Pose, usize)> = if let Some(dir) =
+                &args.correspondences_dir
             {
+                // Externally-matched 2D-3D correspondences (e.g. LightGlue), one
+                // file per query: "x y X Y Z [conf]". Only the Rust PnP+RANSAC is
+                // exercised, so this measures a learned matcher against the
+                // in-pipeline BruteForce baseline under identical pose estimation.
+                let path = dir.join(format!("seq-{seq:02}_frame-{idx:06}.corr.txt"));
+                if !path.exists() {
+                    return None;
+                }
+                let corrs = read_correspondences(&path).ok()?;
+                estimator
+                    .estimate(&corrs, &camera)
+                    .filter(|r| r.inliers.len() >= args.min_inliers)
+                    .map(|r| (r.pose, r.inliers.len()))
+            } else if let Some((keypoints, descriptors)) =
+                frame_features(&args, &extractor, seq, idx).ok()?
+            {
+                if args.retrieve_topk > 0 && !keyframe_index.is_empty() {
                 // Appearance-based retrieval: top-K most similar train keyframes.
                 let qg = normalized_mean(&descriptors);
                 let mut scored: Vec<(f32, usize)> = keyframe_index
@@ -441,25 +503,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                             })
                         })
                         .collect();
-                    let estimator = PnPRansac {
-                        reprojection_threshold: args.reproj,
-                        iterations: 256,
-                        ..PnPRansac::default()
-                    };
                     estimator
                         .estimate(&corrs, &camera)
                         .filter(|r| r.inliers.len() >= args.min_inliers)
                         .map(|r| (r.pose, r.inliers.len()))
                 }
+                } else {
+                    // No retrieval: match against the whole global map.
+                    let query = QueryImage {
+                        camera: camera.clone(),
+                        keypoints,
+                        descriptors,
+                    };
+                    let r = pipeline.localize_with_provider(&query, &provider);
+                    r.pose.filter(|_| r.success).map(|p| (p, r.inlier_count))
+                }
             } else {
-                // No retrieval: match against the whole global map.
-                let query = QueryImage {
-                    camera: camera.clone(),
-                    keypoints,
-                    descriptors,
-                };
-                let r = pipeline.localize_with_provider(&query, &provider);
-                r.pose.filter(|_| r.success).map(|p| (p, r.inlier_count))
+                return None;
             };
 
             let Some((pose, inliers)) = localized_pose else {
