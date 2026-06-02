@@ -391,6 +391,11 @@ pub(crate) struct BlockSymbolic {
     /// block column `c` perturbs exactly the columns on `c`'s path to the root,
     /// so this drives the incremental refactor's affected-set walk.
     parent: Vec<usize>,
+    /// `col_level[j]`: the elimination-tree level of column `j` (one past the
+    /// deepest of its contributors). Redundant with [`Self::levels`] (the bucket
+    /// inverse), kept so an incremental append can level the new column in `O(1)`
+    /// without scanning the buckets.
+    col_level: Vec<usize>,
 }
 
 impl BlockSymbolic {
@@ -421,6 +426,101 @@ impl BlockSymbolic {
         }
         (0..self.n).filter(|&j| marked[j]).collect()
     }
+
+    /// Grow the symbolic factorization by one block variable — the new highest
+    /// index `n` — coupled to the existing columns `edges_to` (its block-row
+    /// neighbours `< n`). Returns the block columns whose numeric factor must be
+    /// (re)computed, sorted ascending, so the caller can grow its `col_vals` /
+    /// `diag_inv` by one and call [`refactor_incremental`] with the augmented
+    /// triplets to finish the update.
+    ///
+    /// This is the *structural* half of an incremental smoother (iSAM2's Bayes-
+    /// tree edit). Because `n` is the largest index it is eliminated last — a new
+    /// root — so adding it leaves every existing column's elimination-tree parent
+    /// and row pattern untouched **except** along the fill paths from its
+    /// neighbours up to their roots: each such column gains row `n`, and the roots
+    /// reached are re-parented onto `n`. The work is therefore `O(Σ path length)`,
+    /// not `O(n)`: a chain append (one neighbour, an old root) is `O(1)`; a loop
+    /// edge to a far-back variable costs the elimination path between them. The
+    /// result is **identical** to re-running [`analyze`] on the augmented pattern
+    /// (a test asserts every field matches), so the incremental and batch paths
+    /// produce the same factor.
+    ///
+    /// `edges_to` must contain only indices `< n`; duplicates are ignored.
+    #[allow(dead_code)]
+    pub(crate) fn append_variable(&mut self, edges_to: &[usize]) -> Vec<usize> {
+        let n = self.n;
+        let mut neighbours: Vec<usize> = edges_to.to_vec();
+        neighbours.sort_unstable();
+        neighbours.dedup();
+        debug_assert!(
+            neighbours.iter().all(|&k| k < n),
+            "append_variable neighbours must be existing (lower) columns"
+        );
+
+        // Grow the per-column structures by the new column `n`.
+        self.col_rows.push(vec![n]);
+        self.contributors.push(Vec::new());
+        self.parent.push(NONE);
+        self.a_pattern.push(vec![n]);
+        // Original lower entry `(n, k)` lands in existing column `k`'s pattern;
+        // `n` is the largest row, so it stays sorted on a push.
+        for &k in &neighbours {
+            self.a_pattern[k].push(n);
+        }
+
+        // Symbolic fill for the new top row `n`: the Gilbert–Ng–Peyton column
+        // walk restricted to row `n`. Walk each neighbour up the existing
+        // elimination tree, appending `n` to every column on the path (these are
+        // `contributors[n]`, and `n` is the largest row so each `col_rows[k]`
+        // stays sorted), and re-parent each root reached onto `n` — fusing the
+        // etree-build and column-pattern steps that the batch `symbolic` does in
+        // two passes, valid here because `n` sits on top of the whole tree.
+        let mut marked = vec![false; n + 1];
+        marked[n] = true;
+        let mut contributors_n: Vec<usize> = Vec::new();
+        for &start in &neighbours {
+            let mut k = start;
+            while !marked[k] {
+                marked[k] = true;
+                self.col_rows[k].push(n);
+                contributors_n.push(k);
+                match self.parent[k] {
+                    NONE => {
+                        self.parent[k] = n;
+                        break;
+                    }
+                    p => k = p,
+                }
+            }
+        }
+        contributors_n.sort_unstable();
+        self.contributors[n] = contributors_n;
+
+        // Level the new column (existing columns keep their level — none of their
+        // contributors changed) and bucket it; `n` is the largest index so the
+        // bucket stays sorted.
+        let level_n = self.contributors[n]
+            .iter()
+            .map(|&k| self.col_level[k] + 1)
+            .max()
+            .unwrap_or(0);
+        self.col_level.push(level_n);
+        if level_n == self.levels.len() {
+            self.levels.push(vec![n]);
+        } else {
+            self.levels[level_n].push(n);
+        }
+
+        self.n = n + 1;
+
+        // The numerically affected columns: the new column plus every column that
+        // gained row `n` (its below-diagonal `L[n][k]` block is new). Sorted, with
+        // `n` last.
+        let mut affected = self.contributors[n].clone();
+        affected.push(n);
+        affected
+    }
 }
 
 /// Symbolic analysis: from the scalar COO sparsity pattern (values ignored)
@@ -438,7 +538,7 @@ pub(crate) fn analyze(
     let n = dim / block_size;
     let (block_lower, a_pattern) = assemble_pattern(triplets, n, block_size);
     let (col_rows, contributors, parent) = symbolic(&block_lower, n);
-    let levels = build_levels(&contributors, n);
+    let (levels, col_level) = build_levels(&contributors, n);
     BlockSymbolic {
         block_size,
         n,
@@ -447,6 +547,7 @@ pub(crate) fn analyze(
         levels,
         a_pattern,
         parent,
+        col_level,
     }
 }
 
@@ -896,8 +997,10 @@ fn factor_level_parallel<const B: usize>(
 /// level among its contributors — and bucket the columns by level. Columns in
 /// the same bucket are mutually independent (no contributor edge), so a bucket
 /// can be factored in parallel. Contributors are strictly-earlier columns, so a
-/// single forward sweep suffices and each bucket comes out sorted.
-fn build_levels(contributors: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
+/// single forward sweep suffices and each bucket comes out sorted. Returns the
+/// buckets and the per-column level (the latter kept on [`BlockSymbolic`] so an
+/// incremental append can level the new column without rescanning).
+fn build_levels(contributors: &[Vec<usize>], n: usize) -> (Vec<Vec<usize>>, Vec<usize>) {
     let mut level = vec![0usize; n];
     let mut max_level = 0;
     for j in 0..n {
@@ -913,7 +1016,7 @@ fn build_levels(contributors: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
     for (j, &lv) in level.iter().enumerate() {
         levels[lv].push(j);
     }
-    levels
+    (levels, level)
 }
 
 /// Block sparsity pattern from scalar COO triplets (values ignored). Returns
@@ -1276,8 +1379,9 @@ mod tests {
         // 0,1 are leaves; 2 depends on {0,1}; 3 depends on {2}; 4 is another
         // leaf; 5 depends on {3,4}.
         let contributors = vec![vec![], vec![], vec![0, 1], vec![2], vec![], vec![3, 4]];
-        let levels = build_levels(&contributors, 6);
+        let (levels, level) = build_levels(&contributors, 6);
         assert_eq!(levels, vec![vec![0, 1, 4], vec![2], vec![3], vec![5]]);
+        assert_eq!(level, vec![0, 0, 1, 2, 0, 3]);
     }
 
     /// Build the diagonally-dominant SPD triplets of a `side × side` 2D-grid
@@ -1810,6 +1914,182 @@ mod tests {
             "  incr @mid (affected {:>5}) {mid_ms:.4} ms => {:.1}x",
             aff_mid.len(),
             full_ms / mid_ms
+        );
+    }
+
+    /// Growing the symbolic factorization by one block variable
+    /// ([`BlockSymbolic::append_variable`]) must produce a structure **identical**
+    /// to re-running [`analyze`] on the augmented pattern, and the factor carried
+    /// forward incrementally must match a full refactor. Exercises both the trivial
+    /// chain append (new root over the previous one) and a loop edge back to a
+    /// far-earlier variable (which fills every column on the path between them).
+    #[test]
+    fn append_variable_matches_full_analyze_and_factor() {
+        let b = 6usize;
+        let lambda = 1e-3;
+        let mut rng = Rng(0x9a73);
+        // Symmetric off-diagonal block + a strong block-diagonal, appended to `t`.
+        let mut couple = |t: &mut Vec<(usize, usize, f64)>, bi: usize, bj: usize, rng: &mut Rng| {
+            for r in 0..b {
+                for c in 0..b {
+                    let v = 0.05 * rng.next_f64();
+                    t.push((bi * b + r, bj * b + c, v));
+                    t.push((bj * b + c, bi * b + r, v));
+                }
+            }
+        };
+        let diag = |t: &mut Vec<(usize, usize, f64)>, bj: usize| {
+            for d in 0..b {
+                t.push((bj * b + d, bj * b + d, 20.0));
+            }
+        };
+        let seqfac = |t: &[(usize, usize, f64)], sym: &BlockSymbolic| {
+            refactor_numeric::<6>(sym, t, lambda, 1, usize::MAX, usize::MAX, usize::MAX)
+                .expect("SPD")
+        };
+
+        // Base chain of 10 blocks.
+        let n0 = 10usize;
+        let mut t: Vec<(usize, usize, f64)> = Vec::new();
+        for j in 0..n0 {
+            diag(&mut t, j);
+        }
+        for j in 0..n0 - 1 {
+            couple(&mut t, j, j + 1, &mut rng);
+        }
+        let mut sym = analyze(&t, n0 * b, b);
+        let (mut cv, mut di) = seqfac(&t, &sym);
+
+        // Append var 10 (chain edge to 9), then var 11 (chain edge to 10 + a loop
+        // edge back to 2 — the fill case that grows several columns' patterns).
+        for (nv, nbrs) in [(10usize, vec![9usize]), (11usize, vec![10usize, 2usize])] {
+            diag(&mut t, nv);
+            for &k in &nbrs {
+                couple(&mut t, nv, k, &mut rng);
+            }
+            let affected = sym.append_variable(&nbrs);
+            cv.push(Vec::new());
+            di.push(SMatrix::<f64, 6, 6>::zeros());
+            refactor_incremental::<6>(&sym, &t, lambda, &affected, &mut cv, &mut di)
+                .expect("incremental append-factor SPD");
+        }
+
+        // The incrementally grown structure must equal a from-scratch analysis.
+        let full = analyze(&t, sym.n * b, b);
+        assert_eq!(sym.n, full.n, "n");
+        assert_eq!(sym.col_rows, full.col_rows, "col_rows");
+        assert_eq!(sym.contributors, full.contributors, "contributors");
+        assert_eq!(sym.levels, full.levels, "levels");
+        assert_eq!(sym.a_pattern, full.a_pattern, "a_pattern");
+        assert_eq!(sym.parent, full.parent, "parent");
+        assert_eq!(sym.col_level, full.col_level, "col_level");
+
+        // …and the incrementally maintained factor must match a full refactor.
+        let (cvf, dif) = seqfac(&t, &full);
+        assert!(
+            cv == cvf && di == dif,
+            "incremental append+factor must match a full analyze+refactor bit-for-bit"
+        );
+    }
+
+    /// A/B timing of streaming graph growth: building a pose chain by appending
+    /// keyframes one at a time, incrementally ([`BlockSymbolic::append_variable`] +
+    /// [`refactor_incremental`] with the per-step delta), vs. the cost of a single
+    /// full [`analyze`] + refactor at the final size. Each chain append is
+    /// `O(1)` structurally, so streaming-building the whole graph costs on the
+    /// order of one batch factor — whereas the naive online loop (a full
+    /// analyze+refactor every keyframe) would pay that batch cost `K` times. Run
+    /// with `cargo test -p visloc-slam --release -- --ignored --nocapture
+    /// bench_append_vs_full_analyze`.
+    #[test]
+    #[ignore]
+    fn bench_append_vs_full_analyze() {
+        use std::time::Instant;
+        let b = 6usize;
+        let lambda = 1e-3;
+        let base_n = 2000usize;
+        let final_n = 4000usize;
+        let k = final_n - base_n;
+
+        let mut rng = Rng(0x5151);
+        let diag_at = |t: &mut Vec<(usize, usize, f64)>, bj: usize| {
+            for d in 0..b {
+                t.push((bj * b + d, bj * b + d, 20.0));
+            }
+        };
+
+        // Base chain of `base_n` blocks.
+        let mut base: Vec<(usize, usize, f64)> = Vec::new();
+        for j in 0..base_n {
+            diag_at(&mut base, j);
+        }
+        for j in 0..base_n - 1 {
+            for r in 0..b {
+                for c in 0..b {
+                    let v = 0.05 * rng.next_f64();
+                    base.push(((j + 1) * b + r, j * b + c, v));
+                    base.push((j * b + c, (j + 1) * b + r, v));
+                }
+            }
+        }
+        let mut sym = analyze(&base, base_n * b, b);
+        let (mut cv, mut di) =
+            refactor_numeric::<6>(&sym, &base, lambda, 1, usize::MAX, usize::MAX, usize::MAX)
+                .unwrap();
+
+        // Stream `k` chain appends, each with only its delta triplets (column
+        // nv-1's diagonal + the new coupling, and column nv's diagonal).
+        let t0 = Instant::now();
+        for _ in 0..k {
+            let nv = sym.n;
+            let mut delta: Vec<(usize, usize, f64)> = Vec::with_capacity(3 * b * b);
+            for d in 0..b {
+                delta.push(((nv - 1) * b + d, (nv - 1) * b + d, 20.0));
+                delta.push((nv * b + d, nv * b + d, 20.0));
+            }
+            for r in 0..b {
+                for c in 0..b {
+                    let v = 0.05 * rng.next_f64();
+                    delta.push((nv * b + r, (nv - 1) * b + c, v));
+                    delta.push(((nv - 1) * b + c, nv * b + r, v));
+                }
+            }
+            let affected = sym.append_variable(&[nv - 1]);
+            cv.push(Vec::new());
+            di.push(SMatrix::<f64, 6, 6>::zeros());
+            refactor_incremental::<6>(&sym, &delta, lambda, &affected, &mut cv, &mut di).unwrap();
+        }
+        let stream_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        // One full analyze + refactor at the final size (the per-step cost the
+        // naive online loop would pay K times).
+        let mut full_t = base.clone();
+        for j in base_n..final_n {
+            diag_at(&mut full_t, j);
+            for r in 0..b {
+                for c in 0..b {
+                    let v = 0.05 * rng.next_f64();
+                    full_t.push((j * b + r, (j - 1) * b + c, v));
+                    full_t.push(((j - 1) * b + c, j * b + r, v));
+                }
+            }
+        }
+        let reps = 10;
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let s = analyze(&full_t, final_n * b, b);
+            let _ =
+                refactor_numeric::<6>(&s, &full_t, lambda, 1, usize::MAX, usize::MAX, usize::MAX)
+                    .unwrap();
+        }
+        let batch_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        println!(
+            "stream-build {base_n} -> {final_n} ({k} chain appends): {stream_ms:.1} ms total ({:.1} us/append)",
+            stream_ms * 1e3 / k as f64,
+        );
+        println!(
+            "  one batch analyze+refactor @ {final_n}: {batch_ms:.1} ms  (naive rebuild-every-step ~= {k} x that)"
         );
     }
 }
