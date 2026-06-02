@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 
 use nalgebra::Point3;
+use rayon::prelude::*;
 
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
@@ -72,9 +73,20 @@ pub struct VoLoopClosureConfig {
     /// seed a stable `k=64` vocabulary. `None` uses the full strided pool.
     pub vocab_max_pool: Option<usize>,
     /// Minimum temporal gap (in frames) between the two frames of a loop
-    /// candidate. Rejects the trivial near-diagonal matches that carry no new
-    /// constraint.
+    /// candidate. A cheap floor; the portable gate is `min_path_length`.
     pub min_frame_gap: usize,
+    /// Optional minimum accumulated VO path length (metres travelled along the
+    /// trajectory) between a candidate's two frames. This is the *frame-rate-
+    /// and speed-independent* loop gate: a loop only corrects drift if drift had
+    /// room to accumulate between the revisit and its original observation, and
+    /// drift grows with distance travelled — not with frame index. A small
+    /// frame gap during slow motion (e.g. a hovering UAV at 20 Hz) travels
+    /// almost nothing and yields odometry-consistent "loops" that contribute no
+    /// correction; gating on path length rejects them without per-dataset
+    /// frame-gap tuning. `None` disables the gate (frame gap only). Measured on
+    /// EuRoC MH_03: frame-gap 30 alone left ATE unchanged (2.46 m), while a few
+    /// metres of required travel recovers the genuine long-range revisits.
+    pub min_path_length: Option<f64>,
     /// Minimum VLAD cosine similarity for a frame pair to become a candidate.
     pub min_similarity: f32,
     /// Keep at most this many earlier frames per query frame as candidates
@@ -107,6 +119,7 @@ impl Default for VoLoopClosureConfig {
             vocab_descriptor_stride: 4,
             vocab_max_pool: Some(60_000),
             min_frame_gap: 50,
+            min_path_length: Some(5.0),
             min_similarity: 0.20,
             max_candidates_per_frame: 3,
             max_verifications: Some(400),
@@ -228,8 +241,10 @@ fn compute_frame_globals(
     )
     .ok_or(VoLoopClosureError::VocabularyBuildFailed)?;
 
+    // VLAD per frame is independent → parallelize (each is a full nearest-
+    // centroid pass over that frame's descriptors). `collect` preserves order.
     Ok(left_features
-        .iter()
+        .par_iter()
         .map(|features| vlad(&features.descriptors, &vocab))
         .collect())
 }
@@ -248,30 +263,37 @@ pub fn detect_loop_candidates(
     min_similarity: f32,
     max_candidates_per_frame: usize,
 ) -> Vec<LoopCandidatePair> {
-    let mut out = Vec::new();
     if min_frame_gap == 0 || max_candidates_per_frame == 0 {
-        return out;
+        return Vec::new();
     }
-    for newer in min_frame_gap..globals.len() {
-        let last_older = newer - min_frame_gap;
-        let mut scored: Vec<(usize, f32)> = (0..=last_older)
-            .map(|older| (older, cosine_similarity(&globals[newer], &globals[older])))
-            .filter(|&(_, similarity)| similarity >= min_similarity)
-            .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-        for &(older, similarity) in scored.iter().take(max_candidates_per_frame) {
-            out.push(LoopCandidatePair {
-                older,
-                newer,
-                similarity,
+    // Each query frame scans its earlier prefix independently — the O(N²·dim)
+    // retrieval is the dominant cost on long sequences, so parallelize across
+    // query frames. `flat_map_iter` over an indexed range keeps the output
+    // order deterministic.
+    (min_frame_gap..globals.len())
+        .into_par_iter()
+        .flat_map_iter(|newer| {
+            let last_older = newer - min_frame_gap;
+            let mut scored: Vec<(usize, f32)> = (0..=last_older)
+                .map(|older| (older, cosine_similarity(&globals[newer], &globals[older])))
+                .filter(|&(_, similarity)| similarity >= min_similarity)
+                .collect();
+            scored.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.0.cmp(&b.0))
             });
-        }
-    }
-    out
+            scored
+                .into_iter()
+                .take(max_candidates_per_frame)
+                .map(move |(older, similarity)| LoopCandidatePair {
+                    older,
+                    newer,
+                    similarity,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Geometrically verify one candidate pair. Matches the newer frame's left
@@ -338,6 +360,20 @@ fn verify_loop_candidate(
     })
 }
 
+/// Accumulated trajectory length up to each frame: `cum[0] = 0`,
+/// `cum[i] = cum[i-1] + ‖center_i − center_{i-1}‖`. The arc length between two
+/// frames `a ≤ b` is `cum[b] − cum[a]`.
+fn cumulative_path_length(poses: &[Pose]) -> Vec<f64> {
+    let mut cum = vec![0.0; poses.len()];
+    for i in 1..poses.len() {
+        let step = (poses[i].camera_center_world().coords
+            - poses[i - 1].camera_center_world().coords)
+            .norm();
+        cum[i] = cum[i - 1] + step;
+    }
+    cum
+}
+
 /// Close loops on an open stereo-VO trajectory and return the globally
 /// consistent poses.
 ///
@@ -361,12 +397,22 @@ pub fn close_loops_on_vo_trajectory(
     }
 
     let globals = compute_frame_globals(left_features, config)?;
-    let candidates = detect_loop_candidates(
+    let mut candidates = detect_loop_candidates(
         &globals,
         config.min_frame_gap,
         config.min_similarity,
         config.max_candidates_per_frame,
     );
+
+    // Path-length gate: keep only candidates whose two frames are separated by
+    // enough accumulated travel for drift to have built up. Speed-/frame-rate-
+    // independent, so it needs no per-dataset frame-gap tuning.
+    if let Some(min_path) = config.min_path_length {
+        if min_path > 0.0 {
+            let cum = cumulative_path_length(poses);
+            candidates.retain(|c| cum[c.newer] - cum[c.older] >= min_path);
+        }
+    }
 
     let matcher = BruteForceMatcher {
         ratio: config.match_ratio,
@@ -385,21 +431,26 @@ pub fn close_loops_on_vo_trajectory(
         to_verify.truncate(cap);
     }
 
-    let mut loop_constraints = Vec::new();
-    for candidate in to_verify {
-        if let Some(constraint) = verify_loop_candidate(
-            camera,
-            poses,
-            left_features,
-            stereo_per_frame,
-            candidate.older,
-            candidate.newer,
-            &matcher,
-            &verifier,
-        ) {
-            loop_constraints.push(constraint);
-        }
-    }
+    // Each candidate's geometric check (a brute-force descriptor match +
+    // PnP RANSAC, O(N_kp²·dim)) is independent and is the other dominant cost,
+    // so verify in parallel. The PnP RANSAC seed is fixed, so results are
+    // thread-count-independent; `collect` preserves the (similarity-sorted)
+    // order so the pose graph's edge order is deterministic.
+    let loop_constraints: Vec<LoopClosureConstraint> = to_verify
+        .par_iter()
+        .filter_map(|candidate| {
+            verify_loop_candidate(
+                camera,
+                poses,
+                left_features,
+                stereo_per_frame,
+                candidate.older,
+                candidate.newer,
+                &matcher,
+                &verifier,
+            )
+        })
+        .collect();
 
     if loop_constraints.is_empty() {
         return Ok(VoLoopClosureResult {

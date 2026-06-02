@@ -77,6 +77,7 @@ struct CliArgs {
     final_global_ba_iterations: usize,
     loop_closure: bool,
     loop_min_frame_gap: usize,
+    loop_min_path_length: Option<f64>,
     loop_min_similarity: f32,
     loop_vocab_k: usize,
     loop_max_candidates_per_frame: usize,
@@ -621,6 +622,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.loop_closure {
         let loop_cfg = VoLoopClosureConfig {
             min_frame_gap: args.loop_min_frame_gap,
+            min_path_length: args.loop_min_path_length,
             min_similarity: args.loop_min_similarity,
             vocab_k: args.loop_vocab_k,
             max_candidates_per_frame: args.loop_max_candidates_per_frame,
@@ -1095,6 +1097,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut final_global_ba_iterations: usize = 30;
     let mut loop_closure: bool = false;
     let mut loop_min_frame_gap: usize = 50;
+    let mut loop_min_path_length: Option<f64> = Some(5.0);
     let mut loop_min_similarity: f32 = 0.20;
     let mut loop_vocab_k: usize = 64;
     let mut loop_max_candidates_per_frame: usize = 3;
@@ -1293,6 +1296,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 loop_min_frame_gap = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--loop-min-path-length" => {
+                let v: f64 = args.remove(i + 1).parse()?;
+                loop_min_path_length = if v > 0.0 { Some(v) } else { None };
+                args.remove(i);
+            }
             "--loop-min-similarity" => {
                 loop_min_similarity = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1478,6 +1486,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         final_global_ba_iterations,
         loop_closure,
         loop_min_frame_gap,
+        loop_min_path_length,
         loop_min_similarity,
         loop_vocab_k,
         loop_max_candidates_per_frame,
@@ -1606,6 +1615,10 @@ fn print_usage() {
          dense global BA cannot. No-op on a loop-free trajectory.\n \
          [--loop-min-frame-gap <n>]  minimum frame gap between the two frames of \
          a loop candidate (default 50)\n \
+         [--loop-min-path-length <m>]  minimum accumulated VO travel (metres) \
+         between a loop candidate's two frames; the speed/frame-rate-independent \
+         loop gate (drift accrues with distance, not frame index). 0 = disable. \
+         (default 5)\n \
          [--loop-min-similarity <x>]  minimum VLAD cosine similarity to propose a \
          candidate (default 0.20)\n \
          [--loop-vocab-k <n>]  VLAD vocabulary size / k-means centroids \

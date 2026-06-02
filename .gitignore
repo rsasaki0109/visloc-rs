@@ -2,3 +2,6 @@
 **/*.rs.bk
 # Benchmark datasets fetched by scripts/fetch_pgo_g2o_datasets.sh
 /datasets/
+
+__pycache__/
+*.pyc
