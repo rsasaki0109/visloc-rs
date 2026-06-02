@@ -71,6 +71,7 @@ struct CliArgs {
     marginalize_window: Option<usize>,
     covisibility_radius: usize,
     incremental: bool,
+    relin_threshold: f64,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -85,6 +86,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut marginalize_window: Option<usize> = None;
     let mut covisibility_radius: usize = 0;
     let mut incremental = false;
+    let mut relin_threshold: f64 = 0.0;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -134,6 +136,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 incremental = true;
                 args.remove(i);
             }
+            "--relin-threshold" => {
+                relin_threshold = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -152,6 +158,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         marginalize_window,
         covisibility_radius,
         incremental,
+        relin_threshold,
     })
 }
 
@@ -698,7 +705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sequence its corrected trajectory should match the batch plain solve above.
     if args.incremental {
         let cfg = IncrementalSmootherConfig {
-            relin_threshold: 0.0,
+            relin_threshold: args.relin_threshold,
             step_tolerance: 1e-7,
             max_inner_iters: 25,
         };
