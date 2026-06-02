@@ -103,7 +103,7 @@ use visloc_rs::vision::features::{
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::matching::{
-    BruteForceMatcher, Matcher, MutualSoftmaxConfig, MutualSoftmaxMatcher,
+    BruteForceMatcher, DescriptorMatch, Matcher, MutualSoftmaxConfig, MutualSoftmaxMatcher,
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::stereo_vo::{
@@ -117,12 +117,12 @@ use visloc_rs::vision::stereo_vo::{StereoFeature, StereoVoError};
 use visloc_rs::vision::two_view::TwoViewCorrespondence;
 #[cfg(feature = "image-io")]
 use visloc_rs::{
-    relative_world_to_camera, scan_pairwise_loop_closures, write_colmap_binary_model_for_3dgs,
-    write_colmap_text_model_for_3dgs, BaConfig, BaStereoObservation, BundleAdjustment,
-    EssentialMatrixLoopClosureVerifier, LinearSolver, LoopClosureCandidate, LoopClosureConstraint,
-    LoopClosureVerifier, PairwiseKeyframeView, PairwiseLoopClosureScannerConfig, PoseGraph,
-    PoseGraphSe3Config, PoseTrajectory, RobustKernel, TrackingEvent, TrackingState,
-    TrajectoryAlignment, TrajectorySample,
+    refine_stereo_vo_with_ba, relative_world_to_camera, scan_pairwise_loop_closures,
+    write_colmap_binary_model_for_3dgs, write_colmap_text_model_for_3dgs, BaConfig,
+    BaStereoObservation, BundleAdjustment, EssentialMatrixLoopClosureVerifier, LinearSolver,
+    LoopClosureCandidate, LoopClosureConstraint, LoopClosureVerifier, PairwiseKeyframeView,
+    PairwiseLoopClosureScannerConfig, PoseGraph, PoseGraphSe3Config, PoseTrajectory, RobustKernel,
+    StereoVoBaConfig, TrackingEvent, TrackingState, TrajectoryAlignment, TrajectorySample,
 };
 
 #[cfg(feature = "image-io")]
@@ -139,6 +139,12 @@ struct CliArgs {
     frame_stride: usize,
     min_pnp_inliers: usize,
     run_stereo_ba: bool,
+    /// When `> 0`, replace the one-shot global BA with sliding-window local BA
+    /// of this window size (overlapping windows, each fixing its first pose —
+    /// the previous window's refined boundary). Scales to long sequences the
+    /// one-shot BA cannot, and propagates drift correction window-to-window via
+    /// [`refine_stereo_vo_with_ba`]'s `window_size`.
+    window_ba: usize,
     /// Run the stereo BA refinement with Graduated Non-Convexity outlier
     /// rejection (`BundleAdjustment::optimize_gnc`) instead of the default
     /// Huber M-estimator. GNC anneals from a convex (all-inlier) surrogate to
@@ -277,6 +283,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut frame_stride: usize = 4;
     let mut min_pnp_inliers: usize = 12;
     let mut run_stereo_ba = true;
+    let mut window_ba: usize = 0;
     let mut ba_gnc = false;
     let mut ba_gnc_kernel = GncKernel::TruncatedLeastSquares;
     let mut ba_gnc_c: f64 = 4.0;
@@ -352,6 +359,13 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--min-pnp-inliers" => {
                 min_pnp_inliers = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--window-ba" => {
+                let value = args.remove(i + 1);
+                window_ba = value.parse().map_err(|_| {
+                    format!("--window-ba expects a positive window size, got {value}")
+                })?;
                 args.remove(i);
             }
             "--no-stereo-ba" => {
@@ -537,6 +551,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         frame_stride,
         min_pnp_inliers,
         run_stereo_ba,
+        window_ba,
         ba_gnc,
         ba_gnc_kernel,
         ba_gnc_c,
@@ -862,190 +877,252 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ba.fix_pose(0);
 
-        // Build multi-frame tracks via projection-guided extension. For
-        // each frame's stereo features, project the landmark forward
-        // through subsequent VO poses and search for descriptor-matching
-        // stereo features near the projected pixel. This produces tracks
-        // that span many more frames than the pair-chain alternative, so
-        // BA gets long-baseline constraints to attack rotation drift.
-        //
-        // Search radius scales with observed per-pair translation, with a
-        // 20 px floor that holds even when motion is small. The
-        // frontend computes this from its `per_pair_translation_m` log.
-        let search_radius_px = adaptive_track_search_radius_px(&per_pair_translation_m);
-        println!("track-extension: search_radius_px={:.1}", search_radius_px,);
-        let track_cfg = TrackExtensionConfig {
-            search_radius_px,
-            ratio: 0.8,
-            max_extension: 30,
-            deduplicate: true,
-        };
-        let tracks = extend_stereo_tracks_via_projection(
-            &vo_poses,
-            &left_features,
-            &stereo_per_frame,
-            &camera,
-            &track_cfg,
-        );
-        let long_tracks: Vec<_> = tracks
-            .iter()
-            .filter(|t| t.observations.len() >= 3)
-            .collect();
-        let track_lengths: Vec<usize> = long_tracks.iter().map(|t| t.observations.len()).collect();
-        println!(
-            "stereo tracks (projection-guided): total={} long(≥3)={} mean_len={:.1} max_len={}",
-            tracks.len(),
-            long_tracks.len(),
-            if track_lengths.is_empty() {
-                0.0
-            } else {
-                track_lengths.iter().sum::<usize>() as f64 / track_lengths.len() as f64
-            },
-            track_lengths.iter().copied().max().unwrap_or(0),
-        );
-
-        // Collect every stereo observation first so the optional outlier
-        // injection can address them by their insertion index — which, because
-        // the demo adds no monocular observations, equals the index into the
-        // GNC `observation_weights` vector. That alignment is what lets us score
-        // the GNC classification against the known injected labels below.
-        let mut stereo_obs: Vec<BaStereoObservation> = Vec::new();
-        for (lm_id, track) in (0_u64..).zip(long_tracks.iter()) {
-            ba.add_landmark(lm_id, track.landmark_world);
-            for obs in &track.observations {
-                let l = left_features[obs.frame_index].keypoints[obs.left_index];
-                let r = right_features[obs.frame_index].keypoints[obs.right_index];
-                stereo_obs.push(BaStereoObservation {
-                    keyframe_id: obs.frame_index as u64,
-                    landmark_id: lm_id,
-                    xy: Point2::new(l.x, l.y),
-                    u_right: r.x,
-                });
-            }
-        }
-
-        // Optional controlled contamination: corrupt N randomly-chosen stereo
-        // observations by a large fixed pixel offset on both the left `u` and
-        // the right `u`, simulating gross wrong temporal data associations. The
-        // sampler is deterministic in the seed, so the Huber and GNC runs being
-        // compared see *identical* corruption — the standard robust-SLAM
-        // protocol (cf. `pgo_g2o_robust_benchmark`), here on real KITTI tracks.
-        let injected: std::collections::HashSet<usize> =
-            if args.ba_inject_outliers > 0 && !stereo_obs.is_empty() {
-                let set = sample_distinct_indices(
-                    stereo_obs.len(),
-                    args.ba_inject_outliers,
-                    args.ba_inject_seed,
-                );
-                for &idx in &set {
-                    let o = &mut stereo_obs[idx];
-                    o.xy.coords.x += args.ba_inject_offset_px;
-                    o.u_right += args.ba_inject_offset_px;
-                }
-                println!(
-                    "BA outlier injection: corrupted {} / {} stereo observations \
-                     (offset={:.1}px seed={})",
-                    set.len(),
-                    stereo_obs.len(),
-                    args.ba_inject_offset_px,
-                    args.ba_inject_seed,
-                );
-                set
-            } else {
-                std::collections::HashSet::new()
-            };
-
-        for o in stereo_obs {
-            ba.add_stereo_observation(o);
-        }
-
-        // Sparse Cholesky scales to the n_frames × stereo_per_frame size.
-        // Robust kernel down-weights residual outliers (e.g., points that
-        // were correctly triangulated within their own frame but matched
-        // to the wrong temporal target during VO chaining).
-        // Bound BA iterations: each LM step builds the Schur reduction over
-        // every (pose-pair, landmark) cross block. For ~3000 landmarks /
-        // ~6000 stereo observations on 100 keyframes the per-iteration cost
-        // is dominated by the inner loop in `build_normal_equations`, so 5
-        // LM iterations is enough to consume most of the cost reduction
-        // without spending many minutes on diminishing returns.
-        // 15 LM iterations: with long-track landmarks the per-iteration cost
-        // is dominated by the Schur reduction over (pose-pair, landmark)
-        // cross blocks; 5 iterations consume most of the cost reduction
-        // but BA still has work to do on rotation drift.
-        let ba_config = BaConfig {
-            max_iterations: 15,
-            linear_solver: LinearSolver::Sparse,
-            robust_kernel: RobustKernel::Huber { delta: 4.0 },
-            ..BaConfig::default()
-        };
-
-        // Both back-ends mutate `ba.poses` in place, so the pose read-back and
-        // ATE/CSV plumbing below is shared. Normalize the two result types to
-        // one tuple: (initial_cost, final_cost, iterations, converged, GNC
-        // extras). The Huber path keeps `RobustKernel::Huber`; the GNC path
-        // ignores `ba_config.robust_kernel` and anneals its own surrogate, so
-        // wrong VO-chaining correspondences are switched off, not down-weighted.
-        let outcome: Result<(f64, f64, usize, bool, Option<GncBaReport>), _> = if args.ba_gnc {
-            let gnc_cfg = GncConfig {
-                kernel: args.ba_gnc_kernel,
-                c: args.ba_gnc_c,
-                auto_scale: if args.ba_gnc_auto_c {
-                    Some(AUTO_SCALE_K)
-                } else {
-                    None
+        #[allow(clippy::type_complexity)]
+        let outcome: Result<
+            (f64, f64, usize, bool, Option<GncBaReport>),
+            Box<dyn std::error::Error>,
+        > = if args.window_ba > 0 {
+            // Sliding-window local BA: overlapping `window_ba`-frame windows,
+            // each fixing its first pose (the prior window's refined boundary).
+            // Scales to long sequences the one-shot global BA cannot, and
+            // propagates drift correction window-to-window. Temporal matches are
+            // brute-force descriptor matches between consecutive left frames.
+            let matcher = BruteForceMatcher { ratio: Some(0.8) };
+            let temporal_matches: Vec<Vec<DescriptorMatch>> = (0..vo_poses.len().saturating_sub(1))
+                .map(|i| {
+                    matcher.match_descriptors(
+                        &left_features[i].descriptors,
+                        &left_features[i + 1].descriptors,
+                    )
+                })
+                .collect();
+            let cfg = StereoVoBaConfig {
+                window_size: Some(args.window_ba),
+                ba_config: BaConfig {
+                    max_iterations: 12,
+                    robust_kernel: RobustKernel::Huber { delta: 3.0 },
+                    linear_solver: LinearSolver::Sparse,
+                    ..BaConfig::default()
                 },
-                auto_scale_readapt: args.ba_gnc_readapt,
-                ..GncConfig::default()
+                ..StereoVoBaConfig::default()
             };
             println!(
-                "stereo BA back-end: GNC (kernel={:?} c={:.2}px auto_c={} readapt={})",
-                gnc_cfg.kernel, gnc_cfg.c, args.ba_gnc_auto_c, args.ba_gnc_readapt,
+                "stereo BA back-end: sliding-window local BA (window={})",
+                args.window_ba,
             );
-            ba.optimize_gnc(&ba_config, &gnc_cfg).map(|r| {
-                let inliers = r.inlier_count(0.5);
-                let outliers = r.outlier_count(0.5);
-                // `observation_weights` is monocular-first then stereo; the demo
-                // adds no monocular observations, so weight index i maps to the
-                // i-th injected/clean stereo observation. Score the w<0.5
-                // rejections against the known injected labels.
-                let mut injected_rejected = 0usize;
-                let mut clean_rejected = 0usize;
-                for (i, w) in r.observation_weights.iter().enumerate() {
-                    if w.is_finite() && *w < 0.5 {
-                        if injected.contains(&i) {
-                            injected_rejected += 1;
-                        } else {
-                            clean_rejected += 1;
-                        }
-                    }
+            refine_stereo_vo_with_ba(
+                &camera,
+                baseline,
+                &vo_poses,
+                &left_features,
+                &right_features,
+                &stereo_per_frame,
+                &temporal_matches,
+                &cfg,
+            )
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map(|r| {
+                // Load the refined poses into `ba` so the shared read-back /
+                // CSV / GT-eval path below works unchanged.
+                for (i, p) in r.refined_poses.iter().enumerate() {
+                    ba.add_pose(i as u64, p.clone());
                 }
                 (
-                    r.initial_cost,
-                    r.final_cost,
-                    r.outer_iterations,
-                    r.converged,
-                    Some(GncBaReport {
-                        inlier_scale: r.inlier_scale,
-                        inliers,
-                        outliers,
-                        observations: r.observation_count,
-                        injected_total: injected.len(),
-                        injected_rejected,
-                        clean_rejected,
-                    }),
-                )
-            })
-        } else {
-            ba.optimize(&ba_config).map(|r| {
-                (
-                    r.initial_cost,
-                    r.final_cost,
-                    r.iterations.len(),
-                    r.converged,
+                    r.ba_result.initial_cost,
+                    r.ba_result.final_cost,
+                    r.ba_result.iterations.len(),
+                    r.ba_result.converged,
                     None,
                 )
             })
+        } else {
+            // Build multi-frame tracks via projection-guided extension. For
+            // each frame's stereo features, project the landmark forward
+            // through subsequent VO poses and search for descriptor-matching
+            // stereo features near the projected pixel. This produces tracks
+            // that span many more frames than the pair-chain alternative, so
+            // BA gets long-baseline constraints to attack rotation drift.
+            //
+            // Search radius scales with observed per-pair translation, with a
+            // 20 px floor that holds even when motion is small. The
+            // frontend computes this from its `per_pair_translation_m` log.
+            let search_radius_px = adaptive_track_search_radius_px(&per_pair_translation_m);
+            println!("track-extension: search_radius_px={:.1}", search_radius_px,);
+            let track_cfg = TrackExtensionConfig {
+                search_radius_px,
+                ratio: 0.8,
+                max_extension: 30,
+                deduplicate: true,
+            };
+            let tracks = extend_stereo_tracks_via_projection(
+                &vo_poses,
+                &left_features,
+                &stereo_per_frame,
+                &camera,
+                &track_cfg,
+            );
+            let long_tracks: Vec<_> = tracks
+                .iter()
+                .filter(|t| t.observations.len() >= 3)
+                .collect();
+            let track_lengths: Vec<usize> =
+                long_tracks.iter().map(|t| t.observations.len()).collect();
+            println!(
+                "stereo tracks (projection-guided): total={} long(≥3)={} mean_len={:.1} max_len={}",
+                tracks.len(),
+                long_tracks.len(),
+                if track_lengths.is_empty() {
+                    0.0
+                } else {
+                    track_lengths.iter().sum::<usize>() as f64 / track_lengths.len() as f64
+                },
+                track_lengths.iter().copied().max().unwrap_or(0),
+            );
+
+            // Collect every stereo observation first so the optional outlier
+            // injection can address them by their insertion index — which, because
+            // the demo adds no monocular observations, equals the index into the
+            // GNC `observation_weights` vector. That alignment is what lets us score
+            // the GNC classification against the known injected labels below.
+            let mut stereo_obs: Vec<BaStereoObservation> = Vec::new();
+            for (lm_id, track) in (0_u64..).zip(long_tracks.iter()) {
+                ba.add_landmark(lm_id, track.landmark_world);
+                for obs in &track.observations {
+                    let l = left_features[obs.frame_index].keypoints[obs.left_index];
+                    let r = right_features[obs.frame_index].keypoints[obs.right_index];
+                    stereo_obs.push(BaStereoObservation {
+                        keyframe_id: obs.frame_index as u64,
+                        landmark_id: lm_id,
+                        xy: Point2::new(l.x, l.y),
+                        u_right: r.x,
+                    });
+                }
+            }
+
+            // Optional controlled contamination: corrupt N randomly-chosen stereo
+            // observations by a large fixed pixel offset on both the left `u` and
+            // the right `u`, simulating gross wrong temporal data associations. The
+            // sampler is deterministic in the seed, so the Huber and GNC runs being
+            // compared see *identical* corruption — the standard robust-SLAM
+            // protocol (cf. `pgo_g2o_robust_benchmark`), here on real KITTI tracks.
+            let injected: std::collections::HashSet<usize> =
+                if args.ba_inject_outliers > 0 && !stereo_obs.is_empty() {
+                    let set = sample_distinct_indices(
+                        stereo_obs.len(),
+                        args.ba_inject_outliers,
+                        args.ba_inject_seed,
+                    );
+                    for &idx in &set {
+                        let o = &mut stereo_obs[idx];
+                        o.xy.coords.x += args.ba_inject_offset_px;
+                        o.u_right += args.ba_inject_offset_px;
+                    }
+                    println!(
+                        "BA outlier injection: corrupted {} / {} stereo observations \
+                     (offset={:.1}px seed={})",
+                        set.len(),
+                        stereo_obs.len(),
+                        args.ba_inject_offset_px,
+                        args.ba_inject_seed,
+                    );
+                    set
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            for o in stereo_obs {
+                ba.add_stereo_observation(o);
+            }
+
+            // Sparse Cholesky scales to the n_frames × stereo_per_frame size.
+            // Robust kernel down-weights residual outliers (e.g., points that
+            // were correctly triangulated within their own frame but matched
+            // to the wrong temporal target during VO chaining).
+            // Bound BA iterations: each LM step builds the Schur reduction over
+            // every (pose-pair, landmark) cross block. For ~3000 landmarks /
+            // ~6000 stereo observations on 100 keyframes the per-iteration cost
+            // is dominated by the inner loop in `build_normal_equations`, so 5
+            // LM iterations is enough to consume most of the cost reduction
+            // without spending many minutes on diminishing returns.
+            // 15 LM iterations: with long-track landmarks the per-iteration cost
+            // is dominated by the Schur reduction over (pose-pair, landmark)
+            // cross blocks; 5 iterations consume most of the cost reduction
+            // but BA still has work to do on rotation drift.
+            let ba_config = BaConfig {
+                max_iterations: 15,
+                linear_solver: LinearSolver::Sparse,
+                robust_kernel: RobustKernel::Huber { delta: 4.0 },
+                ..BaConfig::default()
+            };
+
+            // Both back-ends mutate `ba.poses` in place, so the pose read-back and
+            // ATE/CSV plumbing below is shared. Normalize the two result types to
+            // one tuple: (initial_cost, final_cost, iterations, converged, GNC
+            // extras). The Huber path keeps `RobustKernel::Huber`; the GNC path
+            // ignores `ba_config.robust_kernel` and anneals its own surrogate, so
+            // wrong VO-chaining correspondences are switched off, not down-weighted.
+            (if args.ba_gnc {
+                let gnc_cfg = GncConfig {
+                    kernel: args.ba_gnc_kernel,
+                    c: args.ba_gnc_c,
+                    auto_scale: if args.ba_gnc_auto_c {
+                        Some(AUTO_SCALE_K)
+                    } else {
+                        None
+                    },
+                    auto_scale_readapt: args.ba_gnc_readapt,
+                    ..GncConfig::default()
+                };
+                println!(
+                    "stereo BA back-end: GNC (kernel={:?} c={:.2}px auto_c={} readapt={})",
+                    gnc_cfg.kernel, gnc_cfg.c, args.ba_gnc_auto_c, args.ba_gnc_readapt,
+                );
+                ba.optimize_gnc(&ba_config, &gnc_cfg).map(|r| {
+                    let inliers = r.inlier_count(0.5);
+                    let outliers = r.outlier_count(0.5);
+                    // `observation_weights` is monocular-first then stereo; the demo
+                    // adds no monocular observations, so weight index i maps to the
+                    // i-th injected/clean stereo observation. Score the w<0.5
+                    // rejections against the known injected labels.
+                    let mut injected_rejected = 0usize;
+                    let mut clean_rejected = 0usize;
+                    for (i, w) in r.observation_weights.iter().enumerate() {
+                        if w.is_finite() && *w < 0.5 {
+                            if injected.contains(&i) {
+                                injected_rejected += 1;
+                            } else {
+                                clean_rejected += 1;
+                            }
+                        }
+                    }
+                    (
+                        r.initial_cost,
+                        r.final_cost,
+                        r.outer_iterations,
+                        r.converged,
+                        Some(GncBaReport {
+                            inlier_scale: r.inlier_scale,
+                            inliers,
+                            outliers,
+                            observations: r.observation_count,
+                            injected_total: injected.len(),
+                            injected_rejected,
+                            clean_rejected,
+                        }),
+                    )
+                })
+            } else {
+                ba.optimize(&ba_config).map(|r| {
+                    (
+                        r.initial_cost,
+                        r.final_cost,
+                        r.iterations.len(),
+                        r.converged,
+                        None,
+                    )
+                })
+            })
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         };
         match outcome {
             Ok((initial_cost, final_cost, iters, converged, gnc_extra)) => {
@@ -1610,6 +1687,7 @@ struct FrontendState {
 }
 
 #[cfg(feature = "image-io")]
+#[allow(clippy::too_many_arguments)]
 fn run_stereo_vo_frontend(
     choice: StereoFrontendChoice,
     camera: &visloc_rs::Camera,
