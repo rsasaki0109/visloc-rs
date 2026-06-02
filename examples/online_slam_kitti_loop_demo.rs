@@ -49,11 +49,12 @@ use std::path::{Path, PathBuf};
 use nalgebra::{UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
 use visloc_rs::slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
+use visloc_rs::slam::incremental_pose_graph::{IncrementalPoseGraph, IncrementalSmootherConfig};
 use visloc_rs::slam::pcm::{self, LoopMeasurement, PcmConfig};
 use visloc_rs::slam::sparsification::{kl_divergence, sparsify_chow_liu, sparsify_diagonal};
 use visloc_rs::tracking::PoseTrajectory;
 use visloc_rs::{
-    relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
+    relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind,
     PoseGraphSe3Config,
 };
 
@@ -69,6 +70,7 @@ struct CliArgs {
     pcm: bool,
     marginalize_window: Option<usize>,
     covisibility_radius: usize,
+    incremental: bool,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -82,6 +84,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pcm = false;
     let mut marginalize_window: Option<usize> = None;
     let mut covisibility_radius: usize = 0;
+    let mut incremental = false;
 
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let i = 0;
@@ -127,6 +130,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 covisibility_radius = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--incremental" => {
+                incremental = true;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -144,7 +151,66 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         pcm,
         marginalize_window,
         covisibility_radius,
+        incremental,
     })
+}
+
+/// Drive the [`IncrementalPoseGraph`] iSAM-style smoother keyframe by keyframe:
+/// each step appends the new pose (drifted estimate + its sequential edge) plus
+/// any loop closures whose later endpoint is this keyframe, and incrementally
+/// re-optimizes — growing the factor by one variable and refactoring only the
+/// columns the new constraints touch, instead of re-solving the whole graph. The
+/// online analogue of the batch solve in `main`; its corrected trajectory should
+/// match the batch's on this real loopy sequence. Returns the corrected
+/// trajectory, wall time, and the total relinearized-column count (the local
+/// factor work it did versus a full `O(n)` refactor per keyframe).
+fn incremental_smoother_run(
+    drifted: &[Pose],
+    noisy_edges: &[SE3],
+    loops: &[LoopClosureConstraint],
+    n: usize,
+    cfg: IncrementalSmootherConfig,
+) -> Result<(Vec<Pose>, std::time::Duration, usize), Box<dyn std::error::Error>> {
+    // Loops are added at their later (`to`) endpoint — the keyframe at which both
+    // endpoints first coexist (constraints are built with from < to).
+    let mut loops_by_to: BTreeMap<u64, Vec<&LoopClosureConstraint>> = BTreeMap::new();
+    for c in loops {
+        loops_by_to.entry(c.to_keyframe_id).or_default().push(c);
+    }
+
+    let start = std::time::Instant::now();
+    let mut inc = IncrementalPoseGraph::new(0, drifted[0].clone(), cfg);
+    let mut total_relin = 0usize;
+    for k in 1..n {
+        let id = k as u64;
+        let mut edges = vec![PoseGraphEdge {
+            from: (k - 1) as u64,
+            to: id,
+            measurement: noisy_edges[k - 1].clone(),
+            kind: PoseGraphEdgeKind::Sequential,
+            weight: 1.0,
+            information: None,
+        }];
+        if let Some(cs) = loops_by_to.get(&id) {
+            for c in cs {
+                edges.push(PoseGraphEdge {
+                    from: c.from_keyframe_id,
+                    to: c.to_keyframe_id,
+                    measurement: c.relative_pose.clone(),
+                    kind: PoseGraphEdgeKind::LoopClosure,
+                    weight: (c.inlier_count as f64).max(1.0),
+                    information: None,
+                });
+            }
+        }
+        let stats = inc.add_keyframe(id, drifted[k].clone(), edges)?;
+        total_relin += stats.relinearized_columns;
+    }
+    let elapsed = start.elapsed();
+    let trajectory: Vec<Pose> = (0..n as u64)
+        .map(|id| inc.graph.poses[&id].clone())
+        .collect();
+    Ok((trajectory, elapsed, total_relin))
 }
 
 /// Small deterministic linear-congruential RNG (no `rand` dependency, so the
@@ -624,6 +690,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (p_mean, p_rmse, p_max) = ate(&plain_corrected, &keyframes);
     println!("ATE drifted      mean={d_mean:.3} rmse={d_rmse:.3} max={d_max:.3} (m)");
     println!("ATE plain-PGO    mean={p_mean:.3} rmse={p_rmse:.3} max={p_max:.3} (m)");
+
+    // --- Incremental iSAM-style smoother (online, keyframe by keyframe) ---
+    // Drives `IncrementalPoseGraph`: each keyframe grows the factor by one
+    // variable and refactors only the columns its constraints touch (fluid
+    // relinearization), instead of re-solving the whole graph. On this real loopy
+    // sequence its corrected trajectory should match the batch plain solve above.
+    if args.incremental {
+        let cfg = IncrementalSmootherConfig {
+            relin_threshold: 0.0,
+            step_tolerance: 1e-7,
+            max_inner_iters: 25,
+        };
+        // Only the genuine loops drive the smoother (wrong-loop robustness is the
+        // batch GNC/PCM story; here the question is incremental-vs-batch parity).
+        let genuine: Vec<LoopClosureConstraint> = loop_constraints
+            .iter()
+            .zip(&loop_is_wrong)
+            .filter(|(_, &wrong)| !wrong)
+            .map(|(c, _)| c.clone())
+            .collect();
+        let (inc_traj, inc_time, inc_relin) =
+            incremental_smoother_run(&drifted, &noisy_edges, &genuine, n, cfg)?;
+        let (i_mean, i_rmse, i_max) = ate(&inc_traj, &keyframes);
+        // Per-keyframe agreement with the batch plain solve (same gauge anchor).
+        let max_pose_gap = inc_traj
+            .iter()
+            .zip(&plain_corrected)
+            .map(|(a, b)| (a.camera_center_world() - b.camera_center_world()).norm())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "[incremental] keyframes={n} genuine_loops={} time={:.0}ms relinearized_columns={inc_relin}",
+            genuine.len(),
+            inc_time.as_secs_f64() * 1e3,
+        );
+        println!("ATE incremental  mean={i_mean:.3} rmse={i_rmse:.3} max={i_max:.3} (m)");
+        println!(
+            "  incremental vs batch plain: ATE rmse {p_rmse:.3} vs {i_rmse:.3} m, max per-keyframe centre gap {max_pose_gap:.4} m (should match — both Gauss-Newton on the same graph)"
+        );
+    }
 
     // --- Fixed-lag / sliding-window smoother (incremental) ---
     // Demonstrates the trade-off on a REAL loopy sequence: a bounded window caps
