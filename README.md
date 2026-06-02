@@ -1,11 +1,12 @@
 <h1 align="center">visloc-rs</h1>
 
 <p align="center">
-  <strong>Visual localization, stereo VO, and visual-inertial SLAM building blocks in Rust.</strong><br>
-  COLMAP/SfM map reuse, PnP + RANSAC localization, KITTI stereo VO,
-  EuRoC visual-inertial SLAM with an empirically documented adaptive
-  IMU/pose tracker, loop-candidate diagnostics, bundle-adjusted
-  trajectory demos, and an opt-in in-Rust SuperPoint ONNX path.
+  <strong>GPS-denied visual &amp; visual-inertial localization for robots and UAVs &mdash; in pure Rust.</strong><br>
+  Camera- and IMU-driven positioning for where GNSS is jammed, occluded, or
+  absent: COLMAP/SfM map reuse, PnP + RANSAC localization, KITTI stereo VO,
+  EuRoC MAV (UAV) visual-inertial SLAM with an empirically documented adaptive
+  IMU/pose tracker, loop-candidate diagnostics, bundle-adjusted trajectory
+  demos, and an opt-in in-Rust SuperPoint ONNX path.
 </p>
 
 <p align="center">
@@ -51,16 +52,20 @@
   <a href="PLAN.md"><strong>Handoff plan</strong></a>
 </p>
 
-`visloc-rs` is a Rust foundation library for map-based visual localization and
-the building blocks above it: load an existing COLMAP/SfM map, match query
-features to landmarks, estimate camera pose with PnP + RANSAC. Optional
-pipelines grow toward stereo VO, online VI-SLAM with an adaptive IMU/pose
-tracker, loop-candidate reporting, pose-graph optimization, and bundle
-adjustment.
+`visloc-rs` is a Rust foundation library for **GPS-denied localization** -
+estimating where a robot or UAV is from cameras and an IMU when GNSS is jammed,
+occluded, or simply absent: indoors, in urban canyons, under bridges, or in
+low-altitude flight. It centers on map-based visual localization and the
+building blocks above it: load an existing COLMAP/SfM map, match query features
+to landmarks, estimate camera pose with PnP + RANSAC. Optional pipelines grow
+toward stereo VO, online VI-SLAM with an adaptive IMU/pose tracker,
+loop-candidate reporting, pose-graph optimization, and bundle adjustment.
 
-The project is built for robotics localization work where you want inspectable
-geometry, explicit diagnostics, reusable trait boundaries, and an honest
-empirical record before committing to a heavy runtime or a full SLAM stack.
+The project is built for robotics and UAV localization work where you want
+inspectable geometry, explicit diagnostics, reusable trait boundaries, and an
+honest empirical record before committing to a heavy runtime or a full SLAM
+stack. The aerial side is exercised on the EuRoC MAV (micro-aerial-vehicle)
+datasets - GPS-denied indoor drone flight with stereo + IMU.
 
 ## Why visloc-rs?
 
@@ -71,6 +76,10 @@ foundation** you can read, extend, and trust - with an honest empirical record
 instead of leaderboard claims. There is no established pure-Rust visual
 localization / VI-SLAM stack today; this is meant to be that building-block layer.
 
+- **GPS-denied / UAV focus** - aimed at positioning when GNSS is jammed,
+  occluded, or absent (indoor, urban-canyon, low-altitude flight); validated on
+  the EuRoC MAV drone datasets and KITTI, with GNSS treated as an optional prior
+  rather than a requirement.
 - **Pure Rust, memory-safe** - no C++ toolchain, no OpenCV / Pangolin / Ceres to build.
 - **No mandatory ML runtime** - default crates need no PyTorch / ONNX / CUDA; learned
   frontends (SuperPoint / LightGlue, in-Rust ONNX) are strictly opt-in behind features.
@@ -85,7 +94,7 @@ localization / VI-SLAM stack today; this is meant to be that building-block laye
 | --- | --- | --- | --- |
 | Language | **Rust** | C++ | C++ |
 | Mandatory heavy runtime | none (opt-in ONNX) | OpenCV, Pangolin | OpenCV, Ceres |
-| Primary focus | map-reuse localization + VO / VI building blocks | real-time VI-SLAM | offline SfM / MVS |
+| Primary focus | GPS-denied localization (map reuse + VO / VI building blocks) | real-time VI-SLAM | offline SfM / MVS |
 | Maturity | young foundation (v0.1) | research / production | production |
 | License | MIT OR Apache-2.0 | GPLv3 | BSD |
 
