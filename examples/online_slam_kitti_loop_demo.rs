@@ -50,6 +50,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
 use visloc_rs::slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
 use visloc_rs::slam::pcm::{self, LoopMeasurement, PcmConfig};
+use visloc_rs::slam::sparsification::{kl_divergence, sparsify_chow_liu, sparsify_diagonal};
 use visloc_rs::tracking::PoseTrajectory;
 use visloc_rs::{
     relative_world_to_camera, LoopClosureConstraint, PoseGraph, PoseGraphEdgeKind,
@@ -201,9 +202,10 @@ fn ate(estimate: &[Pose], truth: &[Pose]) -> (f64, f64, f64) {
 /// clique prior) stays sparse instead of accumulating fill-in.
 ///
 /// Returns `(trajectory, loops_applied, loops_dropped, max_active_poses,
-/// peak_prior_offdiag_blocks, elapsed)`. Each keyframe's reported pose is its
-/// estimate at the last solve before it was marginalized (frozen), or the final
-/// estimate if still active.
+/// peak_prior_offdiag_blocks, elapsed, shootout)`. Each keyframe's reported pose is
+/// its estimate at the last solve before it was marginalized (frozen), or the final
+/// estimate if still active. `shootout` is populated only on the DENSE run (the one
+/// that carries the un-sparsified clique priors), scored on the peak-fill snapshot.
 #[allow(clippy::type_complexity)]
 fn windowed_fixed_lag(
     drifted: &[Pose],
@@ -212,8 +214,18 @@ fn windowed_fixed_lag(
     window: usize,
     n: usize,
     sparsify: bool,
-) -> Result<(Vec<Pose>, usize, usize, usize, usize, std::time::Duration), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        Vec<Pose>,
+        usize,
+        usize,
+        usize,
+        usize,
+        std::time::Duration,
+        SparsifierShootout,
+    ),
+    Box<dyn std::error::Error>,
+> {
     use std::collections::BTreeMap;
     let start = std::time::Instant::now();
     // Loops grouped by their later (`to`) endpoint — the step at which both
@@ -227,6 +239,7 @@ fn windowed_fixed_lag(
     let mut trajectory: Vec<Pose> = drifted.to_vec();
     let (mut applied, mut dropped, mut max_active) = (0usize, 0usize, 0usize);
     let mut peak_prior_blocks = 0usize;
+    let mut shootout = SparsifierShootout::default();
 
     for k in 0..n {
         let id = k as u64;
@@ -264,8 +277,16 @@ fn windowed_fixed_lag(
         }
         // Fill-in carried in the window: total nonzero off-diagonal 6×6 prior
         // blocks across all current priors (a dense clique prior over m poses has
-        // m(m−1)/2; its Chow-Liu tree has m−1).
-        peak_prior_blocks = peak_prior_blocks.max(count_offdiag_prior_blocks(&graph));
+        // m(m−1)/2; its Chow-Liu tree has m−1). On the dense run, snapshot the
+        // three-way sparsifier shootout at the peak-fill configuration so the KL
+        // figures match the reported peak block count.
+        let blocks = count_offdiag_prior_blocks(&graph);
+        if blocks > peak_prior_blocks {
+            peak_prior_blocks = blocks;
+            if !sparsify {
+                shootout = shootout_over_priors(&graph);
+            }
+        }
     }
     Ok((
         trajectory,
@@ -274,7 +295,65 @@ fn windowed_fixed_lag(
         max_active,
         peak_prior_blocks,
         start.elapsed(),
+        shootout,
     ))
+}
+
+/// A head-to-head of three marginalization-prior sparsifiers, scored on the dense
+/// clique priors a covisibility window accumulates: the exact **dense** prior
+/// (`KL=0`, `m(m−1)/2` off-diagonal blocks), the **Chow-Liu tree** (`m−1` blocks),
+/// and the **diagonal/independence** approximation (`0` blocks). KL divergence to
+/// the dense prior measures the information lost; block count measures the sparsity
+/// won. Chow-Liu's KL is always ≤ the diagonal's (it optimizes over all trees, the
+/// edgeless one included), so this quantifies, on REAL KITTI priors, exactly what
+/// the tree's retained couplings buy over simply dropping all correlations.
+#[derive(Default, Clone)]
+struct SparsifierShootout {
+    /// Priors that are genuine fill-in cliques (≥3 poses ⇒ dense > tree).
+    clique_priors: usize,
+    /// Largest blanket clique (pose count) seen at the peak snapshot.
+    max_clique_nodes: usize,
+    /// Total off-diagonal blocks under each method, summed over the snapshot priors.
+    dense_blocks: usize,
+    chow_liu_blocks: usize,
+    /// KL divergence to the dense prior, summed and worst-case, per method.
+    chow_liu_kl_sum: f64,
+    chow_liu_kl_max: f64,
+    diagonal_kl_sum: f64,
+    diagonal_kl_max: f64,
+}
+
+/// Score the dense priors currently in `graph` with the Chow-Liu and diagonal
+/// sparsifiers (see [`SparsifierShootout`]). A prior's `gradient` is passed through
+/// only to preserve the mean; the KL of the covariance structure depends on
+/// `information` alone, so this measures the pure sparsification loss.
+fn shootout_over_priors(graph: &PoseGraph) -> SparsifierShootout {
+    let mut s = SparsifierShootout::default();
+    for p in &graph.priors {
+        let m = p.ids.len();
+        if m < 2 {
+            continue;
+        }
+        s.max_clique_nodes = s.max_clique_nodes.max(m);
+        s.dense_blocks += m * (m - 1) / 2;
+        if m >= 3 {
+            s.clique_priors += 1;
+        }
+        if let Some(clt) = sparsify_chow_liu(&p.information, &p.gradient, 6) {
+            s.chow_liu_blocks += clt.edges.len();
+            if let Some(kl) = kl_divergence(&p.information, &clt.lambda) {
+                s.chow_liu_kl_sum += kl;
+                s.chow_liu_kl_max = s.chow_liu_kl_max.max(kl);
+            }
+        }
+        if let Some(diag) = sparsify_diagonal(&p.information, &p.gradient, 6) {
+            if let Some(kl) = kl_divergence(&p.information, &diag.lambda) {
+                s.diagonal_kl_sum += kl;
+                s.diagonal_kl_max = s.diagonal_kl_max.max(kl);
+            }
+        }
+    }
+    s
 }
 
 /// Total number of nonzero off-diagonal 6×6 blocks across all of `graph`'s
@@ -557,9 +636,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // each kept pose's marginal, so the ATE should match while the prior
         // density (and re-solve cost) drops wherever an in-window loop closure
         // made a marginalized pose's blanket a clique.
-        let (dense, applied, dropped, max_active, dense_blocks, dense_t) =
+        let (dense, applied, dropped, max_active, dense_blocks, dense_t, shootout) =
             windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n, false)?;
-        let (sparse, _, _, _, sparse_blocks, sparse_t) =
+        let (sparse, _, _, _, sparse_blocks, sparse_t, _) =
             windowed_fixed_lag(&drifted, &noisy_edges, &loop_constraints, window, n, true)?;
         let (d_mean, d_rmse, d_max) = ate(&dense, &keyframes);
         let (s_mean, s_rmse, s_max) = ate(&sparse, &keyframes);
@@ -587,6 +666,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              sparsify — the long-range KITTI loops are dropped before both endpoints share the \
              window."
         );
+
+        // --- Sparsifier shootout: pit the three prior-sparsification methods on
+        // the REAL dense clique priors this window accumulates, scored by KL
+        // divergence to the exact dense prior and by off-diagonal block count. ---
+        if shootout.max_clique_nodes >= 2 {
+            println!(
+                "[sparsifier shootout] on the peak-fill snapshot: {} clique prior(s) (≥3 poses), \
+                 densest blanket = {} poses",
+                shootout.clique_priors, shootout.max_clique_nodes,
+            );
+            println!("  method     off-diag-blocks  KL-to-dense(sum / worst)");
+            println!(
+                "  dense      {:>15}  {:>10.3e} / {:>10.3e}   (exact reference)",
+                shootout.dense_blocks, 0.0, 0.0,
+            );
+            println!(
+                "  chow-liu   {:>15}  {:>10.3e} / {:>10.3e}   (KL-optimal tree)",
+                shootout.chow_liu_blocks, shootout.chow_liu_kl_sum, shootout.chow_liu_kl_max,
+            );
+            println!(
+                "  diagonal   {:>15}  {:>10.3e} / {:>10.3e}   (drop all correlations)",
+                0, shootout.diagonal_kl_sum, shootout.diagonal_kl_max,
+            );
+            let ratio = if shootout.chow_liu_kl_sum > 0.0 {
+                shootout.diagonal_kl_sum / shootout.chow_liu_kl_sum
+            } else {
+                f64::INFINITY
+            };
+            println!(
+                "NOTE: all three preserve every kept pose's marginal AND the mean; they differ \
+                 only in which cross-pose correlations survive. Dropping ALL of them (diagonal) \
+                 loses {ratio:.1}× more information (KL to the dense prior) than the Chow-Liu tree, \
+                 which keeps the N−1 strongest at the same zero-fill-growth budget — so on a real \
+                 marginalization prior the tree's couplings are not optional padding: they carry \
+                 most of the cross-pose information the dense clique held. Dense is exact but its \
+                 fill ({} blocks) is exactly what the sliding window is trying not to accumulate.",
+                shootout.dense_blocks,
+            );
+        }
     }
 
     // --- Robust (GNC) solve, only meaningful when outliers were injected ---
