@@ -15,7 +15,7 @@
 //! The 21 information-matrix entries are the row-major upper triangle of the
 //! 6×6 matrix in g2o's `[translation; rotation]` ordering, which matches this
 //! crate's [`SE3::log`] tangent layout `[ρ; ω]`, so no axis permutation is
-//! needed.
+//! needed — but a measurement-adjoint congruence IS (see Convention).
 //!
 //! # Convention
 //!
@@ -27,6 +27,16 @@
 //! `Z⁻¹`. With that mapping a consistent g2o graph yields exactly zero
 //! residual (verified in the unit tests), and [`write_g2o`] inverts back so a
 //! load/save round-trip is the identity.
+//!
+//! Inverting the measurement also rotates the solver's residual by the
+//! measurement adjoint — `r_visloc = −Ad(Z)·e_g2o` — so to keep the *weighted*
+//! cost `rᵀΩr` equal to g2o's `e_g2oᵀΩe_g2o` the information is carried by the
+//! matching congruence `Ω → Ad(Z⁻¹)ᵀ Ω Ad(Z⁻¹)` on read (undone on write). This
+//! is a no-op for isotropic `Ω` (hence consistent / unit-info graphs were always
+//! correct) but is essential for the anisotropic information of datasets like
+//! sphere2500 / cubicle, where omitting it makes visloc minimize a subtly
+//! different (adjoint-twisted) cost and converge to a worse optimum than the
+//! g2o / GTSAM reference.
 
 use std::path::Path;
 
@@ -108,7 +118,19 @@ pub fn read_g2o(path: impl AsRef<Path>) -> Result<PoseGraph, G2oError> {
                 } else {
                     PoseGraphEdgeKind::LoopClosure
                 };
-                graph.add_edge_with_information(from, to, measurement.inverse(), kind, information);
+                // Inverting the measurement (Z → Z⁻¹, module convention) rotates
+                // the solver's residual by the measurement adjoint:
+                // r_visloc = −Ad(Z)·e_g2o (e_g2o = log(Z⁻¹ T_i⁻¹ T_j)). For the
+                // weighted cost rᵀΩr to equal g2o's e_g2oᵀΩe_g2o, the information
+                // must be carried by the same congruence: Ω → Ad(Z⁻¹)ᵀ Ω Ad(Z⁻¹)
+                // (= Ad(Z)⁻ᵀ Ω Ad(Z)⁻¹). For isotropic Ω this is a no-op (Ad is
+                // orthogonal up to the translation shear, and Ω·I commutes), which
+                // is why consistent/zero-residual graphs were unaffected; for the
+                // anisotropic info of sphere2500 / cubicle it is essential.
+                let m_inv = measurement.inverse();
+                let ad = m_inv.adjoint();
+                let information = ad.transpose() * information * ad;
+                graph.add_edge_with_information(from, to, m_inv, kind, information);
             }
             "FIX" => {
                 fixed = Some(next_u64(&mut tok, lineno, "fix id")?);
@@ -150,9 +172,15 @@ pub fn write_g2o(graph: &PoseGraph, path: impl AsRef<Path>) -> std::io::Result<(
     for edge in &graph.edges {
         let z = edge.measurement.inverse();
         let q = z.rotation.into_inner();
-        let omega = edge
-            .information
-            .unwrap_or_else(|| Matrix6::identity() * edge.weight);
+        // Undo the adjoint congruence applied on read so the file round-trips:
+        // the stored Ω is Ad(Z⁻¹)ᵀ Ω_g2o Ad(Z⁻¹), so Ω_g2o = Ad(Z)ᵀ Ω Ad(Z)
+        // with Z = edge.measurement.inverse() (= the g2o measurement).
+        let ad = z.adjoint();
+        let omega = ad.transpose()
+            * edge
+                .information
+                .unwrap_or_else(|| Matrix6::identity() * edge.weight)
+            * ad;
         let mut line = format!(
             "EDGE_SE3:QUAT {from} {to} {x} {y} {z} {qx} {qy} {qz} {qw}",
             from = edge.from,
@@ -395,6 +423,78 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// With an ANISOTROPIC information matrix, the loaded cost must equal g2o's
+    /// own weighted residual `e_g2oᵀ Ω e_g2o` (`e_g2o = log(Z⁻¹ T_i⁻¹ T_j)`).
+    ///
+    /// This guards the adjoint-congruence the reader applies to `Ω`: inverting
+    /// the measurement (the storage convention) rotates the solver's residual by
+    /// `Ad(Z)`, so the information must be carried by the matching congruence
+    /// `Ω → Ad(Z⁻¹)ᵀ Ω Ad(Z⁻¹)` or the weighted cost — and hence the optimum —
+    /// silently differs from the reference (g2o / GTSAM) for any non-isotropic
+    /// `Ω`. A consistent graph has zero residual and so cannot catch this; a
+    /// non-zero residual with distinct translation/rotation weights does.
+    #[test]
+    fn anisotropic_g2o_cost_matches_the_g2o_convention() {
+        use nalgebra::Vector6;
+
+        // Two raw g2o world poses with a deliberate (non-zero) edge residual.
+        let t0 = SE3::new(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let t1 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3),
+            Vector3::new(1.0, 0.5, -0.3),
+        );
+        // A measurement that does NOT match T_0⁻¹ T_1 (so e_g2o ≠ 0), with both a
+        // rotation and a translation so Ad(Z) genuinely mixes the two blocks.
+        let z = SE3::new(
+            UnitQuaternion::from_euler_angles(-0.05, 0.15, 0.2),
+            Vector3::new(0.8, 0.2, 0.1),
+        );
+        // Strongly anisotropic info (sphere2500-like): translation ≪ rotation.
+        let omega =
+            Matrix6::<f64>::from_diagonal(&Vector6::new(10.0, 10.0, 10.0, 400.0, 400.0, 99.0));
+
+        // g2o-convention residual and weighted cost (the reference value).
+        let e_g2o = z.inverse().compose(&t0.inverse()).compose(&t1).log();
+        let expected = (e_g2o.transpose() * omega * e_g2o)[(0, 0)];
+
+        let fmt_se3 = |t: &SE3| {
+            let q = t.rotation.into_inner();
+            format!(
+                "{} {} {} {} {} {} {}",
+                t.translation.x, t.translation.y, t.translation.z, q.i, q.j, q.k, q.w
+            )
+        };
+        let info_str: String = {
+            let mut s = String::new();
+            for row in 0..6 {
+                for col in row..6 {
+                    s.push_str(&format!(" {}", omega[(row, col)]));
+                }
+            }
+            s
+        };
+        let text = format!(
+            "VERTEX_SE3:QUAT 0 {}\nVERTEX_SE3:QUAT 1 {}\nFIX 0\nEDGE_SE3:QUAT 0 1 {}{}\n",
+            fmt_se3(&t0),
+            fmt_se3(&t1),
+            fmt_se3(&z),
+            info_str,
+        );
+        let dir = std::env::temp_dir().join(format!("visloc_g2o_aniso_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aniso.g2o");
+        std::fs::write(&path, text).unwrap();
+
+        let graph = read_g2o(&path).unwrap();
+        let cost = graph.se3_cost();
+        assert!(
+            (cost - expected).abs() < 1e-9,
+            "loaded anisotropic cost {cost} must match g2o convention {expected}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Perturb one vertex of an otherwise-consistent graph; the SE(3) solver
     /// must drive the cost back down toward zero.
     #[test]
@@ -473,6 +573,96 @@ mod tests {
             result.final_cost < 1e-9,
             "solver should recover the consistent graph, final cost {}",
             result.final_cost
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Marquardt diagonal damping (`H + λ·diag(H)`) is a correct LM variant: on a
+    /// solvable graph it must reach the SAME optimum as the default identity
+    /// damping (`H + λI`). It differs only in the convergence path / robustness on
+    /// ill-conditioned graphs, never in the answer on a well-posed one.
+    #[test]
+    fn diagonal_damping_reaches_the_same_optimum_as_identity() {
+        use crate::DampingMode;
+
+        let t0 = SE3::new(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let t1 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.3),
+            Vector3::new(1.0, 0.0, 0.0),
+        );
+        let t2 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, -0.2),
+            Vector3::new(2.0, 0.5, 0.0),
+        );
+        let z01 = t0.inverse().compose(&t1);
+        let z12 = t1.inverse().compose(&t2);
+        let z02 = t0.inverse().compose(&t2);
+        let t2_bad = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.4),
+            Vector3::new(1.3, -0.4, 0.2),
+        );
+        let fmt_se3 = |t: &SE3| {
+            let q = t.rotation.into_inner();
+            format!(
+                "{} {} {} {} {} {} {}",
+                t.translation.x, t.translation.y, t.translation.z, q.i, q.j, q.k, q.w
+            )
+        };
+        // Anisotropic info so identity vs diagonal damping are genuinely different.
+        let info: String = {
+            let vals = [10.0, 10.0, 10.0, 400.0, 400.0, 99.0];
+            let mut s = String::new();
+            for row in 0..6 {
+                for col in row..6 {
+                    s.push_str(&format!(" {}", if row == col { vals[row] } else { 0.0 }));
+                }
+            }
+            s
+        };
+        let text = format!(
+            "VERTEX_SE3:QUAT 0 {}\nVERTEX_SE3:QUAT 1 {}\nVERTEX_SE3:QUAT 2 {}\nFIX 0\n\
+             EDGE_SE3:QUAT 0 1 {}{}\nEDGE_SE3:QUAT 1 2 {}{}\nEDGE_SE3:QUAT 0 2 {}{}\n",
+            fmt_se3(&t0),
+            fmt_se3(&t1),
+            fmt_se3(&t2_bad),
+            fmt_se3(&z01),
+            info,
+            fmt_se3(&z12),
+            info,
+            fmt_se3(&z02),
+            info,
+        );
+        let dir = std::env::temp_dir().join(format!("visloc_g2o_diag_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("diag.g2o");
+        std::fs::write(&path, text).unwrap();
+
+        let lm = |damping| PoseGraphSe3Config {
+            initial_lambda: Some(1e-3),
+            damping,
+            ..PoseGraphSe3Config::default()
+        };
+        let mut g_id = read_g2o(&path).unwrap();
+        let r_id = g_id
+            .optimize_se3_iterative(&lm(DampingMode::Identity))
+            .unwrap();
+        let mut g_diag = read_g2o(&path).unwrap();
+        let r_diag = g_diag
+            .optimize_se3_iterative(&lm(DampingMode::Diagonal))
+            .unwrap();
+
+        assert!(r_id.converged && r_diag.converged);
+        assert!(
+            r_diag.final_cost < 1e-9,
+            "diagonal-damped solve should recover the consistent graph, got {}",
+            r_diag.final_cost
+        );
+        assert!(
+            (r_id.final_cost - r_diag.final_cost).abs() < 1e-6,
+            "identity {} vs diagonal {} should reach the same optimum",
+            r_id.final_cost,
+            r_diag.final_cost
         );
 
         std::fs::remove_dir_all(&dir).ok();
