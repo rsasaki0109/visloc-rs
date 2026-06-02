@@ -64,6 +64,13 @@ pub struct VoLoopClosureConfig {
     /// vocabulary construction (`1` = use all; larger keeps k-means tractable on
     /// thousand-frame sequences).
     pub vocab_descriptor_stride: usize,
+    /// Optional hard cap on the pooled descriptor count fed to k-means, applied
+    /// after striding by evenly sub-sampling the pool. k-means is
+    /// `O(pool · k · dim · iters)`, so without a cap a 4500-frame sequence pools
+    /// millions of descriptors and vocabulary construction alone runs for the
+    /// better part of an hour. A few tens of thousands of descriptors already
+    /// seed a stable `k=64` vocabulary. `None` uses the full strided pool.
+    pub vocab_max_pool: Option<usize>,
     /// Minimum temporal gap (in frames) between the two frames of a loop
     /// candidate. Rejects the trivial near-diagonal matches that carry no new
     /// constraint.
@@ -98,6 +105,7 @@ impl Default for VoLoopClosureConfig {
             vocab_iterations: 10,
             vocab_seed: 0xC0FFEE,
             vocab_descriptor_stride: 4,
+            vocab_max_pool: Some(60_000),
             min_frame_gap: 50,
             min_similarity: 0.20,
             max_candidates_per_frame: 3,
@@ -201,6 +209,15 @@ fn compute_frame_globals(
     for features in left_features {
         for descriptor in features.descriptors.iter().step_by(stride) {
             pool.push(descriptor.as_slice());
+        }
+    }
+    // Cap the k-means pool independent of sequence length: k-means is
+    // O(pool · k · dim · iters), so a multi-thousand-frame sequence would
+    // otherwise spend tens of minutes here. Evenly sub-sample to the cap.
+    if let Some(cap) = config.vocab_max_pool {
+        if cap > 0 && pool.len() > cap {
+            let step = pool.len() as f64 / cap as f64;
+            pool = (0..cap).map(|i| pool[(i as f64 * step) as usize]).collect();
         }
     }
     let vocab = Vocabulary::build(
