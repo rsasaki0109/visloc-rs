@@ -48,6 +48,9 @@ def main():
     ap.add_argument("--cx", type=float, default=320.0)
     ap.add_argument("--cy", type=float, default=240.0)
     ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--grouped", action="store_true",
+                    help="emit 'KF x y X Y Z conf' (per-keyframe groups, no dedup) "
+                         "for Rust per-keyframe PnP via --grouped-corrs")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -92,9 +95,11 @@ def main():
         qg = normalized_mean(q["descriptors"].cpu().numpy())
         order = np.argsort(-(G @ qg))[: args.topk]
 
-        # query keypoint index -> (score, X, Y, Z)
+        # query keypoint index -> (score, X, Y, Z) for pooled/dedup output, and
+        # grouped rows (kf_rank, qi, X, Y, Z, score) for --grouped output.
         best = {}
-        for ki in order:
+        grouped_rows = []
+        for kf_rank, ki in enumerate(order):
             kf = keyframes[ki]
             with torch.no_grad():
                 m01 = rbd(matcher({"image0": qfeats, "image1": kf["feats"]}))
@@ -111,18 +116,27 @@ def main():
                     continue
                 pc = np.array([(u - cx) / fx * d, (v - cy) / fy * d, d])
                 pw = kf["R"] @ pc + kf["t"]
-                prev = best.get(int(qi))
-                if prev is None or sc > prev[0]:
-                    best[int(qi)] = (float(sc), pw[0], pw[1], pw[2])
+                if args.grouped:
+                    grouped_rows.append((kf_rank, int(qi), pw[0], pw[1], pw[2], float(sc)))
+                else:
+                    prev = best.get(int(qi))
+                    if prev is None or sc > prev[0]:
+                        best[int(qi)] = (float(sc), pw[0], pw[1], pw[2])
 
         out = args.out_dir / f"seq-{seq:02d}_frame-{idx:06d}.corr.txt"
         with open(out, "w") as f:
-            for qi, (sc, X, Y, Z) in best.items():
-                x, y = qk[qi]
-                f.write(f"{x:.3f} {y:.3f} {X:.5f} {Y:.5f} {Z:.5f} {sc:.5f}\n")
+            if args.grouped:
+                for kf_rank, qi, X, Y, Z, sc in grouped_rows:
+                    x, y = qk[qi]
+                    f.write(f"{kf_rank} {x:.3f} {y:.3f} {X:.5f} {Y:.5f} {Z:.5f} {sc:.5f}\n")
+            else:
+                for qi, (sc, X, Y, Z) in best.items():
+                    x, y = qk[qi]
+                    f.write(f"{x:.3f} {y:.3f} {X:.5f} {Y:.5f} {Z:.5f} {sc:.5f}\n")
         n_written += 1
         if n_written % 20 == 0:
-            print(f"wrote {n_written} queries (seq {seq} idx {idx}, {len(best)} corrs)", flush=True)
+            n_corrs = len(grouped_rows) if args.grouped else len(best)
+            print(f"wrote {n_written} queries (seq {seq} idx {idx}, {n_corrs} corrs)", flush=True)
     print(f"DONE: {n_written} query correspondence files -> {args.out_dir}", flush=True)
 
 

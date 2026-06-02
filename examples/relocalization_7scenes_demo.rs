@@ -35,22 +35,27 @@
 //!
 //! With `--retrieve-topk K` (default 10) the query is matched only against the
 //! K appearance-nearest train keyframes (hierarchical localization), which both
-//! raises recall and cuts the brute-force cost. By default the query is matched
-//! against each retrieved keyframe SEPARATELY and only the single best match per
-//! query keypoint is kept (per-query dedup) before one PnP+RANSAC over the
-//! accumulated 2D-3D correspondences — this roughly doubles recall over merging
-//! the keyframes into one descriptor cloud (`--merged-submap`), because the
-//! merged cloud's near-duplicate landmarks defeat the Lowe ratio test. Trading
-//! recall for precision is a `--retrieve-topk` / `--ratio` / `--min-inliers`
-//! frontier (e.g. topk25/ratio0.95/min8 → ~48% localized but a looser median).
+//! raises recall and cuts the brute-force cost. By default each retrieved
+//! keyframe is matched and PnP'd SEPARATELY and the pose with the most inliers
+//! is kept — every keyframe's depth-lifted points form one internally-consistent
+//! 3D set, so this avoids mixing 3D from keyframes whose depth registers slightly
+//! differently. That mixing is the dominant ACCURACY limiter: on chess this
+//! per-keyframe PnP lifts the 5cm/5deg fraction from ~9% to ~42% AND doubles
+//! recall versus pooling all keyframes' correspondences into one PnP
+//! (`--accumulate-corrs`), which in turn beats merging descriptor clouds
+//! (`--merged-submap`). Recall/precision still trades on `--retrieve-topk` /
+//! `--ratio` / `--min-inliers`.
 //!
 //! To benchmark a learned matcher (LightGlue) against the in-Rust BruteForce
 //! baseline under identical pose estimation, pass `--correspondences-dir`: the
 //! matcher is run out-of-process (`scripts/hloc_lightglue_7scenes.py`) and emits
-//! per-query 2D-3D correspondences ("x y X Y Z conf"); this mode skips the map
-//! build and only exercises the Rust PnP+RANSAC. LightGlue roughly doubles
-//! recall (e.g. ~68% vs ~34% localized) but the 5cm/5deg fraction plateaus
-//! because accuracy is then limited by the raw (unregistered) 7-Scenes depth.
+//! per-query 2D-3D correspondences; this mode skips the map build and only
+//! exercises the Rust PnP+RANSAC. With `--grouped-corrs` the files carry a
+//! leading keyframe column ("KF x y X Y Z conf") and each keyframe group is
+//! PnP'd separately (per-keyframe PnP, as above). LightGlue + per-keyframe PnP
+//! is the strongest combination measured here on chess (~99% localized, median
+//! ~3.3cm / ~1.7deg, ~72% within 5cm/5deg) — the learned matcher and the
+//! per-keyframe-consistent 3D compound; neither alone gets close.
 //!
 //! Run (after extracting chess.zip and its inner seq-*.zip):
 //!   cargo run --release --features image-io --example relocalization_7scenes_demo -- \
@@ -86,7 +91,9 @@ struct Args {
     ratio: f32,
     reproj: f64,
     merged_submap: bool,
+    accumulate_corrs: bool,
     correspondences_dir: Option<PathBuf>,
+    grouped_corrs: bool,
 }
 
 impl Default for Args {
@@ -113,7 +120,9 @@ impl Default for Args {
             ratio: 0.8,
             reproj: 4.0,
             merged_submap: false,
+            accumulate_corrs: false,
             correspondences_dir: None,
+            grouped_corrs: false,
         }
     }
 }
@@ -196,7 +205,9 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--ratio" => args.ratio = val()?.parse()?,
             "--reproj" => args.reproj = val()?.parse()?,
             "--merged-submap" => args.merged_submap = true,
+            "--accumulate-corrs" => args.accumulate_corrs = true,
             "--correspondences-dir" => args.correspondences_dir = Some(PathBuf::from(val()?)),
+            "--grouped-corrs" => args.grouped_corrs = true,
             other => return Err(format!("unknown flag: {other}").into()),
         }
     }
@@ -246,6 +257,56 @@ fn read_correspondences(path: &Path) -> Result<Vec<Correspondence2D3D>, Box<dyn 
         });
     }
     Ok(out)
+}
+
+/// Parse a per-query GROUPED correspondence file: lines "KF x y X Y Z [conf]"
+/// where KF is the source keyframe index. Returns the correspondences grouped by
+/// keyframe so each group can be PnP'd on its own internally-consistent 3D set.
+fn read_grouped_correspondences(
+    path: &Path,
+) -> Result<Vec<Vec<Correspondence2D3D>>, Box<dyn Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut groups: std::collections::HashMap<i64, Vec<Correspondence2D3D>> =
+        std::collections::HashMap::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let t: Vec<f64> = line
+            .split_whitespace()
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if t.len() < 6 {
+            continue;
+        }
+        groups.entry(t[0] as i64).or_default().push(Correspondence2D3D {
+            point2d: Point2::new(t[1], t[2]),
+            point3d: Point3::new(t[3], t[4], t[5]),
+            confidence: t.get(6).map(|&c| c as f32),
+        });
+    }
+    Ok(groups.into_values().collect())
+}
+
+/// Per-keyframe PnP: estimate a pose from each keyframe's correspondence group on
+/// its own, and keep the pose with the most inliers (>= `min_inliers`).
+fn per_keyframe_best_pose(
+    groups: &[Vec<Correspondence2D3D>],
+    estimator: &PnPRansac,
+    camera: &Camera,
+    min_inliers: usize,
+) -> Option<(Pose, usize)> {
+    let mut best: Option<(Pose, usize)> = None;
+    for corrs in groups {
+        if let Some(r) = estimator.estimate(corrs, camera) {
+            if r.inliers.len() >= min_inliers
+                && best.as_ref().map_or(true, |(_, n)| r.inliers.len() > *n)
+            {
+                best = Some((r.pose, r.inliers.len()));
+            }
+        }
+    }
+    best
 }
 
 fn frame_base(dataset: &Path, seq: u32, idx: usize) -> PathBuf {
@@ -427,11 +488,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if !path.exists() {
                     return None;
                 }
-                let corrs = read_correspondences(&path).ok()?;
-                estimator
-                    .estimate(&corrs, &camera)
-                    .filter(|r| r.inliers.len() >= args.min_inliers)
-                    .map(|r| (r.pose, r.inliers.len()))
+                if args.grouped_corrs {
+                    // "KF x y X Y Z conf": PnP each keyframe group, keep best.
+                    let groups = read_grouped_correspondences(&path).ok()?;
+                    per_keyframe_best_pose(&groups, &estimator, &camera, args.min_inliers)
+                } else {
+                    let corrs = read_correspondences(&path).ok()?;
+                    estimator
+                        .estimate(&corrs, &camera)
+                        .filter(|r| r.inliers.len() >= args.min_inliers)
+                        .map(|r| (r.pose, r.inliers.len()))
+                }
             } else if let Some((keypoints, descriptors)) =
                 frame_features(&args, &extractor, seq, idx).ok()?
             {
@@ -463,50 +530,89 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let r = pipeline.localize_with_provider(&query, &submap);
                     r.pose.filter(|_| r.success).map(|p| (p, r.inlier_count))
                 } else {
-                    // Hierarchical localization: match the query against EACH
-                    // retrieved keyframe separately (so the ratio test sees each
-                    // physical point once), then keep only the single BEST match
-                    // per query keypoint across all keyframes. The per-query
-                    // dedup is essential — the same physical point is depth-lifted
-                    // independently by every keyframe into a near-duplicate 3D
-                    // landmark, so without it one query feature contributes K
-                    // redundant, slightly-inconsistent 3D votes that inflate the
-                    // inlier count but bias the pose.
                     let matcher = BruteForceMatcher {
                         ratio: Some(args.ratio),
                     };
-                    // query_index -> (best descriptor distance, point3d, confidence)
-                    let mut best: std::collections::HashMap<usize, (f32, Point3<f64>, Option<f32>)> =
-                        std::collections::HashMap::new();
-                    for i in topk {
-                        let kf = &keyframe_index[i];
-                        for m in matcher.match_descriptors(&descriptors, &kf.descriptors) {
-                            let Some(&point3d) = kf.positions.get(m.train_index) else {
-                                continue;
-                            };
-                            best.entry(m.query_index)
-                                .and_modify(|e| {
-                                    if m.distance < e.0 {
-                                        *e = (m.distance, point3d, m.confidence);
+                    if args.accumulate_corrs {
+                        // Match each keyframe separately, keep the single best
+                        // match per query keypoint across keyframes, then ONE PnP
+                        // over the pooled correspondences. Pooling mixes 3D points
+                        // from keyframes whose depth registers slightly
+                        // differently — an internally-inconsistent patchwork that
+                        // caps pose accuracy (kept as an ablation knob).
+                        let mut best: std::collections::HashMap<
+                            usize,
+                            (f32, Point3<f64>, Option<f32>),
+                        > = std::collections::HashMap::new();
+                        for i in topk {
+                            let kf = &keyframe_index[i];
+                            for m in matcher.match_descriptors(&descriptors, &kf.descriptors) {
+                                let Some(&point3d) = kf.positions.get(m.train_index) else {
+                                    continue;
+                                };
+                                best.entry(m.query_index)
+                                    .and_modify(|e| {
+                                        if m.distance < e.0 {
+                                            *e = (m.distance, point3d, m.confidence);
+                                        }
+                                    })
+                                    .or_insert((m.distance, point3d, m.confidence));
+                            }
+                        }
+                        let corrs: Vec<Correspondence2D3D> = best
+                            .into_iter()
+                            .filter_map(|(qi, (_, point3d, confidence))| {
+                                keypoints.get(qi).map(|&point2d| Correspondence2D3D {
+                                    point2d,
+                                    point3d,
+                                    confidence,
+                                })
+                            })
+                            .collect();
+                        estimator
+                            .estimate(&corrs, &camera)
+                            .filter(|r| r.inliers.len() >= args.min_inliers)
+                            .map(|r| (r.pose, r.inliers.len()))
+                    } else {
+                        // Per-keyframe PnP (the default): match and PnP against
+                        // EACH retrieved keyframe on its own — each keyframe's
+                        // depth-lifted points form ONE internally-consistent 3D
+                        // set — and keep the pose with the most inliers. This
+                        // keeps top-K recall while recovering single-keyframe
+                        // accuracy, and is the dominant accuracy lever (mixing
+                        // keyframes' independently-registered depth is what hurt).
+                        let mut best_pose: Option<(Pose, usize)> = None;
+                        for i in topk {
+                            let kf = &keyframe_index[i];
+                            let corrs: Vec<Correspondence2D3D> = matcher
+                                .match_descriptors(&descriptors, &kf.descriptors)
+                                .iter()
+                                .filter_map(|m| {
+                                    match (
+                                        keypoints.get(m.query_index),
+                                        kf.positions.get(m.train_index),
+                                    ) {
+                                        (Some(&point2d), Some(&point3d)) => {
+                                            Some(Correspondence2D3D {
+                                                point2d,
+                                                point3d,
+                                                confidence: m.confidence,
+                                            })
+                                        }
+                                        _ => None,
                                     }
                                 })
-                                .or_insert((m.distance, point3d, m.confidence));
+                                .collect();
+                            if let Some(r) = estimator.estimate(&corrs, &camera) {
+                                if r.inliers.len() >= args.min_inliers
+                                    && best_pose.as_ref().map_or(true, |(_, n)| r.inliers.len() > *n)
+                                {
+                                    best_pose = Some((r.pose, r.inliers.len()));
+                                }
+                            }
                         }
+                        best_pose
                     }
-                    let corrs: Vec<Correspondence2D3D> = best
-                        .into_iter()
-                        .filter_map(|(qi, (_, point3d, confidence))| {
-                            keypoints.get(qi).map(|&point2d| Correspondence2D3D {
-                                point2d,
-                                point3d,
-                                confidence,
-                            })
-                        })
-                        .collect();
-                    estimator
-                        .estimate(&corrs, &camera)
-                        .filter(|r| r.inliers.len() >= args.min_inliers)
-                        .map(|r| (r.pose, r.inliers.len()))
                 }
                 } else {
                     // No retrieval: match against the whole global map.
