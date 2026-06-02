@@ -123,7 +123,8 @@ pub use visloc_mapping::{
     TriangulationFailureReason, Triangulator,
 };
 pub use visloc_slam::{
-    correspondences_2d3d_for_loop_candidate, correspondences_for_loop_candidate,
+    close_loops_on_vo_trajectory, correspondences_2d3d_for_loop_candidate,
+    correspondences_for_loop_candidate, detect_loop_candidates,
     loop_closure_constraints_from_candidates, online_ba_imu_state_rows,
     online_slam_results_to_html_report, pairwise_pose_factors_from_loop_closures,
     parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, relative_world_to_camera,
@@ -155,6 +156,7 @@ pub use visloc_slam::{
     StereoVoBaImuRefinement, StereoVoBaImuSample, StereoVoBaRefinement, ViInitFallback,
     ViInitializationEvent, ViInitializationStatus, Viba2Config, Viba2Stats,
     VisualInertialInitializationResult, VisualInertialInitializer, VisualInertialInitializerConfig,
+    VoLoopClosureConfig, VoLoopClosureError, VoLoopClosureResult,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, umeyama_similarity_transform,

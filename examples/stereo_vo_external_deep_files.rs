@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::Vector3;
 use visloc_rs::{
-    parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt, parse_stereo_vo_imu_samples_txt,
-    read_external_deep_features_txt, read_external_deep_matches_txt, read_kitti_oxts_dir,
-    refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes, write_colmap_binary_model_for_3dgs,
+    close_loops_on_vo_trajectory, parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt,
+    parse_stereo_vo_imu_samples_txt, read_external_deep_features_txt, read_external_deep_matches_txt,
+    read_kitti_oxts_dir, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
+    write_colmap_binary_model_for_3dgs, VoLoopClosureConfig,
     write_colmap_text_model_for_3dgs, write_online_ba_imu_state_csv, BaConfig, Camera,
     DescriptorMatch, GravityPrior, KabschRansacConfig, LandmarkInit, LinearSolver,
     OnlineStereoVoBa, OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose,
@@ -74,6 +75,12 @@ struct CliArgs {
     online_ba_trigger_every: usize,
     final_global_ba: bool,
     final_global_ba_iterations: usize,
+    loop_closure: bool,
+    loop_min_frame_gap: usize,
+    loop_min_similarity: f32,
+    loop_vocab_k: usize,
+    loop_max_candidates_per_frame: usize,
+    loop_max_verifications: Option<usize>,
     ba_gravity_prior_weight: Option<f64>,
     ba_per_pose_gravity_prior_observations: Option<PathBuf>,
     ba_per_pose_gravity_prior_weight: f64,
@@ -606,6 +613,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Loop-closure pose-graph optimization. Unlike BA (which deforms an open
+    // trajectory toward a local reprojection minimum without ever coupling a
+    // revisit to its earlier observation), this detects revisited places by
+    // appearance, verifies them with PnP into metric relative-pose constraints,
+    // and re-distributes the accumulated drift with a robust GNC SE(3) solve.
+    if args.loop_closure {
+        let loop_cfg = VoLoopClosureConfig {
+            min_frame_gap: args.loop_min_frame_gap,
+            min_similarity: args.loop_min_similarity,
+            vocab_k: args.loop_vocab_k,
+            max_candidates_per_frame: args.loop_max_candidates_per_frame,
+            max_verifications: args.loop_max_verifications,
+            ..VoLoopClosureConfig::default()
+        };
+        println!(
+            "running LOOP-CLOSURE PGO: poses={} min_frame_gap={} min_similarity={:.2} vocab_k={} \
+             max_candidates_per_frame={}",
+            online_runner.frontend.poses.len(),
+            args.loop_min_frame_gap,
+            args.loop_min_similarity,
+            args.loop_vocab_k,
+            args.loop_max_candidates_per_frame,
+        );
+        match close_loops_on_vo_trajectory(
+            &online_runner.frontend.camera,
+            &online_runner.frontend.poses,
+            &online_runner.frontend.left_features,
+            &online_runner.frontend.stereo_per_frame,
+            &loop_cfg,
+        ) {
+            Ok(result) => {
+                match &result.gnc {
+                    Some(gnc) => println!(
+                        "LOOP-CLOSURE PGO: candidates={} verified_loops={} cost {:.6} -> {:.6} \
+                         ({} outer iters, converged={})",
+                        result.candidate_count,
+                        result.verified_count(),
+                        gnc.initial_cost,
+                        gnc.final_cost,
+                        gnc.outer_iterations,
+                        gnc.converged,
+                    ),
+                    None => println!(
+                        "LOOP-CLOSURE PGO: candidates={} verified_loops=0 (no loop verified; \
+                         trajectory unchanged)",
+                        result.candidate_count,
+                    ),
+                }
+                online_runner.frontend.poses = result.refined_poses;
+            }
+            Err(err) => {
+                eprintln!("LOOP-CLOSURE PGO skipped: {err}");
+            }
+        }
+    }
     if let Some(path) = &args.post_ba_position_projection_poses {
         let projected = project_pose_centers_from_kitti_poses(
             &mut online_runner.frontend.poses,
@@ -1031,6 +1093,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut online_ba_trigger_every: usize = 10;
     let mut final_global_ba: bool = false;
     let mut final_global_ba_iterations: usize = 30;
+    let mut loop_closure: bool = false;
+    let mut loop_min_frame_gap: usize = 50;
+    let mut loop_min_similarity: f32 = 0.20;
+    let mut loop_vocab_k: usize = 64;
+    let mut loop_max_candidates_per_frame: usize = 3;
+    let mut loop_max_verifications: Option<usize> = Some(400);
     let mut ba_gravity_prior_weight: Option<f64> = None;
     let mut ba_per_pose_gravity_prior_observations: Option<PathBuf> = None;
     let mut ba_per_pose_gravity_prior_weight: f64 = 1.0;
@@ -1217,6 +1285,31 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 final_global_ba_iterations = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--loop-closure" => {
+                loop_closure = true;
+                args.remove(i);
+            }
+            "--loop-min-frame-gap" => {
+                loop_min_frame_gap = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--loop-min-similarity" => {
+                loop_min_similarity = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--loop-vocab-k" => {
+                loop_vocab_k = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--loop-max-candidates-per-frame" => {
+                loop_max_candidates_per_frame = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--loop-max-verifications" => {
+                let v: usize = args.remove(i + 1).parse()?;
+                loop_max_verifications = if v == 0 { None } else { Some(v) };
+                args.remove(i);
+            }
             "--ba-gravity-prior-weight" => {
                 let w: f64 = args.remove(i + 1).parse()?;
                 ba_gravity_prior_weight = if w > 0.0 { Some(w) } else { None };
@@ -1383,6 +1476,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         online_ba_trigger_every,
         final_global_ba,
         final_global_ba_iterations,
+        loop_closure,
+        loop_min_frame_gap,
+        loop_min_similarity,
+        loop_vocab_k,
+        loop_max_candidates_per_frame,
+        loop_max_verifications,
         ba_gravity_prior_weight,
         ba_per_pose_gravity_prior_observations,
         ba_per_pose_gravity_prior_weight,
@@ -1499,6 +1598,24 @@ fn print_usage() {
          mutually exclusive with --enable-ba (which is already a global one-shot)\n \
          [--final-global-ba-iterations <n>]  max LM iterations for that pass \
          (default 30)\n \
+         \n  Loop-closure PGO (after VO + optional BA; needs a loopy sequence):\n \
+         [--loop-closure]  detect revisited places by VLAD appearance, verify \
+         with PnP into metric loop constraints, and re-distribute accumulated \
+         drift with a robust GNC SE(3) pose-graph solve. Unlike BA this couples \
+         a revisit to its earlier observation, so it removes loop drift that \
+         dense global BA cannot. No-op on a loop-free trajectory.\n \
+         [--loop-min-frame-gap <n>]  minimum frame gap between the two frames of \
+         a loop candidate (default 50)\n \
+         [--loop-min-similarity <x>]  minimum VLAD cosine similarity to propose a \
+         candidate (default 0.20)\n \
+         [--loop-vocab-k <n>]  VLAD vocabulary size / k-means centroids \
+         (default 64)\n \
+         [--loop-max-candidates-per-frame <n>]  strongest earlier matches kept \
+         per query frame (default 3)\n \
+         [--loop-max-verifications <n>]  global cap on candidates sent to PnP \
+         verification (descending similarity first); bounds the per-pair \
+         brute-force matching cost on long sequences. 0 = verify all \
+         (default 400)\n \
          \n  3DGS / NeRF export (after VO + optional BA):\n \
          [--colmap-export <dir>]      write COLMAP cameras.txt / images.txt / \
          points3D.txt under <dir>, suitable for gaussian-splatting / nerfstudio \
