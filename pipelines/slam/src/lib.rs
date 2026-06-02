@@ -3595,6 +3595,26 @@ pub enum LinearSolver {
     Sparse,
 }
 
+/// How the Levenberg-Marquardt damping `λ` enters the normal matrix `H`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DampingMode {
+    /// `H + λI` — add `λ` uniformly to every diagonal entry. Simple, but
+    /// scale-blind: the rotation and translation blocks of `H` differ by orders
+    /// of magnitude, so a single `λ` over-damps the well-conditioned directions
+    /// while under-damping the ill-conditioned ones. As `λ` grows on a hard graph
+    /// the step degenerates and the solve stalls at a poor optimum (observed on
+    /// sphere2500 / cubicle vs GTSAM).
+    #[default]
+    Identity,
+    /// `H + λ·diag(H)` — Marquardt's scale-invariant damping: each variable is
+    /// damped in proportion to its own curvature, so the trust region is an
+    /// ellipsoid matched to the local geometry rather than a sphere. This is the
+    /// default in mature LM solvers (GTSAM, Ceres) and reaches a markedly lower
+    /// optimum than `Identity` on graphs with mixed rotation/translation
+    /// curvature.
+    Diagonal,
+}
+
 /// Configuration for [`PoseGraph::optimize_se3_iterative`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoseGraphSe3Config {
@@ -3618,6 +3638,10 @@ pub struct PoseGraphSe3Config {
     pub lambda_increase_factor: f64,
     /// Multiplier applied to `λ` after an accepted LM step.
     pub lambda_decrease_factor: f64,
+    /// How `λ` enters `H`. Defaults to [`DampingMode::Identity`] (`H + λI`, leaves
+    /// every solve bit-identical). Switch to [`DampingMode::Diagonal`]
+    /// (`H + λ·diag(H)`) for graphs with mixed rotation/translation curvature.
+    pub damping: DampingMode,
     /// Upper bound on `λ`. When a step is rejected and `λ * factor > max_lambda`,
     /// the optimizer gives up and returns `converged: false`.
     pub max_lambda: f64,
@@ -3651,6 +3675,7 @@ impl Default for PoseGraphSe3Config {
             initial_lambda: None,
             lambda_increase_factor: 10.0,
             lambda_decrease_factor: 0.1,
+            damping: DampingMode::Identity,
             max_lambda: 1e12,
             min_lambda: 1e-9,
             linear_solver: LinearSolver::Dense,
@@ -4557,8 +4582,20 @@ impl PoseGraph {
             let (builder, g) =
                 self.assemble_se3_system(&node_index, dim, &kernel, None, config.linear_solver);
 
+            // Marquardt damping scales by the (undamped) curvature, so capture the
+            // diagonal of H before it is consumed by the solve.
+            let diag = match config.damping {
+                DampingMode::Diagonal => Some(builder.diagonal()),
+                DampingMode::Identity => None,
+            };
             let neg_g = -&g;
-            let delta = builder.solve(lambda, &neg_g, &mut order_cache, &mut symbolic_cache)?;
+            let delta = builder.solve(
+                lambda,
+                diag.as_deref(),
+                &neg_g,
+                &mut order_cache,
+                &mut symbolic_cache,
+            )?;
 
             // Tentatively apply the step so we can evaluate the new cost.
             let mut max_step_norm: f64 = 0.0;
@@ -4784,8 +4821,20 @@ impl PoseGraph {
                     Some(&gnc_weights),
                     config.linear_solver,
                 );
+                // Marquardt damping scales by the (undamped) curvature, so capture
+                // the diagonal of H before it is consumed by the solve.
+                let diag = match config.damping {
+                    DampingMode::Diagonal => Some(builder.diagonal()),
+                    DampingMode::Identity => None,
+                };
                 let neg_g = -&g;
-                let delta = builder.solve(lambda, &neg_g, &mut order_cache, &mut symbolic_cache)?;
+                let delta = builder.solve(
+                    lambda,
+                    diag.as_deref(),
+                    &neg_g,
+                    &mut order_cache,
+                    &mut symbolic_cache,
+                )?;
 
                 let saved_poses = if config.initial_lambda.is_some() {
                     Some(self.poses.clone())
@@ -5877,24 +5926,72 @@ impl NormalEquations6 {
     /// Solve the assembled system. For the sparse backend the fill-reducing
     /// ordering is computed once into `order_cache` (the sparsity pattern is
     /// identical across LM iterations) and reused on subsequent calls.
+    /// The diagonal of `H` (length `dim`), in the natural (unpermuted) variable
+    /// order. Used to build the Marquardt damping `λ·diag(H)` and the gain-ratio
+    /// predicted reduction.
+    fn diagonal(&self) -> Vec<f64> {
+        match self {
+            Self::Dense(h) => (0..h.nrows()).map(|k| h[(k, k)]).collect(),
+            Self::Sparse { triplets, dim } => {
+                let mut diag = vec![0.0; *dim];
+                for &(r, c, v) in triplets {
+                    if r == c {
+                        diag[r] += v;
+                    }
+                }
+                diag
+            }
+        }
+    }
+
+    /// Solve `(H + D) δ = -g` where the damping `D` is either `λI`
+    /// (`diag_scale = None`) or `λ·diag(H)` (`diag_scale = Some(diag)`, the
+    /// per-variable curvature from [`Self::diagonal`]). With `diag_scale = None`
+    /// and a given `lambda` this is bit-identical to the original solve.
     fn solve(
         self,
         lambda: f64,
+        diag_scale: Option<&[f64]>,
         neg_g: &DVector<f64>,
         order_cache: &mut Option<reordering::Reordering>,
         symbolic_cache: &mut Option<block_cholesky::BlockSymbolic>,
     ) -> Result<DVector<f64>, PoseGraphError> {
         match self {
             Self::Dense(mut h) => {
-                if lambda > 0.0 {
-                    let dim = h.nrows();
-                    for k in 0..dim {
-                        h[(k, k)] += lambda;
+                let dim = h.nrows();
+                match diag_scale {
+                    // Marquardt: H + λ·diag(H). Read the original diagonal from
+                    // `diag` (captured before this in-place update) so the scaling
+                    // is by the undamped curvature.
+                    Some(diag) => {
+                        for k in 0..dim {
+                            h[(k, k)] += lambda * diag[k];
+                        }
                     }
+                    None if lambda > 0.0 => {
+                        for k in 0..dim {
+                            h[(k, k)] += lambda;
+                        }
+                    }
+                    None => {}
                 }
                 solve_normal_equations(&h, neg_g)
             }
-            Self::Sparse { triplets, dim } => {
+            Self::Sparse { mut triplets, dim } => {
+                // For Marquardt damping, fold λ·diag(H) into the triplets as extra
+                // diagonal entries and let the factorizer run undamped (λ = 0); the
+                // sparsity pattern is unchanged (diagonal blocks are always
+                // present), so the cached symbolic analysis still applies.
+                let factor_lambda = match diag_scale {
+                    Some(diag) => {
+                        triplets.reserve(dim);
+                        for (k, &d) in diag.iter().enumerate().take(dim) {
+                            triplets.push((k, k, lambda * d));
+                        }
+                        0.0
+                    }
+                    None => lambda,
+                };
                 let order = order_cache.get_or_insert_with(|| {
                     reordering::Reordering::fill_reducing(dim, 6, &triplets)
                 });
@@ -5903,7 +6000,7 @@ impl NormalEquations6 {
                     dim,
                     6,
                     neg_g,
-                    lambda,
+                    factor_lambda,
                     order,
                     symbolic_cache,
                 )
