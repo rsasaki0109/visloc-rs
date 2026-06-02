@@ -145,6 +145,10 @@ struct CliArgs {
     /// one-shot BA cannot, and propagates drift correction window-to-window via
     /// [`refine_stereo_vo_with_ba`]'s `window_size`.
     window_ba: usize,
+    /// After the `--window-ba` sweep, run one final GLOBAL BA over all frames
+    /// seeded from the drift-suppressed windowed result (`window_size: None`).
+    /// No effect unless `--window-ba` is also set.
+    final_global_ba: bool,
     /// Run the stereo BA refinement with Graduated Non-Convexity outlier
     /// rejection (`BundleAdjustment::optimize_gnc`) instead of the default
     /// Huber M-estimator. GNC anneals from a convex (all-inlier) surrogate to
@@ -284,6 +288,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut min_pnp_inliers: usize = 12;
     let mut run_stereo_ba = true;
     let mut window_ba: usize = 0;
+    let mut final_global_ba = false;
     let mut ba_gnc = false;
     let mut ba_gnc_kernel = GncKernel::TruncatedLeastSquares;
     let mut ba_gnc_c: f64 = 4.0;
@@ -366,6 +371,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 window_ba = value.parse().map_err(|_| {
                     format!("--window-ba expects a positive window size, got {value}")
                 })?;
+                args.remove(i);
+            }
+            "--final-global-ba" => {
+                final_global_ba = true;
                 args.remove(i);
             }
             "--no-stereo-ba" => {
@@ -552,6 +561,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         min_pnp_inliers,
         run_stereo_ba,
         window_ba,
+        final_global_ba,
         ba_gnc,
         ba_gnc_kernel,
         ba_gnc_c,
@@ -921,19 +931,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cfg,
             )
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-            .map(|r| {
+            .and_then(|r_win| {
+                // Optional final GLOBAL BA pass, seeded from the windowed sweep.
+                // The one-shot global BA fails from the raw VO init (too large /
+                // non-convex), but the windowed sweep already removed most of the
+                // drift, so a joint solve from that good seed can converge and
+                // attack the residual gap a purely-local window cannot reach.
+                let refined = if args.final_global_ba {
+                    let global_cfg = StereoVoBaConfig {
+                        window_size: None,
+                        ba_config: BaConfig {
+                            max_iterations: 30,
+                            robust_kernel: RobustKernel::Huber { delta: 3.0 },
+                            linear_solver: LinearSolver::Sparse,
+                            ..BaConfig::default()
+                        },
+                        ..StereoVoBaConfig::default()
+                    };
+                    println!(
+                        "final global BA pass over {} frames (seeded from the windowed sweep)",
+                        r_win.refined_poses.len(),
+                    );
+                    refine_stereo_vo_with_ba(
+                        &camera,
+                        baseline,
+                        &r_win.refined_poses,
+                        &left_features,
+                        &right_features,
+                        &stereo_per_frame,
+                        &temporal_matches,
+                        &global_cfg,
+                    )
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+                } else {
+                    r_win
+                };
                 // Load the refined poses into `ba` so the shared read-back /
                 // CSV / GT-eval path below works unchanged.
-                for (i, p) in r.refined_poses.iter().enumerate() {
+                for (i, p) in refined.refined_poses.iter().enumerate() {
                     ba.add_pose(i as u64, p.clone());
                 }
-                (
-                    r.ba_result.initial_cost,
-                    r.ba_result.final_cost,
-                    r.ba_result.iterations.len(),
-                    r.ba_result.converged,
+                Ok((
+                    refined.ba_result.initial_cost,
+                    refined.ba_result.final_cost,
+                    refined.ba_result.iterations.len(),
+                    refined.ba_result.converged,
                     None,
-                )
+                ))
             })
         } else {
             // Build multi-frame tracks via projection-guided extension. For
