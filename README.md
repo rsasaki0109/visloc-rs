@@ -43,13 +43,13 @@
 </table>
 
 <p align="center">
-  <img src="docs/assets/euroc_mh01_uav_slam.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: estimated camera trajectory tracking ground truth in top-down route and altitude, rigid ATE 0.12 m" width="92%">
+  <img src="docs/assets/euroc_mh01_match_track.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: SuperPoint feature matches on the cam0 image (left) and the growing 2D estimated trajectory vs ground truth (right)" width="98%">
   <br>
-  <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU): the online
-  VI-SLAM estimate (red) tracking ground truth (black) frame by frame &mdash;
-  top-down route, altitude, and live localization error. Rigidly aligned, as
-  the reported rigid ATE: <strong>0.12 m</strong> over the tracked window
-  (99 frames). Regenerate with <code>scripts/animate_euroc_slam.py</code>.</em>
+  <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU). Left: the
+  SuperPoint frontend matching features frame to frame on the cam0 image.
+  Right: the online VI-SLAM estimate (red) tracking ground truth (black) in 2D,
+  grown frame by frame &mdash; rigidly aligned, ~0.20 m rigid ATE over 176
+  tracked frames. Regenerate with <code>scripts/animate_euroc_match_track.py</code>.</em>
 </p>
 
 <p align="center">
