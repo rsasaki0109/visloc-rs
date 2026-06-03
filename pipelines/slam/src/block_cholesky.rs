@@ -387,6 +387,40 @@ pub(crate) struct BlockSymbolic {
     /// `a_pattern[c]`: sorted block rows `≥ c` present in original block column
     /// `c` (diagonal included) — the slots a refactor scatters values into.
     a_pattern: Vec<Vec<usize>>,
+    /// Elimination-tree parent (`NONE` for a root). A change to the values in
+    /// block column `c` perturbs exactly the columns on `c`'s path to the root,
+    /// so this drives the incremental refactor's affected-set walk.
+    parent: Vec<usize>,
+}
+
+impl BlockSymbolic {
+    /// The block columns whose factor `L` changes when the values in block
+    /// columns `changed` change: the union over each changed column of its path
+    /// to the root of the elimination tree (the classic sparse-Cholesky result —
+    /// editing column `c`'s entries perturbs `L` only along `c → parent(c) → … →
+    /// root`). Returned sorted ascending, so a refactor can sweep them in
+    /// elimination order and every contributor is finalized before its column.
+    /// On a chain (the online pose-graph append case) the newest column's path
+    /// is `O(1)`, the heart of the incremental win; a change near the root
+    /// touches little, a change at a leaf-of-a-deep-tree touches its whole
+    /// ancestor chain.
+    // Exercised by the incremental-refactor tests/bench below; wired into the
+    // online incremental smoother in a follow-up (mirrors gnc.rs landing as a
+    // verified primitive before its driver).
+    #[allow(dead_code)]
+    pub(crate) fn affected_columns(&self, changed: &[usize]) -> Vec<usize> {
+        let mut marked = vec![false; self.n];
+        for &c in changed {
+            let mut k = c;
+            // Walk to the root, stopping early once we reach an already-marked
+            // node: the rest of that path to the root is necessarily marked too.
+            while k != NONE && !marked[k] {
+                marked[k] = true;
+                k = self.parent[k];
+            }
+        }
+        (0..self.n).filter(|&j| marked[j]).collect()
+    }
 }
 
 /// Symbolic analysis: from the scalar COO sparsity pattern (values ignored)
@@ -403,7 +437,7 @@ pub(crate) fn analyze(
     );
     let n = dim / block_size;
     let (block_lower, a_pattern) = assemble_pattern(triplets, n, block_size);
-    let (col_rows, contributors) = symbolic(&block_lower, n);
+    let (col_rows, contributors, parent) = symbolic(&block_lower, n);
     let levels = build_levels(&contributors, n);
     BlockSymbolic {
         block_size,
@@ -412,6 +446,7 @@ pub(crate) fn analyze(
         contributors,
         levels,
         a_pattern,
+        parent,
     }
 }
 
@@ -561,6 +596,101 @@ fn refactor_numeric<const B: usize>(
     }
 
     Ok((col_vals, diag_inv))
+}
+
+/// Incrementally edit a previously computed factor in place: re-factor only the
+/// `affected` block columns (from [`BlockSymbolic::affected_columns`]) against
+/// the new `triplets`, leaving every other column's `L` blocks untouched. This
+/// is the numeric core of an incremental smoother (iSAM-style): when a new
+/// constraint or a relinearization changes the values in a few block columns,
+/// the factor only changes along those columns' elimination-tree ancestor paths,
+/// so the rest of the (often much larger) factor is reused verbatim.
+///
+/// Correctness rests on the elimination-tree invariant: a contributor `k` of an
+/// affected column `j` is a descendant of `j`, so if `k`'s values had changed
+/// `j` would lie on `k`'s root path and `k` would itself be affected. Hence
+/// every unaffected contributor still holds a valid old factor block, and —
+/// sweeping `affected` in ascending (elimination) order — every affected
+/// contributor has already been recomputed. The arithmetic per column is exactly
+/// [`factor_column`]'s, so the result is **bit-identical** to a full sequential
+/// refactor of the new `triplets` (a test asserts this). Sequential by design:
+/// the affected set is the small, localized part of the graph, where a thread
+/// dispatch would not pay and bit-identicality is worth keeping.
+///
+/// `col_vals`/`diag_inv` must be the factor of the *previous* values on this
+/// same symbolic pattern (e.g. from [`refactor_numeric`] or a prior incremental
+/// edit); `affected` must be sorted ascending and cover every column whose `A`
+/// values or contributors changed (a superset is safe, just slower). Only the
+/// `triplets` whose block column lies in `affected` are read, so for an
+/// `O(affected)` update the caller passes just the changed columns' entries (the
+/// delta), not the whole graph — passing the full system is correct but scans it.
+// Wired into the online incremental smoother in a follow-up; exercised now by
+// `incremental_refactor_matches_full*` and the `bench_incremental_vs_full` A/B.
+#[allow(dead_code)]
+fn refactor_incremental<const B: usize>(
+    sym: &BlockSymbolic,
+    triplets: &[(usize, usize, f64)],
+    lambda: f64,
+    affected: &[usize],
+    col_vals: &mut [Vec<SMatrix<f64, B, B>>],
+    diag_inv: &mut [SMatrix<f64, B, B>],
+) -> Result<(), ()> {
+    let mut is_affected = vec![false; sym.n];
+    for &j in affected {
+        is_affected[j] = true;
+    }
+
+    // Scatter the new `A` blocks for the affected columns only (unaffected
+    // columns keep their old factor, so their `A` is never re-read).
+    let mut a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = (0..sym.n)
+        .map(|j| {
+            if is_affected[j] {
+                sym.a_pattern[j]
+                    .iter()
+                    .map(|&br| (br, SMatrix::<f64, B, B>::zeros()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    for &(r, c, v) in triplets {
+        let (br, bc) = (r / B, c / B);
+        if br >= bc && is_affected[bc] {
+            let slot = sym.a_pattern[bc]
+                .binary_search(&br)
+                .expect("triplet's block lies in the analyzed pattern");
+            a_lower[bc][slot].1[(r % B, c % B)] += v;
+        }
+    }
+    if lambda != 0.0 {
+        for &bc in affected {
+            let slot = sym.a_pattern[bc]
+                .binary_search(&bc)
+                .expect("diagonal block lies in the analyzed pattern");
+            for d in 0..B {
+                a_lower[bc][slot].1[(d, d)] += lambda;
+            }
+        }
+    }
+
+    // Re-factor the affected columns in elimination order; `factor_column` reads
+    // `col_vals[k]` for each contributor `k < j` — already recomputed if
+    // affected, still valid if not.
+    let mut map = vec![0usize; sym.n];
+    for &j in affected {
+        let (vals, inv) = factor_column::<B>(
+            j,
+            &sym.col_rows,
+            &sym.contributors[j],
+            &a_lower[j],
+            &*col_vals,
+            &mut map,
+        )?;
+        col_vals[j] = vals;
+        diag_inv[j] = inv;
+    }
+    Ok(())
 }
 
 /// Solve `A x = b` for a single right-hand side via block forward and backward
@@ -829,8 +959,14 @@ fn assemble_pattern(
 /// Gilbert–Ng–Peyton symbolic factorization: from the strictly-lower block
 /// pattern, build the elimination tree and the per-column nonzero row pattern of
 /// `L` (each sorted, diagonal first), plus its transpose `contributors[j]` = the
-/// prior columns that fill into column `j`.
-fn symbolic(block_lower: &[Vec<usize>], n: usize) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+/// prior columns that fill into column `j`. Also returns the elimination-tree
+/// `parent` (`parent[j] = NONE` for a root) — the structure an incremental
+/// refactor walks to find the columns a value change affects (see
+/// [`BlockSymbolic::affected_columns`]).
+fn symbolic(
+    block_lower: &[Vec<usize>],
+    n: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>, Vec<usize>) {
     // Elimination tree via the path-compressing ancestor walk.
     let mut parent = vec![NONE; n];
     let mut ancestor = vec![NONE; n];
@@ -878,7 +1014,7 @@ fn symbolic(block_lower: &[Vec<usize>], n: usize) -> (Vec<Vec<usize>>, Vec<Vec<u
             }
         }
     }
-    (col_rows, contributors)
+    (col_rows, contributors, parent)
 }
 
 /// Position of block row `i` in a sorted column row list. The caller guarantees
@@ -1504,5 +1640,176 @@ mod tests {
             100.0 * in_wide as f64 / total_cols as f64,
         );
         println!("  width bucket (>=) -> supernode count: {hist:?}");
+    }
+
+    /// Editing the values in a few block columns perturbs the factor only along
+    /// those columns' elimination-tree ancestor paths. [`refactor_incremental`]
+    /// re-factors exactly that affected set and reuses the rest of a prior
+    /// factor, and the result must be **bit-identical** to a full sequential
+    /// refactor of the new values (same per-column arithmetic). Two regimes: a
+    /// block-tridiagonal chain (etree is a path, so the affected set is an exact
+    /// tail `c..n`) and a chain with a long-range loop edge (fill makes the tree
+    /// non-trivial — the correctness invariant must still hold).
+    #[test]
+    fn incremental_refactor_matches_full_and_is_local() {
+        let (n, b) = (16usize, 6usize);
+        let dim = n * b;
+        let lambda = 1e-3;
+        // Sequential, bit-identical refactor knobs (threads=1 disables every
+        // parallel path, so the factor is the deterministic left-looking one).
+        let seq = |t: &[(usize, usize, f64)], sym: &BlockSymbolic| {
+            refactor_numeric::<6>(sym, t, lambda, 1, usize::MAX, usize::MAX, usize::MAX)
+                .expect("SPD")
+        };
+
+        // (a) Pure chain: the elimination tree is a path, so changing column c
+        // affects exactly c..n.
+        let band = |bi: usize, bj: usize| bi.abs_diff(bj) <= 1;
+        let (_, t1) = random_spd(n, b, band, 1);
+        let sym = analyze(&t1, dim, b);
+        let (mut cv, mut di) = seq(&t1, &sym);
+
+        let c = n / 2;
+        let mut t2 = t1.clone();
+        for d in 0..b {
+            t2.push((c * b + d, c * b + d, 0.75)); // perturb only column c's diagonal
+        }
+        let affected = sym.affected_columns(&[c]);
+        assert_eq!(
+            affected,
+            (c..n).collect::<Vec<_>>(),
+            "on a path etree the change reaches exactly the tail c..n"
+        );
+        refactor_incremental::<6>(&sym, &t2, lambda, &affected, &mut cv, &mut di)
+            .expect("incremental SPD");
+        let (cvf, dif) = seq(&t2, &sym);
+        assert!(
+            cv == cvf && di == dif,
+            "incremental refactor must match a full refactor bit-for-bit (chain)"
+        );
+
+        // (b) Chain + long-range loop edge: fill makes the tree non-trivial; the
+        // bit-identicality invariant must still hold for an interior change.
+        let loop_keep = |bi: usize, bj: usize| {
+            bi.abs_diff(bj) <= 1 || (bi == 0 && bj == n - 1) || (bi == n - 1 && bj == 0)
+        };
+        let (_, t3) = random_spd(n, b, loop_keep, 7);
+        let sym2 = analyze(&t3, dim, b);
+        let (mut cv2, mut di2) = seq(&t3, &sym2);
+        let c2 = 5;
+        let mut t4 = t3.clone();
+        for d in 0..b {
+            t4.push((c2 * b + d, c2 * b + d, 0.5));
+        }
+        let aff2 = sym2.affected_columns(&[c2]);
+        assert!(aff2.contains(&c2) && aff2.windows(2).all(|w| w[0] < w[1]));
+        refactor_incremental::<6>(&sym2, &t4, lambda, &aff2, &mut cv2, &mut di2)
+            .expect("incremental SPD (loop)");
+        let (cvf2, dif2) = seq(&t4, &sym2);
+        assert!(
+            cv2 == cvf2 && di2 == dif2,
+            "incremental refactor must match a full refactor bit-for-bit (loop)"
+        );
+    }
+
+    /// A/B timing: incrementally editing one column's values vs. refactoring the
+    /// whole chain. On a block-tridiagonal pose chain in natural order (the
+    /// online-append regime) the elimination tree is a path, so editing the
+    /// newest (end) column touches only itself — an `O(1)` update against an
+    /// `O(n)` full refactor — while editing the middle touches half the chain.
+    /// Run with `cargo test -p visloc-slam --release -- --ignored --nocapture
+    /// bench_incremental_vs_full`.
+    #[test]
+    #[ignore]
+    fn bench_incremental_vs_full() {
+        use std::time::Instant;
+        let (n, b) = (4000usize, 6usize);
+        let dim = n * b;
+        let lambda = 1e-3;
+
+        // Sequential odometry chain: block-tridiagonal, diagonally dominant.
+        let mut rng = Rng(0x1cef);
+        let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
+        let mut push_block = |br: usize, bc: usize, rng: &mut Rng| {
+            for r in 0..b {
+                for c in 0..b {
+                    triplets.push((br * b + r, bc * b + c, 0.1 * rng.next_f64()));
+                }
+            }
+        };
+        for j in 0..n - 1 {
+            push_block(j, j + 1, &mut rng);
+            push_block(j + 1, j, &mut rng);
+        }
+        for j in 0..n {
+            for d in 0..b {
+                triplets.push((j * b + d, j * b + d, 10.0));
+            }
+        }
+
+        let sym = analyze(&triplets, dim, b);
+        let seq = |t: &[(usize, usize, f64)]| {
+            refactor_numeric::<6>(&sym, t, lambda, 1, usize::MAX, usize::MAX, usize::MAX).unwrap()
+        };
+        let reps = 20;
+
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let _ = seq(&triplets);
+        }
+        let full_ms = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        // A smoother passes only the *affected* columns' triplets (the delta it
+        // is editing), not the whole graph — restrict to `c/b ∈ affected` so the
+        // value scatter is `O(nnz_affected)`, not `O(nnz_total)`.
+        let restrict =
+            |t: &[(usize, usize, f64)], affected: &[usize]| -> Vec<(usize, usize, f64)> {
+                t.iter()
+                    .copied()
+                    .filter(|&(_, c, _)| affected.binary_search(&(c / b)).is_ok())
+                    .collect()
+            };
+
+        // Edit the newest (end) column — the streaming-append case.
+        let last = n - 1;
+        let mut t_end = triplets.clone();
+        for d in 0..b {
+            t_end.push((last * b + d, last * b + d, 0.5));
+        }
+        let aff_end = sym.affected_columns(&[last]);
+        let t_end = restrict(&t_end, &aff_end);
+        let (mut cve, mut die) = seq(&triplets);
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            refactor_incremental::<6>(&sym, &t_end, lambda, &aff_end, &mut cve, &mut die).unwrap();
+        }
+        let end_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        // Edit a middle column — touches the tail half of the chain.
+        let mid = n / 2;
+        let mut t_mid = triplets.clone();
+        for d in 0..b {
+            t_mid.push((mid * b + d, mid * b + d, 0.5));
+        }
+        let aff_mid = sym.affected_columns(&[mid]);
+        let t_mid = restrict(&t_mid, &aff_mid);
+        let (mut cvm, mut dim_) = seq(&triplets);
+        let t2 = Instant::now();
+        for _ in 0..reps {
+            refactor_incremental::<6>(&sym, &t_mid, lambda, &aff_mid, &mut cvm, &mut dim_).unwrap();
+        }
+        let mid_ms = t2.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        println!("chain {n} blocks (dim {dim}): full refactor {full_ms:.2} ms");
+        println!(
+            "  incr @end (affected {:>5}) {end_ms:.4} ms => {:.0}x",
+            aff_end.len(),
+            full_ms / end_ms
+        );
+        println!(
+            "  incr @mid (affected {:>5}) {mid_ms:.4} ms => {:.1}x",
+            aff_mid.len(),
+            full_ms / mid_ms
+        );
     }
 }
