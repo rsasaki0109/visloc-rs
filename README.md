@@ -161,11 +161,11 @@ adjustment](#outlier-robust-bundle-adjustment-graduated-non-convexity)).
 
 | Dataset | Poses | Edges | initial chi^2 | final chi^2 | reduction | solve |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `parking-garage` | 1661 | 6275 | 1.68e4 | 1.27e0 | **99.99 %** | ~0.3 s |
-| `sphere2500` | 2500 | 4949 | 2.63e6 | 1.66e3 | **99.94 %** | ~1.8 s |
-| `torus3D` | 5000 | 9048 | 4.75e6 | 6.02e4 | **98.73 %** | ~9.7 s |
-| `cubicle` | 5750 | 16869 | 1.09e7 | 9.59e3 | **99.91 %** | ~10 s |
-| `rim` | 10195 | 29743 | 1.26e8 | 8.99e7 | 28.81 % | ~15 s |
+| `parking-garage` | 1661 | 6275 | 1.67e4 | 1.27e0 | **99.99 %** | ~0.3 s |
+| `sphere2500` | 2500 | 4949 | 2.61e6 | 1.35e3 | **99.95 %** | ~1.8 s |
+| `torus3D` | 5000 | 9048 | 4.80e6 | 6.00e4 | **98.75 %** | ~9.7 s |
+| `cubicle` | 5750 | 16869 | 1.08e7 | 2.75e3 | **99.97 %** | ~10 s |
+| `rim` | 10195 | 29743 | 1.28e8 | 8.73e7 | 31.58 % | ~15 s |
 | built-in synthetic loop | 120 | 120 | 2.68e2 | ~1e-21 | **100 %** | <0.2 s |
 
 (`solve` is the SE(3) optimization from raw odometry, no chordal seeding; the
@@ -271,9 +271,9 @@ Gauss-Newton `H` indefinite and the Cholesky factorization fail outright.
 `read_g2o` projects every information matrix onto the PSD cone (clamping
 negative eigenvalues to zero) on load, which is the exact identity on a valid
 matrix, so these datasets optimize instead of aborting. `cubicle` then drives
-down cleanly (**99.91 %**); `rim`, started from raw odometry, is genuinely
+down cleanly (**99.97 %**); `rim`, started from raw odometry, is genuinely
 harder - LM makes early progress then stalls (its damping saturates), reaching
-only **28.81 %** (the table above). That stall is a *basin* problem, not a
+only **31.58 %** (the table above). That stall is a *basin* problem, not a
 solver bug, and a chordal rotation initialization fixes it (next).
 
 #### Chordal rotation initialization (`--chordal-init`)
@@ -301,22 +301,25 @@ the in-solver default and drives the step manually behind `--chordal-init`, so
 its before/after chi^2 below stays a clean, independently-measured comparison.
 
 The effect is a uniform win on the hard 3D graphs - never a worse final chi^2,
-always equal-or-faster, and it flips three datasets from non-converged to
-converged:
+always equal-or-faster, and it flips three datasets (`sphere2500`, `cubicle`,
+`rim`) from non-converged to converged:
 
 (times below use the block Cholesky throughout):
 
 | Dataset | LM from odometry (final chi^2, time) | **+chordal init** (final chi^2, time) |
 | --- | --- | --- |
-| `sphere2500` | 1.66e3, ~1.8 s | 1.66e3, **~1.1 s** |
-| `torus3D` | 6.02e4, ~9.7 s | **2.45e4**, **~5.5 s** (converges) |
-| `cubicle` | 9.59e3, ~10 s | **4.40e3**, **~4.0 s** |
-| `rim` | 8.99e7, ~15 s (28.8 %) | **1.16e5**, **~10 s** (**99.9 %**, converges) |
+| `sphere2500` | 1.35e3, ~1.8 s | 1.35e3, **~1.1 s** (converges) |
+| `torus3D` | 6.00e4, ~9.7 s | **2.42e4**, **~5.5 s** |
+| `cubicle` | 2.75e3, ~10 s | 2.75e3, **~4.0 s** (converges) |
+| `rim` | 8.73e7, ~15 s (31.6 %) | **8.34e4**, **~10 s** (**99.9 %**, converges) |
 
-`rim`'s final chi^2 drops by ~775x and it finally converges; `torus3D` and
-`cubicle` reach a ~2x lower chi^2 in ~2x less wall-clock. The chordal solve
-itself is cheap (~0.4 s on `torus3D`, ~0.8 s on `rim`). `parking-garage` is
-already trivial from odometry, so the init leaves it unchanged - no regression.
+`rim`'s final chi^2 drops by ~1050x and it finally converges; `torus3D` reaches
+a ~2.5x lower optimum in ~2x less wall-clock (and converges too under the
+Marquardt `--diag-damping` mode). `sphere2500` and `cubicle` already bottom out
+at their optimum from odometry, so chordal init does not lower their chi^2 - it
+converges them and roughly halves the wall-clock. The chordal solve itself is
+cheap (~0.4 s on `torus3D`, ~0.8 s on `rim`). `parking-garage` is already trivial
+from odometry, so the init leaves it unchanged - no regression.
 
 Reproduce (the fetch script pulls the standard SE-Sync dataset suite -
 `sphere2500`, `torus3D`, `parking-garage`, `cubicle`, `grid3D`, `rim`):
@@ -330,11 +333,34 @@ cargo run --release --example pgo_g2o_benchmark -- --chordal-init datasets/pgo_g
 cargo run --example pgo_g2o_benchmark
 ```
 
-chi^2 is the sum of Mahalanobis edge residuals in visloc-rs's world-frame
-residual convention - it is not bit-comparable to a specific g2o/GTSAM build
-(those use a body-frame residual), so the figure of merit here is the optimizer
-deterministically driving a drifted graph down to a near-consistent optimum,
-not the absolute number.
+chi^2 is the sum of Mahalanobis edge residuals. visloc-rs stores each vertex as a
+world-frame pose and each measurement inverted, so its residual is the g2o/GTSAM
+body-frame residual rotated by the measurement adjoint; `read_g2o` therefore
+carries every information matrix through the matching congruence
+(`Ad(Z^-1)^T Omega Ad(Z^-1)`) so the weighted cost it minimizes is *identical* to
+the g2o/GTSAM `Sum e^T Omega e` - not merely a monotone surrogate. (Skip that
+congruence and an anisotropic graph like `sphere2500`, whose information weights
+translation ~40x below rotation, minimizes an adjoint-twisted cost and lands on a
+different optimum - the bug this fixes.) Seeded from the same raw odometry,
+visloc-rs lands on the same optimum as GTSAM 4.x's Levenberg-Marquardt:
+
+| Dataset | init chi^2 (both) | visloc-rs final | GTSAM final |
+| --- | ---: | ---: | ---: |
+| `parking-garage` | 1.6727e4 | 1.2684e0 | 1.2684e0 |
+| `sphere2500` | 2.6113e6 | 1.3515e3 | 1.3515e3 |
+| `cubicle` | 1.0811e7 | 2.7527e3 | 2.7493e3 |
+| `torus3D` | 4.8012e6 | 6.000e4 | 5.996e4 |
+| `rim` | 1.2766e8 | 8.73e7 | 6.11e5 |
+
+The initial chi^2 matches GTSAM to every printed digit - a direct check that the
+two solvers minimize the same function. From raw odometry both tie on the
+easy/anisotropic graphs (`parking`, `sphere`, `cubicle` within 0.12 %); the
+strongly non-convex `torus3D`/`rim` need a rotation seed. With `--chordal-init`
+visloc-rs reaches **2.42e4** (`torus3D`) and **8.34e4** (`rim`) - below GTSAM's
+raw-LM optimum - and since GTSAM's own `InitializePose3` chordal seed throws an
+indeterminate-linear-system exception on `sphere`/`cubicle`/`rim`, visloc-rs
+converges graphs from a seed the reference implementation cannot.
+(`scripts/gtsam_pgo_benchmark.py` reproduces the GTSAM column.)
 
 #### Outlier-robust PGO (Graduated Non-Convexity)
 
