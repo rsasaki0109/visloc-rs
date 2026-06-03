@@ -46,8 +46,8 @@
   🌐 <a href="https://rsasaki0109.github.io/visloc-rs/kitti3d/"><strong>Explore the trajectories in interactive 3D</strong></a>
   — KITTI (car): loop-closure before/after and SuperPoint/LightGlue stereo VO + BA; EuRoC (UAV): online VI-SLAM with real altitude. Orbit/zoom in the browser.
   <br>
-  ✨ <a href="https://rsasaki0109.github.io/visloc-rs/euroc_splat/"><strong>EuRoC UAV as a 3D Gaussian Splat</strong></a>
-  — a gsplat reconstruction bootstrapped from the visloc-rs VI-SLAM poses (SLAM poses → COLMAP → 3DGS), viewable in WebGL.
+  ✨ <a href="https://rsasaki0109.github.io/visloc-rs/euroc_splat/"><strong>EuRoC Machine Hall as a 3D Gaussian Splat</strong></a>
+  — the GPS-denied indoor scene visloc-rs localizes in, reconstructed with official gsplat MCMC (COLMAP → 3DGS), viewable in WebGL.
 </p>
 
 <p align="center">
