@@ -39,8 +39,9 @@ def parse_args():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--stride", type=int, default=6, help="keep every Nth cam0 frame")
     p.add_argument("--skip-head", type=int, default=120, help="skip the first N frames (stationary takeoff)")
-    p.add_argument("--iters", type=int, default=15000)
+    p.add_argument("--iters", type=int, default=18000)
     p.add_argument("--init-points", type=int, default=20000)
+    p.add_argument("--cap", type=int, default=600000, help="gsplat MCMC gaussian budget")
     return p.parse_args()
 
 
@@ -152,6 +153,7 @@ def main():
           f"Y[{lo[1]:.1f},{hi[1]:.1f}] Z[{lo[2]:.1f},{hi[2]:.1f}]", flush=True)
 
     # undistort
+    colmap_env = {**os.environ, "PATH": os.environ["HOME"] + "/.local/bin:" + os.environ["PATH"]}
     print("[undistort] running colmap image_undistorter ...", flush=True)
     subprocess.run([
         "colmap", "image_undistorter",
@@ -159,15 +161,24 @@ def main():
         "--input_path", str(sparse),
         "--output_path", str(args.out / "undistorted"),
         "--output_type", "COLMAP",
-    ], check=True, env={**os.environ, "PATH": os.environ["HOME"] + "/.local/bin:" + os.environ["PATH"]})
+    ], check=True, env=colmap_env)
+    # gsplat_mcmc_train.py reads a TXT model
+    subprocess.run([
+        "colmap", "model_converter",
+        "--input_path", str(args.out / "undistorted" / "sparse"),
+        "--output_path", str(args.out / "undistorted" / "sparse"),
+        "--output_type", "TXT",
+    ], check=True, env=colmap_env)
 
-    # train
-    print(f"[train] gsplat {args.iters} iters ...", flush=True)
-    sys.path.insert(0, GSMAPPER_SRC)
-    from gs_sim2real.train.gsplat_trainer import train_gsplat
-    from gs_sim2real.viewer.web_export import ply_to_splat
-    ply = train_gsplat(data_dir=str(args.out), output_dir=str(args.out / "gsplat"), num_iterations=args.iters)
-    splat = ply_to_splat(str(ply), str(args.out / "euroc_mh01_gt.splat"), min_opacity=0.02)
+    # train with the official gsplat MCMC strategy (the gs-mapper hand-rolled
+    # trainer fogs — see scripts/gsplat_mcmc_train.py for the why)
+    splat = str(args.out / f"{args.out.name}.splat")
+    print(f"[train] gsplat MCMC {args.iters} iters -> {splat}", flush=True)
+    here = os.path.dirname(os.path.abspath(__file__))
+    subprocess.run([
+        sys.executable, os.path.join(here, "gsplat_mcmc_train.py"),
+        str(args.out), splat, str(args.iters), str(args.cap),
+    ], check=True)
     n = os.path.getsize(splat) // 32
     print(f"[done] splat={splat} ({n} gaussians, {os.path.getsize(splat)/1e6:.1f} MB)", flush=True)
 
