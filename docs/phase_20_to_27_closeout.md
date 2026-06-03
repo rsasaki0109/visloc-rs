@@ -15,6 +15,42 @@ details.
 | **Survival-priority** (V-class hover) | Add `--motion-model adaptive-imu-pose --adaptive-motion-failures-to-switch-to-pose 3 --adaptive-motion-successes-to-switch-to-imu 10` (Phase-23 #4 + Phase-25 default refresh policy = `three-pose-smoother`)                                |
 | **V-class indoor accuracy** (opt-in)  | Cross-class accuracy + swap the extractor for `--feature-extractor superpoint-offline --superpoint-features-dir <cam0> --superpoint-cam1-features-dir <cam1>` (Phase-26 #1). V1_01 strict reaches **0.0029 m rigid ATE** — the cleanest EuRoC result in the arc. |
 
+## Post-closeout finding (2026-06-03): strict-stereo is frontend-specific
+
+Re-measuring `--stereo-bootstrap-strict` on the **SuperPoint** frontend (the
+Phase-26 #1 stack) with the new `scripts/analyze_slam_trajectory.py` /
+`compare_slam_runs.py` kit refines the Phase-23 #2 "universal win". The
+accuracy benefit strict bought with **HOG** (MH_01 -22 % ATE) does **not** hold
+for SuperPoint: on MH_01, strict and non-strict tie on rigid ATE, and strict
+just *costs 2.7× coverage*. On the close-range V-class rooms, strict is still
+essential — dropping it lets the fixed-4 m fallback landmarks corrupt the scale
+(the Phase-23 #2 V-class story, reproduced here):
+
+| seq   | config (SuperPoint) | tracking_success | rigid ATE | sim_scale |
+|-------|---------------------|-----------------:|----------:|----------:|
+| MH_01 | strict              | 11.9 %           | 0.198 m   | —         |
+| MH_01 | **non-strict**      | **32.3 %**       | **0.198 m** | —       |
+| V2_01 | strict              | 5.7 %            | **0.011 m** | 1.09    |
+| V2_01 | non-strict          | 7.3 %            | 0.208 m   | **2.16** (wrong-scale) |
+| V1_01 | strict              | 6.3 %            | **0.0029 m** | 1.03   |
+| V1_01 | non-strict          | 6.6 %            | 0.040 m   | 0.93      |
+
+**Recommendation:** keep `--stereo-bootstrap-strict` for V-class / close-range
+scenes (scale protection), but **drop it for MH-class / larger-scene SuperPoint
+runs** — it triples coverage at no accuracy cost. The *why* (from
+`analyze_match_quality.py`): the frontend matches are healthy through the
+dropouts (~480 matches, ratio ~0.8), so strict's frame rejection is a
+geometry/scale gate, not a feature-failure — and on MH the 4 m fallback is close
+enough to the scene that the extra landmarks help rather than hurt.
+
+**Refuted code idea (honest negative):** making the fallback depth adaptive (the
+median of the frame's triangulated stereo depths instead of the fixed 4 m) was
+implemented and tested across all three sequences — it was *worse* than both
+strict and the fixed-4 m non-strict everywhere (MH_01 0.66 m, V1_01 0.235 m).
+Cause is structural, not a depth-value tuning gap: seeding all no-stereo
+keypoints onto a single fronto-parallel plane (any depth) biases PnP; the median
+does not change that. Reverted, not shipped.
+
 ## Phase-by-phase summary
 
 | Phase | What shipped                                                              | Empirical outcome                                                                                                                                                                  |
