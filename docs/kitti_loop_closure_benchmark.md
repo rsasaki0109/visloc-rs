@@ -9,7 +9,9 @@ to its earlier observation. A loop closure is exactly that missing constraint.
 
 This benchmark runs the **same** exported SuperPoint/LightGlue stereo VO twice
 over identical features — once open, once with loop closure — and reports ATE
-before vs after, so the only variable is the loop-closure stage.
+before vs after, so the only variable is the loop-closure stage. For the aerial
+6-DOF counterpart on a EuRoC MAV flight, see
+[`euroc_loop_closure_benchmark.md`](euroc_loop_closure_benchmark.md).
 
 ## The loop-closure stage
 
