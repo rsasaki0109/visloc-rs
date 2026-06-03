@@ -5,28 +5,41 @@
 //! changes — `O(n)` per keyframe, `O(n²)` to build a trajectory online. This
 //! smoother instead maintains the factorization across keyframes: each new
 //! keyframe grows the factor by one block variable
-//! ([`BlockSymbolic::append_variable`](crate::block_cholesky)), and each
-//! Gauss–Newton relinearization re-factors only the columns whose pose actually
-//! moved ([`refactor_incremental`](crate::block_cholesky)) — both `O(affected)`,
-//! not `O(n)`. It is the driver on top of [`BlockIncrementalSolver`].
+//! ([`BlockSymbolic::append_variable`](crate::block_cholesky)) without re-analyzing,
+//! and each Gauss–Newton relinearization re-factors only the columns that changed
+//! and their elimination-tree ancestor paths
+//! ([`refactor_incremental`](crate::block_cholesky)). It is the driver on top of
+//! [`BlockIncrementalSolver`].
 //!
 //! Natural variable order (no fill-reducing permutation), so a new keyframe is
 //! always the highest index — a cheap top-of-tree edit. Gauss–Newton, not
 //! Levenberg–Marquardt: an `λ` that changed every iteration would perturb every
 //! diagonal block and defeat the incrementality (a good odometry initialization
 //! makes GN well-behaved here). The smoother therefore suits the online VO/SLAM
-//! regime — a growing trajectory with occasional loop closures — where the
-//! correction stays local; the anchor pins the gauge exactly as in the batch path.
+//! regime — a growing trajectory with occasional loop closures — where a chain
+//! append touches only the new pose while a loop closure's correction propagates
+//! over the span it spans; the anchor pins the gauge exactly as in the batch path.
+//! Validated on real KITTI 00: the incremental trajectory matches a from-scratch
+//! batch Gauss–Newton pose-for-pose.
 //!
-//! ## Fluid relinearization
+//! ## Relinearization and its limit
 //!
-//! After a Gauss–Newton step only the poses that moved more than
-//! [`IncrementalSmootherConfig::relin_threshold`] are relinearized (their `H`
-//! columns recomputed at the new estimate) and their elimination-tree ancestor
-//! paths refactored; the rest of the factor is reused. With the threshold at `0`
-//! every moved pose relinearizes, which reproduces a full Gauss–Newton step
-//! exactly — the correctness anchor a test pins. A positive threshold trades that
-//! exactness for skipping the far, already-settled part of the trajectory.
+//! After a Gauss–Newton step the columns whose normal-matrix block changed — the
+//! poses that moved plus their edge neighbours (an edge's curvature block depends
+//! on its source pose and lands on both endpoints) — are recomputed at the new
+//! estimate and their ancestor paths refactored; the rest of the factor is reused.
+//!
+//! [`IncrementalSmootherConfig::relin_threshold`] can in principle skip poses that
+//! moved less than it, to keep a far, settled span out of the refactor. **But this
+//! is only sound at (or very near) `0`**: the linear system is assembled at the
+//! *current* poses for every variable, so reusing a column's old factor while its
+//! pose has meaningfully moved mixes two linearization points and can make a
+//! Schur-complement block indefinite (a `SingularSystem` on real data). A
+//! genuinely large, safe threshold needs per-variable linearization points (assemble
+//! each edge at its endpoints' *frozen* linearization poses, relinearize only the
+//! chosen variables) — the iSAM2 mechanism, not yet built here. The default is
+//! therefore `0.0` (exact: every moved column relinearizes, matching batch), and a
+//! positive value is an experimental approximation guarded by this caveat.
 
 use std::collections::BTreeMap;
 
@@ -39,9 +52,11 @@ use crate::{PoseGraph, PoseGraphEdge, PoseGraphError};
 /// Tuning for the incremental smoother's inner Gauss–Newton loop.
 #[derive(Debug, Clone, Copy)]
 pub struct IncrementalSmootherConfig {
-    /// A pose is relinearized after a step only if the step's tangent norm
-    /// exceeds this. `0.0` relinearizes every moved pose (an exact Gauss–Newton
-    /// step); a larger value skips the far, settled part of the trajectory.
+    /// Skip relinearizing a pose whose step tangent norm is below this. **Keep at
+    /// (or very near) `0.0`** — see the module docs: the system is assembled at the
+    /// current poses, so skipping a meaningfully-moved pose mixes linearization
+    /// points and can yield an indefinite block. A large, safe value needs
+    /// per-variable linearization points (not yet implemented).
     pub relin_threshold: f64,
     /// Inner loop converges when the largest pose step falls below this.
     pub step_tolerance: f64,
@@ -52,7 +67,7 @@ pub struct IncrementalSmootherConfig {
 impl Default for IncrementalSmootherConfig {
     fn default() -> Self {
         Self {
-            relin_threshold: 1e-3,
+            relin_threshold: 0.0,
             step_tolerance: 1e-6,
             max_inner_iters: 10,
         }
@@ -525,7 +540,7 @@ mod tests {
 
         // --- incremental, keyframe by keyframe ---
         let cfg = IncrementalSmootherConfig {
-            relin_threshold: 1e-3,
+            relin_threshold: 0.0,
             step_tolerance: 1e-7,
             max_inner_iters: 10,
         };
