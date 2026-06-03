@@ -694,6 +694,17 @@ fn refactor_numeric<const B: usize>(
     Ok((col_vals, diag_inv))
 }
 
+/// Reusable scratch for [`refactor_incremental`]: the per-column relative-index
+/// `map`, plus a `mask`/`local_of` pair giving `O(1)` affected-membership and
+/// local-slot lookup. Owned by the incremental solver and grown with the graph, so
+/// thousands of refactors allocate nothing per call.
+#[derive(Default)]
+struct RefactorScratch {
+    map: Vec<usize>,
+    local_of: Vec<usize>,
+    mask: Vec<bool>,
+}
+
 /// Incrementally edit a previously computed factor in place: re-factor only the
 /// `affected` block columns (from [`BlockSymbolic::affected_columns`]) against
 /// the new `triplets`, leaving every other column's `L` blocks untouched. This
@@ -720,6 +731,12 @@ fn refactor_numeric<const B: usize>(
 /// `triplets` whose block column lies in `affected` are read, so for an
 /// `O(affected)` update the caller passes just the changed columns' entries (the
 /// delta), not the whole graph — passing the full system is correct but scans it.
+///
+/// `scratch` is reusable work storage (the per-column relative-index `map` plus an
+/// `O(1)` affected-membership/local-index lookup). Threading it through keeps the
+/// whole call `O(nnz_delta + Σ affected column work)` with no per-call `O(n)`
+/// allocation *and* no per-triplet binary search — the point on a smoother that
+/// refactors thousands of times as the graph grows.
 fn refactor_incremental<const B: usize>(
     sym: &BlockSymbolic,
     triplets: &[(usize, usize, f64)],
@@ -727,63 +744,80 @@ fn refactor_incremental<const B: usize>(
     affected: &[usize],
     col_vals: &mut [Vec<SMatrix<f64, B, B>>],
     diag_inv: &mut [SMatrix<f64, B, B>],
+    scratch: &mut RefactorScratch,
 ) -> Result<(), ()> {
-    let mut is_affected = vec![false; sym.n];
-    for &j in affected {
-        is_affected[j] = true;
+    let n = sym.n;
+    if scratch.map.len() < n {
+        scratch.map.resize(n, 0);
+    }
+    if scratch.mask.len() < n {
+        scratch.mask.resize(n, false);
+        scratch.local_of.resize(n, 0);
+    }
+    // Mark each affected column and its position in the parallel `a_lower`, so the
+    // triplet scan tests membership and finds the local slot in `O(1)`.
+    for (local, &j) in affected.iter().enumerate() {
+        scratch.mask[j] = true;
+        scratch.local_of[j] = local;
     }
 
-    // Scatter the new `A` blocks for the affected columns only (unaffected
-    // columns keep their old factor, so their `A` is never re-read).
-    let mut a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = (0..sym.n)
-        .map(|j| {
-            if is_affected[j] {
-                sym.a_pattern[j]
-                    .iter()
-                    .map(|&br| (br, SMatrix::<f64, B, B>::zeros()))
-                    .collect()
-            } else {
-                Vec::new()
-            }
+    // Scatter the new `A` blocks for the affected columns only, into storage
+    // indexed *parallel to `affected`* (not length-`n`). Unaffected columns keep
+    // their old factor and are never touched.
+    let mut a_lower: Vec<Vec<(usize, SMatrix<f64, B, B>)>> = affected
+        .iter()
+        .map(|&j| {
+            sym.a_pattern[j]
+                .iter()
+                .map(|&br| (br, SMatrix::<f64, B, B>::zeros()))
+                .collect()
         })
         .collect();
     for &(r, c, v) in triplets {
         let (br, bc) = (r / B, c / B);
-        if br >= bc && is_affected[bc] {
+        if br >= bc && bc < n && scratch.mask[bc] {
+            let local = scratch.local_of[bc];
             let slot = sym.a_pattern[bc]
                 .binary_search(&br)
                 .expect("triplet's block lies in the analyzed pattern");
-            a_lower[bc][slot].1[(r % B, c % B)] += v;
+            a_lower[local][slot].1[(r % B, c % B)] += v;
         }
     }
     if lambda != 0.0 {
-        for &bc in affected {
+        for (local, &bc) in affected.iter().enumerate() {
             let slot = sym.a_pattern[bc]
                 .binary_search(&bc)
                 .expect("diagonal block lies in the analyzed pattern");
             for d in 0..B {
-                a_lower[bc][slot].1[(d, d)] += lambda;
+                a_lower[local][slot].1[(d, d)] += lambda;
             }
         }
     }
 
     // Re-factor the affected columns in elimination order; `factor_column` reads
-    // `col_vals[k]` for each contributor `k < j` — already recomputed if
-    // affected, still valid if not.
-    let mut map = vec![0usize; sym.n];
+    // `col_vals[k]` for each contributor `k < j` — already recomputed if affected,
+    // still valid if not. `factor_column` re-seeds `scratch.map` per column, so
+    // reusing it across columns (and across calls) is safe.
+    let result = (|| {
+        for (local, &j) in affected.iter().enumerate() {
+            let (vals, inv) = factor_column::<B>(
+                j,
+                &sym.col_rows,
+                &sym.contributors[j],
+                &a_lower[local],
+                &*col_vals,
+                &mut scratch.map,
+            )?;
+            col_vals[j] = vals;
+            diag_inv[j] = inv;
+        }
+        Ok(())
+    })();
+    // Clear only the affected entries so the mask is all-false for the next call.
     for &j in affected {
-        let (vals, inv) = factor_column::<B>(
-            j,
-            &sym.col_rows,
-            &sym.contributors[j],
-            &a_lower[j],
-            &*col_vals,
-            &mut map,
-        )?;
-        col_vals[j] = vals;
-        diag_inv[j] = inv;
+        scratch.mask[j] = false;
     }
-    Ok(())
+    result
 }
 
 /// A block-Cholesky factor that is maintained *incrementally* across edits — the
@@ -811,6 +845,10 @@ pub(crate) struct BlockIncrementalSolver<const B: usize> {
     sym: BlockSymbolic,
     col_vals: Vec<Vec<SMatrix<f64, B, B>>>,
     diag_inv: Vec<SMatrix<f64, B, B>>,
+    /// Reusable scratch for the incremental refactors, so each `update_columns` /
+    /// `append_variable` is `O(affected)` with no `O(n)` allocation as the graph
+    /// grows.
+    scratch: RefactorScratch,
 }
 
 #[allow(dead_code)]
@@ -827,6 +865,7 @@ impl<const B: usize> BlockIncrementalSolver<B> {
             sym,
             col_vals,
             diag_inv,
+            scratch: RefactorScratch::default(),
         })
     }
 
@@ -855,6 +894,7 @@ impl<const B: usize> BlockIncrementalSolver<B> {
             &affected,
             &mut self.col_vals,
             &mut self.diag_inv,
+            &mut self.scratch,
         )
     }
 
@@ -878,6 +918,7 @@ impl<const B: usize> BlockIncrementalSolver<B> {
             &affected,
             &mut self.col_vals,
             &mut self.diag_inv,
+            &mut self.scratch,
         )
     }
 
@@ -1897,8 +1938,16 @@ mod tests {
             (c..n).collect::<Vec<_>>(),
             "on a path etree the change reaches exactly the tail c..n"
         );
-        refactor_incremental::<6>(&sym, &t2, lambda, &affected, &mut cv, &mut di)
-            .expect("incremental SPD");
+        refactor_incremental::<6>(
+            &sym,
+            &t2,
+            lambda,
+            &affected,
+            &mut cv,
+            &mut di,
+            &mut RefactorScratch::default(),
+        )
+        .expect("incremental SPD");
         let (cvf, dif) = seq(&t2, &sym);
         assert!(
             cv == cvf && di == dif,
@@ -1920,8 +1969,16 @@ mod tests {
         }
         let aff2 = sym2.affected_columns(&[c2]);
         assert!(aff2.contains(&c2) && aff2.windows(2).all(|w| w[0] < w[1]));
-        refactor_incremental::<6>(&sym2, &t4, lambda, &aff2, &mut cv2, &mut di2)
-            .expect("incremental SPD (loop)");
+        refactor_incremental::<6>(
+            &sym2,
+            &t4,
+            lambda,
+            &aff2,
+            &mut cv2,
+            &mut di2,
+            &mut RefactorScratch::default(),
+        )
+        .expect("incremental SPD (loop)");
         let (cvf2, dif2) = seq(&t4, &sym2);
         assert!(
             cv2 == cvf2 && di2 == dif2,
@@ -1996,9 +2053,19 @@ mod tests {
         let aff_end = sym.affected_columns(&[last]);
         let t_end = restrict(&t_end, &aff_end);
         let (mut cve, mut die) = seq(&triplets);
+        let mut scratch = RefactorScratch::default();
         let t1 = Instant::now();
         for _ in 0..reps {
-            refactor_incremental::<6>(&sym, &t_end, lambda, &aff_end, &mut cve, &mut die).unwrap();
+            refactor_incremental::<6>(
+                &sym,
+                &t_end,
+                lambda,
+                &aff_end,
+                &mut cve,
+                &mut die,
+                &mut scratch,
+            )
+            .unwrap();
         }
         let end_ms = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
 
@@ -2011,9 +2078,19 @@ mod tests {
         let aff_mid = sym.affected_columns(&[mid]);
         let t_mid = restrict(&t_mid, &aff_mid);
         let (mut cvm, mut dim_) = seq(&triplets);
+        let mut scratch_mid = RefactorScratch::default();
         let t2 = Instant::now();
         for _ in 0..reps {
-            refactor_incremental::<6>(&sym, &t_mid, lambda, &aff_mid, &mut cvm, &mut dim_).unwrap();
+            refactor_incremental::<6>(
+                &sym,
+                &t_mid,
+                lambda,
+                &aff_mid,
+                &mut cvm,
+                &mut dim_,
+                &mut scratch_mid,
+            )
+            .unwrap();
         }
         let mid_ms = t2.elapsed().as_secs_f64() * 1e3 / reps as f64;
 
@@ -2083,8 +2160,16 @@ mod tests {
             let affected = sym.append_variable(&nbrs);
             cv.push(Vec::new());
             di.push(SMatrix::<f64, 6, 6>::zeros());
-            refactor_incremental::<6>(&sym, &t, lambda, &affected, &mut cv, &mut di)
-                .expect("incremental append-factor SPD");
+            refactor_incremental::<6>(
+                &sym,
+                &t,
+                lambda,
+                &affected,
+                &mut cv,
+                &mut di,
+                &mut RefactorScratch::default(),
+            )
+            .expect("incremental append-factor SPD");
         }
 
         // The incrementally grown structure must equal a from-scratch analysis.
@@ -2232,6 +2317,7 @@ mod tests {
 
         // Stream `k` chain appends, each with only its delta triplets (column
         // nv-1's diagonal + the new coupling, and column nv's diagonal).
+        let mut scratch = RefactorScratch::default();
         let t0 = Instant::now();
         for _ in 0..k {
             let nv = sym.n;
@@ -2250,7 +2336,16 @@ mod tests {
             let affected = sym.append_variable(&[nv - 1]);
             cv.push(Vec::new());
             di.push(SMatrix::<f64, 6, 6>::zeros());
-            refactor_incremental::<6>(&sym, &delta, lambda, &affected, &mut cv, &mut di).unwrap();
+            refactor_incremental::<6>(
+                &sym,
+                &delta,
+                lambda,
+                &affected,
+                &mut cv,
+                &mut di,
+                &mut scratch,
+            )
+            .unwrap();
         }
         let stream_ms = t0.elapsed().as_secs_f64() * 1e3;
 
