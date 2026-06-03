@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
                    help="dir with truth.csv / drifted.csv / corrected.csv")
     p.add_argument("--vo-run", type=Path, default=Path("target/kitti_sp_lg_vo_long_revisit_BA/seq00"),
                    help="dir with gt_poses.txt / vo_poses.txt (KITTI 3x4)")
+    p.add_argument("--euroc-run", type=Path,
+                   default=Path("target/euroc_improve_MH_01_nonstrict_superpoint"),
+                   help="dir with an EuRoC slam_errors.csv (gt_p*/est_p*, Z up)")
+    p.add_argument("--euroc-gap", type=int, default=3,
+                   help="break the EuRoC estimate line where frame_idx jumps more than this")
     p.add_argument("--output", type=Path, default=Path("docs/kitti3d/data.json"))
     return p.parse_args()
 
@@ -63,6 +68,30 @@ def load_kitti_poses(path: Path):
             px, py, pz = remap(float(v[3]), float(v[7]), float(v[11]))
             xs.append(px); ys.append(py); zs.append(pz)
     return xs, ys, zs
+
+
+def load_euroc(path: Path):
+    """EuRoC slam_errors.csv -> (gt_xyz, est_xyz, frame_idx). World Z is up
+    (gravity ≈ -Z), so coordinates are used directly (no KITTI remap)."""
+    gx, gy, gz, ex, ey, ez, fi = [], [], [], [], [], [], []
+    with path.open() as fh:
+        for r in csv.DictReader(fh):
+            gx.append(float(r["gt_px"])); gy.append(float(r["gt_py"])); gz.append(float(r["gt_pz"]))
+            ex.append(float(r["est_px"])); ey.append(float(r["est_py"])); ez.append(float(r["est_pz"]))
+            fi.append(int(r["frame_idx"]))
+    return [gx, gy, gz], [ex, ey, ez], fi
+
+
+def break_at_gaps(xyz, frame_idx, gap):
+    """Insert None into each axis where the frame index jumps > gap, so the
+    web viewer draws a broken line across tracking dropouts instead of a
+    misleading bridge."""
+    xs, ys, zs = ([], [], [])
+    for i in range(len(frame_idx)):
+        if i > 0 and frame_idx[i] - frame_idx[i - 1] > gap:
+            xs.append(None); ys.append(None); zs.append(None)
+        xs.append(xyz[0][i]); ys.append(xyz[1][i]); zs.append(xyz[2][i])
+    return [xs, ys, zs]
 
 
 def umeyama_align(src, dst):
@@ -139,6 +168,23 @@ def main() -> int:
             "traces": [
                 trace("ground truth", gt, "#2b2b2b"),
                 trace(f"VO + BA estimate{f' (ATE {a:.1f} m)' if a else ''}", vo, "#2b6cb0", "dash"),
+            ],
+        })
+
+    # 3) EuRoC UAV (the 3D pays off here — real altitude, 6-DOF flight)
+    euroc_csv = args.euroc_run / "slam_errors.csv"
+    if euroc_csv.exists():
+        gt, est_raw, fi = load_euroc(euroc_csv)
+        est = umeyama_align(est_raw, gt)
+        a = ate(est, gt)
+        datasets.append({
+            "name": f"EuRoC MH_01 UAV — online VI-SLAM{f' (rigid ATE {a:.2f} m)' if a else ''}",
+            "subtitle": "GPS-denied drone (stereo + IMU); the 3D shows real altitude. "
+                        "Estimate line breaks at visual-tracking dropouts (intermittent, accuracy-favouring).",
+            "traces": [
+                trace("ground truth", gt, "#2b2b2b"),
+                trace(f"VI-SLAM estimate{f' (ATE {a:.2f} m)' if a else ''}",
+                      break_at_gaps(est, fi, args.euroc_gap), "#c026d3", "dash"),
             ],
         })
 
