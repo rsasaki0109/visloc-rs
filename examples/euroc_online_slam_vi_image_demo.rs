@@ -2388,6 +2388,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&vi_init_log_path, &vi_init_log)?;
     fs::write(&motion_vi_init_log_path, &motion_vi_init_log)?;
 
+    // Dump the metric landmark cloud (world frame) so downstream tools can seed
+    // a 3D Gaussian Splat from real on-surface SLAM points instead of random
+    // volumetric init (which gives gsplat a huge kNN init-scale -> fog).
+    let mut lm_csv = String::from("id,x,y,z,observations\n");
+    for lm in slam.map().landmarks.values() {
+        lm_csv.push_str(&format!(
+            "{},{:.6},{:.6},{:.6},{}\n",
+            lm.id,
+            lm.position.x,
+            lm.position.y,
+            lm.position.z,
+            lm.observations.len()
+        ));
+    }
+    fs::write(args.out_dir.join("slam_landmarks.csv"), lm_csv)?;
+
     let (rmse_pos, rmse_rot_deg) = if error_samples > 0 {
         (
             (sum_position_sq / error_samples as f64).sqrt(),
