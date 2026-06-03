@@ -27,16 +27,18 @@ use std::time::Instant;
 use nalgebra::{Matrix6, UnitQuaternion, Vector3};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_slam::{
-    read_g2o, relative_world_to_camera, LinearSolver, PoseGraph, PoseGraphEdgeKind,
+    read_g2o, relative_world_to_camera, DampingMode, LinearSolver, PoseGraph, PoseGraphEdgeKind,
     PoseGraphSe3Config, RobustKernel,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut chordal_init = false;
+    let mut diag_damping = false;
     let mut path: Option<String> = None;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--chordal-init" => chordal_init = true,
+            "--diag-damping" => diag_damping = true,
             _ => path = Some(arg),
         }
     }
@@ -53,6 +55,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  vertices      : {}", graph.poses.len());
     println!("  edges         : {}", graph.edges.len());
     println!("  chordal init  : {chordal_init}");
+    println!(
+        "  damping       : {}",
+        if diag_damping {
+            "diagonal (H + λ·diag(H))"
+        } else {
+            "identity (H + λI)"
+        }
+    );
 
     // Optional chordal rotation initialization: solve the relaxed rotation
     // sub-problem and re-derive translations before the full SE(3) solve. On
@@ -83,6 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         linear_solver: LinearSolver::Sparse,
         robust_kernel: RobustKernel::None,
         chordal_init: false,
+        damping: if diag_damping {
+            DampingMode::Diagonal
+        } else {
+            DampingMode::Identity
+        },
         ..PoseGraphSe3Config::default()
     };
 
