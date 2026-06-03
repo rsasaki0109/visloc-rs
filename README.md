@@ -43,6 +43,16 @@
 </table>
 
 <p align="center">
+  <img src="docs/assets/euroc_mh01_uav_slam.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: estimated camera trajectory tracking ground truth in top-down route and altitude, rigid ATE 0.12 m" width="92%">
+  <br>
+  <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU): the online
+  VI-SLAM estimate (red) tracking ground truth (black) frame by frame &mdash;
+  top-down route, altitude, and live localization error. Rigidly aligned, as
+  the reported rigid ATE: <strong>0.12 m</strong> over the tracked window
+  (99 frames). Regenerate with <code>scripts/animate_euroc_slam.py</code>.</em>
+</p>
+
+<p align="center">
   <a href="#why-visloc-rs"><strong>Why visloc-rs</strong></a> /
   <a href="#try-it"><strong>Try it</strong></a> /
   <a href="#demos"><strong>Demos</strong></a> /
