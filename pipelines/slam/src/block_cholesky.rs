@@ -836,18 +836,21 @@ impl<const B: usize> BlockIncrementalSolver<B> {
     }
 
     /// Re-factor in place after the values in block columns `changed` changed.
-    /// `delta` must carry the new values for every column in
-    /// `affected_columns(changed)` (passing the whole system is correct but
-    /// scans it); see [`refactor_incremental`].
+    /// `col_h[c]` provides column `c`'s lower-triangular block values (diagonal
+    /// plus below-diagonal cross blocks); only the columns in
+    /// `affected_columns(changed)` are read, so this is `O(nnz_affected)` — the
+    /// caller need not rebuild the whole system, just keep `col_h` current for the
+    /// columns it changed.
     pub(crate) fn update_columns(
         &mut self,
         changed: &[usize],
-        delta: &[(usize, usize, f64)],
+        col_h: &[Vec<(usize, usize, f64)>],
     ) -> Result<(), ()> {
         let affected = self.sym.affected_columns(changed);
+        let delta = gather_columns(col_h, &affected);
         refactor_incremental::<B>(
             &self.sym,
-            delta,
+            &delta,
             0.0,
             &affected,
             &mut self.col_vals,
@@ -856,19 +859,21 @@ impl<const B: usize> BlockIncrementalSolver<B> {
     }
 
     /// Grow the factor by the new highest block variable, coupled to the existing
-    /// columns `edges_to`. `delta` must carry the new values for every affected
-    /// column (the new column plus the fill path; see [`BlockSymbolic::append_variable`]).
+    /// columns `edges_to`. `col_h` must already include the new column's values
+    /// (index `blocks()` before this call); only the affected columns (the new
+    /// column plus the fill path) are read.
     pub(crate) fn append_variable(
         &mut self,
         edges_to: &[usize],
-        delta: &[(usize, usize, f64)],
+        col_h: &[Vec<(usize, usize, f64)>],
     ) -> Result<(), ()> {
         let affected = self.sym.append_variable(edges_to);
         self.col_vals.push(Vec::new());
         self.diag_inv.push(SMatrix::<f64, B, B>::zeros());
+        let delta = gather_columns(col_h, &affected);
         refactor_incremental::<B>(
             &self.sym,
-            delta,
+            &delta,
             0.0,
             &affected,
             &mut self.col_vals,
@@ -887,6 +892,19 @@ impl<const B: usize> BlockIncrementalSolver<B> {
             b,
         )
     }
+}
+
+/// Concatenate the per-column triplets of the listed columns into one delta list
+/// (the input a [`refactor_incremental`] scatters). `O(nnz` of the listed columns`)`.
+#[allow(dead_code)]
+fn gather_columns(
+    col_h: &[Vec<(usize, usize, f64)>],
+    columns: &[usize],
+) -> Vec<(usize, usize, f64)> {
+    columns
+        .iter()
+        .flat_map(|&c| col_h[c].iter().copied())
+        .collect()
 }
 
 /// Solve `A x = b` for a single right-hand side via block forward and backward
@@ -2123,18 +2141,35 @@ mod tests {
         }
         let mut solver = BlockIncrementalSolver::<6>::factor(&t, n0 * b).expect("base SPD");
 
+        // Lay the flat triplets out by block column (lower-triangular entries), the
+        // per-column form the incremental handle reads.
+        let to_col_h = |t: &[(usize, usize, f64)], n: usize| -> Vec<Vec<(usize, usize, f64)>> {
+            let mut col_h = vec![Vec::new(); n];
+            for &(r, c, v) in t {
+                let (br, bc) = (r / b, c / b);
+                if br >= bc {
+                    col_h[bc].push((r, c, v));
+                }
+            }
+            col_h
+        };
+
         // (1) Value update: strengthen column 3's diagonal (a relinearization /
-        // a re-weighted existing edge). Pass the full system as the delta.
+        // a re-weighted existing edge).
         for d in 0..b {
             t.push((3 * b + d, 3 * b + d, 5.0));
         }
-        solver.update_columns(&[3], &t).expect("update SPD");
+        solver
+            .update_columns(&[3], &to_col_h(&t, n0))
+            .expect("update SPD");
 
         // (2) Append var 8 with a chain edge to 7 and a loop edge back to 1.
         diag(&mut t, 8, 20.0);
         couple(&mut t, 8, 7, &mut rng);
         couple(&mut t, 8, 1, &mut rng);
-        solver.append_variable(&[7, 1], &t).expect("append SPD");
+        solver
+            .append_variable(&[7, 1], &to_col_h(&t, 9))
+            .expect("append SPD");
 
         assert_eq!(solver.blocks(), 9);
 

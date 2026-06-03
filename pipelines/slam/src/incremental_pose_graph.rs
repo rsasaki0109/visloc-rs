@@ -86,6 +86,12 @@ pub struct IncrementalUpdateStats {
     pub relinearized_columns: usize,
     /// Whether the inner loop reached the step tolerance.
     pub converged: bool,
+    /// Seconds spent assembling the normal matrix / gradient (profiling).
+    pub assemble_secs: f64,
+    /// Seconds spent in the linear solve / back-substitution (profiling).
+    pub solve_secs: f64,
+    /// Seconds spent growing/refactoring the block factor (profiling).
+    pub factor_secs: f64,
 }
 
 /// An SE(3) pose graph whose factorization is maintained incrementally as
@@ -97,6 +103,19 @@ pub struct IncrementalPoseGraph {
     config: IncrementalSmootherConfig,
     /// Variable index per pose id (natural order, anchor excluded).
     node_index: BTreeMap<u64, usize>,
+    /// Pose id per variable index (the inverse of `node_index`), so a column can
+    /// be re-assembled from its pose's incident edges.
+    column_id: Vec<u64>,
+    /// `incident[pid]`: indices into `graph.edges` of every edge touching pose
+    /// `pid` — the edges a column re-assembles from.
+    incident: BTreeMap<u64, Vec<usize>>,
+    /// `col_h[c]`: column `c`'s lower-triangular normal-matrix block values
+    /// (diagonal + below-diagonal cross blocks), maintained incrementally so only
+    /// the columns whose pose moved are re-assembled rather than the whole system.
+    col_h: Vec<Vec<(usize, usize, f64)>>,
+    /// The maintained gradient `g` (one 6-block per variable, flat), updated only
+    /// on the columns that changed.
+    g: Vec<f64>,
     /// The maintained block factor (`None` until the first keyframe).
     solver: Option<BlockIncrementalSolver<6>>,
 }
@@ -111,6 +130,10 @@ impl IncrementalPoseGraph {
             graph,
             config,
             node_index: BTreeMap::new(),
+            column_id: Vec::new(),
+            incident: BTreeMap::new(),
+            col_h: Vec::new(),
+            g: Vec::new(),
             solver: None,
         }
     }
@@ -150,13 +173,27 @@ impl IncrementalPoseGraph {
         let new_index = self.node_index.len();
         self.graph.poses.insert(id, pose);
         self.node_index.insert(id, new_index);
+        self.column_id.push(id);
+        self.col_h.push(Vec::new());
+        self.g.extend_from_slice(&[0.0; 6]);
+
+        // Register the new edges in the incidence index, collect the new variable's
+        // couplings, and note which existing columns the new constraints dirty (the
+        // new pose plus each direct neighbour, whose H/g blocks the new edges touch).
         let edge_start = self.graph.edges.len();
         self.graph.edges.extend(edges);
-
-        // Existing variable columns the new keyframe couples to (anchor excluded).
         let mut edges_to: Vec<usize> = Vec::new();
-        for e in &self.graph.edges[edge_start..] {
-            let other = if e.from == id { e.to } else { e.from };
+        let mut touched: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        touched.insert(id);
+        for ei in edge_start..self.graph.edges.len() {
+            let (from, to) = {
+                let e = &self.graph.edges[ei];
+                (e.from, e.to)
+            };
+            self.incident.entry(from).or_default().push(ei);
+            self.incident.entry(to).or_default().push(ei);
+            let other = if from == id { to } else { from };
+            touched.insert(other);
             if let Some(&oi) = self.node_index.get(&other) {
                 if oi != new_index {
                     edges_to.push(oi);
@@ -166,29 +203,42 @@ impl IncrementalPoseGraph {
         edges_to.sort_unstable();
         edges_to.dedup();
 
+        let mut stats = IncrementalUpdateStats::default();
+
+        // Assemble only the new column and its direct neighbours (the only blocks
+        // the new edges changed) — not the whole system.
+        let t_asm = std::time::Instant::now();
+        let rebuild: Vec<usize> = touched
+            .iter()
+            .filter_map(|pid| self.node_index.get(pid).copied())
+            .collect();
+        self.rebuild_columns(&rebuild);
+        stats.assemble_secs += t_asm.elapsed().as_secs_f64();
+
         // Grow (or initialize) the factor at the current linearization point.
-        let (h, _) = self.assemble();
         let dim = (new_index + 1) * 6;
+        let t_fac = std::time::Instant::now();
         match &mut self.solver {
             None => {
+                let flat: Vec<(usize, usize, f64)> = self.col_h.iter().flatten().copied().collect();
                 self.solver = Some(
-                    BlockIncrementalSolver::factor(&h, dim)
+                    BlockIncrementalSolver::factor(&flat, dim)
                         .map_err(|_| PoseGraphError::SingularSystem)?,
                 );
             }
             Some(solver) => {
                 solver
-                    .append_variable(&edges_to, &h)
+                    .append_variable(&edges_to, &self.col_h)
                     .map_err(|_| PoseGraphError::SingularSystem)?;
             }
         }
+        stats.factor_secs += t_fac.elapsed().as_secs_f64();
 
-        // Bounded Gauss–Newton with fluid relinearization.
-        let mut stats = IncrementalUpdateStats::default();
         for _ in 0..self.config.max_inner_iters {
-            let (_, g) = self.assemble();
-            let neg_g = -&g;
+            let neg_g = DVector::from_fn(self.g.len(), |i, _| -self.g[i]);
+            let t_solve = std::time::Instant::now();
             let delta = self.solver.as_ref().unwrap().solve(&neg_g);
+            stats.solve_secs += t_solve.elapsed().as_secs_f64();
             stats.inner_iters += 1;
 
             // Snapshot (id, index, step) so the pose mutation below doesn't alias
@@ -218,13 +268,10 @@ impl IncrementalPoseGraph {
                 break;
             }
 
-            // Which H columns actually changed: an edge's curvature block
-            // `Ad(T_from)ᵀΩAd(T_from)` depends on its `from` pose and lands on
-            // BOTH endpoints' diagonal + cross blocks, so a moved pose dirties not
-            // only itself but every pose it shares an edge with. Relinearizing
-            // only the literally-moved columns would leave those neighbour blocks
-            // stale and the incrementally-edited factor inconsistent (a non-PD
-            // diagonal → SingularSystem). Expand to the closure.
+            // Dirty H columns: a moved pose dirties itself and every pose it shares
+            // an edge with (the curvature block depends on the source pose and lands
+            // on both endpoints). See the module docs for why skipping sub-threshold
+            // moved poses is unsound.
             let mut dirty: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
             for (_pid, vi, xi) in &steps {
                 if xi.norm() > self.config.relin_threshold {
@@ -242,48 +289,75 @@ impl IncrementalPoseGraph {
                 }
             }
             let moved: Vec<usize> = dirty.into_iter().collect();
-
-            // Relinearize the dirty columns at the new estimate; the factor is
-            // updated only along their elimination-tree ancestor paths.
             stats.relinearized_columns += moved.len();
-            let (h2, _) = self.assemble();
-            self.solver
-                .as_mut()
-                .unwrap()
-                .update_columns(&moved, &h2)
+
+            // Re-assemble only the dirty columns' H + g, then refactor along their
+            // elimination-tree ancestor paths.
+            let t_asm = std::time::Instant::now();
+            self.rebuild_columns(&moved);
+            stats.assemble_secs += t_asm.elapsed().as_secs_f64();
+            let t_fac = std::time::Instant::now();
+            let solver = self.solver.as_mut().unwrap();
+            solver
+                .update_columns(&moved, &self.col_h)
                 .map_err(|_| PoseGraphError::SingularSystem)?;
+            stats.factor_secs += t_fac.elapsed().as_secs_f64();
             stats.refactors += 1;
         }
 
         Ok(stats)
     }
 
-    /// Assemble the natural-order Gauss–Newton normal matrix `H` (as scalar COO
-    /// triplets) and gradient `g` at the current estimate. Mirrors the batch
+    /// Re-assemble block column `c`'s lower-triangular normal-matrix blocks
+    /// (diagonal + below-diagonal cross blocks to higher-indexed neighbours) and
+    /// its gradient block, from the pose's incident edges. Mirrors the batch
     /// [`PoseGraph::assemble_se3_system`] per-edge math (no robust kernel, no GNC)
-    /// but in natural variable order so the incremental factor's pattern matches.
-    fn assemble(&self) -> (Vec<(usize, usize, f64)>, DVector<f64>) {
-        let dim = self.node_index.len() * 6;
-        let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
-        let mut g = DVector::<f64>::zeros(dim);
-        for edge in &self.graph.edges {
-            let (w, ata, atr) = edge_gn_terms(edge, &self.graph.poses);
-            let i_to = self.node_index.get(&edge.to).copied();
-            let i_from = self.node_index.get(&edge.from).copied();
-            if let Some(j) = i_to {
-                push_block(&mut triplets, j, j, w, &ata);
-                add_segment(&mut g, j, w, &atr);
-            }
-            if let Some(i) = i_from {
-                push_block(&mut triplets, i, i, w, &ata);
-                add_segment(&mut g, i, -w, &atr);
-            }
-            if let (Some(j), Some(i)) = (i_to, i_from) {
-                push_block(&mut triplets, j, i, w, &(-ata));
-                push_block(&mut triplets, i, j, w, &(-ata.transpose()));
+    /// in natural variable order. `O(degree)`, not `O(n)`.
+    fn assemble_column(&self, c: usize) -> (Vec<(usize, usize, f64)>, Vector6<f64>) {
+        let pid = self.column_id[c];
+        let mut diag = Matrix6::<f64>::zeros();
+        let mut g_block = Vector6::<f64>::zeros();
+        let mut crosses: Vec<(usize, Matrix6<f64>)> = Vec::new();
+        if let Some(edge_idxs) = self.incident.get(&pid) {
+            for &ei in edge_idxs {
+                let edge = &self.graph.edges[ei];
+                let (w, ata, atr) = edge_gn_terms(edge, &self.graph.poses);
+                diag += w * ata;
+                // Gradient sign: +AᵀΩr at the `to` endpoint, −AᵀΩr at the `from`.
+                if edge.to == pid {
+                    g_block += w * atr;
+                }
+                if edge.from == pid {
+                    g_block -= w * atr;
+                }
+                // Below-diagonal cross block to a higher-indexed neighbour. The
+                // curvature block AᵀΩA is symmetric, so both endpoint orderings of
+                // the off-diagonal coupling are −w·AᵀΩA.
+                let other = if edge.from == pid { edge.to } else { edge.from };
+                if let Some(&oi) = self.node_index.get(&other) {
+                    if oi > c {
+                        crosses.push((oi, -(w * ata)));
+                    }
+                }
             }
         }
-        (triplets, g)
+        let mut col: Vec<(usize, usize, f64)> = Vec::with_capacity(36 * (crosses.len() + 1));
+        push_block(&mut col, c, c, 1.0, &diag);
+        for (oi, cross) in &crosses {
+            push_block(&mut col, *oi, c, 1.0, cross);
+        }
+        (col, g_block)
+    }
+
+    /// Re-assemble the given columns' `col_h` triplets and gradient blocks in place.
+    fn rebuild_columns(&mut self, cols: &[usize]) {
+        for &c in cols {
+            let (col, g_block) = self.assemble_column(c);
+            self.col_h[c] = col;
+            for k in 0..6 {
+                self.g[c * 6 + k] = g_block[k];
+            }
+        }
     }
 }
 
@@ -324,13 +398,6 @@ fn push_block(
         for c in 0..6 {
             triplets.push((bi * 6 + r, bj * 6 + c, w * m[(r, c)]));
         }
-    }
-}
-
-/// Accumulate `w · v` into the length-6 block `block` of the gradient.
-fn add_segment(g: &mut DVector<f64>, block: usize, w: f64, v: &Vector6<f64>) {
-    for k in 0..6 {
-        g[block * 6 + k] += w * v[k];
     }
 }
 
@@ -546,6 +613,7 @@ mod tests {
         };
         let mut inc = IncrementalPoseGraph::new(0, est_pose(0), cfg);
         let mut relin_total = 0usize;
+        let (mut asm_s, mut solve_s, mut fac_s) = (0.0, 0.0, 0.0);
         let t0 = Instant::now();
         for i in 1..N {
             let mut edges = vec![edge(
@@ -566,9 +634,18 @@ mod tests {
             }
             let stats = inc.add_keyframe(i, est_pose(i), edges).unwrap();
             relin_total += stats.relinearized_columns;
+            asm_s += stats.assemble_secs;
+            solve_s += stats.solve_secs;
+            fac_s += stats.factor_secs;
         }
         let inc_total = t0.elapsed().as_secs_f64() * 1e3;
         let inc_cost = inc.graph.se3_cost();
+        println!(
+            "  breakdown: assemble {:.0}ms / solve {:.0}ms / factor {:.0}ms",
+            asm_s * 1e3,
+            solve_s * 1e3,
+            fac_s * 1e3,
+        );
 
         // --- one full batch Gauss–Newton at the final size ---
         let mut batch = PoseGraph::new();
