@@ -43,6 +43,11 @@
 </table>
 
 <p align="center">
+  🌐 <a href="https://rsasaki0109.github.io/visloc-rs/kitti3d/"><strong>Explore the KITTI trajectories in interactive 3D</strong></a>
+  — ground-truth vs drifted-VO vs loop-corrected, and real SuperPoint/LightGlue stereo VO + BA, orbit/zoom in the browser.
+</p>
+
+<p align="center">
   <img src="docs/assets/euroc_mh01_match_track.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: SuperPoint feature matches on the cam0 image (left) and the growing 2D estimated trajectory vs ground truth (right)" width="98%">
   <br>
   <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU). Left: the
@@ -312,5 +317,5 @@ priors and fusion, and larger public-data evaluation.
 - [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) - Phase-27 activation contract, model sourcing, validation plan.
 - [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) - toolchain-pin + verification protocol + empirical ledger.
 - [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md) - per-demo guides.
-- **SLAM analysis kit** (`scripts/`): [`analyze_slam_trajectory.py`](scripts/analyze_slam_trajectory.py) (per-run coverage / tracking-continuity / jitter / ATE-over-time report), [`compare_slam_runs.py`](scripts/compare_slam_runs.py) (rank every run by coverage and accuracy, best-per-sequence), [`analyze_match_quality.py`](scripts/analyze_match_quality.py) (per-frame feature-match health vs tracking dropouts - *why* tracking fails), [`animate_euroc_match_track.py`](scripts/animate_euroc_match_track.py) / [`animate_euroc_slam.py`](scripts/animate_euroc_slam.py) (trajectory + feature-match GIFs).
+- **SLAM analysis kit** (`scripts/`): [`analyze_slam_trajectory.py`](scripts/analyze_slam_trajectory.py) (per-run coverage / tracking-continuity / jitter / ATE-over-time report), [`compare_slam_runs.py`](scripts/compare_slam_runs.py) (rank every run by coverage and accuracy, best-per-sequence), [`analyze_match_quality.py`](scripts/analyze_match_quality.py) (per-frame feature-match health vs tracking dropouts - *why* tracking fails), [`animate_euroc_match_track.py`](scripts/animate_euroc_match_track.py) / [`animate_euroc_slam.py`](scripts/animate_euroc_slam.py) (trajectory + feature-match GIFs), [`build_kitti3d_web.py`](scripts/build_kitti3d_web.py) (bundle KITTI results for the [interactive 3D viewer](docs/kitti3d/index.html)).
 - [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).
