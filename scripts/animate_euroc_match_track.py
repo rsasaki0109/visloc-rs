@@ -44,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--align", choices=["rigid", "sim", "none"], default="rigid")
     p.add_argument("--trim-tail-error", type=float, default=0.0)
+    p.add_argument(
+        "--max-gap",
+        type=int,
+        default=0,
+        help="truncate at the first frame_idx gap exceeding this, keeping only the "
+        "leading continuously-tracked run (avoids drawing a line across tracking dropouts)",
+    )
     p.add_argument("--top-features", type=int, default=600, help="keep the N highest-score features per frame before matching")
     p.add_argument("--max-draw", type=int, default=220, help="cap drawn match lines for legibility")
     p.add_argument("--ratio", type=float, default=0.85, help="Lowe ratio threshold")
@@ -129,6 +136,16 @@ def main() -> int:
     with args.errors_csv.open() as fh:
         for r in csv.DictReader(fh):
             rows.append(r)
+    fidx_all = [int(r["frame_idx"]) for r in rows]
+    if args.max_gap > 0:
+        keep = len(rows)
+        for i in range(1, len(fidx_all)):
+            if fidx_all[i] - fidx_all[i - 1] > args.max_gap:
+                keep = i
+                break
+        if keep < len(rows):
+            print(f"--max-gap {args.max_gap}: keeping the leading {keep}-frame continuous run", file=sys.stderr)
+        rows = rows[:keep]
     ts = [r["timestamp_ns"] for r in rows]
     fidx = [int(r["frame_idx"]) for r in rows]
     gt = np.array([[float(r["gt_px"]), float(r["gt_py"]), float(r["gt_pz"])] for r in rows])
