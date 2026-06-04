@@ -732,11 +732,12 @@ void main () {
 `.trim();
 
 // Pulled-back oblique view tuned for outdoor-scale scenes (~20 m range)
-// Framed on a real EuRoC MH_01 ground-truth camera (mid-flight, looking into
-// the Machine Hall), pulled back 2 m so the scene doesn't clip on load.
+// Framed on a real EuRoC V1_01 ground-truth camera (looking at the Vicon-room
+// floor target/boxes), pulled back 1.5 m so the scene doesn't clip on load.
+// The default scene is euroc_v101.splat; MH_01 is reachable from the picker.
 let defaultViewMatrix = [
-    0.3367, 0.2770, -0.9000, 0, 0.9398, -0.1578, 0.3031, 0,
-    -0.0581, -0.9478, -0.3134, 0, -3.6857, 1.8976, -4.1657, 1,
+    0.9769, -0.1087, 0.1839, 0, -0.2094, -0.3163, 0.9253, 0,
+    -0.0424, -0.9424, -0.3318, 0, 0.1470, 0.8528, -0.8458, 1,
 ];
 let viewMatrix = defaultViewMatrix;
 async function main() {
@@ -747,7 +748,7 @@ async function main() {
         carousel = false;
     } catch (err) {}
     const url = new URL(
-        params.get("url") || "euroc_mh01.splat",
+        params.get("url") || "euroc_v101.splat",
         location.href,
     );
     const req = await fetch(url, {
