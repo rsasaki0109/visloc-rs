@@ -51,6 +51,14 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/euroc_v101_splat_compare.png" alt="EuRoC V1_01: ground-truth photo (left) vs the 3D Gaussian Splat reconstruction rendered from the same camera pose (right)" width="72%">
+  <br>
+  <em>EuRoC V1_01: a ground-truth photo (left) vs the 3DGS reconstruction rendered
+  from the same camera pose (right) — grayscale single-camera input, so it's soft
+  but recognisable. Explore it live in the splat viewer above.</em>
+</p>
+
+<p align="center">
   <img src="docs/assets/euroc_mh01_match_track.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: SuperPoint feature matches on the cam0 image (left) and the growing 2D estimated trajectory vs ground truth (right)" width="98%">
   <br>
   <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU). Left: the
