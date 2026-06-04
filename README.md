@@ -261,6 +261,7 @@ under `docs/` (full index in [`docs/demo_strategy.md`](docs/demo_strategy.md)).
 | Outlier-robust PGO (GNC) | Injects wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89x** baseline, GNC **1.0x** (30/30 rejected) | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
 | Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a 30 deg baseline scene (~30x rot/trans-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
 | SuperPoint/LightGlue VO + BA | File-backed SP/LG features -> confidence-weighted PnP -> BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
+| **KITTI loop closure** | Open SP/LG stereo VO vs VLAD->PnP->GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **Sim(3) ATE rmse 36.29 m -> 2.57 m (14x)** - the drift dense global BA cannot remove | [`scripts/run_kitti_loop_closure_benchmark.sh`](scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) |
 | **EuRoC online VI-SLAM** | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap. SuperPoint via offline replay or `--features onnx-inference` | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
 | KITTI / TUM trajectory ATE + RPE evaluator | Frame-id-matched ATE (Umeyama SE(3)/Sim(3) alignment) and TUM-style RPE over Δ-spaced pairs | [`examples/evaluate_trajectory_from_tum_files.rs`](examples/evaluate_trajectory_from_tum_files.rs), [`examples/evaluate_kitti_odometry_benchmark.rs`](examples/evaluate_kitti_odometry_benchmark.rs) |
@@ -324,6 +325,7 @@ priors and fusion, and larger public-data evaluation.
 ## Further reading
 
 - [`docs/pgo_internals.md`](docs/pgo_internals.md) - pose-graph / BA back-end internals: block Cholesky, parallelism, chordal init, GTSAM parity, GNC.
+- [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) - metric loop closure on KITTI seq00: open VO vs VLAD->PnP->GNC PGO (14x ATE), and why frontend scale drift breaks metric loops at higher stride.
 - [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) - single-source-of-truth EuRoC arc synthesis: recommended-config table, per-phase outcomes, known issues, headline ATE evolution.
 - [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) - Phase-27 activation contract, model sourcing, validation plan.
 - [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) - toolchain-pin + verification protocol + empirical ledger.
