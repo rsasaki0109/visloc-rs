@@ -176,6 +176,20 @@ run_vo full2v \
   --loop-min-path-length "$loop_min_path_length" \
   --loop-min-similarity "$loop_min_similarity"
 
+# Add --online-ba-history 20: the fixed-keyframe local-map BA. Each --online-ba
+# trigger extends its window back by 20 fixed frames so long-baseline landmarks
+# anchor the recent poses (without deforming the older trajectory like a wider
+# all-free window would). MH_03 0.065 -> 0.061 m, MH_05 0.086 -> 0.084 m
+# (Sim(3) ~10% / ~6%); within ~2.5x of ORB-SLAM3. history=20 is the sweet spot.
+echo "# Full pipeline + fixed-prefix local-map BA (+ --online-ba-history 20)"
+run_vo full2vh \
+  --online-ba --online-ba-window 30 --online-ba-trigger-every 10 \
+  --online-ba-history 20 \
+  --loop-closure --loop-two-view-ba \
+  --loop-min-frame-gap "$loop_min_frame_gap" \
+  --loop-min-path-length "$loop_min_path_length" \
+  --loop-min-similarity "$loop_min_similarity"
+
 ate() {
   # ate <est.tum> <align-flag>  -> rmse
   evo_ape tum "$gt_tum" "$1" $2 2>/dev/null | awk '/rmse/{print $2; exit}'
@@ -189,7 +203,9 @@ f_se3=$(ate "$out_dir/full/est.tum" -a)
 f_sim3=$(ate "$out_dir/full/est.tum" -as)
 v_se3=$(ate "$out_dir/full2v/est.tum" -a)
 v_sim3=$(ate "$out_dir/full2v/est.tum" -as)
-verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2v/vo.log" | head -1)
+h_se3=$(ate "$out_dir/full2vh/est.tum" -a)
+h_sim3=$(ate "$out_dir/full2vh/est.tum" -as)
+verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2vh/vo.log" | head -1)
 
 {
   echo ""
@@ -203,6 +219,7 @@ verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2v/vo.log" | head -
   printf "| + loop closure (open VO)      | %14s | %15s |\n" "$l_se3" "$l_sim3"
   printf "| window BA + loop (full)       | %14s | %15s |\n" "$f_se3" "$f_sim3"
   printf "| window BA + loop + 2-view BA  | %14s | %15s |\n" "$v_se3" "$v_sim3"
+  printf "| + local-map BA (history 20)   | %14s | %15s |\n" "$h_se3" "$h_sim3"
   echo ""
   echo "ORB-SLAM3 stereo MH_03 ATE = 0.024 m; DROID-SLAM stereo = 0.035 m (reference)."
   echo "$verified" | sed 's/^/  /'

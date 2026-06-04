@@ -57,14 +57,15 @@ sliding-window local BA triggered every 10 frames). That combination is far
 closer to state of the art — measured on the same artifacts, two EuRoC machine
 hall flights:
 
-| pipeline                                      | MH_03 ATE SE(3) | MH_05 ATE SE(3) |
-| --------------------------------------------- | --------------: | --------------: |
-| open VO, no BA, no loop                       |         2.462 m |         2.387 m |
-| open VO + loop (stage isolation, above)       |         0.464 m |               — |
-| window BA + loop                              |         0.089 m |         0.119 m |
-| **window BA + loop + two-view loop BA**       |       **0.065 m** |       **0.086 m** |
+| pipeline                                       | MH_03 ATE SE(3) | MH_05 ATE SE(3) |
+| ---------------------------------------------- | --------------: | --------------: |
+| open VO, no BA, no loop                        |         2.462 m |         2.387 m |
+| open VO + loop (stage isolation, above)        |         0.464 m |               — |
+| window BA + loop                               |         0.089 m |         0.119 m |
+| window BA + loop + two-view loop BA            |         0.065 m |         0.086 m |
+| **+ fixed-prefix local-map BA (history 20)**   |       **0.061 m** |       **0.084 m** |
 
-Both alignments agree (MH_03 Sim(3) 0.059 m, MH_05 Sim(3) 0.077 m), so the metric
+Both alignments agree (MH_03 Sim(3) 0.053 m, MH_05 Sim(3) 0.072 m), so the metric
 scale is correct, not absorbed by the fit. Against the published deep/classical
 stereo SLAM systems on MH_03:
 
@@ -72,9 +73,9 @@ stereo SLAM systems on MH_03:
 | ------------------------------------- | -------------: |
 | ORB-SLAM3 (Campos et al. 2021)        |        0.024 m |
 | DROID-SLAM (Teed & Deng 2021)         |        0.035 m |
-| **visloc-rs (window BA + loop + 2-view)** | **0.065 m** |
+| **visloc-rs (full pipeline)**         |     **0.061 m** |
 
-visloc-rs lands within **~2.7× of ORB-SLAM3** and **~1.85× of DROID-SLAM** on
+visloc-rs lands within **~2.5× of ORB-SLAM3** and **~1.75× of DROID-SLAM** on
 MH_03, in pure Rust.
 
 ### Two-view loop bundle adjustment
@@ -102,15 +103,33 @@ it deforms the already locally-consistent window-BA trajectory and *worsens* ATE
 (0.089 → 0.15 m), the same way a loop-free global reprojection-minimum does. The
 lever is grinding each loop edge well, not re-solving everything.
 
-The remaining gap to ORB-SLAM3 is architectural rather than a tuning knob: its
-local BA optimises over the **covisibility graph** (every keyframe sharing a
-landmark observation), whereas visloc's `--online-ba` is a purely **temporal**
-sliding window that never couples spatially-near or revisited frames during
-tracking. Two measured caveats on the windowed BA: it must be the *streaming*
-`--online-ba` (a one-shot full-batch `--final-global-ba` over the whole flight is
-both far slower and worse, 0.214 m, for the same deform-the-trajectory reason);
-and widening the window past 30 (50/60/80) or lifting the loop-verification cap
-(which admits low-similarity false loops) both *worsen* the result.
+### Fixed-prefix local-map bundle adjustment
+
+The last stage (`--online-ba-history 20`) is what takes the pipeline from 0.065 m
+to **0.061 m** (MH_03) and 0.086 m to **0.084 m** (MH_05) — Sim(3) ATE drops
+~10 % / ~6 %. It is the ORB-SLAM3 *fixed-keyframe local BA* pattern brought onto
+the streaming window: each `--online-ba` trigger extends its optimisation window
+**backward** by 20 frames and holds that older prefix **fixed**, so landmarks
+established in earlier windows anchor the recent poses over a baseline far longer
+than the 30-frame window — without re-optimising (and so without deforming) the
+already-settled older trajectory.
+
+This sharply distinguishes it from naively *widening* the window: a 50/60/80-frame
+window with every pose free *worsens* the result (the old poses get re-perturbed by
+stale, off-view observations), whereas the same extension with the prefix fixed
+*improves* it. The fixed anchor is the whole point. The history length has a sweet
+spot — 20 frames helps both flights, but a longer history (30+) starts admitting
+stale landmarks and on MH_05 turns slightly negative, so 20 is the shipped default.
+
+The remaining gap to ORB-SLAM3 narrows but does not close. Its local BA selects
+the true **covisibility graph** (every keyframe sharing a landmark observation),
+while ours is still a *temporal* window — a good proxy on a mostly-forward flight,
+but it never pulls in a spatially-near non-consecutive keyframe. Two measured
+caveats remain: the windowed BA must be the *streaming* `--online-ba` (a one-shot
+full-batch `--final-global-ba` over the whole flight is both far slower and worse,
+0.214 m, for the same deform-the-trajectory reason); and lifting the
+loop-verification cap (which admits low-similarity false loops) *worsens* the
+result.
 
 ## The frame-gap gate matters more in the air
 
