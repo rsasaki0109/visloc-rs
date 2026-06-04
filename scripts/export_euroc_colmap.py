@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--stride", type=int, default=1, help="keep every Nth tracked frame")
     p.add_argument("--init-points", type=int, default=8000, help="random init points written to points3D.txt")
+    p.add_argument("--landmarks", type=Path, default=None,
+                   help="visloc slam_landmarks.csv — seed points3D from REAL on-surface "
+                        "SLAM landmarks instead of random volumetric points (avoids gsplat fog)")
     return p.parse_args()
 
 
@@ -108,22 +111,34 @@ def main() -> int:
         lines.append("\n")  # empty POINTS2D line
     (sparse / "images.txt").write_text("".join(lines))
 
-    # points3D.txt — random init in the trajectory's bounding box (gsplat refines)
-    import random
-    random.seed(0)
     lo = [min(xs), min(ys), min(zs)]
     hi = [max(xs), max(ys), max(zs)]
-    pad = [max((hi[k] - lo[k]) * 0.5, 0.5) for k in range(3)]
     pts = ["# 3D point list\n# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n"]
-    for pid in range(1, args.init_points + 1):
-        px = random.uniform(lo[0] - pad[0], hi[0] + pad[0])
-        py = random.uniform(lo[1] - pad[1], hi[1] + pad[1])
-        pz = random.uniform(lo[2] - pad[2], hi[2] + pad[2])
-        pts.append(f"{pid} {px:.4f} {py:.4f} {pz:.4f} 128 128 128 1.0\n")
+    if args.landmarks is not None:
+        # points3D.txt from REAL visloc map landmarks (metric, on-surface). These
+        # sit on actual geometry, so gsplat's kNN-derived init scale is small and
+        # the reconstruction converges instead of fogging.
+        npts = 0
+        for lm in csv.DictReader(args.landmarks.open()):
+            npts += 1
+            pts.append(f"{npts} {float(lm['x']):.4f} {float(lm['y']):.4f} "
+                       f"{float(lm['z']):.4f} 128 128 128 1.0\n")
+        seeded = f"{npts} visloc landmarks"
+    else:
+        # random init in the trajectory's bounding box (gsplat refines)
+        import random
+        random.seed(0)
+        pad = [max((hi[k] - lo[k]) * 0.5, 0.5) for k in range(3)]
+        for pid in range(1, args.init_points + 1):
+            px = random.uniform(lo[0] - pad[0], hi[0] + pad[0])
+            py = random.uniform(lo[1] - pad[1], hi[1] + pad[1])
+            pz = random.uniform(lo[2] - pad[2], hi[2] + pad[2])
+            pts.append(f"{pid} {px:.4f} {py:.4f} {pz:.4f} 128 128 128 1.0\n")
+        seeded = f"{args.init_points} random init points"
     (sparse / "points3D.txt").write_text("".join(pts))
 
     print(f"wrote COLMAP model to {sparse} : {len(rows)} images ({linked} symlinked), "
-          f"{args.init_points} init points")
+          f"{seeded}")
     print(f"scene bbox X[{lo[0]:.2f},{hi[0]:.2f}] Y[{lo[1]:.2f},{hi[1]:.2f}] Z[{lo[2]:.2f},{hi[2]:.2f}]")
     return 0
 
