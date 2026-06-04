@@ -33,10 +33,10 @@
 
 use std::collections::HashMap;
 
-use nalgebra::Point3;
+use nalgebra::{Point2, Point3};
 use rayon::prelude::*;
 
-use visloc_core::geometry::Pose;
+use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
 use visloc_vision::matching::{BruteForceMatcher, Matcher};
@@ -47,9 +47,9 @@ use visloc_vision::stereo_vo::StereoFeature;
 
 use crate::gnc::{GncConfig, AUTO_SCALE_K};
 use crate::{
-    relative_world_to_camera, LinearSolver, LoopClosureConstraint, PnPLoopClosureVerifier,
-    PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphError, PoseGraphGncResult,
-    PoseGraphSe3Config, RobustKernel,
+    relative_world_to_camera, BaConfig, BaObservation, BaStereoObservation, BundleAdjustment,
+    LinearSolver, LoopClosureConstraint, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
+    PoseGraph, PoseGraphError, PoseGraphGncResult, PoseGraphSe3Config, RobustKernel,
 };
 
 /// Configuration for [`close_loops_on_vo_trajectory`].
@@ -108,6 +108,18 @@ pub struct VoLoopClosureConfig {
     pub se3: PoseGraphSe3Config,
     /// GNC robust-optimization configuration.
     pub gnc: GncConfig,
+    /// Refine each verified loop's relative pose with a local two-view bundle
+    /// adjustment *before* it enters the pose graph. See
+    /// [`refine_loop_relative_two_view`] for the rationale: PnP minimises
+    /// reprojection in the newer frame only while holding the older frame's
+    /// stereo-depth points fixed, so their triangulation error biases the loop
+    /// edge; a 2-view BA (older pose fixed, newer pose + shared landmarks free,
+    /// the older stereo disparity a *soft* metric anchor) lets the points refine
+    /// to satisfy reprojection in both frames and recovers a metrically better
+    /// grounded relative pose. Strictly local — it touches only each loop's two
+    /// frames, never the rest of the trajectory; the global drift distribution
+    /// stays with the SE(3) PGO. `false` reproduces the PnP-only loop edges.
+    pub refine_loops_two_view: bool,
 }
 
 impl Default for VoLoopClosureConfig {
@@ -135,6 +147,7 @@ impl Default for VoLoopClosureConfig {
                 auto_scale: Some(AUTO_SCALE_K),
                 ..GncConfig::default()
             },
+            refine_loops_two_view: false,
         }
     }
 }
@@ -296,10 +309,30 @@ pub fn detect_loop_candidates(
         .collect()
 }
 
+/// One matched loop correspondence carried out of verification so a local
+/// two-view bundle adjustment can re-grind the loop edge. All quantities are in
+/// the *older* frame's camera coordinates (where that frame's stereo depth lives)
+/// plus the newer frame's pixel observation:
+/// - `older_xy` / `disparity`: the older left-image pixel and its rectified-stereo
+///   disparity (`u_l - u_r`), the soft metric anchor on the landmark.
+/// - `older_point_cam`: the landmark triangulated from that disparity, the BA's
+///   initial 3D point (in older-camera coordinates).
+/// - `newer_xy`: the same physical point's pixel in the newer frame, the cross-view
+///   reprojection target that refines the relative pose.
+#[derive(Debug, Clone, Copy)]
+struct LoopBaCorrespondence {
+    older_xy: Point2<f64>,
+    older_point_cam: Point3<f64>,
+    disparity: f64,
+    newer_xy: Point2<f64>,
+}
+
 /// Geometrically verify one candidate pair. Matches the newer frame's left
 /// descriptors against the older frame's, lifts the older keypoints to world
 /// 3D via the older frame's stereo depth and pose, and runs PnP. Returns a
-/// metric loop constraint (`older -> newer`) when the verifier accepts it.
+/// metric loop constraint (`older -> newer`) when the verifier accepts it,
+/// paired with the matched correspondences (in older-camera coordinates) for an
+/// optional two-view refinement of the loop edge.
 #[allow(clippy::too_many_arguments)]
 fn verify_loop_candidate(
     camera: &Camera,
@@ -310,37 +343,48 @@ fn verify_loop_candidate(
     newer: usize,
     matcher: &BruteForceMatcher,
     verifier: &PnPLoopClosureVerifier,
-) -> Option<LoopClosureConstraint> {
+) -> Option<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)> {
     let older_pose = &poses[older];
     let camera_to_world = older_pose.camera_to_world();
 
-    // older left-keypoint index -> world 3D point (only keypoints with a valid
-    // stereo depth contribute a 2D-3D correspondence).
-    let mut world_by_index: HashMap<usize, Point3<f64>> = HashMap::new();
+    // older left-keypoint index -> (camera-frame point, disparity) for keypoints
+    // with a valid stereo depth. The camera-frame point lifts to world for PnP;
+    // it is also kept in camera frame (with the disparity) so a two-view BA can
+    // re-anchor the loop without re-deriving the stereo geometry.
+    let mut stereo_by_index: HashMap<usize, (Point3<f64>, f64)> = HashMap::new();
     for stereo in &stereo_per_frame[older] {
-        world_by_index.insert(
-            stereo.left_index,
-            camera_to_world.transform_point(&stereo.point_cam),
-        );
+        stereo_by_index.insert(stereo.left_index, (stereo.point_cam, stereo.disparity));
     }
-    if world_by_index.is_empty() {
+    if stereo_by_index.is_empty() {
         return None;
     }
 
     let matches =
         matcher.match_descriptors(&left_features[newer].descriptors, &left_features[older].descriptors);
     let mut correspondences = Vec::with_capacity(matches.len());
+    let mut ba_correspondences = Vec::with_capacity(matches.len());
     for descriptor_match in &matches {
-        let Some(&point3d) = world_by_index.get(&descriptor_match.train_index) else {
+        let Some(&(point_cam, disparity)) = stereo_by_index.get(&descriptor_match.train_index)
+        else {
             continue;
         };
         let Some(&point2d) = left_features[newer].keypoints.get(descriptor_match.query_index) else {
             continue;
         };
+        let Some(&older_xy) = left_features[older].keypoints.get(descriptor_match.train_index)
+        else {
+            continue;
+        };
         correspondences.push(Correspondence2D3D {
             point2d,
-            point3d,
+            point3d: camera_to_world.transform_point(&point_cam),
             confidence: descriptor_match.confidence,
+        });
+        ba_correspondences.push(LoopBaCorrespondence {
+            older_xy,
+            older_point_cam: point_cam,
+            disparity,
+            newer_xy: point2d,
         });
     }
 
@@ -349,15 +393,125 @@ fn verify_loop_candidate(
         return None;
     }
     let relative_pose = verification.relative_pose.clone()?;
-    Some(LoopClosureConstraint {
-        from_keyframe_id: older as u64,
-        to_keyframe_id: newer as u64,
-        relative_pose,
-        inlier_count: verification.inlier_count,
-        inlier_ratio: verification.inlier_ratio,
-        mean_sampson_error: verification.mean_sampson_error,
-        score: verification.score,
-    })
+    Some((
+        LoopClosureConstraint {
+            from_keyframe_id: older as u64,
+            to_keyframe_id: newer as u64,
+            relative_pose,
+            inlier_count: verification.inlier_count,
+            inlier_ratio: verification.inlier_ratio,
+            mean_sampson_error: verification.mean_sampson_error,
+            score: verification.score,
+        },
+        ba_correspondences,
+    ))
+}
+
+/// Re-grind one verified loop's relative pose with a local two-view bundle
+/// adjustment, returning the refined `older -> newer` transform (or `None` to
+/// keep the PnP estimate).
+///
+/// PnP estimates the loop edge by minimising reprojection in the *newer* frame
+/// while holding the older frame's stereo-depth points fixed, so any error in
+/// the older disparity triangulation passes straight into the edge. This sets up
+/// a minimal BA in the older camera frame:
+/// - the older pose is the fixed gauge (identity);
+/// - the newer pose starts at the PnP relative pose and is free;
+/// - each shared landmark starts at its older stereo point and is free, anchored
+///   *softly* by an older rectified-stereo observation (so its depth can move to
+///   satisfy the newer-frame reprojection instead of being frozen at the noisy
+///   disparity), and observed by a newer monocular reprojection.
+///
+/// The older stereo residuals keep the metric scale well-posed, so the refined
+/// relative pose stays metric. The optimisation is local to the two frames and
+/// is rejected (returns `None`) if it wanders implausibly far from the PnP edge,
+/// leaving the global drift distribution to the SE(3) PGO.
+fn refine_loop_relative_two_view(
+    camera: &Camera,
+    relative_pose: &SE3,
+    correspondences: &[LoopBaCorrespondence],
+) -> Option<SE3> {
+    const MIN_CORRESPONDENCES: usize = 8;
+    // Drop a correspondence whose newer-frame reprojection under the PnP edge is
+    // already grossly off — it is a descriptor-match outlier the verifier's
+    // RANSAC rejected, and a free monocular residual would only bias the BA.
+    const REPROJ_INLIER_PX: f64 = 4.0;
+    // Reject a refinement that moved the loop edge implausibly far (the BA
+    // diverged or latched onto a bad configuration); keep the PnP edge instead.
+    const MAX_TRANSLATION_DELTA_M: f64 = 2.0;
+    const MAX_ROTATION_DELTA_RAD: f64 = 0.30;
+
+    let (fx, _, _, _) = camera.intrinsics()?;
+
+    let mut ba = BundleAdjustment::new(camera.clone());
+    ba.add_pose(0, Pose::identity());
+    ba.fix_pose(0);
+    ba.add_pose(
+        1,
+        Pose {
+            world_to_camera: relative_pose.clone(),
+        },
+    );
+
+    let mut baseline: Option<f64> = None;
+    let mut used = 0usize;
+    for corr in correspondences {
+        if corr.disparity <= 0.0 || corr.older_point_cam.z <= 0.0 {
+            continue;
+        }
+        // Reproject the older point into the newer frame under the PnP edge and
+        // gate on the pixel error (outlier rejection consistent with the edge).
+        let newer_cam = relative_pose.transform_point(&corr.older_point_cam);
+        let Some(predicted) = camera.project(&newer_cam) else {
+            continue;
+        };
+        if (predicted - corr.newer_xy).norm() > REPROJ_INLIER_PX {
+            continue;
+        }
+        // All correspondences share one rectified-stereo baseline; recover it
+        // from the disparity geometry (disparity = fx * baseline / z).
+        baseline.get_or_insert(corr.disparity * corr.older_point_cam.z / fx);
+
+        let id = used as u64;
+        ba.add_landmark(id, corr.older_point_cam);
+        ba.add_stereo_observation(BaStereoObservation {
+            keyframe_id: 0,
+            landmark_id: id,
+            xy: corr.older_xy,
+            u_right: corr.older_xy.x - corr.disparity,
+        });
+        ba.add_observation(BaObservation {
+            keyframe_id: 1,
+            landmark_id: id,
+            xy: corr.newer_xy,
+        });
+        used += 1;
+    }
+
+    if used < MIN_CORRESPONDENCES {
+        return None;
+    }
+    ba.set_stereo_baseline(baseline?);
+
+    let config = BaConfig {
+        max_iterations: 12,
+        robust_kernel: RobustKernel::Huber { delta: 3.0 },
+        linear_solver: LinearSolver::Dense,
+        ..BaConfig::default()
+    };
+    ba.optimize(&config).ok()?;
+
+    let refined = ba.poses.get(&1)?.world_to_camera.clone();
+
+    // Sanity-gate the refinement against the PnP edge: a large jump means the BA
+    // diverged, so fall back to the PnP estimate.
+    let delta = refined.compose(&relative_pose.inverse());
+    if delta.translation.norm() > MAX_TRANSLATION_DELTA_M
+        || delta.rotation.angle() > MAX_ROTATION_DELTA_RAD
+    {
+        return None;
+    }
+    Some(refined)
 }
 
 /// Accumulated trajectory length up to each frame: `cum[0] = 0`,
@@ -436,7 +590,7 @@ pub fn close_loops_on_vo_trajectory(
     // so verify in parallel. The PnP RANSAC seed is fixed, so results are
     // thread-count-independent; `collect` preserves the (similarity-sorted)
     // order so the pose graph's edge order is deterministic.
-    let loop_constraints: Vec<LoopClosureConstraint> = to_verify
+    let verified: Vec<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)> = to_verify
         .par_iter()
         .filter_map(|candidate| {
             verify_loop_candidate(
@@ -451,6 +605,27 @@ pub fn close_loops_on_vo_trajectory(
             )
         })
         .collect();
+
+    // Optionally re-grind each loop edge with a local two-view BA (older pose
+    // fixed, newer pose + shared landmarks free) before it enters the pose
+    // graph. Independent per loop, so refine in parallel; falls back to the PnP
+    // edge whenever the refinement is rejected.
+    let loop_constraints: Vec<LoopClosureConstraint> = if config.refine_loops_two_view {
+        verified
+            .par_iter()
+            .map(|(constraint, corrs)| {
+                let mut constraint = constraint.clone();
+                if let Some(refined) =
+                    refine_loop_relative_two_view(camera, &constraint.relative_pose, corrs)
+                {
+                    constraint.relative_pose = refined;
+                }
+                constraint
+            })
+            .collect()
+    } else {
+        verified.into_iter().map(|(c, _)| c).collect()
+    };
 
     if loop_constraints.is_empty() {
         return Ok(VoLoopClosureResult {
@@ -712,5 +887,159 @@ mod tests {
         assert_eq!(result.verified_count(), 0);
         assert!(result.gnc.is_none());
         assert_eq!(result.refined_poses.len(), n);
+    }
+
+    /// The two-view loop refinement recovers a loop edge biased by *noisy older
+    /// stereo depth*. PnP holds the older points fixed at their (corrupted)
+    /// disparity depth and fits the newer pose to them, so its edge inherits the
+    /// depth error; the 2-view BA lets the points slide off the soft stereo
+    /// anchor to satisfy the true newer-frame reprojection and drives the edge
+    /// back toward ground truth.
+    #[test]
+    fn two_view_refinement_corrects_noisy_depth_loop_edge() {
+        let camera = camera();
+        let (fx, _, _, _) = camera.intrinsics().unwrap();
+        let baseline = 0.5;
+
+        // Ground-truth loop edge: a modest forward/lateral translation + yaw.
+        let r_true = SE3 {
+            rotation: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.05),
+            translation: Vector3::new(0.4, 0.0, 0.3),
+        };
+
+        // A spread of landmarks in front of the older camera (its frame == world
+        // here). Per-point unbiased depth noise corrupts the older stereo depth
+        // (and hence the disparity), but the newer-frame pixel is the projection
+        // of the TRUE point, so reprojection alone identifies the true geometry.
+        let mut corrs = Vec::new();
+        for k in 0..60usize {
+            let gx = ((k % 7) as f64 - 3.0) * 0.8;
+            let gy = ((k % 5) as f64 - 2.0) * 0.6;
+            let gz = 4.0 + (k % 11) as f64 * 0.5;
+            let true_point = Point3::new(gx, gy, gz);
+
+            let Some(older_xy) = camera.project(&true_point) else {
+                continue;
+            };
+            let newer_cam = r_true.transform_point(&true_point);
+            let Some(newer_xy) = camera.project(&newer_cam) else {
+                continue;
+            };
+            if older_xy.x < 0.0
+                || older_xy.x >= camera.width as f64
+                || newer_xy.x < 0.0
+                || newer_xy.x >= camera.width as f64
+            {
+                continue;
+            }
+
+            // Deterministic per-point depth noise in ~[-12%, +12%]; scaling the
+            // camera-frame point along its ray changes depth while keeping the
+            // older pixel (and so the older stereo observation stays self-
+            // consistent at the noisy depth, exactly as a real disparity error).
+            let noise = ((k as f64 * 0.61803398).fract() - 0.5) * 0.24;
+            let noisy_point = true_point * (1.0 + noise);
+            let disparity = fx * baseline / noisy_point.z;
+
+            corrs.push(LoopBaCorrespondence {
+                older_xy,
+                older_point_cam: noisy_point,
+                disparity,
+                newer_xy,
+            });
+        }
+        assert!(corrs.len() >= 8, "need enough correspondences for the BA");
+
+        // The PnP edge: minimise newer-frame reprojection holding the (noisy)
+        // older points FIXED — exactly what PnP does — seeded from a slightly
+        // perturbed truth. Its edge inherits the depth bias.
+        let r_seed = SE3 {
+            rotation: r_true.rotation
+                * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02),
+            translation: r_true.translation + Vector3::new(0.04, 0.02, -0.03),
+        };
+        let mut pnp_ba = BundleAdjustment::new(camera.clone());
+        pnp_ba.add_pose(0, Pose::identity());
+        pnp_ba.fix_pose(0);
+        pnp_ba.add_pose(
+            1,
+            Pose {
+                world_to_camera: r_seed.clone(),
+            },
+        );
+        for (id, corr) in corrs.iter().enumerate() {
+            pnp_ba.add_landmark(id as u64, corr.older_point_cam);
+            pnp_ba.fix_landmark(id as u64);
+            pnp_ba.add_observation(BaObservation {
+                keyframe_id: 1,
+                landmark_id: id as u64,
+                xy: corr.newer_xy,
+            });
+        }
+        pnp_ba
+            .optimize(&BaConfig {
+                max_iterations: 20,
+                ..BaConfig::default()
+            })
+            .expect("PnP-analog BA converges");
+        let r_pnp = pnp_ba.poses.get(&1).unwrap().world_to_camera.clone();
+
+        let edge_error = |edge: &SE3| -> f64 {
+            let d = edge.compose(&r_true.inverse());
+            d.translation.norm() + d.rotation.angle()
+        };
+
+        let refined = refine_loop_relative_two_view(&camera, &r_pnp, &corrs)
+            .expect("two-view refinement succeeds");
+
+        let before = edge_error(&r_pnp);
+        let after = edge_error(&refined);
+        assert!(
+            after < before,
+            "two-view BA should pull the loop edge toward truth: PnP {before:.4}, BA {after:.4}"
+        );
+    }
+
+    /// With consistent (noise-free) geometry the refinement is a no-op-quality
+    /// fixed point: it neither diverges nor degrades an already-correct edge.
+    #[test]
+    fn two_view_refinement_keeps_a_clean_loop_edge() {
+        let camera = camera();
+        let (fx, _, _, _) = camera.intrinsics().unwrap();
+        let baseline = 0.5;
+        let r_true = SE3 {
+            rotation: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.03),
+            translation: Vector3::new(0.3, 0.0, 0.2),
+        };
+        let mut corrs = Vec::new();
+        for k in 0..60usize {
+            let true_point = Point3::new(
+                ((k % 7) as f64 - 3.0) * 0.8,
+                ((k % 5) as f64 - 2.0) * 0.6,
+                4.0 + (k % 11) as f64 * 0.5,
+            );
+            let (Some(older_xy), newer) = (
+                camera.project(&true_point),
+                camera.project(&r_true.transform_point(&true_point)),
+            ) else {
+                continue;
+            };
+            let Some(newer_xy) = newer else { continue };
+            corrs.push(LoopBaCorrespondence {
+                older_xy,
+                older_point_cam: true_point,
+                disparity: fx * baseline / true_point.z,
+                newer_xy,
+            });
+        }
+        let refined = refine_loop_relative_two_view(&camera, &r_true, &corrs)
+            .expect("refinement succeeds");
+        let d = refined.compose(&r_true.inverse());
+        assert!(
+            d.translation.norm() < 0.02 && d.rotation.angle() < 0.01,
+            "clean edge should stay put: dt {:.4} dr {:.4}",
+            d.translation.norm(),
+            d.rotation.angle()
+        );
     }
 }

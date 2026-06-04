@@ -82,6 +82,7 @@ struct CliArgs {
     loop_vocab_k: usize,
     loop_max_candidates_per_frame: usize,
     loop_max_verifications: Option<usize>,
+    loop_two_view_ba: bool,
     ba_gravity_prior_weight: Option<f64>,
     ba_per_pose_gravity_prior_observations: Option<PathBuf>,
     ba_per_pose_gravity_prior_weight: f64,
@@ -627,6 +628,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vocab_k: args.loop_vocab_k,
             max_candidates_per_frame: args.loop_max_candidates_per_frame,
             max_verifications: args.loop_max_verifications,
+            refine_loops_two_view: args.loop_two_view_ba,
             ..VoLoopClosureConfig::default()
         };
         println!(
@@ -1096,6 +1098,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut final_global_ba: bool = false;
     let mut final_global_ba_iterations: usize = 30;
     let mut loop_closure: bool = false;
+    let mut loop_two_view_ba: bool = false;
     let mut loop_min_frame_gap: usize = 50;
     let mut loop_min_path_length: Option<f64> = Some(5.0);
     let mut loop_min_similarity: f32 = 0.20;
@@ -1292,6 +1295,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 loop_closure = true;
                 args.remove(i);
             }
+            "--loop-two-view-ba" => {
+                loop_two_view_ba = true;
+                args.remove(i);
+            }
             "--loop-min-frame-gap" => {
                 loop_min_frame_gap = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1485,6 +1492,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         final_global_ba,
         final_global_ba_iterations,
         loop_closure,
+        loop_two_view_ba,
         loop_min_frame_gap,
         loop_min_path_length,
         loop_min_similarity,
@@ -1629,6 +1637,11 @@ fn print_usage() {
          verification (descending similarity first); bounds the per-pair \
          brute-force matching cost on long sequences. 0 = verify all \
          (default 400)\n \
+         [--loop-two-view-ba]  re-grind each verified loop's relative pose with a \
+         local two-view bundle adjustment (older pose fixed, newer pose + shared \
+         landmarks free, older stereo a soft metric anchor) before the pose graph; \
+         removes the older-depth triangulation bias from each loop edge without \
+         touching the rest of the trajectory\n \
          \n  3DGS / NeRF export (after VO + optional BA):\n \
          [--colmap-export <dir>]      write COLMAP cameras.txt / images.txt / \
          points3D.txt under <dir>, suitable for gaussian-splatting / nerfstudio \

@@ -57,34 +57,60 @@ sliding-window local BA triggered every 10 frames). That combination is far
 closer to state of the art — measured on the same artifacts, two EuRoC machine
 hall flights:
 
-| pipeline                                 | MH_03 ATE SE(3) | MH_05 ATE SE(3) |
-| ---------------------------------------- | --------------: | --------------: |
-| open VO, no BA, no loop                  |         2.462 m |         2.387 m |
-| open VO + loop (stage isolation, above)  |         0.464 m |               — |
-| **window BA + loop (full pipeline)**     |       **0.089 m** |       **0.119 m** |
+| pipeline                                      | MH_03 ATE SE(3) | MH_05 ATE SE(3) |
+| --------------------------------------------- | --------------: | --------------: |
+| open VO, no BA, no loop                       |         2.462 m |         2.387 m |
+| open VO + loop (stage isolation, above)       |         0.464 m |               — |
+| window BA + loop                              |         0.089 m |         0.119 m |
+| **window BA + loop + two-view loop BA**       |       **0.065 m** |       **0.086 m** |
 
-Both alignments agree (MH_03 Sim(3) 0.088 m, MH_05 Sim(3) 0.119 m), so the metric
+Both alignments agree (MH_03 Sim(3) 0.059 m, MH_05 Sim(3) 0.077 m), so the metric
 scale is correct, not absorbed by the fit. Against the published deep/classical
 stereo SLAM systems on MH_03:
 
-| system (stereo)                  | MH_03 ATE rmse |
-| -------------------------------- | -------------: |
-| ORB-SLAM3 (Campos et al. 2021)   |        0.024 m |
-| DROID-SLAM (Teed & Deng 2021)    |        0.035 m |
-| **visloc-rs (window BA + loop)** |     **0.089 m** |
+| system (stereo)                       | MH_03 ATE rmse |
+| ------------------------------------- | -------------: |
+| ORB-SLAM3 (Campos et al. 2021)        |        0.024 m |
+| DROID-SLAM (Teed & Deng 2021)         |        0.035 m |
+| **visloc-rs (window BA + loop + 2-view)** | **0.065 m** |
 
-visloc-rs lands within **~3.7× of ORB-SLAM3** and **~2.5× of DROID-SLAM** on
-MH_03, in pure Rust, from a window-BA + loop-closure pipeline. The remaining gap
-is architectural rather than a tuning knob: ORB-SLAM's local BA optimises over
-the **covisibility graph** (every keyframe sharing a landmark observation),
-whereas visloc's `--online-ba` is a purely **temporal** sliding window that never
-couples spatially-near or revisited frames during tracking. Two measured caveats:
-the windowed BA must be the *streaming* `--online-ba` (a one-shot full-batch
-`--final-global-ba` over the whole flight is both far slower and worse, 0.214 m,
-because a single global reprojection-minimum deforms the already locally
-consistent trajectory); and widening the window past 30 (50/60/80) or lifting the
-loop-verification cap (which admits low-similarity false loops) both *worsen* the
-result — 0.089 m is the tuned frontier of this architecture.
+visloc-rs lands within **~2.7× of ORB-SLAM3** and **~1.85× of DROID-SLAM** on
+MH_03, in pure Rust.
+
+### Two-view loop bundle adjustment
+
+The `--loop-two-view-ba` stage is what takes the pipeline from 0.089 m to
+0.065 m (MH_03) and 0.119 m to 0.086 m (MH_05) — a consistent **~28 %** ATE
+reduction on both flights, from the *same* 317 / 282 verified loops. Each loop
+edge enters the pose graph from a PnP estimate that minimises reprojection in the
+**newer** frame only, while holding the **older** frame's stereo-depth points
+fixed — so any error in the older disparity triangulation passes straight into
+the edge. The refinement re-grinds each loop as a minimal two-view bundle
+adjustment in the older camera frame: the older pose is the fixed gauge, the newer
+pose and the shared landmarks are free, and the older rectified-stereo disparity
+becomes a *soft* metric anchor (the points may slide off it to satisfy
+reprojection in **both** views instead of being frozen at the noisy depth). The
+metric scale stays well-posed because the older stereo residuals pin it. The PGO
+cost drops sharply (MH_03 213 → 25, MH_05 104 → 9): the refined edges are
+mutually consistent in a way the depth-biased PnP edges were not.
+
+Crucially this is **local** — it touches only each loop's two frames, never the
+rest of the trajectory; the global drift distribution stays with the SE(3) PGO.
+A *global* post-loop bundle adjustment (merging the loop correspondences into the
+full track set and re-optimising the whole flight) was tried and **discarded**:
+it deforms the already locally-consistent window-BA trajectory and *worsens* ATE
+(0.089 → 0.15 m), the same way a loop-free global reprojection-minimum does. The
+lever is grinding each loop edge well, not re-solving everything.
+
+The remaining gap to ORB-SLAM3 is architectural rather than a tuning knob: its
+local BA optimises over the **covisibility graph** (every keyframe sharing a
+landmark observation), whereas visloc's `--online-ba` is a purely **temporal**
+sliding window that never couples spatially-near or revisited frames during
+tracking. Two measured caveats on the windowed BA: it must be the *streaming*
+`--online-ba` (a one-shot full-batch `--final-global-ba` over the whole flight is
+both far slower and worse, 0.214 m, for the same deform-the-trajectory reason);
+and widening the window past 30 (50/60/80) or lifting the loop-verification cap
+(which admits low-similarity false loops) both *worsen* the result.
 
 ## The frame-gap gate matters more in the air
 

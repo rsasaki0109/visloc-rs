@@ -154,12 +154,24 @@ run_vo loop \
   --loop-min-similarity "$loop_min_similarity"
 
 # Full pipeline visloc actually ships: incremental windowed local BA frontend
-# (--online-ba) PLUS the same loop closure. This is the state-of-the-art-closing
-# configuration (MH_03 0.089 m, MH_05 0.119 m -- within ~3.7x of ORB-SLAM3).
+# (--online-ba) PLUS the same loop closure. (MH_03 0.089 m, MH_05 0.119 m.)
 echo "# Full pipeline VO (window BA + loop closure)"
 run_vo full \
   --online-ba --online-ba-window 30 --online-ba-trigger-every 10 \
   --loop-closure \
+  --loop-min-frame-gap "$loop_min_frame_gap" \
+  --loop-min-path-length "$loop_min_path_length" \
+  --loop-min-similarity "$loop_min_similarity"
+
+# Add --loop-two-view-ba: re-grind each verified loop edge with a local two-view
+# BA (older pose fixed, newer pose + shared landmarks free, older stereo a soft
+# metric anchor) before the pose graph, removing the older-depth triangulation
+# bias from each edge. ~28% lower ATE on both flights from the SAME loops
+# (MH_03 0.089 -> 0.065 m, MH_05 0.119 -> 0.086 m -- within ~2.7x of ORB-SLAM3).
+echo "# Full pipeline VO + two-view loop BA (window BA + loop + --loop-two-view-ba)"
+run_vo full2v \
+  --online-ba --online-ba-window 30 --online-ba-trigger-every 10 \
+  --loop-closure --loop-two-view-ba \
   --loop-min-frame-gap "$loop_min_frame_gap" \
   --loop-min-path-length "$loop_min_path_length" \
   --loop-min-similarity "$loop_min_similarity"
@@ -175,7 +187,9 @@ l_se3=$(ate "$out_dir/loop/est.tum" -a)
 l_sim3=$(ate "$out_dir/loop/est.tum" -as)
 f_se3=$(ate "$out_dir/full/est.tum" -a)
 f_sim3=$(ate "$out_dir/full/est.tum" -as)
-verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full/vo.log" | head -1)
+v_se3=$(ate "$out_dir/full2v/est.tum" -a)
+v_sim3=$(ate "$out_dir/full2v/est.tum" -as)
+verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2v/vo.log" | head -1)
 
 {
   echo ""
@@ -183,11 +197,12 @@ verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full/vo.log" | head -1)
   echo ""
   echo "ATE rmse via evo_ape, timestamp-associated to the Vicon/Leica ground truth."
   echo ""
-  echo "| trajectory                 | ATE rmse SE(3) | ATE rmse Sim(3) |"
-  echo "| -------------------------- | -------------: | --------------: |"
-  printf "| open VO                    | %14s | %15s |\n" "$o_se3" "$o_sim3"
-  printf "| + loop closure (open VO)   | %14s | %15s |\n" "$l_se3" "$l_sim3"
-  printf "| window BA + loop (full)    | %14s | %15s |\n" "$f_se3" "$f_sim3"
+  echo "| trajectory                    | ATE rmse SE(3) | ATE rmse Sim(3) |"
+  echo "| ----------------------------- | -------------: | --------------: |"
+  printf "| open VO                       | %14s | %15s |\n" "$o_se3" "$o_sim3"
+  printf "| + loop closure (open VO)      | %14s | %15s |\n" "$l_se3" "$l_sim3"
+  printf "| window BA + loop (full)       | %14s | %15s |\n" "$f_se3" "$f_sim3"
+  printf "| window BA + loop + 2-view BA  | %14s | %15s |\n" "$v_se3" "$v_sim3"
   echo ""
   echo "ORB-SLAM3 stereo MH_03 ATE = 0.024 m; DROID-SLAM stereo = 0.035 m (reference)."
   echo "$verified" | sed 's/^/  /'
