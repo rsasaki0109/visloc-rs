@@ -47,6 +47,45 @@ the metric frame.
 The open VO (left, red) drifts off ground truth over the flight; loop closure
 (right, green) pulls the revisited places back onto the Vicon/Leica trajectory.
 
+## Closing the gap to state of the art: window BA + loop closure
+
+The table above deliberately isolates the loop-closure *stage* by running it on
+an **open** VO (no bundle adjustment), so the only variable is the loop closure.
+The full pipeline visloc actually ships pairs that same loop closure with an
+**incremental windowed bundle-adjustment frontend** (`--online-ba`, a 30-frame
+sliding-window local BA triggered every 10 frames). That combination is far
+closer to state of the art — measured on the same artifacts, two EuRoC machine
+hall flights:
+
+| pipeline                                 | MH_03 ATE SE(3) | MH_05 ATE SE(3) |
+| ---------------------------------------- | --------------: | --------------: |
+| open VO, no BA, no loop                  |         2.462 m |         2.387 m |
+| open VO + loop (stage isolation, above)  |         0.464 m |               — |
+| **window BA + loop (full pipeline)**     |       **0.089 m** |       **0.119 m** |
+
+Both alignments agree (MH_03 Sim(3) 0.088 m, MH_05 Sim(3) 0.119 m), so the metric
+scale is correct, not absorbed by the fit. Against the published deep/classical
+stereo SLAM systems on MH_03:
+
+| system (stereo)                  | MH_03 ATE rmse |
+| -------------------------------- | -------------: |
+| ORB-SLAM3 (Campos et al. 2021)   |        0.024 m |
+| DROID-SLAM (Teed & Deng 2021)    |        0.035 m |
+| **visloc-rs (window BA + loop)** |     **0.089 m** |
+
+visloc-rs lands within **~3.7× of ORB-SLAM3** and **~2.5× of DROID-SLAM** on
+MH_03, in pure Rust, from a window-BA + loop-closure pipeline. The remaining gap
+is architectural rather than a tuning knob: ORB-SLAM's local BA optimises over
+the **covisibility graph** (every keyframe sharing a landmark observation),
+whereas visloc's `--online-ba` is a purely **temporal** sliding window that never
+couples spatially-near or revisited frames during tracking. Two measured caveats:
+the windowed BA must be the *streaming* `--online-ba` (a one-shot full-batch
+`--final-global-ba` over the whole flight is both far slower and worse, 0.214 m,
+because a single global reprojection-minimum deforms the already locally
+consistent trajectory); and widening the window past 30 (50/60/80) or lifting the
+loop-verification cap (which admits low-similarity false loops) both *worsen* the
+result — 0.089 m is the tuned frontier of this architecture.
+
 ## The frame-gap gate matters more in the air
 
 EuRoC flies at 20 Hz, and the MAV spends time hovering/slow-maneuvering. A small
