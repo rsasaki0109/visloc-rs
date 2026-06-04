@@ -732,9 +732,11 @@ void main () {
 `.trim();
 
 // Pulled-back oblique view tuned for outdoor-scale scenes (~20 m range)
+// Framed on a real EuRoC MH_01 ground-truth camera (mid-flight, looking into
+// the Machine Hall), pulled back 2 m so the scene doesn't clip on load.
 let defaultViewMatrix = [
-    0.47, 0.04, 0.88, 0, -0.11, 0.99, 0.02, 0, -0.88, -0.11, 0.47, 0, 0.35,
-    0.15, 32.0, 1,
+    0.3367, 0.2770, -0.9000, 0, 0.9398, -0.1578, 0.3031, 0,
+    -0.0581, -0.9478, -0.3134, 0, -3.6857, 1.8976, -4.1657, 1,
 ];
 let viewMatrix = defaultViewMatrix;
 async function main() {

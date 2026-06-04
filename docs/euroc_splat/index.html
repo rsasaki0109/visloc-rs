@@ -237,19 +237,21 @@
 			})();
 		</script>
 		<div id="info">
-			<h3 class="nohf">visloc-rs — EuRoC MH_01 UAV, 3D Gaussian Splat</h3>
+			<h3 class="nohf">visloc-rs — EuRoC Machine Hall 01, 3D Gaussian Splat</h3>
 			<p>
 			<small class="nohf">
-				A 3D Gaussian Splat <strong>bootstrapped from the visloc-rs VI-SLAM
-				camera poses</strong> (no external SfM): the EuRoC MH_01 drone run
-				(cam0, stereo + IMU) is exported to COLMAP via
-				<code>scripts/export_euroc_colmap.py</code>, undistorted, and trained
-				with gsplat (7k iter → ~179k gaussians, filtered to ~105k).
-				Proof-of-concept — the views are sparse, low-parallax and grayscale,
-				so expect a rough reconstruction; the point is the
-				<em>SLAM-poses → COLMAP → 3DGS</em> pipeline.
-				Drag to orbit, scroll to zoom; pass <code>?url=&lt;splat-path&gt;</code>
-				for another splat. Viewer:
+				A 3D Gaussian Splat of <strong>EuRoC Machine Hall 01</strong> — the
+				GPS-denied indoor scene visloc-rs localizes a UAV in. The cam0 frames
+				are posed with the dataset's ground truth (Vicon/Leica), undistorted
+				with COLMAP, and trained with the official
+				<a href="https://github.com/nerfstudio-project/gsplat">gsplat</a> MCMC
+				strategy (~18k iter → ~346k gaussians) via
+				<code>scripts/gsplat_mcmc_train.py</code>. This is the dense scene;
+				the camera trajectory <strong>visloc-rs</strong> estimates through this
+				same hall is in the <a href="../kitti3d/">3D trajectory viewer</a>.
+				Grayscale single-camera input over a large hall, so expect a rough but
+				recognisable reconstruction. Drag to orbit, scroll to zoom; pass
+				<code>?url=&lt;splat-path&gt;</code> for another splat. Viewer:
 				<a href="https://github.com/antimatter15/splat">antimatter15/splat</a> (MIT) by Kevin Kwok.
 				<a href="../kitti3d/">← trajectories in 3D</a>.
 			</small>
@@ -260,8 +262,8 @@
 				<label for="sceneSelect"><strong>Scene:</strong></label>
 				<select id="sceneSelect" data-testid="scene-picker">
 					<option value="euroc_mh01.splat"
-						data-summary="EuRoC MH_01 UAV — gsplat from visloc-rs VI-SLAM poses (7k iter)">
-						EuRoC MH_01 UAV — visloc-rs poses → 3DGS
+						data-summary="EuRoC Machine Hall 01 — GT-posed COLMAP + official gsplat MCMC (~18k iter, ~346k gaussians)">
+						EuRoC Machine Hall 01 — 3DGS scene reconstruction
 					</option>
 				</select>
 				<span id="sceneSummary" style="margin-left: 0.4em; opacity: 0.8"></span>
