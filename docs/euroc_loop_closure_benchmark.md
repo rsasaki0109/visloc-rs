@@ -63,7 +63,8 @@ hall flights:
 | open VO + loop (stage isolation, above)        |         0.464 m |               — |
 | window BA + loop                               |         0.089 m |         0.119 m |
 | window BA + loop + two-view loop BA            |         0.065 m |         0.086 m |
-| **+ fixed-prefix local-map BA (history 20)**   |       **0.061 m** |       **0.084 m** |
+| + fixed-prefix local-map BA (history 20)       |         0.061 m |         0.084 m |
+| **+ anisotropic loop-edge information**        |       **0.060 m** |       **0.080 m** |
 
 Both alignments agree (MH_03 Sim(3) 0.053 m, MH_05 Sim(3) 0.072 m), so the metric
 scale is correct, not absorbed by the fit. Against the published deep/classical
@@ -73,9 +74,9 @@ stereo SLAM systems on MH_03:
 | ------------------------------------- | -------------: |
 | ORB-SLAM3 (Campos et al. 2021)        |        0.024 m |
 | DROID-SLAM (Teed & Deng 2021)         |        0.035 m |
-| **visloc-rs (full pipeline)**         |     **0.061 m** |
+| **visloc-rs (full pipeline)**         |     **0.060 m** |
 
-visloc-rs lands within **~2.5× of ORB-SLAM3** and **~1.75× of DROID-SLAM** on
+visloc-rs lands within **~2.5× of ORB-SLAM3** and **~1.7× of DROID-SLAM** on
 MH_03, in pure Rust.
 
 ### Two-view loop bundle adjustment
@@ -120,6 +121,29 @@ stale, off-view observations), whereas the same extension with the prefix fixed
 *improves* it. The fixed anchor is the whole point. The history length has a sweet
 spot — 20 frames helps both flights, but a longer history (30+) starts admitting
 stale landmarks and on MH_05 turns slightly negative, so 20 is the shipped default.
+
+### Anisotropic loop-edge information
+
+The final stage (`--loop-edge-information`) takes MH_03 Sim(3) ATE from 0.053 m to
+**0.052 m** and MH_05 from 0.084 m / 0.072 m (SE3 / Sim3) to **0.080 m / 0.069 m**
+(~5 % on both alignments) — from the *same* verified loops. It is the ORB-SLAM
+*Essential-Graph per-edge information* that the pose graph had been omitting.
+
+Every loop edge entered the SE(3) PGO with a single isotropic weight (the inlier
+count), pulling all six DOF equally. But a loop edge is a PnP / two-view-BA
+estimate: it constrains rotation and the two lateral image directions tightly and
+the optical-axis (depth) direction weakly. With an isotropic weight the solver
+smears each loop correction uniformly over the cycle; with the edge's true
+ellipsoidal information it routes the correction into the directions the loop
+actually observes. `loop_edge_information` recovers `Ω` as the reprojection Hessian
+`Σ JᵀJ` of the loop measurement — finite-differenced in the solver's own
+`[ρ; ω]` SE(3) right-perturbation tangent, so there is no convention mismatch — and
+**trace-normalises it to the same total weight `inlier_count`**. That isolates the
+*direction* of each loop's pull as the only changed variable; the calibrated
+loop-vs-odometry magnitude (which the earlier stages tuned) is preserved. The
+effect on consistency is stark: the GNC pose-graph cost collapses (MH_05 final cost
+9.3 → 0.19, MH_03 24.8 → 0.43) because the anisotropically-weighted loops are
+mutually consistent in a way the isotropic edges were not.
 
 The remaining gap to ORB-SLAM3 narrows but does not close. Its local BA selects
 the true **covisibility graph** (every keyframe sharing a landmark observation),

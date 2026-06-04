@@ -190,6 +190,22 @@ run_vo full2vh \
   --loop-min-path-length "$loop_min_path_length" \
   --loop-min-similarity "$loop_min_similarity"
 
+# Add --loop-edge-information: give each loop edge an anisotropic 6x6 information
+# matrix from its own reprojection geometry (trace-normalised to the same total
+# weight), so the SE(3) PGO routes each loop correction into the directions the
+# loop actually observes instead of pulling all 6 DOF equally. The ORB-SLAM
+# Essential-Graph per-edge information the isotropic edges omitted. MH_03 Sim(3)
+# 0.053 -> 0.052, MH_05 0.084 -> 0.080 / Sim(3) 0.072 -> 0.069 (~5%); PGO cost
+# collapses (the loops become mutually consistent: MH_05 9.3 -> 0.19).
+echo "# Full pipeline + anisotropic loop-edge information (+ --loop-edge-information)"
+run_vo full2vhi \
+  --online-ba --online-ba-window 30 --online-ba-trigger-every 10 \
+  --online-ba-history 20 \
+  --loop-closure --loop-two-view-ba --loop-edge-information \
+  --loop-min-frame-gap "$loop_min_frame_gap" \
+  --loop-min-path-length "$loop_min_path_length" \
+  --loop-min-similarity "$loop_min_similarity"
+
 ate() {
   # ate <est.tum> <align-flag>  -> rmse
   evo_ape tum "$gt_tum" "$1" $2 2>/dev/null | awk '/rmse/{print $2; exit}'
@@ -205,7 +221,9 @@ v_se3=$(ate "$out_dir/full2v/est.tum" -a)
 v_sim3=$(ate "$out_dir/full2v/est.tum" -as)
 h_se3=$(ate "$out_dir/full2vh/est.tum" -a)
 h_sim3=$(ate "$out_dir/full2vh/est.tum" -as)
-verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2vh/vo.log" | head -1)
+i_se3=$(ate "$out_dir/full2vhi/est.tum" -a)
+i_sim3=$(ate "$out_dir/full2vhi/est.tum" -as)
+verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2vhi/vo.log" | head -1)
 
 {
   echo ""
@@ -220,6 +238,7 @@ verified=$(grep "LOOP-CLOSURE PGO: candidates" "$out_dir/full2vh/vo.log" | head 
   printf "| window BA + loop (full)       | %14s | %15s |\n" "$f_se3" "$f_sim3"
   printf "| window BA + loop + 2-view BA  | %14s | %15s |\n" "$v_se3" "$v_sim3"
   printf "| + local-map BA (history 20)   | %14s | %15s |\n" "$h_se3" "$h_sim3"
+  printf "| + loop-edge information (Ω)    | %14s | %15s |\n" "$i_se3" "$i_sim3"
   echo ""
   echo "ORB-SLAM3 stereo MH_03 ATE = 0.024 m; DROID-SLAM stereo = 0.035 m (reference)."
   echo "$verified" | sed 's/^/  /'
