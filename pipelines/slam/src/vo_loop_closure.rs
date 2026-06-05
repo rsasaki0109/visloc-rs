@@ -33,15 +33,15 @@
 
 use std::collections::HashMap;
 
-use nalgebra::{Point2, Point3};
+use nalgebra::{Matrix6, Point2, Point3, Vector6};
 use rayon::prelude::*;
 
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
 use visloc_vision::matching::{BruteForceMatcher, Matcher};
-use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
+use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::ransac::PnPRansac;
 use visloc_vision::stereo_vo::StereoFeature;
 
@@ -49,7 +49,8 @@ use crate::gnc::{GncConfig, AUTO_SCALE_K};
 use crate::{
     relative_world_to_camera, BaConfig, BaObservation, BaStereoObservation, BundleAdjustment,
     LinearSolver, LoopClosureConstraint, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
-    PoseGraph, PoseGraphError, PoseGraphGncResult, PoseGraphSe3Config, RobustKernel,
+    PoseGraph, PoseGraphEdgeKind, PoseGraphError, PoseGraphGncResult, PoseGraphSe3Config,
+    RobustKernel,
 };
 
 /// Configuration for [`close_loops_on_vo_trajectory`].
@@ -120,6 +121,21 @@ pub struct VoLoopClosureConfig {
     /// frames, never the rest of the trajectory; the global drift distribution
     /// stays with the SE(3) PGO. `false` reproduces the PnP-only loop edges.
     pub refine_loops_two_view: bool,
+    /// Give each loop-closure edge an anisotropic 6×6 information matrix `Ω`
+    /// derived from the loop's own reprojection geometry, instead of the default
+    /// isotropic scalar weight (`inlier_count`). PnP/2-view BA constrain a loop
+    /// edge tightly in rotation and the lateral image directions but only weakly
+    /// along the optical axis (depth), yet the scalar weight pulls all six DOF
+    /// equally — so the SE(3) PGO smears each loop correction isotropically over
+    /// the cycle rather than routing it into the directions the loop actually
+    /// observes. [`loop_edge_information`] recovers `Ω` as the reprojection
+    /// Hessian `Σ JᵀJ` (in the solver's `[ρ; ω]` SE(3)-tangent convention) and
+    /// **trace-normalises it to the same total weight `inlier_count`**, so this
+    /// changes *only* the directional distribution of each loop's pull, not the
+    /// calibrated loop-vs-odometry ratio. This is the ORB-SLAM Essential-Graph
+    /// per-edge information that the isotropic edges omit. `false` keeps the
+    /// scalar-weight loop edges.
+    pub loop_edge_information: bool,
 }
 
 impl Default for VoLoopClosureConfig {
@@ -148,6 +164,7 @@ impl Default for VoLoopClosureConfig {
                 ..GncConfig::default()
             },
             refine_loops_two_view: false,
+            loop_edge_information: false,
         }
     }
 }
@@ -359,8 +376,10 @@ fn verify_loop_candidate(
         return None;
     }
 
-    let matches =
-        matcher.match_descriptors(&left_features[newer].descriptors, &left_features[older].descriptors);
+    let matches = matcher.match_descriptors(
+        &left_features[newer].descriptors,
+        &left_features[older].descriptors,
+    );
     let mut correspondences = Vec::with_capacity(matches.len());
     let mut ba_correspondences = Vec::with_capacity(matches.len());
     for descriptor_match in &matches {
@@ -368,10 +387,15 @@ fn verify_loop_candidate(
         else {
             continue;
         };
-        let Some(&point2d) = left_features[newer].keypoints.get(descriptor_match.query_index) else {
+        let Some(&point2d) = left_features[newer]
+            .keypoints
+            .get(descriptor_match.query_index)
+        else {
             continue;
         };
-        let Some(&older_xy) = left_features[older].keypoints.get(descriptor_match.train_index)
+        let Some(&older_xy) = left_features[older]
+            .keypoints
+            .get(descriptor_match.train_index)
         else {
             continue;
         };
@@ -514,6 +538,92 @@ fn refine_loop_relative_two_view(
     Some(refined)
 }
 
+/// Anisotropic 6×6 information matrix `Ω` for a verified loop edge, in the SE(3)
+/// pose-graph's `[ρ; ω]` (translation-first) right-perturbation tangent — the
+/// exact convention [`PoseGraph::assemble_se3_system`] folds into `rᵀ Ω r`.
+///
+/// `Ω` is the reprojection Hessian of the loop measurement: with the older
+/// landmarks fixed (the PnP assumption), the cost that determined the
+/// `older → newer` relative pose `T` is `C(T) = Σ ‖π(T · Xᵢ) − uᵢ‖²`, and its
+/// Hessian at the estimate is the information of the estimate. Parameterising
+/// `T(ξ) = T · exp(ξ)` (right perturbation, matching the PGO residual
+/// `r = log(measurementᵀ · predicted) = ξ`), each correspondence contributes
+/// `Jᵢᵀ Jᵢ` with `Jᵢ = ∂π(T · exp(ξ) · Xᵢ)/∂ξ |₀` (2×6, finite-differenced).
+///
+/// The raw Hessian's *scale* (∝ `fx²/σ_px² · #inliers`) would dwarf the
+/// scalar-weighted odometry edges and over-pull the loop, so `Ω` is
+/// **trace-normalised to `6 · inlier_count`** — its mean eigenvalue equals the
+/// scalar weight [`PoseGraph::add_loop_closure_constraint`] would have used.
+/// Only the *direction* of the loop's pull changes (the well-observed rotation /
+/// lateral axes up, the weak depth axis down); the calibrated loop-vs-odometry
+/// magnitude is preserved. A small ridge keeps `Ω` positive-definite when the
+/// shared landmarks are near-degenerate (collinear / coplanar).
+fn loop_edge_information(
+    camera: &Camera,
+    relative_pose: &SE3,
+    correspondences: &[LoopBaCorrespondence],
+    inlier_count: usize,
+) -> Option<Matrix6<f64>> {
+    // Same inlier gate as the two-view refinement: ignore descriptor-match
+    // outliers whose reprojection is already grossly off under the loop edge.
+    const REPROJ_INLIER_PX: f64 = 4.0;
+    const EPS: f64 = 1e-4;
+    const MIN_CORRESPONDENCES: usize = 8;
+
+    let mut h = Matrix6::<f64>::zeros();
+    let mut used = 0usize;
+    for corr in correspondences {
+        if corr.disparity <= 0.0 || corr.older_point_cam.z <= 0.0 {
+            continue;
+        }
+        let base_cam = relative_pose.transform_point(&corr.older_point_cam);
+        let Some(predicted) = camera.project(&base_cam) else {
+            continue;
+        };
+        if (predicted - corr.newer_xy).norm() > REPROJ_INLIER_PX {
+            continue;
+        }
+        // 2×6 reprojection Jacobian w.r.t. a right perturbation of the edge.
+        let mut jac = nalgebra::Matrix2x6::<f64>::zeros();
+        let mut ok = true;
+        for k in 0..6 {
+            let mut xi = Vector6::zeros();
+            xi[k] = EPS;
+            let perturbed = relative_pose.compose(&SE3::exp(&xi));
+            let Some(proj) = camera.project(&perturbed.transform_point(&corr.older_point_cam))
+            else {
+                ok = false;
+                break;
+            };
+            jac[(0, k)] = (proj.x - predicted.x) / EPS;
+            jac[(1, k)] = (proj.y - predicted.y) / EPS;
+        }
+        if !ok {
+            continue;
+        }
+        h += jac.transpose() * jac;
+        used += 1;
+    }
+
+    if used < MIN_CORRESPONDENCES {
+        return None;
+    }
+    let trace = h.diagonal().sum();
+    if !trace.is_finite() || trace <= 0.0 {
+        return None;
+    }
+    // Trace-normalise so mean(eigenvalues) == inlier_count (the scalar weight),
+    // isolating anisotropy from the loop-vs-odometry magnitude.
+    let weight = (inlier_count as f64).max(1.0);
+    let mut omega = h * (6.0 * weight / trace);
+    // Ridge for strict positive-definiteness on near-degenerate geometry.
+    let ridge = 1e-3 * weight;
+    for d in 0..6 {
+        omega[(d, d)] += ridge;
+    }
+    Some(omega)
+}
+
 /// Accumulated trajectory length up to each frame: `cum[0] = 0`,
 /// `cum[i] = cum[i-1] + ‖center_i − center_{i-1}‖`. The arc length between two
 /// frames `a ≤ b` is `cum[b] − cum[a]`.
@@ -608,24 +718,37 @@ pub fn close_loops_on_vo_trajectory(
 
     // Optionally re-grind each loop edge with a local two-view BA (older pose
     // fixed, newer pose + shared landmarks free) before it enters the pose
-    // graph. Independent per loop, so refine in parallel; falls back to the PnP
-    // edge whenever the refinement is rejected.
-    let loop_constraints: Vec<LoopClosureConstraint> = if config.refine_loops_two_view {
-        verified
-            .par_iter()
-            .map(|(constraint, corrs)| {
-                let mut constraint = constraint.clone();
+    // graph, and optionally derive its anisotropic information matrix `Ω` from
+    // the loop's reprojection geometry. Independent per loop, so process in
+    // parallel; the two-view refine falls back to the PnP edge when rejected,
+    // and `Ω` is `None` when the lever is off or the geometry is degenerate.
+    let refined: Vec<(LoopClosureConstraint, Option<Matrix6<f64>>)> = verified
+        .par_iter()
+        .map(|(constraint, corrs)| {
+            let mut constraint = constraint.clone();
+            if config.refine_loops_two_view {
                 if let Some(refined) =
                     refine_loop_relative_two_view(camera, &constraint.relative_pose, corrs)
                 {
                     constraint.relative_pose = refined;
                 }
-                constraint
-            })
-            .collect()
-    } else {
-        verified.into_iter().map(|(c, _)| c).collect()
-    };
+            }
+            let information = if config.loop_edge_information {
+                loop_edge_information(
+                    camera,
+                    &constraint.relative_pose,
+                    corrs,
+                    constraint.inlier_count,
+                )
+            } else {
+                None
+            };
+            (constraint, information)
+        })
+        .collect();
+
+    let loop_constraints: Vec<LoopClosureConstraint> =
+        refined.iter().map(|(c, _)| c.clone()).collect();
 
     if loop_constraints.is_empty() {
         return Ok(VoLoopClosureResult {
@@ -648,8 +771,17 @@ pub fn close_loops_on_vo_trajectory(
             relative_world_to_camera(&poses[index], &poses[index + 1]),
         );
     }
-    for constraint in &loop_constraints {
-        graph.add_loop_closure_constraint(constraint);
+    for (constraint, information) in &refined {
+        match information {
+            Some(omega) => graph.add_edge_with_information(
+                constraint.from_keyframe_id,
+                constraint.to_keyframe_id,
+                constraint.relative_pose.clone(),
+                PoseGraphEdgeKind::LoopClosure,
+                *omega,
+            ),
+            None => graph.add_loop_closure_constraint(constraint),
+        }
     }
 
     let gnc = graph.optimize_se3_gnc(&config.se3, &config.gnc)?;
@@ -778,7 +910,11 @@ mod tests {
             let t = i as f64 / (n - 1) as f64; // 0..1 around the loop
             let angle = t * std::f64::consts::TAU;
             let radius = 6.0;
-            centers.push(Vector3::new(radius * angle.sin(), 0.0, radius * (1.0 - angle.cos())));
+            centers.push(Vector3::new(
+                radius * angle.sin(),
+                0.0,
+                radius * (1.0 - angle.cos()),
+            ));
             angles.push(angle);
         }
         let true_poses: Vec<Pose> = centers
@@ -795,7 +931,11 @@ mod tests {
             let r = 9.0;
             landmarks.push((
                 k,
-                Point3::new(r * a.sin(), (k % 5) as f64 * 0.3 - 0.6, r * (1.0 - a.cos()) + 3.0),
+                Point3::new(
+                    r * a.sin(),
+                    (k % 5) as f64 * 0.3 - 0.6,
+                    r * (1.0 - a.cos()) + 3.0,
+                ),
             ));
         }
 
@@ -836,9 +976,14 @@ mod tests {
             ..VoLoopClosureConfig::default()
         };
 
-        let result =
-            close_loops_on_vo_trajectory(&camera, &vo_poses, &left_features, &stereo_per_frame, &config)
-                .expect("loop closure runs");
+        let result = close_loops_on_vo_trajectory(
+            &camera,
+            &vo_poses,
+            &left_features,
+            &stereo_per_frame,
+            &config,
+        )
+        .expect("loop closure runs");
 
         assert!(
             result.verified_count() >= 1,
@@ -864,7 +1009,12 @@ mod tests {
         let mut left_features = Vec::new();
         let mut stereo_per_frame = Vec::new();
         let landmarks: Vec<(usize, Point3<f64>)> = (0..40)
-            .map(|k| (k, Point3::new((k % 7) as f64 - 3.0, (k % 3) as f64 - 1.0, 8.0)))
+            .map(|k| {
+                (
+                    k,
+                    Point3::new((k % 7) as f64 - 3.0, (k % 3) as f64 - 1.0, 8.0),
+                )
+            })
             .collect();
         for i in 0..n {
             let pose = pose_at(Vector3::new(0.0, 0.0, i as f64 * 2.0), 0.0);
@@ -881,9 +1031,14 @@ mod tests {
             vocab_descriptor_stride: 1,
             ..VoLoopClosureConfig::default()
         };
-        let result =
-            close_loops_on_vo_trajectory(&camera, &poses, &left_features, &stereo_per_frame, &config)
-                .expect("runs");
+        let result = close_loops_on_vo_trajectory(
+            &camera,
+            &poses,
+            &left_features,
+            &stereo_per_frame,
+            &config,
+        )
+        .expect("runs");
         assert_eq!(result.verified_count(), 0);
         assert!(result.gnc.is_none());
         assert_eq!(result.refined_poses.len(), n);
@@ -954,8 +1109,7 @@ mod tests {
         // older points FIXED — exactly what PnP does — seeded from a slightly
         // perturbed truth. Its edge inherits the depth bias.
         let r_seed = SE3 {
-            rotation: r_true.rotation
-                * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02),
+            rotation: r_true.rotation * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02),
             translation: r_true.translation + Vector3::new(0.04, 0.02, -0.03),
         };
         let mut pnp_ba = BundleAdjustment::new(camera.clone());
@@ -1032,14 +1186,86 @@ mod tests {
                 newer_xy,
             });
         }
-        let refined = refine_loop_relative_two_view(&camera, &r_true, &corrs)
-            .expect("refinement succeeds");
+        let refined =
+            refine_loop_relative_two_view(&camera, &r_true, &corrs).expect("refinement succeeds");
         let d = refined.compose(&r_true.inverse());
         assert!(
             d.translation.norm() < 0.02 && d.rotation.angle() < 0.01,
             "clean edge should stay put: dt {:.4} dr {:.4}",
             d.translation.norm(),
             d.rotation.angle()
+        );
+    }
+
+    /// The loop-edge information matrix is symmetric positive-definite, calibrated
+    /// to the same total weight the isotropic edge would have used (trace ≈
+    /// 6·inlier_count), and *genuinely anisotropic* — a scaled identity would
+    /// defeat the purpose, so the reprojection geometry must produce distinct
+    /// eigenvalues (well-observed rotation/lateral axes up, weak depth axis down).
+    #[test]
+    fn loop_edge_information_is_spd_calibrated_and_anisotropic() {
+        let camera = camera();
+        let (fx, _, _, _) = camera.intrinsics().unwrap();
+        let baseline = 0.5;
+        let r_true = SE3 {
+            rotation: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.05),
+            translation: Vector3::new(0.4, 0.0, 0.3),
+        };
+
+        let mut corrs = Vec::new();
+        for k in 0..60usize {
+            let gx = ((k % 7) as f64 - 3.0) * 0.8;
+            let gy = ((k % 5) as f64 - 2.0) * 0.6;
+            let gz = 4.0 + (k % 11) as f64 * 0.5;
+            let point = Point3::new(gx, gy, gz);
+            let (Some(older_xy), newer) = (
+                camera.project(&point),
+                camera.project(&r_true.transform_point(&point)),
+            ) else {
+                continue;
+            };
+            let Some(newer_xy) = newer else { continue };
+            if older_xy.x < 0.0
+                || older_xy.x >= camera.width as f64
+                || newer_xy.x < 0.0
+                || newer_xy.x >= camera.width as f64
+            {
+                continue;
+            }
+            corrs.push(LoopBaCorrespondence {
+                older_xy,
+                older_point_cam: point,
+                disparity: fx * baseline / point.z,
+                newer_xy,
+            });
+        }
+        assert!(corrs.len() >= 8, "need enough correspondences");
+
+        let inlier_count = 137usize;
+        let omega = loop_edge_information(&camera, &r_true, &corrs, inlier_count)
+            .expect("information matrix");
+
+        // Symmetric.
+        let asym = (omega - omega.transpose()).amax();
+        assert!(asym < 1e-9, "Omega must be symmetric, got asymmetry {asym}");
+
+        // Trace-calibrated to ~6·inlier_count (a tiny PD ridge aside).
+        let trace = omega.diagonal().sum();
+        let target = 6.0 * inlier_count as f64;
+        assert!(
+            (trace - target).abs() < 0.01 * target,
+            "trace {trace} should match 6·inlier_count {target}"
+        );
+
+        // Positive-definite, and genuinely anisotropic (not a scaled identity).
+        let eigenvalues = omega.symmetric_eigenvalues();
+        let min_eig = eigenvalues.min();
+        let max_eig = eigenvalues.max();
+        assert!(min_eig > 0.0, "Omega must be SPD, min eigenvalue {min_eig}");
+        assert!(
+            max_eig / min_eig > 1.5,
+            "expected anisotropy, eigenvalue ratio {}",
+            max_eig / min_eig
         );
     }
 }

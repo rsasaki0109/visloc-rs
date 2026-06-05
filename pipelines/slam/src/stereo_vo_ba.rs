@@ -497,7 +497,9 @@ pub fn refine_stereo_vo_with_ba(
     // Fix a leading prefix of poses as the gauge / local-map anchor (default 1 =
     // fix pose 0 only). A larger prefix anchors long-baseline landmarks over an
     // extended backward window while only the recent poses move.
-    let fixed_prefix = config.fix_pose_prefix.clamp(1, n_frames.saturating_sub(1).max(1));
+    let fixed_prefix = config
+        .fix_pose_prefix
+        .clamp(1, n_frames.saturating_sub(1).max(1));
     for i in 0..fixed_prefix {
         ba.fix_pose(i as u64);
     }
@@ -1462,7 +1464,14 @@ mod tests {
             ..StereoVoBaConfig::default()
         };
         let refinement = refine_stereo_vo_with_ba(
-            &camera, baseline, &initial, &left, &right, &stereo, &temporal_matches, &config,
+            &camera,
+            baseline,
+            &initial,
+            &left,
+            &right,
+            &stereo,
+            &temporal_matches,
+            &config,
         )
         .expect("BA should succeed");
 
