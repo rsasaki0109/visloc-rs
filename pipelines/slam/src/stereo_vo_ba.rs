@@ -758,6 +758,305 @@ pub fn refine_stereo_vo_with_ba(
     })
 }
 
+/// A left-image observation track: `(frame, left_keypoint_index, pixel)` per view.
+type TrackObservations = Vec<(usize, usize, Point2<f64>)>;
+
+/// A single reconstructed 3D point with its full multi-view track.
+///
+/// Unlike the per-frame stereo lift used by the streaming VO (one landmark per
+/// frame, observed once), each `ReconstructedLandmark` is a *merged* track: the
+/// same physical point seen by every frame the forward-track chaining linked it
+/// to. This is the multi-view constraint that makes a global bundle adjustment
+/// tighten reprojection to sub-pixel — i.e. COLMAP-grade structure suitable for
+/// downstream novel-view synthesis (3DGS).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconstructedLandmark {
+    /// Refined world-frame position after BA.
+    pub position: Point3<f64>,
+    /// Every left-image observation of this point: `(frame, left_keypoint_index, pixel)`.
+    pub observations: TrackObservations,
+}
+
+/// Output of [`reconstruct_stereo_vo_with_ba`]: a BA-grade sparse reconstruction
+/// (refined poses + merged multi-view landmark tracks) ready for COLMAP export.
+#[derive(Debug, Clone)]
+pub struct StereoVoReconstruction {
+    /// Refined `world_to_camera` pose per frame (pose 0 fixed as the anchor).
+    pub refined_poses: Vec<Pose>,
+    /// Merged multi-view landmark tracks (each observed by ≥ `min_track_length` frames).
+    pub landmarks: Vec<ReconstructedLandmark>,
+    /// LM iteration trace and final cost from the BA solve.
+    pub ba_result: BaResult,
+    /// Total left-image observations across all landmark tracks.
+    pub observation_count: usize,
+    /// Mean left-image reprojection error (px) before BA, over all observations.
+    pub mean_reproj_before_px: f64,
+    /// Mean left-image reprojection error (px) after BA — the structure-quality headline.
+    pub mean_reproj_after_px: f64,
+}
+
+/// Build a COLMAP-grade sparse reconstruction from a stereo VO trajectory.
+///
+/// Where [`refine_stereo_vo_with_ba`] runs the same global bundle adjustment but
+/// only returns the refined *poses* (discarding the structure), this entry point
+/// keeps the merged multi-view landmark tracks so they can be written out as a
+/// COLMAP model — every 3D point carries the full `TRACK[]` of frames that see
+/// it, which is exactly what a per-frame stereo lift lacks and what a downstream
+/// 3DGS optimizer needs to converge crisply.
+///
+/// Visual-only and global (no IMU, no sliding window): novel-view synthesis
+/// wants one joint solve over every pose and point. Metric scale is anchored by
+/// the rectified-stereo baseline; pose 0 is fixed as the gauge.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_stereo_vo_with_ba(
+    camera: &Camera,
+    baseline: f64,
+    initial_poses: &[Pose],
+    left_features: &[FeatureSet],
+    right_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    temporal_matches: &[Vec<DescriptorMatch>],
+    config: &StereoVoBaConfig,
+) -> Result<StereoVoReconstruction, StereoVoBaError> {
+    let n_frames = initial_poses.len();
+    if n_frames < config.min_track_length || n_frames < 2 {
+        return Err(StereoVoBaError::TooFewFrames(n_frames));
+    }
+    if left_features.len() != n_frames
+        || right_features.len() != n_frames
+        || stereo_per_frame.len() != n_frames
+        || temporal_matches.len() != n_frames - 1
+    {
+        return Err(StereoVoBaError::InputLengthMismatch);
+    }
+
+    let stereo_lookup: Vec<HashMap<usize, &StereoFeature>> = stereo_per_frame
+        .iter()
+        .map(|stereo| stereo.iter().map(|f| (f.left_index, f)).collect())
+        .collect();
+    let temporal_lookup: Vec<HashMap<usize, usize>> = temporal_matches
+        .iter()
+        .map(|matches| {
+            matches
+                .iter()
+                .filter(|m| match config.min_temporal_confidence {
+                    Some(min) => m
+                        .confidence
+                        .map(|c| c.is_finite() && c >= min)
+                        .unwrap_or(false),
+                    None => true,
+                })
+                .map(|m| (m.query_index, m.train_index))
+                .collect()
+        })
+        .collect();
+
+    let tracks = build_forward_tracks(
+        n_frames,
+        left_features,
+        &temporal_lookup,
+        config.min_track_length,
+    );
+    if tracks.is_empty() {
+        return Err(StereoVoBaError::NoLongTracks);
+    }
+
+    let mut ba = BundleAdjustment::new(camera.clone());
+    ba.set_stereo_baseline(baseline);
+    for (i, pose) in initial_poses.iter().enumerate() {
+        ba.add_pose(i as u64, pose.clone());
+    }
+    ba.fix_pose(0);
+
+    let seed_row_threshold: Option<f64> = config
+        .max_seed_row_fraction
+        .map(|frac| (camera.height as f64) * frac);
+    let intrinsics_for_residual: Option<(f64, f64, f64, f64)> =
+        config.max_init_residual_px.and(camera.intrinsics());
+
+    // Per accepted landmark, remember its left-image observations so we can
+    // emit the merged track once BA has refined the point.
+    let mut landmark_obs: Vec<(u64, TrackObservations)> = Vec::new();
+    let mut observation_count = 0usize;
+    let mut next_landmark_id: u64 = 0;
+
+    for track in &tracks {
+        if let Some(row_max) = seed_row_threshold {
+            let (first_frame, first_idx) = track[0];
+            let Some(first_kp) = left_features[first_frame].keypoints.get(first_idx) else {
+                continue;
+            };
+            if first_kp.y >= row_max {
+                continue;
+            }
+        }
+        let init_world = match config.landmark_init {
+            LandmarkInit::StereoSingleFrame => initial_landmark_world(
+                track,
+                &stereo_lookup,
+                initial_poses,
+                config.max_initial_depth_m,
+            ),
+            LandmarkInit::MultiViewDlt => initial_landmark_world_dlt(
+                track,
+                &stereo_lookup,
+                left_features,
+                right_features,
+                initial_poses,
+                camera,
+                baseline,
+                config.max_initial_depth_m,
+            )
+            .or_else(|| {
+                initial_landmark_world(
+                    track,
+                    &stereo_lookup,
+                    initial_poses,
+                    config.max_initial_depth_m,
+                )
+            }),
+        };
+        let Some(init_world) = init_world else {
+            continue;
+        };
+
+        let landmark_id = next_landmark_id;
+        let mut candidate_obs: Vec<BaStereoObservation> = Vec::with_capacity(track.len());
+        let mut track_obs: TrackObservations = Vec::with_capacity(track.len());
+        let mut track_passes_residual_gate = true;
+        for &(frame, left_idx) in track {
+            let Some(left_kp) = left_features[frame].keypoints.get(left_idx) else {
+                continue;
+            };
+            let Some(stereo) = stereo_lookup[frame].get(&left_idx) else {
+                continue;
+            };
+            let Some(right_kp) = right_features[frame].keypoints.get(stereo.right_index) else {
+                continue;
+            };
+            if let (Some(threshold), Some((fx, fy, cx, cy))) =
+                (config.max_init_residual_px, intrinsics_for_residual)
+            {
+                let pose = &initial_poses[frame];
+                let xc = pose.transform_world_point(&init_world);
+                if xc.z <= 0.0 {
+                    track_passes_residual_gate = false;
+                    break;
+                }
+                let u_l_pred = fx * xc.x / xc.z + cx;
+                let v_pred = fy * xc.y / xc.z + cy;
+                let u_r_pred = u_l_pred - fx * baseline / xc.z;
+                let du_l = u_l_pred - left_kp.x;
+                let dv = v_pred - left_kp.y;
+                let du_r = u_r_pred - right_kp.x;
+                let residual_norm = (du_l * du_l + dv * dv + du_r * du_r).sqrt();
+                if !residual_norm.is_finite() || residual_norm > threshold {
+                    track_passes_residual_gate = false;
+                    break;
+                }
+            }
+            let xy = Point2::new(left_kp.x, left_kp.y);
+            candidate_obs.push(BaStereoObservation {
+                keyframe_id: frame as u64,
+                landmark_id,
+                xy,
+                u_right: right_kp.x,
+            });
+            track_obs.push((frame, left_idx, xy));
+        }
+        if !track_passes_residual_gate || candidate_obs.len() < config.min_track_length {
+            continue;
+        }
+        next_landmark_id += 1;
+        ba.add_landmark(landmark_id, init_world);
+        observation_count += candidate_obs.len();
+        for obs in candidate_obs {
+            ba.add_stereo_observation(obs);
+        }
+        landmark_obs.push((landmark_id, track_obs));
+    }
+
+    if landmark_obs.is_empty() {
+        return Err(StereoVoBaError::NoLongTracks);
+    }
+    if let Some(required) = config.min_track_count {
+        if landmark_obs.len() < required {
+            return Err(StereoVoBaError::InsufficientTracks {
+                count: landmark_obs.len(),
+                required,
+            });
+        }
+    }
+
+    let mean_reproj_before_px = mean_left_reprojection_px(&ba);
+    let ba_result = ba
+        .optimize(&config.ba_config)
+        .map_err(StereoVoBaError::Ba)?;
+    let mean_reproj_after_px = mean_left_reprojection_px(&ba);
+
+    let refined_poses: Vec<Pose> = (0..n_frames as u64)
+        .map(|i| {
+            ba.poses
+                .get(&i)
+                .cloned()
+                .unwrap_or_else(|| initial_poses[i as usize].clone())
+        })
+        .collect();
+
+    let landmarks: Vec<ReconstructedLandmark> = landmark_obs
+        .into_iter()
+        .filter_map(|(id, observations)| {
+            ba.landmarks.get(&id).map(|p| ReconstructedLandmark {
+                position: *p,
+                observations,
+            })
+        })
+        .collect();
+
+    Ok(StereoVoReconstruction {
+        refined_poses,
+        landmarks,
+        ba_result,
+        observation_count,
+        mean_reproj_before_px,
+        mean_reproj_after_px,
+    })
+}
+
+/// Mean left-image reprojection error (px) over every stereo observation in a
+/// BA problem, using the current pose/landmark estimates. The right-image term
+/// is ignored so the figure is directly comparable to a monocular reprojection.
+fn mean_left_reprojection_px(ba: &BundleAdjustment) -> f64 {
+    let Some((fx, fy, cx, cy)) = ba.camera.intrinsics() else {
+        return f64::NAN;
+    };
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for obs in &ba.stereo_observations {
+        let (Some(pose), Some(point)) = (
+            ba.poses.get(&obs.keyframe_id),
+            ba.landmarks.get(&obs.landmark_id),
+        ) else {
+            continue;
+        };
+        let xc = pose.transform_world_point(point);
+        if xc.z <= 0.0 {
+            continue;
+        }
+        let u = fx * xc.x / xc.z + cx;
+        let v = fy * xc.y / xc.z + cy;
+        let du = u - obs.xy.x;
+        let dv = v - obs.xy.y;
+        sum += (du * du + dv * dv).sqrt();
+        count += 1;
+    }
+    if count == 0 {
+        f64::NAN
+    } else {
+        sum / count as f64
+    }
+}
+
 fn slice_position_prior_for_window(
     prior: &PositionPrior,
     start: usize,
@@ -1397,6 +1696,114 @@ mod tests {
             assert!(
                 dt < 1e-3,
                 "frame {idx} drifted {dt} from a known-correct initialisation"
+            );
+        }
+    }
+
+    /// `reconstruct_stereo_vo_with_ba` returns merged multi-view tracks (each
+    /// landmark observed by every frame it was chained through) and a global BA
+    /// that does not worsen reprojection. On a noise-free synthetic scene the
+    /// recovered landmark positions match truth and the tracks span all frames.
+    #[test]
+    fn reconstruct_emits_multiview_tracks_and_does_not_worsen_reprojection() {
+        let camera = kitti_camera();
+        let baseline = 0.537;
+        let landmarks = synthetic_landmark_grid();
+
+        // Four frames of forward motion (truth).
+        let poses: Vec<Pose> = (0..4)
+            .map(|i| Pose {
+                world_to_camera: SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(0.0, 0.0, -0.8 * i as f64),
+                ),
+            })
+            .collect();
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut stereo = Vec::new();
+        for p in &poses {
+            let (l, r, s) = project_to_pixels(&camera, p, &landmarks, baseline);
+            left.push(l);
+            right.push(r);
+            stereo.push(s);
+        }
+
+        // Identity temporal matches: feature i → feature i in the next frame.
+        let temporal_matches: Vec<Vec<DescriptorMatch>> = (0..poses.len() - 1)
+            .map(|f| {
+                let n = left[f].keypoints.len().min(left[f + 1].keypoints.len());
+                (0..n)
+                    .map(|i| DescriptorMatch {
+                        query_index: i,
+                        train_index: i,
+                        distance: 0.0,
+                        second_best_distance: None,
+                        ratio: None,
+                        confidence: Some(1.0),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let config = StereoVoBaConfig::default();
+        let recon = reconstruct_stereo_vo_with_ba(
+            &camera,
+            baseline,
+            &poses,
+            &left,
+            &right,
+            &stereo,
+            &temporal_matches,
+            &config,
+        )
+        .expect("reconstruction should succeed on synthetic scene");
+
+        assert!(!recon.landmarks.is_empty(), "expected merged landmarks");
+        assert_eq!(recon.refined_poses.len(), poses.len());
+
+        // The defining property vs the per-frame writer: each landmark carries a
+        // multi-view track. With identity matches every grid point is seen by all
+        // 4 frames, so at least one landmark must span > 1 frame, and total
+        // observations must exceed the landmark count.
+        let max_track = recon
+            .landmarks
+            .iter()
+            .map(|l| l.observations.len())
+            .max()
+            .unwrap();
+        assert!(
+            max_track >= 3,
+            "expected a multi-view track spanning ≥3 frames, got {max_track}"
+        );
+        assert!(recon.observation_count > recon.landmarks.len());
+
+        // Observations within a track must reference distinct frames in order.
+        for l in &recon.landmarks {
+            for w in l.observations.windows(2) {
+                assert!(w[0].0 < w[1].0, "track frames must be strictly increasing");
+            }
+        }
+
+        // Global BA must not worsen reprojection on a consistent scene.
+        assert!(
+            recon.mean_reproj_after_px <= recon.mean_reproj_before_px + 1e-6,
+            "BA worsened reprojection: {} -> {}",
+            recon.mean_reproj_before_px,
+            recon.mean_reproj_after_px,
+        );
+
+        // Recovered landmark positions should match one of the truth grid points.
+        for l in &recon.landmarks {
+            let nearest = landmarks
+                .iter()
+                .map(|t| (t - l.position).norm())
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                nearest < 1e-2,
+                "reconstructed landmark {:?} not near any truth point (nearest {nearest})",
+                l.position,
             );
         }
     }

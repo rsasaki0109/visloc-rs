@@ -38,9 +38,10 @@ pub use sim3_pose_graph::{
 
 pub mod stereo_vo_ba;
 pub use stereo_vo_ba::{
-    parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
-    LandmarkInit, StereoVoBaConfig, StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement,
-    StereoVoBaImuSample, StereoVoBaRefinement,
+    parse_stereo_vo_imu_samples_txt, reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
+    slice_imu_samples_for_keyframes, LandmarkInit, ReconstructedLandmark, StereoVoBaConfig,
+    StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement, StereoVoBaImuSample,
+    StereoVoBaRefinement, StereoVoReconstruction,
 };
 
 pub mod online_stereo_vo_ba;
