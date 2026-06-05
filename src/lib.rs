@@ -67,8 +67,8 @@ pub use visloc_io::calibration::{
     read_kitti_pinhole_camera, CalibrationError, KittiProjection,
 };
 pub use visloc_io::colmap::{
-    write_colmap_binary_model_for_3dgs, write_colmap_text_model_for_3dgs, ColmapError,
-    ColmapExportSummary, ColmapMapProvider,
+    write_colmap_binary_model_for_3dgs, write_colmap_reconstruction_for_3dgs,
+    write_colmap_text_model_for_3dgs, ColmapError, ColmapExportSummary, ColmapMapProvider,
 };
 pub use visloc_io::external_deep::{
     parse_external_deep_features_txt, parse_external_deep_matches_txt,
@@ -127,7 +127,8 @@ pub use visloc_slam::{
     correspondences_for_loop_candidate, detect_loop_candidates,
     loop_closure_constraints_from_candidates, online_ba_imu_state_rows,
     online_slam_results_to_html_report, pairwise_pose_factors_from_loop_closures,
-    parse_stereo_vo_imu_samples_txt, refine_stereo_vo_with_ba, relative_world_to_camera,
+    parse_stereo_vo_imu_samples_txt, reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
+    relative_world_to_camera,
     scan_pairwise_loop_closures, slice_imu_samples_for_keyframes, verify_loop_closure_candidates,
     verify_loop_closure_candidates_hybrid, verify_loop_closure_candidates_pnp,
     write_online_ba_imu_state_csv, write_online_slam_results_html_report,
@@ -150,10 +151,12 @@ pub use visloc_slam::{
     PerPoseGravityPrior, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph,
     PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
     PoseGraphParseError, PoseGraphSe3Config, PoseGraphSe3IterationStats, PoseGraphSe3Result,
-    PositionPrior, PositionPriorObservation, RobustKernel, Sim3Edge, Sim3Information,
+    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RobustKernel, Sim3Edge,
+    Sim3Information,
     Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats, Sim3PoseGraphResult,
     StationaryRejectionReason, StereoVoBaConfig, StereoVoBaError, StereoVoBaImuInput,
-    StereoVoBaImuRefinement, StereoVoBaImuSample, StereoVoBaRefinement, ViInitFallback,
+    StereoVoBaImuRefinement, StereoVoBaImuSample, StereoVoBaRefinement, StereoVoReconstruction,
+    ViInitFallback,
     ViInitializationEvent, ViInitializationStatus, Viba2Config, Viba2Stats,
     VisualInertialInitializationResult, VisualInertialInitializer, VisualInertialInitializerConfig,
     VoLoopClosureConfig, VoLoopClosureError, VoLoopClosureResult,

@@ -30,6 +30,11 @@ pub enum ColmapError {
     InvalidExportInput(String),
 }
 
+/// A merged multi-view landmark for COLMAP export: `(world_position,
+/// observations)` where each observation is `(frame, left_keypoint_index,
+/// pixel)`. See [`write_colmap_reconstruction_for_3dgs`].
+pub type ReconstructionLandmark = (Point3<f64>, Vec<(usize, usize, Point2<f64>)>);
+
 /// Summary of a [`write_colmap_text_model_for_3dgs`] call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColmapExportSummary {
@@ -496,6 +501,134 @@ where
     Ok(ColmapExportSummary {
         frame_count: poses.len(),
         landmark_count: landmark_count as usize,
+        observation_count,
+    })
+}
+
+/// Write a COLMAP text model from a *merged-track* sparse reconstruction.
+///
+/// Unlike [`write_colmap_text_model_for_3dgs`] — which lifts one fresh landmark
+/// per frame (every `POINT3D` has a single-element `TRACK[]`) — this writer takes
+/// landmarks that are already merged across views by a global bundle adjustment:
+/// each `landmarks[i]` is `(world_position, observations)` where `observations`
+/// is the full `(frame, left_keypoint_index, pixel)` track. The emitted
+/// `points3D.txt` therefore carries genuine multi-view `TRACK[]` tails, which is
+/// what lets a downstream 3DGS optimizer converge to crisp geometry instead of
+/// the per-frame depth-lift fog.
+///
+/// `left_features[frame]` supplies the full keypoint list so `images.txt` can map
+/// each keypoint to its `POINT3D_ID` (or `-1` when untracked); the COLMAP
+/// `POINT2D_IDX` recorded in each track equals the keypoint index, since
+/// `POINTS2D[]` is emitted in keypoint order.
+pub fn write_colmap_reconstruction_for_3dgs<F>(
+    out_dir: impl AsRef<Path>,
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    landmarks: &[ReconstructionLandmark],
+    image_name: F,
+) -> Result<ColmapExportSummary, ColmapError>
+where
+    F: Fn(usize) -> String,
+{
+    if poses.len() != left_features.len() {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "input length mismatch: poses={}, left_features={}",
+            poses.len(),
+            left_features.len(),
+        )));
+    }
+    colmap_id_from_camera_model(&camera.model)?;
+
+    let out_dir = out_dir.as_ref();
+    fs::create_dir_all(out_dir)?;
+
+    // cameras.txt — one shared camera.
+    let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
+    cameras_text.push_str(&format!(
+        "{} {} {} {}",
+        camera.id,
+        camera_model_to_colmap_name(&camera.model),
+        camera.width,
+        camera.height,
+    ));
+    for param in &camera.params {
+        cameras_text.push_str(&format!(" {}", format_f64(*param)));
+    }
+    cameras_text.push('\n');
+    fs::write(out_dir.join("cameras.txt"), cameras_text)?;
+
+    // For each frame, map left-keypoint index -> assigned POINT3D_ID so the
+    // images.txt second line can emit the `X Y POINT3D_ID` triples.
+    let mut frame_kp_to_point: Vec<std::collections::HashMap<usize, u64>> =
+        vec![std::collections::HashMap::new(); poses.len()];
+    let mut observation_count: usize = 0;
+
+    // points3D.txt — one line per merged landmark, with the full multi-view TRACK[].
+    let mut points3d_text =
+        String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
+    for (idx, (position, observations)) in landmarks.iter().enumerate() {
+        let point_id = (idx as u64) + 1;
+        points3d_text.push_str(&format!(
+            "{} {} {} {} 255 255 255 0",
+            point_id,
+            format_f64(position.x),
+            format_f64(position.y),
+            format_f64(position.z),
+        ));
+        for &(frame, left_idx, _) in observations {
+            if frame >= poses.len() {
+                continue;
+            }
+            // POINT2D_IDX == keypoint index, because images.txt emits POINTS2D[]
+            // in keypoint order below.
+            points3d_text.push_str(&format!(" {} {}", frame, left_idx));
+            frame_kp_to_point[frame].insert(left_idx, point_id);
+            observation_count += 1;
+        }
+        points3d_text.push('\n');
+    }
+    fs::write(out_dir.join("points3D.txt"), points3d_text)?;
+
+    // images.txt — alternating header line + 2D point list.
+    let mut images_text = String::from(
+        "# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n# POINTS2D[] as X Y POINT3D_ID\n",
+    );
+    for (frame_idx, (pose, features)) in poses.iter().zip(left_features.iter()).enumerate() {
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        let name = image_name(frame_idx);
+        validate_colmap_image_name(&name, frame_idx)?;
+        images_text.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {}\n",
+            frame_idx,
+            format_f64(q.w),
+            format_f64(q.i),
+            format_f64(q.j),
+            format_f64(q.k),
+            format_f64(t.x),
+            format_f64(t.y),
+            format_f64(t.z),
+            camera.id,
+            name,
+        ));
+        let kp_to_point = &frame_kp_to_point[frame_idx];
+        let mut tokens: Vec<String> = Vec::with_capacity(features.keypoints.len());
+        for (kp_idx, kp) in features.keypoints.iter().enumerate() {
+            let point_id = kp_to_point
+                .get(&kp_idx)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-1".to_owned());
+            tokens.push(format!("{} {} {}", format_f64(kp.x), format_f64(kp.y), point_id));
+        }
+        images_text.push_str(&tokens.join(" "));
+        images_text.push('\n');
+    }
+    fs::write(out_dir.join("images.txt"), images_text)?;
+
+    Ok(ColmapExportSummary {
+        frame_count: poses.len(),
+        landmark_count: landmarks.len(),
         observation_count,
     })
 }

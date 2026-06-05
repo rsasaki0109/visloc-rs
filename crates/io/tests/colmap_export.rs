@@ -520,3 +520,93 @@ fn write_colmap_models_for_3dgs_reject_image_name_with_format_breaking_character
         fs::remove_dir_all(&binary_dir).ok();
     }
 }
+
+#[test]
+fn write_colmap_reconstruction_for_3dgs_emits_merged_multiview_tracks() {
+    // The merged-track writer's defining property: a single POINT3D carries the
+    // full multi-view TRACK[] (every frame that observed it), unlike the
+    // per-frame writer where every POINT3D has a single-element track.
+    let dir = make_tempdir("colmap_reconstruction_merged");
+
+    let camera = synthetic_camera();
+    let poses: Vec<Pose> = (0..3)
+        .map(|i| Pose {
+            world_to_camera: SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(0.0, 0.0, -(i as f64)),
+            ),
+        })
+        .collect();
+    // 3 left keypoints per frame; the first two are tracked across all 3 frames.
+    let left_features = vec![
+        feature_set_from_keypoints(&[(100.0, 80.0), (200.0, 90.0), (300.0, 100.0)]),
+        feature_set_from_keypoints(&[(101.0, 80.0), (201.0, 90.0), (301.0, 100.0)]),
+        feature_set_from_keypoints(&[(102.0, 80.0), (202.0, 90.0), (302.0, 100.0)]),
+    ];
+    // Two merged landmarks, each observed by all three frames (a 3-long TRACK[]).
+    let landmarks: Vec<visloc_io::colmap::ReconstructionLandmark> = vec![
+        (
+            Point3::new(0.5, 0.0, 5.0),
+            vec![
+                (0, 0, Point2::new(100.0, 80.0)),
+                (1, 0, Point2::new(101.0, 80.0)),
+                (2, 0, Point2::new(102.0, 80.0)),
+            ],
+        ),
+        (
+            Point3::new(-0.5, 0.0, 6.0),
+            vec![
+                (0, 1, Point2::new(200.0, 90.0)),
+                (1, 1, Point2::new(201.0, 90.0)),
+                (2, 1, Point2::new(202.0, 90.0)),
+            ],
+        ),
+    ];
+
+    let summary = visloc_io::colmap::write_colmap_reconstruction_for_3dgs(
+        &dir,
+        &camera,
+        &poses,
+        &left_features,
+        &landmarks,
+        |idx| format!("{idx:06}.png"),
+    )
+    .expect("write merged-track 3DGS colmap model");
+
+    assert_eq!(summary.frame_count, 3);
+    assert_eq!(summary.landmark_count, 2);
+    // 2 landmarks × 3 observations each.
+    assert_eq!(summary.observation_count, 6);
+
+    // points3D.txt: each of the 2 points must carry a 3-frame TRACK[] tail
+    // (IMAGE_ID POINT2D_IDX pairs for frames 0,1,2).
+    let points3d = fs::read_to_string(dir.join("points3D.txt")).unwrap();
+    let data_lines: Vec<&str> = points3d
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .collect();
+    assert_eq!(data_lines.len(), 2, "two merged landmarks");
+    for line in &data_lines {
+        // POINT3D_ID X Y Z R G B ERROR + 3×(IMAGE_ID POINT2D_IDX) = 8 + 6 = 14 tokens.
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(
+            tokens.len(),
+            14,
+            "merged TRACK[] must span 3 frames: {line}"
+        );
+    }
+
+    // Re-read through the existing COLMAP reader: the two merged points parse
+    // back at their written world positions (frame 0 is identity pose, so the
+    // world position equals the stored landmark position).
+    let map = read_colmap_text_model(&dir).expect("read merged colmap model");
+    assert_eq!(map.landmarks.len(), 2);
+    let lm1 = map.landmarks.get(&1).expect("landmark 1");
+    assert!((lm1.position.x - 0.5).abs() < 1e-9);
+    assert!((lm1.position.z - 5.0).abs() < 1e-9);
+    let lm2 = map.landmarks.get(&2).expect("landmark 2");
+    assert!((lm2.position.x + 0.5).abs() < 1e-9);
+    assert!((lm2.position.z - 6.0).abs() < 1e-9);
+
+    fs::remove_dir_all(&dir).ok();
+}

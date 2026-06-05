@@ -25,9 +25,10 @@ use nalgebra::Vector3;
 use visloc_rs::{
     close_loops_on_vo_trajectory, parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt,
     parse_stereo_vo_imu_samples_txt, read_external_deep_features_txt, read_external_deep_matches_txt,
-    read_kitti_oxts_dir, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
-    write_colmap_binary_model_for_3dgs, VoLoopClosureConfig,
-    write_colmap_text_model_for_3dgs, write_online_ba_imu_state_csv, BaConfig, Camera,
+    read_kitti_oxts_dir, reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
+    slice_imu_samples_for_keyframes, write_colmap_binary_model_for_3dgs,
+    write_colmap_reconstruction_for_3dgs, write_colmap_text_model_for_3dgs,
+    write_online_ba_imu_state_csv, BaConfig, Camera, VoLoopClosureConfig,
     DescriptorMatch, GravityPrior, KabschRansacConfig, LandmarkInit, LinearSolver,
     OnlineStereoVoBa, OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose,
     PoseTrajectory, PositionPrior, PositionPriorObservation, RobustKernel, StereoRelativePoseMode,
@@ -110,6 +111,7 @@ struct CliArgs {
     imu_fix_first_velocity: bool,
     colmap_export_dir: Option<PathBuf>,
     colmap_export_binary_dir: Option<PathBuf>,
+    sfm_colmap_export_dir: Option<PathBuf>,
     colmap_image_prefix: String,
     colmap_image_suffix: String,
     online_ba_imu_csv: Option<PathBuf>,
@@ -419,7 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.min_temporal_confidence,
             ))
         };
-        if args.enable_ba || args.final_global_ba {
+        if args.enable_ba || args.final_global_ba || args.sfm_colmap_export_dir.is_some() {
             if let Some(ref tm) = temporal_matches {
                 all_temporal_matches.push(tm.clone());
             }
@@ -768,6 +770,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             summary.observation_count,
             colmap_dir.display(),
         );
+    }
+
+    // SfM-grade COLMAP export: build merged multi-view tracks from the temporal
+    // matches, run one global bundle adjustment over every pose and landmark,
+    // and write a COLMAP model whose POINT3D TRACK[] tails span every frame that
+    // observed each point. This is the structure a per-frame stereo lift lacks
+    // and the form a downstream 3DGS optimizer needs to converge crisply.
+    if let Some(sfm_dir) = &args.sfm_colmap_export_dir {
+        let sfm_config = StereoVoBaConfig {
+            min_track_length: args.ba_min_track_length,
+            max_initial_depth_m: args.ba_max_initial_depth_m,
+            max_seed_row_fraction: args.ba_max_seed_row_fraction,
+            max_init_residual_px: args.ba_max_init_residual_px,
+            min_temporal_confidence: args.ba_min_temporal_confidence,
+            min_track_count: args.ba_min_track_count,
+            landmark_init: args.ba_landmark_init,
+            window_size: None,
+            gravity_prior: None,
+            position_prior: None,
+            per_pose_gravity_prior: None,
+            imu_input: None,
+            fix_pose_prefix: 1,
+            ba_config: BaConfig {
+                max_iterations: args.final_global_ba_iterations,
+                robust_kernel: RobustKernel::Huber {
+                    delta: args.ba_huber_delta_px,
+                },
+                linear_solver: LinearSolver::Sparse,
+                ..BaConfig::default()
+            },
+        };
+        println!(
+            "running SfM reconstruction for COLMAP export: min_track_length={} max_iterations={}",
+            sfm_config.min_track_length, sfm_config.ba_config.max_iterations,
+        );
+        match reconstruct_stereo_vo_with_ba(
+            &online_runner.frontend.camera,
+            online_runner.frontend.baseline,
+            &online_runner.frontend.poses,
+            &online_runner.frontend.left_features,
+            &online_runner.frontend.right_features,
+            &online_runner.frontend.stereo_per_frame,
+            &all_temporal_matches,
+            &sfm_config,
+        ) {
+            Ok(recon) => {
+                println!(
+                    "SfM reconstruction: tracks={} observations={} reproj_px {:.4} -> {:.4} \
+                     (BA cost {:.4} -> {:.4}, {} iters, converged={})",
+                    recon.landmarks.len(),
+                    recon.observation_count,
+                    recon.mean_reproj_before_px,
+                    recon.mean_reproj_after_px,
+                    recon.ba_result.initial_cost,
+                    recon.ba_result.final_cost,
+                    recon.ba_result.iterations.len(),
+                    recon.ba_result.converged,
+                );
+                let landmarks: Vec<visloc_rs::io::colmap::ReconstructionLandmark> = recon
+                    .landmarks
+                    .iter()
+                    .map(|l| (l.position, l.observations.clone()))
+                    .collect();
+                let prefix = args.colmap_image_prefix.clone();
+                let suffix = args.colmap_image_suffix.clone();
+                let summary = write_colmap_reconstruction_for_3dgs(
+                    sfm_dir,
+                    &online_runner.frontend.camera,
+                    &recon.refined_poses,
+                    &online_runner.frontend.left_features,
+                    &landmarks,
+                    |idx| format!("{prefix}{idx:06}{suffix}"),
+                )?;
+                println!(
+                    "SfM COLMAP export: frames={} landmarks={} observations={} dir={}",
+                    summary.frame_count,
+                    summary.landmark_count,
+                    summary.observation_count,
+                    sfm_dir.display(),
+                );
+            }
+            Err(err) => {
+                eprintln!("SfM reconstruction skipped: {err}");
+            }
+        }
     }
 
     println!("wrote {}", args.out_dir.display());
@@ -1139,6 +1226,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut imu_fix_first_velocity: bool = false;
     let mut colmap_export_dir: Option<PathBuf> = None;
     let mut colmap_export_binary_dir: Option<PathBuf> = None;
+    let mut sfm_colmap_export_dir: Option<PathBuf> = None;
     let mut colmap_image_prefix: String = String::new();
     let mut colmap_image_suffix: String = String::from(".png");
     let mut online_ba_imu_csv: Option<PathBuf> = None;
@@ -1450,6 +1538,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 colmap_export_binary_dir = Some(PathBuf::from(args.remove(i + 1)));
                 args.remove(i);
             }
+            "--sfm-colmap-out" => {
+                sfm_colmap_export_dir = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
             "--colmap-image-prefix" => {
                 colmap_image_prefix = args.remove(i + 1);
                 args.remove(i);
@@ -1543,6 +1635,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         imu_fix_first_velocity,
         colmap_export_dir,
         colmap_export_binary_dir,
+        sfm_colmap_export_dir,
         colmap_image_prefix,
         colmap_image_suffix,
         online_ba_imu_csv,
@@ -1676,6 +1769,13 @@ fn print_usage() {
          when the downstream trainer prefers the binary form (Inria 3DGS / \
          nerfstudio both accept it). Independent of --colmap-export, so a \
          single VO run can emit both formats.\n \
+         [--sfm-colmap-out <dir>]     SfM-grade COLMAP export: chains temporal \
+         matches into merged multi-view tracks, runs one global bundle \
+         adjustment over all poses+landmarks, and writes a model whose POINT3D \
+         TRACK[] tails span every observing frame. Unlike --colmap-export (one \
+         single-observation landmark per frame), this is the multi-view \
+         structure a 3DGS optimizer needs to converge crisply. Reuses the \
+         --ba-* knobs (track length, depth/residual gates, huber, iterations)\n \
          [--colmap-image-prefix <s>]  prefix for image NAME field in images.* \
          (default empty)\n \
          [--colmap-image-suffix <s>]  suffix for image NAME field in images.* \
