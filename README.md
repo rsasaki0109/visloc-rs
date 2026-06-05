@@ -59,10 +59,11 @@
   &nbsp;·&nbsp;
   ✨ <a href="https://rsasaki0109.github.io/visloc-rs/euroc_splat/"><strong>EuRoC indoor scenes as 3D Gaussian Splats</strong></a>
   <br>
-  <img src="docs/assets/euroc_v101_splat_compare.png" alt="EuRoC V1_01: ground-truth photo (left) vs the 3D Gaussian Splat reconstruction rendered from the same camera pose (right)" width="70%">
+  <img src="docs/assets/euroc_v203_visloc_splat_compare.png" alt="EuRoC V2_03 Vicon room: real photo (left) vs a 3D Gaussian Splat rendered from visloc-rs's own estimated SLAM poses (right), nearly indistinguishable" width="80%">
   <br>
-  <em>EuRoC V1_01: a real photo (left) vs a 3DGS reconstruction of the same GPS-denied scene
-  visloc-rs localizes in (right) — explore it live in the splat viewer above.</em>
+  <em>EuRoC V2_03: a real photo (left) vs a 3DGS rendered from <strong>visloc-rs's own estimated SLAM
+  poses</strong> (right) — not ground truth. The <a href="docs/euroc_sfm_benchmark.md">SfM pillar</a>
+  tightens structure to <strong>0.53 px</strong> reprojection, sharp enough for crisp novel-view synthesis.</em>
 </p>
 
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
