@@ -52,27 +52,38 @@ form COLMAP feeds to 3DGS.
 
 ### On the downstream 3DGS quality
 
-Whether the reconstruction renders **crisp** in 3DGS turns out to depend almost
-entirely on the **capture trajectory**, not on visloc's pose precision:
+The sparse reconstruction is COLMAP-grade, but whether it renders **crisp** in
+3DGS depends on the **capture motion**, not on the reprojection number. We ran
+the identical SfM pipeline across four regimes:
 
-| Sequence | Motion | Reprojection (after BA) | 3DGS render |
-| --- | --- | ---: | --- |
-| **MH_03** (Machine Hall) | forward fly-through | 1.04 px | recognisable but **blurry** |
-| **V2_03** (Vicon Room) | orbit-like, 150-frame window | **0.53 px** | **crisp** (see README) |
+| Sequence | Motion | Window | Reprojection (after BA) | 3DGS render |
+| --- | --- | ---: | ---: | --- |
+| **V2_03** (Vicon Room) | room **orbit** | 150 | **0.53 px** | **crisp** (l1 ≈ 0.006) |
+| **MH_05** (Machine Hall) | hall fly-through | 300 | **0.60 px** | **blurry** (l1 ≈ 0.24) |
+| MH_03 (Machine Hall) | hall fly-through | 300 | 0.57 px | blurry |
+| MH_03 (Machine Hall) | hall fly-through | 2700 | 1.04 px | blurry |
+| KITTI seq00 | road fly-through (fast) | 300 | 3.64 px | very blurry |
 
-On MH_03 the drone flies *forward through* the hall: each surface is seen from a
-narrow range of angles, so 3DGS cannot pin its depth and the gaussians smear —
-the same softness any pose source (COLMAP included) would produce on that
-trajectory. We confirmed this is *not* fixable downstream: per-image exposure
-compensation, longer training, more gaussians, and MCMC scale/opacity
-regularisation all leave it blurry.
+![Same sub-pixel reprojection, opposite 3D Gaussian Splat quality: V2_03 room-orbit (top, reproj 0.53 px) renders crisp, MH_05 hall fly-through (bottom, reproj 0.60 px) renders blurry](assets/euroc_sfm_capture_geometry.png)
 
-On V2_03 the flight **orbits** the room, giving each surface rich multi-view
-parallax. The same SfM pipeline then tightens to **sub-pixel (0.53 px)**
-reprojection, and the resulting splat — rendered from visloc-rs's *own* estimated
-poses — is sharp enough to be nearly indistinguishable from the real photo. This
-is the proof that visloc's poses are reconstruction/NVS-grade when the capture
-suits 3DGS; the MH_03 blur was capture geometry, not pose error.
+The decisive pair is **V2_03 vs MH_05**: their post-BA reprojection is nearly
+identical (0.53 vs 0.60 px), yet the splats are opposite. So **tight
+sparse-feature reprojection is *necessary but not sufficient* for crisp novel-view
+synthesis** — it certifies the SfM structure, not the surface coverage.
+
+What 3DGS additionally needs is **orbital angular coverage**: each surface seen
+from a spread of viewpoints so its depth is pinned. The Vicon-room orbit (V2_03)
+provides it; the machine-hall and road fly-throughs sweep *past* surfaces
+front-on, so the gaussians stay elongated and smear — the same softness any pose
+source (COLMAP included) would produce on those trajectories. We confirmed the
+fly-through blur is not fixable downstream: per-image exposure compensation,
+longer training, more gaussians, and MCMC scale/opacity regularisation all leave
+it blurry.
+
+The takeaway: visloc-rs's own poses are reconstruction/NVS-grade — V2_03 proves a
+crisp splat from purely estimated poses — and the SfM reprojection number tells
+you the structure is tight, but a crisp 3DGS additionally requires an
+orbit-style capture.
 
 ## Reproduce
 
