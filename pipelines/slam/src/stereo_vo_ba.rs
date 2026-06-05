@@ -248,6 +248,14 @@ pub struct StereoVoBaConfig {
     /// compatible with [`Self::window_size`] (the sliding window slices
     /// poses but not IMU samples). `None` (default) runs visual-only BA.
     pub imu_input: Option<StereoVoBaImuInput>,
+    /// Number of leading poses to hold fixed as the gauge / map anchor. The
+    /// default `1` fixes only pose 0 (the classic single-anchor window BA). A
+    /// larger value fixes a *prefix* of poses: used by the streaming wrapper to
+    /// run a "local map" BA over an extended backward window whose old frames are
+    /// fixed (they anchor long-baseline landmarks) while only the recent frames
+    /// are optimised — the fixed-keyframe local BA pattern. Values are clamped to
+    /// `[1, n_frames-1]`.
+    pub fix_pose_prefix: usize,
     /// Underlying BA solver config. Defaults to sparse Cholesky + Huber
     /// kernel sized to a 3 px reprojection residual norm.
     pub ba_config: BaConfig,
@@ -268,6 +276,7 @@ impl Default for StereoVoBaConfig {
             position_prior: None,
             per_pose_gravity_prior: None,
             imu_input: None,
+            fix_pose_prefix: 1,
             ba_config: BaConfig {
                 max_iterations: 12,
                 robust_kernel: RobustKernel::Huber { delta: 3.0 },
@@ -485,7 +494,13 @@ pub fn refine_stereo_vo_with_ba(
     for (i, pose) in initial_poses.iter().enumerate() {
         ba.add_pose(i as u64, pose.clone());
     }
-    ba.fix_pose(0);
+    // Fix a leading prefix of poses as the gauge / local-map anchor (default 1 =
+    // fix pose 0 only). A larger prefix anchors long-baseline landmarks over an
+    // extended backward window while only the recent poses move.
+    let fixed_prefix = config.fix_pose_prefix.clamp(1, n_frames.saturating_sub(1).max(1));
+    for i in 0..fixed_prefix {
+        ba.fix_pose(i as u64);
+    }
 
     // IMU factor / velocity / bias wiring. Pre-integrate every supplied
     // window, register velocity & bias slots for each active keyframe,
@@ -1380,6 +1395,95 @@ mod tests {
             assert!(
                 dt < 1e-3,
                 "frame {idx} drifted {dt} from a known-correct initialisation"
+            );
+        }
+    }
+
+    /// `fix_pose_prefix > 1` holds a leading prefix of poses fixed (the
+    /// fixed-keyframe local-map anchor) while still optimising the trailing
+    /// poses: the prefix is bit-for-bit unchanged, and a drifted trailing pose is
+    /// pulled back toward truth by the long-baseline landmarks the fixed prefix
+    /// anchors.
+    #[test]
+    fn fix_pose_prefix_anchors_leading_poses() {
+        let camera = kitti_camera();
+        let baseline = 0.537;
+        let landmarks = synthetic_landmark_grid();
+
+        // Five frames of forward motion (truth).
+        let truth: Vec<Pose> = (0..5)
+            .map(|i| Pose {
+                world_to_camera: SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(0.0, 0.0, -0.8 * i as f64),
+                ),
+            })
+            .collect();
+
+        // Observations are projected from the TRUE poses.
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut stereo = Vec::new();
+        for p in &truth {
+            let (l, r, s) = project_to_pixels(&camera, p, &landmarks, baseline);
+            left.push(l);
+            right.push(r);
+            stereo.push(s);
+        }
+        let temporal_matches: Vec<Vec<DescriptorMatch>> = (0..truth.len() - 1)
+            .map(|f| {
+                let n = left[f].keypoints.len().min(left[f + 1].keypoints.len());
+                (0..n)
+                    .map(|i| DescriptorMatch {
+                        query_index: i,
+                        train_index: i,
+                        distance: 0.0,
+                        second_best_distance: None,
+                        ratio: None,
+                        confidence: Some(1.0),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Initial poses: truth, but the trailing two are drifted.
+        let mut initial = truth.clone();
+        for f in [3usize, 4] {
+            initial[f] = Pose {
+                world_to_camera: SE3::new(
+                    UnitQuaternion::identity(),
+                    truth[f].world_to_camera.translation + Vector3::new(0.06, 0.04, 0.05),
+                ),
+            };
+        }
+
+        let config = StereoVoBaConfig {
+            fix_pose_prefix: 3,
+            ..StereoVoBaConfig::default()
+        };
+        let refinement = refine_stereo_vo_with_ba(
+            &camera, baseline, &initial, &left, &right, &stereo, &temporal_matches, &config,
+        )
+        .expect("BA should succeed");
+
+        // The fixed prefix (poses 0,1,2) is bit-for-bit unchanged.
+        for f in 0..3 {
+            let d = (refinement.refined_poses[f].world_to_camera.translation
+                - initial[f].world_to_camera.translation)
+                .norm();
+            assert!(d < 1e-12, "fixed prefix pose {f} moved by {d}");
+        }
+        // The drifted trailing poses are pulled back toward truth.
+        for f in [3usize, 4] {
+            let before = (initial[f].world_to_camera.translation
+                - truth[f].world_to_camera.translation)
+                .norm();
+            let after = (refinement.refined_poses[f].world_to_camera.translation
+                - truth[f].world_to_camera.translation)
+                .norm();
+            assert!(
+                after < before * 0.5,
+                "trailing pose {f}: expected correction, before {before:.4} after {after:.4}"
             );
         }
     }

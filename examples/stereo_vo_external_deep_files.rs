@@ -73,6 +73,7 @@ struct CliArgs {
     online_ba: bool,
     online_ba_window: usize,
     online_ba_trigger_every: usize,
+    online_ba_history: usize,
     final_global_ba: bool,
     final_global_ba_iterations: usize,
     loop_closure: bool,
@@ -323,6 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // is sliced per trigger and injected as the inner refiner's
             // `imu_input`. Leave the inner config's `imu_input` as `None`.
             imu_input: None,
+            fix_pose_prefix: 1,
             ba_config: BaConfig {
                 max_iterations: args.ba_max_iterations,
                 robust_kernel: RobustKernel::Huber {
@@ -341,6 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         },
+        local_map_history: args.online_ba_history,
     };
     if args.online_ba {
         println!(
@@ -458,6 +461,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             position_prior: position_prior.clone(),
             per_pose_gravity_prior: per_pose_gravity_prior.clone(),
             imu_input,
+            fix_pose_prefix: 1,
             ba_config: BaConfig {
                 max_iterations: args.ba_max_iterations,
                 robust_kernel: RobustKernel::Huber {
@@ -570,6 +574,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             position_prior: position_prior.clone(),
             per_pose_gravity_prior: per_pose_gravity_prior.clone(),
             imu_input: None,
+            fix_pose_prefix: 1,
             ba_config: BaConfig {
                 max_iterations: args.final_global_ba_iterations,
                 robust_kernel: RobustKernel::Huber {
@@ -1095,6 +1100,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut online_ba: bool = false;
     let mut online_ba_window: usize = 30;
     let mut online_ba_trigger_every: usize = 10;
+    let mut online_ba_history: usize = 0;
     let mut final_global_ba: bool = false;
     let mut final_global_ba_iterations: usize = 30;
     let mut loop_closure: bool = false;
@@ -1281,6 +1287,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--online-ba-trigger-every" => {
                 online_ba_trigger_every = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--online-ba-history" => {
+                online_ba_history = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
             "--final-global-ba" => {
@@ -1489,6 +1499,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         online_ba,
         online_ba_window,
         online_ba_trigger_every,
+        online_ba_history,
         final_global_ba,
         final_global_ba_iterations,
         loop_closure,

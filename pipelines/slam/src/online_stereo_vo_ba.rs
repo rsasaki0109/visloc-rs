@@ -73,6 +73,18 @@ pub struct OnlineStereoVoBaConfig {
     /// keyframe of *each* trailing window, mirroring the post-process
     /// BA semantics). `None` runs the wrapper as visual-only sliding BA.
     pub imu_input: Option<StereoVoBaImuInput>,
+    /// Extra backward "local map" history (in frames) prepended to the trailing
+    /// optimisation window. `0` (default) is the classic window BA: optimise the
+    /// trailing `window_size` poses, fixing only pose 0 of that window. When
+    /// `> 0`, the BA window is extended back by this many frames, those older
+    /// frames are held FIXED (anchoring long-baseline landmarks that persist from
+    /// earlier windows), and only the trailing `window_size` poses are optimised
+    /// — the fixed-keyframe local-mapping pattern. This lets a landmark constrain
+    /// the recent poses over a baseline far longer than `window_size` without
+    /// re-optimising (or deforming) the already-settled older trajectory.
+    /// Incompatible with `imu_input` (the IMU slice aligns to the trailing
+    /// window only); ignored when `imu_input` is set.
+    pub local_map_history: usize,
 }
 
 impl Default for OnlineStereoVoBaConfig {
@@ -82,6 +94,7 @@ impl Default for OnlineStereoVoBaConfig {
             window_size: 20,
             ba_config: StereoVoBaConfig::default(),
             imu_input: None,
+            local_map_history: 0,
         }
     }
 }
@@ -204,16 +217,30 @@ where
     }
 
     fn run_ba_window(&mut self, start: usize, end: usize) -> OnlineBaTriggerStats {
+        // Optional "local map" backward history: extend the window back by
+        // `local_map_history` frames and fix that prefix, so long-baseline
+        // landmarks persisted from earlier windows anchor the recent poses
+        // without re-optimising the older trajectory. Disabled (history = 0)
+        // when IMU input is active, since the IMU slice aligns to the trailing
+        // window only.
+        let history = if self.config.imu_input.is_some() {
+            0
+        } else {
+            self.config.local_map_history.min(start)
+        };
+        let ext_start = start - history;
         // The frontend's `temporal_matches_per_pair[i]` holds the matches
         // used between poses `i` and `i+1`, so the slice for poses
-        // `start..end` is `temporal_matches_per_pair[start..end-1]`.
-        let temporal_slice = &self.frontend.temporal_matches_per_pair[start..end - 1];
+        // `ext_start..end` is `temporal_matches_per_pair[ext_start..end-1]`.
+        let temporal_slice = &self.frontend.temporal_matches_per_pair[ext_start..end - 1];
 
         // Build the effective BA config for this trigger. The wrapper
         // owns the global IMU input and slices it to align with the
         // trailing window; the inner refiner sees a window-local
         // `imu_input` whose `windows.len() == end - start - 1`.
         let mut effective_config = self.config.ba_config.clone();
+        // Fix the backward-history prefix (or just pose 0 when history == 0).
+        effective_config.fix_pose_prefix = history.max(1);
         if self.config.imu_input.is_some() && effective_config.imu_input.is_some() {
             return OnlineBaTriggerStats {
                 window_start: start,
@@ -258,24 +285,26 @@ where
             });
         }
 
-        // Refine over the trailing window.
+        // Refine over the (optionally history-extended) window.
         let result = refine_stereo_vo_with_ba(
             &self.frontend.camera,
             self.frontend.baseline,
-            &self.frontend.poses[start..end],
-            &self.frontend.left_features[start..end],
-            &self.frontend.right_features[start..end],
-            &self.frontend.stereo_per_frame[start..end],
+            &self.frontend.poses[ext_start..end],
+            &self.frontend.left_features[ext_start..end],
+            &self.frontend.right_features[ext_start..end],
+            &self.frontend.stereo_per_frame[ext_start..end],
             temporal_slice,
             &effective_config,
         );
         if let Ok(refinement) = &result {
-            for (offset, refined) in refinement.refined_poses.iter().enumerate() {
-                self.frontend.poses[start + offset] = refined.clone();
+            // Write back only the trailing (optimised) window; the fixed history
+            // prefix [ext_start, start) is unchanged by construction.
+            for frame in start..end {
+                self.frontend.poses[frame] = refinement.refined_poses[frame - ext_start].clone();
             }
         }
         OnlineBaTriggerStats {
-            window_start: start,
+            window_start: ext_start,
             window_end: end,
             result,
         }
@@ -552,6 +581,7 @@ mod tests {
                 window_size: 5,
                 ba_config: StereoVoBaConfig::default(),
                 imu_input: None,
+                local_map_history: 0,
             },
         );
 
@@ -606,6 +636,7 @@ mod tests {
                 window_size: 4,
                 ba_config: StereoVoBaConfig::default(),
                 imu_input: None,
+                local_map_history: 0,
             },
         );
         for i in 0..left.len() {
@@ -652,6 +683,7 @@ mod tests {
                 window_size: 5,
                 ba_config: StereoVoBaConfig::default(),
                 imu_input,
+                local_map_history: 0,
             },
         );
         for i in 0..left.len() {
