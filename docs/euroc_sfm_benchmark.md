@@ -52,15 +52,27 @@ form COLMAP feeds to 3DGS.
 
 ### On the downstream 3DGS quality
 
-Fed to gsplat on a high-parallax local window, the merged-track model roughly
-**halves** the 3DGS reconstruction loss versus the per-frame export
-(l1 ≈ 0.117 → 0.059) and visibly recovers structure the per-frame fog loses.
-It is still short of a crisp novel-view render, but the residual gap is no longer
-visloc's geometry: it is EuRoC's per-frame auto-exposure/gain inconsistency
-(3DGS needs photometric compensation), the ~2× headroom from 1.04 px to COLMAP's
-typical sub-pixel reprojection (the BA is capped at 30 iterations here), and the
-source-image motion blur. The lever direction — merged tracks + global BA — is
-the right one, and it is measurably better than a per-frame lift.
+Whether the reconstruction renders **crisp** in 3DGS turns out to depend almost
+entirely on the **capture trajectory**, not on visloc's pose precision:
+
+| Sequence | Motion | Reprojection (after BA) | 3DGS render |
+| --- | --- | ---: | --- |
+| **MH_03** (Machine Hall) | forward fly-through | 1.04 px | recognisable but **blurry** |
+| **V2_03** (Vicon Room) | orbit-like, 150-frame window | **0.53 px** | **crisp** (see README) |
+
+On MH_03 the drone flies *forward through* the hall: each surface is seen from a
+narrow range of angles, so 3DGS cannot pin its depth and the gaussians smear —
+the same softness any pose source (COLMAP included) would produce on that
+trajectory. We confirmed this is *not* fixable downstream: per-image exposure
+compensation, longer training, more gaussians, and MCMC scale/opacity
+regularisation all leave it blurry.
+
+On V2_03 the flight **orbits** the room, giving each surface rich multi-view
+parallax. The same SfM pipeline then tightens to **sub-pixel (0.53 px)**
+reprojection, and the resulting splat — rendered from visloc-rs's *own* estimated
+poses — is sharp enough to be nearly indistinguishable from the real photo. This
+is the proof that visloc's poses are reconstruction/NVS-grade when the capture
+suits 3DGS; the MH_03 blur was capture geometry, not pose error.
 
 ## Reproduce
 
@@ -77,3 +89,11 @@ and run `scripts/gsplat_mcmc_train.py <base> <out.splat> 7000 400000`.
 
 Requires python with `torch` + `lightglue` + `opencv` for the rectify/export
 stages and the `stereo_vo_external_deep_files` example.
+
+For the **crisp orbit splat** (the README figure), run the same flow on an
+orbit-style capture. We used EuRoC V2_03 (Vicon Room 2), frames 0–150 (it is a
+"difficult" sequence with a later sensor blackout, so the window stops before
+it): `--features-dir <V2_03 features> --frames 150 --width 752 --height 480
+--sfm-colmap-out <dir>` gives 0.53 px reprojection, and
+`scripts/gsplat_mcmc_train.py <base> <out.splat> 7000 300000` renders the crisp
+result.
