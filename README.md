@@ -1,12 +1,9 @@
 <h1 align="center">visloc-rs</h1>
 
 <p align="center">
-  <strong>GPS-denied visual &amp; visual-inertial localization for robots and UAVs &mdash; in pure Rust.</strong><br>
-  Camera- and IMU-driven positioning for where GNSS is jammed, occluded, or
-  absent: COLMAP/SfM map reuse, PnP + RANSAC localization, KITTI stereo VO,
-  EuRoC MAV (UAV) visual-inertial SLAM with an empirically documented adaptive
-  IMU/pose tracker, loop-candidate diagnostics, bundle-adjusted trajectory
-  demos, and an opt-in in-Rust SuperPoint ONNX path.
+  <strong>GPS-denied visual &amp; visual-inertial SLAM for robots and UAVs &mdash; in pure Rust.</strong><br>
+  Stereo VO · map-reuse PnP localization · loop closure · pose-graph &amp; bundle adjustment.<br>
+  Validated on KITTI and the EuRoC MAV.
 </p>
 
 <p align="center">
@@ -14,216 +11,127 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-f46623" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
-  <img src="https://img.shields.io/badge/status-research%20foundation-6f42c1" alt="Research foundation">
 </p>
 
 <p align="center">
-  <img src="docs/assets/south-building-deep-vs-classical-matches.jpg" alt="Real classical-vs-deep COLMAP South Building localization match overlay: classical pipeline 132 inliers, deep pipeline 289 inliers (+119%)" width="92%">
+  <img src="docs/assets/euroc_mh03_loop_closure.png" alt="EuRoC MH_03 GPS-denied 6-DOF MAV flight: open stereo VO drifts off ground truth (left); loop closure plus bundle adjustment pulls it back onto the Vicon/Leica trajectory (right)" width="96%">
   <br>
-  <em>Real Rust-pipeline output on the COLMAP South Building map+query pair `P1180141 -> P1180144`:
-  classical Corner+BF (top, orange) lands 132 inliers; deep HogLike+MutualSoftmax (bottom, cyan)
-  lands 289 (+119 %). Reproduce with the demo command under <a href="#try-it">Try It</a>.</em>
+  <em><strong>EuRoC MH_03</strong> — a GPS-denied 6-DOF drone flight. Open stereo VO drifts (left);
+  loop closure + bundle adjustment pulls it back to <strong>0.061 m ATE</strong>, within ~2.5× of
+  ORB-SLAM3 and ~1.75× of DROID-SLAM — in pure Rust.</em>
 </p>
 
 <table>
   <tr>
     <td width="50%">
+      <img src="docs/assets/kitti_seq00_loop_closure.png" alt="KITTI seq00 loop closure: open stereo VO Sim(3) ATE 36.29 m (left) vs VLAD to PnP to GNC pose-graph optimization 2.57 m (right)" width="100%">
+      <br>
+      <strong>KITTI seq00 loop closure</strong><br>
+      4541 frames, 35 verified loops: <strong>36.3 m → 2.6 m ATE (14×)</strong> — the drift dense global BA cannot remove.
+    </td>
+    <td width="50%">
       <img src="docs/assets/kitti_deep_vo.gif" alt="Deep stereo visual odometry on KITTI 00" width="100%">
       <br>
       <strong>KITTI stereo VO</strong><br>
-      Metric rectified-stereo VO with confidence-weighted PnP and BA diagnostics.
+      Metric rectified-stereo VO with confidence-weighted PnP, bundle adjustment, and pose-graph correction.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/euroc_mh01_match_track.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: SuperPoint feature matches on the cam0 image (left) and the growing 2D estimated trajectory vs ground truth (right)" width="100%">
+      <br>
+      <strong>EuRoC MH_01 online VI-SLAM</strong><br>
+      SuperPoint frontend matching frame-to-frame (left) while the live trajectory tracks ground truth (right).
     </td>
     <td width="50%">
-      <img src="docs/assets/kitti_revisit_loop_candidate.jpg" alt="KITTI 00 real revisit loop candidate: 41 verified candidates, strongest pair 49 to 4501 with 57 of 95 inliers" width="100%">
+      <img src="docs/assets/south-building-deep-vs-classical-matches.jpg" alt="COLMAP South Building map-reuse localization: classical Corner plus brute-force 132 inliers vs deep HogLike plus mutual-softmax 289 inliers" width="100%">
       <br>
-      <strong>KITTI loop candidate</strong><br>
-      Real revisit scan with 41 verified cross-segment candidates and strongest-pair inlier overlay.
+      <strong>COLMAP map-reuse localization</strong><br>
+      Load an SfM map, match query → landmarks, PnP. Deep frontend lands <strong>+119%</strong> verified inliers as the viewpoint gap grows.
     </td>
   </tr>
 </table>
 
 <p align="center">
   🌐 <a href="https://rsasaki0109.github.io/visloc-rs/kitti3d/"><strong>Explore the trajectories in interactive 3D</strong></a>
-  — KITTI (car): loop-closure before/after and SuperPoint/LightGlue stereo VO + BA; EuRoC (UAV): online VI-SLAM with real altitude. Orbit/zoom in the browser.
-  <br>
+  &nbsp;·&nbsp;
   ✨ <a href="https://rsasaki0109.github.io/visloc-rs/euroc_splat/"><strong>EuRoC indoor scenes as 3D Gaussian Splats</strong></a>
-  — the GPS-denied scenes visloc-rs localizes in (V1_01 Vicon room, MH_01 machine hall), reconstructed with official gsplat MCMC (COLMAP → 3DGS), viewable in WebGL.
-</p>
-
-<p align="center">
-  <img src="docs/assets/euroc_v101_splat_compare.png" alt="EuRoC V1_01: ground-truth photo (left) vs the 3D Gaussian Splat reconstruction rendered from the same camera pose (right)" width="72%">
   <br>
-  <em>EuRoC V1_01: a ground-truth photo (left) vs the 3DGS reconstruction rendered
-  from the same camera pose (right) — grayscale single-camera input, so it's soft
-  but recognisable. Explore it live in the splat viewer above.</em>
-</p>
-
-<p align="center">
-  <img src="docs/assets/euroc_mh01_match_track.gif" alt="EuRoC MH_01 UAV visual-inertial SLAM: SuperPoint feature matches on the cam0 image (left) and the growing 2D estimated trajectory vs ground truth (right)" width="98%">
+  <img src="docs/assets/euroc_v101_splat_compare.png" alt="EuRoC V1_01: ground-truth photo (left) vs the 3D Gaussian Splat reconstruction rendered from the same camera pose (right)" width="70%">
   <br>
-  <em>Real EuRoC MH_01 (Machine Hall, GPS-denied UAV stereo + IMU). Left: the
-  SuperPoint frontend matching features frame to frame on the cam0 image.
-  Right: an online VI-SLAM trajectory estimate on the same sequence (red)
-  tracking ground truth (black) in 2D, grown frame by frame &mdash; rigidly
-  aligned, ~0.06 m rigid ATE over 142 continuously-tracked frames (the drone
-  holds position, then maneuvers). Regenerate with
-  <code>scripts/animate_euroc_match_track.py</code>; inspect any run's tracking
-  continuity / jitter / ATE with <code>scripts/analyze_slam_trajectory.py</code>.</em>
+  <em>EuRoC V1_01: a real photo (left) vs a 3DGS reconstruction of the same GPS-denied scene
+  visloc-rs localizes in (right) — explore it live in the splat viewer above.</em>
 </p>
 
-<p align="center">
-  <a href="#why-visloc-rs"><strong>Why visloc-rs</strong></a> /
-  <a href="#try-it"><strong>Try it</strong></a> /
-  <a href="#demos"><strong>Demos</strong></a> /
-  <a href="#benchmark-snapshot"><strong>Benchmarks</strong></a> /
-  <a href="docs/phase_20_to_27_closeout.md"><strong>EuRoC closeout</strong></a> /
-  <a href="PLAN.md"><strong>Handoff plan</strong></a>
-</p>
-
-`visloc-rs` is a Rust foundation library for **GPS-denied localization** -
-estimating where a robot or UAV is from cameras and an IMU when GNSS is jammed,
-occluded, or simply absent: indoors, in urban canyons, under bridges, or in
-low-altitude flight. It centers on map-based visual localization and the
-building blocks above it: load an existing COLMAP/SfM map, match query features
-to landmarks, estimate camera pose with PnP + RANSAC. Optional pipelines grow
-toward stereo VO, online VI-SLAM with an adaptive IMU/pose tracker,
-loop-candidate reporting, pose-graph optimization, and bundle adjustment.
-
-The aerial side is exercised on the EuRoC MAV (micro-aerial-vehicle) datasets -
-GPS-denied indoor drone flight with stereo + IMU. The project is built for work
-where you want inspectable geometry, explicit diagnostics, reusable trait
-boundaries, and an honest empirical record before committing to a heavy runtime
-or a full SLAM stack.
+`visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
+where a robot or UAV is, from cameras and an IMU, when GNSS is jammed, occluded, or
+absent (indoors, urban canyons, under bridges, low-altitude flight). Load a COLMAP/SfM
+map and localize with PnP + RANSAC, or run the optional pipelines: stereo VO, online
+VI-SLAM, loop closure, pose-graph optimization, and bundle adjustment — every stage
+with inspectable geometry and an honest empirical record, no heavy C++ runtime required.
 
 ## Why visloc-rs?
 
-Most open visual-SLAM and SfM stacks are mature C++ projects that pull in heavy
-runtimes (OpenCV, Pangolin, Ceres, CUDA) and hand you a finished pipeline.
-`visloc-rs` takes the opposite bet: a **pure-Rust, dependency-light, trait-based
-foundation** you can read, extend, and trust - with an honest empirical record
-instead of leaderboard claims. There is no established pure-Rust visual
-localization / VI-SLAM stack today; this is meant to be that building-block layer.
+There is no established pure-Rust visual-localization / VI-SLAM stack. Most open
+SLAM/SfM is mature C++ (OpenCV, Pangolin, Ceres, CUDA) handed to you as a finished
+black box. `visloc-rs` takes the opposite bet: a **pure-Rust, dependency-light,
+trait-based foundation** you can read, extend, and trust.
 
-- **GPS-denied / UAV focus** - positioning when GNSS is jammed, occluded, or
-  absent; validated on the EuRoC MAV drone datasets and KITTI, with GNSS treated
-  as an optional prior rather than a requirement.
-- **Pure Rust, memory-safe** - no C++ toolchain, no OpenCV / Pangolin / Ceres to build.
-- **No mandatory ML runtime** - default crates need no PyTorch / ONNX / CUDA; learned
-  frontends (SuperPoint / LightGlue, in-Rust ONNX) are strictly opt-in behind features.
-- **Inspectable geometry & diagnostics** - every stage exposes inlier counts,
-  reprojection error, and tracking / loop diagnostics instead of a black box.
-- **Trait-based, replaceable frontends** - feature extractors, matchers, pose
-  estimators, priors, and VO frontends are swap-in trait boundaries.
-- **Reproducible by construction** - a toolchain pin plus a 3-run determinism
-  protocol confirms bit-identical rebuilds across tested configurations.
+- **Pure Rust, memory-safe** — no C++ toolchain; no mandatory OpenCV / Ceres / ONNX / CUDA. Learned frontends (SuperPoint / LightGlue) are strictly opt-in behind features.
+- **GPS-denied / UAV focus** — validated on the EuRoC MAV drone datasets and KITTI, with GNSS treated as an optional prior, not a requirement.
+- **Inspectable & honest** — every stage exposes inlier counts, reprojection error, and loop diagnostics; results are an empirical record, not leaderboard claims.
 
 | | visloc-rs | ORB-SLAM3 | COLMAP |
 | --- | --- | --- | --- |
 | Language | **Rust** | C++ | C++ |
 | Mandatory heavy runtime | none (opt-in ONNX) | OpenCV, Pangolin | OpenCV, Ceres |
 | Primary focus | GPS-denied localization (map reuse + VO / VI building blocks) | real-time VI-SLAM | offline SfM / MVS |
-| Maturity | young foundation (v0.1) | research / production | production |
 | License | MIT OR Apache-2.0 | GPLv3 | BSD |
 
 `visloc-rs` is deliberately **not** a finished SLAM system (see
-[Project Boundaries](#project-boundaries)); it is the layer you reach for when you
-want to compose and understand the pipeline, not just run a black box.
+[Project Boundaries](#project-boundaries)) — it is the layer you reach for to compose
+and understand the pipeline, not just run a black box.
 
-**30-second taste** - no dataset download, no extra features:
+**30-second taste** — no dataset download, no extra features:
 
 ```bash
 cargo run --example localize_dummy
 ```
 
-## Highlights
+## What works now
 
-| Area | What works now |
-| --- | --- |
-| Map localization | COLMAP text/binary IO, descriptor stores, 2D-3D correspondence building, DLT PnP, PnP RANSAC, optional Gauss-Newton pose refinement |
-| Stereo VO | Rectified-stereo triangulation, confidence-weighted 2D-3D PnP, Kabsch fallback, pair diagnostics, KITTI trajectory export/eval |
-| **EuRoC VI-SLAM** | Adaptive IMU/pose tracker (`ImuVelocityRefreshPolicy` Phase-25), motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap, recovery PnP scaffold. **V1_01 strict + SuperPoint -> 0.0029 m rigid ATE on tracked frames** (Phase-26 #1). See [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
-| Deep-style frontend | Pure-Rust HOG-like descriptors, LightGlue-style mutual-softmax matcher, external SuperPoint/LightGlue file bridge, **opt-in in-Rust SuperPoint ONNX runtime** behind `--features onnx-inference` (Phase-27) |
-| Optimization | Sparse Cholesky bundle adjustment with Huber/Cauchy kernels; full SE(3) pose-graph optimizer (GN/LM, 6x6 anisotropic info matrices, `.g2o` IO, fill-reducing reordering, a `BxB`-block Cholesky ~3-4x faster than scalar, default-on chordal rotation init); Graduated Non-Convexity outlier rejection for both PGO and BA; 7-DOF Sim(3) pose graph for monocular scale drift. Runs on the standard SE-Sync `.g2o` benchmarks and ties GTSAM - details in [`docs/pgo_internals.md`](docs/pgo_internals.md) |
-| Sequence tooling | Tracking states, local mapping skeleton, loop-candidate reports, ATE/RPE/KITTI/TUM trajectory evaluators |
-| Fusion hooks | Timestamped frames, GNSS/pose/IMU measurements, loose localization priors, VI initialization workstream |
-| Reproducibility | `rust-toolchain.toml` pin + `scripts/verify_binary_determinism.sh` 3-run protocol confirms bit-identical cross-rebuild on all tested configurations |
+- **Map localization** — COLMAP text/binary IO, 2D-3D correspondence building, DLT PnP, PnP RANSAC, Gauss-Newton pose refinement.
+- **Stereo VO** — rectified-stereo triangulation, confidence-weighted PnP, Kabsch fallback, KITTI trajectory export/eval.
+- **EuRoC VI-SLAM** — adaptive IMU/pose tracker, motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap.
+- **Optimization** — sparse-Cholesky bundle adjustment + full SE(3) / Sim(3) pose-graph optimizer with GNC outlier rejection; runs the SE-Sync `.g2o` benchmarks and ties GTSAM.
+- **Deep frontend (opt-in)** — pure-Rust HOG-like descriptors, mutual-softmax matcher, SuperPoint/LightGlue file bridge, in-Rust SuperPoint ONNX behind `--features onnx-inference`.
 
-## Benchmark Snapshot
+## Benchmarks
 
 Local public-data development measurements, not official leaderboard submissions.
 
-| Demo | Dataset | Result |
-| --- | --- | ---: |
-| COLMAP localization sweep | South Building, 25 map/query pairs | Deep-style descriptors give **+37% to +98%** more verified inliers as viewpoint gap grows |
-| KITTI loop scanner | KITTI 00 start + revisit sandwich | Quick deep run (`50x30`, 200 features/frame) finds **41** verified cross-segment candidates; strongest pair `49 -> 4501` has **57/95** inliers |
-| SP/LG stereo VO + BA | KITTI odometry train `00..10`, 260 frames each | `mean_t_rel = 1.2715%`, `mean_max_t_rel = 2.9785%` with tuned SuperPoint/LightGlue + BA |
-| EuRoC VI-SLAM (SuperPoint + strict-stereo) | EuRoC V1_01_easy, Phase-26 #1 strict | rigid ATE **0.0029 m** on 93 surviving frames, coverage 6 % - see *EuRoC vs baselines* below |
-| EuRoC VI-SLAM (HOG + ThreePoseSmoother) | EuRoC V2_01_easy, Phase-25 strict | rigid ATE **0.198 m** on 102 surviving frames, coverage 6.8 % |
-| KITTI stereo VO + PGO | KITTI 00 real stereo image window | README asset run lowers max translation error **2.01 m -> 0.72 m** after pose-graph correction |
+| Benchmark | Result |
+| --- | ---: |
+| **KITTI seq00 loop closure** | open VO 36.3 m → **2.6 m** Sim(3) ATE (**14×**), 35 verified loops |
+| **EuRoC MH_03 full pipeline** | **0.061 m** ATE — within **~2.5× of ORB-SLAM3**, **~1.75× of DROID-SLAM**, pure Rust |
+| COLMAP South Building localization | deep frontend gives **+37% to +98%** more verified inliers as the viewpoint gap grows |
+| Pose-graph optimization (SE-Sync `.g2o`) | **ties GTSAM 4.x LM** on `parking`/`sphere`/`cubicle`; **beats** it on `torus3D` (2.4e4 vs 6.0e4) and `rim` (8.3e4 vs 6.1e5) |
+| Outlier-robust PGO (GNC) | `sphere2500` + 30 wrong loops: L2 **89×** baseline, GNC **1.0×** (30/30 rejected) |
 
-### Pose-graph optimization (g2o benchmarks)
-
-The pure-Rust SE(3) optimizer (`PoseGraph::optimize_se3_iterative`, GN/LM on the
-SE(3) manifold, `.g2o` `EDGE_SE3:QUAT` IO) runs directly on the canonical
-back-end datasets - no C++, no Ceres, no ROS. A `BxB`-block Cholesky (~3-4x
-faster than scalar `CscCholesky`), fill-reducing reordering, and a default-on
-chordal rotation init make the hard 3D graphs tractable, and it **ties GTSAM 4.x
-LM** from the same odometry (and converges `sphere`/`cubicle`/`rim` from a
-chordal seed GTSAM's own `InitializePose3` cannot). Full method, parallelism,
-and GTSAM-parity tables: [`docs/pgo_internals.md`](docs/pgo_internals.md).
-
-| Dataset | Poses | Edges | initial chi^2 | final chi^2 (+chordal) | GTSAM final |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `parking-garage` | 1661 | 6275 | 1.67e4 | 1.27e0 | 1.27e0 |
-| `sphere2500` | 2500 | 4949 | 2.61e6 | 1.35e3 | 1.35e3 |
-| `torus3D` | 5000 | 9048 | 4.80e6 | **2.42e4** | 5.996e4 |
-| `cubicle` | 5750 | 16869 | 1.08e7 | 2.75e3 | 2.749e3 |
-| `rim` | 10195 | 29743 | 1.28e8 | **8.34e4** | 6.11e5 |
-
-For graphs with **wrong** loop closures, `PoseGraph::optimize_se3_gnc` adds
-Graduated Non-Convexity (Yang et al. 2020): on `sphere2500` + 30 injected
-outliers an L2 solve lands **89x** the outlier-free baseline while GNC recovers
-**1.0x** (30/30 rejected, 0 false positives). The same machinery is available
-per-observation in BA as `BundleAdjustment::optimize_gnc`.
-
-```sh
-scripts/fetch_pgo_g2o_datasets.sh datasets/pgo_g2o
-cargo run --release --example pgo_g2o_benchmark -- --chordal-init datasets/pgo_g2o/rim.g2o
-cargo run --example pgo_g2o_benchmark   # zero-setup built-in loop graph
-```
-
-### EuRoC vs published baselines (honest read)
-
-The strict-stereo bootstrap is **accuracy-favouring, not coverage-favouring**:
-it gives up tracking on EuRoC cliff regions rather than admit wrong-scale
-solutions. On the frames it tracks, per-frame accuracy is competitive with
-published full-sequence numbers; on full-sequence coverage it is not. The full
-trade-off (Phase-{20..27} honest negatives) is in
-[`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md).
-
-| Method | V1_01 ATE | V2_01 ATE | Coverage | Stack |
-| --- | --- | --- | --- | --- |
-| ORB-SLAM3 stereo-inertial *[Campos 2021]* | 0.037 m | 0.038 m | full sequence | C++, OpenCV/Eigen |
-| VINS-Fusion stereo-inertial *[Qin 2019]* | 0.087 m | 0.150 m | full sequence | C++, Ceres, ROS-tied |
-| **visloc-rs V1_01 strict + SuperPoint** | **0.0029 m\*** | - | **6 % of frames** | Rust, no mandatory ML runtime |
-| **visloc-rs V2_01 strict + HOG (Phase-25)** | - | **0.198 m\*** | **6.8 % of frames** | Rust, classical descriptor only |
-
-`\*` Per-frame rigid-ATE-on-surviving-frames; not directly comparable to the
-full-sequence ATE of the ORB-SLAM3 / VINS-Fusion rows. Use visloc-rs as a
-Rust-side foundation to build on; use ORB-SLAM3 / VINS-Fusion for turnkey
-full-sequence VI-SLAM.
+Details and reproduction: [KITTI loop closure](docs/kitti_loop_closure_benchmark.md) ·
+[EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
+[pose-graph / BA internals + GTSAM parity](docs/pgo_internals.md) ·
+[EuRoC vs published baselines](docs/phase_20_to_27_closeout.md).
 
 ## Project Boundaries
 
 The first public slice is deliberately narrow: make visual localization solid,
-observable, and easy to extend instead of hiding an unfinished SLAM stack behind
-a large API.
+observable, and easy to extend, rather than hide an unfinished SLAM stack behind a
+large API.
 
-- **Input:** existing COLMAP/SfM maps, landmark descriptors, query features, stereo image sequences, file-backed external deep features/matches, or pre-exported SuperPoint features
-- **Output:** `SE3` / `Pose` estimates, inlier counts, reprojection error, tracking diagnostics, loop-candidate diagnostics, pose trajectories
-- **Extensible:** feature extractors, matchers, pose estimators, priors, and VO frontends are trait-based
-- **Core stays light:** no mandatory OpenCV, PyTorch, ONNX, TensorRT, or GPU runtime in default crates
-- **Not claimed:** production full SLAM, dense mapping, production loop closure, full SfM, tightly coupled VIO/GNSS, or official KITTI leaderboard results
+- **In:** COLMAP/SfM maps, query/stereo features, file-backed deep features → `SE3`/`Pose` estimates with inlier counts, reprojection error, and tracking/loop diagnostics.
+- **Extensible & light:** feature extractors, matchers, pose estimators, priors, and VO frontends are trait-based; no mandatory OpenCV / PyTorch / ONNX / GPU runtime in default crates.
+- **Not claimed:** production full SLAM, dense mapping, full SfM, tightly coupled VIO/GNSS, or official KITTI leaderboard results.
 
 ## Try It
 
@@ -248,25 +156,19 @@ scripts/check.sh
 
 ## Demos
 
-Each row points at a runnable example or sweep script; longer walkthroughs live
-under `docs/` (full index in [`docs/demo_strategy.md`](docs/demo_strategy.md)).
+Each row points at a runnable example or sweep script on **real public data**;
+the full index (including synthetic correctness demos) lives in
+[`docs/demo_strategy.md`](docs/demo_strategy.md).
 
 | Demo | Stack | Reference |
 | --- | --- | --- |
 | COLMAP South Building localization | Real images vs sparse SfM map, deep frontend optional | [`examples/deep_localization_demo.rs`](examples/deep_localization_demo.rs), [`docs/public_data_demo.md`](docs/public_data_demo.md) |
-| KITTI stereo VO + BA + loop closure | Rectified stereo -> 2D-3D PnP -> multi-frame BA -> essential-matrix verifier -> SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs) |
-| KITTI 00 sandwich loop detection | Start + revisit slices, quick deep scanner; writes `index.html` + verified-inlier overlay (`41` candidates) | [`examples/kitti_revisit_scanner_demo.rs`](examples/kitti_revisit_scanner_demo.rs), [`scripts/run_kitti_deep_vo_revisit_smoke.py`](scripts/run_kitti_deep_vo_revisit_smoke.py) |
-| Synthetic scanner loop closure | 9-keyframe arc, appearance scan -> loop edge -> SE(3) PGO. `<2 cm` max error recovery | [`examples/scanner_loop_closure_demo.rs`](examples/scanner_loop_closure_demo.rs) |
-| Sim(3) scale-drift correction | 24-node monocular loop with 3 %/keyframe scale shrink; worst `\|scale-1\|` **0.50 -> 0**, mean position error **1.49 m -> 0 m** | [`examples/sim3_scale_drift_pgo_demo.rs`](examples/sim3_scale_drift_pgo_demo.rs) |
-| Outlier-robust PGO (GNC) | Injects wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89x** baseline, GNC **1.0x** (30/30 rejected) | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
-| Deep frontend two-view geometry | HogLike + MutualSoftmax vs classical Corner + BF on a 30 deg baseline scene (~30x rot/trans-direction win) | [`examples/deep_frontend_two_view_demo.rs`](examples/deep_frontend_two_view_demo.rs) |
-| SuperPoint/LightGlue VO + BA | File-backed SP/LG features -> confidence-weighted PnP -> BA. KITTI train `00..10` `mean_t_rel 1.27 %` | [`scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh`](scripts/run_kitti_superpoint_lightglue_vo_train_benchmark.sh) |
-| **KITTI loop closure** | Open SP/LG stereo VO vs VLAD->PnP->GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **Sim(3) ATE rmse 36.29 m -> 2.57 m (14x)** - the drift dense global BA cannot remove | [`scripts/run_kitti_loop_closure_benchmark.sh`](scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) |
-| **EuRoC loop closure (UAV)** | Same pipeline on a 6-DOF MAV flight, MH_03 (2700 frames, 317 loops, evo_ape vs Vicon/Leica GT). Loop stage alone **2.46 m -> 0.46 m**; window BA + loop **0.089 m**; + two-view loop BA **0.065 m**; **+ fixed-prefix local-map BA -> 0.061 m** (MH_05 0.119 -> 0.084 m), **within ~2.5x of ORB-SLAM3 / ~1.75x of DROID-SLAM** in pure Rust | [`scripts/run_euroc_loop_closure_benchmark.sh`](scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) |
-| **EuRoC online VI-SLAM** | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap. SuperPoint via offline replay or `--features onnx-inference` | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
+| KITTI stereo VO + BA + loop closure | Rectified stereo → 2D-3D PnP → multi-frame BA → SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs) |
+| **KITTI loop closure (14×)** | Open SP/LG stereo VO vs VLAD→PnP→GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **36.29 m → 2.57 m Sim(3) ATE** | [`scripts/run_kitti_loop_closure_benchmark.sh`](scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) |
+| **EuRoC loop closure (UAV, 0.061 m)** | Same pipeline on a 6-DOF MAV flight, MH_03. Window BA + loop **0.089 m** → + two-view loop BA **0.065 m** → + fixed-prefix local-map BA **0.061 m**, within ~2.5× ORB-SLAM3 | [`scripts/run_euroc_loop_closure_benchmark.sh`](scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) |
+| EuRoC online VI-SLAM | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
+| Outlier-robust PGO (GNC) | Wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89×** baseline, GNC **1.0×** | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
 | GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
-| KITTI / TUM trajectory ATE + RPE evaluator | Frame-id-matched ATE (Umeyama SE(3)/Sim(3) alignment) and TUM-style RPE over Δ-spaced pairs | [`examples/evaluate_trajectory_from_tum_files.rs`](examples/evaluate_trajectory_from_tum_files.rs), [`examples/evaluate_kitti_odometry_benchmark.rs`](examples/evaluate_kitti_odometry_benchmark.rs) |
-| Binary determinism verification | Three-run protocol on EuRoC V2_01 baseline + SuperPoint configurations | [`scripts/verify_binary_determinism.sh`](scripts/verify_binary_determinism.sh), [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) |
 
 ## Minimal Example
 
@@ -317,20 +219,15 @@ docs/                  design notes, demo guides, EuRoC closeout, plan docs
 
 ## Roadmap
 
-[`docs/roadmap.md`](docs/roadmap.md) has the staged plan; [`PLAN.md`](PLAN.md) is
-the handoff checklist. Near-term layers: sequential tracking quality, local
-mapping + keyframe policies, online Visual SLAM with incremental map updates,
-deep VO frontend integration, loop-closure detection + visualization, VI/GNSS
-priors and fusion, and larger public-data evaluation.
+[`docs/roadmap.md`](docs/roadmap.md) has the staged plan ([`PLAN.md`](PLAN.md) is the
+handoff checklist): sequential tracking quality, keyframe policies, incremental map
+updates, deep VO integration, loop-closure visualization, VI/GNSS fusion, and larger
+public-data evaluation.
 
 ## Further reading
 
-- [`docs/pgo_internals.md`](docs/pgo_internals.md) - pose-graph / BA back-end internals: block Cholesky, parallelism, chordal init, GTSAM parity, GNC.
-- [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) - metric loop closure on KITTI seq00: open VO vs VLAD->PnP->GNC PGO (14x ATE), and why frontend scale drift breaks metric loops at higher stride.
-- [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) - the aerial counterpart: same pipeline on a EuRoC MH_03 6-DOF MAV flight (loop stage 5.3x ATE vs Vicon/Leica GT; window-BA + loop 0.089 m, + two-view loop BA 0.065 m, + fixed-prefix local-map BA -> 0.061 m / within ~2.5x of ORB-SLAM3), and why the frame-gap gate matters more at 20 Hz.
-- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) - single-source-of-truth EuRoC arc synthesis: recommended-config table, per-phase outcomes, known issues, headline ATE evolution.
-- [`docs/superpoint_onnx_runtime_plan.md`](docs/superpoint_onnx_runtime_plan.md) - Phase-27 activation contract, model sourcing, validation plan.
-- [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) - toolchain-pin + verification protocol + empirical ledger.
-- [`docs/gnss_demo.md`](docs/gnss_demo.md), [`docs/kitti_image_sequence_demo.md`](docs/kitti_image_sequence_demo.md) - per-demo guides.
-- **SLAM analysis kit** (`scripts/`): [`analyze_slam_trajectory.py`](scripts/analyze_slam_trajectory.py) (per-run coverage / tracking-continuity / jitter / ATE-over-time report), [`compare_slam_runs.py`](scripts/compare_slam_runs.py) (rank every run by coverage and accuracy, best-per-sequence), [`analyze_match_quality.py`](scripts/analyze_match_quality.py) (per-frame feature-match health vs tracking dropouts - *why* tracking fails), [`animate_euroc_match_track.py`](scripts/animate_euroc_match_track.py) / [`animate_euroc_slam.py`](scripts/animate_euroc_slam.py) (trajectory + feature-match GIFs), [`build_kitti3d_web.py`](scripts/build_kitti3d_web.py) (bundle KITTI results for the [interactive 3D viewer](docs/kitti3d/index.html)).
+- [`docs/pgo_internals.md`](docs/pgo_internals.md) — pose-graph / BA internals: block Cholesky, parallelism, chordal init, GTSAM parity, GNC.
+- [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) · [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) — the loop-closure benchmarks above, with reproduction.
+- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) — EuRoC arc synthesis: recommended config, per-phase outcomes, honest negatives, headline ATE evolution.
+- [`docs/demo_strategy.md`](docs/demo_strategy.md) — full demo index · [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) — determinism protocol.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).
