@@ -15,6 +15,12 @@ pub use bundle::{
     PositionPriorObservation,
 };
 
+pub mod incremental_sfm;
+pub use incremental_sfm::{
+    incremental_sfm, IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult,
+    PairwiseMatches, SfmTrack,
+};
+
 pub mod imu_preintegration;
 pub use imu_preintegration::{ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator};
 
