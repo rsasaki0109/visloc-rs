@@ -6,6 +6,7 @@
 //! so applications can replace the default brute-force matcher or DLT PnP with
 //! OpenCV, learned features, or domain-specific implementations.
 
+pub mod dense_stereo;
 pub mod distortion;
 pub mod features;
 pub mod matching;
