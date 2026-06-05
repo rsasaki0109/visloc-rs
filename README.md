@@ -105,7 +105,7 @@ cargo run --example localize_dummy
 
 - **Map localization** — COLMAP text/binary IO, 2D-3D correspondence building, DLT PnP, PnP RANSAC, Gauss-Newton pose refinement.
 - **Stereo VO** — rectified-stereo triangulation, confidence-weighted PnP, Kabsch fallback, KITTI trajectory export/eval.
-- **Structure-from-motion** — chain temporal matches into merged multi-view tracks, run one global bundle adjustment over all poses + landmarks, and export a COLMAP-grade reconstruction (genuine multi-view `TRACK[]`) for downstream 3DGS / MVS. `--sfm-colmap-out`.
+- **Structure-from-motion** — *ordered*: chain temporal matches into merged multi-view tracks, one global bundle adjustment over all poses + landmarks, COLMAP-grade export (genuine multi-view `TRACK[]`) for 3DGS / MVS (`--sfm-colmap-out`). *Unordered*: from a bare photo set, discover the view graph by VLAD retrieval, verify pairs by essential-matrix RANSAC, and grow one reconstruction incrementally (seed → PnP register → triangulate → BA) — the COLMAP mapper loop in pure Rust (`incremental_sfm`, `examples/unordered_sfm_demo.rs`).
 - **EuRoC VI-SLAM** — adaptive IMU/pose tracker, motion-based VI init, local VI-BA sliding window, stereo-strict bootstrap.
 - **Optimization** — sparse-Cholesky bundle adjustment + full SE(3) / Sim(3) pose-graph optimizer with GNC outlier rejection; runs the SE-Sync `.g2o` benchmarks and ties GTSAM.
 - **Deep frontend (opt-in)** — pure-Rust HOG-like descriptors, mutual-softmax matcher, SuperPoint/LightGlue file bridge, in-Rust SuperPoint ONNX behind `--features onnx-inference`.
@@ -119,6 +119,7 @@ Local public-data development measurements, not official leaderboard submissions
 | **KITTI seq00 loop closure** | open VO 36.3 m → **2.6 m** Sim(3) ATE (**14×**), 35 verified loops |
 | **EuRoC MH_03 full pipeline** | **0.060 m** ATE — within **~2.5× of ORB-SLAM3**, **~1.7× of DROID-SLAM**, pure Rust |
 | **EuRoC MH_03 SfM reconstruction** | merged multi-view tracks + global BA: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, COLMAP export for 3DGS / MVS |
+| **Unordered SfM (EuRoC V2_03)** | 31 orderless monocular photos → VLAD view graph → incremental reconstruction: **28/31 registered**, **0.63 px** reproj, reproduces the ordered stereo model to **0.99 cm** (Sim(3)) |
 | COLMAP South Building localization | deep frontend gives **+37% to +98%** more verified inliers as the viewpoint gap grows |
 | Pose-graph optimization (SE-Sync `.g2o`) | **ties GTSAM 4.x LM** on `parking`/`sphere`/`cubicle`; **beats** it on `torus3D` (2.4e4 vs 6.0e4) and `rim` (8.3e4 vs 6.1e5) |
 | Outlier-robust PGO (GNC) | `sphere2500` + 30 wrong loops: L2 **89×** baseline, GNC **1.0×** (30/30 rejected) |
@@ -126,6 +127,7 @@ Local public-data development measurements, not official leaderboard submissions
 Details and reproduction: [KITTI loop closure](docs/kitti_loop_closure_benchmark.md) ·
 [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
 [EuRoC SfM reconstruction](docs/euroc_sfm_benchmark.md) ·
+[unordered SfM](docs/unordered_sfm_benchmark.md) ·
 [pose-graph / BA internals + GTSAM parity](docs/pgo_internals.md) ·
 [EuRoC vs published baselines](docs/phase_20_to_27_closeout.md).
 
@@ -137,7 +139,7 @@ large API.
 
 - **In:** COLMAP/SfM maps, query/stereo features, file-backed deep features → `SE3`/`Pose` estimates with inlier counts, reprojection error, and tracking/loop diagnostics.
 - **Extensible & light:** feature extractors, matchers, pose estimators, priors, and VO frontends are trait-based; no mandatory OpenCV / PyTorch / ONNX / GPU runtime in default crates.
-- **Not claimed:** production full SLAM, dense mapping, full SfM, tightly coupled VIO/GNSS, or official KITTI leaderboard results.
+- **Not claimed:** production full SLAM, dense mapping, internet-scale / global SfM (the SfM here is a focused incremental pipeline, not production COLMAP at collection scale), tightly coupled VIO/GNSS, or official KITTI leaderboard results.
 
 ## Try It
 
@@ -173,6 +175,7 @@ the full index (including synthetic correctness demos) lives in
 | **KITTI loop closure (14×)** | Open SP/LG stereo VO vs VLAD→PnP→GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **36.29 m → 2.57 m Sim(3) ATE** | [`scripts/run_kitti_loop_closure_benchmark.sh`](scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) |
 | **EuRoC loop closure (UAV, 0.060 m)** | Same pipeline on a 6-DOF MAV flight, MH_03. Window BA + loop **0.089 m** → + two-view loop BA **0.065 m** → + fixed-prefix local-map BA **0.061 m** → + anisotropic loop-edge information **0.060 m**, within ~2.5× ORB-SLAM3 | [`scripts/run_euroc_loop_closure_benchmark.sh`](scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) |
 | **EuRoC SfM reconstruction** | Stereo VO → merged multi-view tracks → one global BA → COLMAP export (`--sfm-colmap-out`). MH_03: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, for downstream 3DGS / MVS | [`scripts/run_euroc_sfm_benchmark.sh`](scripts/run_euroc_sfm_benchmark.sh), [`docs/euroc_sfm_benchmark.md`](docs/euroc_sfm_benchmark.md) |
+| **Unordered SfM** | Orderless photo set → VLAD view graph → essential-RANSAC verification → incremental reconstruction (seed → PnP → triangulate → BA) → COLMAP export. EuRoC V2_03: **28/31 registered**, **0.63 px**, **0.99 cm** vs the ordered model | [`examples/unordered_sfm_demo.rs`](examples/unordered_sfm_demo.rs), [`scripts/run_unordered_sfm_benchmark.sh`](scripts/run_unordered_sfm_benchmark.sh), [`docs/unordered_sfm_benchmark.md`](docs/unordered_sfm_benchmark.md) |
 | EuRoC online VI-SLAM | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Outlier-robust PGO (GNC) | Wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89×** baseline, GNC **1.0×** | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
 | GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
