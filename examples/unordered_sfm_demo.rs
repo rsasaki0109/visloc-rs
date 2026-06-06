@@ -68,6 +68,7 @@ struct Args {
     min_pnp_inliers: usize,
     max_reproj: f64,
     final_ba: bool,
+    seed_trials: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -85,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
     let mut min_pnp_inliers = 12usize;
     let mut max_reproj = 4.0f64;
     let mut final_ba = true;
+    let mut seed_trials = 12usize;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -112,6 +114,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--max-reproj" => max_reproj = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--no-final-ba" => final_ba = false,
+            "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -143,6 +146,7 @@ fn parse_args() -> Result<Args, String> {
         min_pnp_inliers,
         max_reproj,
         final_ba,
+        seed_trials,
     })
 }
 
@@ -209,7 +213,10 @@ fn candidate_pairs(
         // Fall back to exhaustive if the vocabulary cannot be built.
         return candidate_pairs(features, vocab_size, topk, true);
     };
-    let globals: Vec<Vec<f32>> = features.iter().map(|f| vlad(&f.descriptors, &vocab)).collect();
+    let globals: Vec<Vec<f32>> = features
+        .iter()
+        .map(|f| vlad(&f.descriptors, &vocab))
+        .collect();
 
     let mut set: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
     for i in 0..n {
@@ -335,6 +342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_pnp_inliers: args.min_pnp_inliers,
         max_reprojection_error_px: args.max_reproj,
         final_global_ba: args.final_ba,
+        seed_trials: args.seed_trials,
         ..IncrementalSfmConfig::default()
     };
     let result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
