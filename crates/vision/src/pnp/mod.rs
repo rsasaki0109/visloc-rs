@@ -2,6 +2,9 @@ use nalgebra::{DMatrix, DVector, Matrix3, Point2, Point3, UnitQuaternion, Vector
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 
+mod p3p;
+pub use p3p::P3PGrunert;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Correspondence2D3D {
     pub point2d: Point2<f64>,

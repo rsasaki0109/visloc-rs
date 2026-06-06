@@ -55,19 +55,19 @@ to the unordered pipeline as a bare photo set.
 | Input images (left camera, strided) | 31 |
 | View-graph candidate pairs (VLAD top-10) | 207 |
 | Geometrically verified pairs | 207 |
-| **Images registered** | **30 / 31** |
-| Reconstructed multi-view tracks | 625 |
-| Observations | 8,349 |
+| **Images registered** | **31 / 31** |
+| Reconstructed multi-view tracks | 630 |
+| Observations | 8,640 |
 | **Mean reprojection error** | **0.63 px** |
 
 Sub-pixel reprojection from a monocular, orderless input is already a strong
 internal-consistency signal. But the decisive check is **external**: align the
-27 recovered camera centres to the trusted *ordered* stereo reconstruction (the
+30 recovered camera centres to the trusted *ordered* stereo reconstruction (the
 crisp-3DGS model) with a similarity (Umeyama Sim(3)) transform.
 
 | Sim(3) vs ordered reconstruction | Value |
 | --- | ---: |
-| **Camera-centre RMSE** | **0.98 cm** (median 0.57 cm, max 3.12 cm) |
+| **Camera-centre RMSE** | **0.96 cm** (median 0.54 cm, max 3.12 cm) |
 | Trajectory extent | 0.65 m |
 
 **The unordered, monocular, orderless reconstruction reproduces the ordered
@@ -89,26 +89,58 @@ keypoints to a pinhole with the dataset's own intrinsics, and compared the
 recovered poses to COLMAP's *own* sparse reconstruction (its `sparse/images.txt`)
 by Sim(3) on the camera centres.
 
-Where visloc-rs registers an image confidently it matches COLMAP's reconstruction
-to **sub-millimetre** (camera-centre RMSE ≈ 0.07 cm on the confidently-registered
-set). High-resolution images need a looser pixel gate — `--max-reproj` scales the
+High-resolution images need a looser pixel gate — `--max-reproj` scales the
 reprojection threshold with image size (4 px on a 752-px EuRoC frame is ~16 px on
 a 3072-px photo).
 
-This dataset also **surfaced and fixed a real bug in the DLT PnP solver**: it did
+This dataset first **surfaced and fixed a real bug in the DLT PnP solver**: it did
 not Hartley-normalise the 3D points, so when points sit far from the origin
 relative to the scene scale (a 2-view SfM seed has depth ≫ baseline) the linear
 system was badly conditioned and returned a garbage pose even from an all-inlier
 sample; and it resolved the projection's overall sign by determinant only, which
 could place every point *behind* the camera (reprojection ∞). Both are fixed,
 with a regression test, in `crates/vision/src/pnp` — and the fix raised the EuRoC
-registration above (28 → 30 / 31) as a side effect.
+registration to 30 / 31 as a side effect.
 
-**Limitation / future work.** Full reconstruction of a *planar* subject — a flat
-building façade, as in much of South Building — is bounded by the 6-point DLT's
-known degeneracy on coplanar points. COLMAP uses P3P / EPnP minimal solvers with
-explicit degeneracy handling; a pure-Rust P3P/EPnP is the next step to match it
-on planar-façade collections. The orbit / general-3D case (EuRoC above) is
+### P3P: registering the planar façade the DLT could not
+
+Even with the conditioning fix, the DLT stalled at **2 / 128** images on South
+Building: the 6-point DLT is a *linear* solver and is **degenerate on coplanar
+points**, and a building is mostly flat façade. So the third image, registered by
+PnP against a near-planar seed, never got a usable pose and the reconstruction
+never grew. This is the textbook reason COLMAP and every serious SfM frontend use
+a *minimal geometric* solver — P3P — inside the registration RANSAC.
+
+visloc-rs now ships **Grunert's Perspective-Three-Point solver**
+(`crates/vision/src/pnp/p3p.rs`, the default `PnpSolver::P3p`): from three world
+points and their image bearings it forms a quartic in one length ratio, solves it
+by the companion-matrix eigenvalues, recovers the three camera-frame depths for
+each real root, and reads off the pose by absolute orientation (Kabsch) — well-posed
+for any three non-collinear points whether or not the scene is planar. Swapping it
+in for the minimal solver:
+
+| South Building (128 JPEGs, monocular) | DLT | **P3P (Grunert)** |
+| --- | ---: | ---: |
+| Images registered | 2 / 128 | **126 / 128** |
+| Multi-view tracks | — | 21,316 |
+| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm (median 29 cm) |
+
+P3P **unlocks the planar façade**: the reconstruction now grows across nearly the
+whole collection instead of stalling at the seed. It also helped the orbit case —
+EuRoC V2_03 above went from 30 / 31 to **31 / 31** registered, at the same 0.63 px
+reprojection and a marginally better 0.96 cm Sim(3) RMSE, with P3P as the default
+solver. The same regression tests cover the general-3D, coplanar, and
+far-from-origin-seed cases.
+
+**Limitation / future work — precision, not registration.** On South Building the
+*registration* is now solved, but the monocular reconstruction sits ~1 m (median
+~29 cm, ≈ 2.7 % of the 11 m extent) from COLMAP's mature model, with a heavy tail
+(a few cameras off by metres) and a ~22 px mean reprojection. That gap is the
+*next* layer of SfM maturity — iterative outlier-track filtering, retriangulation,
+and global BA with re-registration — not the minimal solver: tightening the PnP
+inlier gate only removes images and worsens drift, confirming the residual is
+scale drift and track contamination on a large outdoor monocular scene, the
+machinery COLMAP spent years on. The orbit / general-3D case (EuRoC above) is
 already COLMAP-grade.
 
 ## Reproduce
