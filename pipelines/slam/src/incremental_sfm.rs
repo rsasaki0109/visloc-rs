@@ -37,7 +37,7 @@ use nalgebra::{Point2, Point3, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
-use visloc_vision::pnp::Correspondence2D3D;
+use visloc_vision::pnp::{Correspondence2D3D, GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 use visloc_vision::stereo_bootstrap::triangulate_two_view_left_frame;
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
@@ -81,6 +81,22 @@ pub struct IncrementalSfmConfig {
     pub final_global_ba: bool,
     /// Bundle-adjustment configuration shared by the periodic and final solves.
     pub ba_config: BaConfig,
+    /// Minimal solver the PnP RANSAC uses to register each new image.
+    pub pnp_solver: PnpSolver,
+}
+
+/// Minimal PnP solver used to register a new image against the reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PnpSolver {
+    /// 6-point Direct Linear Transform. Linear and fast, but **degenerate on
+    /// coplanar points** — a flat building façade or planar patch yields a
+    /// garbage pose. Kept for parity with the classic path.
+    Dlt,
+    /// Grunert's Perspective-Three-Point minimal solver. Geometrically
+    /// well-posed for any three non-collinear points whether or not the scene
+    /// is planar, so it registers planar façades the DLT cannot. The default.
+    #[default]
+    P3p,
 }
 
 impl Default for IncrementalSfmConfig {
@@ -97,6 +113,7 @@ impl Default for IncrementalSfmConfig {
                 robust_kernel: RobustKernel::Huber { delta: 3.0 },
                 ..BaConfig::default()
             },
+            pnp_solver: PnpSolver::default(),
         }
     }
 }
@@ -197,11 +214,27 @@ pub fn incremental_sfm(
             break;
         };
 
-        let pnp = PnPRansac {
-            reprojection_threshold: config.max_reprojection_error_px,
-            ..PnPRansac::default()
+        // P3P (Grunert) is the default minimal solver — well-posed on coplanar
+        // façades where the linear DLT degenerates. Both share the Gauss-Newton
+        // refiner and the config reprojection gate.
+        let report = match config.pnp_solver {
+            PnpSolver::P3p => PnPRansac {
+                pose_estimator: P3PGrunert,
+                pose_refiner: Some(GaussNewtonPoseRefiner::default()),
+                iterations: 128,
+                reprojection_threshold: config.max_reprojection_error_px,
+                seed: 7,
+                early_stop_min_iterations: 0,
+                early_stop_inlier_ratio: None,
+            }
+            .estimate(&corrs, camera),
+            PnpSolver::Dlt => PnPRansac {
+                reprojection_threshold: config.max_reprojection_error_px,
+                ..PnPRansac::default()
+            }
+            .estimate(&corrs, camera),
         };
-        match pnp.estimate(&corrs, camera) {
+        match report {
             Some(report) if report.inliers.len() >= config.min_pnp_inliers => {
                 poses[next_image] = Some(report.pose);
                 triangulate_pending(camera, features, &tracks, &poses, config, &mut track_point);
@@ -226,8 +259,15 @@ pub fn incremental_sfm(
     // ---- 4. Final global bundle adjustment ----
     let ba_result = if config.final_global_ba {
         Some(
-            run_bundle_adjustment(camera, features, &tracks, config, &mut poses, &mut track_point)
-                .map_err(IncrementalSfmError::Ba)?,
+            run_bundle_adjustment(
+                camera,
+                features,
+                &tracks,
+                config,
+                &mut poses,
+                &mut track_point,
+            )
+            .map_err(IncrementalSfmError::Ba)?,
         )
     } else {
         None
@@ -289,7 +329,9 @@ fn build_tracks(
     // Map each observed (image, keypoint) to a dense node id.
     let mut node_id: HashMap<(usize, usize), usize> = HashMap::new();
     let mut nodes: Vec<(usize, usize)> = Vec::new();
-    let node_of = |image: usize, kp: usize, node_id: &mut HashMap<(usize, usize), usize>,
+    let node_of = |image: usize,
+                   kp: usize,
+                   node_id: &mut HashMap<(usize, usize), usize>,
                    nodes: &mut Vec<(usize, usize)>|
      -> usize {
         *node_id.entry((image, kp)).or_insert_with(|| {
@@ -482,9 +524,13 @@ fn triangulate_pending(
         if obs.len() < 2 {
             continue;
         }
-        if let Some(point) =
-            triangulate_track(camera, poses, &obs, min_cos, config.max_reprojection_error_px)
-        {
+        if let Some(point) = triangulate_track(
+            camera,
+            poses,
+            &obs,
+            min_cos,
+            config.max_reprojection_error_px,
+        ) {
             track_point[track_id] = Some(point);
         }
     }
@@ -711,8 +757,7 @@ mod tests {
             let right = forward.cross(&world_up).normalize();
             let up = right.cross(&forward);
             // Rotation columns map camera axes (x=right, y=down, z=forward) to world.
-            let r_cam_to_world =
-                nalgebra::Matrix3::from_columns(&[right, -up, forward]);
+            let r_cam_to_world = nalgebra::Matrix3::from_columns(&[right, -up, forward]);
             let rot_c2w = nalgebra::Rotation3::from_matrix_unchecked(r_cam_to_world);
             let q_c2w = UnitQuaternion::from_rotation_matrix(&rot_c2w);
             let q_w2c = q_c2w.inverse();
@@ -862,8 +907,13 @@ mod tests {
             .filter(|&i| result.poses[i].is_some())
             .collect();
         assert!(registered.len() >= 3);
-        let center =
-            |i: usize| result.poses[i].as_ref().unwrap().camera_to_world().translation;
+        let center = |i: usize| {
+            result.poses[i]
+                .as_ref()
+                .unwrap()
+                .camera_to_world()
+                .translation
+        };
         let gt_center = |i: usize| scene.poses[i].camera_to_world().translation;
         let (a, b, c) = (registered[0], registered[1], registered[2]);
         let est_ratio = (center(a) - center(b)).norm() / (center(b) - center(c)).norm();
