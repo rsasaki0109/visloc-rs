@@ -281,3 +281,55 @@ undistorts the keypoints to an ideal pinhole using a COLMAP `cameras.txt`
 the exact `--fx --fy --cx --cy` to hand the demo. Compare the result to the
 dataset's own `sparse/images.txt` with `scripts/compare_sfm_sim3.py` (images are
 matched by the first integer in their COLMAP `NAME`).
+
+## Photorealistic 3D Gaussian Splatting from the SfM model
+
+The same reconstruction the benchmark scores at ~1 cm against COLMAP is good
+enough to train a **crisp 3D Gaussian Splat** — the unordered SfM model
+(`128 / 128` images, mean reprojection ~1.4 px) fed straight into a standard
+gsplat trainer, with a completely independent pure-Rust frontend taking the place
+of COLMAP.
+
+![Pure-Rust unordered SfM → 3DGS of South Building: input photo (left) vs 3DGS render (right)](assets/sfm_3dgs_south_building.png)
+
+*Left: the input photograph. Right: the 3D Gaussian Splat rendered at the same
+camera — columns, window mullions, brick texture, the cupola and the entrance are
+all recovered.*
+
+![South Building 3DGS fly-through](assets/sfm_3dgs_south_building_flythrough.gif)
+
+One command, from photos to splat:
+
+```sh
+scripts/run_south_building_3dgs.sh --python /path/to/python  # torch + gsplat + lightglue + opencv, CUDA
+```
+
+It exports SuperPoint features (the 2048-keypoint export the SfM benchmark uses),
+reconstructs with `unordered_sfm_demo`, undistorts + half-scales the photos to the
+ideal pinhole and recolours the points (`scripts/prepare_3dgs_from_colmap.py`),
+then trains with `scripts/gsplat_sfm_3dgs_train.py` and writes a `.splat`, a
+GT-vs-render comparison, and the fly-through above.
+
+### What makes it crisp — the trainer, not the poses
+
+The crisp lever is **entirely the trainer**, and it is worth being precise about
+why, because the obvious culprit is wrong:
+
+- **A minimal fixed-budget MCMC trainer renders this exact model soft** — a
+  recognizable but hazy building whose windows and columns smear, because it
+  spreads a fixed Gaussian budget nearly uniformly and prunes floaters weakly.
+- **Tightening the SfM does *not* fix it.** Dropping the reprojection gate
+  (`--max-reproj 1.5`) plus a denser 4096-keypoint export takes mean reprojection
+  from 1.4 px to **0.66 px** — and the splat comes out *no sharper*. Pose
+  precision at this level is not the bottleneck (the splat is the same on the
+  1.4 px and 0.66 px models).
+- **`gsplat`'s `DefaultStrategy` is the whole difference.** Its gradient-driven
+  adaptive densification clones and splits Gaussians exactly where the image
+  gradient demands detail (growing to ~2 M Gaussians concentrated on edges and
+  texture) and prunes transparent floaters, while degree-3 spherical harmonics
+  give each Gaussian a view-dependent colour. That — not the SfM accuracy — is
+  what turns the haze crisp.
+
+So the splat's sharpness is a readout of the *renderer's* densification, not of
+the reconstruction's reprojection error: the pure-Rust SfM model is already
+accurate enough (1.4 px / ~1 cm) for photorealistic novel-view synthesis.
