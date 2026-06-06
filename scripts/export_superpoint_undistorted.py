@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Export undistorted SuperPoint features for a flat image directory, using a
-COLMAP cameras.txt for the (SIMPLE_RADIAL) intrinsics. Writes one
-`<stem>_features.txt` per image in the `X Y SCORE D0 D1 ...` format
-visloc-rs's `read_external_deep_features_txt` consumes, with keypoints
-undistorted to the ideal pinhole so the demo can treat the camera as pinhole."""
+COLMAP cameras.txt for the intrinsics. Writes one `<stem>_features.txt` per
+image in the `X Y SCORE D0 D1 ...` format visloc-rs's
+`read_external_deep_features_txt` consumes, with keypoints undistorted to the
+ideal pinhole so the demo can treat the camera as pinhole.
+
+Supported camera models: SIMPLE_PINHOLE / PINHOLE (no distortion),
+SIMPLE_RADIAL (one-parameter radial, inverted analytically) and OPENCV
+(k1,k2,p1,p2 radial+tangential, inverted with cv2.undistortPoints). The
+pinhole the demo should use is printed as `--fx --fy --cx --cy`."""
 import argparse
 import sys
 from pathlib import Path
@@ -14,7 +19,7 @@ from lightglue import SuperPoint
 from lightglue.utils import load_image
 
 
-def read_simple_radial(cameras_txt):
+def read_camera(cameras_txt):
     for ln in open(cameras_txt):
         if ln.startswith("#") or not ln.strip():
             continue
@@ -39,6 +44,18 @@ def undistort_simple_radial(uv, f, cx, cy, k1):
     return np.stack([f * xu + cx, f * yu + cy], axis=1)
 
 
+def undistort_opencv(uv, fx, fy, cx, cy, k1, k2, p1, p2):
+    """OPENCV (k1,k2,p1,p2): invert with cv2.undistortPoints, mapping back into
+    the same pinhole K so the output keypoints are ideal-pinhole pixels."""
+    import cv2
+
+    k = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+    dist = np.array([k1, k2, p1, p2])
+    pts = uv.reshape(-1, 1, 2).astype(np.float64)
+    out = cv2.undistortPoints(pts, k, dist, P=k)
+    return out.reshape(-1, 2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--images-dir", type=Path, required=True)
@@ -52,19 +69,29 @@ def main():
     dev = args.device if torch.cuda.is_available() else "cpu"
     extractor = SuperPoint(max_num_keypoints=args.max_keypoints).eval().to(dev)
 
+    model = None
+    fx = fy = cx = cy = None
+    opencv_dist = None  # (k1,k2,p1,p2) when model == OPENCV
     k1 = 0.0
-    f = cx = cy = None
     if args.cameras_txt:
-        model, w, h, p = read_simple_radial(args.cameras_txt)
+        model, w, h, p = read_camera(args.cameras_txt)
         if model == "SIMPLE_RADIAL":
-            f, cx, cy, k1 = p[0], p[1], p[2], p[3]
-        elif model in ("PINHOLE",):
-            f, cx, cy = p[0], p[2], p[3]
+            fx = fy = p[0]
+            cx, cy, k1 = p[1], p[2], p[3]
+        elif model == "PINHOLE":
+            fx, fy, cx, cy = p[0], p[1], p[2], p[3]
         elif model == "SIMPLE_PINHOLE":
-            f, cx, cy = p[0], p[1], p[2]
+            fx = fy = p[0]
+            cx, cy = p[1], p[2]
+        elif model == "OPENCV":
+            fx, fy, cx, cy = p[0], p[1], p[2], p[3]
+            opencv_dist = (p[4], p[5], p[6], p[7])
         else:
             print(f"warning: camera model {model} not handled; no undistortion", file=sys.stderr)
-        print(f"camera {model} {w}x{h} f={f} cx={cx} cy={cy} k1={k1}")
+        print(f"camera {model} {w}x{h} fx={fx} fy={fy} cx={cx} cy={cy} "
+              f"k1={k1} opencv_dist={opencv_dist}")
+        print(f"  -> demo pinhole: --width {w} --height {h} --fx {fx} --fy {fy} "
+              f"--cx {cx} --cy {cy}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     imgs = sorted([p for p in args.images_dir.iterdir()
@@ -77,8 +104,10 @@ def main():
         kpts = feats["keypoints"][0].cpu().numpy()           # (N,2) pixel
         desc = feats["descriptors"][0].cpu().numpy()         # (N,256)
         scores = feats["keypoint_scores"][0].cpu().numpy()   # (N,)
-        if f is not None and k1 != 0.0:
-            kpts = undistort_simple_radial(kpts, f, cx, cy, k1)
+        if model == "OPENCV" and opencv_dist is not None:
+            kpts = undistort_opencv(kpts, fx, fy, cx, cy, *opencv_dist)
+        elif model == "SIMPLE_RADIAL" and k1 != 0.0:
+            kpts = undistort_simple_radial(kpts, fx, cx, cy, k1)
         out = args.out_dir / (ip.stem + args.suffix)
         with open(out, "w") as fo:
             fo.write("# X Y SCORE D0 D1 ...\n")

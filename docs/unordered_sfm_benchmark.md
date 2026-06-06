@@ -162,6 +162,28 @@ improvements register all 31 / 31 EuRoC V2_03 images at 0.58 px reprojection and
 genuine photo collection — the precision gap the previous revision flagged as
 future work is closed.
 
+### Generality: a second real collection, a different camera
+
+One dataset could be a fluke, so the same pipeline — no tuning beyond scaling the
+pixel gate with the image size — was run on a *second* genuine COLMAP example,
+**Gerrard Hall** (100 photos, **5616 × 3744**, `OPENCV` camera with full radial +
+tangential distortion `k1,k2,p1,p2`, undistorted with `cv2.undistortPoints`). It
+is a different building, a different camera, a different distortion model and 3×
+the resolution of South Building.
+
+| vs COLMAP's own model | South Building | **Gerrard Hall** |
+| --- | ---: | ---: |
+| Photos | 128 (3072×2304, SIMPLE_RADIAL) | 100 (5616×3744, OPENCV) |
+| Images registered | 128 / 128 | 95 / 100 |
+| Mean reprojection | 2.0 px | 3.2 px |
+| **Sim(3) camera-centre RMSE** | **0.59 cm** | **1.20 cm** (median 0.96 cm) |
+| Fraction of trajectory extent | 0.1 % (11 m) | 0.1 % (11 m) |
+
+Both land at **~0.1 % of the trajectory extent** against COLMAP's reference, from a
+completely independent SuperPoint frontend. The result is not a one-off: pure-Rust
+incremental SfM reconstructs real photo collections to COLMAP grade across cameras,
+distortion models and resolutions.
+
 ## Reproduce
 
 ```sh
@@ -185,3 +207,11 @@ directory. Intrinsics default to the V2_03 rectified pinhole
 The same `unordered_sfm_demo` runs on any photo set — point `--features-dir` at a
 directory of per-image deep-feature files, supply the camera intrinsics, and the
 COLMAP model it writes feeds directly into a 3DGS / MVS pipeline.
+
+For a genuine photo collection (South Building, Gerrard Hall, or your own),
+`scripts/export_superpoint_undistorted.py` exports SuperPoint features and
+undistorts the keypoints to an ideal pinhole using a COLMAP `cameras.txt`
+(`SIMPLE_PINHOLE` / `PINHOLE` / `SIMPLE_RADIAL` / `OPENCV` k1,k2,p1,p2); it prints
+the exact `--fx --fy --cx --cy` to hand the demo. Compare the result to the
+dataset's own `sparse/images.txt` with `scripts/compare_sfm_sim3.py` (images are
+matched by the first integer in their COLMAP `NAME`).
