@@ -212,6 +212,24 @@ COLMAP grade across cameras, distortion models and resolutions.
 
 ## Reproduce
 
+### Real photo collections (the headline result)
+
+```sh
+scripts/run_colmap_sfm_benchmark.sh --dataset south-building
+scripts/run_colmap_sfm_benchmark.sh --dataset gerrard-hall
+```
+
+One command per dataset, end to end: it downloads the COLMAP example
+(`South-Building.zip` / `gerrard-hall.zip`), exports undistorted SuperPoint
+features with `scripts/export_superpoint_undistorted.py` (reading the intrinsics
+from `sparse/cameras.txt`), reconstructs with `unordered_sfm_demo`, and Sim(3)-
+aligns the recovered camera centres to COLMAP's own `sparse/images.txt` with
+`scripts/compare_sfm_sim3.py`. Features are cached, so a re-run only re-solves.
+The SuperPoint export needs a Python env with `torch` + `lightglue` — pass
+`--python /usr/bin/python3` (or wherever it lives) and `--device cuda|cpu`.
+
+### EuRoC orbit (order-shuffled video subset)
+
 ```sh
 scripts/run_unordered_sfm_benchmark.sh \
     --feat-dir /path/to/V2_03/left-features \
