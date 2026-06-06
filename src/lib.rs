@@ -124,7 +124,8 @@ pub use visloc_mapping::{
 };
 pub use visloc_slam::{
     close_loops_on_vo_trajectory, correspondences_2d3d_for_loop_candidate,
-    correspondences_for_loop_candidate, detect_loop_candidates,
+    correspondences_for_loop_candidate, detect_loop_candidates, incremental_sfm,
+    IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult, PairwiseMatches, SfmTrack,
     loop_closure_constraints_from_candidates, online_ba_imu_state_rows,
     online_slam_results_to_html_report, pairwise_pose_factors_from_loop_closures,
     parse_stereo_vo_imu_samples_txt, reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
