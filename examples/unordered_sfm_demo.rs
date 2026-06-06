@@ -42,6 +42,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use nalgebra::{Point2, Point3};
+use rayon::prelude::*;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 use visloc_rs::{
@@ -65,6 +66,7 @@ struct Args {
     match_ratio: f32,
     min_matches: usize,
     min_pnp_inliers: usize,
+    max_reproj: f64,
     final_ba: bool,
 }
 
@@ -81,6 +83,7 @@ fn parse_args() -> Result<Args, String> {
     let mut match_ratio = 0.8f32;
     let mut min_matches = 30usize;
     let mut min_pnp_inliers = 12usize;
+    let mut max_reproj = 4.0f64;
     let mut final_ba = true;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
@@ -107,6 +110,7 @@ fn parse_args() -> Result<Args, String> {
             "--min-pnp-inliers" => {
                 min_pnp_inliers = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
+            "--max-reproj" => max_reproj = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--no-final-ba" => final_ba = false,
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -137,6 +141,7 @@ fn parse_args() -> Result<Args, String> {
         match_ratio,
         min_matches,
         min_pnp_inliers,
+        max_reproj,
         final_ba,
     })
 }
@@ -189,11 +194,18 @@ fn candidate_pairs(
         return pairs;
     }
 
+    // Build the vocabulary from a bounded, deterministic descriptor sample —
+    // k-means over *every* descriptor (262 k for 128×2048-kpt images) is the
+    // pipeline's bottleneck and unnecessary: a VLAD vocabulary only needs a
+    // representative sample. Stride the full descriptor list down to ~VOCAB_SAMPLE.
+    const VOCAB_SAMPLE: usize = 40_000;
     let all_desc: Vec<&[f32]> = features
         .iter()
         .flat_map(|f| f.descriptors.iter().map(|d| d.as_slice()))
         .collect();
-    let Some(vocab) = Vocabulary::build(&all_desc, vocab_size, 10, 0) else {
+    let stride = (all_desc.len() / VOCAB_SAMPLE).max(1);
+    let sample: Vec<&[f32]> = all_desc.iter().step_by(stride).copied().collect();
+    let Some(vocab) = Vocabulary::build(&sample, vocab_size, 10, 0) else {
         // Fall back to exhaustive if the vocabulary cannot be built.
         return candidate_pairs(features, vocab_size, topk, true);
     };
@@ -214,6 +226,8 @@ fn candidate_pairs(
 }
 
 /// Match and geometrically verify each candidate pair into `PairwiseMatches`.
+/// Candidate pairs are independent, so the (descriptor-matching dominated) loop
+/// is run across cores with rayon.
 fn verify_pairs(
     features: &[FeatureSet],
     camera: &Camera,
@@ -221,43 +235,42 @@ fn verify_pairs(
     match_ratio: f32,
     min_matches: usize,
 ) -> Vec<PairwiseMatches> {
-    let matcher = CrossCheckMatcher::new(BruteForceMatcher {
-        ratio: Some(match_ratio),
-    });
-    let estimator = RelativePoseEstimator::default();
-    let mut pairwise = Vec::new();
-    for &(i, j) in candidates {
-        let dm = matcher.match_descriptors(&features[i].descriptors, &features[j].descriptors);
-        if dm.len() < min_matches {
-            continue;
-        }
-        let corrs: Vec<TwoViewCorrespondence> = dm
-            .iter()
-            .map(|m| {
-                TwoViewCorrespondence::new(
-                    features[i].keypoints[m.query_index],
-                    features[j].keypoints[m.train_index],
-                )
+    candidates
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            let matcher = CrossCheckMatcher::new(BruteForceMatcher {
+                ratio: Some(match_ratio),
+            });
+            let estimator = RelativePoseEstimator::default();
+            let dm = matcher.match_descriptors(&features[i].descriptors, &features[j].descriptors);
+            if dm.len() < min_matches {
+                return None;
+            }
+            let corrs: Vec<TwoViewCorrespondence> = dm
+                .iter()
+                .map(|m| {
+                    TwoViewCorrespondence::new(
+                        features[i].keypoints[m.query_index],
+                        features[j].keypoints[m.train_index],
+                    )
+                })
+                .collect();
+            let rel = estimator.estimate(&corrs, camera)?;
+            if rel.inliers.len() < min_matches {
+                return None;
+            }
+            let matches: Vec<(usize, usize)> = rel
+                .inliers
+                .iter()
+                .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
+                .collect();
+            Some(PairwiseMatches {
+                image_i: i,
+                image_j: j,
+                matches,
             })
-            .collect();
-        let Some(rel) = estimator.estimate(&corrs, camera) else {
-            continue;
-        };
-        if rel.inliers.len() < min_matches {
-            continue;
-        }
-        let matches: Vec<(usize, usize)> = rel
-            .inliers
-            .iter()
-            .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
-            .collect();
-        pairwise.push(PairwiseMatches {
-            image_i: i,
-            image_j: j,
-            matches,
-        });
-    }
-    pairwise
+        })
+        .collect()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -320,6 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = IncrementalSfmConfig {
         min_seed_matches: args.min_matches,
         min_pnp_inliers: args.min_pnp_inliers,
+        max_reprojection_error_px: args.max_reproj,
         final_global_ba: args.final_ba,
         ..IncrementalSfmConfig::default()
     };
