@@ -25,7 +25,12 @@
 //!    registered views now share with sufficient parallax.
 //! 4. **Bundle-adjust.** Periodically and at the end, refine all registered
 //!    poses and triangulated points jointly with the Schur-complement BA
-//!    ([`crate::bundle`]), seed pose fixed for gauge.
+//!    ([`crate::bundle`]). Monocular has a 7-DoF gauge (6 rigid + scale), so two
+//!    poses are fixed — the anchor and the longest-baseline pose — to pin scale
+//!    as well as the frame.
+//! 5. **Filter.** Post-BA, strip observations that reproject past the gate (the
+//!    symptom of a contaminated union-find track) and re-optimise, a few rounds.
+//!    No image is ever un-posed, so registration is invariant.
 //!
 //! The output ([`IncrementalSfmResult`]) carries per-image poses (`None` for
 //! images that never registered) and merged multi-view tracks, ready for a
@@ -83,6 +88,14 @@ pub struct IncrementalSfmConfig {
     pub ba_config: BaConfig,
     /// Minimal solver the PnP RANSAC uses to register each new image.
     pub pnp_solver: PnpSolver,
+    /// Post-BA track-refinement rounds. Each round removes observations that
+    /// reproject worse than `max_reprojection_error_px` after the global BA —
+    /// the symptom of a contaminated union-find track whose merged 3D point
+    /// fits none of its observations — and re-optimises. Registration is
+    /// **invariant** (no image is ever un-posed), so this only cleans structure
+    /// and can never drop a registered camera; on a clean reconstruction it is
+    /// a near-no-op. `0` disables it.
+    pub track_filter_iterations: usize,
 }
 
 /// Minimal PnP solver used to register a new image against the reconstruction.
@@ -114,6 +127,7 @@ impl Default for IncrementalSfmConfig {
                 ..BaConfig::default()
             },
             pnp_solver: PnpSolver::default(),
+            track_filter_iterations: 2,
         }
     }
 }
@@ -185,7 +199,7 @@ pub fn incremental_sfm(
     let n_images = features.len();
 
     // ---- 1. Build feature tracks via union-find over (image, keypoint) ----
-    let tracks = build_tracks(features.len(), pairwise, config.min_track_length);
+    let mut tracks = build_tracks(features.len(), pairwise, config.min_track_length);
 
     // For each image, which (keypoint, track) pairs it observes — drives both
     // triangulation and next-image selection.
@@ -257,7 +271,7 @@ pub fn incremental_sfm(
     }
 
     // ---- 4. Final global bundle adjustment ----
-    let ba_result = if config.final_global_ba {
+    let mut ba_result = if config.final_global_ba {
         Some(
             run_bundle_adjustment(
                 camera,
@@ -272,6 +286,32 @@ pub fn incremental_sfm(
     } else {
         None
     };
+
+    // ---- 5. Post-BA track refinement: drop contaminated observations, re-BA ----
+    for _ in 0..config.track_filter_iterations {
+        let removed = filter_outlier_observations(
+            camera,
+            features,
+            &mut tracks,
+            config,
+            &poses,
+            &mut track_point,
+        );
+        if removed == 0 {
+            break;
+        }
+        ba_result = Some(
+            run_bundle_adjustment(
+                camera,
+                features,
+                &tracks,
+                config,
+                &mut poses,
+                &mut track_point,
+            )
+            .map_err(IncrementalSfmError::Ba)?,
+        );
+    }
 
     // ---- Assemble output tracks (only triangulated, registered observations) ----
     let mut out_tracks = Vec::new();
@@ -645,14 +685,45 @@ fn run_bundle_adjustment(
 ) -> Result<BaResult, BaError> {
     let mut ba = BundleAdjustment::new(camera.clone());
 
-    let mut fixed_done = false;
     for (image, pose) in poses.iter().enumerate() {
         if let Some(pose) = pose {
             ba.add_pose(image as u64, pose.clone());
-            if !fixed_done {
-                ba.fix_pose(image as u64);
-                fixed_done = true;
+        }
+    }
+
+    // Gauge fixing. A monocular reconstruction (no stereo residual) has 7 gauge
+    // freedoms: 6 for the rigid SE(3) frame plus **1 for global scale**. Fixing
+    // a single pose pins only the 6 rigid DoF and leaves scale unconstrained, so
+    // the BA's normal equations are singular along the scale direction. A single
+    // solve from a perturbed state tolerates that (the damping holds the null
+    // direction), but **re-optimising from an already-converged state lets the
+    // scale drift and the reconstruction collapse**. Pin scale too by also
+    // fixing the registered pose whose camera centre is farthest from the
+    // anchor — the longest, best-conditioned baseline.
+    let anchor = poses.iter().position(|p| p.is_some());
+    if let Some(anchor) = anchor {
+        ba.fix_pose(anchor as u64);
+        let anchor_center = poses[anchor]
+            .as_ref()
+            .unwrap()
+            .camera_to_world()
+            .translation;
+        let mut farthest = None;
+        let mut best_d2 = 0.0;
+        for (image, pose) in poses.iter().enumerate() {
+            if image == anchor {
+                continue;
             }
+            if let Some(pose) = pose {
+                let d2 = (pose.camera_to_world().translation - anchor_center).norm_squared();
+                if d2 > best_d2 {
+                    best_d2 = d2;
+                    farthest = Some(image);
+                }
+            }
+        }
+        if let Some(scale_anchor) = farthest {
+            ba.fix_pose(scale_anchor as u64);
         }
     }
 
@@ -698,6 +769,58 @@ fn run_bundle_adjustment(
         }
     }
     Ok(result)
+}
+
+/// Remove, from every triangulated track, the observations that reproject worse
+/// than `max_reprojection_error_px` after the current BA (or land behind the
+/// camera). A contaminated union-find track — two distinct 3D points merged into
+/// one — has a BA'd point that fits neither cluster, so most of its observations
+/// exceed the gate and are stripped here; a track left with fewer than the
+/// minimum posed observations is dropped entirely (`track_point` cleared).
+///
+/// Observations in *unregistered* images are kept untouched (the BA already
+/// ignores them); no pose is ever removed, so the registered-image count is
+/// invariant. Returns how many observations were removed.
+fn filter_outlier_observations(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &mut [Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &[Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+) -> usize {
+    let threshold = config.max_reprojection_error_px;
+    let min_obs = config.min_track_length.max(2);
+    let mut removed = 0usize;
+
+    for (track_id, track) in tracks.iter_mut().enumerate() {
+        let Some(point) = track_point[track_id] else {
+            continue;
+        };
+        let before = track.len();
+        track.retain(|&(image, kp)| {
+            let Some(pose) = &poses[image] else {
+                return true; // unregistered view: BA ignores it, cannot judge.
+            };
+            let Some(px) = features[image].keypoints.get(kp).copied() else {
+                return false;
+            };
+            match reprojection_error_px(camera, pose, &point, &px) {
+                Some(err) => err <= threshold,
+                None => false, // behind the camera => outlier.
+            }
+        });
+        removed += before - track.len();
+
+        let posed_obs = track
+            .iter()
+            .filter(|&&(image, _)| poses[image].is_some())
+            .count();
+        if posed_obs < min_obs {
+            track_point[track_id] = None;
+        }
+    }
+    removed
 }
 
 /// Reprojection error (px) of `point_world` against pixel `px` in a camera.
@@ -921,6 +1044,134 @@ mod tests {
         assert!(
             (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
             "camera-spacing ratio {est_ratio} != GT {gt_ratio} (similarity-invariant)"
+        );
+    }
+
+    /// Build three views (identity rotation, small lateral offsets) of one world
+    /// point, with `outlier_views` images observing it at a planted off-by-50px
+    /// outlier keypoint instead of the true projection.
+    fn outlier_track_fixture(
+        outlier_views: &[usize],
+    ) -> (
+        Camera,
+        Vec<FeatureSet>,
+        Vec<Option<Pose>>,
+        Vec<Vec<(usize, usize)>>,
+        Vec<Option<Point3<f64>>>,
+    ) {
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let point = Point3::new(0.1, -0.2, 5.0);
+        let mut features = Vec::new();
+        let mut poses = Vec::new();
+        for k in 0..3 {
+            let pose = Pose::from_world_to_camera(
+                UnitQuaternion::identity(),
+                Vector3::new(k as f64 * 0.3 - 0.3, 0.0, 0.0),
+            );
+            let mut px = camera.project(&pose.transform_world_point(&point)).unwrap();
+            if outlier_views.contains(&k) {
+                px += Vector3::new(50.0, 50.0, 0.0).xy();
+            }
+            features.push(FeatureSet::new(vec![px], vec![vec![k as f32, 1.0]]).unwrap());
+            poses.push(Some(pose));
+        }
+        let tracks = vec![vec![(0, 0), (1, 0), (2, 0)]];
+        let track_point = vec![Some(point)];
+        (camera, features, poses, tracks, track_point)
+    }
+
+    #[test]
+    fn filter_strips_single_outlier_observation_keeps_track() {
+        let (camera, features, poses, mut tracks, mut track_point) = outlier_track_fixture(&[2]);
+        let config = IncrementalSfmConfig::default();
+        let removed = filter_outlier_observations(
+            &camera,
+            &features,
+            &mut tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(removed, 1, "the planted outlier observation is removed");
+        assert_eq!(
+            tracks[0],
+            vec![(0, 0), (1, 0)],
+            "only the two inliers remain"
+        );
+        assert!(track_point[0].is_some(), "track survives with >= 2 inliers");
+    }
+
+    #[test]
+    fn filter_drops_track_below_min_observations() {
+        // Two of three views are outliers -> a single inlier left -> drop track.
+        let (camera, features, poses, mut tracks, mut track_point) = outlier_track_fixture(&[1, 2]);
+        let config = IncrementalSfmConfig::default();
+        let removed = filter_outlier_observations(
+            &camera,
+            &features,
+            &mut tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(removed, 2);
+        assert!(
+            track_point[0].is_none(),
+            "track with < 2 inlier observations is dropped"
+        );
+    }
+
+    #[test]
+    fn repeated_bundle_adjustment_does_not_collapse_scale() {
+        // A monocular reconstruction has a free scale gauge; without anchoring it
+        // a second BA from the converged state collapses the reconstruction.
+        // run_bundle_adjustment fixes a second (farthest) pose to pin scale, so
+        // re-optimising must be stable — track refinement relies on this.
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            track_filter_iterations: 4,
+            ..IncrementalSfmConfig::default()
+        };
+        let result = incremental_sfm(&scene.camera, &features, &pairwise, &config).unwrap();
+        // A scale collapse manifests as nearly all tracks dropping out (the EuRoC
+        // symptom was 630 -> 1) and the camera geometry degenerating; with the
+        // gauge anchored, structure and registration survive four BA rounds.
+        assert!(
+            result.registered_images >= 5,
+            "registration must survive repeated BA, got {}",
+            result.registered_images
+        );
+        assert!(
+            result.tracks.len() >= 20,
+            "structure must survive repeated BA, got {} tracks",
+            result.tracks.len()
+        );
+        assert!(
+            result.mean_reprojection_px < 1.0,
+            "reprojection {} px too high after repeated BA",
+            result.mean_reprojection_px
+        );
+        // Camera-spacing ratio stays similarity-correct (a collapse would warp it).
+        let registered: Vec<usize> = (0..scene.poses.len())
+            .filter(|&i| result.poses[i].is_some())
+            .collect();
+        let center = |i: usize| {
+            result.poses[i]
+                .as_ref()
+                .unwrap()
+                .camera_to_world()
+                .translation
+        };
+        let gt_center = |i: usize| scene.poses[i].camera_to_world().translation;
+        let (a, b, c) = (registered[0], registered[1], registered[2]);
+        let est_ratio = (center(a) - center(b)).norm() / (center(b) - center(c)).norm();
+        let gt_ratio = (gt_center(a) - gt_center(b)).norm() / (gt_center(b) - gt_center(c)).norm();
+        assert!(
+            (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
+            "camera geometry warped after repeated BA: {est_ratio} vs GT {gt_ratio}"
         );
     }
 }

@@ -56,9 +56,9 @@ to the unordered pipeline as a bare photo set.
 | View-graph candidate pairs (VLAD top-10) | 207 |
 | Geometrically verified pairs | 207 |
 | **Images registered** | **31 / 31** |
-| Reconstructed multi-view tracks | 630 |
-| Observations | 8,640 |
-| **Mean reprojection error** | **0.63 px** |
+| Reconstructed multi-view tracks | 616 |
+| Observations | 8,513 |
+| **Mean reprojection error** | **0.58 px** |
 
 Sub-pixel reprojection from a monocular, orderless input is already a strong
 internal-consistency signal. But the decisive check is **external**: align the
@@ -67,11 +67,11 @@ crisp-3DGS model) with a similarity (Umeyama Sim(3)) transform.
 
 | Sim(3) vs ordered reconstruction | Value |
 | --- | ---: |
-| **Camera-centre RMSE** | **0.96 cm** (median 0.54 cm, max 3.12 cm) |
+| **Camera-centre RMSE** | **1.08 cm** (median 0.53 cm, max 3.44 cm) |
 | Trajectory extent | 0.65 m |
 
 **The unordered, monocular, orderless reconstruction reproduces the ordered
-stereo reconstruction to ~1 cm** — about 1.5 % of the trajectory extent. The
+stereo reconstruction to ~1 cm** — about 1.7 % of the trajectory extent. The
 pipeline rediscovered the entire overlap graph from VLAD alone and recovered the
 same camera geometry (up to the expected global scale, `s ≈ 0.11`, since a single
 camera has no metric reference). That is the COLMAP-grade result the SfM pillar
@@ -119,29 +119,48 @@ each real root, and reads off the pose by absolute orientation (Kabsch) — well
 for any three non-collinear points whether or not the scene is planar. Swapping it
 in for the minimal solver:
 
-| South Building (128 JPEGs, monocular) | DLT | **P3P (Grunert)** |
-| --- | ---: | ---: |
-| Images registered | 2 / 128 | **126 / 128** |
-| Multi-view tracks | — | 21,316 |
-| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm (median 29 cm) |
+P3P **unlocks the planar façade**: the reconstruction grows across the whole
+collection instead of stalling at the seed. The same regression tests cover the
+general-3D, coplanar, and far-from-origin-seed cases.
 
-P3P **unlocks the planar façade**: the reconstruction now grows across nearly the
-whole collection instead of stalling at the seed. It also helped the orbit case —
-EuRoC V2_03 above went from 30 / 31 to **31 / 31** registered, at the same 0.63 px
-reprojection and a marginally better 0.96 cm Sim(3) RMSE, with P3P as the default
-solver. The same regression tests cover the general-3D, coplanar, and
-far-from-origin-seed cases.
+### Closing the precision gap: scale-gauge fixing + iterative track filtering
 
-**Limitation / future work — precision, not registration.** On South Building the
-*registration* is now solved, but the monocular reconstruction sits ~1 m (median
-~29 cm, ≈ 2.7 % of the 11 m extent) from COLMAP's mature model, with a heavy tail
-(a few cameras off by metres) and a ~22 px mean reprojection. That gap is the
-*next* layer of SfM maturity — iterative outlier-track filtering, retriangulation,
-and global BA with re-registration — not the minimal solver: tightening the PnP
-inlier gate only removes images and worsens drift, confirming the residual is
-scale drift and track contamination on a large outdoor monocular scene, the
-machinery COLMAP spent years on. The orbit / general-3D case (EuRoC above) is
-already COLMAP-grade.
+P3P got South Building *registered* (126 / 128) but, at first, only roughly: the
+monocular model sat ~1 m (median ~29 cm) from COLMAP with a ~22 px mean
+reprojection. Two coupled problems caused that, and both are now fixed.
+
+1. **The monocular bundle adjustment did not pin scale.** A monocular
+   reconstruction has *seven* gauge freedoms — six for the rigid SE(3) frame plus
+   one for global scale — but the BA fixed only a single pose, leaving the scale
+   direction of the normal equations singular. One solve from a perturbed state
+   tolerates that, but re-optimising from a converged state lets scale drift and
+   the reconstruction **collapse**. The fix anchors scale by also fixing the
+   registered pose with the longest baseline to the anchor (`run_bundle_adjustment`),
+   exactly as COLMAP fixes its first two cameras.
+2. **Union-find tracks were contaminated.** A loop-inconsistent match chain can
+   merge two distinct 3D points into one track; its BA'd point then fits none of
+   its observations. A **post-BA filtering pass** (`track_filter_iterations`, the
+   default) strips every observation that reprojects worse than the gate after the
+   global BA and re-optimises, iterating a few rounds. Crucially it never un-poses
+   an image, so the **registered-image count is invariant** — it only cleans
+   structure, and on a clean reconstruction it is a near-no-op.
+
+Together they turn the rough registration into a COLMAP-grade reconstruction:
+
+| South Building (128 JPEGs, monocular) | DLT | P3P | **P3P + gauge-fix + track filter** |
+| --- | ---: | ---: | ---: |
+| Images registered | 2 / 128 | 126 / 128 | **128 / 128** |
+| Multi-view tracks | — | 21,316 | 22,024 |
+| Mean reprojection | — | 22.8 px | **2.0 px** |
+| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm | **0.59 cm** (median 0.47 cm, max 1.12 cm) |
+
+**The orderless, monocular reconstruction now reproduces COLMAP's own model of a
+real 128-photo building to 0.59 cm — 0.1 % of the 11 m trajectory extent**, with a
+completely independent frontend (SuperPoint, not COLMAP's SIFT). The same two
+improvements register all 31 / 31 EuRoC V2_03 images at 0.58 px reprojection and a
+1.08 cm Sim(3) RMSE (median 0.53 cm). That is COLMAP-grade unordered SfM on a
+genuine photo collection — the precision gap the previous revision flagged as
+future work is closed.
 
 ## Reproduce
 
