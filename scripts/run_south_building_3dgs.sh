@@ -1,6 +1,12 @@
 #!/usr/bin/env sh
 # Photorealistic 3D Gaussian Splatting from the pure-Rust unordered SfM model of
-# a real building (COLMAP's South-Building, 128 unordered photos).
+# a real building. Defaults to COLMAP's South-Building (128 unordered photos);
+# point --sb-root at any COLMAP-format collection (images/ + sparse/cameras.txt)
+# to reproduce the crisp result on a different scene — e.g. Gerrard-Hall, a second
+# real building with an OPENCV (vs South-Building's SIMPLE_RADIAL) camera model:
+#
+#   scripts/run_south_building_3dgs.sh --sb-root ~/datasets/gerrard-hall \
+#       --name gerrard_hall --work target/gerrard_hall_3dgs --scale 0.25
 #
 # This closes the loop on the unordered-SfM benchmark: the same VLAD -> essential
 # -> incremental SfM that scores ~1 cm against COLMAP also produces a COLMAP model
@@ -33,17 +39,19 @@ device="${SB_3DGS_DEVICE:-cuda}"
 max_keypoints="${SB_3DGS_MAX_KEYPOINTS:-2048}"
 iters="${SB_3DGS_ITERS:-30000}"
 scale="${SB_3DGS_SCALE:-0.5}"
+name="${SB_3DGS_NAME:-south_building}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --sb-root) sb_root="$2"; shift 2 ;;
         --work) work="$2"; shift 2 ;;
+        --name) name="$2"; shift 2 ;;
         --python) python_bin="$2"; shift 2 ;;
         --device) device="$2"; shift 2 ;;
         --max-keypoints) max_keypoints="$2"; shift 2 ;;
         --iters) iters="$2"; shift 2 ;;
         --scale) scale="$2"; shift 2 ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -88,10 +96,10 @@ echo "# 3. undistort + lay out the gsplat model"
 
 echo "# 4. gsplat DefaultStrategy + SH training ($iters iters)"
 "$python_bin" "$script_dir/gsplat_sfm_3dgs_train.py" \
-    "$work" "$work/south_building.splat" "$iters" \
-    "$work/south_building_compare.png" 30,64,100
+    "$work" "$work/$name.splat" "$iters" \
+    "$work/${name}_compare.png" 30,64,100
 
 echo
-echo "splat:       $work/south_building.splat"
-echo "comparison:  $work/south_building_compare.png"
-echo "fly-through: $work/south_building_compare_flythrough.gif"
+echo "splat:       $work/$name.splat"
+echo "comparison:  $work/${name}_compare.png"
+echo "fly-through: $work/${name}_compare_flythrough.gif"
