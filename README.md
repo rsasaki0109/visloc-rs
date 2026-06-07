@@ -66,6 +66,16 @@
   tightens structure to <strong>0.53 px</strong> reprojection, sharp enough for crisp novel-view synthesis.</em>
 </p>
 
+<p align="center">
+  🏛️ <strong>A crisp 3D Gaussian Splat of a real building, from the pure-Rust unordered SfM model</strong>
+  <br>
+  <img src="docs/assets/sfm_3dgs_south_building.png" alt="COLMAP South Building: input photo (left) vs a 3D Gaussian Splat (right) trained on the pure-Rust unordered-SfM model, columns and window mullions sharp" width="80%">
+  <br>
+  <em>COLMAP's South Building (128 unordered photos): input photo (left) vs a 3DGS (right) trained on the
+  <strong>pure-Rust unordered-SfM model</strong> — the same reconstruction scored at ~1 cm vs COLMAP, no C++ mapper.
+  See the <a href="docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model">SfM → 3DGS showcase</a>.</em>
+</p>
+
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
 where a robot or UAV is, from cameras and an IMU, when GNSS is jammed, occluded, or
 absent (indoors, urban canyons, under bridges, low-altitude flight). Load a COLMAP/SfM
@@ -176,6 +186,7 @@ the full index (including synthetic correctness demos) lives in
 | **EuRoC loop closure (UAV, 0.060 m)** | Same pipeline on a 6-DOF MAV flight, MH_03. Window BA + loop **0.089 m** → + two-view loop BA **0.065 m** → + fixed-prefix local-map BA **0.061 m** → + anisotropic loop-edge information **0.060 m**, within ~2.5× ORB-SLAM3 | [`scripts/run_euroc_loop_closure_benchmark.sh`](scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) |
 | **EuRoC SfM reconstruction** | Stereo VO → merged multi-view tracks → one global BA → COLMAP export (`--sfm-colmap-out`). MH_03: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, for downstream 3DGS / MVS | [`scripts/run_euroc_sfm_benchmark.sh`](scripts/run_euroc_sfm_benchmark.sh), [`docs/euroc_sfm_benchmark.md`](docs/euroc_sfm_benchmark.md) |
 | **Unordered SfM** | Orderless photo set → VLAD view graph → essential-RANSAC verification → incremental reconstruction (robust multi-seed init → **P3P** register → triangulate → scale-gauge-fixed BA → iterative track filter) → COLMAP export. Real COLMAP examples vs their own models: **South Building** (128 photos) **128/128, 1.09 cm**; **Gerrard Hall** (100, 5616×3744 OPENCV) **98/100, 0.68 cm** — both 0.1% of extent; EuRoC V2_03 orbit **31/31, 1.08 cm** | [`examples/unordered_sfm_demo.rs`](examples/unordered_sfm_demo.rs), [`scripts/run_colmap_sfm_benchmark.sh`](scripts/run_colmap_sfm_benchmark.sh), [`scripts/run_unordered_sfm_benchmark.sh`](scripts/run_unordered_sfm_benchmark.sh), [`docs/unordered_sfm_benchmark.md`](docs/unordered_sfm_benchmark.md) |
+| **SfM → 3DGS (crisp, real building)** | The unordered-SfM South Building model → undistort + recolour → gsplat **DefaultStrategy + degree-3 SH** → a photorealistic 3D Gaussian Splat. The crisp lever is the trainer's adaptive densification, *not* SfM precision (1.4 px and 0.66 px models render identically) | [`scripts/run_south_building_3dgs.sh`](scripts/run_south_building_3dgs.sh), [`scripts/gsplat_sfm_3dgs_train.py`](scripts/gsplat_sfm_3dgs_train.py), [`docs/unordered_sfm_benchmark.md`](docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model) |
 | EuRoC online VI-SLAM | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
 | Outlier-robust PGO (GNC) | Wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89×** baseline, GNC **1.0×** | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
 | GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
