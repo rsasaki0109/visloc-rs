@@ -28,9 +28,10 @@
 //!    ([`crate::bundle`]). Monocular has a 7-DoF gauge (6 rigid + scale), so two
 //!    poses are fixed — the anchor and the longest-baseline pose — to pin scale
 //!    as well as the frame.
-//! 5. **Filter.** Post-BA, strip observations that reproject past the gate (the
-//!    symptom of a contaminated union-find track) and re-optimise, a few rounds.
-//!    No image is ever un-posed, so registration is invariant.
+//! 5. **Filter.** Post-BA, strip observations that reproject past the gate (a
+//!    contaminated union-find track) and drop tracks whose re-measured parallax
+//!    is below the gate (depth-ambiguous far-flung points), then re-optimise, a
+//!    few rounds. No image is ever un-posed, so registration is invariant.
 //!
 //! The output ([`IncrementalSfmResult`]) carries per-image poses (`None` for
 //! images that never registered) and merged multi-view tracks, ready for a
@@ -771,16 +772,24 @@ fn run_bundle_adjustment(
     Ok(result)
 }
 
-/// Remove, from every triangulated track, the observations that reproject worse
-/// than `max_reprojection_error_px` after the current BA (or land behind the
-/// camera). A contaminated union-find track — two distinct 3D points merged into
-/// one — has a BA'd point that fits neither cluster, so most of its observations
-/// exceed the gate and are stripped here; a track left with fewer than the
-/// minimum posed observations is dropped entirely (`track_point` cleared).
+/// Clean every triangulated track after the current BA, on two grounds:
+///
+/// 1. **Reprojection.** A contaminated union-find track — two distinct 3D points
+///    merged into one — has a BA'd point that fits neither cluster, so its
+///    observations reproject past `max_reprojection_error_px` and are stripped;
+///    a track left below the minimum posed observations is dropped.
+/// 2. **Parallax.** A point first triangulated just over the parallax gate is
+///    depth-unstable: BA can slide it far along its viewing ray without changing
+///    any reprojection (low parallax = depth ambiguity), so it survives the
+///    reprojection test while sitting thousands of units from the scene — these
+///    far-flung outliers wreck the scene scale for downstream 3DGS / MVS. So
+///    re-measure parallax against the *current* point and all observing camera
+///    centres (the widest angle subtended at the point), and drop the track if
+///    it is below `min_triangulation_angle_deg`.
 ///
 /// Observations in *unregistered* images are kept untouched (the BA already
 /// ignores them); no pose is ever removed, so the registered-image count is
-/// invariant. Returns how many observations were removed.
+/// invariant. Returns how many tracks/observations changed (zero ⇒ converged).
 fn filter_outlier_observations(
     camera: &Camera,
     features: &[FeatureSet],
@@ -791,7 +800,8 @@ fn filter_outlier_observations(
 ) -> usize {
     let threshold = config.max_reprojection_error_px;
     let min_obs = config.min_track_length.max(2);
-    let mut removed = 0usize;
+    let min_angle = config.min_triangulation_angle_deg.to_radians();
+    let mut changed = 0usize;
 
     for (track_id, track) in tracks.iter_mut().enumerate() {
         let Some(point) = track_point[track_id] else {
@@ -810,17 +820,54 @@ fn filter_outlier_observations(
                 None => false, // behind the camera => outlier.
             }
         });
-        removed += before - track.len();
+        changed += before - track.len();
 
         let posed_obs = track
             .iter()
             .filter(|&&(image, _)| poses[image].is_some())
             .count();
         if posed_obs < min_obs {
-            track_point[track_id] = None;
+            if track_point[track_id].take().is_some() {
+                changed += 1;
+            }
+            continue;
+        }
+
+        if track_max_parallax(poses, track, &point) < min_angle
+            && track_point[track_id].take().is_some()
+        {
+            changed += 1;
         }
     }
-    removed
+    changed
+}
+
+/// Widest angle (radians) subtended at `point` by any pair of registered camera
+/// centres that observe it — the post-BA triangulation angle. Zero if fewer than
+/// two registered views remain.
+fn track_max_parallax(
+    poses: &[Option<Pose>],
+    track: &[(usize, usize)],
+    point: &Point3<f64>,
+) -> f64 {
+    let dirs: Vec<Vector3<f64>> = track
+        .iter()
+        .filter_map(|&(image, _)| poses[image].as_ref())
+        .filter_map(|pose| {
+            let v = pose.camera_to_world().translation - point.coords;
+            (v.norm() > f64::EPSILON).then(|| v.normalize())
+        })
+        .collect();
+    let mut max_angle = 0.0;
+    for a in 0..dirs.len() {
+        for b in (a + 1)..dirs.len() {
+            let angle = dirs[a].dot(&dirs[b]).clamp(-1.0, 1.0).acos();
+            if angle > max_angle {
+                max_angle = angle;
+            }
+        }
+    }
+    max_angle
 }
 
 /// Reprojection error (px) of `point_world` against pixel `px` in a camera.
@@ -1102,6 +1149,42 @@ mod tests {
     }
 
     #[test]
+    fn filter_drops_low_parallax_far_point() {
+        // A point 500 units away, seen by three cameras 0.6 units apart, projects
+        // with ZERO reprojection error (perfect) yet has ~0.07 deg parallax — the
+        // depth-ambiguous far-flung outlier the reprojection test cannot catch.
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let point = Point3::new(0.0, 0.0, 500.0);
+        let mut features = Vec::new();
+        let mut poses = Vec::new();
+        for k in 0..3 {
+            let pose = Pose::from_world_to_camera(
+                UnitQuaternion::identity(),
+                Vector3::new(k as f64 * 0.3 - 0.3, 0.0, 0.0),
+            );
+            let px = camera.project(&pose.transform_world_point(&point)).unwrap();
+            features.push(FeatureSet::new(vec![px], vec![vec![k as f32, 1.0]]).unwrap());
+            poses.push(Some(pose));
+        }
+        let mut tracks = vec![vec![(0, 0), (1, 0), (2, 0)]];
+        let mut track_point = vec![Some(point)];
+        let config = IncrementalSfmConfig::default(); // min_triangulation_angle_deg = 2.0
+        let changed = filter_outlier_observations(
+            &camera,
+            &features,
+            &mut tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(changed, 1, "the low-parallax track is dropped");
+        assert!(
+            track_point[0].is_none(),
+            "depth-ambiguous far point dropped despite zero reprojection error"
+        );
+    }
+
+    #[test]
     fn filter_drops_track_below_min_observations() {
         // Two of three views are outliers -> a single inlier left -> drop track.
         let (camera, features, poses, mut tracks, mut track_point) = outlier_track_fixture(&[1, 2]);
@@ -1114,7 +1197,7 @@ mod tests {
             &poses,
             &mut track_point,
         );
-        assert_eq!(removed, 2);
+        assert_eq!(removed, 3, "2 observations stripped + 1 track dropped");
         assert!(
             track_point[0].is_none(),
             "track with < 2 inlier observations is dropped"

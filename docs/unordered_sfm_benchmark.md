@@ -56,8 +56,8 @@ to the unordered pipeline as a bare photo set.
 | View-graph candidate pairs (VLAD top-10) | 207 |
 | Geometrically verified pairs | 207 |
 | **Images registered** | **31 / 31** |
-| Reconstructed multi-view tracks | 616 |
-| Observations | 8,513 |
+| Reconstructed multi-view tracks | 612 |
+| Observations | 8,490 |
 | **Mean reprojection error** | **0.58 px** |
 
 Sub-pixel reprojection from a monocular, orderless input is already a strong
@@ -137,25 +137,35 @@ reprojection. Two coupled problems caused that, and both are now fixed.
    the reconstruction **collapse**. The fix anchors scale by also fixing the
    registered pose with the longest baseline to the anchor (`run_bundle_adjustment`),
    exactly as COLMAP fixes its first two cameras.
-2. **Union-find tracks were contaminated.** A loop-inconsistent match chain can
-   merge two distinct 3D points into one track; its BA'd point then fits none of
-   its observations. A **post-BA filtering pass** (`track_filter_iterations`, the
-   default) strips every observation that reprojects worse than the gate after the
-   global BA and re-optimises, iterating a few rounds. Crucially it never un-poses
-   an image, so the **registered-image count is invariant** — it only cleans
-   structure, and on a clean reconstruction it is a near-no-op.
+2. **Union-find tracks were contaminated, and far-flung points survived.** A
+   loop-inconsistent match chain can merge two distinct 3D points into one track,
+   whose BA'd point then fits none of its observations; and a point first
+   triangulated *just* over the parallax gate is depth-unstable — BA can slide it
+   thousands of units along its viewing ray without changing any reprojection
+   (low parallax = depth ambiguity), so it survives a reprojection test while
+   sitting far outside the scene. A **post-BA filtering pass**
+   (`track_filter_iterations`, the default) strips every observation that
+   reprojects worse than the gate **and** drops every track whose parallax —
+   re-measured against the *current* point and all observing camera centres —
+   falls below `min_triangulation_angle_deg`, then re-optimises, a few rounds.
+   Crucially it never un-poses an image, so the **registered-image count is
+   invariant** — it only cleans structure, and on a clean reconstruction it is a
+   near-no-op. The parallax drop matters downstream: on South Building it shrank
+   the point-cloud extent **1500×** (a handful of depth-ambiguous points had flung
+   themselves ~250 000 units out), which is the difference between a usable input
+   to a 3DGS / MVS pipeline and one whose scene scale is destroyed by outliers.
 
 Together they turn the rough registration into a COLMAP-grade reconstruction:
 
 | South Building (128 JPEGs, monocular) | DLT | P3P | **P3P + gauge-fix + track filter** |
 | --- | ---: | ---: | ---: |
 | Images registered | 2 / 128 | 126 / 128 | **128 / 128** |
-| Multi-view tracks | — | 21,316 | 22,024 |
+| Multi-view tracks | — | 21,316 | 21,859 |
 | Mean reprojection | — | 22.8 px | **2.0 px** |
-| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm | **0.59 cm** (median 0.47 cm, max 1.12 cm) |
+| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm | **0.58 cm** (median 0.47 cm, max 1.11 cm) |
 
 **The orderless, monocular reconstruction now reproduces COLMAP's own model of a
-real 128-photo building to 0.59 cm — 0.1 % of the 11 m trajectory extent**, with a
+real 128-photo building to 0.58 cm — 0.1 % of the 11 m trajectory extent**, with a
 completely independent frontend (SuperPoint, not COLMAP's SIFT). The same two
 improvements register all 31 / 31 EuRoC V2_03 images at 0.58 px reprojection and a
 1.08 cm Sim(3) RMSE (median 0.53 cm). That is COLMAP-grade unordered SfM on a
@@ -176,7 +186,7 @@ the resolution of South Building.
 | Photos | 128 (3072×2304, SIMPLE_RADIAL) | 100 (5616×3744, OPENCV) |
 | Images registered | 128 / 128 | 95 / 100 |
 | Mean reprojection | 2.0 px | 3.2 px |
-| **Sim(3) camera-centre RMSE** | **0.59 cm** | **1.20 cm** (median 0.96 cm) |
+| **Sim(3) camera-centre RMSE** | **0.58 cm** | **1.20 cm** (median 0.96 cm) |
 | Fraction of trajectory extent | 0.1 % (11 m) | 0.1 % (11 m) |
 
 Both land at **~0.1 % of the trajectory extent** against COLMAP's reference, from a
