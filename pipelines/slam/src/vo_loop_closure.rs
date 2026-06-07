@@ -111,7 +111,7 @@ pub struct VoLoopClosureConfig {
     pub gnc: GncConfig,
     /// Refine each verified loop's relative pose with a local two-view bundle
     /// adjustment *before* it enters the pose graph. See
-    /// [`refine_loop_relative_two_view`] for the rationale: PnP minimises
+    /// `refine_loop_relative_two_view` for the rationale: PnP minimises
     /// reprojection in the newer frame only while holding the older frame's
     /// stereo-depth points fixed, so their triangulation error biases the loop
     /// edge; a 2-view BA (older pose fixed, newer pose + shared landmarks free,
@@ -128,7 +128,7 @@ pub struct VoLoopClosureConfig {
     /// along the optical axis (depth), yet the scalar weight pulls all six DOF
     /// equally — so the SE(3) PGO smears each loop correction isotropically over
     /// the cycle rather than routing it into the directions the loop actually
-    /// observes. [`loop_edge_information`] recovers `Ω` as the reprojection
+    /// observes. `loop_edge_information` recovers `Ω` as the reprojection
     /// Hessian `Σ JᵀJ` (in the solver's `[ρ; ω]` SE(3)-tangent convention) and
     /// **trace-normalises it to the same total weight `inlier_count`**, so this
     /// changes *only* the directional distribution of each loop's pull, not the
