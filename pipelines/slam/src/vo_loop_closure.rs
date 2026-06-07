@@ -821,7 +821,7 @@ mod tests {
     /// SuperPoint vectors never exhibit).
     fn descriptor_for(id: usize, dim: usize) -> Vec<f32> {
         let mut d = vec![0.0f32; dim];
-        let phase = id as f32 * 0.61803398;
+        let phase = id as f32 * 0.618_034;
         for (j, slot) in d.iter_mut().enumerate() {
             *slot = ((phase + j as f32 * 0.27).sin() * 0.5 + 0.5)
                 + ((id * 13 + j * 7) % 5) as f32 * 0.05;
