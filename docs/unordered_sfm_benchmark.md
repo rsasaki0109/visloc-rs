@@ -160,17 +160,30 @@ Together they turn the rough registration into a COLMAP-grade reconstruction:
 | South Building (128 JPEGs, monocular) | DLT | P3P | **P3P + gauge-fix + track filter** |
 | --- | ---: | ---: | ---: |
 | Images registered | 2 / 128 | 126 / 128 | **128 / 128** |
-| Multi-view tracks | — | 21,316 | 21,859 |
-| Mean reprojection | — | 22.8 px | **2.0 px** |
-| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm | **0.58 cm** (median 0.47 cm, max 1.11 cm) |
+| Multi-view tracks | — | 21,316 | 20,478 |
+| Mean reprojection | — | 22.8 px | **1.4 px** |
+| Sim(3) camera-centre RMSE vs COLMAP | — | 106 cm | **1.09 cm** (median 0.94 cm, max 2.30 cm) |
+
+(The track-filter column also drops the depth-ambiguous low-parallax points that
+would otherwise fling a usable 3DGS / MVS cloud apart — a deliberate trade that
+tightens the reprojection to 1.4 px and keeps the camera centres at ~1 cm.)
 
 **The orderless, monocular reconstruction now reproduces COLMAP's own model of a
-real 128-photo building to 0.58 cm — 0.1 % of the 11 m trajectory extent**, with a
+real 128-photo building to 1.1 cm — 0.1 % of the 11 m trajectory extent**, with a
 completely independent frontend (SuperPoint, not COLMAP's SIFT). The same two
 improvements register all 31 / 31 EuRoC V2_03 images at 0.58 px reprojection and a
 1.08 cm Sim(3) RMSE (median 0.53 cm). That is COLMAP-grade unordered SfM on a
 genuine photo collection — the precision gap the previous revision flagged as
 future work is closed.
+
+![Unordered SfM on COLMAP South Building: visloc-rs camera centres Sim(3)-aligned
+to COLMAP's own model](assets/unordered_sfm_south_building.png)
+
+*128 orderless monocular photos. Left: the recovered camera centres (red) over
+COLMAP's reference (blue), top-down, with visloc-rs's own sparse cloud faint
+behind them — the two reconstructions are indistinguishable at this scale. Right:
+the per-camera Sim(3) residual, RMSE 1.09 cm over an 11 m orbit (0.1 % of extent).
+Regenerate with `scripts/run_colmap_sfm_benchmark.sh --dataset south-building`.*
 
 ### Generality: a second real collection, a different camera
 
@@ -200,9 +213,18 @@ low-parallax neighbours still reaches the first wide-baseline seed beyond them.
 | --- | ---: | ---: |
 | Photos | 128 (3072×2304, SIMPLE_RADIAL) | 100 (5616×3744, OPENCV) |
 | Images registered | 128 / 128 | **98 / 100** (3 / 100 single-seed) |
-| Mean reprojection | 2.0 px | 1.7 px |
-| **Sim(3) camera-centre RMSE** | **0.58 cm** | **0.68 cm** (median 0.51 cm) |
+| Mean reprojection | 1.4 px | 1.7 px |
+| **Sim(3) camera-centre RMSE** | **1.09 cm** (median 0.94 cm) | **0.68 cm** (median 0.51 cm) |
 | Fraction of trajectory extent | 0.1 % (11 m) | 0.1 % (11 m) |
+
+![Unordered SfM on COLMAP Gerrard Hall: visloc-rs camera centres Sim(3)-aligned to
+COLMAP's own model](assets/unordered_sfm_gerrard_hall.png)
+
+*Gerrard Hall, 100 photos at 5616×3744 with full OPENCV distortion — a different
+building, camera and 3× the resolution. The robust multi-seed init walks past the
+adjacent-frame trap the single seed falls into (3 / 100) and recovers 98 / 100
+camera centres to 0.68 cm RMSE. Regenerate with
+`scripts/run_colmap_sfm_benchmark.sh --dataset gerrard-hall`.*
 
 Both land at **~0.1 % of the trajectory extent** against COLMAP's reference, from a
 completely independent SuperPoint frontend, and Gerrard Hall now reproduces from

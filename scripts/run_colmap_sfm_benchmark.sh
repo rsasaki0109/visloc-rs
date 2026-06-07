@@ -23,7 +23,7 @@
 #   scripts/run_colmap_sfm_benchmark.sh --dataset gerrard-hall
 #
 # Measured (default VLAD top-k=12 retrieval, no hand-tuning):
-#   South Building (128 photos)  128 / 128 registered, Sim(3) 0.58 cm RMSE
+#   South Building (128 photos)  128 / 128 registered, Sim(3) 1.09 cm RMSE
 #   Gerrard Hall   (100 photos)   98 / 100 registered, Sim(3) 0.68 cm RMSE
 # both ~0.1 % of the trajectory extent vs COLMAP's own model.
 #
@@ -151,11 +151,16 @@ echo "reconstructing with unordered_sfm_demo (top-k=$retrieval_topk, min-matches
     --retrieval-topk "$retrieval_topk" --min-matches "$min_matches" \
     --out-colmap "$colmap_out" )
 
-# ---- 5. Sim(3) comparison vs COLMAP's own model --------------------------------
+# ---- 5. Sim(3) comparison vs COLMAP's own model (+ overlay figure) -------------
 echo
 echo "Sim(3) camera-centre comparison vs COLMAP's reference model:"
+overlay="$colmap_out/sim3_overlay.png"
 "$python_bin" "$script_dir/compare_sfm_sim3.py" \
-    "$sparse_dir/images.txt" "$colmap_out/images.txt"
+    "$sparse_dir/images.txt" "$colmap_out/images.txt" \
+    --points "$colmap_out/points3D.txt" \
+    --plot "$overlay" \
+    --title "Unordered SfM — $dataset: visloc-rs vs COLMAP" || true
 
 echo
 echo "COLMAP model: $colmap_out"
+echo "overlay figure: $overlay"
