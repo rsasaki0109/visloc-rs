@@ -71,6 +71,8 @@
   <br>
   <img src="docs/assets/sfm_3dgs_south_building.png" alt="COLMAP South Building: input photo (left) vs a 3D Gaussian Splat (right) trained on the pure-Rust unordered-SfM model, columns and window mullions sharp" width="80%">
   <br>
+  <img src="docs/assets/sfm_3dgs_south_building_flythrough.gif" alt="South Building 3DGS fly-through rendered from the pure-Rust unordered-SfM model" width="55%">
+  <br>
   <em>COLMAP's South Building (128 unordered photos): input photo (left) vs a 3DGS (right) trained on the
   <strong>pure-Rust unordered-SfM model</strong> — the same reconstruction scored at ~1 cm vs COLMAP, no C++ mapper.
   See the <a href="docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model">SfM → 3DGS showcase</a>.</em>
