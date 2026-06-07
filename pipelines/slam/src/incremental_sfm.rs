@@ -14,11 +14,12 @@
 //!    pairwise match. Each connected component is a feature track — one 3D
 //!    point seen by many images. Tracks with two keypoints in the *same* image
 //!    are inconsistent and dropped.
-//! 2. **Seed.** The verified pair with the most matches (and enough parallax)
-//!    bootstraps the reconstruction via two-view relative pose
-//!    ([`visloc_vision::two_view`]); its shared tracks are triangulated. This
-//!    fixes the gauge (seed image at the origin) and the arbitrary monocular
-//!    scale.
+//! 2. **Seed.** Candidate pairs (most matches first, enough parallax) bootstrap
+//!    the reconstruction via two-view relative pose ([`visloc_vision::two_view`]);
+//!    the candidate that grows the most images is kept, so a repetitive scene
+//!    whose strongest pair is an isolated cluster of adjacent frames is not
+//!    trapped. This fixes the gauge (seed image at the origin) and the arbitrary
+//!    monocular scale.
 //! 3. **Grow.** Repeatedly register the unregistered image that observes the
 //!    most already-triangulated tracks, by PnP RANSAC
 //!    ([`visloc_vision::ransac`]); then triangulate every track that two
@@ -70,6 +71,17 @@ pub struct IncrementalSfmConfig {
     /// A pair must contribute at least this many verified matches to be a
     /// candidate seed pair. (Track building still uses *all* pairs.)
     pub min_seed_matches: usize,
+    /// How many candidate seeds to grow before committing. The highest-match
+    /// pair is not always a good seed: on repetitive structure (a building with
+    /// near-identical façades) the most-overlapping pair can be an isolated local
+    /// cluster of a few adjacent frames that the reconstruction cannot grow out
+    /// of. So up to `seed_trials` candidate pairs are each grown and the one that
+    /// registers the most images is kept — the COLMAP-style robust-initialisation
+    /// pattern — committing early as soon as a seed reaches most of its connected
+    /// component (so a well-connected scene still grows exactly one). Pairs that
+    /// fail the two-view baseline gate place nothing and don't count against the
+    /// budget. `1` restores the old first-qualifying-seed behaviour.
+    pub seed_trials: usize,
     /// Minimum triangulation (parallax) angle in degrees for a point to be
     /// accepted. Small-angle triangulations are depth-unstable and dropped.
     pub min_triangulation_angle_deg: f64,
@@ -117,6 +129,7 @@ impl Default for IncrementalSfmConfig {
     fn default() -> Self {
         Self {
             min_seed_matches: 30,
+            seed_trials: 12,
             min_triangulation_angle_deg: 2.0,
             max_reprojection_error_px: 4.0,
             min_track_length: 2,
@@ -185,6 +198,10 @@ impl std::fmt::Display for IncrementalSfmError {
 
 impl std::error::Error for IncrementalSfmError {}
 
+/// A grown reconstruction the seed search compares: how many images it
+/// registered, the per-image poses and the per-track points.
+type SeedGrowth = (usize, Vec<Option<Pose>>, Vec<Option<Point3<f64>>>);
+
 /// Run incremental SfM over an unordered image set.
 ///
 /// `features[k]` are the keypoints + descriptors of image `k`; `pairwise` are
@@ -211,65 +228,56 @@ pub fn incremental_sfm(
         }
     }
 
-    // Reconstruction state.
-    let mut poses: Vec<Option<Pose>> = vec![None; n_images];
-    let mut track_point: Vec<Option<Point3<f64>>> = vec![None; tracks.len()];
-
-    // ---- 2. Seed from the strongest verified pair ----
-    seed_reconstruction(camera, features, pairwise, &tracks, config, &mut poses)?;
-    triangulate_pending(camera, features, &tracks, &poses, config, &mut track_point);
-
-    // ---- 3. Grow: register the best next image, triangulate, periodically BA ----
-    let mut failed: Vec<bool> = vec![false; n_images];
-    let mut registrations_since_ba = 0usize;
-    loop {
-        let Some((next_image, corrs)) =
-            select_next_image(features, &obs_by_image, &poses, &failed, &track_point)
-        else {
+    // ---- 2. Seed selection: try several candidate seeds, keep the largest ----
+    // The highest-match pair is not always a good seed. On repetitive structure
+    // (a building photographed around near-identical façades) the most-overlapping
+    // verified pair can be a handful of adjacent frames that triangulate fine but
+    // form an isolated local cluster the reconstruction cannot grow out of. So
+    // walk verified pairs in descending match order and keep the reconstruction
+    // that registers the most images, committing as soon as one is *not trapped*
+    // — reaches at least half of its connected component. A well-connected scene
+    // (the strongest pair is already central) commits on the first candidate that
+    // places, growing exactly one reconstruction, just as the old
+    // first-qualifying-seed path did; only a repetitive scene whose strongest
+    // pairs are isolated clusters keeps searching, and then takes the
+    // farthest-reaching seed found. Each grow runs its periodic BA, so reach is
+    // measured on the real (bundle-adjusted) trajectory, not a drifting proxy.
+    //
+    // `seed_trials` caps how many pairs actually *grow* a reconstruction; pairs
+    // that fail the two-view baseline gate placed nothing and are skipped for
+    // free, so an orbit whose highest-overlap pairs are all low-parallax adjacent
+    // frames still reaches the first wide-baseline pair beyond them.
+    let seed_order = seed_candidate_order(pairwise, config);
+    let trials = config.seed_trials.max(1);
+    let not_trapped = largest_connected_component(pairwise, n_images)
+        .div_ceil(2)
+        .max(1);
+    let mut best: Option<SeedGrowth> = None;
+    let mut grows = 0usize;
+    for &pi in &seed_order {
+        let (trial_poses, trial_points, reach) = grow_from_seed(
+            camera,
+            features,
+            &tracks,
+            &obs_by_image,
+            config,
+            &pairwise[pi],
+        )?;
+        if reach == 0 {
+            continue; // pair failed the seed gate — nothing placed, no grow ran
+        }
+        grows += 1;
+        if best
+            .as_ref()
+            .is_none_or(|(best_reach, _, _)| reach > *best_reach)
+        {
+            best = Some((reach, trial_poses, trial_points));
+        }
+        if reach >= not_trapped || grows >= trials {
             break;
-        };
-
-        // P3P (Grunert) is the default minimal solver — well-posed on coplanar
-        // façades where the linear DLT degenerates. Both share the Gauss-Newton
-        // refiner and the config reprojection gate.
-        let report = match config.pnp_solver {
-            PnpSolver::P3p => PnPRansac {
-                pose_estimator: P3PGrunert,
-                pose_refiner: Some(GaussNewtonPoseRefiner::default()),
-                iterations: 128,
-                reprojection_threshold: config.max_reprojection_error_px,
-                seed: 7,
-                early_stop_min_iterations: 0,
-                early_stop_inlier_ratio: None,
-            }
-            .estimate(&corrs, camera),
-            PnpSolver::Dlt => PnPRansac {
-                reprojection_threshold: config.max_reprojection_error_px,
-                ..PnPRansac::default()
-            }
-            .estimate(&corrs, camera),
-        };
-        match report {
-            Some(report) if report.inliers.len() >= config.min_pnp_inliers => {
-                poses[next_image] = Some(report.pose);
-                triangulate_pending(camera, features, &tracks, &poses, config, &mut track_point);
-                registrations_since_ba += 1;
-                if config.ba_every > 0 && registrations_since_ba >= config.ba_every {
-                    run_bundle_adjustment(
-                        camera,
-                        features,
-                        &tracks,
-                        config,
-                        &mut poses,
-                        &mut track_point,
-                    )
-                    .map_err(IncrementalSfmError::Ba)?;
-                    registrations_since_ba = 0;
-                }
-            }
-            _ => failed[next_image] = true,
         }
     }
+    let (_, mut poses, mut track_point) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
 
     // ---- 4. Final global bundle adjustment ----
     let mut ba_result = if config.final_global_ba {
@@ -451,90 +459,186 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
     }
 }
 
-/// Pick a verified pair that bootstraps well — recover its two-view relative
-/// pose and place both images (seed at the world origin). Mutates `poses`.
-///
-/// The strongest-match pair is *not* always a good seed: on an orbit the most
-/// overlapping pair is two adjacent low-parallax frames, whose tiny baseline
-/// makes triangulation depth-unstable (and fails the parallax gate, leaving the
-/// reconstruction with nothing to register against). So candidates are tried in
-/// descending match order but each is accepted only if enough of its
-/// correspondences actually triangulate to well-conditioned points — the same
-/// parallax + cheirality + reprojection gate the rest of the pipeline uses.
-fn seed_reconstruction(
+/// Size of the largest connected component of the view graph — images joined by
+/// a verified pair. This bounds how many images any single seed can ever reach,
+/// so a seed that reaches a large fraction of it is well-connected rather than an
+/// isolated local cluster of a few near-identical frames.
+fn largest_connected_component(pairwise: &[PairwiseMatches], n_images: usize) -> usize {
+    if n_images == 0 {
+        return 0;
+    }
+    let mut parent: Vec<usize> = (0..n_images).collect();
+    for p in pairwise {
+        union(&mut parent, p.image_i, p.image_j);
+    }
+    let mut count = vec![0usize; n_images];
+    for i in 0..n_images {
+        let r = find(&mut parent, i);
+        count[r] += 1;
+    }
+    count.into_iter().max().unwrap_or(0)
+}
+
+/// Indices of verified pairs in descending match-count order, restricted to
+/// those that clear `min_seed_matches`. These are the candidate seeds, strongest
+/// first; [`grow_from_seed`] decides which one actually bootstraps the largest
+/// reconstruction.
+fn seed_candidate_order(pairwise: &[PairwiseMatches], config: &IncrementalSfmConfig) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pairwise.len())
+        .filter(|&i| pairwise[i].matches.len() >= config.min_seed_matches)
+        .collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(pairwise[i].matches.len()));
+    order
+}
+
+/// Recover one verified pair's two-view relative pose and place both images
+/// (seed `i` at the world origin, `j` at the relative pose). Returns `true` only
+/// if the pair bootstraps a well-conditioned baseline: enough of its inlier
+/// correspondences triangulate under the shared parallax / cheirality /
+/// reprojection gate. A low-parallax pair (e.g. two adjacent frames) is rejected
+/// and `poses` is left untouched for `i` and `j`.
+fn place_seed_pair(
     camera: &Camera,
     features: &[FeatureSet],
-    pairwise: &[PairwiseMatches],
-    _tracks: &[Vec<(usize, usize)>],
+    pair: &PairwiseMatches,
     config: &IncrementalSfmConfig,
     poses: &mut [Option<Pose>],
-) -> Result<(), IncrementalSfmError> {
-    // Candidate pairs by descending match count.
-    let mut order: Vec<usize> = (0..pairwise.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(pairwise[i].matches.len()));
-
+) -> bool {
     let estimator = RelativePoseEstimator::default();
     let min_cos = config.min_triangulation_angle_deg.to_radians().cos();
-    for &pi in &order {
-        let pair = &pairwise[pi];
-        if pair.matches.len() < config.min_seed_matches {
-            break; // sorted descending — nothing weaker can qualify
-        }
-        // Build correspondences, keeping the (kp_i, kp_j) map aligned so a
-        // relative-pose inlier index maps back to the right keypoints.
-        let mut corrs = Vec::with_capacity(pair.matches.len());
-        let mut corr_kp = Vec::with_capacity(pair.matches.len());
-        for &(ki, kj) in &pair.matches {
-            let (Some(pi_xy), Some(pj_xy)) = (
-                features[pair.image_i].keypoints.get(ki),
-                features[pair.image_j].keypoints.get(kj),
-            ) else {
-                continue;
-            };
-            corrs.push(TwoViewCorrespondence::new(*pi_xy, *pj_xy));
-            corr_kp.push((*pi_xy, *pj_xy));
-        }
-        let Some(relative) = estimator.estimate(&corrs, camera) else {
+
+    // Build correspondences, keeping the (kp_i, kp_j) map aligned so a
+    // relative-pose inlier index maps back to the right keypoints.
+    let mut corrs = Vec::with_capacity(pair.matches.len());
+    let mut corr_kp = Vec::with_capacity(pair.matches.len());
+    for &(ki, kj) in &pair.matches {
+        let (Some(pi_xy), Some(pj_xy)) = (
+            features[pair.image_i].keypoints.get(ki),
+            features[pair.image_j].keypoints.get(kj),
+        ) else {
             continue;
         };
-        if relative.inliers.len() < config.min_seed_matches {
-            continue;
-        }
-        // Tentatively place: image i at the origin, image j at the relative.
-        poses[pair.image_i] = Some(Pose::from_world_to_camera(
-            nalgebra::UnitQuaternion::identity(),
-            Vector3::zeros(),
-        ));
-        poses[pair.image_j] = Some(Pose::from_world_to_camera(
-            relative.previous_to_current.rotation,
-            relative.previous_to_current.translation,
-        ));
-        // Count inlier correspondences that triangulate to well-conditioned
-        // points under the shared parallax / cheirality / reprojection gate.
-        let mut well_triangulated = 0usize;
-        for &inl in &relative.inliers {
-            let (px_i, px_j) = corr_kp[inl];
-            let obs = [(pair.image_i, px_i), (pair.image_j, px_j)];
-            if triangulate_track(
-                camera,
-                poses,
-                &obs,
-                min_cos,
-                config.max_reprojection_error_px,
-            )
-            .is_some()
-            {
-                well_triangulated += 1;
-            }
-        }
-        if well_triangulated >= config.min_seed_matches {
-            return Ok(()); // good baseline — keep these poses
-        }
-        // Low parallax: undo and try the next pair.
-        poses[pair.image_i] = None;
-        poses[pair.image_j] = None;
+        corrs.push(TwoViewCorrespondence::new(*pi_xy, *pj_xy));
+        corr_kp.push((*pi_xy, *pj_xy));
     }
-    Err(IncrementalSfmError::NoSeedPair)
+    let Some(relative) = estimator.estimate(&corrs, camera) else {
+        return false;
+    };
+    if relative.inliers.len() < config.min_seed_matches {
+        return false;
+    }
+    // Tentatively place: image i at the origin, image j at the relative.
+    poses[pair.image_i] = Some(Pose::from_world_to_camera(
+        nalgebra::UnitQuaternion::identity(),
+        Vector3::zeros(),
+    ));
+    poses[pair.image_j] = Some(Pose::from_world_to_camera(
+        relative.previous_to_current.rotation,
+        relative.previous_to_current.translation,
+    ));
+    // Count inlier correspondences that triangulate to well-conditioned points.
+    let mut well_triangulated = 0usize;
+    for &inl in &relative.inliers {
+        let (px_i, px_j) = corr_kp[inl];
+        let obs = [(pair.image_i, px_i), (pair.image_j, px_j)];
+        if triangulate_track(
+            camera,
+            poses,
+            &obs,
+            min_cos,
+            config.max_reprojection_error_px,
+        )
+        .is_some()
+        {
+            well_triangulated += 1;
+        }
+    }
+    if well_triangulated >= config.min_seed_matches {
+        return true; // good baseline — keep these poses
+    }
+    // Low parallax: undo.
+    poses[pair.image_i] = None;
+    poses[pair.image_j] = None;
+    false
+}
+
+/// Bootstrap from `seed_pair` and grow the reconstruction by repeatedly
+/// registering the best next image, running the periodic global bundle
+/// adjustment every `ba_every` registrations. Returns the per-image poses,
+/// per-track points and the number of registered images — the reach the seed
+/// selection compares across candidates. A seed that fails the baseline gate
+/// yields zero registered images.
+#[allow(clippy::type_complexity)]
+fn grow_from_seed(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    obs_by_image: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    seed_pair: &PairwiseMatches,
+) -> Result<(Vec<Option<Pose>>, Vec<Option<Point3<f64>>>, usize), IncrementalSfmError> {
+    let n_images = features.len();
+    let mut poses: Vec<Option<Pose>> = vec![None; n_images];
+    let mut track_point: Vec<Option<Point3<f64>>> = vec![None; tracks.len()];
+
+    if !place_seed_pair(camera, features, seed_pair, config, &mut poses) {
+        return Ok((poses, track_point, 0));
+    }
+    triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
+
+    let mut failed: Vec<bool> = vec![false; n_images];
+    let mut registrations_since_ba = 0usize;
+    loop {
+        let Some((next_image, corrs)) =
+            select_next_image(features, obs_by_image, &poses, &failed, &track_point)
+        else {
+            break;
+        };
+
+        // P3P (Grunert) is the default minimal solver — well-posed on coplanar
+        // façades where the linear DLT degenerates. Both share the Gauss-Newton
+        // refiner and the config reprojection gate.
+        let report = match config.pnp_solver {
+            PnpSolver::P3p => PnPRansac {
+                pose_estimator: P3PGrunert,
+                pose_refiner: Some(GaussNewtonPoseRefiner::default()),
+                iterations: 128,
+                reprojection_threshold: config.max_reprojection_error_px,
+                seed: 7,
+                early_stop_min_iterations: 0,
+                early_stop_inlier_ratio: None,
+            }
+            .estimate(&corrs, camera),
+            PnpSolver::Dlt => PnPRansac {
+                reprojection_threshold: config.max_reprojection_error_px,
+                ..PnPRansac::default()
+            }
+            .estimate(&corrs, camera),
+        };
+        match report {
+            Some(report) if report.inliers.len() >= config.min_pnp_inliers => {
+                poses[next_image] = Some(report.pose);
+                triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
+                registrations_since_ba += 1;
+                if config.ba_every > 0 && registrations_since_ba >= config.ba_every {
+                    run_bundle_adjustment(
+                        camera,
+                        features,
+                        tracks,
+                        config,
+                        &mut poses,
+                        &mut track_point,
+                    )
+                    .map_err(IncrementalSfmError::Ba)?;
+                    registrations_since_ba = 0;
+                }
+            }
+            _ => failed[next_image] = true,
+        }
+    }
+
+    let registered = poses.iter().filter(|p| p.is_some()).count();
+    Ok((poses, track_point, registered))
 }
 
 /// Triangulate every track that has ≥2 registered observations and is not yet
@@ -1091,6 +1195,129 @@ mod tests {
         assert!(
             (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
             "camera-spacing ratio {est_ratio} != GT {gt_ratio} (similarity-invariant)"
+        );
+    }
+
+    /// Look-at world→camera poses on an arc of `n` cameras at `radius` from
+    /// `target`, spanning `span` radians (so neighbours keep a real baseline).
+    fn arc_cameras(n: usize, target: Point3<f64>, radius: f64, span: f64) -> Vec<Pose> {
+        let mut poses = Vec::new();
+        let denom = (n.max(2) - 1) as f64;
+        for k in 0..n {
+            let angle = -span / 2.0 + span * (k as f64) / denom;
+            let cam_center =
+                target + Vector3::new(radius * angle.sin(), 0.0, -radius * angle.cos());
+            let forward = (target - cam_center).normalize();
+            let right = forward.cross(&Vector3::new(0.0, 1.0, 0.0)).normalize();
+            let up = right.cross(&forward);
+            let r_c2w = nalgebra::Matrix3::from_columns(&[right, -up, forward]);
+            let q_c2w = UnitQuaternion::from_rotation_matrix(
+                &nalgebra::Rotation3::from_matrix_unchecked(r_c2w),
+            );
+            let q_w2c = q_c2w.inverse();
+            let t_w2c = -(q_w2c * cam_center.coords);
+            poses.push(Pose::from_world_to_camera(q_w2c, t_w2c));
+        }
+        poses
+    }
+
+    /// A scene with two geometrically disjoint components: a small dense "trap"
+    /// cluster (3 cameras, ~100 co-visible points → the *strongest-match* pairs in
+    /// the whole graph) far to one side, and a larger "main" component (8 cameras
+    /// over a grid). The trap's frustums never see the main grid and vice versa,
+    /// so they form two connected components; the strongest seed reconstructs only
+    /// the 3-camera trap, and recovering the main component needs the multi-seed
+    /// search to look past it. Cameras: indices 0..3 trap, 3..11 main.
+    fn build_two_component_scene() -> Scene {
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut points = Vec::new();
+        // Trap cluster: a dense cube at the origin (every trap camera sees all of
+        // it, so each trap pair carries the most matches).
+        for xi in -2..=2 {
+            for yi in -2..=2 {
+                for zi in -2..=1 {
+                    points.push(Point3::new(
+                        xi as f64 * 0.2,
+                        yi as f64 * 0.2,
+                        zi as f64 * 0.2,
+                    ));
+                }
+            }
+        }
+        // Main grid: a separate, larger structure offset far along +x.
+        for xi in -2..=2 {
+            for yi in -2..=2 {
+                for zi in 0..=2 {
+                    points.push(Point3::new(
+                        20.0 + xi as f64 * 0.3,
+                        yi as f64 * 0.3,
+                        zi as f64 * 0.3,
+                    ));
+                }
+            }
+        }
+        let mut poses = arc_cameras(3, Point3::origin(), 3.0, 0.5);
+        poses.extend(arc_cameras(8, Point3::new(20.0, 0.0, 0.0), 3.0, 1.2));
+        Scene {
+            camera,
+            points,
+            poses,
+        }
+    }
+
+    #[test]
+    fn multi_seed_escapes_strongest_isolated_cluster() {
+        let scene = build_two_component_scene();
+        let (features, pairwise) = render(&scene);
+
+        // The strongest-match pair is inside the 3-camera trap.
+        let strongest = pairwise
+            .iter()
+            .max_by_key(|p| p.matches.len())
+            .expect("a view graph");
+        assert!(
+            strongest.image_i < 3 && strongest.image_j < 3,
+            "expected the densest pair to be inside the trap cluster, got ({},{})",
+            strongest.image_i,
+            strongest.image_j
+        );
+
+        // One trial commits to that strongest seed and is trapped in the cluster.
+        let trapped = incremental_sfm(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &IncrementalSfmConfig {
+                min_seed_matches: 8,
+                min_pnp_inliers: 6,
+                seed_trials: 1,
+                ..IncrementalSfmConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            trapped.registered_images <= 3,
+            "single-seed should be stuck in the 3-camera trap, got {}",
+            trapped.registered_images
+        );
+
+        // The multi-seed search looks past the trap and recovers the 8-camera
+        // main component instead.
+        let escaped = incremental_sfm(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &IncrementalSfmConfig {
+                min_seed_matches: 8,
+                min_pnp_inliers: 6,
+                ..IncrementalSfmConfig::default() // seed_trials = 12
+            },
+        )
+        .unwrap();
+        assert!(
+            escaped.registered_images >= 7,
+            "multi-seed should recover the 8-camera main component, got {}",
+            escaped.registered_images
         );
     }
 

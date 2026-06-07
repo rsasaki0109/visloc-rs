@@ -181,18 +181,34 @@ tangential distortion `k1,k2,p1,p2`, undistorted with `cv2.undistortPoints`). It
 is a different building, a different camera, a different distortion model and 3×
 the resolution of South Building.
 
+Gerrard Hall exposed a third failure the first dataset never tripped: **the
+single strongest-match pair is a bad seed on repetitive architecture.** A building
+photographed around near-identical façades has its most-overlapping verified pair
+between two *adjacent* frames — which triangulate fine (they clear the parallax
+gate) yet form an isolated local cluster the reconstruction cannot grow out of.
+Seeding from it stalls at **3 / 100** registered images. The fix is COLMAP-style
+**robust initialisation** (`seed_trials`, the default): walk verified pairs in
+descending match order, grow each, and keep the reconstruction that registers the
+most images — committing as soon as one reaches at least half of its connected
+component. A well-connected scene (South Building, EuRoC) commits on the first
+pair that places, growing exactly one reconstruction at no extra cost; only a
+repetitive scene keeps searching, and pairs that fail the two-view baseline gate
+place nothing and are skipped for free, so an orbit whose strongest pairs are all
+low-parallax neighbours still reaches the first wide-baseline seed beyond them.
+
 | vs COLMAP's own model | South Building | **Gerrard Hall** |
 | --- | ---: | ---: |
 | Photos | 128 (3072×2304, SIMPLE_RADIAL) | 100 (5616×3744, OPENCV) |
-| Images registered | 128 / 128 | 95 / 100 |
-| Mean reprojection | 2.0 px | 3.2 px |
-| **Sim(3) camera-centre RMSE** | **0.58 cm** | **1.20 cm** (median 0.96 cm) |
+| Images registered | 128 / 128 | **98 / 100** (3 / 100 single-seed) |
+| Mean reprojection | 2.0 px | 1.7 px |
+| **Sim(3) camera-centre RMSE** | **0.58 cm** | **0.68 cm** (median 0.51 cm) |
 | Fraction of trajectory extent | 0.1 % (11 m) | 0.1 % (11 m) |
 
 Both land at **~0.1 % of the trajectory extent** against COLMAP's reference, from a
-completely independent SuperPoint frontend. The result is not a one-off: pure-Rust
-incremental SfM reconstructs real photo collections to COLMAP grade across cameras,
-distortion models and resolutions.
+completely independent SuperPoint frontend, and Gerrard Hall now reproduces from
+the default VLAD top-k=12 retrieval rather than a hand-found seed. The result is
+not a one-off: pure-Rust incremental SfM reconstructs real photo collections to
+COLMAP grade across cameras, distortion models and resolutions.
 
 ## Reproduce
 
