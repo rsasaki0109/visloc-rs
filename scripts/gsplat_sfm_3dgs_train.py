@@ -160,9 +160,12 @@ def main():
         print(f"floater prune: {n_before} -> {params['means'].shape[0]} (dropped {n_before - int(inside.sum())} outside SfM hull)", flush=True)
 
     if CMP_OUT:
+        # clamp requested comparison views to what was actually registered (a
+        # sparser scene may register fewer images than the default indices assume)
+        cmp_views = sorted({min(max(v, 0), len(views) - 1) for v in CMP_VIEWS})
         with torch.no_grad():
             tiles = []
-            for vi in CMP_VIEWS:
+            for vi in cmp_views:
                 out, _, _ = rasterization(params["means"], F.normalize(params["quats"], dim=-1),
                     torch.exp(params["scales"]), torch.sigmoid(params["opacities"]), colors(),
                     viewmats[vi:vi + 1], Ks, W, H, sh_degree=SH_DEG, render_mode="RGB", packed=False)
@@ -171,7 +174,7 @@ def main():
                 tiles.append(np.concatenate([gtv, ren], axis=1))
             grid = Image.fromarray(np.concatenate(tiles, axis=0))
             grid.resize((1600, int(grid.height * 1600 / grid.width))).save(CMP_OUT)
-            print(f"wrote comparison {CMP_OUT} (left=GT, right=3DGS DefaultStrategy; views {CMP_VIEWS})", flush=True)
+            print(f"wrote comparison {CMP_OUT} (left=GT, right=3DGS DefaultStrategy; views {cmp_views})", flush=True)
             # flythrough GIF at the (name-sorted) training poses
             order = sorted(range(len(views)), key=lambda k: views[k][1])
             frames = []

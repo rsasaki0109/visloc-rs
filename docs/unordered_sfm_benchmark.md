@@ -333,3 +333,26 @@ why, because the obvious culprit is wrong:
 So the splat's sharpness is a readout of the *renderer's* densification, not of
 the reconstruction's reprojection error: the pure-Rust SfM model is already
 accurate enough (1.4 px / ~1 cm) for photorealistic novel-view synthesis.
+
+### Not scene-specific — a second building, a different camera model
+
+To check this is the pipeline and not one lucky scene, the *same one command*
+runs on **Gerrard-Hall** — a different real building from COLMAP's datasets,
+shot with an `OPENCV` (k1,k2,p1,p2) camera rather than South-Building's
+`SIMPLE_RADIAL`. The pure-Rust SfM registers `98 / 100` photos at **1.72 px**
+mean reprojection, and the splat comes out just as crisp: brick courses, the
+columned portico, window frames and doors are all recovered.
+
+![Pure-Rust unordered SfM → 3DGS of Gerrard Hall: input photo (left) vs 3DGS render (right)](assets/sfm_3dgs_gerrard_hall.png)
+
+![Gerrard Hall 3DGS fly-through](assets/sfm_3dgs_gerrard_hall_flythrough.gif)
+
+```sh
+scripts/run_south_building_3dgs.sh --sb-root ~/datasets/gerrard-hall \
+    --name gerrard_hall --work target/gerrard_hall_3dgs --scale 0.25
+```
+
+The only per-scene knob is `--scale` (Gerrard-Hall's 21 MP frames are quarter-scaled
+to cap trainer VRAM); the camera model is read straight from the dataset's
+`cameras.txt`, so any `SIMPLE_PINHOLE` / `PINHOLE` / `SIMPLE_RADIAL` / `OPENCV`
+collection works unchanged.
