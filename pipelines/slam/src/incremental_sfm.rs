@@ -1321,18 +1321,18 @@ mod tests {
         );
     }
 
-    /// Build three views (identity rotation, small lateral offsets) of one world
-    /// point, with `outlier_views` images observing it at a planted off-by-50px
-    /// outlier keypoint instead of the true projection.
-    fn outlier_track_fixture(
-        outlier_views: &[usize],
-    ) -> (
+    type OutlierTrackFixture = (
         Camera,
         Vec<FeatureSet>,
         Vec<Option<Pose>>,
         Vec<Vec<(usize, usize)>>,
         Vec<Option<Point3<f64>>>,
-    ) {
+    );
+
+    /// Build three views (identity rotation, small lateral offsets) of one world
+    /// point, with `outlier_views` images observing it at a planted off-by-50px
+    /// outlier keypoint instead of the true projection.
+    fn outlier_track_fixture(outlier_views: &[usize]) -> OutlierTrackFixture {
         let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
         let point = Point3::new(0.1, -0.2, 5.0);
         let mut features = Vec::new();

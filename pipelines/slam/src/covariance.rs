@@ -118,7 +118,7 @@ fn fetch_block(sig: &[HashMap<usize, DMatrix<f64>>], a: usize, b: usize) -> Opti
 /// `col_rows[j]` lists the block rows present in column `j` of `L`, the diagonal
 /// (`== j`) first then the strictly-below rows ascending; `col_vals[j]` holds the
 /// matching `B×B` blocks (`col_vals[j][0] == L_jj`); `diag_inv[j] == L_jj⁻¹`.
-/// (This is exactly the factor representation [`crate::block_cholesky`] produces.)
+/// (This is exactly the factor representation `block_cholesky` produces.)
 /// Returns one `B×B` covariance per block column, in column order. `None` if the
 /// inputs disagree in length or a required on-pattern block is missing (a
 /// malformed factor).

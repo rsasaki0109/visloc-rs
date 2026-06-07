@@ -619,7 +619,12 @@ where
                 .get(&kp_idx)
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-1".to_owned());
-            tokens.push(format!("{} {} {}", format_f64(kp.x), format_f64(kp.y), point_id));
+            tokens.push(format!(
+                "{} {} {}",
+                format_f64(kp.x),
+                format_f64(kp.y),
+                point_id
+            ));
         }
         images_text.push_str(&tokens.join(" "));
         images_text.push('\n');

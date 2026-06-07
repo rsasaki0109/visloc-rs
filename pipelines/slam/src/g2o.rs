@@ -613,9 +613,9 @@ mod tests {
         let info: String = {
             let vals = [10.0, 10.0, 10.0, 400.0, 400.0, 99.0];
             let mut s = String::new();
-            for row in 0..6 {
+            for (row, &val) in vals.iter().enumerate() {
                 for col in row..6 {
-                    s.push_str(&format!(" {}", if row == col { vals[row] } else { 0.0 }));
+                    s.push_str(&format!(" {}", if row == col { val } else { 0.0 }));
                 }
             }
             s
