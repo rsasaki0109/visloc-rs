@@ -73,8 +73,19 @@
   <br>
   <em>COLMAP's South Building (128 unordered photos): input photo (left) vs a 3DGS (right) trained on the
   <strong>pure-Rust unordered-SfM model</strong> — the same reconstruction scored at ~1 cm vs COLMAP, no C++ mapper.
-  The same one command reproduces it on a <a href="docs/unordered_sfm_benchmark.md#not-scene-specific--a-second-building-a-different-camera-model">second building (Gerrard-Hall, a different camera model)</a>.
   See the <a href="docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model">SfM → 3DGS showcase</a>.</em>
+</p>
+
+<p align="center">
+  🏫 <strong>Not one lucky scene — the same one command on a second building</strong>
+  <br>
+  <img src="docs/assets/sfm_3dgs_gerrard_hall.png" alt="COLMAP Gerrard Hall: input photo (left) vs a 3D Gaussian Splat (right) trained on the pure-Rust unordered-SfM model, brick courses and the columned portico sharp" width="80%">
+  <br>
+  <img src="docs/assets/sfm_3dgs_gerrard_hall_flythrough.gif" alt="Gerrard Hall 3DGS fly-through rendered from the pure-Rust unordered-SfM model" width="55%">
+  <br>
+  <em>Gerrard-Hall (100 photos, an <strong>OPENCV</strong> camera vs South-Building's SIMPLE_RADIAL): input photo (left) vs the
+  3DGS (right), and a fly-through. Pure-Rust SfM registers 98/100 at 1.7 px and the splat comes out just as crisp —
+  the showcase is the pipeline, not the scene. <a href="docs/unordered_sfm_benchmark.md#not-scene-specific--a-second-building-a-different-camera-model">Details</a>.</em>
 </p>
 
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
