@@ -5,11 +5,11 @@
 //! changes — `O(n)` per keyframe, `O(n²)` to build a trajectory online. This
 //! smoother instead maintains the factorization across keyframes: each new
 //! keyframe grows the factor by one block variable
-//! ([`BlockSymbolic::append_variable`](crate::block_cholesky)) without re-analyzing,
+//! (`BlockSymbolic::append_variable` in `block_cholesky`) without re-analyzing,
 //! and each Gauss–Newton relinearization re-factors only the columns that changed
 //! and their elimination-tree ancestor paths
-//! ([`refactor_incremental`](crate::block_cholesky)). It is the driver on top of
-//! [`BlockIncrementalSolver`].
+//! (`refactor_incremental` in `block_cholesky`). It is the driver on top of
+//! `BlockIncrementalSolver`.
 //!
 //! Natural variable order (no fill-reducing permutation), so a new keyframe is
 //! always the highest index — a cheap top-of-tree edit. Gauss–Newton, not

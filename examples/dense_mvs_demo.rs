@@ -87,9 +87,13 @@ mod imp {
                 "--colmap" => colmap = Some(PathBuf::from(a.remove(i + 1))),
                 "--left-dir" => left_dir = Some(PathBuf::from(a.remove(i + 1))),
                 "--right-dir" => right_dir = Some(PathBuf::from(a.remove(i + 1))),
-                "--baseline" => baseline = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?),
+                "--baseline" => {
+                    baseline = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+                }
                 "--stride" => stride = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
-                "--max-frames" => max_frames = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
+                "--max-frames" => {
+                    max_frames = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+                }
                 "--out-ply" => out_ply = PathBuf::from(a.remove(i + 1)),
                 "--min-depth" => min_depth = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
                 "--max-depth" => max_depth = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
@@ -225,7 +229,16 @@ mod imp {
         for (sum, intensity, count) in &kept {
             let n = *count as f64;
             let g = ((intensity / n) * 255.0).round().clamp(0.0, 255.0) as u8;
-            writeln!(w, "{} {} {} {} {} {}", sum[0] / n, sum[1] / n, sum[2] / n, g, g, g)?;
+            writeln!(
+                w,
+                "{} {} {} {} {} {}",
+                sum[0] / n,
+                sum[1] / n,
+                sum[2] / n,
+                g,
+                g,
+                g
+            )?;
         }
         w.flush()?;
 
