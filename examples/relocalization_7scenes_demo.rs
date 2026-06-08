@@ -279,11 +279,14 @@ fn read_grouped_correspondences(
         if t.len() < 6 {
             continue;
         }
-        groups.entry(t[0] as i64).or_default().push(Correspondence2D3D {
-            point2d: Point2::new(t[1], t[2]),
-            point3d: Point3::new(t[3], t[4], t[5]),
-            confidence: t.get(6).map(|&c| c as f32),
-        });
+        groups
+            .entry(t[0] as i64)
+            .or_default()
+            .push(Correspondence2D3D {
+                point2d: Point2::new(t[1], t[2]),
+                point3d: Point3::new(t[3], t[4], t[5]),
+                confidence: t.get(6).map(|&c| c as f32),
+            });
     }
     Ok(groups.into_values().collect())
 }
@@ -350,7 +353,15 @@ fn frame_features(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args()?;
-    let camera = Camera::pinhole(0, args.width, args.height, args.fx, args.fy, args.cx, args.cy);
+    let camera = Camera::pinhole(
+        0,
+        args.width,
+        args.height,
+        args.fx,
+        args.fy,
+        args.cx,
+        args.cy,
+    );
     let extractor = CornerFeatureExtractor::new(CornerFeatureConfig {
         max_features: args.max_features,
         ..CornerFeatureConfig::default()
@@ -383,60 +394,61 @@ fn main() -> Result<(), Box<dyn Error>> {
     // In --correspondences-dir mode the 2D-3D matches are supplied externally, so
     // the in-process map / descriptor matching is not needed at all.
     if args.correspondences_dir.is_none() {
-    for &seq in &args.train_seqs {
-        for idx in (0..args.frames_per_seq).step_by(args.train_stride.max(1)) {
-            let base = frame_base(&args.dataset, seq, idx);
-            let Some((keypoints, descriptors)) = frame_features(&args, &extractor, seq, idx)? else {
-                continue;
-            };
-            let depth_path = base.with_extension("depth.png");
-            if !depth_path.exists() {
-                continue;
-            }
-            let depth = image::open(&depth_path)?.into_luma16();
-            let (r_cw, t_cw) = read_pose(&base.with_extension("pose.txt"))?;
-            train_keyframes += 1;
+        for &seq in &args.train_seqs {
+            for idx in (0..args.frames_per_seq).step_by(args.train_stride.max(1)) {
+                let base = frame_base(&args.dataset, seq, idx);
+                let Some((keypoints, descriptors)) = frame_features(&args, &extractor, seq, idx)?
+                else {
+                    continue;
+                };
+                let depth_path = base.with_extension("depth.png");
+                if !depth_path.exists() {
+                    continue;
+                }
+                let depth = image::open(&depth_path)?.into_luma16();
+                let (r_cw, t_cw) = read_pose(&base.with_extension("pose.txt"))?;
+                train_keyframes += 1;
 
-            let mut kf_ids = Vec::new();
-            let mut kf_descs = Vec::new();
-            let mut kf_positions = Vec::new();
-            for (kp, desc) in keypoints.iter().zip(descriptors.iter()) {
-                let u = kp.x.round().clamp(0.0, (args.width - 1) as f64) as u32;
-                let v = kp.y.round().clamp(0.0, (args.height - 1) as f64) as u32;
-                let raw = depth.get_pixel(u, v)[0];
-                if raw == 0 || raw == 65535 {
-                    continue;
+                let mut kf_ids = Vec::new();
+                let mut kf_descs = Vec::new();
+                let mut kf_positions = Vec::new();
+                for (kp, desc) in keypoints.iter().zip(descriptors.iter()) {
+                    let u = kp.x.round().clamp(0.0, (args.width - 1) as f64) as u32;
+                    let v = kp.y.round().clamp(0.0, (args.height - 1) as f64) as u32;
+                    let raw = depth.get_pixel(u, v)[0];
+                    if raw == 0 || raw == 65535 {
+                        continue;
+                    }
+                    let d = raw as f64 / 1000.0;
+                    if d < args.min_depth || d > args.max_depth {
+                        continue;
+                    }
+                    // Back-project pixel to the camera frame, then lift to world.
+                    let p_cam = Point3::new(
+                        (kp.x - args.cx) / args.fx * d,
+                        (kp.y - args.cy) / args.fy * d,
+                        d,
+                    );
+                    let p_world = Point3::from(r_cw * p_cam.coords + t_cw);
+                    let mut lm = Landmark::new(next_id, p_world);
+                    lm.descriptor = Some(desc.clone());
+                    map.landmarks.insert(next_id, lm);
+                    store.insert(next_id, desc.clone());
+                    kf_ids.push(next_id);
+                    kf_descs.push(desc.clone());
+                    kf_positions.push(p_world);
+                    next_id += 1;
                 }
-                let d = raw as f64 / 1000.0;
-                if d < args.min_depth || d > args.max_depth {
-                    continue;
+                if !kf_ids.is_empty() {
+                    keyframe_index.push(KeyframeIndex {
+                        global: normalized_mean(&kf_descs),
+                        landmark_ids: kf_ids,
+                        positions: kf_positions,
+                        descriptors: kf_descs,
+                    });
                 }
-                // Back-project pixel to the camera frame, then lift to world.
-                let p_cam = Point3::new(
-                    (kp.x - args.cx) / args.fx * d,
-                    (kp.y - args.cy) / args.fy * d,
-                    d,
-                );
-                let p_world = Point3::from(r_cw * p_cam.coords + t_cw);
-                let mut lm = Landmark::new(next_id, p_world);
-                lm.descriptor = Some(desc.clone());
-                map.landmarks.insert(next_id, lm);
-                store.insert(next_id, desc.clone());
-                kf_ids.push(next_id);
-                kf_descs.push(desc.clone());
-                kf_positions.push(p_world);
-                next_id += 1;
-            }
-            if !kf_ids.is_empty() {
-                keyframe_index.push(KeyframeIndex {
-                    global: normalized_mean(&kf_descs),
-                    landmark_ids: kf_ids,
-                    positions: kf_positions,
-                    descriptors: kf_descs,
-                });
             }
         }
-    }
     }
     println!(
         "map built: {train_keyframes} train keyframes -> {} landmarks",
@@ -477,8 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
 
             // Localize. Returns the estimated world->camera pose and inlier count.
-            let localized_pose: Option<(Pose, usize)> = if let Some(dir) =
-                &args.correspondences_dir
+            let localized_pose: Option<(Pose, usize)> = if let Some(dir) = &args.correspondences_dir
             {
                 // Externally-matched 2D-3D correspondences (e.g. LightGlue), one
                 // file per query: "x y X Y Z [conf]". Only the Rust PnP+RANSAC is
@@ -503,117 +514,119 @@ fn main() -> Result<(), Box<dyn Error>> {
                 frame_features(&args, &extractor, seq, idx).ok()?
             {
                 if args.retrieve_topk > 0 && !keyframe_index.is_empty() {
-                // Appearance-based retrieval: top-K most similar train keyframes.
-                let qg = normalized_mean(&descriptors);
-                let mut scored: Vec<(f32, usize)> = keyframe_index
-                    .iter()
-                    .enumerate()
-                    .map(|(i, kf)| (dot(&qg, &kf.global), i))
-                    .collect();
-                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-                let topk = scored.iter().take(args.retrieve_topk).map(|&(_, i)| i);
+                    // Appearance-based retrieval: top-K most similar train keyframes.
+                    let qg = normalized_mean(&descriptors);
+                    let mut scored: Vec<(f32, usize)> = keyframe_index
+                        .iter()
+                        .enumerate()
+                        .map(|(i, kf)| (dot(&qg, &kf.global), i))
+                        .collect();
+                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                    let topk = scored.iter().take(args.retrieve_topk).map(|&(_, i)| i);
 
-                if args.merged_submap {
-                    // Merge the retrieved keyframes into one cloud, then one
-                    // match + PnP via the pipeline (suffers the duplicate-
-                    // descriptor ratio-test pathology described on KeyframeIndex).
-                    let mut ids: Vec<u64> = Vec::new();
-                    for i in topk {
-                        ids.extend_from_slice(&keyframe_index[i].landmark_ids);
-                    }
-                    let submap = InMemoryMapProvider::from_provider_landmarks(&provider, ids);
-                    let query = QueryImage {
-                        camera: camera.clone(),
-                        keypoints,
-                        descriptors,
-                    };
-                    let r = pipeline.localize_with_provider(&query, &submap);
-                    r.pose.filter(|_| r.success).map(|p| (p, r.inlier_count))
-                } else {
-                    let matcher = BruteForceMatcher {
-                        ratio: Some(args.ratio),
-                    };
-                    if args.accumulate_corrs {
-                        // Match each keyframe separately, keep the single best
-                        // match per query keypoint across keyframes, then ONE PnP
-                        // over the pooled correspondences. Pooling mixes 3D points
-                        // from keyframes whose depth registers slightly
-                        // differently — an internally-inconsistent patchwork that
-                        // caps pose accuracy (kept as an ablation knob).
-                        let mut best: std::collections::HashMap<
-                            usize,
-                            (f32, Point3<f64>, Option<f32>),
-                        > = std::collections::HashMap::new();
+                    if args.merged_submap {
+                        // Merge the retrieved keyframes into one cloud, then one
+                        // match + PnP via the pipeline (suffers the duplicate-
+                        // descriptor ratio-test pathology described on KeyframeIndex).
+                        let mut ids: Vec<u64> = Vec::new();
                         for i in topk {
-                            let kf = &keyframe_index[i];
-                            for m in matcher.match_descriptors(&descriptors, &kf.descriptors) {
-                                let Some(&point3d) = kf.positions.get(m.train_index) else {
-                                    continue;
-                                };
-                                best.entry(m.query_index)
-                                    .and_modify(|e| {
-                                        if m.distance < e.0 {
-                                            *e = (m.distance, point3d, m.confidence);
-                                        }
-                                    })
-                                    .or_insert((m.distance, point3d, m.confidence));
-                            }
+                            ids.extend_from_slice(&keyframe_index[i].landmark_ids);
                         }
-                        let corrs: Vec<Correspondence2D3D> = best
-                            .into_iter()
-                            .filter_map(|(qi, (_, point3d, confidence))| {
-                                keypoints.get(qi).map(|&point2d| Correspondence2D3D {
-                                    point2d,
-                                    point3d,
-                                    confidence,
-                                })
-                            })
-                            .collect();
-                        estimator
-                            .estimate(&corrs, &camera)
-                            .filter(|r| r.inliers.len() >= args.min_inliers)
-                            .map(|r| (r.pose, r.inliers.len()))
+                        let submap = InMemoryMapProvider::from_provider_landmarks(&provider, ids);
+                        let query = QueryImage {
+                            camera: camera.clone(),
+                            keypoints,
+                            descriptors,
+                        };
+                        let r = pipeline.localize_with_provider(&query, &submap);
+                        r.pose.filter(|_| r.success).map(|p| (p, r.inlier_count))
                     } else {
-                        // Per-keyframe PnP (the default): match and PnP against
-                        // EACH retrieved keyframe on its own — each keyframe's
-                        // depth-lifted points form ONE internally-consistent 3D
-                        // set — and keep the pose with the most inliers. This
-                        // keeps top-K recall while recovering single-keyframe
-                        // accuracy, and is the dominant accuracy lever (mixing
-                        // keyframes' independently-registered depth is what hurt).
-                        let mut best_pose: Option<(Pose, usize)> = None;
-                        for i in topk {
-                            let kf = &keyframe_index[i];
-                            let corrs: Vec<Correspondence2D3D> = matcher
-                                .match_descriptors(&descriptors, &kf.descriptors)
-                                .iter()
-                                .filter_map(|m| {
-                                    match (
-                                        keypoints.get(m.query_index),
-                                        kf.positions.get(m.train_index),
-                                    ) {
-                                        (Some(&point2d), Some(&point3d)) => {
-                                            Some(Correspondence2D3D {
-                                                point2d,
-                                                point3d,
-                                                confidence: m.confidence,
-                                            })
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                                .collect();
-                            if let Some(r) = estimator.estimate(&corrs, &camera) {
-                                if r.inliers.len() >= args.min_inliers
-                                    && best_pose.as_ref().map_or(true, |(_, n)| r.inliers.len() > *n)
-                                {
-                                    best_pose = Some((r.pose, r.inliers.len()));
+                        let matcher = BruteForceMatcher {
+                            ratio: Some(args.ratio),
+                        };
+                        if args.accumulate_corrs {
+                            // Match each keyframe separately, keep the single best
+                            // match per query keypoint across keyframes, then ONE PnP
+                            // over the pooled correspondences. Pooling mixes 3D points
+                            // from keyframes whose depth registers slightly
+                            // differently — an internally-inconsistent patchwork that
+                            // caps pose accuracy (kept as an ablation knob).
+                            let mut best: std::collections::HashMap<
+                                usize,
+                                (f32, Point3<f64>, Option<f32>),
+                            > = std::collections::HashMap::new();
+                            for i in topk {
+                                let kf = &keyframe_index[i];
+                                for m in matcher.match_descriptors(&descriptors, &kf.descriptors) {
+                                    let Some(&point3d) = kf.positions.get(m.train_index) else {
+                                        continue;
+                                    };
+                                    best.entry(m.query_index)
+                                        .and_modify(|e| {
+                                            if m.distance < e.0 {
+                                                *e = (m.distance, point3d, m.confidence);
+                                            }
+                                        })
+                                        .or_insert((m.distance, point3d, m.confidence));
                                 }
                             }
+                            let corrs: Vec<Correspondence2D3D> = best
+                                .into_iter()
+                                .filter_map(|(qi, (_, point3d, confidence))| {
+                                    keypoints.get(qi).map(|&point2d| Correspondence2D3D {
+                                        point2d,
+                                        point3d,
+                                        confidence,
+                                    })
+                                })
+                                .collect();
+                            estimator
+                                .estimate(&corrs, &camera)
+                                .filter(|r| r.inliers.len() >= args.min_inliers)
+                                .map(|r| (r.pose, r.inliers.len()))
+                        } else {
+                            // Per-keyframe PnP (the default): match and PnP against
+                            // EACH retrieved keyframe on its own — each keyframe's
+                            // depth-lifted points form ONE internally-consistent 3D
+                            // set — and keep the pose with the most inliers. This
+                            // keeps top-K recall while recovering single-keyframe
+                            // accuracy, and is the dominant accuracy lever (mixing
+                            // keyframes' independently-registered depth is what hurt).
+                            let mut best_pose: Option<(Pose, usize)> = None;
+                            for i in topk {
+                                let kf = &keyframe_index[i];
+                                let corrs: Vec<Correspondence2D3D> = matcher
+                                    .match_descriptors(&descriptors, &kf.descriptors)
+                                    .iter()
+                                    .filter_map(|m| {
+                                        match (
+                                            keypoints.get(m.query_index),
+                                            kf.positions.get(m.train_index),
+                                        ) {
+                                            (Some(&point2d), Some(&point3d)) => {
+                                                Some(Correspondence2D3D {
+                                                    point2d,
+                                                    point3d,
+                                                    confidence: m.confidence,
+                                                })
+                                            }
+                                            _ => None,
+                                        }
+                                    })
+                                    .collect();
+                                if let Some(r) = estimator.estimate(&corrs, &camera) {
+                                    if r.inliers.len() >= args.min_inliers
+                                        && best_pose
+                                            .as_ref()
+                                            .map_or(true, |(_, n)| r.inliers.len() > *n)
+                                    {
+                                        best_pose = Some((r.pose, r.inliers.len()));
+                                    }
+                                }
+                            }
+                            best_pose
                         }
-                        best_pose
                     }
-                }
                 } else {
                     // No retrieval: match against the whole global map.
                     let query = QueryImage {
@@ -678,9 +691,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         100.0 * localized as f64 / total.max(1) as f64
     );
     if localized > 0 {
-        println!("mean inliers / localized: {:.1}", inlier_sum as f64 / localized as f64);
-        println!("median translation error: {:.3} m", median(&mut trans_errors));
-        println!("median rotation error:    {:.2} deg", median(&mut rot_errors));
+        println!(
+            "mean inliers / localized: {:.1}",
+            inlier_sum as f64 / localized as f64
+        );
+        println!(
+            "median translation error: {:.3} m",
+            median(&mut trans_errors)
+        );
+        println!(
+            "median rotation error:    {:.2} deg",
+            median(&mut rot_errors)
+        );
         println!(
             "within 5cm/5deg: {within_5_5} ({:.1}% of all test frames)",
             100.0 * within_5_5 as f64 / total.max(1) as f64

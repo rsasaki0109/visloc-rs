@@ -1883,9 +1883,9 @@ mod tests {
         .expect("BA should succeed");
 
         // The fixed prefix (poses 0,1,2) is bit-for-bit unchanged.
-        for f in 0..3 {
+        for (f, initial_pose) in initial.iter().enumerate().take(3) {
             let d = (refinement.refined_poses[f].world_to_camera.translation
-                - initial[f].world_to_camera.translation)
+                - initial_pose.world_to_camera.translation)
                 .norm();
             assert!(d < 1e-12, "fixed prefix pose {f} moved by {d}");
         }

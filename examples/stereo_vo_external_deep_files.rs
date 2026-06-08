@@ -24,17 +24,16 @@ use std::path::{Path, PathBuf};
 use nalgebra::Vector3;
 use visloc_rs::{
     close_loops_on_vo_trajectory, parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt,
-    parse_stereo_vo_imu_samples_txt, read_external_deep_features_txt, read_external_deep_matches_txt,
-    read_kitti_oxts_dir, reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
-    slice_imu_samples_for_keyframes, write_colmap_binary_model_for_3dgs,
+    parse_stereo_vo_imu_samples_txt, read_external_deep_features_txt,
+    read_external_deep_matches_txt, read_kitti_oxts_dir, reconstruct_stereo_vo_with_ba,
+    refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes, write_colmap_binary_model_for_3dgs,
     write_colmap_reconstruction_for_3dgs, write_colmap_text_model_for_3dgs,
-    write_online_ba_imu_state_csv, BaConfig, Camera, VoLoopClosureConfig,
-    DescriptorMatch, GravityPrior, KabschRansacConfig, LandmarkInit, LinearSolver,
-    OnlineStereoVoBa, OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose,
-    PoseTrajectory, PositionPrior, PositionPriorObservation, RobustKernel, StereoRelativePoseMode,
-    StereoVoBaConfig, StereoVoBaImuInput, StereoVoBaImuSample, StereoVoFrontend,
-    StereoVoFrontendConfig, StereoVoPairDiagnostics, TrackingEvent, TrackingState,
-    TrajectorySample,
+    write_online_ba_imu_state_csv, BaConfig, Camera, DescriptorMatch, GravityPrior,
+    KabschRansacConfig, LandmarkInit, LinearSolver, OnlineStereoVoBa, OnlineStereoVoBaConfig,
+    PerPoseGravityObservation, PerPoseGravityPrior, Pose, PoseTrajectory, PositionPrior,
+    PositionPriorObservation, RobustKernel, StereoRelativePoseMode, StereoVoBaConfig,
+    StereoVoBaImuInput, StereoVoBaImuSample, StereoVoFrontend, StereoVoFrontendConfig,
+    StereoVoPairDiagnostics, TrackingEvent, TrackingState, TrajectorySample, VoLoopClosureConfig,
 };
 
 #[derive(Debug)]
