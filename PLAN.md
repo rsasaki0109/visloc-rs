@@ -40,6 +40,175 @@ with robust kernels, sparse Cholesky, Schur BA, real-image VO, and loop-closure
 candidate diagnostics. The current focus is KITTI-style stereo VO accuracy and
 public-data evidence, not milestone-score reporting.
 
+## Session Handoff 2026-06-11 — ratio-lever closure, frontend probes, DPV-SLAM++ battle setup, crate-root refactors
+
+This section is the full handoff for the 2026-06-11 session. Four threads ran
+in parallel: (A) closing the loop/odometry-ratio calibration vein, (B)
+frontend-side probes against the residual EuRoC SOTA gap, (C) standing up the
+DPV-SLAM++ KITTI battle, and (D) crate-root decomposition refactors. Auto-memory
+`project_euroc_sota_gap` has the condensed version of (A)/(B); this section is
+authoritative for resume steps.
+
+### A. Loop/odometry ratio calibration — CLOSED, all variants null
+
+The anisotropic-loop-edge work (commit `797d3ec`) had flagged "calibrate the
+loop/odometry ratio (give sequential edges proper info too)" as the highest-EV
+follow-up. Both forms are now measured and dead:
+
+- Scalar global ratio (`--loop-odometry-weight`, previous session): null on
+  MH_03 (W∈{1,4,16,64} → SE3 within ±1%) and KITTI seq00 (W=16 −0.6% / +0.3%).
+  Root cause is mathematical: sequential edges have identically-zero residual
+  at the initial estimate, so a uniform multiplier moves nothing; drift
+  redistribution depends only on relative weights along the chain.
+- Heterogeneous per-edge weights (this session): `--loop-seq-quality-weights`
+  weighted each sequential edge by its frontend PnP inlier count
+  (mean-normalised, clamped [0.1,10], post-clamp re-normalised after a codex
+  review caught the clamp shifting the mean) plus a renamed `--loop-odom-ratio`
+  global knob. Measured on all three benchmarks, full pipeline (online-ba w30 +
+  history 20 + loop + two-view + edge-info): MH_03 SE3 0.0582→0.0591 (slightly
+  worse), MH_05 0.0831→0.0836 (neutral), KITTI seq00 SE3/Sim3 1.2265/0.9661 →
+  1.2287/0.9736 (neutral, same 34 loops). Root cause: after online BA the chain
+  quality is homogeneous (EuRoC inliers ~700–1100 throughout; KITTI drift is
+  uniform accumulation, not localized soft segments) — there is no structure
+  for relative stiffness to exploit.
+- Both knobs were reverted (pure discard, nothing committed); the patch is
+  saved at `/tmp/loop_ratio_knobs_discarded.patch`. If ever revisited, the only
+  untried form is a real per-edge 6×6 covariance from the frontend PnP Hessian,
+  but the homogeneity finding predicts that is also null on these benchmarks.
+
+Conclusion reaffirmed: the residual SOTA gap (MH_03 ~2.5× ORB-SLAM3) lives in
+between-loop odometry drift — frontend territory, not PGO weighting.
+
+### B. Frontend probes against the residual gap (partial, resumable)
+
+- **Confidence-gate sweep (MH_03, full pipeline)** — verdict effectively in:
+  the default gates are already optimal. Baseline sc/tc = 0.5/0.5: SE3 0.0582 /
+  Sim3 0.0513. Measured: c33 (0.3/0.3) SE3 0.0652 / Sim3 0.0516 (worse, 311
+  loops); c77 (0.7/0.7) SE3 0.0658 / Sim3 0.0525 (worse despite 336 loops).
+  Both directions hurt → 0.5/0.5 sits at the optimum; the mixed configs
+  (0.3/0.7, 0.7/0.3) were skipped when the sweep was stopped on user request.
+  Script: `/tmp/frontend_gate_sweep.sh`, outputs `/tmp/gate_sweep_mh03/`.
+- **4096-keypoint SuperPoint export — COMPLETE, A/B NOT yet run.** Features at
+  `/tmp/sp_MH_03_4k` (2700 frames, `--max-keypoints 4096`, vs the 2048-kp
+  baseline `/tmp/sp_MH_03`). Resume: run the full-pipeline command from the
+  gate-sweep script with `FEATDIR=/tmp/sp_MH_03_4k`, sc/tc 0.5/0.5, and compare
+  against SE3 0.0582 / Sim3 0.0513. This is the direct "denser frontend vs
+  between-loop drift" test.
+
+### C. DPV-SLAM++ KITTI seq00 battle — setup COMPLETE, runs not started
+
+Key reframing (codex gpt-5.5-xhigh + web-research agent, independently
+converging): the previous session's "divergence" (Sim3 134 m, stopped ~frame
+2270) was almost certainly a COMPLETED stride-2 run, not a crash — the paper's
+own proximity-only DPV-SLAM scores 112.8 m on seq00 (vs DPVO 113.21 m), and the
+official eval is stride 2 (4541/2 ≈ 2271 frames). Proximity loop closure
+cannot fix monocular scale drift by construction; the paper's good seq00 number
+is **DPV-SLAM++ = 8.30 m**, which needs `CLASSIC_LOOP_CLOSURE` (DBoW2 retrieval
++ Sim(3) pose graph). Also: `evaluate_kitti.py` uses `BACKEND_THRESH 32`
+(KITTI-specific; config default 64 admits geometrically wrong long-range edges
+under scale drift) and the color `image_2` camera (we have only grayscale
+`image_0` locally — slight off-distribution caveat to note with any result).
+
+Setup completed this session (user-approved):
+
+- DBoW2 submodule cloned and built to `~/dpvo_battle/local` (needs
+  `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` with cmake 3.28).
+- DPRetrieval pip-installed into `~/dpvo_battle/venv`. Gotcha:
+  `~/.local/bin/cmake` is a broken python-wrapper cmake; install with
+  `PATH=$HOME/dpvo_battle/venv/bin:/usr/bin:/bin` so the venv pip and
+  `/usr/bin/cmake` are used. Runtime linkage verified (`ldd` resolves
+  `libDBoW2.so` via rpath; `LongTermLoopClosure` imports).
+- `ORBvoc.txt` (145 MB, ORB-SLAM3 vocabulary) extracted at
+  `~/dpvo_battle/DPVO/` (the classic LC looks it up relative to cwd).
+- Runner ready: `/tmp/dpvo_kitti00.sh <name> <stride> [--opts ...]` — feeds
+  `~/datasets/kitti_seq00_full/image_0` with exact P0 intrinsics
+  (`718.856 718.856 607.1928 185.2157`), saves the TUM trajectory, and
+  evaluates SE3/Sim3 ATE by Umeyama against
+  `~/datasets/kitti_seq00_full2/poses_00.txt` with stride-aware frame indexing.
+
+Planned runs (GPU was busy with the 4k export at close; it is now free):
+
+1. `bash /tmp/dpvo_kitti00.sh dpvslampp_s2 2 --opts LOOP_CLOSURE True CLASSIC_LOOP_CLOSURE True BACKEND_THRESH 32.0`
+   — paper-faithful DPV-SLAM++; expect ~8.3 m (paper, color) modulo grayscale.
+2. `bash /tmp/dpvo_kitti00.sh dpvo_s2 2` — plain DPVO sanity baseline (~113 m)
+   to confirm the pipeline reproduces the paper baseline on our data.
+3. Optional stride-1: add `BUFFER_SIZE 8192` (4541 frames overflow the default
+   4096 keyframe buffer — documented upstream as issue #23).
+
+visloc reference on the same data: online-ba + loop + two-view + edge-info,
+stride 1 → Sim3 0.966 m (and the committed loop-only benchmark doc reports
+2.57 m). Even paper-best mono (8.3 m) is ~8.6× behind the stereo metric stack;
+the battle's point is a measured same-data comparison, framed against the
+DROID/DPVO comparison memory (`project_vslam_oss_comparison`).
+
+codex CLI usage notes (it is set up as a review/advice subagent): its
+bubblewrap sandbox cannot exec anything in this environment (`bwrap: loopback
+EPERM`) → pipe all context via stdin; `gpt-5.5-codex` is not available on the
+ChatGPT account — use the default `gpt-5.5` with
+`model_reasoning_effort="xhigh"` (already in `~/.codex/config.toml`). It does
+have web access (cited ar5iv + GitHub issues correctly).
+
+### D. Crate-root decomposition refactors
+
+- **DONE, merged to main (`a286f73`):** `pipelines/slam/src/lib.rs` (6297
+  lines) → `online_slam.rs` (1906: configs + reloc/refinement/IMU state +
+  pipeline + result), `loop_closure.rs` (1061: candidate scan + EM/PnP/hybrid
+  verifiers + constraints), `pose_graph.rs` (2592: SE(3) graph, kernels, GNC,
+  solvers, g2o parse), `report.rs` (373: HTML/SVG), `loop_gating.rs` (262:
+  PCM + covariance admission gates, crate-internal) + a re-exporting lib.rs.
+  Pure moves + five `pub(crate)` promotions; public API paths unchanged
+  (glob re-exports); fmt/clippy/165 tests green; line-accounting proved no
+  loss/duplication. codex architectural review: all five boundaries AGREE;
+  second-pass suggestions (not acted on): split `pose_graph.rs` into
+  types/solver/io, split `online_slam.rs` by concern, optional rename
+  `loop_gating` → `loop_admission`.
+- **IN FLIGHT, branch `refactor/split-tracking-lib`, WIP commit `4521e07` —
+  DOES NOT COMPILE:** `pipelines/tracking/src/lib.rs` (6355 lines) →
+  `trajectory.rs` (2616: trajectory types, TUM/KITTI parsing, Umeyama,
+  ATE/RPE/KITTI-odometry evaluation, alignment tests), `report.rs` (1039:
+  CSV/SVG/HTML for trajectories + tracking timelines), `motion.rs` (1445:
+  motion models + VO frontend priors + IMU tests), `tracker.rs` (1099:
+  Tracker/ImageTracker/FrameLocalizer/covisibility + tests), lib.rs keeps the
+  core tracking types (156 lines). 81 remaining errors, all mechanical
+  cross-module visibility: promote to `pub(crate)` on the definition side —
+  helper fns `optional_f64_json/csv`, `optional_usize_json`,
+  `optional_vec3_json`, `optional_frame_id_json`, `push_metric_card`,
+  `format_optional_metric/count/frame_id`, `parse_tum_f64`,
+  `parse_tum_frame_id`, `parse_kitti_f64`, `export_f64`,
+  `relative_camera_to_world`, `relative_pose_error_statistics_json`,
+  `trajectory_svg`, `trajectory_comparison_svg`,
+  `trajectory_evaluation_failures_json`, `cumulative_reference_distances`,
+  `first_index_for_distance`; private members `PoseTrajectory::samples`
+  (field), several `::new` associated fns, `trajectory_alignment_transform`,
+  `to_json_inline`; plus one `E0282` type annotation at `report.rs:75`.
+  After it compiles: consider moving the parse/json helpers that landed in
+  `report.rs` back into `trajectory.rs` (they are parsing, not reporting),
+  then fmt/clippy/test, codex boundary review, merge. The split scripts are
+  `/tmp/split_slam_lib.py` and `/tmp/split_tracking_lib.py` (the latter has
+  the generalized backward-walk over docs/attrs — reusable for the next
+  targets).
+- Remaining oversized files (next candidates): `crates/vision/src/stereo_vo.rs`
+  (4063), `pipelines/slam/tests/online_slam.rs` (4696, test-only),
+  `examples/euroc_online_slam_vi_image_demo.rs` (2872),
+  `pipelines/slam/src/stereo_vo_ba.rs` (2738).
+- Process rule that mattered: **do not `cargo build --release` while a
+  benchmark A/B that compares against a previously-built binary is pending**
+  (debug-profile `cargo check/test` does not touch
+  `target/release/examples/*`). The release binary currently on disk was built
+  from pre-refactor main; the refactor is behavior-preserving (tests), but
+  rebuild + a one-run MH_03 baseline sanity check (expect SE3 0.0582) is the
+  cheap fine-grained verification before trusting new release-binary numbers.
+
+### E. Open levers, ranked (state of the gap-hunt after this session)
+
+1. DPV-SLAM++ battle runs (C) — everything staged, ~30 min of GPU.
+2. 4096-kp frontend A/B (B) — features exported, one 10-min CPU run + eval.
+3. Finish the tracking-crate split (D) — ~30 min of mechanical visibility
+   fixes + review.
+4. If the 4k A/B is null: the frontend vein on EuRoC narrows to matcher-side
+   changes (temporal match density / track length), or accept ~2.5× as the
+   stack's plateau and move the gap-hunt to KITTI between-loop drift.
+
 ## Project Goal
 
 `visloc-rs` is a Rust foundation library for map-based visual localization and
