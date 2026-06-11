@@ -961,4 +961,81 @@ mod tests {
         assert_eq!(lines.len(), 1, "header line only");
         std::fs::remove_dir_all(&dir).ok();
     }
+    /// Lock down the pair_diagnostics <-> temporal_matches_per_pair index
+    /// alignment of `exclude_rescued_pair_matches` when the BA window is
+    /// extended backward (`ext_start > 0`): a rescued pair inside the
+    /// extended window must blank its matches (track count drops), a rescued
+    /// pair before `ext_start` must change nothing.
+    #[test]
+    fn exclude_rescued_pair_matches_respects_extended_window_alignment() {
+        let run = |rescued_pair: Option<usize>| {
+            let (camera, baseline, left, right, stereo, temporal) =
+                build_synthetic_sequence(15, 0.4);
+            let extractor = CornerFeatureExtractor::new(CornerFeatureConfig::default());
+            let matcher = BruteForceMatcher { ratio: Some(0.8) };
+            let frontend = StereoVoFrontend::new_with(
+                camera,
+                baseline,
+                StereoVoFrontendConfig::default(),
+                extractor,
+                matcher,
+            );
+            let mut online = OnlineStereoVoBa::new(
+                frontend,
+                OnlineStereoVoBaConfig {
+                    trigger_every_frames: 0,
+                    window_size: 5,
+                    ba_config: StereoVoBaConfig::default(),
+                    imu_input: None,
+                    local_map_history: 5,
+                    exclude_rescued_pair_matches: true,
+                },
+            );
+            for i in 0..left.len() {
+                let temp = if i == 0 {
+                    None
+                } else {
+                    Some(temporal[i - 1].as_slice())
+                };
+                online
+                    .process_pair_with_matches(
+                        left[i].clone(),
+                        right[i].clone(),
+                        Some(stereo[i].as_slice()),
+                        temp,
+                    )
+                    .expect("frontend processes synthetic pair");
+            }
+            if let Some(pair) = rescued_pair {
+                online.frontend.pair_diagnostics[pair].rotation_spike_rescued = true;
+            }
+            // 15 poses, window 5 -> start = 10; history 5 -> ext_start = 5.
+            let stats = online.run_ba_now().expect("BA runs");
+            let refinement = stats.result.expect("BA solves");
+            (refinement.track_count, refinement.observation_count)
+        };
+
+        let (clean_tracks, clean_obs) = run(None);
+        // Pair 7 (frames 7->8) sits inside the extended window [5, 15):
+        // blanking it splits every track crossing that pair.
+        let (rescued_tracks, rescued_obs) = run(Some(7));
+        // Pair 2 (frames 2->3) is before ext_start = 5: out of window, the
+        // BA input must be untouched.
+        let (outside_tracks, outside_obs) = run(Some(2));
+
+        assert!(clean_tracks > 0, "harness must build tracks");
+        assert_eq!(
+            (outside_tracks, outside_obs),
+            (clean_tracks, clean_obs),
+            "a rescued pair before ext_start must not affect the BA input"
+        );
+        // Blanking the in-window pair splits every track crossing it: the
+        // observation total stays (both fragments survive min_track_length
+        // in this harness) but the track count rises.
+        assert!(
+            rescued_tracks > clean_tracks,
+            "blanking an in-window rescued pair must split tracks \
+             (clean {clean_tracks}, rescued {rescued_tracks})"
+        );
+    }
 }
