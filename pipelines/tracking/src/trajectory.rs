@@ -1782,6 +1782,70 @@ impl PoseTrajectory {
     }
 }
 
+fn parse_tum_frame_id(
+    value: &str,
+    line_number: usize,
+    line: &str,
+) -> Result<FrameId, TumTrajectoryParseError> {
+    value.parse::<FrameId>().map_err(|error| {
+        TumTrajectoryParseError::new(line_number, line, format!("invalid frame_id: {error}"))
+    })
+}
+
+fn parse_tum_f64(
+    value: &str,
+    field_name: &str,
+    line_number: usize,
+    line: &str,
+) -> Result<f64, TumTrajectoryParseError> {
+    value.parse::<f64>().map_err(|error| {
+        TumTrajectoryParseError::new(line_number, line, format!("invalid {field_name}: {error}"))
+    })
+}
+
+fn parse_kitti_f64(
+    value: &str,
+    field_index: usize,
+    line_number: usize,
+    line: &str,
+) -> Result<f64, KittiTrajectoryParseError> {
+    value.parse::<f64>().map_err(|error| {
+        KittiTrajectoryParseError::new(
+            line_number,
+            line,
+            format!("invalid field {field_index}: {error}"),
+        )
+    })
+}
+
+fn cumulative_reference_distances(matched: &[(&TrajectorySample, &TrajectorySample)]) -> Vec<f64> {
+    let mut distances = Vec::with_capacity(matched.len());
+    let mut cumulative = 0.0;
+    for (index, (_, reference_sample)) in matched.iter().enumerate() {
+        if index > 0 {
+            let previous = matched[index - 1].1.camera_center_world();
+            let current = reference_sample.camera_center_world();
+            cumulative += (current - previous).norm();
+        }
+        distances.push(cumulative);
+    }
+    distances
+}
+
+fn first_index_for_distance(distances: &[f64], target_distance: f64) -> Option<usize> {
+    distances
+        .iter()
+        .position(|distance| *distance >= target_distance)
+}
+
+fn relative_camera_to_world(first: &TrajectorySample, last: &TrajectorySample) -> SE3 {
+    let first_camera_to_world = first.pose.world_to_camera.inverse();
+    let last_camera_to_world = last.pose.world_to_camera.inverse();
+    first_camera_to_world
+        .inverse()
+        .compose(&last_camera_to_world)
+}
+
 #[cfg(test)]
 mod umeyama_alignment_tests {
     use super::*;

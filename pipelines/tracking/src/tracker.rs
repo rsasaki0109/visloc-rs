@@ -966,6 +966,406 @@ where
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackingStats {
+    pub first_frame_id: Option<FrameId>,
+    pub last_frame_id: Option<FrameId>,
+    pub frame_count: usize,
+    pub successful_frame_count: usize,
+    pub failed_frame_count: usize,
+    pub lost_count: usize,
+    pub relocalization_count: usize,
+    pub pose_prior_used_count: usize,
+    pub external_localization_prior_used_count: usize,
+    pub tracking_quality_gate_failure_count: usize,
+    pub total_inlier_count: usize,
+    pub total_correspondence_count: usize,
+    pub covisibility_local_map_used_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackingEvaluationConfig {
+    pub min_success_rate: Option<f64>,
+    pub max_failure_rate: Option<f64>,
+    pub max_lost_count: Option<usize>,
+    pub max_tracking_quality_gate_failure_count: Option<usize>,
+    pub min_external_localization_prior_usage_rate: Option<f64>,
+    pub min_overall_inlier_ratio: Option<f64>,
+    pub min_mean_inliers_per_successful_frame: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackingEvaluationResult {
+    pub passed: bool,
+    pub stats: TrackingStats,
+    pub config: TrackingEvaluationConfig,
+    pub failures: Vec<TrackingEvaluationFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackingEvaluationFailure {
+    SuccessRateTooLow { actual: f64, minimum: f64 },
+    FailureRateTooHigh { actual: f64, maximum: f64 },
+    LostCountTooHigh { actual: usize, maximum: usize },
+    QualityGateFailureCountTooHigh { actual: usize, maximum: usize },
+    ExternalLocalizationPriorUsageRateTooLow { actual: f64, minimum: f64 },
+    OverallInlierRatioTooLow { actual: f64, minimum: f64 },
+    MeanInliersPerSuccessfulFrameTooLow { actual: f64, minimum: f64 },
+}
+
+impl TrackingStats {
+    pub fn from_results(results: &[TrackingResult]) -> Self {
+        let mut stats = Self::default();
+        for result in results {
+            if stats.first_frame_id.is_none() {
+                stats.first_frame_id = Some(result.frame_id);
+            }
+            stats.last_frame_id = Some(result.frame_id);
+            stats.frame_count += 1;
+            if result.localization.success {
+                stats.successful_frame_count += 1;
+            } else {
+                stats.failed_frame_count += 1;
+            }
+            if result.event == TrackingEvent::Lost {
+                stats.lost_count += 1;
+            }
+            if result.event == TrackingEvent::Relocalized {
+                stats.relocalization_count += 1;
+            }
+            if result.used_pose_prior {
+                stats.pose_prior_used_count += 1;
+            }
+            if result.used_external_localization_prior {
+                stats.external_localization_prior_used_count += 1;
+            }
+            if result.tracking_failure_reason.is_some() {
+                stats.tracking_quality_gate_failure_count += 1;
+            }
+            stats.total_inlier_count += result.localization.inlier_count;
+            stats.total_correspondence_count += result.localization.correspondence_count;
+            if result.covisibility_local_map_size.is_some() {
+                stats.covisibility_local_map_used_count += 1;
+            }
+        }
+        stats
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        ratio(self.successful_frame_count, self.frame_count)
+    }
+
+    pub fn failure_rate(&self) -> f64 {
+        ratio(self.failed_frame_count, self.frame_count)
+    }
+
+    pub fn pose_prior_usage_rate(&self) -> f64 {
+        ratio(self.pose_prior_used_count, self.frame_count)
+    }
+
+    pub fn external_localization_prior_usage_rate(&self) -> f64 {
+        ratio(
+            self.external_localization_prior_used_count,
+            self.frame_count,
+        )
+    }
+
+    pub fn overall_inlier_ratio(&self) -> f64 {
+        ratio(self.total_inlier_count, self.total_correspondence_count)
+    }
+
+    pub fn mean_inliers_per_successful_frame(&self) -> f64 {
+        ratio(self.total_inlier_count, self.successful_frame_count)
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"first_frame_id\": {},\n",
+                "  \"last_frame_id\": {},\n",
+                "  \"frame_count\": {},\n",
+                "  \"successful_frame_count\": {},\n",
+                "  \"failed_frame_count\": {},\n",
+                "  \"lost_count\": {},\n",
+                "  \"relocalization_count\": {},\n",
+                "  \"pose_prior_used_count\": {},\n",
+                "  \"external_localization_prior_used_count\": {},\n",
+                "  \"tracking_quality_gate_failure_count\": {},\n",
+                "  \"total_inlier_count\": {},\n",
+                "  \"total_correspondence_count\": {},\n",
+                "  \"success_rate\": {},\n",
+                "  \"failure_rate\": {},\n",
+                "  \"pose_prior_usage_rate\": {},\n",
+                "  \"external_localization_prior_usage_rate\": {},\n",
+                "  \"overall_inlier_ratio\": {},\n",
+                "  \"mean_inliers_per_successful_frame\": {}\n",
+                "}}\n"
+            ),
+            optional_frame_id_json(self.first_frame_id),
+            optional_frame_id_json(self.last_frame_id),
+            self.frame_count,
+            self.successful_frame_count,
+            self.failed_frame_count,
+            self.lost_count,
+            self.relocalization_count,
+            self.pose_prior_used_count,
+            self.external_localization_prior_used_count,
+            self.tracking_quality_gate_failure_count,
+            self.total_inlier_count,
+            self.total_correspondence_count,
+            self.success_rate(),
+            self.failure_rate(),
+            self.pose_prior_usage_rate(),
+            self.external_localization_prior_usage_rate(),
+            self.overall_inlier_ratio(),
+            self.mean_inliers_per_successful_frame(),
+        )
+    }
+
+    fn to_json_inline(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"first_frame_id\": {}, ",
+                "\"last_frame_id\": {}, ",
+                "\"frame_count\": {}, ",
+                "\"successful_frame_count\": {}, ",
+                "\"failed_frame_count\": {}, ",
+                "\"lost_count\": {}, ",
+                "\"relocalization_count\": {}, ",
+                "\"pose_prior_used_count\": {}, ",
+                "\"external_localization_prior_used_count\": {}, ",
+                "\"tracking_quality_gate_failure_count\": {}, ",
+                "\"total_inlier_count\": {}, ",
+                "\"total_correspondence_count\": {}, ",
+                "\"success_rate\": {}, ",
+                "\"failure_rate\": {}, ",
+                "\"pose_prior_usage_rate\": {}, ",
+                "\"external_localization_prior_usage_rate\": {}, ",
+                "\"overall_inlier_ratio\": {}, ",
+                "\"mean_inliers_per_successful_frame\": {}",
+                "}}"
+            ),
+            optional_frame_id_json(self.first_frame_id),
+            optional_frame_id_json(self.last_frame_id),
+            self.frame_count,
+            self.successful_frame_count,
+            self.failed_frame_count,
+            self.lost_count,
+            self.relocalization_count,
+            self.pose_prior_used_count,
+            self.external_localization_prior_used_count,
+            self.tracking_quality_gate_failure_count,
+            self.total_inlier_count,
+            self.total_correspondence_count,
+            self.success_rate(),
+            self.failure_rate(),
+            self.pose_prior_usage_rate(),
+            self.external_localization_prior_usage_rate(),
+            self.overall_inlier_ratio(),
+            self.mean_inliers_per_successful_frame(),
+        )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+
+    pub fn evaluate(&self, config: TrackingEvaluationConfig) -> TrackingEvaluationResult {
+        TrackingEvaluationResult::from_stats(self.clone(), config)
+    }
+}
+
+impl TrackingEvaluationResult {
+    pub fn from_stats(stats: TrackingStats, config: TrackingEvaluationConfig) -> Self {
+        let mut failures = Vec::new();
+
+        if let Some(minimum) = config.min_success_rate {
+            let actual = stats.success_rate();
+            if actual < minimum {
+                failures.push(TrackingEvaluationFailure::SuccessRateTooLow { actual, minimum });
+            }
+        }
+
+        if let Some(maximum) = config.max_failure_rate {
+            let actual = stats.failure_rate();
+            if actual > maximum {
+                failures.push(TrackingEvaluationFailure::FailureRateTooHigh { actual, maximum });
+            }
+        }
+
+        if let Some(maximum) = config.max_lost_count {
+            if stats.lost_count > maximum {
+                failures.push(TrackingEvaluationFailure::LostCountTooHigh {
+                    actual: stats.lost_count,
+                    maximum,
+                });
+            }
+        }
+
+        if let Some(maximum) = config.max_tracking_quality_gate_failure_count {
+            if stats.tracking_quality_gate_failure_count > maximum {
+                failures.push(TrackingEvaluationFailure::QualityGateFailureCountTooHigh {
+                    actual: stats.tracking_quality_gate_failure_count,
+                    maximum,
+                });
+            }
+        }
+
+        if let Some(minimum) = config.min_external_localization_prior_usage_rate {
+            let actual = stats.external_localization_prior_usage_rate();
+            if actual < minimum {
+                failures.push(
+                    TrackingEvaluationFailure::ExternalLocalizationPriorUsageRateTooLow {
+                        actual,
+                        minimum,
+                    },
+                );
+            }
+        }
+
+        if let Some(minimum) = config.min_overall_inlier_ratio {
+            let actual = stats.overall_inlier_ratio();
+            if actual < minimum {
+                failures
+                    .push(TrackingEvaluationFailure::OverallInlierRatioTooLow { actual, minimum });
+            }
+        }
+
+        if let Some(minimum) = config.min_mean_inliers_per_successful_frame {
+            let actual = stats.mean_inliers_per_successful_frame();
+            if actual < minimum {
+                failures.push(
+                    TrackingEvaluationFailure::MeanInliersPerSuccessfulFrameTooLow {
+                        actual,
+                        minimum,
+                    },
+                );
+            }
+        }
+
+        let passed = failures.is_empty();
+        Self {
+            passed,
+            stats,
+            config,
+            failures,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"passed\": {},\n",
+                "  \"config\": {},\n",
+                "  \"stats\": {},\n",
+                "  \"failures\": {}\n",
+                "}}\n"
+            ),
+            self.passed,
+            self.config.to_json_inline(),
+            self.stats.to_json_inline(),
+            tracking_evaluation_failures_json(&self.failures)
+        )
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_json())
+    }
+}
+
+impl TrackingEvaluationConfig {
+    fn to_json_inline(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"min_success_rate\": {}, ",
+                "\"max_failure_rate\": {}, ",
+                "\"max_lost_count\": {}, ",
+                "\"max_tracking_quality_gate_failure_count\": {}, ",
+                "\"min_external_localization_prior_usage_rate\": {}, ",
+                "\"min_overall_inlier_ratio\": {}, ",
+                "\"min_mean_inliers_per_successful_frame\": {}",
+                "}}"
+            ),
+            optional_f64_json(self.min_success_rate),
+            optional_f64_json(self.max_failure_rate),
+            optional_usize_json(self.max_lost_count),
+            optional_usize_json(self.max_tracking_quality_gate_failure_count),
+            optional_f64_json(self.min_external_localization_prior_usage_rate),
+            optional_f64_json(self.min_overall_inlier_ratio),
+            optional_f64_json(self.min_mean_inliers_per_successful_frame)
+        )
+    }
+}
+
+impl TrackingEvaluationFailure {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::SuccessRateTooLow { .. } => "success_rate_too_low",
+            Self::FailureRateTooHigh { .. } => "failure_rate_too_high",
+            Self::LostCountTooHigh { .. } => "lost_count_too_high",
+            Self::QualityGateFailureCountTooHigh { .. } => "quality_gate_failure_count_too_high",
+            Self::ExternalLocalizationPriorUsageRateTooLow { .. } => {
+                "external_localization_prior_usage_rate_too_low"
+            }
+            Self::OverallInlierRatioTooLow { .. } => "overall_inlier_ratio_too_low",
+            Self::MeanInliersPerSuccessfulFrameTooLow { .. } => {
+                "mean_inliers_per_successful_frame_too_low"
+            }
+        }
+    }
+
+    fn to_json_inline(&self) -> String {
+        match self {
+            Self::SuccessRateTooLow { actual, minimum }
+            | Self::ExternalLocalizationPriorUsageRateTooLow { actual, minimum }
+            | Self::OverallInlierRatioTooLow { actual, minimum }
+            | Self::MeanInliersPerSuccessfulFrameTooLow { actual, minimum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"minimum\": {}}}",
+                self.reason(),
+                actual,
+                minimum
+            ),
+            Self::FailureRateTooHigh { actual, maximum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"maximum\": {}}}",
+                self.reason(),
+                actual,
+                maximum
+            ),
+            Self::LostCountTooHigh { actual, maximum }
+            | Self::QualityGateFailureCountTooHigh { actual, maximum } => format!(
+                "{{\"reason\": \"{}\", \"actual\": {}, \"maximum\": {}}}",
+                self.reason(),
+                actual,
+                maximum
+            ),
+        }
+    }
+}
+
+fn tracking_evaluation_failures_json(failures: &[TrackingEvaluationFailure]) -> String {
+    let mut output = String::from("[");
+    for (index, failure) in failures.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&failure.to_json_inline());
+    }
+    output.push(']');
+    output
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 #[cfg(test)]
 mod covisibility_local_map_tests {
     use super::*;
