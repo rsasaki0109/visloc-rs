@@ -40,7 +40,7 @@ with robust kernels, sparse Cholesky, Schur BA, real-image VO, and loop-closure
 candidate diagnostics. The current focus is KITTI-style stereo VO accuracy and
 public-data evidence, not milestone-score reporting.
 
-## Session Handoff 2026-06-11 — ratio-lever closure, frontend probes, DPV-SLAM++ battle setup, crate-root refactors
+## Session Handoff 2026-06-11 → concluded 2026-06-12 — all four threads landed
 
 This section is the full handoff for the 2026-06-11 session. Four threads ran
 in parallel: (A) closing the loop/odometry-ratio calibration vein, (B)
@@ -88,14 +88,50 @@ between-loop odometry drift — frontend territory, not PGO weighting.
   Both directions hurt → 0.5/0.5 sits at the optimum; the mixed configs
   (0.3/0.7, 0.7/0.3) were skipped when the sweep was stopped on user request.
   Script: `/tmp/frontend_gate_sweep.sh`, outputs `/tmp/gate_sweep_mh03/`.
-- **4096-keypoint SuperPoint export — COMPLETE, A/B NOT yet run.** Features at
-  `/tmp/sp_MH_03_4k` (2700 frames, `--max-keypoints 4096`, vs the 2048-kp
-  baseline `/tmp/sp_MH_03`). Resume: run the full-pipeline command from the
-  gate-sweep script with `FEATDIR=/tmp/sp_MH_03_4k`, sc/tc 0.5/0.5, and compare
-  against SE3 0.0582 / Sim3 0.0513. This is the direct "denser frontend vs
-  between-loop drift" test.
+- **4096-keypoint A/B — MEASURED NEUTRAL (2026-06-12).** `/tmp/sp_MH_03_4k`
+  full pipeline: SE3 0.0589 / Sim3 0.0494 / 318 loops vs the 2048-kp baseline
+  SE3 0.0582 / Sim3 0.0513 — SE3 +1%, Sim3 −4%, within noise. A denser
+  frontend does not move between-loop drift. Together with the gate sweep,
+  the frontend-density/gate vein is CLOSED: the residual ~2.5× gap to
+  ORB-SLAM3 needs a qualitatively different mechanism, not frontend tuning.
 
-### C. DPV-SLAM++ KITTI seq00 battle — setup COMPLETE, runs not started
+### C. DPV-SLAM++ KITTI seq00 battle — CONCLUDED 2026-06-12
+
+**Results (stride 2, 2271 frames, grayscale image_0, Umeyama vs poses_00.txt):**
+
+| config | Sim3 ATE | SE3 ATE | paper |
+|---|---|---|---|
+| plain DPVO | 120.3 m | 124.2 m | 113.21 m ✓ |
+| DPV-SLAM++ (classic LC, 11 loops) | **10.37 m** | 176.4 m | 8.30 m ✓ |
+| visloc-rs full stack (stereo+SP, stride 1) | **0.966 m** | 1.23 m | — |
+
+Both paper numbers reproduced (within run variance + the grayscale-vs-color
+caveat) — the reframing below was correct; the old "divergence 134 m" was
+paper-normal proximity-only behavior. Classic LC = 11.6× lever on mono scale
+drift. visloc-rs is >10× better on the same data, with the honest caveat that
+stereo-metric vs monocular is a structural advantage; mono rows are Sim3-only
+(SE3 is meaningless under global scale error).
+
+**Two unreported upstream DPVO bugs were patched locally**
+(`~/dpvo_battle/DPVO`, not upstreamed — would make a legitimate issue/PR):
+
+1. `retrieval/image_cache.py` — kornia 0.8.3 moved `image_list_to_tensor`
+   from `kornia.utils` to `kornia.image`; the first classic-LC attempt died
+   with AttributeError, then the process zombied 2 h in an mp join (the
+   traceback was invisible because output went through a buffered `tail` —
+   the v2 runner `/tmp/dpvo_kitti00_v2.sh` uses `python -u` + direct log
+   redirect to `/tmp/dpvo_run.log`).
+2. `retrieval/retrieval_dbow.py` `close()` — mp.Queue finalizer deadlock:
+   `in_queue` carries ~1.3 MB images ≫ 64 KB pipe buffer so the feeder
+   thread blocks mid-`pipe_write`; `proc.terminate()` kills the only reader;
+   the Queue finalizer then joins the stuck feeder without timeout → main
+   parks in futex_wait after the final "LC COUNT" print, before the
+   trajectory is saved. Fix: `cancel_join_thread()` on both queues after
+   `proc.join()`. Trigger = long sequence + loop candidate pending at
+   shutdown. Diagnostic signature: one thread in pipe_write + main in
+   futex_wait + 0% CPU/GPU.
+
+Original setup notes follow (still valid for reruns):
 
 Key reframing (codex gpt-5.5-xhigh + web-research agent, independently
 converging): the previous session's "divergence" (Sim3 134 m, stopped ~frame
@@ -128,9 +164,9 @@ Setup completed this session (user-approved):
 
 Planned runs (GPU was busy with the 4k export at close; it is now free):
 
-1. `bash /tmp/dpvo_kitti00.sh dpvslampp_s2 2 --opts LOOP_CLOSURE True CLASSIC_LOOP_CLOSURE True BACKEND_THRESH 32.0`
+1. [DONE, 10.37 m] `bash /tmp/dpvo_kitti00_v2.sh dpvslampp_s2 2 --opts LOOP_CLOSURE True CLASSIC_LOOP_CLOSURE True BACKEND_THRESH 32.0`
    — paper-faithful DPV-SLAM++; expect ~8.3 m (paper, color) modulo grayscale.
-2. `bash /tmp/dpvo_kitti00.sh dpvo_s2 2` — plain DPVO sanity baseline (~113 m)
+2. [DONE, 120.3 m] `bash /tmp/dpvo_kitti00_v2.sh dpvo_s2 2` — plain DPVO sanity baseline (~113 m)
    to confirm the pipeline reproduces the paper baseline on our data.
 3. Optional stride-1: add `BUFFER_SIZE 8192` (4541 frames overflow the default
    4096 keyframe buffer — documented upstream as issue #23).
@@ -162,30 +198,25 @@ have web access (cited ar5iv + GitHub issues correctly).
   second-pass suggestions (not acted on): split `pose_graph.rs` into
   types/solver/io, split `online_slam.rs` by concern, optional rename
   `loop_gating` → `loop_admission`.
-- **IN FLIGHT, branch `refactor/split-tracking-lib`, WIP commit `4521e07` —
-  DOES NOT COMPILE:** `pipelines/tracking/src/lib.rs` (6355 lines) →
-  `trajectory.rs` (2616: trajectory types, TUM/KITTI parsing, Umeyama,
-  ATE/RPE/KITTI-odometry evaluation, alignment tests), `report.rs` (1039:
-  CSV/SVG/HTML for trajectories + tracking timelines), `motion.rs` (1445:
-  motion models + VO frontend priors + IMU tests), `tracker.rs` (1099:
-  Tracker/ImageTracker/FrameLocalizer/covisibility + tests), lib.rs keeps the
-  core tracking types (156 lines). 81 remaining errors, all mechanical
-  cross-module visibility: promote to `pub(crate)` on the definition side —
-  helper fns `optional_f64_json/csv`, `optional_usize_json`,
-  `optional_vec3_json`, `optional_frame_id_json`, `push_metric_card`,
-  `format_optional_metric/count/frame_id`, `parse_tum_f64`,
-  `parse_tum_frame_id`, `parse_kitti_f64`, `export_f64`,
-  `relative_camera_to_world`, `relative_pose_error_statistics_json`,
-  `trajectory_svg`, `trajectory_comparison_svg`,
-  `trajectory_evaluation_failures_json`, `cumulative_reference_distances`,
-  `first_index_for_distance`; private members `PoseTrajectory::samples`
-  (field), several `::new` associated fns, `trajectory_alignment_transform`,
-  `to_json_inline`; plus one `E0282` type annotation at `report.rs:75`.
-  After it compiles: consider moving the parse/json helpers that landed in
-  `report.rs` back into `trajectory.rs` (they are parsing, not reporting),
-  then fmt/clippy/test, codex boundary review, merge. The split scripts are
-  `/tmp/split_slam_lib.py` and `/tmp/split_tracking_lib.py` (the latter has
-  the generalized backward-walk over docs/attrs — reusable for the next
+- **DONE, merged to main `df35b5f` + pushed (2026-06-12):**
+  `pipelines/tracking/src/lib.rs` (6355 lines) → `trajectory.rs` (2.6k:
+  trajectory types, TUM/KITTI parsing, Umeyama, ATE/RPE/KITTI-odometry
+  evaluation), `report.rs` (CSV/SVG/HTML rendering only), `motion.rs` (motion
+  models + VO frontend priors), `tracker.rs` (Tracker/ImageTracker/
+  FrameLocalizer/covisibility + TrackingStats and evaluation types), lib.rs
+  keeps the core tracking types. Commit `7344796` = the pure-move split (the
+  81 visibility errors fixed mechanically: 20 `pub(crate)` fns in report.rs +
+  5 defs in trajectory.rs; the E0282 resolved itself once field visibility
+  was fixed). Commit `ea09f2b` = codex boundary-review follow-up (verdict:
+  4/5 modules AGREE, report.rs flagged): parse/geometry helpers →
+  trajectory.rs and demoted back to private; TrackingStats +
+  TrackingEvaluation{Config,Result,Failure} + `ratio` +
+  `tracking_evaluation_failures_json` → tracker.rs. 742 workspace tests
+  green, clippy 0 warnings, line accounting ±33 (headers/decls). Gotcha for
+  next time: keep test modules at end-of-file — appending moved items past a
+  `#[cfg(test)] mod` fires clippy items-after-test-module. The split scripts
+  are `/tmp/split_slam_lib.py` and `/tmp/split_tracking_lib.py` (the latter
+  has the generalized backward-walk over docs/attrs — reusable for the next
   targets).
 - Remaining oversized files (next candidates): `crates/vision/src/stereo_vo.rs`
   (4063), `pipelines/slam/tests/online_slam.rs` (4696, test-only),
@@ -199,15 +230,18 @@ have web access (cited ar5iv + GitHub issues correctly).
   rebuild + a one-run MH_03 baseline sanity check (expect SE3 0.0582) is the
   cheap fine-grained verification before trusting new release-binary numbers.
 
-### E. Open levers, ranked (state of the gap-hunt after this session)
+### E. Open levers, ranked (updated 2026-06-12 — items 1–3 all DONE)
 
-1. DPV-SLAM++ battle runs (C) — everything staged, ~30 min of GPU.
-2. 4096-kp frontend A/B (B) — features exported, one 10-min CPU run + eval.
-3. Finish the tracking-crate split (D) — ~30 min of mechanical visibility
-   fixes + review.
-4. If the 4k A/B is null: the frontend vein on EuRoC narrows to matcher-side
-   changes (temporal match density / track length), or accept ~2.5× as the
-   stack's plateau and move the gap-hunt to KITTI between-loop drift.
+1. ~~DPV-SLAM++ battle runs (C)~~ DONE: 120.3 m / 10.37 m / 0.966 m table in C.
+2. ~~4096-kp frontend A/B (B)~~ DONE: neutral; frontend vein closed.
+3. ~~Finish the tracking-crate split (D)~~ DONE: merged `df35b5f`, pushed.
+4. The 4k A/B was null → per the original plan, the EuRoC frontend vein
+   narrows to matcher-side changes (temporal match density / track length),
+   or accept ~2.5× as the stack's plateau and move the gap-hunt to KITTI
+   between-loop drift.
+5. Optional residue: DPVO stride-1 run (BUFFER_SIZE 8192); upstreaming the
+   two DPVO bug patches (kornia API move + cancel_join_thread deadlock) as
+   issues/PRs; next decomposition targets in D.
 
 ## Project Goal
 
