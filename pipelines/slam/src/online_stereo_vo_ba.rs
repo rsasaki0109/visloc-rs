@@ -85,6 +85,17 @@ pub struct OnlineStereoVoBaConfig {
     /// Incompatible with `imu_input` (the IMU slice aligns to the trailing
     /// window only); ignored when `imu_input` is set.
     pub local_map_history: usize,
+    /// Exclude the temporal matches of frontend-rescued pairs from BA track
+    /// building. When a pair's weak-consensus pose was clamped by a frontend
+    /// rescue (translation-direction / rotation-spike / rotation-vector), its
+    /// matches voted for a relative pose the motion model rejected as
+    /// implausible — typically a dynamic object capturing the PnP consensus.
+    /// Feeding those same matches to BA lets the optimiser re-impose the
+    /// rejected motion onto the clamped poses (and smear it across the
+    /// window). With this flag the rescued pair contributes no temporal
+    /// matches: its tracks break at the contaminated pair and the clamped
+    /// odometry carries the trajectory through the event.
+    pub exclude_rescued_pair_matches: bool,
 }
 
 impl Default for OnlineStereoVoBaConfig {
@@ -95,6 +106,7 @@ impl Default for OnlineStereoVoBaConfig {
             ba_config: StereoVoBaConfig::default(),
             imu_input: None,
             local_map_history: 0,
+            exclude_rescued_pair_matches: false,
         }
     }
 }
@@ -232,7 +244,32 @@ where
         // The frontend's `temporal_matches_per_pair[i]` holds the matches
         // used between poses `i` and `i+1`, so the slice for poses
         // `ext_start..end` is `temporal_matches_per_pair[ext_start..end-1]`.
-        let temporal_slice = &self.frontend.temporal_matches_per_pair[ext_start..end - 1];
+        // `pair_diagnostics[i]` describes the same pair, so rescued pairs can
+        // be blanked index-aligned.
+        let temporal_owned: Option<Vec<Vec<DescriptorMatch>>> =
+            if self.config.exclude_rescued_pair_matches {
+                Some(
+                    (ext_start..end - 1)
+                        .map(|i| {
+                            let d = &self.frontend.pair_diagnostics[i];
+                            if d.translation_direction_rescued
+                                || d.rotation_spike_rescued
+                                || d.rotation_vector_rescued
+                            {
+                                Vec::new()
+                            } else {
+                                self.frontend.temporal_matches_per_pair[i].clone()
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        let temporal_slice: &[Vec<DescriptorMatch>] = match &temporal_owned {
+            Some(owned) => owned,
+            None => &self.frontend.temporal_matches_per_pair[ext_start..end - 1],
+        };
 
         // Build the effective BA config for this trigger. The wrapper
         // owns the global IMU input and slices it to align with the
@@ -582,6 +619,7 @@ mod tests {
                 ba_config: StereoVoBaConfig::default(),
                 imu_input: None,
                 local_map_history: 0,
+                exclude_rescued_pair_matches: false,
             },
         );
 
@@ -637,6 +675,7 @@ mod tests {
                 ba_config: StereoVoBaConfig::default(),
                 imu_input: None,
                 local_map_history: 0,
+                exclude_rescued_pair_matches: false,
             },
         );
         for i in 0..left.len() {
@@ -684,6 +723,7 @@ mod tests {
                 ba_config: StereoVoBaConfig::default(),
                 imu_input,
                 local_map_history: 0,
+                exclude_rescued_pair_matches: false,
             },
         );
         for i in 0..left.len() {
