@@ -143,6 +143,88 @@ around the visual-inertial scorecard (wording depends on the cell count).
   Phase 2 to move any MH number; its value is completion + the V-room
   difficult cells.
 
+## Strategy 2026-06-12 — CUDA acceleration: in-process learned frontend, not GPU solver
+
+User question: "CUDA で高速化とかはどう?" Verdict: **the winning CUDA move is
+in-process GPU inference for the learned frontend (SuperPoint/LightGlue),
+not GPU-ifying the optimizer.** Same phrase, wildly different EV.
+
+### Why NOT the solver (BA/Cholesky/PGO) — low EV
+
+- Our window BA is a 30–50-frame sparse problem; at that size GPU kernel
+  launch overhead dominates and a GPU port would be *slower*. GPU BA
+  (MegBA-class, PCG-based) pays off at BAL scale (10^5–10^6 poses/points).
+- Sparse direct Cholesky is notoriously hard to beat on GPU (irregular
+  sparsity), and the CPU solver is already at its Amdahl ceiling (block
+  Cholesky + fill-reducing reordering + rayon — see the back-end
+  workstream).
+- The only candidate that could ever justify it is the SfM pillar's global
+  BA (MH_03: 178,973 tracks) — and no measurement yet shows it as the
+  bottleneck.
+- Identity cost: the project's banner is pure Rust / `unsafe` forbidden.
+  cuSolver/cust-style FFI breaks that; if solver GPU work ever measures as
+  worth it, the route is wgpu compute (safe Rust, WGSL shaders).
+
+### Why YES the frontend — high EV
+
+The pipeline's biggest structural weakness is that SP/LG runs as an
+offline Python export (file-backed features): tens of GB per sequence
+(the current disk-97% pain), hours of export, and **no possible
+"real-time" or "online" claim**. Moving inference in-process via the
+`ort` crate (ONNX Runtime + CUDA execution provider) or candle buys:
+
+1. **One-binary SLAM** — the export step and the multi-GB intermediate
+   feature files disappear.
+2. **A real-time claim becomes possible**: SP+LG on a decent GPU is
+   roughly 30–80 ms/frame total; KITTI's 10 Hz is in reach (EuRoC 20 Hz
+   harder). "Real-time deep-frontend stereo SLAM, pure Rust" is a slot
+   neither OV2SLAM (classical-RT) nor DROID (huge-GPU) occupies.
+3. The SfM-vs-COLMAP head-to-head (below) gets an honest **end-to-end**
+   wall-clock column.
+4. Effort is days, not weeks: well-established community ONNX exports of
+   SuperPoint and LightGlue exist.
+
+### Order of operations
+
+1. **Measure first (zero code)**: per-stage time breakdown (export / VO /
+   window BA / loop / global BA) on one sequence. No GPU-solver debate
+   until this exists.
+2. **`ort` + CUDA in-process SP/LG** — a base investment that pays into
+   *both* the VI battle and the SfM battle, and dissolves the disk
+   problem.
+3. Solver GPU work only if (1) shows SfM global BA as a measured
+   bottleneck, and then via wgpu compute.
+
+Composes with (does not block) the two pending measurement battles: VI
+Phase 1 and SfM-vs-COLMAP.
+
+## Strategy 2026-06-12 — SfM battle vs COLMAP (assessed, not started)
+
+User question: "SfM では勝てないか?" Verdict: not on COLMAP's home turf
+(unordered photo collections — that needs retrieval + incremental mapper +
+multi-hypothesis triangulation built from scratch, against GLOMAP at
+10–100× COLMAP speed and the learned VGGT/MASt3R-SfM wave), but **yes on
+metric video SfM**, where we already have the pillar
+(`reconstruct_stereo_vo_with_ba` → multi-view tracks → global BA → COLMAP
+output; MH_03 reproj 1.04 px / 178,973 tracks; V2_03 orbit 0.53 px,
+near-photo 3DGS).
+
+Structural advantages on that turf: (a) **metric scale by construction**
+(stereo) — COLMAP mono is scale-free, decisive for robotics/UAV; (b)
+**speed** — COLMAP sequential-matching + incremental mapping on a
+2700-frame video is hours, we are minutes; (c) **measurable accuracy** —
+EuRoC has GT, so COLMAP's reconstructed camera poses can be ATE-scored
+with the same evo tooling (the DROID/DPVO same-tool battle pattern).
+
+Proposed battle (near-zero code): run COLMAP (+ GLOMAP if easy) on MH_03
+and the V2_03 orbit capture, same frames; report a 5-metric table —
+wall-clock / registration rate / ATE vs GT / reproj / downstream 3DGS
+quality. A win becomes the README's fourth pillar: "COLMAP-grade
+reconstruction at N× speed, with metric scale — pure Rust". Caveat to
+state honestly: SfM has no standardized published per-sequence table
+(IMC is matcher-centric, ETH3D is MVS-centric), so the claim form is
+same-tool head-to-head, not published-number-beating.
+
 ## Session 2026-06-12 — SOTA push: multi-seq KITTI benchmark + README/GitHub
 
 User directive: reach SOTA and front it on README/GitHub. Concluded same day.
