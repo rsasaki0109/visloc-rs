@@ -40,6 +40,109 @@ with robust kernels, sparse Cholesky, Schur BA, real-image VO, and loop-closure
 candidate diagnostics. The current focus is KITTI-style stereo VO accuracy and
 public-data evidence, not milestone-score reporting.
 
+## Strategy 2026-06-12 — Visual-Inertial SLAM: beating ORB-SLAM3
+
+User directive: "ORB-SLAM3 に勝ちたい。Visual-inertial SLAM として勝てるか考えて."
+This section is the resulting battle plan. Verdict up front: **a full win
+(beat their 0.035 m EuRoC average) is not realistic short-term, but a partial
+win is — one cell is already won, and the honest target is "completes all 11
+EuRoC sequences incl. V2_03 + beats ORB-SLAM3's published stereo-inertial ATE
+on N of 11".**
+
+### Verified enemy table (primary source ×3 cross-checked)
+
+ORB-SLAM3 (Campos et al., TRO 2021, arXiv:2007.11898 v2, Table II). Protocol:
+RMS ATE on all frames, **SE(3)** alignment for every inertial/stereo config
+(Sim(3) only for pure mono), **median of 10 runs**. Headline "3.5 cm on
+EuRoC" = the stereo-inertial average (v1 abstract said 3.6).
+
+| config | MH01 | MH02 | MH03 | MH04 | MH05 | V101 | V102 | V103 | V201 | V202 | V203 | avg |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Stereo | .029 | .019 | .024 | .085 | .052 | .035 | .025 | .061 | .041 | .028 | .521 | .084 |
+| **Stereo-Inertial** | .036 | .033 | .035 | .051 | **.082** | .038 | .014 | .024 | .032 | .014 | .024 | **.035** |
+| Mono-Inertial | .062 | .037 | .046 | .075 | .057 | .049 | .015 | .037 | .042 | .021 | .027 | .043 |
+| visloc-rs today | — | — | .057 | — | **.072** | — | — | — | — | — | DNF | — |
+
+Wider VI-SLAM landscape (per-seq EuRoC ATE, all verified from paper HTML):
+full-SLAM SOTA band MH03 0.019–0.035 / MH05 0.048–0.082 / V103 ~0.02 /
+V203 ~0.02 (best V203 = OKVIS2 0.020, pos+yaw align; OKVIS2-X vi-ba avg
+0.028 is the strongest published system overall). SL-SLAM (= ORB-SLAM3 +
+SuperPoint/LightGlue, arXiv:2405.03413) does MH03 **0.019** / MH05 0.051 —
+the uncomfortable direct competitor: same learned frontend class as ours.
+Causal/no-loop VIO band is ~2× looser (MH03 0.07–0.10, MH05 0.08–0.14,
+V203 0.05–0.11). V2_03 is the field's selection filter: BASALT omits it,
+OpenVINS' own paper excludes it, vision-only systems fail (DSO 1.15, SVO
+1.08, ORB-SLAM3 stereo 0.521); VINS-Fusion (0.096) and DM-VIO (0.114)
+survive but degrade.
+
+### Three structural findings that shape the strategy
+
+1. **ORB-SLAM3's own IMU makes MH worse** (stereo→SI: MH03 0.024→0.035,
+   MH05 0.052→0.082). This independently confirms our task-C conclusion
+   (metric-stereo + deep frontend + windowed BA leaves the IMU zero
+   marginal value on MH — VIO == BA-only to 6 sig figs). Consequence: the
+   VI-vs-VI comparison column is *friendlier* to us on MH than the stereo
+   column — **MH_05 0.072 vs their SI 0.082 is already a win**.
+2. **The IMU's real value is V103/V203 only** (0.061→0.024, 0.521→0.024).
+   That is exactly where our file-backed stereo VO hard-crashes
+   (V2_03 KabschFailed at the pair-206 blackout). No tight coupling → no
+   seat at the VI table.
+3. **MH03's residual (0.057 vs 0.035) is between-loop VO drift** — the
+   back-end levers are tapped (two-view loop BA, fixed-prefix history,
+   anisotropic loop info each gave 3–10 %); SL-SLAM's 0.019 shows the
+   learned-frontend class can go much lower, so the remaining lever is
+   matcher-side track quality, not optimization.
+
+### Win/loss prediction map (vs the SI column)
+
+- **Won**: MH05 (0.072 < 0.082, measured).
+- **Winnable by measurement alone**: MH01/MH02 (targets 0.036/0.033 are
+  soft for easy sequences; expectation 0.03–0.05), V101/V201 (0.038/0.032,
+  small room / slow / loop-rich = our strong regime).
+- **Unfavorable**: MH03 (1.6× gap, levers tapped), V102/V202 (0.014 is
+  very tight).
+- **Need tight VI to even compete**: V103 (0.024), V203 (0.024; we DNF).
+
+Realistic landing zone: **3–5 wins of 11 + all-11 completion**, average
+~0.05–0.07 vs their 0.035. Honest, strong claim: "beats ORB-SLAM3's
+published stereo-inertial ATE on N of 11 EuRoC sequences and completes
+V2_03, where vision-only systems fail".
+
+### Phased plan
+
+**Phase 1 — measurement campaign (zero code, ~1 session).** Fetch + rectify
++ SP/LG-export + full-stack-run the 8 unmeasured sequences (MH01/02/04,
+V101–V203; V2_03 artifacts already in /tmp). Decides MH01/02/V101/V201
+win cells and calibrates Phase-2 EV with a vision-only V103 number.
+Blocker: disk at 97 % (31 GB free) — delete the regenerable
+/tmp/sp_kitti_seqXX_full exports first (6 × 10–40 GB).
+
+**Phase 2 — tight visual-inertial coupling (the big build).** Put the
+existing `ImuPreintegrationFactor` permanently into the online-BA window
+and add IMU propagation as the tracking fallback **with velocity/bias
+co-estimation committed into the state** — the discarded loose bridge
+(2026-06) drifted 32–285 m precisely because it propagated without
+co-estimating v/b. OSS reference patterns: MSCKF/OpenVINS propagate on
+IMU; ORB-SLAM3-VI keeps preintegration factors always in the local window.
+Acceptance: **V2_03 completes** and lands in the published causal-VIO band
+(0.05–0.11 m); beating OKVIS2's 0.020 full-SLAM number is a stretch goal,
+not a commitment.
+
+**Phase 3 — exposure.** Once the 11-row table exists, reframe README/About
+around the visual-inertial scorecard (wording depends on the cell count).
+
+### Risks
+
+- Phase 2 is OpenVINS-class frontend surgery, not a knob: blackout
+  bridging + reacquisition + v/b estimation in the streaming pipeline.
+- V2_03's online stereo bootstrap also failed for scale (0–48 matches) in
+  the earlier probe — the file-backed SP/LG path avoids that, but the
+  blackout segments still have near-zero features; the bridge must carry
+  multi-second gaps.
+- task C precedent says IMU adds nothing outside V103/V203 — do not expect
+  Phase 2 to move any MH number; its value is completion + the V-room
+  difficult cells.
+
 ## Session 2026-06-12 — SOTA push: multi-seq KITTI benchmark + README/GitHub
 
 User directive: reach SOTA and front it on README/GitHub. Concluded same day.
