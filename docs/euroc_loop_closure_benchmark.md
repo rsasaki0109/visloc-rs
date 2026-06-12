@@ -64,20 +64,32 @@ hall flights:
 | window BA + loop                               |         0.089 m |         0.119 m |
 | window BA + loop + two-view loop BA            |         0.065 m |         0.086 m |
 | + fixed-prefix local-map BA (history 20)       |         0.061 m |         0.084 m |
-| **+ anisotropic loop-edge information**        |       **0.060 m** |       **0.080 m** |
+| + anisotropic loop-edge information            |         0.060 m |         0.080 m |
+| **+ BA track init-residual gate (10 px)**      |       **0.057 m** |       **0.072 m** |
 
-Both alignments agree (MH_03 Sim(3) 0.053 m, MH_05 Sim(3) 0.072 m), so the metric
+The final rung (`--ba-max-init-residual 10`) gates each BA track by its
+initial reprojection residual against the RANSAC-validated frontend poses.
+It was found on KITTI (it filters dynamic-object tracks that bundle
+adjustment would otherwise trust — BA track building has no RANSAC; see the
+[KITTI multi-sequence benchmark](kitti_multiseq_benchmark.md)) and turns out
+to also help both EuRoC flights, where it trims the noisiest depth-lift
+tracks.
+
+Both alignments agree (MH_03 Sim(3) 0.046 m, MH_05 Sim(3) 0.064 m), so the metric
 scale is correct, not absorbed by the fit. Against the published deep/classical
-stereo SLAM systems on MH_03:
+stereo SLAM systems:
 
-| system (stereo)                       | MH_03 ATE rmse |
-| ------------------------------------- | -------------: |
-| ORB-SLAM3 (Campos et al. 2021)        |        0.024 m |
-| DROID-SLAM (Teed & Deng 2021)         |        0.035 m |
-| **visloc-rs (full pipeline)**         |     **0.060 m** |
+| system (stereo)                       | MH_03 ATE rmse | MH_05 ATE rmse |
+| ------------------------------------- | -------------: | -------------: |
+| ORB-SLAM3 (Campos et al. 2021)        |        0.024 m |        0.052 m |
+| DROID-SLAM (Teed & Deng 2021)         |        0.035 m |        0.040 m |
+| OV2SLAM (Ferrera et al. 2021)         |         0.04 m |         0.07 m |
+| VINS-Fusion stereo (Qin et al. 2019)  |         0.33 m |         0.50 m |
+| **visloc-rs (full pipeline)**         |     **0.057 m** |     **0.072 m** |
 
-visloc-rs lands within **~2.5× of ORB-SLAM3** and **~1.7× of DROID-SLAM** on
-MH_03, in pure Rust.
+visloc-rs lands within **~2.4× of ORB-SLAM3** and **~1.6× of DROID-SLAM** on
+MH_03 and within **~1.4× of ORB-SLAM3** on MH_05 — at OV2SLAM's real-time
+accuracy and 5–7× ahead of VINS-Fusion's stereo-only mode — in pure Rust.
 
 ### Two-view loop bundle adjustment
 
@@ -124,7 +136,7 @@ stale landmarks and on MH_05 turns slightly negative, so 20 is the shipped defau
 
 ### Anisotropic loop-edge information
 
-The final stage (`--loop-edge-information`) takes MH_03 Sim(3) ATE from 0.053 m to
+The `--loop-edge-information` stage takes MH_03 Sim(3) ATE from 0.053 m to
 **0.052 m** and MH_05 from 0.084 m / 0.072 m (SE3 / Sim3) to **0.080 m / 0.069 m**
 (~5 % on both alignments) — from the *same* verified loops. It is the ORB-SLAM
 *Essential-Graph per-edge information* that the pose graph had been omitting.
