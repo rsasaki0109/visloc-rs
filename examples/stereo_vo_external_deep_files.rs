@@ -57,6 +57,9 @@ struct CliArgs {
     stereo_vertical_alignment: bool,
     stereo_vertical_alignment_min_pairs: usize,
     stereo_vertical_alignment_max_correction_m: f64,
+    rescue_min_median_translation_m: Option<f64>,
+    motion_scale_rescue_max_inlier_ratio: Option<f64>,
+    ba_exclude_rescued_pairs: bool,
     min_stereo_confidence: Option<f32>,
     min_temporal_confidence: Option<f32>,
     enable_ba: bool,
@@ -129,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (args.fx, args.fy, args.cx, args.cy, args.baseline)
     };
     let camera = Camera::pinhole(0, args.width, args.height, fx, fy, cx, cy);
-    let config = StereoVoFrontendConfig {
+    let mut config = StereoVoFrontendConfig {
         kabsch: KabschRansacConfig {
             iterations: 4000,
             min_inliers: StereoVoFrontendConfig::default().kabsch.min_inliers,
@@ -143,6 +146,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         relative_pose_mode: args.relative_pose_mode,
         ..StereoVoFrontendConfig::default()
     };
+    if let Some(min_median) = args.rescue_min_median_translation_m {
+        config.translation_direction_rescue_min_median_translation_m = min_median;
+        config.rotation_spike_rescue_min_median_translation_m = min_median;
+        config.rotation_vector_rescue_min_median_translation_m = min_median;
+    }
+    if let Some(max_ratio) = args.motion_scale_rescue_max_inlier_ratio {
+        config.motion_scale_rescue_max_pnp_inlier_ratio = max_ratio;
+    }
+    let config = config;
     if args.online_ba && args.enable_ba {
         return Err(
             "--online-ba and --enable-ba are mutually exclusive: online BA interleaves the same \
@@ -346,6 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         },
         local_map_history: args.online_ba_history,
+        exclude_rescued_pair_matches: args.ba_exclude_rescued_pairs,
     };
     if args.online_ba {
         println!(
@@ -1172,6 +1185,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         StereoVoFrontendConfig::default().stereo_vertical_alignment_min_pairs;
     let mut stereo_vertical_alignment_max_correction_m =
         StereoVoFrontendConfig::default().stereo_vertical_alignment_max_correction_m;
+    let mut rescue_min_median_translation_m: Option<f64> = None;
+    let mut motion_scale_rescue_max_inlier_ratio: Option<f64> = None;
+    let mut ba_exclude_rescued_pairs = false;
     let mut min_stereo_confidence: Option<f32> = Some(0.5);
     let mut min_temporal_confidence: Option<f32> = Some(0.5);
     let mut enable_ba: bool = false;
@@ -1308,6 +1324,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--stereo-vertical-alignment-max-correction" => {
                 stereo_vertical_alignment_max_correction_m = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--rescue-min-median-translation" => {
+                rescue_min_median_translation_m = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--ba-exclude-rescued-pairs" => {
+                ba_exclude_rescued_pairs = true;
+                args.remove(i);
+            }
+            "--motion-scale-rescue-max-inlier-ratio" => {
+                motion_scale_rescue_max_inlier_ratio = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--min-stereo-confidence" => {
@@ -1581,6 +1609,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         stereo_vertical_alignment,
         stereo_vertical_alignment_min_pairs,
         stereo_vertical_alignment_max_correction_m,
+        rescue_min_median_translation_m,
+        motion_scale_rescue_max_inlier_ratio,
+        ba_exclude_rescued_pairs,
         min_stereo_confidence,
         min_temporal_confidence,
         enable_ba,
@@ -1675,6 +1706,20 @@ fn print_usage() {
          [--stereo-vertical-alignment] \
          [--stereo-vertical-alignment-min-pairs <n>] \
          [--stereo-vertical-alignment-max-correction <m>] \
+         [--rescue-min-median-translation <m>]  lower the shared sustained-motion \
+         gate of the weak-consensus rescue clamps (translation-direction / \
+         rotation-spike / rotation-vector); the default 1.5 m/frame only arms \
+         them at highway speed, 0.5 also covers low-speed urban driving where \
+         a crossing vehicle can capture the PnP consensus \
+         [--ba-exclude-rescued-pairs]  drop the temporal matches of rescued \
+         pairs from online-BA track building, so the optimiser cannot re-impose \
+         the rejected (dynamic-object) motion onto the clamped poses \
+         [--motion-scale-rescue-max-inlier-ratio <r>]  only rescue the \
+         translation magnitude when the PnP inlier ratio is at most <r>. The \
+         default 1.05 treats every pose as weak, which lets a sustained \
+         fast-then-decelerating stretch lock the translation to the stale \
+         median forever (rescued values feed the history); 0.45 restricts the \
+         rescue to genuinely weak consensus like the other rescues \
          [--min-stereo-confidence <0..1, default 0.5>] \
          [--min-temporal-confidence <0..1, default 0.5>] \
          [--ba-position-prior-poses <kitti_poses.txt>]  one-shot BA absolute \
