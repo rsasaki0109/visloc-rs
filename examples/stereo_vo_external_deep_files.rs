@@ -59,6 +59,7 @@ struct CliArgs {
     stereo_vertical_alignment_max_correction_m: f64,
     rescue_min_median_translation_m: Option<f64>,
     motion_scale_rescue_max_inlier_ratio: Option<f64>,
+    min_depth_m: Option<f64>,
     ba_exclude_rescued_pairs: bool,
     min_stereo_confidence: Option<f32>,
     min_temporal_confidence: Option<f32>,
@@ -153,6 +154,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(max_ratio) = args.motion_scale_rescue_max_inlier_ratio {
         config.motion_scale_rescue_max_pnp_inlier_ratio = max_ratio;
+    }
+    if let Some(min_depth) = args.min_depth_m {
+        config.stereo.min_depth_m = min_depth;
     }
     let config = config;
     if args.online_ba && args.enable_ba {
@@ -1187,6 +1191,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         StereoVoFrontendConfig::default().stereo_vertical_alignment_max_correction_m;
     let mut rescue_min_median_translation_m: Option<f64> = None;
     let mut motion_scale_rescue_max_inlier_ratio: Option<f64> = None;
+    let mut min_depth_m: Option<f64> = None;
     let mut ba_exclude_rescued_pairs = false;
     let mut min_stereo_confidence: Option<f32> = Some(0.5);
     let mut min_temporal_confidence: Option<f32> = Some(0.5);
@@ -1336,6 +1341,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--motion-scale-rescue-max-inlier-ratio" => {
                 motion_scale_rescue_max_inlier_ratio = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--min-depth" => {
+                min_depth_m = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--min-stereo-confidence" => {
@@ -1611,6 +1620,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         stereo_vertical_alignment_max_correction_m,
         rescue_min_median_translation_m,
         motion_scale_rescue_max_inlier_ratio,
+        min_depth_m,
         ba_exclude_rescued_pairs,
         min_stereo_confidence,
         min_temporal_confidence,
@@ -1720,6 +1730,9 @@ fn print_usage() {
          fast-then-decelerating stretch lock the translation to the stale \
          median forever (rescued values feed the history); 0.45 restricts the \
          rescue to genuinely weak consensus like the other rescues \
+         [--min-depth <m>]  minimum accepted stereo-triangulated depth \
+         (default 3.0, tuned for vehicle/hall scale; indoor room-scale \
+         scenes need ~0.5 or the near-field landmarks are all rejected) \
          [--min-stereo-confidence <0..1, default 0.5>] \
          [--min-temporal-confidence <0..1, default 0.5>] \
          [--ba-position-prior-poses <kitti_poses.txt>]  one-shot BA absolute \
