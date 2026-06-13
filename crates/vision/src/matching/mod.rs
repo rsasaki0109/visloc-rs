@@ -52,6 +52,98 @@ impl BruteForceMatcher {
 
 impl Matcher for BruteForceMatcher {
     fn match_descriptors(&self, query: &[Vec<f32>], train: &[Vec<f32>]) -> Vec<DescriptorMatch> {
+        // Nearest-neighbour by L2 is equivalent to nearest-neighbour by the
+        // squared distance ‖q−t‖² = ‖q‖² + ‖t‖² − 2·q·t. The cross term q·t for
+        // every (query, train) pair is one matrix product Q·Tᵀ, which nalgebra
+        // dispatches to the blocked `matrixmultiply` kernel — orders of
+        // magnitude faster than the element-wise double loop on the
+        // 256-dimensional deep descriptors this matcher is fed. The selected
+        // best/second distances are recovered as the actual L2 (sqrt), so the
+        // returned `distance` / `ratio` fields are unchanged.
+        let n_query = query.len();
+        let n_train = train.len();
+        if n_query == 0 || n_train == 0 {
+            return Vec::new();
+        }
+        let dim = query[0].len();
+        // The GEMM path assumes a single uniform descriptor dimension. Mixed
+        // lengths (or a zero dimension) fall back to the exact element-wise
+        // path, which skips mismatched pairs via `l2_distance`.
+        let uniform = dim != 0
+            && query.iter().all(|q| q.len() == dim)
+            && train.iter().all(|t| t.len() == dim);
+        if !uniform {
+            return self.match_descriptors_elementwise(query, train);
+        }
+
+        let q = nalgebra::DMatrix::from_fn(n_query, dim, |i, k| query[i][k]);
+        let t = nalgebra::DMatrix::from_fn(n_train, dim, |j, k| train[j][k]);
+        let dots = q * t.transpose(); // (n_query × n_train), dots[(i, j)] = qᵢ·tⱼ
+        let query_norm_sq: Vec<f32> = query
+            .iter()
+            .map(|q| q.iter().map(|x| x * x).sum())
+            .collect();
+        let train_norm_sq: Vec<f32> = train
+            .iter()
+            .map(|t| t.iter().map(|x| x * x).sum())
+            .collect();
+
+        let mut matches = Vec::new();
+        for query_index in 0..n_query {
+            // Rank by score_j = ‖t‖² − 2·q·t = ‖q−t‖² − ‖q‖²; ‖q‖² is constant
+            // across the row, so this preserves the argmin and the strict-`<`
+            // first-wins tie-break of the original loop.
+            let mut best: Option<(usize, f32)> = None;
+            let mut second_best: Option<(usize, f32)> = None;
+            for train_index in 0..n_train {
+                let score = train_norm_sq[train_index] - 2.0 * dots[(query_index, train_index)];
+                if best.is_none_or(|(_, best_score)| score < best_score) {
+                    second_best = best;
+                    best = Some((train_index, score));
+                } else if second_best.is_none_or(|(_, second_score)| score < second_score) {
+                    second_best = Some((train_index, score));
+                }
+            }
+
+            let Some((train_index, best_score)) = best else {
+                continue;
+            };
+            let distance = (query_norm_sq[query_index] + best_score).max(0.0).sqrt();
+            let second_distance = second_best.map(|(_, second_score)| {
+                (query_norm_sq[query_index] + second_score).max(0.0).sqrt()
+            });
+
+            if let Some(ratio) = self.ratio {
+                if let Some(second_distance) = second_distance {
+                    if distance >= ratio * second_distance {
+                        continue;
+                    }
+                }
+            }
+
+            matches.push(DescriptorMatch {
+                query_index,
+                train_index,
+                distance,
+                second_best_distance: second_distance,
+                ratio: second_distance.map(|second_distance| distance / second_distance),
+                confidence: None,
+            });
+        }
+
+        matches
+    }
+}
+
+impl BruteForceMatcher {
+    /// Exact element-wise nearest-neighbour matching — the reference path used
+    /// when descriptors have mixed dimensions (the GEMM path needs a uniform
+    /// dimension). Identical in behaviour to the pre-GEMM implementation.
+    fn match_descriptors_elementwise(
+        &self,
+        query: &[Vec<f32>],
+        train: &[Vec<f32>],
+    ) -> Vec<DescriptorMatch> {
         let mut matches = Vec::new();
 
         for (query_index, query_descriptor) in query.iter().enumerate() {
