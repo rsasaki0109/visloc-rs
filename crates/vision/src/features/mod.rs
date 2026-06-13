@@ -1,4 +1,5 @@
 pub mod deep;
+pub mod lightglue_onnx;
 pub mod superpoint_onnx;
 
 pub use deep::{
