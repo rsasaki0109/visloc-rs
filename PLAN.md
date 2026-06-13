@@ -143,6 +143,46 @@ around the visual-inertial scorecard (wording depends on the cell count).
   Phase 2 to move any MH number; its value is completion + the V-room
   difficult cells.
 
+### Phase 1 result (2026-06-13) — CONCLUDED, vision-only ceiling confirmed
+
+Ran the full stack over all 11 EuRoC sequences. Outcome (SE3 ATE m, vs
+ORB-SLAM3 stereo-inertial Table II):
+
+| | MH01 | MH02 | MH03 | MH04 | MH05 | V101 | V102 | V103 | V201 | V202 | V203 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| visloc | .052 | .054 | .054 | .106† | **.065** | .091 | .072 | .161 | .180 | .129 | DNF |
+| ORB3 SI | .036 | .033 | .035 | .051 | .082 | .038 | .014 | .024 | .032 | .014 | .024 |
+
+(† MH04 is 0.060 at the 3.0 m depth default; 0.106 at 0.5 m.) The optimistic
+"3–5 wins" prediction did **not** hold: the only stereo-inertial win is
+**MH_05 (0.065 < 0.082)**. Machine hall is OV2SLAM-class (within ~1.5×, MH04
+also beats ORB3 stereo-vision 0.085); the Vicon rooms are 2.5–11× behind — the
+IMU regime (fast rotation, motion blur), exactly as the strategy predicted the
+IMU's value lives in V103/V203. V2_03 still DNFs (genuine blackout, stereo
+pairs 59→5; the min-depth fix advanced it pair 206→479 but a vision-only stack
+can't bridge a blackout).
+
+Two real wins from the campaign, independent of the scoreboard:
+1. **min-depth robustness bug found + fixed** (commit `18c2efd`): the
+   `StereoFeatureConfig::min_depth_m` 3.0 m default (KITTI/hall-tuned) rejected
+   nearly all near-field points on the Vicon rooms → all 5 V1/V2 flights
+   hard-crashed (KabschFailed). New opt-in `--min-depth` (default None preserves
+   3.0, so KITTI/MH published numbers unchanged); `--min-depth 0.5` lets all
+   five complete. MH_02 also needs it (0.64 m close-approach segment crashed at
+   3.0 m). The 3rd "benchmark-breadth surfaces a real robustness bug" instance
+   (after seq07 truck, seq09 freeze).
+2. **The depth gate is scene-scale dependent** (hall 3.0 / room 0.5, and MH04
+   wants 3.0 while MH02 wants 0.5) → frame-adaptive depth gate keyed on running
+   median triangulated depth is the clean future fix (noted, not built).
+
+**User decision (2026-06-13): "正直に締めて公開"** — ship the honest standing
+(machine hall OV2SLAM/ORB3-SI class incl. the MH_05 win, Vicon rooms = the
+vision-only ceiling, min-depth fix), do NOT pursue Phase 2 tight VI now. Doc:
+`docs/euroc_loop_closure_benchmark.md` gained a "full EuRoC suite" section with
+the 11-seq table and the depth-gate note. Phase 2 (tight `ImuPreintegrationFactor`
+in the window + IMU propagation fallback) remains the only path to the V-room /
+V2_03 cells if ever revisited.
+
 ## Strategy 2026-06-12 — CUDA acceleration: in-process learned frontend, not GPU solver
 
 User question: "CUDA で高速化とかはどう?" Verdict: **the winning CUDA move is
