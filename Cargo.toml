@@ -117,6 +117,11 @@ path = "examples/relocalization_7scenes_demo.rs"
 required-features = ["image-io"]
 
 [[example]]
+name = "multi_session_lifelong_demo"
+path = "examples/multi_session_lifelong_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
 name = "superpoint_onnx_throughput"
 path = "examples/superpoint_onnx_throughput.rs"
 required-features = ["image-io", "onnx-inference"]
