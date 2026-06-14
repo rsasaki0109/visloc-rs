@@ -145,6 +145,7 @@ Local public-data development measurements, not official leaderboard submissions
 | **EuRoC MH_03 / MH_05 full pipeline** | **0.057 m / 0.072 m** ATE — within **~2.4× / ~1.4× of ORB-SLAM3**, at OV2SLAM's real-time accuracy, **5–7× ahead of VINS-Fusion stereo**, pure Rust |
 | **KITTI seq00 loop closure** | open VO 36.3 m → **2.6 m** Sim(3) ATE (**14×**), 35 verified loops |
 | **EuRoC MH_03 SfM reconstruction** | merged multi-view tracks + global BA: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, COLMAP export for 3DGS / MVS |
+| **Sequential SfM vs COLMAP (metric video)** | same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) — **≈117× faster, ≈17–33× more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.) |
 | **Unordered SfM (real photo collections)** | Orderless monocular photos → VLAD view graph → incremental reconstruction (robust multi-seed init, P3P register, scale-gauge-fixed BA, iterative track filter), vs **COLMAP's own model** with an independent SuperPoint frontend: **COLMAP South Building** (128 photos) **128/128 reg, 1.09 cm**; **Gerrard Hall** (100 photos, 5616×3744 OPENCV) **98/100, 0.68 cm** (3/100 single-seed) — both **0.1 % of extent**. EuRoC V2_03 orbit **31/31, 1.08 cm** |
 | COLMAP South Building localization | deep frontend gives **+37% to +98%** more verified inliers as the viewpoint gap grows |
 | Pose-graph optimization (SE-Sync `.g2o`) | **ties GTSAM 4.x LM** on `parking`/`sphere`/`cubicle`; **beats** it on `torus3D` (2.4e4 vs 6.0e4) and `rim` (8.3e4 vs 6.1e5) |
@@ -154,6 +155,7 @@ Details and reproduction: [KITTI multi-sequence vs published SLAM](docs/kitti_mu
 [KITTI loop closure](docs/kitti_loop_closure_benchmark.md) ·
 [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
 [EuRoC SfM reconstruction](docs/euroc_sfm_benchmark.md) ·
+[sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ·
 [unordered SfM](docs/unordered_sfm_benchmark.md) ·
 [pose-graph / BA internals + GTSAM parity](docs/pgo_internals.md) ·
 [EuRoC vs published baselines](docs/phase_20_to_27_closeout.md).
