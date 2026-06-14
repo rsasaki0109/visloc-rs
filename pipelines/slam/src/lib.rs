@@ -58,8 +58,9 @@ pub use online_stereo_vo_ba::{
 
 pub mod vo_loop_closure;
 pub use vo_loop_closure::{
-    close_loops_on_vo_trajectory, detect_loop_candidates, LoopCandidatePair, VoLoopClosureConfig,
-    VoLoopClosureError, VoLoopClosureResult,
+    close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
+    detect_loop_candidates, LoopCandidatePair, VoLoopClosureConfig, VoLoopClosureError,
+    VoLoopClosureResult,
 };
 
 pub mod online_slam_vi_ba;

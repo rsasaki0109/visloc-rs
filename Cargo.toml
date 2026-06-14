@@ -131,6 +131,11 @@ name = "deep_stereo_slam"
 path = "examples/deep_stereo_slam.rs"
 required-features = ["image-io", "onnx-inference"]
 
+[[example]]
+name = "vpr_global_descriptor_demo"
+path = "examples/vpr_global_descriptor_demo.rs"
+required-features = ["image-io", "onnx-inference"]
+
 [dev-dependencies]
 # 7-Scenes relocalization benchmark needs raw 16-bit depth PNGs (mm); the io
 # crate's grayscale loader normalizes to [0,1] and loses metric depth, so the
