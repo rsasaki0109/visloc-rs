@@ -5,3 +5,6 @@
 
 __pycache__/
 *.pyc
+
+# ONNX model weights (regenerate via scripts/export_*_onnx.py)
+/models/*.onnx

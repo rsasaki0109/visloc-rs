@@ -79,8 +79,14 @@ impl Matcher for BruteForceMatcher {
         let q = nalgebra::DMatrix::from_fn(n_query, dim, |i, k| query[i][k]);
         let t = nalgebra::DMatrix::from_fn(n_train, dim, |j, k| train[j][k]);
         let dots = q * t.transpose(); // (n_query × n_train), dots[(i, j)] = qᵢ·tⱼ
-        let query_norm_sq: Vec<f32> = query.iter().map(|q| q.iter().map(|x| x * x).sum()).collect();
-        let train_norm_sq: Vec<f32> = train.iter().map(|t| t.iter().map(|x| x * x).sum()).collect();
+        let query_norm_sq: Vec<f32> = query
+            .iter()
+            .map(|q| q.iter().map(|x| x * x).sum())
+            .collect();
+        let train_norm_sq: Vec<f32> = train
+            .iter()
+            .map(|t| t.iter().map(|x| x * x).sum())
+            .collect();
 
         let mut matches = Vec::new();
         for query_index in 0..n_query {
