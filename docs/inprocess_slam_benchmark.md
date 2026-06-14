@@ -88,35 +88,40 @@ with no Python and no 42 GB feature dump.
 
 ## Reproduce
 
+The clean top-level entry point is the `deep_stereo_slam` example: it bakes the
+benchmark-validated VO/BA/loop-closure configuration (and the 0.5 LightGlue
+match-confidence gate) as defaults, so the only inputs are the image directory,
+the two ONNX models, and the stereo calibration. It reproduces the numbers above
+**bit-for-bit** (MH_03: 4512 candidates → 306 verified loops, SE(3) 0.0509 m).
+
 ```sh
 # 1. Export the two ONNX models (once).
 scripts/export_superpoint_onnx.py --out models/superpoint_1500.onnx
 scripts/export_lightglue_onnx.py  --out models/lightglue.onnx
 
-# 2. Run single-binary deep SLAM on the rectified stereo images.
-#    (Build with --features "image-io onnx-cuda"; the CUDA-provider runtime
-#     setup is the same as the SuperPoint benchmark runner — provider shared
-#     libs next to the binary, cuDNN on LD_LIBRARY_PATH.)
-target/release/examples/stereo_vo_external_deep_files \
-    --in-process-onnx --images-dir /tmp/MH_03_rect \
-    --superpoint-model models/superpoint_1500.onnx \
-    --lightglue-model models/lightglue.onnx \
-    --frames 2700 --calib /tmp/MH_03_rect/calib.txt \
-    --projection-left P0 --projection-right P1 --width 752 --height 480 \
-    --online-ba --online-ba-window 10 --online-ba-history 20 \
-    --loop-closure --loop-min-frame-gap 200 --loop-two-view-ba --loop-edge-information \
-    --out-dir target/inproc_mh03
+# 2. Single-binary deep SLAM. The runner builds with --features
+#    "image-io onnx-cuda" and handles the CUDA-provider runtime setup (provider
+#    shared libs next to the binary, cuDNN on LD_LIBRARY_PATH).
+scripts/run_deep_stereo_slam.sh \
+    --images-dir /tmp/MH_03_rect --calib /tmp/MH_03_rect/calib.txt \
+    --width 752 --height 480 --frames 2700 --loop-min-frame-gap 200 \
+    --out-dir target/deep_slam_mh03
 
 # 3. Score (KITTI 3x4 vo_poses -> TUM via timestamps -> evo).
-python3 scripts/kitti_poses_to_tum.py target/inproc_mh03/vo_poses.txt \
-    /tmp/MH_03_rect/timestamps.txt target/inproc_mh03/inproc.tum
-evo_ape tum /tmp/MH_03_gt.tum target/inproc_mh03/inproc.tum -a    # SE(3)
+python3 scripts/kitti_poses_to_tum.py target/deep_slam_mh03/vo_poses.txt \
+    /tmp/MH_03_rect/timestamps.txt target/deep_slam_mh03/est.tum
+evo_ape tum /tmp/MH_03_gt.tum target/deep_slam_mh03/est.tum -a    # SE(3)
 ```
 
-`--in-process-onnx` takes `--images-dir` (with `--left-subdir`/`--right-subdir`,
-default `image_0`/`image_1`), `--superpoint-model`, `--lightglue-model`,
-`--onnx-cpu` (force CPU), and `--onnx-max-keypoints`. The match confidence
-carried in `DescriptorMatch::confidence` is the LightGlue score, so the same
-`--min-stereo-confidence` / `--min-temporal-confidence` gates apply to both
-front-ends. Without the `onnx-inference`+`image-io` features the flag errors and
-the binary stays the file-based reader (the default build is unchanged).
+The example takes `--images-dir` (with `--left-subdir`/`--right-subdir`, default
+`image_0`/`image_1`), `--superpoint-model`, `--lightglue-model`, `--calib` (KITTI
+P0/P1) or explicit `--fx/--fy/--cx/--cy/--baseline`, `--frames`,
+`--loop-min-frame-gap` (50 for KITTI driving, 200 for EuRoC aerial),
+`--max-keypoints`, and `--onnx-cpu`. EuRoC and KITTI differ only by frame gap and
+the LightGlue model resolution (the matcher bakes the image size; re-export at
+1241×376 for KITTI — SuperPoint is resolution-dynamic).
+
+The lower-level `stereo_vo_external_deep_files --in-process-onnx` exposes the
+same in-process front-end behind the full file-based flag surface (`--online-ba`,
+`--loop-two-view-ba`, `--loop-edge-information`, `--min-stereo-confidence`, …) for
+ablation; `deep_stereo_slam` is the curated default of that configuration.
