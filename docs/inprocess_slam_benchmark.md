@@ -125,3 +125,35 @@ The lower-level `stereo_vo_external_deep_files --in-process-onnx` exposes the
 same in-process front-end behind the full file-based flag surface (`--online-ba`,
 `--loop-two-view-ba`, `--loop-edge-information`, `--min-stereo-confidence`, …) for
 ablation; `deep_stereo_slam` is the curated default of that configuration.
+
+## 3D Gaussian Splatting from the single binary
+
+`--sfm-colmap-out <dir>` makes `deep_stereo_slam` also emit a **metric COLMAP
+model** (merged multi-view tracks: it stitches the temporal matches, runs one
+global BA over the loop-closed poses, and writes `cameras/images/points3D.txt`
+with multi-view `TRACK[]` tails). One Rust binary thus turns raw rectified
+stereo into a 3DGS-ready reconstruction — no Python, no COLMAP mapper hours, no
+mono scale ambiguity. `--sfm-ba-iterations` trades reprojection tightness
+(crisper structure) against preserving the loop-closed trajectory.
+
+Validated on the EuRoC **V2_03** Vicon-room orbit (150 frames, already
+rectified). The single binary runs VO at 23.9 fps and reconstructs 520
+multi-view tracks at 0.98 → 0.60 px reprojection; feeding that COLMAP model
+straight into gsplat MCMC (7000 iters) yields a 153 k-gaussian splat at L1
+0.0204 that renders the room — curtains, table, chair — recognizably from the
+SLAM poses:
+
+![deep_stereo_slam V2_03 3DGS: real frame (left) vs splat rendered from the single-binary SLAM poses (right)](assets/deep_stereo_slam_v203_3dgs.png)
+
+*Left: real V2_03 frame. Right: the 3D Gaussian Splat rendered from the same
+pose — trained on the COLMAP model that `deep_stereo_slam --sfm-colmap-out`
+wrote, not ground truth.*
+
+Reproduce end-to-end (SLAM → COLMAP → 3DGS → fly-through) with
+`scripts/run_deep_slam_3dgs.sh` (needs `gsplat`):
+
+```sh
+scripts/run_deep_slam_3dgs.sh \
+    --images-dir /tmp/V2_03_rect --calib /tmp/V2_03_rect/calib.txt \
+    --width 752 --height 480 --frames 150 --out /tmp/deep_v203_3dgs
+```
