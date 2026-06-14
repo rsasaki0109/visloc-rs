@@ -36,9 +36,142 @@ use visloc_rs::{
     StereoVoPairDiagnostics, TrackingEvent, TrackingState, TrajectorySample, VoLoopClosureConfig,
 };
 
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+use visloc_rs::io::images::read_common_image;
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+use visloc_rs::vision::features::deep::DeepFeatureExtractor;
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+use visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher;
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+use visloc_rs::vision::features::superpoint_onnx::{
+    OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxExtractor,
+};
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+use visloc_rs::vision::features::FeatureSet;
+
+/// In-process deep front-end: SuperPoint + LightGlue run via ONNX Runtime per
+/// frame, producing the same `FeatureSet` / `DescriptorMatch` data the
+/// file-based path reads from `--features-dir`. The match confidence carried in
+/// `DescriptorMatch::confidence` is the LightGlue score, so the same
+/// `--min-stereo-confidence` / `--min-temporal-confidence` gates apply.
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+struct InProcessFrontend {
+    superpoint: SuperPointOnnxExtractor,
+    lightglue: LightGlueOnnxMatcher,
+    left_dir: PathBuf,
+    right_dir: PathBuf,
+    // Previous left-frame SuperPoint keypoints + descriptors, for the temporal
+    // (previous-left -> current-left) match.
+    prev_left: Option<(Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>)>,
+}
+
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+type FrameInputs = (
+    FeatureSet,
+    FeatureSet,
+    Vec<DescriptorMatch>,
+    Option<Vec<DescriptorMatch>>,
+);
+
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+impl InProcessFrontend {
+    fn new(args: &CliArgs) -> Result<Self, Box<dyn std::error::Error>> {
+        let backend = if args.onnx_backend_cpu {
+            OnnxBackend::Cpu
+        } else {
+            OnnxBackend::CudaThenCpu
+        };
+        let config = SuperPointOnnxConfig {
+            max_keypoints: args.onnx_max_keypoints,
+            ..Default::default()
+        };
+        let superpoint = SuperPointOnnxExtractor::load_from_path_with_backend(
+            args.superpoint_model.as_ref().unwrap(),
+            config,
+            backend,
+        )?;
+        let lightglue = LightGlueOnnxMatcher::load_from_path_with_backend(
+            args.lightglue_model.as_ref().unwrap(),
+            backend,
+        )?;
+        let images_dir = args.images_dir.as_ref().unwrap();
+        Ok(Self {
+            superpoint,
+            lightglue,
+            left_dir: images_dir.join(&args.left_subdir),
+            right_dir: images_dir.join(&args.right_subdir),
+            prev_left: None,
+        })
+    }
+
+    fn process_frame(&mut self, frame_id: usize) -> Result<FrameInputs, Box<dyn std::error::Error>> {
+        let name = format!("{frame_id:06}.png");
+        let left_img = read_common_image(self.left_dir.join(&name))?;
+        let right_img = read_common_image(self.right_dir.join(&name))?;
+        let left = self.superpoint.extract_deep(&left_img)?;
+        let right = self.superpoint.extract_deep(&right_img)?;
+
+        let stereo = self
+            .lightglue
+            .match_features(
+                &left.keypoints,
+                &left.descriptors,
+                &right.keypoints,
+                &right.descriptors,
+            )?
+            .into_iter()
+            .map(to_descriptor_match)
+            .collect::<Vec<_>>();
+
+        let temporal = match self.prev_left.take() {
+            None => None,
+            Some((prev_kpts, prev_desc)) => Some(
+                self.lightglue
+                    .match_features(&prev_kpts, &prev_desc, &left.keypoints, &left.descriptors)?
+                    .into_iter()
+                    .map(to_descriptor_match)
+                    .collect::<Vec<_>>(),
+            ),
+        };
+
+        let left_features = FeatureSet::new(left.keypoints.clone(), left.descriptors.clone())?;
+        let right_features = FeatureSet::new(right.keypoints, right.descriptors)?;
+        self.prev_left = Some((left.keypoints, left.descriptors));
+        Ok((left_features, right_features, stereo, temporal))
+    }
+}
+
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+fn to_descriptor_match(
+    m: visloc_rs::vision::features::lightglue_onnx::LightGlueMatch,
+) -> DescriptorMatch {
+    DescriptorMatch {
+        query_index: m.query_index,
+        train_index: m.train_index,
+        distance: 1.0 - m.score,
+        second_best_distance: None,
+        ratio: None,
+        confidence: Some(m.score),
+    }
+}
+
 #[derive(Debug)]
+// Several fields are only read under the `onnx-inference` + `image-io` in-process
+// path; the default file-based build does not touch them.
+#[allow(dead_code)]
 struct CliArgs {
     features_dir: PathBuf,
+    // In-process ONNX deep front-end (SuperPoint + LightGlue) instead of the
+    // pre-exported `--features-dir`. Requires building with
+    // `--features "image-io onnx-cuda"` (or `onnx-inference` for CPU).
+    in_process_onnx: bool,
+    superpoint_model: Option<PathBuf>,
+    lightglue_model: Option<PathBuf>,
+    images_dir: Option<PathBuf>,
+    left_subdir: String,
+    right_subdir: String,
+    onnx_backend_cpu: bool,
+    onnx_max_keypoints: usize,
     out_dir: PathBuf,
     calib: Option<PathBuf>,
     projection_left: String,
@@ -413,30 +546,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // multi-frame track building after the frame-by-frame VO completes.
     let mut all_temporal_matches: Vec<Vec<DescriptorMatch>> = Vec::new();
 
+    #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+    let mut inprocess = if args.in_process_onnx {
+        Some(InProcessFrontend::new(&args)?)
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "onnx-inference", feature = "image-io")))]
+    if args.in_process_onnx {
+        return Err("--in-process-onnx requires building this example with \
+                    --features \"image-io onnx-cuda\" (or \"image-io onnx-inference\" for CPU)"
+            .into());
+    }
+
     for frame_id in 0..args.frames {
-        let left_features =
-            read_external_deep_features_txt(args.features_dir.join(left_features_name(frame_id)))?
-                .into_feature_set()?;
-        let right_features =
-            read_external_deep_features_txt(args.features_dir.join(right_features_name(frame_id)))?
-                .into_feature_set()?;
-        let stereo_matches =
-            read_external_deep_matches_txt(args.features_dir.join(stereo_matches_name(frame_id)))?
-                .into_descriptor_matches();
-        let stereo_matches =
-            filter_matches_by_confidence(stereo_matches, args.min_stereo_confidence);
-        let temporal_matches = if frame_id == 0 {
-            None
+        // Feature/match inputs come from either the in-process ONNX front-end
+        // or the pre-exported `--features-dir`; both yield the same types.
+        let left_features;
+        let right_features;
+        let stereo_matches;
+        let temporal_matches;
+        #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+        let from_inprocess = inprocess.is_some();
+        #[cfg(not(all(feature = "onnx-inference", feature = "image-io")))]
+        let from_inprocess = false;
+        if from_inprocess {
+            #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+            {
+                let (lf, rf, sm, tm) = inprocess.as_mut().unwrap().process_frame(frame_id)?;
+                left_features = lf;
+                right_features = rf;
+                stereo_matches = filter_matches_by_confidence(sm, args.min_stereo_confidence);
+                temporal_matches =
+                    tm.map(|m| filter_matches_by_confidence(m, args.min_temporal_confidence));
+            }
+            #[cfg(not(all(feature = "onnx-inference", feature = "image-io")))]
+            {
+                unreachable!();
+            }
         } else {
-            let matches = read_external_deep_matches_txt(
-                args.features_dir.join(temporal_matches_name(frame_id)),
+            left_features = read_external_deep_features_txt(
+                args.features_dir.join(left_features_name(frame_id)),
+            )?
+            .into_feature_set()?;
+            right_features = read_external_deep_features_txt(
+                args.features_dir.join(right_features_name(frame_id)),
+            )?
+            .into_feature_set()?;
+            let sm = read_external_deep_matches_txt(
+                args.features_dir.join(stereo_matches_name(frame_id)),
             )?
             .into_descriptor_matches();
-            Some(filter_matches_by_confidence(
-                matches,
-                args.min_temporal_confidence,
-            ))
-        };
+            stereo_matches = filter_matches_by_confidence(sm, args.min_stereo_confidence);
+            temporal_matches = if frame_id == 0 {
+                None
+            } else {
+                let matches = read_external_deep_matches_txt(
+                    args.features_dir.join(temporal_matches_name(frame_id)),
+                )?
+                .into_descriptor_matches();
+                Some(filter_matches_by_confidence(
+                    matches,
+                    args.min_temporal_confidence,
+                ))
+            };
+        }
         if args.enable_ba || args.final_global_ba || args.sfm_colmap_export_dir.is_some() {
             if let Some(ref tm) = temporal_matches {
                 all_temporal_matches.push(tm.clone());
@@ -1168,6 +1342,14 @@ fn project_pose_rotations_from_kitti_poses(
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut features_dir: Option<PathBuf> = None;
+    let mut in_process_onnx = false;
+    let mut superpoint_model: Option<PathBuf> = None;
+    let mut lightglue_model: Option<PathBuf> = None;
+    let mut images_dir: Option<PathBuf> = None;
+    let mut left_subdir = String::from("image_0");
+    let mut right_subdir = String::from("image_1");
+    let mut onnx_backend_cpu = false;
+    let mut onnx_max_keypoints: usize = 1500;
     let mut out_dir = PathBuf::from("target/stereo_vo_external_deep_files");
     let mut calib: Option<PathBuf> = None;
     let mut projection_left = String::from("P0");
@@ -1257,6 +1439,38 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--features-dir" => {
                 features_dir = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
+            "--in-process-onnx" => {
+                in_process_onnx = true;
+                args.remove(i);
+            }
+            "--superpoint-model" => {
+                superpoint_model = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
+            "--lightglue-model" => {
+                lightglue_model = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
+            "--images-dir" => {
+                images_dir = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
+            "--left-subdir" => {
+                left_subdir = args.remove(i + 1);
+                args.remove(i);
+            }
+            "--right-subdir" => {
+                right_subdir = args.remove(i + 1);
+                args.remove(i);
+            }
+            "--onnx-cpu" => {
+                onnx_backend_cpu = true;
+                args.remove(i);
+            }
+            "--onnx-max-keypoints" => {
+                onnx_max_keypoints = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
             "--out-dir" => {
@@ -1598,8 +1812,32 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         }
     }
 
+    if in_process_onnx {
+        if images_dir.is_none() {
+            return Err("--in-process-onnx requires --images-dir".into());
+        }
+        if superpoint_model.is_none() || lightglue_model.is_none() {
+            return Err(
+                "--in-process-onnx requires --superpoint-model and --lightglue-model".into(),
+            );
+        }
+    }
+    let features_dir = if in_process_onnx {
+        features_dir.unwrap_or_default()
+    } else {
+        features_dir.ok_or("--features-dir is required (or use --in-process-onnx)")?
+    };
+
     Ok(CliArgs {
-        features_dir: features_dir.ok_or("--features-dir is required")?,
+        features_dir,
+        in_process_onnx,
+        superpoint_model,
+        lightglue_model,
+        images_dir,
+        left_subdir,
+        right_subdir,
+        onnx_backend_cpu,
+        onnx_max_keypoints,
         out_dir,
         calib,
         projection_left,
