@@ -74,7 +74,10 @@ impl fmt::Display for LightGlueOnnxError {
                 write!(f, "LightGlue ONNX input dimension mismatch: {message}")
             }
             LightGlueOnnxError::OutputShapeMismatch { expected, actual } => {
-                write!(f, "LightGlue ONNX output shape: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "LightGlue ONNX output shape: expected {expected}, got {actual}"
+                )
             }
             LightGlueOnnxError::OnnxRuntime(message) => {
                 write!(f, "LightGlue ONNX Runtime error: {message}")
@@ -213,18 +216,20 @@ impl LightGlueOnnxMatcher {
             .run(ort::inputs![kpts0, desc0, kpts1, desc1])
             .map_err(LightGlueOnnxError::from_ort)?;
 
-        let matches0 = outputs
-            .remove("matches0")
-            .ok_or_else(|| LightGlueOnnxError::OutputShapeMismatch {
-                expected: "output named `matches0`",
-                actual: "missing".to_string(),
-            })?;
-        let mscores0 = outputs
-            .remove("mscores0")
-            .ok_or_else(|| LightGlueOnnxError::OutputShapeMismatch {
-                expected: "output named `mscores0`",
-                actual: "missing".to_string(),
-            })?;
+        let matches0 =
+            outputs
+                .remove("matches0")
+                .ok_or_else(|| LightGlueOnnxError::OutputShapeMismatch {
+                    expected: "output named `matches0`",
+                    actual: "missing".to_string(),
+                })?;
+        let mscores0 =
+            outputs
+                .remove("mscores0")
+                .ok_or_else(|| LightGlueOnnxError::OutputShapeMismatch {
+                    expected: "output named `mscores0`",
+                    actual: "missing".to_string(),
+                })?;
 
         let matches0 = matches0
             .try_extract_array::<i64>()
@@ -236,9 +241,7 @@ impl LightGlueOnnxMatcher {
         let mscores0 = squeeze_to_1d_f32(mscores0.view())?;
 
         let mut matches = Vec::new();
-        for (query_index, (&target, &score)) in
-            matches0.iter().zip(mscores0.iter()).enumerate()
-        {
+        for (query_index, (&target, &score)) in matches0.iter().zip(mscores0.iter()).enumerate() {
             if target >= 0 {
                 matches.push(LightGlueMatch {
                     query_index,

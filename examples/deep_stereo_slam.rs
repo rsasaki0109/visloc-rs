@@ -142,9 +142,9 @@ fn kitti_stereo_calibration(
         .iter()
         .find(|p| p.label == projection_right)
         .ok_or_else(|| format!("calib missing {projection_right}"))?;
-    let baseline = right
-        .stereo_baseline_from(left)
-        .ok_or_else(|| format!("calib pair {projection_left}<->{projection_right} gave no baseline"))?;
+    let baseline = right.stereo_baseline_from(left).ok_or_else(|| {
+        format!("calib pair {projection_left}<->{projection_right} gave no baseline")
+    })?;
     Ok((left.fx(), left.fy(), left.cx(), left.cy(), baseline))
 }
 
@@ -181,7 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kitti_stereo_calibration(calib, &args.projection_left, &args.projection_right)?
     } else {
         if args.fx <= 0.0 || args.baseline <= 0.0 {
-            return Err("supply --calib (KITTI P0/P1) or explicit --fx/--fy/--cx/--cy/--baseline".into());
+            return Err(
+                "supply --calib (KITTI P0/P1) or explicit --fx/--fy/--cx/--cy/--baseline".into(),
+            );
         }
         (args.fx, args.fy, args.cx, args.cy, args.baseline)
     };
@@ -213,7 +215,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "online BA: window={} history={} trigger_every={}",
-        online_config.window_size, online_config.local_map_history, online_config.trigger_every_frames
+        online_config.window_size,
+        online_config.local_map_history,
+        online_config.trigger_every_frames
     );
     let mut runner = OnlineStereoVoBa::new(frontend, online_config);
 
@@ -227,9 +231,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_keypoints: args.max_keypoints,
         ..Default::default()
     };
-    let superpoint =
-        SuperPointOnnxExtractor::load_from_path_with_backend(&args.superpoint_model, sp_config, backend)?;
-    let lightglue = LightGlueOnnxMatcher::load_from_path_with_backend(&args.lightglue_model, backend)?;
+    let superpoint = SuperPointOnnxExtractor::load_from_path_with_backend(
+        &args.superpoint_model,
+        sp_config,
+        backend,
+    )?;
+    let lightglue =
+        LightGlueOnnxMatcher::load_from_path_with_backend(&args.lightglue_model, backend)?;
     let left_dir = args.images_dir.join(&args.left_subdir);
     let right_dir = args.images_dir.join(&args.right_subdir);
     println!(
@@ -257,9 +265,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let temporal: Option<Vec<DescriptorMatch>> = match prev_left.take() {
             None => None,
-            Some((pk, pd)) => Some(to_descriptor_matches(
-                lightglue.match_features(&pk, &pd, &left.keypoints, &left.descriptors)?,
-            )),
+            Some((pk, pd)) => Some(to_descriptor_matches(lightglue.match_features(
+                &pk,
+                &pd,
+                &left.keypoints,
+                &left.descriptors,
+            )?)),
         };
 
         let left_features = FeatureSet::new(left.keypoints.clone(), left.descriptors.clone())?;
@@ -278,8 +289,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if frame_id % 100 == 0 {
                 println!(
                     "frame {frame_id}/{}  src={:?} temporal={} stereo={} inliers={} t={:.3}m",
-                    args.frames, d.source, d.temporal_match_count,
-                    d.stereo_pair_correspondence_count, d.inlier_count, d.translation_m,
+                    args.frames,
+                    d.source,
+                    d.temporal_match_count,
+                    d.stereo_pair_correspondence_count,
+                    d.inlier_count,
+                    d.translation_m,
                 );
             }
         }
@@ -302,7 +317,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "loop-closure PGO: poses={} min_frame_gap={} min_similarity={:.2} vocab_k={}",
-        runner.frontend.poses.len(), loop_cfg.min_frame_gap, loop_cfg.min_similarity, loop_cfg.vocab_k,
+        runner.frontend.poses.len(),
+        loop_cfg.min_frame_gap,
+        loop_cfg.min_similarity,
+        loop_cfg.vocab_k,
     );
     match close_loops_on_vo_trajectory(
         &runner.frontend.camera,
@@ -316,8 +334,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(gnc) => println!(
                     "loop-closure PGO: candidates={} verified_loops={} cost {:.3} -> {:.3} \
                      ({} outer iters, converged={})",
-                    result.candidate_count, result.verified_count(),
-                    gnc.initial_cost, gnc.final_cost, gnc.outer_iterations, gnc.converged,
+                    result.candidate_count,
+                    result.verified_count(),
+                    gnc.initial_cost,
+                    gnc.final_cost,
+                    gnc.outer_iterations,
+                    gnc.converged,
                 ),
                 None => println!(
                     "loop-closure PGO: candidates={} verified_loops=0 (trajectory unchanged)",
@@ -361,6 +383,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frontend.trajectory_length_m(),
         ),
     )?;
-    println!("wrote {}/vo_poses.txt (+ vo.csv, summary.txt)", args.out_dir.display());
+    println!(
+        "wrote {}/vo_poses.txt (+ vo.csv, summary.txt)",
+        args.out_dir.display()
+    );
     Ok(())
 }

@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::vision::features::deep::DeepFeatureExtractor;
-use visloc_rs::vision::features::lightglue_onnx::{LightGlueOnnxMatcher, LightGlueMatch};
+use visloc_rs::vision::features::lightglue_onnx::{LightGlueMatch, LightGlueOnnxMatcher};
 use visloc_rs::vision::features::superpoint_onnx::{
     OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxExtractor,
 };
@@ -128,7 +128,12 @@ fn run(
         let f0 = sp.extract_deep(&frames[i]).expect("extract");
         let f1 = sp.extract_deep(&frames[i + 1]).expect("extract");
         let _ = lg
-            .match_features(&f0.keypoints, &f0.descriptors, &f1.keypoints, &f1.descriptors)
+            .match_features(
+                &f0.keypoints,
+                &f0.descriptors,
+                &f1.keypoints,
+                &f1.descriptors,
+            )
             .expect("match");
     }
     let e2e_s = t.elapsed().as_secs_f64();

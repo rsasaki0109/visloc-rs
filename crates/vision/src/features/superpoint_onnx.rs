@@ -162,11 +162,12 @@ impl DeepFeatureExtractor for SuperPointOnnxExtractor {
 /// the CPU provider. `Cpu` forces the CPU provider only — useful for an A/B
 /// throughput comparison and for deterministic CI.
 #[cfg(feature = "onnx-inference")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnnxBackend {
     /// Prefer CUDA, fall back to CPU if the GPU provider cannot register.
     /// This is the production default: a deployment without a CUDA runtime
     /// still runs, just on the CPU.
+    #[default]
     CudaThenCpu,
     /// CUDA execution provider only; loading errors if the GPU provider
     /// cannot register (no silent CPU fallback). Use this when a caller must
@@ -175,13 +176,6 @@ pub enum OnnxBackend {
     Cuda,
     /// CPU execution provider only.
     Cpu,
-}
-
-#[cfg(feature = "onnx-inference")]
-impl Default for OnnxBackend {
-    fn default() -> Self {
-        OnnxBackend::CudaThenCpu
-    }
 }
 
 #[cfg(feature = "onnx-inference")]
@@ -281,17 +275,24 @@ impl DeepFeatureExtractor for SuperPointOnnxExtractor {
     }
 }
 
+/// The three named SuperPoint network outputs as owned ndarrays:
+/// `(keypoints (N,2) i64, scores (N,) f32, descriptors (N,256) f32)`.
+#[cfg(feature = "onnx-inference")]
+type NamedOutputs = (
+    ndarray::Array2<i64>,
+    ndarray::Array1<f32>,
+    ndarray::Array2<f32>,
+);
+
+/// One decoded keypoint: image position, detector score, and L2-normalized
+/// descriptor.
+#[cfg(feature = "onnx-inference")]
+type DecodedKeypoints = Vec<(Point2<f64>, f32, Vec<f32>)>;
+
 #[cfg(feature = "onnx-inference")]
 fn extract_named_outputs(
     outputs: &mut ort::session::SessionOutputs<'_>,
-) -> Result<
-    (
-        ndarray::Array2<i64>,
-        ndarray::Array1<f32>,
-        ndarray::Array2<f32>,
-    ),
-    SuperPointOnnxError,
-> {
+) -> Result<NamedOutputs, SuperPointOnnxError> {
     // The LightGlue-ONNX style export names the three outputs
     // "keypoints", "scores", "descriptors". If a model under
     // evaluation diverges from those names the lookup below errors
@@ -456,7 +457,7 @@ fn postprocess(
     scores: ndarray::ArrayView1<'_, f32>,
     descriptors: ndarray::ArrayView2<'_, f32>,
     config: &SuperPointOnnxConfig,
-) -> Result<Vec<(Point2<f64>, f32, Vec<f32>)>, SuperPointOnnxError> {
+) -> Result<DecodedKeypoints, SuperPointOnnxError> {
     let n_kp = keypoints.shape()[0];
     let n_score = scores.shape()[0];
     let n_desc = descriptors.shape()[0];

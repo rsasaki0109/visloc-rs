@@ -34,7 +34,7 @@ The two are **not** bit-identical: the file-based features were exported by a
 separate Python SuperPoint pass, so the keypoint *sets* differ slightly (the
 ONNX export keeps the top-1500 above a 0.005 score gate). Given the *same*
 features, the ONNX LightGlue matches are bit-identical to the Python reference
-([1500/1500 indices agree](lightglue_onnx_benchmark.md#parity--bit-identical-to-the-python-reference));
+([1500/1500 indices agree](lightglue_onnx_benchmark.md#parity-bit-identical-to-the-python-reference));
 the small ATE difference here is the front-end's keypoint selection, not the
 matcher. Both land in the same accuracy regime (within ~2.4× of ORB-SLAM3 on
 this flight), confirming the in-process front-end drives real SLAM at the

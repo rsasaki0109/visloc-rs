@@ -12,7 +12,7 @@ pre-exported feature dump.
   returns matches, on the same CUDA-or-CPU execution-provider plumbing as
   SuperPoint (`OnnxBackend`).
 
-## Parity — bit-identical to the Python reference
+## Parity: bit-identical to the Python reference
 
 On a real EuRoC MH_03 pair, the exported ONNX LightGlue reproduces the Python
 `lightglue` matcher exactly (same SuperPoint features, pruning disabled in both):

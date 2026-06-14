@@ -104,7 +104,10 @@ impl InProcessFrontend {
         })
     }
 
-    fn process_frame(&mut self, frame_id: usize) -> Result<FrameInputs, Box<dyn std::error::Error>> {
+    fn process_frame(
+        &mut self,
+        frame_id: usize,
+    ) -> Result<FrameInputs, Box<dyn std::error::Error>> {
         let name = format!("{frame_id:06}.png");
         let left_img = read_common_image(self.left_dir.join(&name))?;
         let right_img = read_common_image(self.right_dir.join(&name))?;
