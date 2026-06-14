@@ -121,6 +121,11 @@ name = "superpoint_onnx_throughput"
 path = "examples/superpoint_onnx_throughput.rs"
 required-features = ["image-io", "onnx-inference"]
 
+[[example]]
+name = "deep_frontend_onnx_demo"
+path = "examples/deep_frontend_onnx_demo.rs"
+required-features = ["image-io", "onnx-inference"]
+
 [dev-dependencies]
 # 7-Scenes relocalization benchmark needs raw 16-bit depth PNGs (mm); the io
 # crate's grayscale loader normalizes to [0,1] and loses metric depth, so the

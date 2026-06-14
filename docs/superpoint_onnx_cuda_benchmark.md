@@ -39,12 +39,11 @@ pure latency win, not an accuracy trade.
   in Rust, on the GPU, at real time. For the extraction stage this removes the
   Python/PyTorch dependency and the multi-GB on-disk feature dump entirely — the
   network is loaded from a single 5 MB `.onnx` file and run per frame.
-- **Still external:** the learned **LightGlue matcher** is not yet an in-process
-  ONNX graph; the deep-VO benchmarks still read pre-exported LightGlue matches.
-  An in-process, training-free matcher already exists
-  (`matching::MutualSoftmaxMatcher`, a dual-softmax LightGlue emulation), so a
-  fully in-process deep front-end is possible today with that matcher; porting
-  the learned LightGlue weights to ONNX for the quality tier is the next step.
+- **Also landed (follow-up):** the learned **LightGlue matcher** now runs
+  in-process too — see [the LightGlue ONNX benchmark](lightglue_onnx_benchmark.md).
+  The full learned front-end (extract + match) runs at **34 fps** on the GPU,
+  bit-identical matches to the Python reference. (A training-free in-process
+  matcher, `matching::MutualSoftmaxMatcher`, also exists as a no-weights option.)
 
 So the honest claim is narrow: **the deep feature-extraction front-end is now
 real-time and in-process (pure-Rust + ONNX Runtime), no Python export pass** — a
