@@ -23,17 +23,18 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::Vector3;
 use visloc_rs::{
-    close_loops_on_vo_trajectory, parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt,
-    parse_stereo_vo_imu_samples_txt, read_external_deep_features_txt,
-    read_external_deep_matches_txt, read_kitti_oxts_dir, reconstruct_stereo_vo_with_ba,
-    refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes, write_colmap_binary_model_for_3dgs,
-    write_colmap_reconstruction_for_3dgs, write_colmap_text_model_for_3dgs,
-    write_online_ba_imu_state_csv, BaConfig, Camera, DescriptorMatch, GravityPrior,
-    KabschRansacConfig, LandmarkInit, LinearSolver, OnlineStereoVoBa, OnlineStereoVoBaConfig,
-    PerPoseGravityObservation, PerPoseGravityPrior, Pose, PoseTrajectory, PositionPrior,
-    PositionPriorObservation, RobustKernel, StereoRelativePoseMode, StereoVoBaConfig,
-    StereoVoBaImuInput, StereoVoBaImuSample, StereoVoFrontend, StereoVoFrontendConfig,
-    StereoVoPairDiagnostics, TrackingEvent, TrackingState, TrajectorySample, VoLoopClosureConfig,
+    close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
+    parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt, parse_stereo_vo_imu_samples_txt,
+    read_external_deep_features_txt, read_external_deep_matches_txt, read_kitti_oxts_dir,
+    reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
+    write_colmap_binary_model_for_3dgs, write_colmap_reconstruction_for_3dgs,
+    write_colmap_text_model_for_3dgs, write_online_ba_imu_state_csv, BaConfig, Camera,
+    DescriptorMatch, GravityPrior, KabschRansacConfig, LandmarkInit, LinearSolver,
+    OnlineStereoVoBa, OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose,
+    PoseTrajectory, PositionPrior, PositionPriorObservation, RobustKernel, StereoRelativePoseMode,
+    StereoVoBaConfig, StereoVoBaImuInput, StereoVoBaImuSample, StereoVoFrontend,
+    StereoVoFrontendConfig, StereoVoPairDiagnostics, TrackingEvent, TrackingState,
+    TrajectorySample, VoLoopClosureConfig,
 };
 
 #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
@@ -144,6 +145,24 @@ impl InProcessFrontend {
     }
 }
 
+/// Read precomputed per-frame global descriptors written by
+/// `vpr_global_descriptor_demo`: one line per frame, each a whitespace-separated
+/// list of float32 values (already L2-normalised).
+fn load_global_descriptors(path: &Path) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(path)?;
+    let mut globals = Vec::new();
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let row: Result<Vec<f32>, _> = line.split_whitespace().map(|v| v.parse::<f32>()).collect();
+        let row = row.map_err(|e| format!("{}:{}: {e}", path.display(), line_no + 1))?;
+        globals.push(row);
+    }
+    Ok(globals)
+}
+
 #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
 fn to_descriptor_match(
     m: visloc_rs::vision::features::lightglue_onnx::LightGlueMatch,
@@ -225,6 +244,9 @@ struct CliArgs {
     loop_max_verifications: Option<usize>,
     loop_two_view_ba: bool,
     loop_edge_information: bool,
+    loop_global_descriptor_file: Option<PathBuf>,
+    loop_min_inlier_ratio: Option<f64>,
+    loop_min_inliers: Option<usize>,
     ba_gravity_prior_weight: Option<f64>,
     ba_per_pose_gravity_prior_observations: Option<PathBuf>,
     ba_per_pose_gravity_prior_weight: f64,
@@ -822,6 +844,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // appearance, verifies them with PnP into metric relative-pose constraints,
     // and re-distributes the accumulated drift with a robust GNC SE(3) solve.
     if args.loop_closure {
+        let mut verifier = VoLoopClosureConfig::default().verifier;
+        if let Some(ratio) = args.loop_min_inlier_ratio {
+            verifier.min_inlier_ratio = ratio;
+        }
+        if let Some(min_inliers) = args.loop_min_inliers {
+            verifier.min_inliers = min_inliers;
+        }
         let loop_cfg = VoLoopClosureConfig {
             min_frame_gap: args.loop_min_frame_gap,
             min_path_length: args.loop_min_path_length,
@@ -831,24 +860,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_verifications: args.loop_max_verifications,
             refine_loops_two_view: args.loop_two_view_ba,
             loop_edge_information: args.loop_edge_information,
+            verifier,
             ..VoLoopClosureConfig::default()
         };
+        // Optional: drive retrieval with a *learned* global descriptor
+        // (EigenPlaces / CosPlace) precomputed by `vpr_global_descriptor_demo`,
+        // one L2-normalised vector per frame, instead of the built-in k-means
+        // VLAD over local SuperPoint descriptors. The geometric verification and
+        // PGO that follow are identical, so this is a clean VLAD-vs-learned A/B.
+        let learned_globals = match &args.loop_global_descriptor_file {
+            Some(path) => {
+                let globals = load_global_descriptors(path)?;
+                if globals.len() != online_runner.frontend.poses.len() {
+                    return Err(format!(
+                        "global descriptor count {} != pose count {} (file {})",
+                        globals.len(),
+                        online_runner.frontend.poses.len(),
+                        path.display()
+                    )
+                    .into());
+                }
+                println!(
+                    "loaded {} learned global descriptors (dim {}) from {}",
+                    globals.len(),
+                    globals.first().map(|g| g.len()).unwrap_or(0),
+                    path.display(),
+                );
+                Some(globals)
+            }
+            None => None,
+        };
         println!(
-            "running LOOP-CLOSURE PGO: poses={} min_frame_gap={} min_similarity={:.2} vocab_k={} \
-             max_candidates_per_frame={}",
+            "running LOOP-CLOSURE PGO: poses={} min_frame_gap={} min_similarity={:.2} \
+             retrieval={} max_candidates_per_frame={}",
             online_runner.frontend.poses.len(),
             args.loop_min_frame_gap,
             args.loop_min_similarity,
-            args.loop_vocab_k,
+            match &learned_globals {
+                Some(_) => "learned-vpr".to_string(),
+                None => format!("vlad(k={})", args.loop_vocab_k),
+            },
             args.loop_max_candidates_per_frame,
         );
-        match close_loops_on_vo_trajectory(
-            &online_runner.frontend.camera,
-            &online_runner.frontend.poses,
-            &online_runner.frontend.left_features,
-            &online_runner.frontend.stereo_per_frame,
-            &loop_cfg,
-        ) {
+        let loop_result = match &learned_globals {
+            Some(globals) => close_loops_on_vo_trajectory_with_globals(
+                &online_runner.frontend.camera,
+                &online_runner.frontend.poses,
+                &online_runner.frontend.left_features,
+                &online_runner.frontend.stereo_per_frame,
+                globals,
+                &loop_cfg,
+            ),
+            None => close_loops_on_vo_trajectory(
+                &online_runner.frontend.camera,
+                &online_runner.frontend.poses,
+                &online_runner.frontend.left_features,
+                &online_runner.frontend.stereo_per_frame,
+                &loop_cfg,
+            ),
+        };
+        match loop_result {
             Ok(result) => {
                 match &result.gnc {
                     Some(gnc) => println!(
@@ -1400,6 +1471,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut loop_closure: bool = false;
     let mut loop_two_view_ba: bool = false;
     let mut loop_edge_information: bool = false;
+    let mut loop_global_descriptor_file: Option<PathBuf> = None;
+    let mut loop_min_inlier_ratio: Option<f64> = None;
+    let mut loop_min_inliers: Option<usize> = None;
     let mut loop_min_frame_gap: usize = 50;
     let mut loop_min_path_length: Option<f64> = Some(5.0);
     let mut loop_min_similarity: f32 = 0.20;
@@ -1657,6 +1731,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 loop_edge_information = true;
                 args.remove(i);
             }
+            "--global-descriptor-file" => {
+                args.remove(i);
+                loop_global_descriptor_file = Some(PathBuf::from(args.remove(i)));
+            }
+            "--loop-min-inlier-ratio" => {
+                args.remove(i);
+                loop_min_inlier_ratio = Some(args.remove(i).parse()?);
+            }
+            "--loop-min-inliers" => {
+                args.remove(i);
+                loop_min_inliers = Some(args.remove(i).parse()?);
+            }
             "--loop-min-frame-gap" => {
                 loop_min_frame_gap = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1885,6 +1971,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         loop_closure,
         loop_two_view_ba,
         loop_edge_information,
+        loop_global_descriptor_file,
+        loop_min_inlier_ratio,
+        loop_min_inliers,
         loop_min_frame_gap,
         loop_min_path_length,
         loop_min_similarity,
