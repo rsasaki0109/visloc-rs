@@ -40,6 +40,24 @@ matcher. Both land in the same accuracy regime (within ~2.4× of ORB-SLAM3 on
 this flight), confirming the in-process front-end drives real SLAM at the
 file-based path's accuracy.
 
+## Second EuRoC flight — MH_05, full 2273 frames
+
+To confirm the result is not specific to MH_03, the same single binary and the
+same config run on EuRoC MH_05 (same 752×480 resolution, so the same
+`lightglue.onnx`), with the file-based path re-run on the *same machine* and the
+*same* config for an exact comparison:
+
+| front-end | verified loops | ATE SE(3) | ATE Sim(3) |
+|---|---|---|---|
+| **in-process ONNX** (single binary) | 338 | **0.070 m** | **0.069 m** |
+| file-based pre-export (same machine, same config) | 297 | 0.077 m | 0.075 m |
+
+Again the in-process binary is **slightly better, not merely on par** (~9 % SE(3),
+~8 % Sim(3)), and finds more verified loops (338 vs 297). Across all three
+same-machine comparisons — MH_03 (0.051 vs 0.066 m), MH_05 (0.070 vs 0.077 m) and
+KITTI seq00 (2.18 vs 2.49 m below) — the single-binary in-process front-end
+**meets or beats** the Python-export file-based path it replaces.
+
 ## Generalizes to KITTI — seq00, full 4541 frames
 
 The same single binary, on the KITTI seq00 driving sequence (1241×376, exported a
