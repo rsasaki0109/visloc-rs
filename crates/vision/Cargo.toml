@@ -28,6 +28,11 @@ default = []
 # validation gate and crates/vision/src/features/superpoint_onnx.rs for
 # the implementation.
 onnx-inference = ["dep:ort", "dep:ndarray"]
+# Adds the CUDA execution provider: pulls the CUDA-enabled ONNX Runtime
+# binaries so `OnnxBackend::CudaThenCpu` runs SuperPoint on the GPU. Requires a
+# CUDA 12 runtime + cuDNN 9 at run time (add cuDNN to `LD_LIBRARY_PATH` if it is
+# not on the system path); falls back to CPU when the GPU provider cannot load.
+onnx-cuda = ["onnx-inference", "ort/cuda"]
 
 [dependencies]
 nalgebra = { workspace = true }
