@@ -40,6 +40,25 @@ matcher. Both land in the same accuracy regime (within ~2.4× of ORB-SLAM3 on
 this flight), confirming the in-process front-end drives real SLAM at the
 file-based path's accuracy.
 
+## Generalizes to KITTI — seq00, full 4541 frames
+
+The same single binary, on the KITTI seq00 driving sequence (1241×376, exported a
+LightGlue model at that resolution; SuperPoint is resolution-dynamic), with the
+same loop-closure config as the
+[published KITTI loop-closure benchmark](kitti_loop_closure_benchmark.md):
+
+| front-end | wall-clock | verified loops | ATE Sim(3) |
+|---|---|---|---|
+| **in-process ONNX** (single binary) | 6 min 48 s | 73 | **2.18 m** |
+| file-based pre-export (published benchmark) | — | — | 2.57 m |
+
+The in-process front-end lands **2.18 m Sim(3) ATE on the full 4541-frame seq00 —
+at or slightly better than the file-based 2.57 m** the benchmark records, from a
+single binary with no Python and no 42 GB feature dump. (Again the SuperPoint
+keypoint *sets* differ between the two exports; the result confirms the
+in-process front-end generalizes from the EuRoC MAV flight to the KITTI car
+sequence at the file-based path's accuracy.)
+
 ## Reproduce
 
 ```sh
