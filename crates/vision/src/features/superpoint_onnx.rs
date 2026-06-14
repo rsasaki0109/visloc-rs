@@ -152,18 +152,74 @@ impl DeepFeatureExtractor for SuperPointOnnxExtractor {
 // Active implementation (`onnx-inference` feature)
 // ---------------------------------------------------------------
 
+/// Execution-provider selection for the in-Rust SuperPoint session.
+///
+/// `CudaThenCpu` registers the CUDA execution provider first and the CPU
+/// provider as a fallback, so the session runs on the GPU when the build
+/// includes the `onnx-cuda` feature (which pulls the CUDA-enabled ONNX
+/// Runtime binaries) *and* a working CUDA + cuDNN runtime is present;
+/// otherwise CUDA registration fails gracefully and inference falls back to
+/// the CPU provider. `Cpu` forces the CPU provider only — useful for an A/B
+/// throughput comparison and for deterministic CI.
+#[cfg(feature = "onnx-inference")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnnxBackend {
+    /// Prefer CUDA, fall back to CPU if the GPU provider cannot register.
+    /// This is the production default: a deployment without a CUDA runtime
+    /// still runs, just on the CPU.
+    #[default]
+    CudaThenCpu,
+    /// CUDA execution provider only; loading errors if the GPU provider
+    /// cannot register (no silent CPU fallback). Use this when a caller must
+    /// know the GPU is actually in use — e.g. a throughput benchmark that
+    /// would otherwise mislabel CPU numbers as CUDA.
+    Cuda,
+    /// CPU execution provider only.
+    Cpu,
+}
+
 #[cfg(feature = "onnx-inference")]
 impl SuperPointOnnxExtractor {
     /// Load a SuperPoint ONNX model from disk and build a session
-    /// optimised at level 3. The session is shared via [`Arc`] so
-    /// `Clone` of the extractor is cheap.
+    /// optimised at level 3, preferring the CUDA execution provider with a
+    /// graceful CPU fallback. The session is shared via [`Arc`] so `Clone`
+    /// of the extractor is cheap.
     pub fn load_from_path<P: AsRef<Path>>(
         path: P,
         config: SuperPointOnnxConfig,
     ) -> Result<Self, SuperPointOnnxError> {
+        Self::load_from_path_with_backend(path, config, OnnxBackend::default())
+    }
+
+    /// Like [`load_from_path`](Self::load_from_path) but with an explicit
+    /// execution-provider choice (see [`OnnxBackend`]).
+    pub fn load_from_path_with_backend<P: AsRef<Path>>(
+        path: P,
+        config: SuperPointOnnxConfig,
+        backend: OnnxBackend,
+    ) -> Result<Self, SuperPointOnnxError> {
+        use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+
+        let providers = match backend {
+            // CUDA first, CPU as the always-available fallback. ort registers
+            // providers in order and silently skips one that fails to load
+            // (e.g. CUDA binaries / cuDNN absent), so this degrades to CPU
+            // without erroring.
+            OnnxBackend::CudaThenCpu => vec![
+                CUDAExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ],
+            OnnxBackend::Cuda => {
+                vec![CUDAExecutionProvider::default().build().error_on_failure()]
+            }
+            OnnxBackend::Cpu => vec![CPUExecutionProvider::default().build()],
+        };
+
         let session = ort::session::Session::builder()
             .map_err(SuperPointOnnxError::from_ort)?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .map_err(SuperPointOnnxError::from_ort)?
+            .with_execution_providers(providers)
             .map_err(SuperPointOnnxError::from_ort)?
             .commit_from_file(path.as_ref())
             .map_err(SuperPointOnnxError::from_ort)?;
@@ -219,17 +275,24 @@ impl DeepFeatureExtractor for SuperPointOnnxExtractor {
     }
 }
 
+/// The three named SuperPoint network outputs as owned ndarrays:
+/// `(keypoints (N,2) i64, scores (N,) f32, descriptors (N,256) f32)`.
+#[cfg(feature = "onnx-inference")]
+type NamedOutputs = (
+    ndarray::Array2<i64>,
+    ndarray::Array1<f32>,
+    ndarray::Array2<f32>,
+);
+
+/// One decoded keypoint: image position, detector score, and L2-normalized
+/// descriptor.
+#[cfg(feature = "onnx-inference")]
+type DecodedKeypoints = Vec<(Point2<f64>, f32, Vec<f32>)>;
+
 #[cfg(feature = "onnx-inference")]
 fn extract_named_outputs(
     outputs: &mut ort::session::SessionOutputs<'_>,
-) -> Result<
-    (
-        ndarray::Array2<i64>,
-        ndarray::Array1<f32>,
-        ndarray::Array2<f32>,
-    ),
-    SuperPointOnnxError,
-> {
+) -> Result<NamedOutputs, SuperPointOnnxError> {
     // The LightGlue-ONNX style export names the three outputs
     // "keypoints", "scores", "descriptors". If a model under
     // evaluation diverges from those names the lookup below errors
@@ -394,7 +457,7 @@ fn postprocess(
     scores: ndarray::ArrayView1<'_, f32>,
     descriptors: ndarray::ArrayView2<'_, f32>,
     config: &SuperPointOnnxConfig,
-) -> Result<Vec<(Point2<f64>, f32, Vec<f32>)>, SuperPointOnnxError> {
+) -> Result<DecodedKeypoints, SuperPointOnnxError> {
     let n_kp = keypoints.shape()[0];
     let n_score = scores.shape()[0];
     let n_desc = descriptors.shape()[0];

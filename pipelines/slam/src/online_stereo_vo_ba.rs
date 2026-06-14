@@ -1037,5 +1037,10 @@ mod tests {
             "blanking an in-window rescued pair must split tracks \
              (clean {clean_tracks}, rescued {rescued_tracks})"
         );
+        assert_eq!(
+            rescued_obs, clean_obs,
+            "blanking an in-window rescued pair splits tracks without dropping \
+             observations (clean {clean_obs}, rescued {rescued_obs})"
+        );
     }
 }

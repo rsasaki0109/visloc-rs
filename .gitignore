@@ -5,3 +5,6 @@
 
 __pycache__/
 *.pyc
+
+# Generated SuperPoint ONNX model (regenerate via scripts/export_superpoint_onnx.py)
+/models/*.onnx
