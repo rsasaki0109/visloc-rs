@@ -35,10 +35,11 @@ use visloc_rs::vision::features::superpoint_onnx::{
 };
 use visloc_rs::vision::features::FeatureSet;
 use visloc_rs::{
-    close_loops_on_vo_trajectory, parse_kitti_calibration_txt, Camera, DescriptorMatch,
-    OnlineStereoVoBa, OnlineStereoVoBaConfig, PoseTrajectory, StereoRelativePoseMode,
-    StereoVoFrontend, StereoVoFrontendConfig, TrackingEvent, TrackingState, TrajectorySample,
-    VoLoopClosureConfig,
+    close_loops_on_vo_trajectory, parse_kitti_calibration_txt, reconstruct_stereo_vo_with_ba,
+    write_colmap_reconstruction_for_3dgs, BaConfig, Camera, DescriptorMatch, LinearSolver,
+    OnlineStereoVoBa, OnlineStereoVoBaConfig, PoseTrajectory, RobustKernel, StereoRelativePoseMode,
+    StereoVoBaConfig, StereoVoFrontend, StereoVoFrontendConfig, TrackingEvent, TrackingState,
+    TrajectorySample, VoLoopClosureConfig,
 };
 
 struct Args {
@@ -62,6 +63,8 @@ struct Args {
     max_keypoints: usize,
     onnx_cpu: bool,
     loop_min_frame_gap: usize,
+    sfm_colmap_out: Option<PathBuf>,
+    sfm_ba_iterations: usize,
 }
 
 impl Default for Args {
@@ -87,6 +90,8 @@ impl Default for Args {
             max_keypoints: 1500,
             onnx_cpu: false,
             loop_min_frame_gap: 50,
+            sfm_colmap_out: None,
+            sfm_ba_iterations: 10,
         }
     }
 }
@@ -117,6 +122,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
             "--max-keypoints" => a.max_keypoints = next()?.parse()?,
             "--onnx-cpu" => a.onnx_cpu = true,
             "--loop-min-frame-gap" => a.loop_min_frame_gap = next()?.parse()?,
+            "--sfm-colmap-out" => a.sfm_colmap_out = Some(PathBuf::from(next()?)),
+            "--sfm-ba-iterations" => a.sfm_ba_iterations = next()?.parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -248,6 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     // Previous left-frame SuperPoint keypoints+descriptors, for the temporal match.
     let mut prev_left: Option<(Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>)> = None;
+    // Temporal matches per consecutive pair (frame i -> i+1), accumulated only when
+    // an SfM-grade COLMAP export is requested — the merged multi-view tracks the
+    // reconstruction stitches need them. `all_temporal_matches[i]` links frame i to
+    // i+1 (frame 0 has no predecessor), so the vector has `frames - 1` entries.
+    let want_sfm = args.sfm_colmap_out.is_some();
+    let mut all_temporal_matches: Vec<Vec<DescriptorMatch>> = Vec::new();
 
     for frame_id in 0..args.frames {
         let name = format!("{frame_id:06}.png");
@@ -276,6 +289,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let left_features = FeatureSet::new(left.keypoints.clone(), left.descriptors.clone())?;
         let right_features = FeatureSet::new(right.keypoints, right.descriptors)?;
         prev_left = Some((left.keypoints, left.descriptors));
+
+        if want_sfm {
+            if let Some(ref tm) = temporal {
+                all_temporal_matches.push(tm.clone());
+            }
+        }
 
         runner.process_pair_with_matches(
             left_features,
@@ -387,5 +406,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wrote {}/vo_poses.txt (+ vo.csv, summary.txt)",
         args.out_dir.display()
     );
+
+    // SfM-grade COLMAP export for 3D Gaussian Splatting. The streaming VO + the
+    // per-frame stereo lift give one observation per point (track length 1) —
+    // a point cloud, not the multi-view structure a 3DGS optimizer needs. This
+    // stitches the temporal matches into merged multi-view tracks, runs one
+    // global bundle adjustment over every (loop-closed) pose and landmark, and
+    // writes a COLMAP model whose POINT3D TRACK[] tails span every observing
+    // frame. The poses are already metric (stereo baseline) and loop-closed, so
+    // the model is metric — no COLMAP mapper hours, no scale-free ambiguity.
+    //
+    // `--sfm-ba-iterations` is the reproj-vs-ATE knob: few iterations preserve
+    // the loop-closed trajectory (better ATE, looser reprojection); more tighten
+    // reprojection (crisper 3DGS structure) at the cost of deforming the path.
+    if let Some(sfm_dir) = &args.sfm_colmap_out {
+        let sfm_config = StereoVoBaConfig {
+            window_size: None,
+            fix_pose_prefix: 1,
+            ba_config: BaConfig {
+                max_iterations: args.sfm_ba_iterations,
+                robust_kernel: RobustKernel::Huber { delta: 3.0 },
+                linear_solver: LinearSolver::Sparse,
+                ..BaConfig::default()
+            },
+            ..StereoVoBaConfig::default()
+        };
+        println!(
+            "running SfM reconstruction for COLMAP export: min_track_length={} max_iterations={}",
+            sfm_config.min_track_length, sfm_config.ba_config.max_iterations,
+        );
+        match reconstruct_stereo_vo_with_ba(
+            &frontend.camera,
+            frontend.baseline,
+            &frontend.poses,
+            &frontend.left_features,
+            &frontend.right_features,
+            &frontend.stereo_per_frame,
+            &all_temporal_matches,
+            &sfm_config,
+        ) {
+            Ok(recon) => {
+                println!(
+                    "SfM reconstruction: tracks={} observations={} reproj_px {:.4} -> {:.4} \
+                     (BA cost {:.4} -> {:.4}, {} iters, converged={})",
+                    recon.landmarks.len(),
+                    recon.observation_count,
+                    recon.mean_reproj_before_px,
+                    recon.mean_reproj_after_px,
+                    recon.ba_result.initial_cost,
+                    recon.ba_result.final_cost,
+                    recon.ba_result.iterations.len(),
+                    recon.ba_result.converged,
+                );
+                let landmarks: Vec<visloc_rs::io::colmap::ReconstructionLandmark> = recon
+                    .landmarks
+                    .iter()
+                    .map(|l| (l.position, l.observations.clone()))
+                    .collect();
+                let summary = write_colmap_reconstruction_for_3dgs(
+                    sfm_dir,
+                    &frontend.camera,
+                    &recon.refined_poses,
+                    &frontend.left_features,
+                    &landmarks,
+                    |idx| format!("{idx:06}.png"),
+                )?;
+                println!(
+                    "SfM COLMAP export: frames={} landmarks={} observations={} dir={}",
+                    summary.frame_count,
+                    summary.landmark_count,
+                    summary.observation_count,
+                    sfm_dir.display(),
+                );
+            }
+            Err(err) => eprintln!("SfM reconstruction skipped: {err}"),
+        }
+    }
+
     Ok(())
 }
