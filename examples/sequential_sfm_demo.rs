@@ -38,6 +38,15 @@
 //!     --window 5 --min-matches 30 \
 //!     --out-colmap /tmp/seq_sfm_colmap
 //! ```
+//!
+//! Flags of note. `--colmap-style` runs COLMAP's `IncrementalMapper` BA schedule
+//! (per-registration local BA + growth-triggered iterative global refinement +
+//! registration retries) instead of the simple "global BA every N + final BA"
+//! path; on a 300-frame EuRoC MH_03 monocular subset this lifts accuracy from
+//! 2.13 to 1.64 cm and registration from 272 to 299 / 300 (see
+//! `docs/sfm_vs_colmap_benchmark.md`). `--retriangulate` (simple path only)
+//! re-triangulates tracks after the final BA — a structure-density lever,
+//! ATE-neutral, off by default.
 
 use std::collections::HashMap;
 use std::env;
@@ -68,6 +77,10 @@ struct Args {
     max_reproj: f64,
     final_ba: bool,
     seed_trials: usize,
+    retriangulate: bool,
+    colmap_style: bool,
+    min_tri_angle: f64,
+    refine_intrinsics: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -84,6 +97,10 @@ fn parse_args() -> Result<Args, String> {
     let mut max_reproj = 4.0f64;
     let mut final_ba = true;
     let mut seed_trials = 12usize;
+    let mut retriangulate = false;
+    let mut colmap_style = false;
+    let mut min_tri_angle = 2.0f64;
+    let mut refine_intrinsics = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -107,6 +124,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--max-reproj" => max_reproj = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--no-final-ba" => final_ba = false,
+            "--retriangulate" => retriangulate = true,
+            "--colmap-style" => colmap_style = true,
+            "--min-tri-angle" => {
+                min_tri_angle = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--refine-intrinsics" => refine_intrinsics = true,
             "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -142,6 +165,10 @@ fn parse_args() -> Result<Args, String> {
         max_reproj,
         final_ba,
         seed_trials,
+        retriangulate,
+        colmap_style,
+        min_tri_angle,
+        refine_intrinsics,
     })
 }
 
@@ -290,6 +317,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_reprojection_error_px: args.max_reproj,
         final_global_ba: args.final_ba,
         seed_trials: args.seed_trials,
+        retriangulate: args.retriangulate,
+        colmap_style_mapper: args.colmap_style,
+        refine_intrinsics: args.refine_intrinsics,
+        min_triangulation_angle_deg: args.min_tri_angle,
+        // NB: the low-parallax multi-view exemption (`low_parallax_min_observations`)
+        // is deliberately left off. On this forward-flying trajectory it is a trap —
+        // even tracks seen by ≥6 views stay near-zero-parallax (the camera barely
+        // sideways-translates), so keeping them injects depth-ambiguous points that
+        // corrupt the poses: measured 10 k tracks but ATE blows up to 16 cm vs the
+        // strict 2° gate's 1.64 cm. The exemption is for sideways/orbiting capture,
+        // not forward video. See `docs/sfm_vs_colmap_benchmark.md`.
         ..IncrementalSfmConfig::default()
     };
     let t_sfm = std::time::Instant::now();
@@ -302,6 +340,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.mean_reprojection_px,
         t_sfm.elapsed().as_secs_f64(),
     );
+
+    // If intrinsics were refined, the poses/tracks are expressed against the
+    // refined camera — export with it, not the input calibration.
+    let export_camera = result
+        .refined_camera
+        .clone()
+        .unwrap_or_else(|| args.camera.clone());
+    if let Some(refined) = &result.refined_camera {
+        if let (Some((fx0, fy0, cx0, cy0)), Some((fx, fy, cx, cy))) =
+            (args.camera.intrinsics(), refined.intrinsics())
+        {
+            println!(
+                "refined intrinsics: fx {fx0:.2}->{fx:.2}  fy {fy0:.2}->{fy:.2}  \
+                 cx {cx0:.2}->{cx:.2}  cy {cy0:.2}->{cy:.2}",
+            );
+        }
+    }
 
     // Compact to registered images (the COLMAP writer expects a dense pose list)
     // and remap each track observation's image index.
@@ -334,7 +389,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let summary = write_colmap_reconstruction_for_3dgs(
         &args.out_colmap,
-        &args.camera,
+        &export_camera,
         &poses_out,
         &features_out,
         &landmarks_out,
