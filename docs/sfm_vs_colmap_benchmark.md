@@ -211,6 +211,17 @@ to monocular reconstruction; rectified stereo is already undistorted. The residu
 vs the 0.44 cm undistorted baseline is the focal/principal-point co-adjustment,
 mainly `cy`, that soaks up part of the radial term.)
 
+**Next-image selection — the visibility pyramid (ported).** Image registration
+order now follows COLMAP's `RankNextImages`: instead of picking the next view by the
+raw *count* of 2D–3D correspondences, it scores each candidate by a multi-resolution
+**visibility pyramid** (`2×2 … 64×64` occupancy grids, each cell counted once) that
+rewards correspondences *spread across the frame* — a better-conditioned PnP — with
+the count only as a tiebreak. On South Building, where every image registers either
+way, this is neutral (0.44 → 0.43 cm); its value is robustness on harder /
+repetitive scenes where a clustered-but-numerous candidate would otherwise be
+chosen over a better-distributed one (unit-tested in
+`visibility_pyramid_prefers_distribution_over_count`).
+
 (Schedule ablation, separately: re-triangulation must run **both** during growth
 — dropping it collapses registration to 212/300 and ATE to 6.6 cm — **and** in
 the final refinement — filter-only there leaves 718 tracks and 2.21 cm; keeping
