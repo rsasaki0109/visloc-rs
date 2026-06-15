@@ -23,6 +23,12 @@
 #       --calib ~/datasets/kitti_seq00_full/calib.txt \
 #       --lightglue-model models/lightglue_kitti.onnx \
 #       --width 1241 --height 376 --frames 4541 --out-dir target/deep_slam_kitti00
+#
+# Add --sfm-colmap-out <dir> to also emit a metric COLMAP model (cameras/images/
+# points3D.txt) with merged multi-view tracks for 3D Gaussian Splatting — one
+# binary, raw images -> 3DGS input, no Python and no COLMAP mapper hours. The
+# --sfm-ba-iterations <n> knob trades reprojection tightness (crisper 3DGS
+# structure) against ATE preservation of the loop-closed trajectory (default 10).
 set -eu
 
 backend="cuda"
