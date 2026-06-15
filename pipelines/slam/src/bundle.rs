@@ -1419,7 +1419,7 @@ pub struct BaConfig {
     /// residual onto the poses, and letting the camera absorb it tightens the
     /// trajectory. Only the 4-parameter [`CameraModel::Pinhole`] is refined; for
     /// any other model this is a no-op. **`false` by default** (the public
-    /// [`Self::optimize`] is then bit-identical to before).
+    /// [`BundleAdjustment::optimize`] is then bit-identical to before).
     pub refine_intrinsics: bool,
     /// Max alternation rounds when `refine_intrinsics` is set; the loop also
     /// stops early once the intrinsics update falls below a small threshold.
