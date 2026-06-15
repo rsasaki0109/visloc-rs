@@ -750,6 +750,7 @@ fn grow_from_seed(
     let mut reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
     loop {
         let Some((next_image, corrs)) = select_next_image(
+            &cam,
             features,
             obs_by_image,
             &poses,
@@ -965,6 +966,7 @@ fn triangulate_track(
 /// observing the most triangulated tracks, returning it with its 2D-3D
 /// correspondences.
 fn select_next_image(
+    camera: &Camera,
     features: &[FeatureSet],
     obs_by_image: &[Vec<(usize, usize)>],
     poses: &[Option<Pose>],
@@ -972,7 +974,13 @@ fn select_next_image(
     max_trials: usize,
     track_point: &[Option<Point3<f64>>],
 ) -> Option<(usize, Vec<Correspondence2D3D>)> {
-    let mut best: Option<(usize, Vec<Correspondence2D3D>)> = None;
+    // COLMAP's `IncrementalMapper::RankNextImages`: rank candidate images not by
+    // the raw *count* of 2D–3D correspondences but by a multi-resolution
+    // **visibility-pyramid score** that rewards correspondences *well distributed*
+    // across the image (better-conditioned PnP), with the count as a tiebreak. An
+    // image with many points clustered in one corner is a worse next view than one
+    // with fewer points spread over the frame, and this score prefers the latter.
+    let mut best: Option<(usize, (usize, usize), Vec<Correspondence2D3D>)> = None;
     for (image, observations) in obs_by_image.iter().enumerate() {
         if poses[image].is_some() || trials[image] >= max_trials {
             continue;
@@ -994,11 +1002,42 @@ fn select_next_image(
         if corrs.len() < 6 {
             continue; // DLT PnP needs ≥6
         }
-        if best.as_ref().is_none_or(|(_, b)| corrs.len() > b.len()) {
-            best = Some((image, corrs));
+        let score =
+            visibility_pyramid_score(camera.width, camera.height, corrs.iter().map(|c| c.point2d));
+        let key = (score, corrs.len());
+        if best.as_ref().is_none_or(|(_, b, _)| key > *b) {
+            best = Some((image, key, corrs));
         }
     }
-    best
+    best.map(|(image, _, corrs)| (image, corrs))
+}
+
+/// COLMAP visibility-pyramid score (`Image::Point3DVisibilityScore`): occupancy of
+/// a stack of grids at increasing resolution (`2×2`, `4×4`, … up to `64×64`), each
+/// cell counted **once** regardless of how many points land in it. Spreading
+/// observations across the frame lights up more cells at every level, so the score
+/// rewards spatial distribution and saturates on clusters — unlike a raw point
+/// count. Returns the number of occupied cells summed over all pyramid levels.
+fn visibility_pyramid_score(
+    width: u32,
+    height: u32,
+    points: impl Iterator<Item = Point2<f64>>,
+) -> usize {
+    const NUM_LEVELS: u32 = 6;
+    let (w, h) = (width.max(1) as f64, height.max(1) as f64);
+    let mut occupied: Vec<HashSet<(u32, u32)>> = vec![HashSet::new(); NUM_LEVELS as usize];
+    for p in points {
+        // Clamp into the image so an out-of-frame keypoint cannot index past a grid.
+        let fx = (p.x / w).clamp(0.0, 0.999_999);
+        let fy = (p.y / h).clamp(0.0, 0.999_999);
+        for level in 0..NUM_LEVELS {
+            let dim = 1u32 << (level + 1); // 2, 4, 8, 16, 32, 64
+            let cx = (fx * dim as f64) as u32;
+            let cy = (fy * dim as f64) as u32;
+            occupied[level as usize].insert((cx, cy));
+        }
+    }
+    occupied.iter().map(|cells| cells.len()).sum()
 }
 
 /// Global BA over all registered poses + triangulated landmarks. Seed pose
@@ -1768,6 +1807,41 @@ mod tests {
         ];
         let tracks = build_tracks(2, &pairwise, 2);
         assert!(tracks.is_empty(), "same-image conflict track is dropped");
+    }
+
+    #[test]
+    fn visibility_pyramid_prefers_distribution_over_count() {
+        // A small cluster of MANY points in one corner versus FEWER points spread
+        // across the frame: the COLMAP visibility score must rank the spread set
+        // higher (better-conditioned PnP), even though it has fewer correspondences.
+        let (w, h) = (640u32, 480u32);
+        let clustered: Vec<Point2<f64>> = (0..50)
+            .map(|i| Point2::new(2.0 + (i % 5) as f64, 2.0 + (i / 5) as f64))
+            .collect();
+        let spread: Vec<Point2<f64>> = (0..5)
+            .flat_map(|gy| {
+                (0..4).map(move |gx| {
+                    Point2::new(
+                        (gx as f64 + 0.5) * w as f64 / 4.0,
+                        (gy as f64 + 0.5) * h as f64 / 5.0,
+                    )
+                })
+            })
+            .collect();
+        let clustered_score = visibility_pyramid_score(w, h, clustered.iter().copied());
+        let spread_score = visibility_pyramid_score(w, h, spread.iter().copied());
+        assert!(
+            spread_score > clustered_score,
+            "spread ({spread_score}, {} pts) should beat clustered ({clustered_score}, {} pts)",
+            spread.len(),
+            clustered.len(),
+        );
+        // The 50 clustered points collapse onto a handful of cells (occupancy
+        // saturates), unlike a raw count which would have ranked them first.
+        assert!(
+            clustered_score < clustered.len(),
+            "clustered occupancy {clustered_score} must saturate below the point count"
+        );
     }
 
     #[test]
