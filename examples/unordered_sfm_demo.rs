@@ -69,6 +69,8 @@ struct Args {
     max_reproj: f64,
     final_ba: bool,
     seed_trials: usize,
+    refine_intrinsics: bool,
+    colmap_style: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -87,6 +89,8 @@ fn parse_args() -> Result<Args, String> {
     let mut max_reproj = 4.0f64;
     let mut final_ba = true;
     let mut seed_trials = 12usize;
+    let mut refine_intrinsics = false;
+    let mut colmap_style = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -115,6 +119,8 @@ fn parse_args() -> Result<Args, String> {
             "--max-reproj" => max_reproj = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--no-final-ba" => final_ba = false,
             "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
+            "--refine-intrinsics" => refine_intrinsics = true,
+            "--colmap-style" => colmap_style = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -147,6 +153,8 @@ fn parse_args() -> Result<Args, String> {
         max_reproj,
         final_ba,
         seed_trials,
+        refine_intrinsics,
+        colmap_style,
     })
 }
 
@@ -343,6 +351,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_reprojection_error_px: args.max_reproj,
         final_global_ba: args.final_ba,
         seed_trials: args.seed_trials,
+        refine_intrinsics: args.refine_intrinsics,
+        colmap_style_mapper: args.colmap_style,
         ..IncrementalSfmConfig::default()
     };
     let result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
@@ -353,6 +363,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.tracks.len(),
         result.mean_reprojection_px,
     );
+
+    // When intrinsics were refined, export with the refined camera (and report the
+    // before→after pull — on observable, wide-parallax capture this is where focal
+    // length is recoverable, unlike low-parallax forward video).
+    let export_camera = result.refined_camera.clone().unwrap_or(args.camera.clone());
+    if let (Some(i0), Some(i1)) = (args.camera.intrinsics(), export_camera.intrinsics()) {
+        if result.refined_camera.is_some() {
+            println!(
+                "refined intrinsics: fx {:.2}->{:.2}  fy {:.2}->{:.2}  cx {:.2}->{:.2}  cy {:.2}->{:.2}",
+                i0.0, i1.0, i0.1, i1.1, i0.2, i1.2, i0.3, i1.3,
+            );
+        }
+    }
 
     // Compact to registered images (the COLMAP writer expects a dense pose list)
     // and remap each track observation's image index.
@@ -385,7 +408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let summary = write_colmap_reconstruction_for_3dgs(
         &args.out_colmap,
-        &args.camera,
+        &export_camera,
         &poses_out,
         &features_out,
         &landmarks_out,
