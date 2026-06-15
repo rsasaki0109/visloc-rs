@@ -94,6 +94,7 @@ struct Args {
     accumulate_corrs: bool,
     correspondences_dir: Option<PathBuf>,
     grouped_corrs: bool,
+    global_descriptor_dir: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -123,6 +124,7 @@ impl Default for Args {
             accumulate_corrs: false,
             correspondences_dir: None,
             grouped_corrs: false,
+            global_descriptor_dir: None,
         }
     }
 }
@@ -153,6 +155,26 @@ fn normalized_mean(descriptors: &[Vec<f32>]) -> Vec<f32> {
         }
     }
     acc
+}
+
+/// Load a precomputed learned global descriptor for one frame from
+/// `<dir>/seq-SS_frame-NNNNNN.txt` (one whitespace-separated line of floats),
+/// written by `scripts/export_vpr_globals_7scenes.py`. Returns `None` if the
+/// directory is unset or the file is absent, so the caller falls back to
+/// `normalized_mean`. This is the learned-VPR retrieval gate (the A/B against
+/// the bag-of-features `normalized_mean`).
+fn frame_global(dir: Option<&PathBuf>, seq: u32, idx: usize) -> Option<Vec<f32>> {
+    let path = dir?.join(format!("seq-{seq:02}_frame-{idx:06}.txt"));
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Vec<f32> = text
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -208,6 +230,7 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--accumulate-corrs" => args.accumulate_corrs = true,
             "--correspondences-dir" => args.correspondences_dir = Some(PathBuf::from(val()?)),
             "--grouped-corrs" => args.grouped_corrs = true,
+            "--global-descriptor-dir" => args.global_descriptor_dir = Some(PathBuf::from(val()?)),
             other => return Err(format!("unknown flag: {other}").into()),
         }
     }
@@ -441,7 +464,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 if !kf_ids.is_empty() {
                     keyframe_index.push(KeyframeIndex {
-                        global: normalized_mean(&kf_descs),
+                        global: frame_global(args.global_descriptor_dir.as_ref(), seq, idx)
+                            .unwrap_or_else(|| normalized_mean(&kf_descs)),
                         landmark_ids: kf_ids,
                         positions: kf_positions,
                         descriptors: kf_descs,
@@ -515,7 +539,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             {
                 if args.retrieve_topk > 0 && !keyframe_index.is_empty() {
                     // Appearance-based retrieval: top-K most similar train keyframes.
-                    let qg = normalized_mean(&descriptors);
+                    let qg = frame_global(args.global_descriptor_dir.as_ref(), seq, idx)
+                        .unwrap_or_else(|| normalized_mean(&descriptors));
                     let mut scored: Vec<(f32, usize)> = keyframe_index
                         .iter()
                         .enumerate()
