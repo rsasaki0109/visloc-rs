@@ -70,14 +70,17 @@
 <p align="center">
   🏛️ <strong>Crisp 3D Gaussian Splats of real buildings, from the pure-Rust unordered SfM model</strong>
   <br>
-  <img src="docs/assets/sfm_3dgs_south_building.png" alt="COLMAP South Building: input photo (left) vs a 3D Gaussian Splat (right) trained on the pure-Rust unordered-SfM model, columns and window mullions sharp" width="80%">
+  <img src="docs/assets/sfm_3dgs_south_building_flythrough.gif" alt="South Building 3D Gaussian Splat fly-through rendered from the pure-Rust unordered-SfM model — the camera orbits a freely navigable 3D reconstruction" width="60%">
+  <br>
+  <em>A fly-through of COLMAP's South Building (128 photos) rendered from a 3DGS trained on the
+  <strong>pure-Rust unordered-SfM model</strong> — a freely navigable 3D scene, not a flat image. The recovered SfM
+  camera poses land within <strong>~1 cm</strong> of COLMAP, no C++ mapper.</em>
   <br>
   <img src="docs/assets/sfm_3dgs_gerrard_hall.png" alt="COLMAP Gerrard Hall: input photo (left) vs a 3D Gaussian Splat (right) trained on the pure-Rust unordered-SfM model, brick courses and the columned portico sharp" width="80%">
   <br>
-  <em>COLMAP's South Building (128 photos, SIMPLE_RADIAL) and Gerrard Hall (100 photos, an <strong>OPENCV</strong> camera):
-  input photo (left) vs a 3DGS (right) trained on the <strong>pure-Rust unordered-SfM model</strong> — South Building
-  scored at ~1 cm vs COLMAP, Gerrard Hall registers 98/100 at 1.7 px, both splats crisp. Not one lucky scene;
-  the showcase is the pipeline. See the
+  <em>Not one lucky scene — Gerrard Hall (100 photos, an <strong>OPENCV</strong> camera): <strong>left = real photo,
+  right = 3DGS render</strong> from the pure-Rust SfM model (98/100 registered at 1.7 px). The showcase is the
+  pipeline, not the scene. See the
   <a href="docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model">SfM → 3DGS showcase</a>.</em>
 </p>
 
