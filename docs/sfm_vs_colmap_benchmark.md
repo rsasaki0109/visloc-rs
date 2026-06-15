@@ -188,6 +188,29 @@ orthogonal, un-perturbed `fy` / `cy` stay fixed; `cx` co-adjusts within the look
 arc's focal/centre ambiguity, a confound absent on the richer South-Building
 viewpoints.)
 
+**3. The same solve self-calibrates radial distortion — SfM straight from
+uncorrected images.** `--refine-distortion` extends the joint camera block to six
+unknowns `(fx, fy, cx, cy, k1, k2)`, so the lens distortion is estimated alongside
+the intrinsics (the `1 + k1·r² + k2·r⁴` model now lives in `Camera::project` /
+`normalize_pixel`, used by the whole front-end). To measure it on real scene
+structure, a known distortion `(k1 = −0.10, k2 = 0.02)` was injected into the
+South-Building keypoints (so the input is now "raw" distorted pixels) and the
+reconstruction started from a distortion-free pinhole:
+
+| condition (distorted input) | recovered distortion | ATE |
+|---|---|---|
+| no refinement (pinhole) | — | 11.71 cm |
+| **joint distortion self-calibration** | `k1 → −0.1003`, `k2 → 0.0247` | **1.43 cm** |
+
+From a zero start the solve recovers `k1` essentially exactly (`−0.1003` vs the
+injected `−0.10`) and `k2` closely, taking the trajectory from a distortion-wrecked
+11.71 cm back to 1.43 cm (≈ 8×). This is end-to-end self-calibrating SfM: register,
+triangulate, and solve for the lens from uncorrected images with no prior
+calibration — COLMAP's `RADIAL` workflow, in the same Schur framework. (Restricted
+to monocular reconstruction; rectified stereo is already undistorted. The residual
+vs the 0.44 cm undistorted baseline is the focal/principal-point co-adjustment,
+mainly `cy`, that soaks up part of the radial term.)
+
 (Schedule ablation, separately: re-triangulation must run **both** during growth
 — dropping it collapses registration to 212/300 and ATE to 6.6 cm — **and** in
 the final refinement — filter-only there leaves 718 tracks and 2.21 cm; keeping

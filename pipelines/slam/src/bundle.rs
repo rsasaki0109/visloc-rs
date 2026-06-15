@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{
-    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix6,
-    Matrix6x3, Point2, Point3, Vector2, Vector3, Vector6,
+    DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix6, Matrix6x3,
+    Point2, Point3, Vector2, Vector3, Vector6,
 };
 
 use visloc_core::geometry::{Pose, SE3, SO3};
@@ -605,7 +605,9 @@ impl BundleAdjustment {
             if xc.z <= 0.0 {
                 continue;
             }
-            if let Some(predicted) = project_pinhole(&intrinsics, &xc) {
+            // Distortion-aware projection (identical to `project_pinhole` when the
+            // camera carries no distortion, so all existing callers are unchanged).
+            if let Some(predicted) = self.camera.project(&xc) {
                 let r = predicted - obs.xy;
                 let s = r.x * r.x + r.y * r.y;
                 let w = gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
@@ -869,7 +871,21 @@ impl BundleAdjustment {
         }
         let p_count = pose_index.len();
         let k_off = p_count * 6;
-        let cam_dim = k_off + 4;
+        // Also self-calibrate radial distortion (k1, k2) when asked — but only on
+        // a monocular reconstruction (rectified stereo is already undistorted, and
+        // its baseline term does not carry a distortion model). The two coefficients
+        // get appended to the camera block, so `k_dim` is 6 instead of 4.
+        let refine_dist = config.refine_distortion
+            && self.camera.model == CameraModel::Pinhole
+            && self.stereo_observations.is_empty();
+        if refine_dist {
+            // Ensure the camera carries the two distortion slots (start at 0).
+            while self.camera.params.len() < 6 {
+                self.camera.params.push(0.0);
+            }
+        }
+        let k_dim = if refine_dist { 6 } else { 4 };
+        let cam_dim = k_off + k_dim;
 
         let initial_cost = self.robust_cost_weighted(&kernel, None);
         let mut iterations: Vec<BaIterationStats> = Vec::with_capacity(config.max_iterations);
@@ -878,8 +894,16 @@ impl BundleAdjustment {
         let mut converged = false;
 
         for iteration in 0..config.max_iterations {
-            let (cam_dim_n, h_cc, b_c, lm_blocks) =
-                self.build_joint_intrinsics_system(&pose_index, &landmark_index, &kernel);
+            // Current distortion (reflects the running k1, k2 estimate) drives the
+            // distortion-aware projection / Jacobians inside the build.
+            let dist = self.camera.radial_distortion();
+            let (cam_dim_n, h_cc, b_c, lm_blocks) = self.build_joint_intrinsics_system(
+                &pose_index,
+                &landmark_index,
+                &kernel,
+                k_dim,
+                dist,
+            );
             debug_assert_eq!(cam_dim_n, cam_dim);
 
             // Damped Schur reduction (Levenberg I·λ on both the camera and the
@@ -974,8 +998,8 @@ impl BundleAdjustment {
                 let pt = self.landmarks.get_mut(&id).expect("landmark exists");
                 *pt = Point3::from(pt.coords + dl);
             }
-            // Intrinsics block.
-            for j in 0..4 {
+            // Intrinsics (and, when k_dim == 6, distortion) block.
+            for j in 0..k_dim {
                 self.camera.params[j] += delta_cam[k_off + j];
             }
 
@@ -1047,12 +1071,14 @@ impl BundleAdjustment {
         pose_index: &BTreeMap<u64, usize>,
         landmark_index: &BTreeMap<u64, usize>,
         kernel: &RobustKernel,
+        k_dim: usize,
+        dist: Option<(f64, f64)>,
     ) -> (usize, DMatrix<f64>, DVector<f64>, Vec<JointLandmarkBlock>) {
         let intrinsics = self.intrinsics().expect("pinhole checked by caller");
-        let (fx, fy, _, _) = intrinsics;
+        let (fx, fy, cx, cy) = intrinsics;
         let p_count = pose_index.len();
         let k_off = p_count * 6;
-        let cam_dim = k_off + 4;
+        let cam_dim = k_off + k_dim;
         let mut h_cc = DMatrix::<f64>::zeros(cam_dim, cam_dim);
         let mut b_c = DVector::<f64>::zeros(cam_dim);
         let mut lm_blocks: Vec<JointLandmarkBlock> = landmark_index
@@ -1082,21 +1108,36 @@ impl BundleAdjustment {
             if xc.z <= 0.0 {
                 continue;
             }
-            let Some(predicted) = project_pinhole(&intrinsics, &xc) else {
-                continue;
-            };
-            let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
             let z_inv = 1.0 / xc.z;
+            let x = xc.x * z_inv;
+            let y = xc.y * z_inv;
+            let r2 = x * x + y * y;
+            // Radial distortion factor d = 1 + k1·r² + k2·r⁴ and its radial
+            // derivative helper g = k1 + 2·k2·r² (d=1, g=0 when distortion-free).
+            let (k1, k2) = dist.unwrap_or((0.0, 0.0));
+            let d = 1.0 + k1 * r2 + k2 * r2 * r2;
+            let g = k1 + 2.0 * k2 * r2;
+            let (xd, yd) = (x * d, y * d);
+            let predicted = Point2::new(fx * xd + cx, fy * yd + cy);
+            let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
             let r_mat = pose
                 .world_to_camera
                 .rotation
                 .to_rotation_matrix()
                 .into_inner();
+            // J_π = diag(fx, fy) · D · ∂(x, y)/∂X_c, where the distortion Jacobian
+            //   D = [[d + 2x²g, 2xyg], [2xyg, d + 2y²g]]  (= I when distortion-free)
+            // and ∂(x, y)/∂X_c = (1/Z)·[[1, 0, -x], [0, 1, -y]].
+            let d11 = d + 2.0 * x * x * g;
+            let d12 = 2.0 * x * y * g;
+            let d22 = d + 2.0 * y * y * g;
             let mut j_pi = Matrix2x3::<f64>::zeros();
-            j_pi[(0, 0)] = fx * z_inv;
-            j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
-            j_pi[(1, 1)] = fy * z_inv;
-            j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+            j_pi[(0, 0)] = fx * d11 * z_inv;
+            j_pi[(0, 1)] = fx * d12 * z_inv;
+            j_pi[(0, 2)] = -fx * (d11 * x + d12 * y) * z_inv;
+            j_pi[(1, 0)] = fy * d12 * z_inv;
+            j_pi[(1, 1)] = fy * d22 * z_inv;
+            j_pi[(1, 2)] = -fy * (d12 * x + d22 * y) * z_inv;
             let mut dx_dxi = Matrix3x6::<f64>::zeros();
             dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
             dx_dxi
@@ -1104,26 +1145,32 @@ impl BundleAdjustment {
                 .copy_from(&(-r_mat * skew(&point.coords)));
             let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
             let j_lm: Matrix2x3<f64> = j_pi * r_mat;
-            // ∂(predicted)/∂(fx, fy, cx, cy).
-            let mut j_k = Matrix2x4::<f64>::zeros();
-            j_k[(0, 0)] = xc.x * z_inv;
+            // ∂(predicted)/∂K with K = (fx, fy, cx, cy[, k1, k2]) (2×k_dim).
+            let mut j_k = DMatrix::<f64>::zeros(2, k_dim);
+            j_k[(0, 0)] = xd;
             j_k[(0, 2)] = 1.0;
-            j_k[(1, 1)] = xc.y * z_inv;
+            j_k[(1, 1)] = yd;
             j_k[(1, 3)] = 1.0;
+            if k_dim == 6 {
+                j_k[(0, 4)] = fx * x * r2;
+                j_k[(0, 5)] = fx * x * r2 * r2;
+                j_k[(1, 4)] = fy * y * r2;
+                j_k[(1, 5)] = fy * y * r2 * r2;
+            }
 
             let s = residual.x * residual.x + residual.y * residual.y;
             let w = kernel.weight(s);
             let i_pose = pose_index.get(&obs.keyframe_id).copied();
             let i_lm = landmark_index.get(&obs.landmark_id).copied();
 
+            // Dynamic-sized residual / pose for the K-coupled products.
+            let res2 = DVector::from_column_slice(&[residual.x, residual.y]);
+            let jkt = j_k.transpose(); // k_dim×2
+
             // K-K and K gradient (intrinsics are always variable).
-            add_cc(
-                k_off,
-                k_off,
-                &DMatrix::from_fn(4, 4, |r, c| w * (j_k.transpose() * j_k)[(r, c)]),
-            );
-            let bk = w * (j_k.transpose() * residual);
-            for j in 0..4 {
+            add_cc(k_off, k_off, &(w * (&jkt * &j_k)));
+            let bk = w * (&jkt * &res2);
+            for j in 0..k_dim {
                 b_c[k_off + j] += bk[j];
             }
             if let Some(p) = i_pose {
@@ -1134,9 +1181,10 @@ impl BundleAdjustment {
                     b_c[p * 6 + r] += bp[r];
                 }
                 // pose-K coupling (and its transpose).
-                let hpk = w * (j_pose.transpose() * j_k); // 6×4
-                add_cc(p * 6, k_off, &DMatrix::from_fn(6, 4, |r, c| hpk[(r, c)]));
-                add_cc(k_off, p * 6, &DMatrix::from_fn(4, 6, |r, c| hpk[(c, r)]));
+                let jp_dyn = DMatrix::from_iterator(2, 6, j_pose.iter().copied());
+                let hpk = w * (jp_dyn.transpose() * &j_k); // 6×k_dim
+                add_cc(p * 6, k_off, &hpk);
+                add_cc(k_off, p * 6, &hpk.transpose());
             }
             if let Some(l) = i_lm {
                 lm_blocks[l].h_ll += w * (j_lm.transpose() * j_lm);
@@ -1150,13 +1198,9 @@ impl BundleAdjustment {
                         &DMatrix::from_fn(6, 3, |r, c| cr[(r, c)]),
                     );
                 }
-                let crk = w * (j_k.transpose() * j_lm); // 4×3
-                add_cross(
-                    &mut lm_blocks[l].cross,
-                    k_off,
-                    4,
-                    &DMatrix::from_fn(4, 3, |r, c| crk[(r, c)]),
-                );
+                let jl_dyn = DMatrix::from_iterator(2, 3, j_lm.iter().copied());
+                let crk = w * (&jkt * &jl_dyn); // k_dim×3
+                add_cross(&mut lm_blocks[l].cross, k_off, k_dim, &crk);
             }
         }
 
@@ -1732,6 +1776,13 @@ pub struct BaConfig {
     /// pose/structure-only solve. **`false` by default** (the public
     /// [`BundleAdjustment::optimize`] is then bit-identical to before).
     pub refine_intrinsics: bool,
+    /// Additionally self-calibrate the two radial-distortion coefficients
+    /// `(k1, k2)` jointly with the intrinsics (the camera block grows from 4 to 6).
+    /// Requires `refine_intrinsics`; only applies to a **monocular** pinhole
+    /// reconstruction (rectified stereo is already undistorted). The coefficients
+    /// are appended to `Camera::params` as `[fx, fy, cx, cy, k1, k2]`. **`false`
+    /// by default.**
+    pub refine_distortion: bool,
 }
 
 impl Default for BaConfig {
@@ -1748,6 +1799,7 @@ impl Default for BaConfig {
             linear_solver: LinearSolver::Dense,
             robust_kernel: RobustKernel::None,
             refine_intrinsics: false,
+            refine_distortion: false,
         }
     }
 }
