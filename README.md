@@ -148,6 +148,7 @@ Local public-data development measurements, not official leaderboard submissions
 | **Sequential SfM vs COLMAP (metric video)** | same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) — **≈117× faster, ≈17–33× more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.) |
 | **Unordered SfM (real photo collections)** | Orderless monocular photos → VLAD view graph → incremental reconstruction (robust multi-seed init, P3P register, scale-gauge-fixed BA, iterative track filter), vs **COLMAP's own model** with an independent SuperPoint frontend: **COLMAP South Building** (128 photos) **128/128 reg, 1.09 cm**; **Gerrard Hall** (100 photos, 5616×3744 OPENCV) **98/100, 0.68 cm** (3/100 single-seed) — both **0.1 % of extent**. EuRoC V2_03 orbit **31/31, 1.08 cm** |
 | COLMAP South Building localization | deep frontend gives **+37% to +98%** more verified inliers as the viewpoint gap grows |
+| **Multi-session lifelong mapping (7-Scenes)** | a map bootstrapped from one session is **grown across later visits by relocalization alone** (no GT poses): learned EigenPlaces retrieval integrates **126 vs 120** later-session keyframes loose / **106 vs 93** strict-gate vs bag-of-features, the gap widening as the gate tightens, and its merges are **≈0.09 m vs ≈0.14 m** accurate — a cleaner lifelong map (test median **0.059 m vs 0.144 m**) |
 | Pose-graph optimization (SE-Sync `.g2o`) | **ties GTSAM 4.x LM** on `parking`/`sphere`/`cubicle`; **beats** it on `torus3D` (2.4e4 vs 6.0e4) and `rim` (8.3e4 vs 6.1e5) |
 | Outlier-robust PGO (GNC) | `sphere2500` + 30 wrong loops: L2 **89×** baseline, GNC **1.0×** (30/30 rejected) |
 
@@ -158,6 +159,7 @@ Details and reproduction: [KITTI multi-sequence vs published SLAM](docs/kitti_mu
 [sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ·
 [unordered SfM](docs/unordered_sfm_benchmark.md) ·
 [learned retrieval for relocalization](docs/learned_retrieval_relocalization.md) ·
+[multi-session lifelong mapping](docs/multi_session_lifelong_benchmark.md) ·
 [pose-graph / BA internals + GTSAM parity](docs/pgo_internals.md) ·
 [EuRoC vs published baselines](docs/phase_20_to_27_closeout.md).
 
