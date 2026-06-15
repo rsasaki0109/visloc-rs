@@ -29,16 +29,21 @@
 //!    ([`crate::bundle`]). Monocular has a 7-DoF gauge (6 rigid + scale), so two
 //!    poses are fixed — the anchor and the longest-baseline pose — to pin scale
 //!    as well as the frame.
-//! 5. **Filter.** Post-BA, strip observations that reproject past the gate (a
-//!    contaminated union-find track) and drop tracks whose re-measured parallax
-//!    is below the gate (depth-ambiguous far-flung points), then re-optimise, a
-//!    few rounds. No image is ever un-posed, so registration is invariant.
+//! 5. **Filter (+ optional re-triangulate).** Post-BA, strip observations that
+//!    reproject past the gate (a contaminated union-find track) and drop tracks
+//!    whose re-measured parallax is below the gate (depth-ambiguous far-flung
+//!    points); optionally also **re-triangulate** against the BA-refined poses
+//!    (`retriangulate`, off by default) — completing tracks the narrow seed-time
+//!    baseline could not triangulate and re-seeding noisy points (guarded so an
+//!    already-better point is never regressed), a density lever for downstream
+//!    3DGS/NeRF — then re-optimise, a few rounds. No image is ever un-posed, so
+//!    registration is invariant.
 //!
 //! The output ([`IncrementalSfmResult`]) carries per-image poses (`None` for
 //! images that never registered) and merged multi-view tracks, ready for a
 //! COLMAP `points3D.txt` export and downstream 3DGS / NeRF training.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Point2, Point3, Vector3};
 use visloc_core::geometry::Pose;
@@ -109,6 +114,96 @@ pub struct IncrementalSfmConfig {
     /// and can never drop a registered camera; on a clean reconstruction it is
     /// a near-no-op. `0` disables it.
     pub track_filter_iterations: usize,
+    /// Re-triangulate tracks in each post-BA refinement round (COLMAP's
+    /// completeness/refinement step the single-pass growth lacks). Once a global
+    /// BA has moved the poses, two things change: a track that failed the
+    /// parallax gate at growth time (a narrow baseline *then*) can now triangulate
+    /// against the BA-refined wide-baseline views, and a point first triangulated
+    /// from a narrow seed-time baseline can be re-seeded from the current widest
+    /// pair. Completion is unconditional; the re-seed of an existing point is a
+    /// **guarded swap** — kept only if it lowers that track's mean reprojection —
+    /// so a multi-view point BA already placed better is never regressed. When
+    /// enabled, at least one post-BA refinement round always runs (even if
+    /// `track_filter_iterations` is `0`).
+    ///
+    /// **`false` by default.** Growth already triangulates greedily (every
+    /// un-triangulated track is retried after *every* registration against all
+    /// registered views), so by the end the structure is near-complete and the
+    /// post-BA pass only mops up the marginal, gate-grazing tracks. Measured on a
+    /// 300-frame EuRoC MH_03 monocular subset it adds ~3 % more tracks / ~1.5 %
+    /// more observations — useful **density** for a downstream 3DGS/NeRF model —
+    /// but is **ATE-neutral-to-slightly-negative** (Sim(3) 2.13 → 2.27 cm), since
+    /// the extra tracks are the weakly-constrained ones. Enable it when you want
+    /// the densest possible structure and can spend the extra BA rounds; leave it
+    /// off when trajectory accuracy is the goal. See
+    /// `docs/sfm_vs_colmap_benchmark.md`.
+    pub retriangulate: bool,
+    /// Use COLMAP's `IncrementalMapper` bundle-adjustment **schedule** instead of
+    /// the simple "global BA every `ba_every` registrations + final BA" path.
+    /// This is a faithful port of COLMAP's defaults — the lever that closes the
+    /// small-scene monocular accuracy gap on COLMAP's home turf:
+    ///
+    ///  - **Local BA after every registration.** Optimise only the new image and
+    ///    its most-covisible neighbours (`local_ba_num_images`) plus the points
+    ///    they see, holding the rest of the reconstruction fixed — cheap, and it
+    ///    keeps the freshly added geometry tight before drift can compound.
+    ///  - **Growth-triggered global refinement.** When the registered-image count
+    ///    has grown by `global_ba_images_ratio` since the last global solve, run
+    ///    an iterative global refinement: global BA → re-triangulate/complete →
+    ///    filter, looped until the changed-observation fraction falls below
+    ///    `global_ba_change_rate` (≤ `global_ba_max_refinements` rounds).
+    ///  - **Registration retries.** A PnP failure is not permanent; after a
+    ///    global refinement adds structure, failed images are retried, up to
+    ///    `max_registration_trials` attempts each — COLMAP registers every frame
+    ///    where the simple single-attempt path leaves a tail unregistered.
+    ///
+    /// The final refinement is always the iterative global form when this is on.
+    /// `false` by default (preserves the simple schedule and every existing test).
+    pub colmap_style_mapper: bool,
+    /// COLMAP `Mapper.ba_local_num_images`: how many most-covisible registered
+    /// images (besides the newly registered one) the per-registration local BA
+    /// optimises. Only used when `colmap_style_mapper` is set.
+    pub local_ba_num_images: usize,
+    /// COLMAP `Mapper.ba_global_images_ratio`: trigger a global refinement once
+    /// the registered-image count has grown by this factor since the last one.
+    /// Only used when `colmap_style_mapper` is set.
+    pub global_ba_images_ratio: f64,
+    /// COLMAP `Mapper.ba_global_max_refinements`: max global BA → complete →
+    /// filter rounds per global refinement. Only used when `colmap_style_mapper`.
+    pub global_ba_max_refinements: usize,
+    /// COLMAP `Mapper.ba_global_max_refinement_change_rate`: stop the global
+    /// refinement loop once `changed_observations / total_observations` drops
+    /// below this. Only used when `colmap_style_mapper` is set.
+    pub global_ba_change_rate: f64,
+    /// COLMAP `Mapper.max_reg_trials`: how many times a single image may be
+    /// retried for registration (across global-refinement boundaries) before it
+    /// is given up on. Only used when `colmap_style_mapper` is set.
+    pub max_registration_trials: usize,
+    /// Multi-view exemption to the `min_triangulation_angle_deg` gate. A point on
+    /// a forward-flying trajectory often subtends a parallax angle below the gate
+    /// yet is **well-constrained** when many views observe it (each view adds a
+    /// reprojection constraint on its 3 DoF). `None` keeps the strict angle gate
+    /// for every track (the simple path). `Some(n)` keeps — and triangulates — a
+    /// track whose widest parallax is between `low_parallax_min_angle_deg` and
+    /// `min_triangulation_angle_deg` **if it has ≥ n registered observations**, so
+    /// long low-parallax tracks survive while 2-view depth-ambiguous ones (which
+    /// would slide freely along their ray and corrupt the poses) are still
+    /// rejected. This is the lever that recovers COLMAP-grade structure density on
+    /// forward-motion video without the accuracy collapse a blanket low gate
+    /// causes. Used by both the simple and COLMAP-style paths when set.
+    pub low_parallax_min_observations: Option<usize>,
+    /// Lower parallax floor (degrees) for the multi-view exemption above: a track
+    /// below this angle is dropped regardless of how many views see it (truly
+    /// degenerate). Only consulted when `low_parallax_min_observations` is `Some`.
+    pub low_parallax_min_angle_deg: f64,
+    /// Refine the shared pinhole intrinsics `(fx, fy, cx, cy)` in the **final**
+    /// global refinement (alternating BA ↔ intrinsics, see
+    /// [`crate::BaConfig::refine_intrinsics`]). A slightly-off fixed calibration
+    /// forces a residual onto the poses; letting the camera absorb it is COLMAP's
+    /// lever for the last of the small-scene accuracy gap. Growth keeps the input
+    /// intrinsics fixed; the refined camera emerges from the final solve and is
+    /// returned in [`IncrementalSfmResult::refined_camera`]. `false` by default.
+    pub refine_intrinsics: bool,
 }
 
 /// Minimal PnP solver used to register a new image against the reconstruction.
@@ -142,6 +237,17 @@ impl Default for IncrementalSfmConfig {
             },
             pnp_solver: PnpSolver::default(),
             track_filter_iterations: 2,
+            retriangulate: false,
+            // COLMAP IncrementalMapper defaults (off unless colmap_style_mapper).
+            colmap_style_mapper: false,
+            local_ba_num_images: 8,
+            global_ba_images_ratio: 1.1,
+            global_ba_max_refinements: 5,
+            global_ba_change_rate: 0.0005,
+            max_registration_trials: 3,
+            low_parallax_min_observations: None,
+            low_parallax_min_angle_deg: 1.0,
+            refine_intrinsics: false,
         }
     }
 }
@@ -169,6 +275,11 @@ pub struct IncrementalSfmResult {
     pub mean_reprojection_px: f64,
     /// Result of the final BA solve, if one ran.
     pub ba_result: Option<BaResult>,
+    /// Refined camera intrinsics, when `config.refine_intrinsics` was set. The
+    /// poses, tracks, and `mean_reprojection_px` are all expressed against *this*
+    /// camera, so a COLMAP / 3DGS export must use it rather than the input camera.
+    /// `None` when intrinsics refinement was off.
+    pub refined_camera: Option<Camera>,
 }
 
 /// Why [`incremental_sfm`] could not build a reconstruction.
@@ -279,13 +390,20 @@ pub fn incremental_sfm(
     }
     let (_, mut poses, mut track_point) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
 
-    // ---- 4. Final global bundle adjustment ----
-    let mut ba_result = if config.final_global_ba {
+    // ---- 4 + 5. Final refinement ----
+    // Growth used the fixed input intrinsics; the final solve may refine them
+    // (alternating BA ↔ intrinsics) into `cam`, which then expresses the output
+    // poses/tracks/reprojection and is returned to the caller for export.
+    let mut cam = camera.clone();
+    let ba_result = if config.colmap_style_mapper {
+        // COLMAP's final pass IS an iterative global refinement (global BA →
+        // complete/re-triangulate → filter, to convergence). The grow loop has
+        // already run local BAs + growth-triggered refinements throughout.
         Some(
-            run_bundle_adjustment(
-                camera,
+            iterative_global_refinement(
+                &mut cam,
                 features,
-                &tracks,
+                &mut tracks,
                 config,
                 &mut poses,
                 &mut track_point,
@@ -293,34 +411,67 @@ pub fn incremental_sfm(
             .map_err(IncrementalSfmError::Ba)?,
         )
     } else {
-        None
-    };
-
-    // ---- 5. Post-BA track refinement: drop contaminated observations, re-BA ----
-    for _ in 0..config.track_filter_iterations {
-        let removed = filter_outlier_observations(
-            camera,
-            features,
-            &mut tracks,
-            config,
-            &poses,
-            &mut track_point,
-        );
-        if removed == 0 {
-            break;
-        }
-        ba_result = Some(
-            run_bundle_adjustment(
-                camera,
+        // Simple schedule: one final global BA, then a few filter (+ optional
+        // re-triangulate) rounds. With re-triangulation on, run at least one
+        // round even when the filter budget is zero — the completion/re-seed pass
+        // is the point of the round.
+        let mut ba_result = if config.final_global_ba {
+            let (res, refined) = run_bundle_adjustment(
+                &cam,
                 features,
                 &tracks,
                 config,
                 &mut poses,
                 &mut track_point,
+                config.refine_intrinsics,
             )
-            .map_err(IncrementalSfmError::Ba)?,
-        );
-    }
+            .map_err(IncrementalSfmError::Ba)?;
+            if let Some(c) = refined {
+                cam = c;
+            }
+            Some(res)
+        } else {
+            None
+        };
+        let refine_rounds = if config.retriangulate {
+            config.track_filter_iterations.max(1)
+        } else {
+            config.track_filter_iterations
+        };
+        for _ in 0..refine_rounds {
+            let removed = filter_outlier_observations(
+                &cam,
+                features,
+                &mut tracks,
+                config,
+                &poses,
+                &mut track_point,
+            );
+            let retriangulated = if config.retriangulate {
+                retriangulate_tracks(&cam, features, &tracks, config, &poses, &mut track_point)
+            } else {
+                0
+            };
+            if removed == 0 && retriangulated == 0 {
+                break;
+            }
+            let (res, refined) = run_bundle_adjustment(
+                &cam,
+                features,
+                &tracks,
+                config,
+                &mut poses,
+                &mut track_point,
+                config.refine_intrinsics,
+            )
+            .map_err(IncrementalSfmError::Ba)?;
+            if let Some(c) = refined {
+                cam = c;
+            }
+            ba_result = Some(res);
+        }
+        ba_result
+    };
 
     // ---- Assemble output tracks (only triangulated, registered observations) ----
     let mut out_tracks = Vec::new();
@@ -337,7 +488,7 @@ pub fn incremental_sfm(
                 continue;
             };
             observations.push((image, kp, pixel));
-            if let Some(err) = reprojection_error_px(camera, pose, &position, &pixel) {
+            if let Some(err) = reprojection_error_px(&cam, pose, &position, &pixel) {
                 reproj_sum += err;
                 reproj_count += 1;
             }
@@ -363,6 +514,7 @@ pub fn incremental_sfm(
         registered_images,
         mean_reprojection_px,
         ba_result,
+        refined_camera: config.refine_intrinsics.then_some(cam),
     })
 }
 
@@ -505,7 +657,6 @@ fn place_seed_pair(
     poses: &mut [Option<Pose>],
 ) -> bool {
     let estimator = RelativePoseEstimator::default();
-    let min_cos = config.min_triangulation_angle_deg.to_radians().cos();
 
     // Build correspondences, keeping the (kp_i, kp_j) map aligned so a
     // relative-pose inlier index maps back to the right keypoints.
@@ -541,15 +692,7 @@ fn place_seed_pair(
     for &inl in &relative.inliers {
         let (px_i, px_j) = corr_kp[inl];
         let obs = [(pair.image_i, px_i), (pair.image_j, px_j)];
-        if triangulate_track(
-            camera,
-            poses,
-            &obs,
-            min_cos,
-            config.max_reprojection_error_px,
-        )
-        .is_some()
-        {
+        if triangulate_track(camera, poses, &obs, config).is_some() {
             well_triangulated += 1;
         }
     }
@@ -586,14 +729,31 @@ fn grow_from_seed(
     }
     triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
 
-    let mut failed: Vec<bool> = vec![false; n_images];
+    // `trials[i]` counts PnP attempts on image `i`. In the simple schedule one
+    // failed attempt is permanent (the cap is 1); the COLMAP schedule retries up
+    // to `max_registration_trials` across global-refinement boundaries.
+    let max_trials = if config.colmap_style_mapper {
+        config.max_registration_trials.max(1)
+    } else {
+        1
+    };
+    let mut trials: Vec<usize> = vec![0; n_images];
     let mut registrations_since_ba = 0usize;
+    // COLMAP triggers a global refinement once the registered-image count has
+    // grown by `global_ba_images_ratio` since the last one.
+    let mut reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
     loop {
-        let Some((next_image, corrs)) =
-            select_next_image(features, obs_by_image, &poses, &failed, &track_point)
-        else {
+        let Some((next_image, corrs)) = select_next_image(
+            features,
+            obs_by_image,
+            &poses,
+            &trials,
+            max_trials,
+            &track_point,
+        ) else {
             break;
         };
+        trials[next_image] += 1;
 
         // P3P (Grunert) is the default minimal solver — well-posed on coplanar
         // façades where the linear DLT degenerates. Both share the Gauss-Newton
@@ -615,25 +775,70 @@ fn grow_from_seed(
             }
             .estimate(&corrs, camera),
         };
-        match report {
-            Some(report) if report.inliers.len() >= config.min_pnp_inliers => {
-                poses[next_image] = Some(report.pose);
-                triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
-                registrations_since_ba += 1;
-                if config.ba_every > 0 && registrations_since_ba >= config.ba_every {
-                    run_bundle_adjustment(
-                        camera,
-                        features,
-                        tracks,
-                        config,
-                        &mut poses,
-                        &mut track_point,
-                    )
-                    .map_err(IncrementalSfmError::Ba)?;
-                    registrations_since_ba = 0;
+        let Some(report) = report.filter(|r| r.inliers.len() >= config.min_pnp_inliers) else {
+            continue; // registration failed this attempt (may be retried)
+        };
+        poses[next_image] = Some(report.pose);
+        triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
+
+        if config.colmap_style_mapper {
+            // COLMAP `AdjustLocalBundle`: tighten the new image + its covisible
+            // neighbourhood after every registration.
+            adjust_local_bundle(
+                camera,
+                features,
+                tracks,
+                config,
+                &mut poses,
+                &mut track_point,
+                next_image,
+            )
+            .map_err(IncrementalSfmError::Ba)?;
+
+            // Growth-ratio global refinement (COLMAP `IterativeGlobalRefinement`).
+            // During the seed search `tracks` is shared read-only across trials,
+            // so the in-growth refinement only re-triangulates + re-BAs (touching
+            // this trial's own poses/points); the track-membership *filter* that
+            // would mutate the shared tracks is deferred to the final refinement,
+            // after a seed has been committed. The BA's Huber kernel keeps
+            // outliers down-weighted in the meantime.
+            let n_reg = poses.iter().filter(|p| p.is_some()).count();
+            if n_reg as f64 >= reg_at_last_global as f64 * config.global_ba_images_ratio {
+                growth_global_refinement(
+                    camera,
+                    features,
+                    tracks,
+                    config,
+                    &mut poses,
+                    &mut track_point,
+                )
+                .map_err(IncrementalSfmError::Ba)?;
+                reg_at_last_global = n_reg;
+                // Structure changed — give previously-failed images a fresh shot
+                // by resetting their trial counters (COLMAP retries on change).
+                for (i, t) in trials.iter_mut().enumerate() {
+                    if poses[i].is_none() {
+                        *t = 0;
+                    }
                 }
             }
-            _ => failed[next_image] = true,
+        } else {
+            registrations_since_ba += 1;
+            if config.ba_every > 0 && registrations_since_ba >= config.ba_every {
+                // Growth never refines intrinsics (the camera is fixed until the
+                // final solve); the returned refined-camera slot is always None.
+                run_bundle_adjustment(
+                    camera,
+                    features,
+                    tracks,
+                    config,
+                    &mut poses,
+                    &mut track_point,
+                    false,
+                )
+                .map_err(IncrementalSfmError::Ba)?;
+                registrations_since_ba = 0;
+            }
         }
     }
 
@@ -651,7 +856,6 @@ fn triangulate_pending(
     config: &IncrementalSfmConfig,
     track_point: &mut [Option<Point3<f64>>],
 ) {
-    let min_cos = (config.min_triangulation_angle_deg.to_radians()).cos();
     for (track_id, track) in tracks.iter().enumerate() {
         if track_point[track_id].is_some() {
             continue;
@@ -669,15 +873,25 @@ fn triangulate_pending(
         if obs.len() < 2 {
             continue;
         }
-        if let Some(point) = triangulate_track(
-            camera,
-            poses,
-            &obs,
-            min_cos,
-            config.max_reprojection_error_px,
-        ) {
+        if let Some(point) = triangulate_track(camera, poses, &obs, config) {
             track_point[track_id] = Some(point);
         }
+    }
+}
+
+/// Whether a track's widest parallax `angle` (radians) clears the triangulation
+/// gate: the strict `min_triangulation_angle_deg`, or — with the multi-view
+/// exemption (`low_parallax_min_observations`) configured — the relaxed
+/// `low_parallax_min_angle_deg` floor once at least that many views observe it.
+fn parallax_angle_ok(angle: f64, num_obs: usize, config: &IncrementalSfmConfig) -> bool {
+    if angle >= config.min_triangulation_angle_deg.to_radians() {
+        return true;
+    }
+    match config.low_parallax_min_observations {
+        Some(min_obs) => {
+            num_obs >= min_obs && angle >= config.low_parallax_min_angle_deg.to_radians()
+        }
+        None => false,
     }
 }
 
@@ -688,9 +902,9 @@ fn triangulate_track(
     camera: &Camera,
     poses: &[Option<Pose>],
     obs: &[(usize, Point2<f64>)],
-    min_cos: f64,
-    max_reproj: f64,
+    config: &IncrementalSfmConfig,
 ) -> Option<Point3<f64>> {
+    let max_reproj = config.max_reprojection_error_px;
     // Precompute world-frame bearing rays for each observation.
     let mut rays: Vec<Vector3<f64>> = Vec::with_capacity(obs.len());
     for &(image, px) in obs {
@@ -711,7 +925,9 @@ fn triangulate_track(
         }
     }
     let (a, b, cos) = best?;
-    if cos > min_cos {
+    // Widest-pair parallax angle; accept on the strict gate or the multi-view
+    // exemption (a long low-parallax track is well-constrained by its many views).
+    if !parallax_angle_ok(cos.acos(), obs.len(), config) {
         return None; // insufficient parallax
     }
 
@@ -739,18 +955,20 @@ fn triangulate_track(
     Some(point_world)
 }
 
-/// Among unregistered, not-failed images, choose the one observing the most
-/// triangulated tracks, returning it with its 2D-3D correspondences.
+/// Among unregistered images still under the per-image trial cap, choose the one
+/// observing the most triangulated tracks, returning it with its 2D-3D
+/// correspondences.
 fn select_next_image(
     features: &[FeatureSet],
     obs_by_image: &[Vec<(usize, usize)>],
     poses: &[Option<Pose>],
-    failed: &[bool],
+    trials: &[usize],
+    max_trials: usize,
     track_point: &[Option<Point3<f64>>],
 ) -> Option<(usize, Vec<Correspondence2D3D>)> {
     let mut best: Option<(usize, Vec<Correspondence2D3D>)> = None;
     for (image, observations) in obs_by_image.iter().enumerate() {
-        if poses[image].is_some() || failed[image] {
+        if poses[image].is_some() || trials[image] >= max_trials {
             continue;
         }
         let mut corrs = Vec::new();
@@ -779,7 +997,10 @@ fn select_next_image(
 
 /// Global BA over all registered poses + triangulated landmarks. Seed pose
 /// (the lowest-index registered image) is fixed for gauge. Writes refined
-/// poses and points back in place.
+/// poses and points back in place. When `refine_intrinsics` is set, the BA also
+/// refines the pinhole intrinsics (alternating) and the refined camera is
+/// returned as `Some` (the caller propagates it); otherwise the second tuple
+/// element is `None` and the camera is untouched.
 fn run_bundle_adjustment(
     camera: &Camera,
     features: &[FeatureSet],
@@ -787,7 +1008,8 @@ fn run_bundle_adjustment(
     config: &IncrementalSfmConfig,
     poses: &mut [Option<Pose>],
     track_point: &mut [Option<Point3<f64>>],
-) -> Result<BaResult, BaError> {
+    refine_intrinsics: bool,
+) -> Result<(BaResult, Option<Camera>), BaError> {
     let mut ba = BundleAdjustment::new(camera.clone());
 
     for (image, pose) in poses.iter().enumerate() {
@@ -857,7 +1079,11 @@ fn run_bundle_adjustment(
         }
     }
 
-    let result = ba.optimize(&config.ba_config)?;
+    let ba_config = BaConfig {
+        refine_intrinsics,
+        ..config.ba_config
+    };
+    let result = ba.optimize(&ba_config)?;
 
     for (image, pose) in poses.iter_mut().enumerate() {
         if pose.is_some() {
@@ -873,7 +1099,306 @@ fn run_bundle_adjustment(
             }
         }
     }
+    let refined_camera = refine_intrinsics.then(|| ba.camera.clone());
+    Ok((result, refined_camera))
+}
+
+/// COLMAP `IncrementalMapper::AdjustLocalBundle`. After registering `new_image`,
+/// bundle-adjust only it and its `local_ba_num_images` most-covisible registered
+/// neighbours (sharing the most triangulated tracks) plus the points they see —
+/// every *other* registered image that observes one of those points is added as a
+/// **fixed** pose, so it constrains the local solve without being moved. This
+/// keeps the freshly grown geometry tight after every step at a fraction of a
+/// global solve's cost, the schedule that lets COLMAP hold sub-centimetre
+/// accuracy as the reconstruction grows. Poses/points outside the variable set
+/// are untouched.
+fn adjust_local_bundle(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+    new_image: usize,
+) -> Result<(), BaError> {
+    // Covisible registered images: how many triangulated tracks each shares with
+    // the newly registered one.
+    let mut covis: HashMap<usize, usize> = HashMap::new();
+    for (track_id, track) in tracks.iter().enumerate() {
+        if track_point[track_id].is_none() {
+            continue;
+        }
+        if !track
+            .iter()
+            .any(|&(img, _)| img == new_image && poses[img].is_some())
+        {
+            continue;
+        }
+        for &(img, _) in track {
+            if img != new_image && poses[img].is_some() {
+                *covis.entry(img).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut neighbours: Vec<(usize, usize)> = covis.into_iter().collect();
+    // Most-covisible first; break ties by index for determinism.
+    neighbours.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut variable: HashSet<usize> = neighbours
+        .into_iter()
+        .take(config.local_ba_num_images)
+        .map(|(img, _)| img)
+        .collect();
+    variable.insert(new_image);
+
+    bundle_adjust_local(
+        camera,
+        features,
+        tracks,
+        config,
+        poses,
+        track_point,
+        &variable,
+    )
+}
+
+/// Bundle-adjust a chosen `variable` set of poses plus every triangulated track
+/// they observe. Other registered images observing those tracks join as fixed
+/// poses (constraints). The gauge: with ≥2 fixed observers their baseline pins
+/// the 7-DoF monocular gauge for free; otherwise (an early, loosely connected
+/// neighbourhood) the variable set's own anchor + farthest pose are fixed, as in
+/// the global solve. Only variable poses and the solved landmarks are written back.
+fn bundle_adjust_local(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+    variable: &HashSet<usize>,
+) -> Result<(), BaError> {
+    let mut ba = BundleAdjustment::new(camera.clone());
+
+    // Landmarks touching ≥1 variable image, and the images that participate.
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut lm_ids: Vec<usize> = Vec::new();
+    for (track_id, track) in tracks.iter().enumerate() {
+        if track_point[track_id].is_none() {
+            continue;
+        }
+        let mut obs_images: Vec<usize> = Vec::new();
+        let mut touches_variable = false;
+        for &(image, kp) in track {
+            if poses[image].is_none() {
+                continue;
+            }
+            if features[image].keypoints.get(kp).is_none() {
+                continue;
+            }
+            obs_images.push(image);
+            if variable.contains(&image) {
+                touches_variable = true;
+            }
+        }
+        if obs_images.len() < 2 || !touches_variable {
+            continue;
+        }
+        for image in obs_images {
+            used.insert(image);
+        }
+        lm_ids.push(track_id);
+    }
+    if lm_ids.is_empty() {
+        return Ok(());
+    }
+
+    for &image in &used {
+        ba.add_pose(image as u64, poses[image].clone().unwrap());
+        if !variable.contains(&image) {
+            ba.fix_pose(image as u64);
+        }
+    }
+
+    // Need ≥2 fixed poses to pin metric scale; otherwise fix the variable gauge.
+    let n_fixed = used.iter().filter(|i| !variable.contains(i)).count();
+    if n_fixed < 2 {
+        let var_used: Vec<usize> = used
+            .iter()
+            .copied()
+            .filter(|i| variable.contains(i))
+            .collect();
+        fix_monocular_scale_gauge(&mut ba, poses, &var_used);
+    }
+
+    for &track_id in &lm_ids {
+        ba.add_landmark(track_id as u64, track_point[track_id].unwrap());
+        for &(image, kp) in &tracks[track_id] {
+            if poses[image].is_none() {
+                continue;
+            }
+            if let Some(px) = features[image].keypoints.get(kp).copied() {
+                ba.add_observation(BaObservation {
+                    keyframe_id: image as u64,
+                    landmark_id: track_id as u64,
+                    xy: px,
+                });
+            }
+        }
+    }
+
+    ba.optimize(&config.ba_config)?;
+
+    for &image in &used {
+        if variable.contains(&image) {
+            if let Some(refined) = ba.poses.get(&(image as u64)) {
+                poses[image] = Some(refined.clone());
+            }
+        }
+    }
+    for &track_id in &lm_ids {
+        if let Some(refined) = ba.landmarks.get(&(track_id as u64)) {
+            track_point[track_id] = Some(*refined);
+        }
+    }
+    Ok(())
+}
+
+/// Pin the 7-DoF monocular gauge (6 rigid + scale) by fixing two of `candidates`:
+/// the lowest-index pose (rigid anchor) and the one farthest from it (the scale
+/// anchor — longest, best-conditioned baseline). Mirrors the global solve's gauge
+/// handling; used by a local solve that lacks two fixed-observer poses of its own.
+fn fix_monocular_scale_gauge(
+    ba: &mut BundleAdjustment,
+    poses: &[Option<Pose>],
+    candidates: &[usize],
+) {
+    let Some(&anchor) = candidates.iter().min() else {
+        return;
+    };
+    ba.fix_pose(anchor as u64);
+    let anchor_center = poses[anchor]
+        .as_ref()
+        .unwrap()
+        .camera_to_world()
+        .translation;
+    let mut farthest = None;
+    let mut best_d2 = 0.0;
+    for &image in candidates {
+        if image == anchor {
+            continue;
+        }
+        let d2 = (poses[image].as_ref().unwrap().camera_to_world().translation - anchor_center)
+            .norm_squared();
+        if d2 > best_d2 {
+            best_d2 = d2;
+            farthest = Some(image);
+        }
+    }
+    if let Some(scale_anchor) = farthest {
+        ba.fix_pose(scale_anchor as u64);
+    }
+}
+
+/// COLMAP `IncrementalMapper::IterativeGlobalRefinement`: a global BA, then a loop
+/// of {re-triangulate/complete tracks, filter outliers, global BA} until the
+/// changed-observation fraction falls below `global_ba_change_rate` (or
+/// `global_ba_max_refinements` rounds run). Re-triangulation is forced on here
+/// regardless of `config.retriangulate` — completing tracks between global solves
+/// is integral to COLMAP's schedule, not the opt-in density lever of the simple
+/// path.
+fn iterative_global_refinement(
+    camera: &mut Camera,
+    features: &[FeatureSet],
+    tracks: &mut [Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+) -> Result<BaResult, BaError> {
+    // Refine intrinsics on each global solve when enabled; the refined camera is
+    // carried forward so the next round's filter / re-triangulation / BA all use
+    // it (and the caller reads the final camera back from `*camera`).
+    let refine = config.refine_intrinsics;
+    let run_ba = |cam: &mut Camera,
+                  tr: &[Vec<(usize, usize)>],
+                  p: &mut [Option<Pose>],
+                  tp: &mut [Option<Point3<f64>>]|
+     -> Result<BaResult, BaError> {
+        let (res, refined) = run_bundle_adjustment(cam, features, tr, config, p, tp, refine)?;
+        if let Some(c) = refined {
+            *cam = c;
+        }
+        Ok(res)
+    };
+
+    let mut result = run_ba(camera, tracks, poses, track_point)?;
+    for _ in 0..config.global_ba_max_refinements {
+        let total_obs = count_observations(tracks, poses, track_point).max(1);
+        // Filter outlier observations, then complete/re-triangulate tracks the
+        // tightened frame can now place. Completing between solves is integral to
+        // the schedule — it gives the next global BA more constraints and, on this
+        // metric video, measurably beats filter-only (1.64 cm vs 2.21 cm); the
+        // forward-motion low-parallax churn it induces against the filter is the
+        // price, and the track-density ceiling it leaves is the next lever.
+        let mut changed =
+            filter_outlier_observations(camera, features, tracks, config, poses, track_point);
+        changed += retriangulate_tracks(camera, features, tracks, config, poses, track_point);
+        if (changed as f64 / total_obs as f64) < config.global_ba_change_rate {
+            break;
+        }
+        result = run_ba(camera, tracks, poses, track_point)?;
+    }
     Ok(result)
+}
+
+/// In-growth global refinement, used during the seed search where `tracks` is
+/// shared read-only across trials: global BA, then up to a couple rounds of
+/// {re-triangulate/complete, global BA} while it keeps completing tracks. The
+/// completion is what keeps registration moving — a freshly tightened global
+/// frame lets [`retriangulate_tracks`] triangulate tracks the narrow growth-time
+/// baseline had missed, and those new 3D points give the next PnP enough
+/// 2D-3D matches to register (without it, registration stalls well short of full
+/// coverage and the trajectory develops ATE-wrecking gaps). The track-membership
+/// *filter* (which would mutate the shared tracks) is deferred to the final
+/// [`iterative_global_refinement`] after a seed is committed.
+fn growth_global_refinement(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+) -> Result<(), BaError> {
+    // Growth keeps the input intrinsics fixed (refine = false), so the returned
+    // refined-camera slot is always None and is ignored.
+    run_bundle_adjustment(camera, features, tracks, config, poses, track_point, false)?;
+    for _ in 0..config.global_ba_max_refinements.min(2) {
+        let changed = retriangulate_tracks(camera, features, tracks, config, poses, track_point);
+        if changed == 0 {
+            break;
+        }
+        run_bundle_adjustment(camera, features, tracks, config, poses, track_point, false)?;
+    }
+    Ok(())
+}
+
+/// Total triangulated observations: for every track with a 3D point, the number
+/// of its registered observations. The denominator for the refinement-loop
+/// change-rate stop test.
+fn count_observations(
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    track_point: &[Option<Point3<f64>>],
+) -> usize {
+    let mut n = 0usize;
+    for (track_id, track) in tracks.iter().enumerate() {
+        if track_point[track_id].is_none() {
+            continue;
+        }
+        n += track
+            .iter()
+            .filter(|&&(img, _)| poses[img].is_some())
+            .count();
+    }
+    n
 }
 
 /// Clean every triangulated track after the current BA, on two grounds:
@@ -904,7 +1429,6 @@ fn filter_outlier_observations(
 ) -> usize {
     let threshold = config.max_reprojection_error_px;
     let min_obs = config.min_track_length.max(2);
-    let min_angle = config.min_triangulation_angle_deg.to_radians();
     let mut changed = 0usize;
 
     for (track_id, track) in tracks.iter_mut().enumerate() {
@@ -937,10 +1461,91 @@ fn filter_outlier_observations(
             continue;
         }
 
-        if track_max_parallax(poses, track, &point) < min_angle
+        // Drop a low-parallax track unless the multi-view exemption keeps it: a
+        // long forward-motion track below the strict angle but seen by many views
+        // is well-constrained, while a 2-view depth-ambiguous one is not.
+        if !parallax_angle_ok(track_max_parallax(poses, track, &point), posed_obs, config)
             && track_point[track_id].take().is_some()
         {
             changed += 1;
+        }
+    }
+    changed
+}
+
+/// Re-triangulate tracks after a bundle adjustment has moved the poses — the
+/// COLMAP completeness/refinement step the single-pass growth lacks. For each
+/// track with ≥2 registered observations, triangulate a fresh point from the
+/// current widest-parallax view pair ([`triangulate_track`], so it still passes
+/// the parallax + reprojection gates) and either:
+///
+///  1. **Complete** an un-triangulated track. At growth time its registered
+///     views were a narrow baseline and the parallax gate rejected it; the
+///     BA-refined geometry (more views registered, wider baselines) can now place
+///     it. The new point constrains the next BA.
+///  2. **Re-seed** an existing point, but only as a **guarded swap**: keep the
+///     re-triangulation only if it lowers the track's mean reprojection over its
+///     registered observations. A point a multi-view BA already placed better is
+///     never regressed, so the step is monotone per track.
+///
+/// Poses are read-only here; the caller re-runs the BA afterwards. Returns how
+/// many tracks gained or improved a point (zero ⇒ nothing changed, converged).
+fn retriangulate_tracks(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &[Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+) -> usize {
+    let mut changed = 0usize;
+
+    for (track_id, track) in tracks.iter().enumerate() {
+        // Registered observations of this track: (image, pixel).
+        let mut obs: Vec<(usize, Point2<f64>)> = Vec::new();
+        for &(image, kp) in track {
+            if poses[image].is_none() {
+                continue;
+            }
+            if let Some(px) = features[image].keypoints.get(kp).copied() {
+                obs.push((image, px));
+            }
+        }
+        if obs.len() < 2 {
+            continue;
+        }
+        let Some(candidate) = triangulate_track(camera, poses, &obs, config) else {
+            continue;
+        };
+
+        match track_point[track_id] {
+            None => {
+                track_point[track_id] = Some(candidate);
+                changed += 1;
+            }
+            Some(current) => {
+                // Mean reprojection of a point over this track's registered obs.
+                let mean_reproj = |p: &Point3<f64>| -> f64 {
+                    let mut sum = 0.0;
+                    let mut n = 0usize;
+                    for &(image, px) in &obs {
+                        let Some(pose) = &poses[image] else { continue };
+                        if let Some(err) = reprojection_error_px(camera, pose, p, &px) {
+                            sum += err;
+                            n += 1;
+                        }
+                    }
+                    if n > 0 {
+                        sum / n as f64
+                    } else {
+                        f64::INFINITY
+                    }
+                };
+                if mean_reproj(&candidate) + 1e-9 < mean_reproj(&current) {
+                    track_point[track_id] = Some(candidate);
+                    changed += 1;
+                }
+            }
         }
     }
     changed
@@ -1428,6 +2033,145 @@ mod tests {
         assert!(
             track_point[0].is_none(),
             "track with < 2 inlier observations is dropped"
+        );
+    }
+
+    #[test]
+    fn retriangulate_completes_untriangulated_track() {
+        // Three identity-rotation views with a real lateral baseline see one
+        // world point. The track exists in the union-find but was never given a
+        // 3D point (it failed the parallax gate at growth time, say). With the
+        // poses now fixed, re-triangulation must complete it.
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let point = Point3::new(0.1, -0.2, 5.0);
+        let mut features = Vec::new();
+        let mut poses = Vec::new();
+        for k in 0..3 {
+            let pose = Pose::from_world_to_camera(
+                UnitQuaternion::identity(),
+                Vector3::new(k as f64 * 0.5 - 0.5, 0.0, 0.0),
+            );
+            let px = camera.project(&pose.transform_world_point(&point)).unwrap();
+            features.push(FeatureSet::new(vec![px], vec![vec![k as f32, 1.0]]).unwrap());
+            poses.push(Some(pose));
+        }
+        let tracks = vec![vec![(0, 0), (1, 0), (2, 0)]];
+        let mut track_point: Vec<Option<Point3<f64>>> = vec![None]; // not yet triangulated
+        let config = IncrementalSfmConfig::default();
+        let changed = retriangulate_tracks(
+            &camera,
+            &features,
+            &tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(changed, 1, "the un-triangulated track is completed");
+        let p = track_point[0].expect("track now has a 3D point");
+        assert!(
+            (p - point).norm() < 1e-6,
+            "re-triangulated point {p:?} should recover the true point {point:?}"
+        );
+    }
+
+    #[test]
+    fn retriangulate_guarded_swap_replaces_noisy_point_only_when_better() {
+        // Same three-view geometry, but the track already carries a *noisy* point
+        // displaced far along the depth ray. Re-triangulation from the true
+        // observations fits them better, so the guarded swap must replace it; a
+        // second pass (now exact) must be a no-op (never regress an exact point).
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let point = Point3::new(0.1, -0.2, 5.0);
+        let mut features = Vec::new();
+        let mut poses = Vec::new();
+        for k in 0..3 {
+            let pose = Pose::from_world_to_camera(
+                UnitQuaternion::identity(),
+                Vector3::new(k as f64 * 0.5 - 0.5, 0.0, 0.0),
+            );
+            let px = camera.project(&pose.transform_world_point(&point)).unwrap();
+            features.push(FeatureSet::new(vec![px], vec![vec![k as f32, 1.0]]).unwrap());
+            poses.push(Some(pose));
+        }
+        let tracks = vec![vec![(0, 0), (1, 0), (2, 0)]];
+        let noisy = Point3::new(0.3, -0.6, 8.0);
+        let mut track_point = vec![Some(noisy)];
+        let config = IncrementalSfmConfig::default();
+
+        let changed = retriangulate_tracks(
+            &camera,
+            &features,
+            &tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(changed, 1, "the noisy point is replaced by a better fit");
+        let p = track_point[0].unwrap();
+        assert!(
+            (p - point).norm() < 1e-6,
+            "guarded swap should land on the true point, got {p:?}"
+        );
+
+        // Re-running on the now-exact point changes nothing.
+        let again = retriangulate_tracks(
+            &camera,
+            &features,
+            &tracks,
+            &config,
+            &poses,
+            &mut track_point,
+        );
+        assert_eq!(again, 0, "an already-exact point must not be regressed");
+    }
+
+    #[test]
+    fn colmap_style_mapper_reconstructs_ring_scene() {
+        // The COLMAP schedule (per-registration local BA + growth-triggered
+        // iterative global refinement + registration retries) must reconstruct the
+        // synthetic ring at least as completely as the simple schedule, with tight
+        // reprojection and a similarity-correct camera geometry.
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            colmap_style_mapper: true,
+            ..IncrementalSfmConfig::default()
+        };
+        let result = incremental_sfm(&scene.camera, &features, &pairwise, &config).unwrap();
+        assert!(
+            result.registered_images >= 5,
+            "registered only {}",
+            result.registered_images
+        );
+        assert!(
+            result.tracks.len() >= 20,
+            "triangulated only {} tracks",
+            result.tracks.len()
+        );
+        assert!(
+            result.mean_reprojection_px < 1.0,
+            "mean reprojection {} px too high",
+            result.mean_reprojection_px
+        );
+        let registered: Vec<usize> = (0..scene.poses.len())
+            .filter(|&i| result.poses[i].is_some())
+            .collect();
+        let center = |i: usize| {
+            result.poses[i]
+                .as_ref()
+                .unwrap()
+                .camera_to_world()
+                .translation
+        };
+        let gt_center = |i: usize| scene.poses[i].camera_to_world().translation;
+        let (a, b, c) = (registered[0], registered[1], registered[2]);
+        let est_ratio = (center(a) - center(b)).norm() / (center(b) - center(c)).norm();
+        let gt_ratio = (gt_center(a) - gt_center(b)).norm() / (gt_center(b) - gt_center(c)).norm();
+        assert!(
+            (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
+            "camera-spacing ratio {est_ratio} != GT {gt_ratio} (similarity-invariant)"
         );
     }
 

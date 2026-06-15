@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{
-    DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Matrix3x6, Matrix6, Matrix6x3, Point2, Point3,
-    Vector2, Vector3, Vector6,
+    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix4,
+    Matrix6, Matrix6x3, Point2, Point3, Vector2, Vector3, Vector4, Vector6,
 };
 
 use visloc_core::geometry::{Pose, SE3, SO3};
@@ -815,7 +815,142 @@ impl BundleAdjustment {
     /// Run Levenberg-Marquardt bundle adjustment with Schur-complement
     /// landmark elimination. Returns iteration trace and final cost.
     pub fn optimize(&mut self, config: &BaConfig) -> Result<BaResult, BaError> {
-        self.optimize_weighted(config, None)
+        if !config.refine_intrinsics {
+            return self.optimize_weighted(config, None);
+        }
+        // Alternating pose/structure ↔ intrinsics refinement. Solve the BA with
+        // the current camera, refine the intrinsics against the fixed result,
+        // then re-solve — repeating until the camera stops moving.
+        let mut result = self.optimize_weighted(config, None)?;
+        for _ in 0..config.intrinsics_refinement_rounds.max(1) {
+            let change = self.refine_intrinsics(&config.robust_kernel, None);
+            if change == 0.0 {
+                break; // not a refinable pinhole, or nothing to do
+            }
+            result = self.optimize_weighted(config, None)?;
+            if change < 1e-3 {
+                break; // intrinsics converged (sub-millipixel focal/centre move)
+            }
+        }
+        Ok(result)
+    }
+
+    /// One alternating refinement of the shared pinhole intrinsics
+    /// `(fx, fy, cx, cy)` with the poses and landmarks held fixed: a small damped
+    /// Gauss-Newton over every (monocular + stereo) reprojection residual w.r.t.
+    /// the 4 intrinsics, applied in place to `self.camera`. Reuses the same
+    /// `predicted − observed` residual sign and IRLS weighting as the main solve.
+    /// Returns the L2 norm of the applied `(fx, fy, cx, cy)` update — `0.0` if the
+    /// camera is not a 4-parameter [`CameraModel::Pinhole`] or there is nothing to
+    /// refine. The intrinsics-only normal equations are full-rank given fixed
+    /// structure (no gauge freedom), so no extra anchoring is needed.
+    fn refine_intrinsics(&mut self, kernel: &RobustKernel, gnc_weights: Option<&[f64]>) -> f64 {
+        if self.camera.model != CameraModel::Pinhole {
+            return 0.0;
+        }
+        let Some((mut fx, mut fy, mut cx, mut cy)) = self.camera.intrinsics() else {
+            return 0.0;
+        };
+        let baseline = match self.stereo_baseline {
+            Some(b) if b.is_finite() && b > 0.0 => Some(b),
+            _ => None,
+        };
+        let mono_count = self.observations.len();
+
+        let mut total_change = 0.0;
+        // A few internal Gauss-Newton steps (structure is fixed, so this is cheap
+        // and converges in a handful of iterations).
+        for _ in 0..5 {
+            let mut h = Matrix4::<f64>::zeros();
+            let mut g = Vector4::<f64>::zeros();
+
+            for (idx, obs) in self.observations.iter().enumerate() {
+                let (Some(pose), Some(point)) = (
+                    self.poses.get(&obs.keyframe_id),
+                    self.landmarks.get(&obs.landmark_id),
+                ) else {
+                    continue;
+                };
+                let xc = pose.transform_world_point(point);
+                if xc.z <= 0.0 {
+                    continue;
+                }
+                let zi = 1.0 / xc.z;
+                let r = Vector2::new(
+                    fx * xc.x * zi + cx - obs.xy.x,
+                    fy * xc.y * zi + cy - obs.xy.y,
+                );
+                let s = r.x * r.x + r.y * r.y;
+                let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[idx]);
+                // ∂r/∂[fx, fy, cx, cy].
+                let mut j = Matrix2x4::<f64>::zeros();
+                j[(0, 0)] = xc.x * zi;
+                j[(0, 2)] = 1.0;
+                j[(1, 1)] = xc.y * zi;
+                j[(1, 3)] = 1.0;
+                h += w * (j.transpose() * j);
+                g += w * (j.transpose() * r);
+            }
+
+            if let Some(b) = baseline {
+                for (k, obs) in self.stereo_observations.iter().enumerate() {
+                    let (Some(pose), Some(point)) = (
+                        self.poses.get(&obs.keyframe_id),
+                        self.landmarks.get(&obs.landmark_id),
+                    ) else {
+                        continue;
+                    };
+                    let xc = pose.transform_world_point(point);
+                    if xc.z <= 0.0 {
+                        continue;
+                    }
+                    let zi = 1.0 / xc.z;
+                    let pred_x = fx * xc.x * zi + cx;
+                    let pred_y = fy * xc.y * zi + cy;
+                    // u_r_pred = u_l_pred − fx·b/Z = fx·(X−b)/Z + cx.
+                    let u_r_pred = pred_x - fx * b * zi;
+                    let r =
+                        Vector3::new(pred_x - obs.xy.x, pred_y - obs.xy.y, u_r_pred - obs.u_right);
+                    let s = r.x * r.x + r.y * r.y + r.z * r.z;
+                    let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[mono_count + k]);
+                    let mut j = Matrix3x4::<f64>::zeros();
+                    j[(0, 0)] = xc.x * zi;
+                    j[(0, 2)] = 1.0;
+                    j[(1, 1)] = xc.y * zi;
+                    j[(1, 3)] = 1.0;
+                    j[(2, 0)] = (xc.x - b) * zi;
+                    j[(2, 2)] = 1.0;
+                    h += w * (j.transpose() * j);
+                    g += w * (j.transpose() * r);
+                }
+            }
+
+            // Tikhonov-damped solve (the system is well-conditioned; the small
+            // ridge only guards against a degenerate all-frontal configuration).
+            let ridge = 1e-9 * h.diagonal().max().max(1.0);
+            let h_damped = h + Matrix4::<f64>::identity() * ridge;
+            let Some(delta) = h_damped.lu().solve(&(-g)) else {
+                break;
+            };
+            if !delta.iter().all(|x| x.is_finite()) {
+                break;
+            }
+            fx += delta[0];
+            fy += delta[1];
+            cx += delta[2];
+            cy += delta[3];
+            let step = delta.norm();
+            total_change += step;
+            if step < 1e-6 {
+                break;
+            }
+        }
+
+        self.camera.params[0] = fx;
+        self.camera.params[1] = fy;
+        self.camera.params[2] = cx;
+        self.camera.params[3] = cy;
+        total_change
     }
 
     /// Outlier-robust bundle adjustment via Graduated Non-Convexity (GNC).
@@ -1274,6 +1409,21 @@ pub struct BaConfig {
     /// number of bad correspondences cannot pull the solution away from
     /// the inlier consensus.
     pub robust_kernel: RobustKernel,
+    /// Also refine the shared pinhole intrinsics `(fx, fy, cx, cy)` by
+    /// **alternation**: after the pose+structure LM solve converges, the
+    /// intrinsics are updated by a small damped Gauss-Newton over every
+    /// reprojection residual (poses + landmarks held fixed), then the whole BA
+    /// is re-run with the new camera — repeated up to
+    /// `intrinsics_refinement_rounds` times. This is COLMAP's lever for the last
+    /// of the small-scene accuracy gap: a slightly-off fixed calibration forces a
+    /// residual onto the poses, and letting the camera absorb it tightens the
+    /// trajectory. Only the 4-parameter [`CameraModel::Pinhole`] is refined; for
+    /// any other model this is a no-op. **`false` by default** (the public
+    /// [`Self::optimize`] is then bit-identical to before).
+    pub refine_intrinsics: bool,
+    /// Max alternation rounds when `refine_intrinsics` is set; the loop also
+    /// stops early once the intrinsics update falls below a small threshold.
+    pub intrinsics_refinement_rounds: usize,
 }
 
 impl Default for BaConfig {
@@ -1289,6 +1439,8 @@ impl Default for BaConfig {
             cost_tolerance: 1e-9,
             linear_solver: LinearSolver::Dense,
             robust_kernel: RobustKernel::None,
+            refine_intrinsics: false,
+            intrinsics_refinement_rounds: 5,
         }
     }
 }

@@ -64,10 +64,96 @@ VO frontend + windowed BA + loop closure dominates a from-scratch monocular
 incremental mapper on speed, accuracy, and scale recovery.** It is *not* a claim
 that visloc beats COLMAP on COLMAP's home turf — unordered internet photo
 collections, where retrieval + multi-hypothesis incremental mapping is COLMAP's
-strength. On a small-scene monocular subset (300 frames, same images, both
-monocular), COLMAP's full global BA wins accuracy (3.8 cm vs visloc's monocular
-`sequential_sfm_demo` at 11 cm); the win reported here is specifically the
-long-metric-video regime.
+strength.
+
+### Small-scene monocular subset (300 frames, both monocular) — COLMAP wins
+
+On the first 300 MH_03 frames reconstructed monocularly (left camera only, so
+both engines are scale-free and scored with a Sim(3) alignment against the same
+GT, same `colmap_images_to_tum.py` + `evo_ape -as` tooling):
+
+| engine | registered | Sim(3) ATE rmse | wall-clock |
+|---|---|---|---|
+| **COLMAP** mono incremental | **300 / 300** | **0.37 cm** | ~29 min |
+| visloc `--colmap-style` mapper | 299 / 300 | 1.64 cm | ~7 min |
+| visloc `sequential_sfm_demo` (simple) | 272 / 300 | 2.13 cm | ~7 min |
+
+**COLMAP still wins this turf, but the gap is closing.** COLMAP's repeated global
+bundle adjustment over a small, well-conditioned set is hard to beat on accuracy.
+Porting its `IncrementalMapper` schedule — per-registration **local BA**,
+**growth-triggered iterative global refinement**, and **registration retries** —
+into the incremental engine (`--colmap-style`, `IncrementalSfmConfig::colmap_style_mapper`)
+takes visloc from 2.13 → **1.64 cm** and from 272 → **299 / 300** registered,
+narrowing the accuracy gap from ~5.7× to ~4.4× and nearly matching COLMAP's full
+registration. (An earlier note in this file quoted 11 cm for visloc and 3.8 cm
+for COLMAP; both are superseded by these fresh same-subset measurements — COLMAP
+4.0.3's mapper reaches 0.37 cm.) visloc does **not** yet match COLMAP on its home
+turf; the headline win below is specifically the long metric **stereo** video
+regime.
+
+**Remaining gap to 0.37 cm — it is *not* track density (measured).** The
+COLMAP-style reconstruction keeps only ~2 k triangulated points against COLMAP's
+~15 k, so the obvious hypothesis is "denser structure → tighter poses." It is
+**wrong on this data**, and the ablation is worth recording:
+
+| variant | tracks | reg | Sim(3) ATE |
+|---|---|---|---|
+| strict 2° gate (shipped) | 2 062 | 299 | **1.64 cm** |
+| flat 1° gate | 12 632 | 278 | 15.1 cm |
+| multi-view exemption (keep <2° tracks with ≥6 views) | 10 047 | 208 | 16.5 cm |
+
+Relaxing the parallax gate *does* recover COLMAP-grade point counts, but ATE
+collapses by ~10×. The reason is the capture geometry: on a forward-flying
+trajectory a point near the heading direction subtends near-zero parallax **no
+matter how many frames see it**, so its depth is unconstrained; admitting such
+points (even long, many-view ones) injects depth-ambiguous structure that pulls
+the poses. The strict 2° gate is therefore the accuracy optimum here, and the
+sparse-but-clean reconstruction is *correct*, not a defect.
+
+**Intrinsics refinement — also *not* the lever here (measured).** The natural
+next hypothesis was COLMAP's focal-length + principal-point refinement: a
+slightly-off fixed calibration forces a residual onto the poses. So it was
+implemented (`BaConfig::refine_intrinsics` / `--refine-intrinsics`: alternating
+BA ↔ a damped Gauss-Newton on `(fx, fy, cx, cy)`, validated by a unit test that
+recovers a perturbed focal when the structure is fixed). On this benchmark it
+**does not help** — Sim(3) ATE 1.64 → 1.77 cm, a touch *worse*. Two measurements
+explain why, and it is the **same** geometry as the density result:
+
+- On the rectified EuRoC images the calibration is already accurate, so there is
+  no residual to absorb; refinement only overfits `fy` (436.2 → 439.1) to the
+  sparse structure and mildly biases the trajectory.
+- Deliberately starting from a wrong focal (`fx = fy = 460`, true ≈ 436) does
+  **not** get recovered — refinement leaves it at 460. On forward motion the
+  focal length is **weakly observable** (the focal/depth ambiguity): a wrong
+  focal is absorbed into structure during growth, leaving nothing for the
+  intrinsics step to pull on. (A uniform focal error is in any case largely
+  Sim(3)-absorbed in scoring.)
+
+So COLMAP's 0.37 cm edge on its home turf is neither intrinsics nor raw point
+count — it is most plausibly its **denser, better-distributed SIFT frontend** and
+mature global BA producing well-conditioned structure, which a sequential
+SuperPoint-window frontend does not match. That is the honest remaining gap.
+Intrinsics refinement is kept (off by default) because it *is* the right tool for
+unknown / inaccurate calibration on observable geometry (sideways, orbiting, or
+unordered photo collections) — just not for rectified forward video.
+
+(Schedule ablation, separately: re-triangulation must run **both** during growth
+— dropping it collapses registration to 212/300 and ATE to 6.6 cm — **and** in
+the final refinement — filter-only there leaves 718 tracks and 2.21 cm; keeping
+it everywhere is the 1.64 cm / 299-frame point above. The
+`low_parallax_min_observations` exemption remains available for sideways/orbiting
+capture, where many-view low-angle tracks *are* well-constrained, but is off by
+default.)
+
+**Re-triangulation (`--retriangulate`, off by default).** Adding COLMAP's
+post-BA re-triangulation step — complete tracks the narrow seed-time baseline
+missed, guarded-re-seed noisy points — grows the model by **+318 tracks / +2151
+observations (~3 %)**, useful structure density for a downstream 3DGS/NeRF
+model, but is **ATE-neutral-to-slightly-negative** here (Sim(3) 2.13 → 2.27 cm):
+the engine already triangulates greedily after every registration, so the extra
+tracks the post-BA pass recovers are the weakly-constrained, gate-grazing ones.
+It is therefore an opt-in density lever, not an accuracy lever, on this
+already-tight metric-video regime.
 
 ## Reproduce
 

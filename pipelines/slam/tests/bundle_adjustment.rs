@@ -71,6 +71,64 @@ fn truth_bundle() -> BundleAdjustment {
 }
 
 #[test]
+fn refine_intrinsics_recovers_perturbed_focal_length() {
+    // Exact observations are generated with the true camera (fx = fy = 500).
+    // Start the BA from a wrong focal length and let alternating intrinsics
+    // refinement pull it back, the COLMAP small-scene-accuracy lever.
+    let mut ba = truth_bundle();
+    // Perturb the intrinsics the solver starts from (truth is 500/500/320/240).
+    ba.camera = Camera::pinhole(1, 640, 480, 520.0, 515.0, 326.0, 233.0);
+    // Fix two poses and all landmarks so the wrong focal length cannot be absorbed
+    // into structure — on this tiny 3-camera scene a free point cloud would soak
+    // up the fx error (the focal/depth ambiguity), leaving nothing for the
+    // intrinsics step to correct. Pinning the structure makes fx observable, which
+    // is exactly what a large many-view reconstruction does for free.
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    for (id, _) in world_grid() {
+        ba.fix_landmark(id);
+    }
+
+    let cost_before = ba.cost();
+    let config = BaConfig {
+        refine_intrinsics: true,
+        ..BaConfig::default()
+    };
+    ba.optimize(&config).expect("BA with intrinsics refinement");
+
+    let (fx, fy, cx, cy) = ba.camera.intrinsics().unwrap();
+    assert!(
+        (fx - 500.0).abs() < 0.5 && (fy - 500.0).abs() < 0.5,
+        "focal length not recovered: fx={fx}, fy={fy} (truth 500)"
+    );
+    assert!(
+        (cx - 320.0).abs() < 0.5 && (cy - 240.0).abs() < 0.5,
+        "principal point not recovered: cx={cx}, cy={cy} (truth 320/240)"
+    );
+    assert!(
+        ba.cost() < 0.1 && ba.cost() < cost_before,
+        "cost must collapse once the camera is recovered: {} (was {cost_before})",
+        ba.cost()
+    );
+}
+
+#[test]
+fn refine_intrinsics_is_noop_when_disabled() {
+    // With the flag off, optimize() must leave the (wrong) intrinsics untouched —
+    // the default path is unchanged.
+    let mut ba = truth_bundle();
+    ba.camera = Camera::pinhole(1, 640, 480, 520.0, 520.0, 320.0, 240.0);
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    ba.optimize(&BaConfig::default()).expect("plain BA");
+    let (fx, _, _, _) = ba.camera.intrinsics().unwrap();
+    assert!(
+        (fx - 520.0).abs() < 1e-9,
+        "intrinsics must be untouched when refine_intrinsics is off, got fx={fx}"
+    );
+}
+
+#[test]
 fn bundle_cost_is_zero_at_truth() {
     let ba = truth_bundle();
     assert!(
