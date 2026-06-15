@@ -47,8 +47,8 @@ use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
-    BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig, Matcher,
-    PairwiseMatches, Pose,
+    BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig,
+    Matcher, PairwiseMatches, Pose,
 };
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
@@ -70,6 +70,7 @@ struct Args {
     final_ba: bool,
     seed_trials: usize,
     refine_intrinsics: bool,
+    refine_distortion: bool,
     colmap_style: bool,
 }
 
@@ -90,6 +91,7 @@ fn parse_args() -> Result<Args, String> {
     let mut final_ba = true;
     let mut seed_trials = 12usize;
     let mut refine_intrinsics = false;
+    let mut refine_distortion = false;
     let mut colmap_style = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
@@ -120,6 +122,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-final-ba" => final_ba = false,
             "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--refine-intrinsics" => refine_intrinsics = true,
+            "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -154,6 +157,7 @@ fn parse_args() -> Result<Args, String> {
         final_ba,
         seed_trials,
         refine_intrinsics,
+        refine_distortion,
         colmap_style,
     })
 }
@@ -351,7 +355,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_reprojection_error_px: args.max_reproj,
         final_global_ba: args.final_ba,
         seed_trials: args.seed_trials,
-        refine_intrinsics: args.refine_intrinsics,
+        // Distortion self-calibration runs inside the joint intrinsics BA, so it
+        // implies intrinsics refinement; the (k1, k2) flag rides on `ba_config`.
+        refine_intrinsics: args.refine_intrinsics || args.refine_distortion,
+        ba_config: BaConfig {
+            refine_distortion: args.refine_distortion,
+            ..IncrementalSfmConfig::default().ba_config
+        },
         colmap_style_mapper: args.colmap_style,
         ..IncrementalSfmConfig::default()
     };
@@ -374,6 +384,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "refined intrinsics: fx {:.2}->{:.2}  fy {:.2}->{:.2}  cx {:.2}->{:.2}  cy {:.2}->{:.2}",
                 i0.0, i1.0, i0.1, i1.1, i0.2, i1.2, i0.3, i1.3,
             );
+            if let Some((k1, k2)) = export_camera.radial_distortion() {
+                let (k1_0, k2_0) = args.camera.radial_distortion().unwrap_or((0.0, 0.0));
+                println!("refined distortion: k1 {k1_0:.5}->{k1:.5}  k2 {k2_0:.5}->{k2:.5}");
+            }
         }
     }
 

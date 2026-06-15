@@ -70,6 +70,79 @@ fn truth_bundle() -> BundleAdjustment {
     ba
 }
 
+/// Like [`truth_bundle`] but the measurements are rendered through a camera that
+/// carries radial distortion `(k1, k2)`, so a distortion-free BA cannot fit them.
+fn truth_bundle_distorted(k1: f64, k2: f64) -> BundleAdjustment {
+    let camera = Camera::pinhole_radial(1, 640, 480, 500.0, 500.0, 320.0, 240.0, k1, k2);
+    let mut ba = BundleAdjustment::new(camera.clone());
+    let truth_poses = [
+        (10u64, pose_at(Vector3::new(0.0, 0.0, 0.0))),
+        (20u64, pose_at(Vector3::new(0.5, 0.0, 0.0))),
+        (30u64, pose_at(Vector3::new(1.0, 0.0, 0.0))),
+    ];
+    for (id, pose) in &truth_poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    let points = world_grid();
+    for (id, point) in &points {
+        ba.add_landmark(*id, *point);
+    }
+    for (kf_id, pose) in &truth_poses {
+        for (lm_id, point) in &points {
+            let xc = pose.transform_world_point(point);
+            // `Camera::project` applies the radial distortion baked into `camera`.
+            let uv = camera.project(&xc).expect("point in front of camera");
+            ba.add_observation(BaObservation {
+                keyframe_id: *kf_id,
+                landmark_id: *lm_id,
+                xy: uv,
+            });
+        }
+    }
+    ba
+}
+
+#[test]
+fn joint_ba_self_calibrates_radial_distortion() {
+    // Measurements are rendered through a lens with radial distortion
+    // (k1 = -0.05, k2 = 0.01). Start the BA from a distortion-free pinhole and
+    // let the joint solve self-calibrate (k1, k2) alongside the intrinsics. As
+    // with the focal-length test, fixing the structure makes the distortion
+    // observable on this tiny scene (a large many-view reconstruction does so for
+    // free).
+    let (true_k1, true_k2) = (-0.05, 0.01);
+    let mut ba = truth_bundle_distorted(true_k1, true_k2);
+    ba.camera = pinhole(); // distortion-free start (k1 = k2 = 0)
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    for (id, _) in world_grid() {
+        ba.fix_landmark(id);
+    }
+
+    let cost_before = ba.cost();
+    let config = BaConfig {
+        refine_intrinsics: true,
+        refine_distortion: true,
+        ..BaConfig::default()
+    };
+    ba.optimize(&config)
+        .expect("joint BA with distortion refinement");
+
+    let (k1, k2) = ba
+        .camera
+        .radial_distortion()
+        .expect("distortion slots populated");
+    assert!(
+        (k1 - true_k1).abs() < 5.0e-3 && (k2 - true_k2).abs() < 5.0e-3,
+        "distortion not recovered: k1={k1}, k2={k2} (truth {true_k1}/{true_k2})"
+    );
+    assert!(
+        ba.cost() < 0.1 && ba.cost() < cost_before,
+        "cost must collapse once the lens is recovered: {} (was {cost_before})",
+        ba.cost()
+    );
+}
+
 #[test]
 fn refine_intrinsics_recovers_perturbed_focal_length() {
     // Exact observations are generated with the true camera (fx = fy = 500).
