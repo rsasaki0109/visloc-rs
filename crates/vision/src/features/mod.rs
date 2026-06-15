@@ -1,4 +1,5 @@
 pub mod deep;
+pub mod global_descriptor_onnx;
 pub mod lightglue_onnx;
 pub mod superpoint_onnx;
 

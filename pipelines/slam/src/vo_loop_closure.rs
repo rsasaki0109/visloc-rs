@@ -652,17 +652,53 @@ pub fn close_loops_on_vo_trajectory(
     stereo_per_frame: &[Vec<StereoFeature>],
     config: &VoLoopClosureConfig,
 ) -> Result<VoLoopClosureResult, VoLoopClosureError> {
+    let globals = compute_frame_globals(left_features, config)?;
+    close_loops_on_vo_trajectory_with_globals(
+        camera,
+        poses,
+        left_features,
+        stereo_per_frame,
+        &globals,
+        config,
+    )
+}
+
+/// Like [`close_loops_on_vo_trajectory`] but with the per-frame *global
+/// descriptors* supplied by the caller instead of computed internally as a
+/// k-means VLAD over the local SuperPoint descriptors.
+///
+/// Appearance retrieval only needs one L2-comparable vector per frame; its
+/// *source* is orthogonal to the geometric verification + PGO that follow. This
+/// entry point lets a caller drive retrieval with a **learned** global
+/// descriptor — e.g. an EigenPlaces / CosPlace embedding from
+/// `GlobalDescriptorOnnxExtractor` (in `visloc-vision`)
+/// — which is the same "learned front-end is the lever" substitution that
+/// SuperPoint and LightGlue applied to the local stages. `globals[i]` is frame
+/// `i`'s descriptor (any fixed dimension, the same for every frame); they need
+/// not be unit-norm (`cosine_similarity` normalises), though learned VPR heads
+/// already emit L2-normalised vectors.
+///
+/// Everything downstream of candidate proposal — path-length gating, PnP
+/// verification, optional two-view BA, GNC SE(3) PGO — is identical to the VLAD
+/// path.
+pub fn close_loops_on_vo_trajectory_with_globals(
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    globals: &[Vec<f32>],
+    config: &VoLoopClosureConfig,
+) -> Result<VoLoopClosureResult, VoLoopClosureError> {
     let n = poses.len();
-    if left_features.len() != n || stereo_per_frame.len() != n {
+    if left_features.len() != n || stereo_per_frame.len() != n || globals.len() != n {
         return Err(VoLoopClosureError::InputLengthMismatch);
     }
     if n < 2 {
         return Err(VoLoopClosureError::TooFewFrames(n));
     }
 
-    let globals = compute_frame_globals(left_features, config)?;
     let mut candidates = detect_loop_candidates(
-        &globals,
+        globals,
         config.min_frame_gap,
         config.min_similarity,
         config.max_candidates_per_frame,
