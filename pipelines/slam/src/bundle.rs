@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{
-    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix4,
-    Matrix6, Matrix6x3, Point2, Point3, Vector2, Vector3, Vector4, Vector6,
+    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix6,
+    Matrix6x3, Point2, Point3, Vector2, Vector3, Vector6,
 };
 
 use visloc_core::geometry::{Pose, SE3, SO3};
@@ -818,139 +818,449 @@ impl BundleAdjustment {
         if !config.refine_intrinsics {
             return self.optimize_weighted(config, None);
         }
-        // Alternating pose/structure ↔ intrinsics refinement. Solve the BA with
-        // the current camera, refine the intrinsics against the fixed result,
-        // then re-solve — repeating until the camera stops moving.
-        let mut result = self.optimize_weighted(config, None)?;
-        for _ in 0..config.intrinsics_refinement_rounds.max(1) {
-            let change = self.refine_intrinsics(&config.robust_kernel, None);
-            if change == 0.0 {
-                break; // not a refinable pinhole, or nothing to do
-            }
-            result = self.optimize_weighted(config, None)?;
-            if change < 1e-3 {
-                break; // intrinsics converged (sub-millipixel focal/centre move)
-            }
+        // Joint pose + structure + intrinsics refinement (the COLMAP self-
+        // calibration formulation). Falls back to the pose/structure-only solve
+        // for non-pinhole cameras, which carry no refinable 4-parameter intrinsics.
+        if self.camera.model != CameraModel::Pinhole || self.camera.intrinsics().is_none() {
+            return self.optimize_weighted(config, None);
         }
-        Ok(result)
+        self.optimize_joint_intrinsics(config)
     }
 
-    /// One alternating refinement of the shared pinhole intrinsics
-    /// `(fx, fy, cx, cy)` with the poses and landmarks held fixed: a small damped
-    /// Gauss-Newton over every (monocular + stereo) reprojection residual w.r.t.
-    /// the 4 intrinsics, applied in place to `self.camera`. Reuses the same
-    /// `predicted − observed` residual sign and IRLS weighting as the main solve.
-    /// Returns the L2 norm of the applied `(fx, fy, cx, cy)` update — `0.0` if the
-    /// camera is not a 4-parameter [`CameraModel::Pinhole`] or there is nothing to
-    /// refine. The intrinsics-only normal equations are full-rank given fixed
-    /// structure (no gauge freedom), so no extra anchoring is needed.
-    fn refine_intrinsics(&mut self, kernel: &RobustKernel, gnc_weights: Option<&[f64]>) -> f64 {
-        if self.camera.model != CameraModel::Pinhole {
-            return 0.0;
-        }
-        let Some((mut fx, mut fy, mut cx, mut cy)) = self.camera.intrinsics() else {
-            return 0.0;
-        };
-        let baseline = match self.stereo_baseline {
-            Some(b) if b.is_finite() && b > 0.0 => Some(b),
-            _ => None,
-        };
-        let mono_count = self.observations.len();
+    /// Bundle adjustment that carries the shared pinhole intrinsics
+    /// `(fx, fy, cx, cy)` as four extra unknowns **inside** the Schur-complement
+    /// camera system, jointly with the poses and (eliminated) landmarks.
+    ///
+    /// This is the difference that matters versus an *alternating* refinement
+    /// (update the intrinsics by Gauss-Newton against a *converged* structure,
+    /// then re-solve): there the structure-fixed gradient `∂cost/∂K` is ≈ 0 (the
+    /// structure has already absorbed any focal error), so it cannot move a wrong
+    /// focal. The joint solve uses the **coupled** gradient — the
+    /// reduced-camera gradient *after* landmark elimination — which is non-zero,
+    /// so it pulls the intrinsics and poses together toward the true calibration.
+    ///
+    /// SfM-only: handles monocular + rectified-stereo reprojection observations
+    /// and ignores IMU / velocity / bias / gravity / position-prior factors (which
+    /// SfM intrinsics refinement does not use). The intrinsics are always a free
+    /// block; the caller fixes poses (anchor + farthest, or ≥2 stereo observers) to
+    /// pin the remaining gauge. Writes refined poses, landmarks, and intrinsics
+    /// into `self`.
+    fn optimize_joint_intrinsics(&mut self, config: &BaConfig) -> Result<BaResult, BaError> {
+        let kernel = config.robust_kernel;
 
-        let mut total_change = 0.0;
-        // A few internal Gauss-Newton steps (structure is fixed, so this is cheap
-        // and converges in a handful of iterations).
-        for _ in 0..5 {
-            let mut h = Matrix4::<f64>::zeros();
-            let mut g = Vector4::<f64>::zeros();
-
-            for (idx, obs) in self.observations.iter().enumerate() {
-                let (Some(pose), Some(point)) = (
-                    self.poses.get(&obs.keyframe_id),
-                    self.landmarks.get(&obs.landmark_id),
-                ) else {
-                    continue;
-                };
-                let xc = pose.transform_world_point(point);
-                if xc.z <= 0.0 {
-                    continue;
-                }
-                let zi = 1.0 / xc.z;
-                let r = Vector2::new(
-                    fx * xc.x * zi + cx - obs.xy.x,
-                    fy * xc.y * zi + cy - obs.xy.y,
-                );
-                let s = r.x * r.x + r.y * r.y;
-                let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[idx]);
-                // ∂r/∂[fx, fy, cx, cy].
-                let mut j = Matrix2x4::<f64>::zeros();
-                j[(0, 0)] = xc.x * zi;
-                j[(0, 2)] = 1.0;
-                j[(1, 1)] = xc.y * zi;
-                j[(1, 3)] = 1.0;
-                h += w * (j.transpose() * j);
-                g += w * (j.transpose() * r);
+        // Variable layout: non-fixed poses occupy `6·p .. 6·p+6`; the 4 shared
+        // intrinsics occupy the final block `k_off .. k_off+4`. Fixed poses and
+        // fixed landmarks contribute residuals but get no variable slot.
+        let mut pose_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.poses.keys() {
+            if self.fixed_poses.contains(&id) {
+                continue;
             }
+            let next = pose_index.len();
+            pose_index.insert(id, next);
+        }
+        let mut landmark_index: BTreeMap<u64, usize> = BTreeMap::new();
+        for &id in self.landmarks.keys() {
+            if self.fixed_landmarks.contains(&id) {
+                continue;
+            }
+            let next = landmark_index.len();
+            landmark_index.insert(id, next);
+        }
+        let p_count = pose_index.len();
+        let k_off = p_count * 6;
+        let cam_dim = k_off + 4;
 
-            if let Some(b) = baseline {
-                for (k, obs) in self.stereo_observations.iter().enumerate() {
-                    let (Some(pose), Some(point)) = (
-                        self.poses.get(&obs.keyframe_id),
-                        self.landmarks.get(&obs.landmark_id),
-                    ) else {
-                        continue;
-                    };
-                    let xc = pose.transform_world_point(point);
-                    if xc.z <= 0.0 {
-                        continue;
+        let initial_cost = self.robust_cost_weighted(&kernel, None);
+        let mut iterations: Vec<BaIterationStats> = Vec::with_capacity(config.max_iterations);
+        let mut current_cost = initial_cost;
+        let mut lambda = config.initial_lambda.unwrap_or(0.0);
+        let mut converged = false;
+
+        for iteration in 0..config.max_iterations {
+            let (cam_dim_n, h_cc, b_c, lm_blocks) =
+                self.build_joint_intrinsics_system(&pose_index, &landmark_index, &kernel);
+            debug_assert_eq!(cam_dim_n, cam_dim);
+
+            // Damped Schur reduction (Levenberg I·λ on both the camera and the
+            // landmark diagonals, exactly as `solve_step`).
+            let mut s = h_cc.clone();
+            if lambda > 0.0 {
+                for d in 0..cam_dim {
+                    s[(d, d)] += lambda;
+                }
+            }
+            let mut b_reduced = -&b_c;
+            let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(lm_blocks.len());
+            for lm in &lm_blocks {
+                let mut h_ll = lm.h_ll;
+                if lambda > 0.0 {
+                    h_ll[(0, 0)] += lambda;
+                    h_ll[(1, 1)] += lambda;
+                    h_ll[(2, 2)] += lambda;
+                }
+                let inv = h_ll.try_inverse();
+                h_ll_inv_cache.push(inv);
+                let Some(inv) = inv else { continue };
+                // S -= Σ cross_a^T · H_ll^{-1} · cross_b ; b += cross_a^T H_ll^{-1} b_l.
+                for (cs_a, a) in &lm.cross {
+                    let ah = a * inv; // (rows_a × 3)
+                    for (cs_b, b) in &lm.cross {
+                        let block = &ah * b.transpose(); // (rows_a × rows_b)
+                        for r in 0..a.nrows() {
+                            for c in 0..b.nrows() {
+                                s[(cs_a + r, cs_b + c)] -= block[(r, c)];
+                            }
+                        }
                     }
-                    let zi = 1.0 / xc.z;
-                    let pred_x = fx * xc.x * zi + cx;
-                    let pred_y = fy * xc.y * zi + cy;
-                    // u_r_pred = u_l_pred − fx·b/Z = fx·(X−b)/Z + cx.
-                    let u_r_pred = pred_x - fx * b * zi;
-                    let r =
-                        Vector3::new(pred_x - obs.xy.x, pred_y - obs.xy.y, u_r_pred - obs.u_right);
-                    let s = r.x * r.x + r.y * r.y + r.z * r.z;
-                    let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[mono_count + k]);
-                    let mut j = Matrix3x4::<f64>::zeros();
-                    j[(0, 0)] = xc.x * zi;
-                    j[(0, 2)] = 1.0;
-                    j[(1, 1)] = xc.y * zi;
-                    j[(1, 3)] = 1.0;
-                    j[(2, 0)] = (xc.x - b) * zi;
-                    j[(2, 2)] = 1.0;
-                    h += w * (j.transpose() * j);
-                    g += w * (j.transpose() * r);
+                    let upd = &ah * lm.b_l; // (rows_a)
+                    for r in 0..a.nrows() {
+                        b_reduced[cs_a + r] += upd[r];
+                    }
                 }
             }
 
-            // Tikhonov-damped solve (the system is well-conditioned; the small
-            // ridge only guards against a degenerate all-frontal configuration).
-            let ridge = 1e-9 * h.diagonal().max().max(1.0);
-            let h_damped = h + Matrix4::<f64>::identity() * ridge;
-            let Some(delta) = h_damped.lu().solve(&(-g)) else {
-                break;
+            let delta_cam = match solve_normal_equations(&s, &b_reduced) {
+                Ok(d) => d,
+                Err(_) => {
+                    lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                    iterations.push(BaIterationStats {
+                        iteration,
+                        cost_before: current_cost,
+                        cost_after: current_cost,
+                        max_pose_step: 0.0,
+                        max_landmark_step: 0.0,
+                        lambda,
+                        step_accepted: false,
+                    });
+                    if lambda >= config.max_lambda {
+                        break;
+                    }
+                    continue;
+                }
             };
-            if !delta.iter().all(|x| x.is_finite()) {
+
+            // Back-substitute landmark updates: δ_L = H_ll^{-1}(−b_l − Σ crossᵀ δ_cam).
+            let mut delta_lm: BTreeMap<u64, Vector3<f64>> = BTreeMap::new();
+            for (lm, inv) in lm_blocks.iter().zip(&h_ll_inv_cache) {
+                let Some(inv) = inv else { continue };
+                let mut acc = -lm.b_l;
+                for (cs, a) in &lm.cross {
+                    let mut dcam = DVector::<f64>::zeros(a.nrows());
+                    for r in 0..a.nrows() {
+                        dcam[r] = delta_cam[cs + r];
+                    }
+                    acc -= a.transpose() * dcam;
+                }
+                delta_lm.insert(lm.id, inv * acc);
+            }
+
+            // Tentative update (save → apply → cost → accept/reject).
+            let saved_poses = self.poses.clone();
+            let saved_landmarks = self.landmarks.clone();
+            let saved_params = self.camera.params.clone();
+            let cost_before = current_cost;
+
+            let mut max_pose_step = 0.0f64;
+            for (&id, &p) in &pose_index {
+                let xi: Vector6<f64> = delta_cam.fixed_rows::<6>(p * 6).into_owned();
+                max_pose_step = max_pose_step.max(xi.norm());
+                let pose = self.poses.get_mut(&id).expect("pose exists");
+                pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&xi));
+            }
+            let mut max_landmark_step = 0.0f64;
+            for (&id, dl) in &delta_lm {
+                max_landmark_step = max_landmark_step.max(dl.norm());
+                let pt = self.landmarks.get_mut(&id).expect("landmark exists");
+                *pt = Point3::from(pt.coords + dl);
+            }
+            // Intrinsics block.
+            for j in 0..4 {
+                self.camera.params[j] += delta_cam[k_off + j];
+            }
+
+            let cost_after = self.robust_cost_weighted(&kernel, None);
+            let step_accepted = match config.initial_lambda {
+                None => true,
+                Some(_) => cost_after < cost_before,
+            };
+            if !step_accepted {
+                self.poses = saved_poses;
+                self.landmarks = saved_landmarks;
+                self.camera.params = saved_params;
+                lambda = (lambda * config.lambda_increase_factor).min(config.max_lambda);
+                iterations.push(BaIterationStats {
+                    iteration,
+                    cost_before,
+                    cost_after,
+                    max_pose_step,
+                    max_landmark_step,
+                    lambda,
+                    step_accepted: false,
+                });
+                if lambda >= config.max_lambda {
+                    break;
+                }
+                continue;
+            }
+
+            iterations.push(BaIterationStats {
+                iteration,
+                cost_before,
+                cost_after,
+                max_pose_step,
+                max_landmark_step,
+                lambda,
+                step_accepted: true,
+            });
+            current_cost = cost_after;
+            if config.initial_lambda.is_some() {
+                lambda = (lambda * config.lambda_decrease_factor).max(config.min_lambda);
+            }
+            if max_pose_step < config.step_tolerance && max_landmark_step < config.step_tolerance {
+                converged = true;
                 break;
             }
-            fx += delta[0];
-            fy += delta[1];
-            cx += delta[2];
-            cy += delta[3];
-            let step = delta.norm();
-            total_change += step;
-            if step < 1e-6 {
+            if (cost_before - cost_after).abs() < config.cost_tolerance {
+                converged = true;
                 break;
             }
         }
 
-        self.camera.params[0] = fx;
-        self.camera.params[1] = fy;
-        self.camera.params[2] = cx;
-        self.camera.params[3] = cy;
-        total_change
+        Ok(BaResult {
+            initial_cost,
+            final_cost: current_cost,
+            iterations,
+            converged,
+        })
+    }
+
+    /// Assemble the raw (un-damped) joint normal equations for
+    /// [`Self::optimize_joint_intrinsics`]: the camera-block Hessian `H_cc`
+    /// (poses then the 4 intrinsics) and gradient `b_c`, plus per-landmark
+    /// `{H_ll, b_l, cross}` blocks where `cross` maps each touching camera-block
+    /// column-start to `Jᵀ_cam · J_lm`. Mirrors `build_normal_equations`'
+    /// reprojection Jacobians, extended with the intrinsics columns
+    /// `J_K = ∂(predicted)/∂(fx, fy, cx, cy)`.
+    fn build_joint_intrinsics_system(
+        &self,
+        pose_index: &BTreeMap<u64, usize>,
+        landmark_index: &BTreeMap<u64, usize>,
+        kernel: &RobustKernel,
+    ) -> (usize, DMatrix<f64>, DVector<f64>, Vec<JointLandmarkBlock>) {
+        let intrinsics = self.intrinsics().expect("pinhole checked by caller");
+        let (fx, fy, _, _) = intrinsics;
+        let p_count = pose_index.len();
+        let k_off = p_count * 6;
+        let cam_dim = k_off + 4;
+        let mut h_cc = DMatrix::<f64>::zeros(cam_dim, cam_dim);
+        let mut b_c = DVector::<f64>::zeros(cam_dim);
+        let mut lm_blocks: Vec<JointLandmarkBlock> = landmark_index
+            .iter()
+            .map(|(&id, _)| JointLandmarkBlock {
+                id,
+                h_ll: Matrix3::zeros(),
+                b_l: Vector3::zeros(),
+                cross: BTreeMap::new(),
+            })
+            .collect();
+
+        // Accumulate a camera×camera block (rows_a × cols_b) at (row_start, col_start).
+        let mut add_cc = |rs: usize, cs: usize, blk: &DMatrix<f64>| {
+            for r in 0..blk.nrows() {
+                for c in 0..blk.ncols() {
+                    h_cc[(rs + r, cs + c)] += blk[(r, c)];
+                }
+            }
+        };
+
+        // Monocular observations.
+        for obs in &self.observations {
+            let pose = &self.poses[&obs.keyframe_id];
+            let point = &self.landmarks[&obs.landmark_id];
+            let xc = pose.transform_world_point(point);
+            if xc.z <= 0.0 {
+                continue;
+            }
+            let Some(predicted) = project_pinhole(&intrinsics, &xc) else {
+                continue;
+            };
+            let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
+            let z_inv = 1.0 / xc.z;
+            let r_mat = pose
+                .world_to_camera
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
+            let mut j_pi = Matrix2x3::<f64>::zeros();
+            j_pi[(0, 0)] = fx * z_inv;
+            j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
+            j_pi[(1, 1)] = fy * z_inv;
+            j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+            let mut dx_dxi = Matrix3x6::<f64>::zeros();
+            dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
+            dx_dxi
+                .fixed_view_mut::<3, 3>(0, 3)
+                .copy_from(&(-r_mat * skew(&point.coords)));
+            let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+            let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+            // ∂(predicted)/∂(fx, fy, cx, cy).
+            let mut j_k = Matrix2x4::<f64>::zeros();
+            j_k[(0, 0)] = xc.x * z_inv;
+            j_k[(0, 2)] = 1.0;
+            j_k[(1, 1)] = xc.y * z_inv;
+            j_k[(1, 3)] = 1.0;
+
+            let s = residual.x * residual.x + residual.y * residual.y;
+            let w = kernel.weight(s);
+            let i_pose = pose_index.get(&obs.keyframe_id).copied();
+            let i_lm = landmark_index.get(&obs.landmark_id).copied();
+
+            // K-K and K gradient (intrinsics are always variable).
+            add_cc(
+                k_off,
+                k_off,
+                &DMatrix::from_fn(4, 4, |r, c| w * (j_k.transpose() * j_k)[(r, c)]),
+            );
+            let bk = w * (j_k.transpose() * residual);
+            for j in 0..4 {
+                b_c[k_off + j] += bk[j];
+            }
+            if let Some(p) = i_pose {
+                let hpp = w * (j_pose.transpose() * j_pose);
+                add_cc(p * 6, p * 6, &DMatrix::from_fn(6, 6, |r, c| hpp[(r, c)]));
+                let bp = w * (j_pose.transpose() * residual);
+                for r in 0..6 {
+                    b_c[p * 6 + r] += bp[r];
+                }
+                // pose-K coupling (and its transpose).
+                let hpk = w * (j_pose.transpose() * j_k); // 6×4
+                add_cc(p * 6, k_off, &DMatrix::from_fn(6, 4, |r, c| hpk[(r, c)]));
+                add_cc(k_off, p * 6, &DMatrix::from_fn(4, 6, |r, c| hpk[(c, r)]));
+            }
+            if let Some(l) = i_lm {
+                lm_blocks[l].h_ll += w * (j_lm.transpose() * j_lm);
+                lm_blocks[l].b_l += w * (j_lm.transpose() * residual);
+                if let Some(p) = i_pose {
+                    let cr = w * (j_pose.transpose() * j_lm); // 6×3
+                    add_cross(
+                        &mut lm_blocks[l].cross,
+                        p * 6,
+                        6,
+                        &DMatrix::from_fn(6, 3, |r, c| cr[(r, c)]),
+                    );
+                }
+                let crk = w * (j_k.transpose() * j_lm); // 4×3
+                add_cross(
+                    &mut lm_blocks[l].cross,
+                    k_off,
+                    4,
+                    &DMatrix::from_fn(4, 3, |r, c| crk[(r, c)]),
+                );
+            }
+        }
+
+        // Rectified-stereo observations (3D residual u_l, v_l, u_r).
+        if !self.stereo_observations.is_empty() {
+            if let Some(baseline) = self.stereo_baseline {
+                if baseline.is_finite() && baseline > 0.0 {
+                    for obs in &self.stereo_observations {
+                        let pose = &self.poses[&obs.keyframe_id];
+                        let point = &self.landmarks[&obs.landmark_id];
+                        let xc = pose.transform_world_point(point);
+                        if xc.z <= 0.0 {
+                            continue;
+                        }
+                        let Some(predicted) = project_pinhole(&intrinsics, &xc) else {
+                            continue;
+                        };
+                        let z_inv = 1.0 / xc.z;
+                        let z_inv2 = z_inv * z_inv;
+                        let u_r_pred = predicted.x - fx * baseline * z_inv;
+                        let residual = Vector3::new(
+                            predicted.x - obs.xy.x,
+                            predicted.y - obs.xy.y,
+                            u_r_pred - obs.u_right,
+                        );
+                        let r_mat = pose
+                            .world_to_camera
+                            .rotation
+                            .to_rotation_matrix()
+                            .into_inner();
+                        let mut j_pi = Matrix3::<f64>::zeros();
+                        j_pi[(0, 0)] = fx * z_inv;
+                        j_pi[(0, 2)] = -fx * xc.x * z_inv2;
+                        j_pi[(1, 1)] = fy * z_inv;
+                        j_pi[(1, 2)] = -fy * xc.y * z_inv2;
+                        j_pi[(2, 0)] = fx * z_inv;
+                        j_pi[(2, 2)] = -fx * (xc.x - baseline) * z_inv2;
+                        let mut dx_dxi = Matrix3x6::<f64>::zeros();
+                        dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
+                        dx_dxi
+                            .fixed_view_mut::<3, 3>(0, 3)
+                            .copy_from(&(-r_mat * skew(&point.coords)));
+                        let j_pose: Matrix3x6<f64> = j_pi * dx_dxi;
+                        let j_lm: Matrix3<f64> = j_pi * r_mat;
+                        // u_r = fx·(X−b)/Z + cx, so ∂u_r/∂fx = (X−b)/Z, ∂u_r/∂cx = 1.
+                        let mut j_k = Matrix3x4::<f64>::zeros();
+                        j_k[(0, 0)] = xc.x * z_inv;
+                        j_k[(0, 2)] = 1.0;
+                        j_k[(1, 1)] = xc.y * z_inv;
+                        j_k[(1, 3)] = 1.0;
+                        j_k[(2, 0)] = (xc.x - baseline) * z_inv;
+                        j_k[(2, 2)] = 1.0;
+
+                        let s = residual.norm_squared();
+                        let w = kernel.weight(s);
+                        let i_pose = pose_index.get(&obs.keyframe_id).copied();
+                        let i_lm = landmark_index.get(&obs.landmark_id).copied();
+
+                        add_cc(
+                            k_off,
+                            k_off,
+                            &DMatrix::from_fn(4, 4, |r, c| w * (j_k.transpose() * j_k)[(r, c)]),
+                        );
+                        let bk = w * (j_k.transpose() * residual);
+                        for j in 0..4 {
+                            b_c[k_off + j] += bk[j];
+                        }
+                        if let Some(p) = i_pose {
+                            let hpp = w * (j_pose.transpose() * j_pose);
+                            add_cc(p * 6, p * 6, &DMatrix::from_fn(6, 6, |r, c| hpp[(r, c)]));
+                            let bp = w * (j_pose.transpose() * residual);
+                            for r in 0..6 {
+                                b_c[p * 6 + r] += bp[r];
+                            }
+                            let hpk = w * (j_pose.transpose() * j_k);
+                            add_cc(p * 6, k_off, &DMatrix::from_fn(6, 4, |r, c| hpk[(r, c)]));
+                            add_cc(k_off, p * 6, &DMatrix::from_fn(4, 6, |r, c| hpk[(c, r)]));
+                        }
+                        if let Some(l) = i_lm {
+                            lm_blocks[l].h_ll += w * (j_lm.transpose() * j_lm);
+                            lm_blocks[l].b_l += w * (j_lm.transpose() * residual);
+                            if let Some(p) = i_pose {
+                                let cr = w * (j_pose.transpose() * j_lm);
+                                add_cross(
+                                    &mut lm_blocks[l].cross,
+                                    p * 6,
+                                    6,
+                                    &DMatrix::from_fn(6, 3, |r, c| cr[(r, c)]),
+                                );
+                            }
+                            let crk = w * (j_k.transpose() * j_lm);
+                            add_cross(
+                                &mut lm_blocks[l].cross,
+                                k_off,
+                                4,
+                                &DMatrix::from_fn(4, 3, |r, c| crk[(r, c)]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        (cam_dim, h_cc, b_c, lm_blocks)
     }
 
     /// Outlier-robust bundle adjustment via Graduated Non-Convexity (GNC).
@@ -1409,21 +1719,19 @@ pub struct BaConfig {
     /// number of bad correspondences cannot pull the solution away from
     /// the inlier consensus.
     pub robust_kernel: RobustKernel,
-    /// Also refine the shared pinhole intrinsics `(fx, fy, cx, cy)` by
-    /// **alternation**: after the pose+structure LM solve converges, the
-    /// intrinsics are updated by a small damped Gauss-Newton over every
-    /// reprojection residual (poses + landmarks held fixed), then the whole BA
-    /// is re-run with the new camera — repeated up to
-    /// `intrinsics_refinement_rounds` times. This is COLMAP's lever for the last
-    /// of the small-scene accuracy gap: a slightly-off fixed calibration forces a
-    /// residual onto the poses, and letting the camera absorb it tightens the
-    /// trajectory. Only the 4-parameter [`CameraModel::Pinhole`] is refined; for
-    /// any other model this is a no-op. **`false` by default** (the public
+    /// Also refine the shared pinhole intrinsics `(fx, fy, cx, cy)` **jointly**:
+    /// when set, [`BundleAdjustment::optimize`] carries the 4 intrinsics as extra
+    /// unknowns inside the Schur-complement camera system, co-estimated with the
+    /// poses and (eliminated) landmarks — the COLMAP self-calibration formulation.
+    /// This is the lever for unknown / inaccurate calibration: a wrong fixed focal
+    /// forces a residual onto the poses, and the joint solve lets the camera absorb
+    /// it. (The coupled, landmark-eliminated gradient is what makes this work; an
+    /// alternating refinement against converged structure cannot move a wrong focal,
+    /// because the structure-fixed gradient is ~0.) Only the 4-parameter
+    /// [`CameraModel::Pinhole`] is refined; any other model falls back to the
+    /// pose/structure-only solve. **`false` by default** (the public
     /// [`BundleAdjustment::optimize`] is then bit-identical to before).
     pub refine_intrinsics: bool,
-    /// Max alternation rounds when `refine_intrinsics` is set; the loop also
-    /// stops early once the intrinsics update falls below a small threshold.
-    pub intrinsics_refinement_rounds: usize,
 }
 
 impl Default for BaConfig {
@@ -1440,7 +1748,6 @@ impl Default for BaConfig {
             linear_solver: LinearSolver::Dense,
             robust_kernel: RobustKernel::None,
             refine_intrinsics: false,
-            intrinsics_refinement_rounds: 5,
         }
     }
 }
@@ -1569,6 +1876,32 @@ struct LandmarkBlock {
     /// `(pose_idx, J_pose^T · J_lm)` per observation that touches a
     /// non-fixed pose. Shape `6×3`.
     cross: Vec<(usize, Matrix6x3<f64>)>,
+}
+
+/// Per-landmark block for the joint pose+structure+intrinsics solve
+/// ([`BundleAdjustment::optimize_joint_intrinsics`]). Unlike [`LandmarkBlock`]
+/// the cross blocks are keyed by the touching camera-block column-start (a pose
+/// block of width 6, or the shared 4-wide intrinsics block) so a single map
+/// holds both the pose and intrinsics couplings, and observations sharing a
+/// camera block (e.g. the intrinsics, seen by every observation) accumulate.
+struct JointLandmarkBlock {
+    id: u64,
+    h_ll: Matrix3<f64>,
+    b_l: Vector3<f64>,
+    /// `column_start → Σ_obs Jᵀ_cam · J_lm` (`rows × 3`, `rows ∈ {6, 4}`).
+    cross: BTreeMap<usize, DMatrix<f64>>,
+}
+
+/// Accumulate a `rows × 3` cross block into the per-landmark map at `col_start`.
+fn add_cross(
+    cross: &mut BTreeMap<usize, DMatrix<f64>>,
+    col_start: usize,
+    rows: usize,
+    blk: &DMatrix<f64>,
+) {
+    *cross
+        .entry(col_start)
+        .or_insert_with(|| DMatrix::zeros(rows, 3)) += blk;
 }
 
 /// Output of the per-iteration normal-equations build.

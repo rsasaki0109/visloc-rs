@@ -113,21 +113,21 @@ sparse-but-clean reconstruction is *correct*, not a defect.
 **Intrinsics refinement — also *not* the lever here (measured).** The natural
 next hypothesis was COLMAP's focal-length + principal-point refinement: a
 slightly-off fixed calibration forces a residual onto the poses. So it was
-implemented (`BaConfig::refine_intrinsics` / `--refine-intrinsics`: alternating
-BA ↔ a damped Gauss-Newton on `(fx, fy, cx, cy)`, validated by a unit test that
-recovers a perturbed focal when the structure is fixed). On this benchmark it
-**does not help** — Sim(3) ATE 1.64 → 1.77 cm, a touch *worse*. Two measurements
-explain why, and it is the **same** geometry as the density result:
+implemented (`BaConfig::refine_intrinsics` / `--refine-intrinsics`: the four
+intrinsics `(fx, fy, cx, cy)` co-estimated jointly inside the Schur-complement BA
+— it recovers a wrong focal cleanly on observable geometry, see the orbit section
+below). On this rectified forward-video benchmark it **does not help** — two
+measurements explain why, and it is the **same** geometry as the density result:
 
 - On the rectified EuRoC images the calibration is already accurate, so there is
-  no residual to absorb; refinement only overfits `fy` (436.2 → 439.1) to the
-  sparse structure and mildly biases the trajectory.
-- Deliberately starting from a wrong focal (`fx = fy = 460`, true ≈ 436) does
-  **not** get recovered — refinement leaves it at 460. On forward motion the
-  focal length is **weakly observable** (the focal/depth ambiguity): a wrong
-  focal is absorbed into structure during growth, leaving nothing for the
-  intrinsics step to pull on. (A uniform focal error is in any case largely
-  Sim(3)-absorbed in scoring.)
+  no residual to absorb; refinement has nothing to pull on and the trajectory is
+  unchanged to the measured digits.
+- Deliberately starting from a wrong focal does **not** get recovered. On forward
+  motion the focal length is **weakly observable** (the focal/depth ambiguity): a
+  wrong focal is absorbed into structure no matter how the BA is posed, so even the
+  joint solve has no signal to follow — unlike the orbit below, where the focal is
+  observable and the joint solve recovers it almost completely. (A uniform focal
+  error is in any case largely Sim(3)-absorbed in scoring.)
 
 So COLMAP's 0.37 cm edge on its home turf is neither intrinsics nor raw point
 count — it is most plausibly its **denser, better-distributed SIFT frontend** and
@@ -153,30 +153,40 @@ exactly what closes the gap. (This is the unordered orbit, not the metric-video
 headline above; it does not contradict the "COLMAP wins forward video's small-scene
 mono subset" result, which is a different, low-parallax regime.)
 
-**2. Intrinsics refinement recovers an injected focal error here — but only when
-it co-evolves during growth.** Injecting an *anisotropic* miscalibration
-(`fx ×1.05`, `fy ×0.97`) degrades the colmap-style ATE 0.44 → **4.98 cm**.
-Refining intrinsics then pulls it back to **4.26 cm**, with `fx 2687.7 → 2662.1`
-and `fy 2483.9 → 2506.1` both moving toward the truth (2559.7) and the
-un-perturbed principal point staying put — a directionally-correct ~25 % recovery,
-where the *forward-video* refinement recovered nothing. The mechanism matters: the
-recovery only happens because the refinement is now wired into the **growth**
-global passes (`growth_global_refinement`), co-evolving the camera with the
-structure the way COLMAP does. The earlier *final-only* alternating refinement
-moved the focal by < 1 unit even here — once the growth has converged the structure
-into a wrong-focal basin, the structure-fixed intrinsics gradient is ≈ 0, so no
-amount of final alternation escapes it. Co-evolving from the small early model,
-before the basin forms, is what gives the intrinsics step a live signal.
+**2. Joint intrinsics BA recovers an injected focal error almost completely.**
+Injecting an *anisotropic* miscalibration (`fx ×1.05`, `fy ×0.97`) degrades the
+colmap-style ATE 0.44 → **4.98 cm**. Refining the intrinsics with
+`--refine-intrinsics` then pulls it back to **0.91 cm** — and the recovered focal
+is `fx 2687.7 → 2561.2` and `fy 2483.9 → 2562.3`, both within ~1.5 of the truth
+(2559.7), with reprojection back to 1.407 px (the true-calibration 1.404 px). That
+is near-complete self-calibration: a 5 %/3 % focal error recovered to ~0.06 %, the
+trajectory back to ~2× the perfectly-calibrated baseline. (The residual 0.91 vs
+0.44 cm is the horizontal principal point co-adjusting, `cx 1536 → 1527`, within
+the mild focal/centre coupling.)
 
-The recovery is **partial** (~25 %), not full self-calibration: each growth pass
-still uses the *alternating* (structure-fixed) intrinsics step, so it accumulates
-corrections across passes rather than solving for the focal jointly. Closing the
-rest needs the intrinsics carried as shared unknowns *inside* the Schur-complement
-BA (the COLMAP joint formulation) — the clear next lever, and a larger change to
-the core solver. (Validated by the `colmap_style_co_evolves_intrinsics_toward_truth`
-unit test: on the synthetic ring a wrong horizontal focal `fx 530` is pulled back
-toward 500 while `fy` / `(cx, cy)` — un-perturbed, and on this purely-azimuthal arc
-`fy` is not even observable — do not drift.)
+The mechanism is what makes this work. `--refine-intrinsics` now carries the four
+intrinsics `(fx, fy, cx, cy)` as shared unknowns **inside** the Schur-complement
+camera system (`BundleAdjustment::optimize_joint_intrinsics`), co-estimated with
+the poses and the eliminated landmarks — the COLMAP self-calibration formulation.
+The key is the gradient it descends: the **coupled**, landmark-eliminated camera
+gradient, which is non-zero even at a structure-converged point. Two weaker
+formulations were measured first and explain why this one is needed:
+
+- A *final-only alternating* refinement (converge pose+structure, then a
+  structure-fixed Gauss-Newton on the intrinsics, repeat) recovered **nothing**,
+  even here — it moved the focal by < 1 unit. Once growth has converged the
+  structure into a wrong-focal basin, the structure-fixed gradient `∂cost/∂K` is
+  ≈ 0, so alternation has no signal to follow.
+- *Co-evolving* that same alternating step inside the growth global passes (before
+  the basin hardens) helped but only partially — ~25 % of the error, ATE 4.98 →
+  4.26 cm — because each pass still used the structure-fixed step.
+
+The joint solve supersedes both. (Validated by the
+`colmap_style_co_evolves_intrinsics_toward_truth` unit test: on the synthetic ring
+a wrong horizontal focal `fx 530` is pulled substantially back toward 500 while the
+orthogonal, un-perturbed `fy` / `cy` stay fixed; `cx` co-adjusts within the look-at
+arc's focal/centre ambiguity, a confound absent on the richer South-Building
+viewpoints.)
 
 (Schedule ablation, separately: re-triangulation must run **both** during growth
 — dropping it collapses registration to 212/300 and ATE to 6.6 cm — **and** in
