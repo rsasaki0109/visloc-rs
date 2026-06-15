@@ -136,6 +136,7 @@ Local public-data development measurements, not official leaderboard submissions
 | --- | ---: |
 | **KITTI multi-sequence vs published SLAM** | one uniform full-stack config over 00/02/05/06/07/09: **beats ORB-SLAM2's published ATE on seq00 (1.23 vs 1.3 m) and seq09 (2.07 vs 3.2 m)**, within 5–15% of OV2SLAM-RT on 00/05/06 — and the benchmark caught + fixed two real-world frontend failure modes (a crossing truck capturing the PnP consensus; a motion-scale rescue feedback freeze) |
 | **EuRoC MH_03 / MH_05 full pipeline** | **0.057 m / 0.072 m** ATE — within **~2.4× / ~1.4× of ORB-SLAM3**, at OV2SLAM's real-time accuracy, **5–7× ahead of VINS-Fusion stereo**, pure Rust |
+| **TUM RGB-D fr1_xyz / fr1_desk** | indoor handheld via **virtual stereo** (depth as a synthetic right image, zero backend changes): **0.014 m / 0.026 m** ATE — within **~1.3–1.6× of ORB-SLAM2 RGB-D**; loop closure is a **6×** lever on the revisit-heavy desk |
 | **KITTI seq00 loop closure** | open VO 36.3 m → **2.6 m** Sim(3) ATE (**14×**), 35 verified loops |
 | **EuRoC MH_03 SfM reconstruction** | merged multi-view tracks + global BA: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, COLMAP export for 3DGS / MVS |
 | **Sequential SfM vs COLMAP (metric video)** | same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) — **≈117× faster, ≈17–33× more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.) |
@@ -148,6 +149,7 @@ Local public-data development measurements, not official leaderboard submissions
 Details and reproduction: [KITTI multi-sequence vs published SLAM](docs/kitti_multiseq_benchmark.md) ·
 [KITTI loop closure](docs/kitti_loop_closure_benchmark.md) ·
 [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
+[TUM RGB-D (virtual stereo)](docs/tum_rgbd_benchmark.md) ·
 [EuRoC SfM reconstruction](docs/euroc_sfm_benchmark.md) ·
 [sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ·
 [unordered SfM](docs/unordered_sfm_benchmark.md) ·
