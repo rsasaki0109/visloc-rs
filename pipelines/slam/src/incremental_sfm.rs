@@ -204,6 +204,19 @@ pub struct IncrementalSfmConfig {
     /// intrinsics fixed; the refined camera emerges from the final solve and is
     /// returned in [`IncrementalSfmResult::refined_camera`]. `false` by default.
     pub refine_intrinsics: bool,
+    /// COLMAP `Reconstruction::FilterImages`: after each growth global refinement,
+    /// **de-register** any image whose count of well-supported 3D-point
+    /// observations (triangulated, within `max_reprojection_error_px`) has fallen
+    /// below `filter_min_image_observations`. A pose that BA + point filtering
+    /// stripped of support is unreliable; dropping it (its trial counter resets, so
+    /// it can re-register once the structure around it improves) keeps a bad pose
+    /// from dragging the global solve. The two seed images are never filtered (they
+    /// anchor the gauge), and the registered count is never taken below 3. Only
+    /// used when `colmap_style_mapper` is set. `false` by default.
+    pub filter_images: bool,
+    /// Minimum well-supported observations an image must keep to stay registered
+    /// under `filter_images`. Only consulted when `filter_images` is set.
+    pub filter_min_image_observations: usize,
 }
 
 /// Minimal PnP solver used to register a new image against the reconstruction.
@@ -248,6 +261,8 @@ impl Default for IncrementalSfmConfig {
             low_parallax_min_observations: None,
             low_parallax_min_angle_deg: 1.0,
             refine_intrinsics: false,
+            filter_images: false,
+            filter_min_image_observations: 15,
         }
     }
 }
@@ -827,6 +842,13 @@ fn grow_from_seed(
                     if poses[i].is_none() {
                         *t = 0;
                     }
+                }
+                // COLMAP `FilterImages`: de-register images whose pose lost support
+                // after the global solve. Done AFTER the retry reset so a filtered
+                // image keeps its accumulated trial count (it is re-registered at
+                // most `max_registration_trials` times, not indefinitely).
+                if config.filter_images {
+                    filter_images(&cam, features, tracks, config, &mut poses, &track_point);
                 }
             }
         } else {
@@ -1460,6 +1482,65 @@ fn count_observations(
             .count();
     }
     n
+}
+
+/// COLMAP `Reconstruction::FilterImages`: de-register registered images whose
+/// well-supported observation count has collapsed. For each registered image,
+/// count its observations that are triangulated and reproject within
+/// `max_reprojection_error_px`; if that count is below
+/// `config.filter_min_image_observations`, set its pose to `None`. The two
+/// lowest-index registered images (the seed pair) are protected as the gauge
+/// anchor, and the registered count is never driven below 3. Returns how many
+/// images were de-registered. The caller's grow loop resets the trial counter of
+/// any now-unregistered image, so a filtered image can re-register once the
+/// surrounding structure improves.
+fn filter_images(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &[Option<Point3<f64>>],
+) -> usize {
+    let threshold = config.max_reprojection_error_px;
+    let min_obs = config.filter_min_image_observations;
+
+    // Per-image count of well-supported (triangulated, in-threshold) observations.
+    let mut good_obs = vec![0usize; poses.len()];
+    for (track_id, track) in tracks.iter().enumerate() {
+        let Some(point) = track_point[track_id] else {
+            continue;
+        };
+        for &(image, kp) in track {
+            let Some(pose) = &poses[image] else { continue };
+            let Some(px) = features[image].keypoints.get(kp).copied() else {
+                continue;
+            };
+            if matches!(reprojection_error_px(camera, pose, &point, &px), Some(e) if e <= threshold)
+            {
+                good_obs[image] += 1;
+            }
+        }
+    }
+
+    // Protect the seed pair (the two lowest-index registered images) — they pin the
+    // 7-DoF monocular gauge — and keep at least three registered images alive.
+    let registered: Vec<usize> = (0..poses.len()).filter(|&i| poses[i].is_some()).collect();
+    let protected: std::collections::HashSet<usize> = registered.iter().take(2).copied().collect();
+    let mut remaining = registered.len();
+
+    let mut removed = 0usize;
+    for &image in &registered {
+        if remaining <= 3 || protected.contains(&image) {
+            continue;
+        }
+        if good_obs[image] < min_obs {
+            poses[image] = None;
+            removed += 1;
+            remaining -= 1;
+        }
+    }
+    removed
 }
 
 /// Clean every triangulated track after the current BA, on two grounds:
@@ -2129,6 +2210,59 @@ mod tests {
         assert!(
             track_point[0].is_none(),
             "track with < 2 inlier observations is dropped"
+        );
+    }
+
+    #[test]
+    fn filter_images_deregisters_unsupported_pose_and_protects_seed() {
+        // Register all six ring cameras with their true poses, triangulate, then
+        // corrupt one non-seed image's pose so none of its observations reproject.
+        // FilterImages must de-register exactly that image, keep the well-supported
+        // ones, and never touch the two seed (lowest-index) images.
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let tracks = build_tracks(features.len(), &pairwise, 2);
+        let config = IncrementalSfmConfig {
+            filter_images: true,
+            filter_min_image_observations: 5,
+            ..IncrementalSfmConfig::default()
+        };
+        let mut poses: Vec<Option<Pose>> = scene.poses.iter().map(|p| Some(p.clone())).collect();
+        let mut track_point = vec![None; tracks.len()];
+        triangulate_pending(
+            &scene.camera,
+            &features,
+            &tracks,
+            &poses,
+            &config,
+            &mut track_point,
+        );
+
+        // Corrupt image 3 (not in the protected seed pair): aim it away from the
+        // cloud so every observation reprojects far off or behind the camera.
+        let bad = Pose::from_world_to_camera(
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f64::consts::PI),
+            Vector3::new(0.0, 0.0, 0.0),
+        );
+        poses[3] = Some(bad);
+
+        let removed = filter_images(
+            &scene.camera,
+            &features,
+            &tracks,
+            &config,
+            &mut poses,
+            &track_point,
+        );
+        assert_eq!(removed, 1, "only the unsupported image is de-registered");
+        assert!(poses[3].is_none(), "the corrupted-pose image is filtered");
+        assert!(
+            poses[0].is_some() && poses[1].is_some(),
+            "the seed pair is protected from filtering"
+        );
+        assert!(
+            poses[2].is_some() && poses[4].is_some() && poses[5].is_some(),
+            "well-supported images stay registered"
         );
     }
 

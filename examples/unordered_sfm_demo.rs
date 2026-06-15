@@ -72,6 +72,7 @@ struct Args {
     refine_intrinsics: bool,
     refine_distortion: bool,
     colmap_style: bool,
+    filter_images: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -93,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_intrinsics = false;
     let mut refine_distortion = false;
     let mut colmap_style = false;
+    let mut filter_images = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -124,6 +126,7 @@ fn parse_args() -> Result<Args, String> {
             "--refine-intrinsics" => refine_intrinsics = true,
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
+            "--filter-images" => filter_images = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -159,6 +162,7 @@ fn parse_args() -> Result<Args, String> {
         refine_intrinsics,
         refine_distortion,
         colmap_style,
+        filter_images,
     })
 }
 
@@ -363,6 +367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..IncrementalSfmConfig::default().ba_config
         },
         colmap_style_mapper: args.colmap_style,
+        filter_images: args.filter_images,
         ..IncrementalSfmConfig::default()
     };
     let result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
