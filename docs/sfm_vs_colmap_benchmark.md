@@ -222,6 +222,22 @@ repetitive scenes where a clustered-but-numerous candidate would otherwise be
 chosen over a better-distributed one (unit-tested in
 `visibility_pyramid_prefers_distribution_over_count`).
 
+**Image filtering — de-registration (`--filter-images`, ported, off by default).**
+COLMAP's `Reconstruction::FilterImages`: after each growth global refinement,
+de-register any image whose count of well-supported observations (triangulated,
+within the reprojection threshold) has fallen below
+`filter_min_image_observations` — a pose BA + point filtering stripped of support is
+unreliable. The two seed images are protected (they pin the gauge), the registered
+count never drops below three, and a filtered image keeps its trial count so it is
+re-registered at most `max_registration_trials` times (not indefinitely). On the
+clean South-Building / Gerrard-Hall sets it is an exact **no-op** (0.43 → 0.43 cm,
+128/128; 0.40 → 0.40 cm, 98/100 — byte-identical models): no registered image ever
+loses support, so nothing is filtered, confirming the safety property that it never
+drops a good image. Its value is registration robustness on degenerate / repetitive
+scenes where a contaminated pose would otherwise survive into the model (the
+de-registration mechanism is unit-tested in
+`filter_images_deregisters_unsupported_pose_and_protects_seed`).
+
 (Schedule ablation, separately: re-triangulation must run **both** during growth
 — dropping it collapses registration to 212/300 and ATE to 6.6 cm — **and** in
 the final refinement — filter-only there leaves 718 tracks and 2.21 cm; keeping
