@@ -27,6 +27,14 @@
 #   Gerrard Hall   (100 photos)   98 / 100 registered, Sim(3) 0.68 cm RMSE
 # both ~0.1 % of the trajectory extent vs COLMAP's own model.
 #
+# Adding --extra-args "--colmap-style" runs the COLMAP IncrementalMapper schedule
+# (per-registration local BA + growth-triggered global refinement) instead of the
+# simple one; on the observable South-Building orbit it tightens the result to
+# 128/128 registered, Sim(3) 0.44 cm RMSE — near COLMAP's own 0.37 cm (slower).
+# Pair it with --extra-args "--colmap-style --refine-intrinsics" to additionally
+# co-evolve the pinhole intrinsics during growth (the right tool when the input
+# calibration is unknown / inaccurate; see docs/sfm_vs_colmap_benchmark.md).
+#
 # Requires: a Python env with torch + lightglue (the SuperPoint export stage) and
 # curl/wget + unzip. The export GPU step dominates the runtime; pass
 # --python /usr/bin/python3 (or wherever lightglue lives) and --device cpu/cuda.
@@ -41,12 +49,14 @@ max_keypoints="${COLMAP_SFM_MAX_KEYPOINTS:-2048}"
 retrieval_topk="${COLMAP_SFM_TOPK:-12}"
 min_matches="${COLMAP_SFM_MIN_MATCHES:-30}"
 base_url="${COLMAP_SFM_BASE_URL:-https://demuc.de/colmap/datasets}"
+extra_args="${COLMAP_SFM_EXTRA_ARGS:-}"
 
 usage() {
     sed -n '2,37p' "$0"
     echo
     echo "Flags: --dataset south-building|gerrard-hall  --data-root DIR  --out-dir DIR"
     echo "       --python BIN  --device cuda|cpu  --topk N  --min-matches N  --max-keypoints N"
+    echo "       --extra-args \"...\"  (pass-through to unordered_sfm_demo, e.g. --colmap-style)"
     exit "${1:-0}"
 }
 
@@ -60,6 +70,7 @@ while [ $# -gt 0 ]; do
         --topk) retrieval_topk="$2"; shift 2 ;;
         --min-matches) min_matches="$2"; shift 2 ;;
         --max-keypoints) max_keypoints="$2"; shift 2 ;;
+        --extra-args) extra_args="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
         *) echo "unknown argument: $1" >&2; usage 1 ;;
     esac
@@ -149,6 +160,7 @@ echo "reconstructing with unordered_sfm_demo (top-k=$retrieval_topk, min-matches
     --feature-suffix _features.txt --image-suffix "$img_suffix" \
     $pinhole \
     --retrieval-topk "$retrieval_topk" --min-matches "$min_matches" \
+    $extra_args \
     --out-colmap "$colmap_out" )
 
 # ---- 5. Sim(3) comparison vs COLMAP's own model (+ overlay figure) -------------

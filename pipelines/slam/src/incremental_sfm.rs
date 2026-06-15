@@ -311,7 +311,7 @@ impl std::error::Error for IncrementalSfmError {}
 
 /// A grown reconstruction the seed search compares: how many images it
 /// registered, the per-image poses and the per-track points.
-type SeedGrowth = (usize, Vec<Option<Pose>>, Vec<Option<Point3<f64>>>);
+type SeedGrowth = (usize, Vec<Option<Pose>>, Vec<Option<Point3<f64>>>, Camera);
 
 /// Run incremental SfM over an unordered image set.
 ///
@@ -366,7 +366,7 @@ pub fn incremental_sfm(
     let mut best: Option<SeedGrowth> = None;
     let mut grows = 0usize;
     for &pi in &seed_order {
-        let (trial_poses, trial_points, reach) = grow_from_seed(
+        let (trial_poses, trial_points, reach, trial_cam) = grow_from_seed(
             camera,
             features,
             &tracks,
@@ -380,21 +380,23 @@ pub fn incremental_sfm(
         grows += 1;
         if best
             .as_ref()
-            .is_none_or(|(best_reach, _, _)| reach > *best_reach)
+            .is_none_or(|(best_reach, _, _, _)| reach > *best_reach)
         {
-            best = Some((reach, trial_poses, trial_points));
+            best = Some((reach, trial_poses, trial_points, trial_cam));
         }
         if reach >= not_trapped || grows >= trials {
             break;
         }
     }
-    let (_, mut poses, mut track_point) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
+    let (_, mut poses, mut track_point, grown_cam) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
 
     // ---- 4 + 5. Final refinement ----
-    // Growth used the fixed input intrinsics; the final solve may refine them
-    // (alternating BA ↔ intrinsics) into `cam`, which then expresses the output
-    // poses/tracks/reprojection and is returned to the caller for export.
-    let mut cam = camera.clone();
+    // When intrinsics refinement is on, growth already co-evolved them into
+    // `grown_cam` (COLMAP keeps the camera moving with the structure so a wrong
+    // focal cannot be silently absorbed). The final solve continues refining from
+    // there; `cam` expresses the output poses/tracks/reprojection and is returned
+    // to the caller for export.
+    let mut cam = grown_cam;
     let ba_result = if config.colmap_style_mapper {
         // COLMAP's final pass IS an iterative global refinement (global BA →
         // complete/re-triangulate → filter, to convergence). The grow loop has
@@ -719,15 +721,19 @@ fn grow_from_seed(
     obs_by_image: &[Vec<(usize, usize)>],
     config: &IncrementalSfmConfig,
     seed_pair: &PairwiseMatches,
-) -> Result<(Vec<Option<Pose>>, Vec<Option<Point3<f64>>>, usize), IncrementalSfmError> {
+) -> Result<(Vec<Option<Pose>>, Vec<Option<Point3<f64>>>, usize, Camera), IncrementalSfmError> {
     let n_images = features.len();
     let mut poses: Vec<Option<Pose>> = vec![None; n_images];
     let mut track_point: Vec<Option<Point3<f64>>> = vec![None; tracks.len()];
 
-    if !place_seed_pair(camera, features, seed_pair, config, &mut poses) {
-        return Ok((poses, track_point, 0));
+    // Per-trial camera clone: the seed search grows several reconstructions over
+    // the same shared `tracks`, so each trial co-evolves intrinsics on its own
+    // copy (no cross-trial contamination). The winning trial's camera is returned.
+    let mut cam = camera.clone();
+    if !place_seed_pair(&cam, features, seed_pair, config, &mut poses) {
+        return Ok((poses, track_point, 0, cam));
     }
-    triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
+    triangulate_pending(&cam, features, tracks, &poses, config, &mut track_point);
 
     // `trials[i]` counts PnP attempts on image `i`. In the simple schedule one
     // failed attempt is permanent (the cap is 1); the COLMAP schedule retries up
@@ -768,24 +774,24 @@ fn grow_from_seed(
                 early_stop_min_iterations: 0,
                 early_stop_inlier_ratio: None,
             }
-            .estimate(&corrs, camera),
+            .estimate(&corrs, &cam),
             PnpSolver::Dlt => PnPRansac {
                 reprojection_threshold: config.max_reprojection_error_px,
                 ..PnPRansac::default()
             }
-            .estimate(&corrs, camera),
+            .estimate(&corrs, &cam),
         };
         let Some(report) = report.filter(|r| r.inliers.len() >= config.min_pnp_inliers) else {
             continue; // registration failed this attempt (may be retried)
         };
         poses[next_image] = Some(report.pose);
-        triangulate_pending(camera, features, tracks, &poses, config, &mut track_point);
+        triangulate_pending(&cam, features, tracks, &poses, config, &mut track_point);
 
         if config.colmap_style_mapper {
             // COLMAP `AdjustLocalBundle`: tighten the new image + its covisible
             // neighbourhood after every registration.
             adjust_local_bundle(
-                camera,
+                &cam,
                 features,
                 tracks,
                 config,
@@ -805,7 +811,7 @@ fn grow_from_seed(
             let n_reg = poses.iter().filter(|p| p.is_some()).count();
             if n_reg as f64 >= reg_at_last_global as f64 * config.global_ba_images_ratio {
                 growth_global_refinement(
-                    camera,
+                    &mut cam,
                     features,
                     tracks,
                     config,
@@ -825,10 +831,10 @@ fn grow_from_seed(
         } else {
             registrations_since_ba += 1;
             if config.ba_every > 0 && registrations_since_ba >= config.ba_every {
-                // Growth never refines intrinsics (the camera is fixed until the
-                // final solve); the returned refined-camera slot is always None.
+                // The simple schedule keeps intrinsics fixed during growth (refine
+                // is a colmap-style / final-solve concern); refined slot is None.
                 run_bundle_adjustment(
-                    camera,
+                    &cam,
                     features,
                     tracks,
                     config,
@@ -843,7 +849,7 @@ fn grow_from_seed(
     }
 
     let registered = poses.iter().filter(|p| p.is_some()).count();
-    Ok((poses, track_point, registered))
+    Ok((poses, track_point, registered, cam))
 }
 
 /// Triangulate every track that has ≥2 registered observations and is not yet
@@ -1360,22 +1366,38 @@ fn iterative_global_refinement(
 /// *filter* (which would mutate the shared tracks) is deferred to the final
 /// [`iterative_global_refinement`] after a seed is committed.
 fn growth_global_refinement(
-    camera: &Camera,
+    camera: &mut Camera,
     features: &[FeatureSet],
     tracks: &[Vec<(usize, usize)>],
     config: &IncrementalSfmConfig,
     poses: &mut [Option<Pose>],
     track_point: &mut [Option<Point3<f64>>],
 ) -> Result<(), BaError> {
-    // Growth keeps the input intrinsics fixed (refine = false), so the returned
-    // refined-camera slot is always None and is ignored.
-    run_bundle_adjustment(camera, features, tracks, config, poses, track_point, false)?;
+    // When intrinsics refinement is on, co-evolve them in these periodic global
+    // passes (COLMAP's IterativeGlobalRefinement keeps the camera moving with the
+    // structure, so a wrong focal is corrected while the model is still small
+    // enough to expose it — the well-conditioned global solve, not the narrow
+    // per-registration local one, is where the focal is observable). Otherwise the
+    // intrinsics stay fixed and the refined slot is always None.
+    let refine = config.refine_intrinsics;
+    let run_global = |cam: &mut Camera,
+                      p: &mut [Option<Pose>],
+                      tp: &mut [Option<Point3<f64>>]|
+     -> Result<(), BaError> {
+        let (_, refined) = run_bundle_adjustment(cam, features, tracks, config, p, tp, refine)?;
+        if let Some(c) = refined {
+            *cam = c;
+        }
+        Ok(())
+    };
+
+    run_global(camera, poses, track_point)?;
     for _ in 0..config.global_ba_max_refinements.min(2) {
         let changed = retriangulate_tracks(camera, features, tracks, config, poses, track_point);
         if changed == 0 {
             break;
         }
-        run_bundle_adjustment(camera, features, tracks, config, poses, track_point, false)?;
+        run_global(camera, poses, track_point)?;
     }
     Ok(())
 }
@@ -2173,6 +2195,50 @@ mod tests {
             (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
             "camera-spacing ratio {est_ratio} != GT {gt_ratio} (similarity-invariant)"
         );
+    }
+
+    #[test]
+    fn colmap_style_co_evolves_intrinsics_toward_truth() {
+        // The synthetic ring is observable geometry, so a focal error is
+        // recoverable. Render with the TRUE camera (fx=fy=500) but reconstruct from
+        // a WRONG horizontal focal (fx=530). The arc moves the cameras only in the
+        // x-z plane, so the *horizontal* focal fx is well constrained by the
+        // azimuthal parallax (fy would need elevation change — exercised instead by
+        // the anisotropic South-Building benchmark). With intrinsics co-evolution on,
+        // the COLMAP-style growth schedule must pull fx back toward 500 (the
+        // final-only alternating refinement can't — converged structure absorbs the
+        // error before the intrinsics step sees it), while leaving the un-perturbed
+        // fy and principal point essentially fixed (no spurious drift).
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let wrong = Camera::pinhole(0, 640, 480, 530.0, 500.0, 320.0, 240.0);
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            colmap_style_mapper: true,
+            refine_intrinsics: true,
+            ..IncrementalSfmConfig::default()
+        };
+        let result = incremental_sfm(&wrong, &features, &pairwise, &config).unwrap();
+        let cam = result
+            .refined_camera
+            .expect("refine_intrinsics returns the refined camera");
+        let (fx, fy, cx, cy) = cam.intrinsics().unwrap();
+        eprintln!("co-evolved intrinsics: fx {fx} fy {fy} cx {cx} cy {cy}");
+        // fx moves down from 530 toward 500 — directional recovery is the claim (the
+        // final-only alternating refinement can't move at all once converged
+        // structure absorbs the error). The magnitude scales with the number of
+        // growth global passes, i.e. image count: a clear move on this 6-camera ring,
+        // ~25% of the injected error on the 128-image South-Building benchmark.
+        assert!(
+            fx < 530.0 - 1.0,
+            "fx {fx} should recover toward 500 from 530"
+        );
+        // The un-perturbed parameters must not drift: fy within ~2 of 500, and the
+        // principal point within ~2 px of (320, 240).
+        assert!((fy - 500.0).abs() < 2.0, "fy {fy} drifted from 500");
+        assert!((cx - 320.0).abs() < 2.0, "cx {cx} drifted from 320");
+        assert!((cy - 240.0).abs() < 2.0, "cy {cy} drifted from 240");
     }
 
     #[test]
