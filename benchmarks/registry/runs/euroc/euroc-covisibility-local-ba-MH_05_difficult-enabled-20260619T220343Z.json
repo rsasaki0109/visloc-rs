@@ -1,0 +1,317 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled\\slam_trajectory.csv",
+      "sha256": "47b5d3b2d4903d22423b9f536432b4fa9772bd20fb721c0aba0479e28c70e780"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled\\slam_errors.csv",
+      "sha256": "e6a9091d3c0856632ffefefc39bf923d5a82304d59507ae6cd310901acfb9962"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled\\summary.txt",
+      "sha256": "3d223dc667872c3b6d46727ab6cf9084efc4893a9a4bbbdb3a0f775442338b23"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled\\covisibility_ba_log.txt",
+      "sha256": "2876e38361886fc59c23a5e05ad5dba85495adcffd17430f1efe1252b4d61d3e"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-covisibility-local-ba",
+    "name": "EuRoC online SLAM covisibility local BA A/B",
+    "protocol": "disabled/enabled OnlineSlamConfig::covisibility_local_ba A/B on identical EuRoC image/IMU command",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": null,
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "dev",
+    "rustc": null,
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe",
+      "run",
+      "--features",
+      "image-io",
+      "--example",
+      "euroc_online_slam_vi_image_demo",
+      "--",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult",
+      "--out-dir",
+      "target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled",
+      "--max-frames",
+      "400",
+      "--gravity",
+      "0,0,-9.81",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--stereo-bootstrap-strict",
+      "--covisibility-local-ba",
+      "--covisibility-local-ba-min-keyframes",
+      "10",
+      "--covisibility-local-ba-trigger-every",
+      "5",
+      "--covisibility-local-ba-max-neighbor-keyframes",
+      "10",
+      "--covisibility-local-ba-min-shared",
+      "15",
+      "--covisibility-local-ba-max-boundary-keyframes",
+      "10",
+      "--covisibility-local-ba-min-boundary-observations",
+      "5",
+      "--covisibility-local-ba-fallback-min-boundary-observations",
+      "none",
+      "--covisibility-local-ba-min-active-observations",
+      "20",
+      "--covisibility-local-ba-outlier-threshold-px",
+      "5.0",
+      "--covisibility-local-ba-max-landmarks",
+      "200"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "'C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe' run --features image-io --example euroc_online_slam_vi_image_demo -- --euroc-dir 'C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult' --out-dir 'target\\euroc_covisibility_mh05_mitigation\\min10_every5\\MH_05_difficult\\enabled' --max-frames 400 --gravity 0,0,-9.81 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --max-pose-jump-meters 0.2 --stereo-bootstrap-strict --covisibility-local-ba --covisibility-local-ba-min-keyframes 10 --covisibility-local-ba-trigger-every 5 --covisibility-local-ba-max-neighbor-keyframes 10 --covisibility-local-ba-min-shared 15 --covisibility-local-ba-max-boundary-keyframes 10 --covisibility-local-ba-min-boundary-observations 5 --covisibility-local-ba-fallback-min-boundary-observations none --covisibility-local-ba-min-active-observations 20 --covisibility-local-ba-outlier-threshold-px 5.0 --covisibility-local-ba-max-landmarks 200"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "covisibility_local_ba_fallback_min_boundary_observations": "none",
+      "covisibility_local_ba_max_boundary_keyframes": 10,
+      "covisibility_local_ba_max_landmarks": 200,
+      "covisibility_local_ba_max_neighbor_keyframes": 10,
+      "covisibility_local_ba_min_active_observations": 20,
+      "covisibility_local_ba_min_boundary_observations": 5,
+      "covisibility_local_ba_min_keyframes": 10,
+      "covisibility_local_ba_min_shared": 15,
+      "covisibility_local_ba_outlier_threshold_px": 5.0,
+      "covisibility_local_ba_remove_outliers": "False",
+      "covisibility_local_ba_trigger_every": 5,
+      "demo_args": "--gravity 0,0,-9.81 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --max-pose-jump-meters 0.2 --stereo-bootstrap-strict",
+      "max_frames": 400,
+      "variant": "enabled"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-19T22:08:35Z",
+  "dataset": {
+    "checksum": null,
+    "checksum_method": null,
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult",
+    "sequence": "MH_05_difficult",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1255
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1243
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.525
+    },
+    {
+      "implementation": null,
+      "name": "frames_recorded",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 400
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 43
+    },
+    {
+      "implementation": null,
+      "name": "map_landmarks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 140
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 7
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 7
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_active_observation_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_boundary_fallback_active_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_no_local_landmarks_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_no_observations_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_solver_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_other_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_boundary_fallback_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_mean_reprojection_before_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.7234317092176744
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_mean_reprojection_after_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.5646130008285779
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_total",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 8229.6138
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 1175.6591142857144
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_max",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 1494.2611
+    }
+  ],
+  "models": [],
+  "notes": null,
+  "result_kind": "visloc_run",
+  "run_id": "euroc-covisibility-local-ba-MH_05_difficult-enabled-20260619T220343Z",
+  "schema_version": 1,
+  "status": "success"
+}

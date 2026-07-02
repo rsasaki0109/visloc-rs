@@ -88,11 +88,15 @@ scripts/fetch_kitti_seq00_images.py \
 scripts/run_kitti_loop_closure_benchmark.sh \
   --data-root ~/datasets/kitti_seq00_full \
   --gt-poses  ~/datasets/kitti_seq00_full/poses_00.txt \
-  --frames 4541
+  --frames 4541 \
+  --capture-retrieval-recall
 ```
 
 The script builds the `stereo_vo_external_deep_files` and
 `evaluate_trajectory_from_kitti_files` examples, exports SuperPoint/LightGlue
 features once, runs the VO twice (open / `--loop-closure`), evaluates both, and
-writes `summary.md` with the table above. Pass `--skip-export` to reuse already
-exported features, or `--device cpu` if no CUDA GPU is available (much slower).
+writes `summary.md` with the table above. With `--capture-retrieval-recall`, it
+also evaluates `loop/loop_candidates.csv`, writes `loop/retrieval_recall/`, and
+captures a `kitti_loop_retrieval_recall_v1` registry manifest. Pass
+`--skip-export` to reuse already exported features, or `--device cpu` if no CUDA
+GPU is available (much slower).

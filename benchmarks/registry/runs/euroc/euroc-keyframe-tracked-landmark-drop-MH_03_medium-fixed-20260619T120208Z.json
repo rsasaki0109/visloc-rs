@@ -1,0 +1,283 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed\\slam_trajectory.csv",
+      "sha256": "949157e0323fb93e9a1e48d2409d75a559190779a918ac2b88ec03a4a57ea021"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed\\slam_errors.csv",
+      "sha256": "7b6b00d5d21afb15fea98fbdfb54e0a351a5a4af97cab118c5df901bbaba9214"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed\\summary.txt",
+      "sha256": "5bb4cf06734e7ce31d1fb6280bc7116d118386fc874c1d4666bc889b4a0fbfa5"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed\\keyframe_decisions.csv",
+      "sha256": "024f235710e58385420a319372a1dbc652fc8fe201b8d58ba22857b5e625843e"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed\\covisibility_ba_log.txt",
+      "sha256": "f07b2be4f9619c60b5f97368ead94497c156459873589efcb98e37f87866aff2"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-keyframe-tracked-landmark-drop",
+    "name": "EuRoC online SLAM tracked-landmark keyframe policy A/B",
+    "protocol": "fixed/tracked-drop SimpleKeyframePolicy A/B on identical EuRoC image/IMU command",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": null,
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": null,
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe",
+      "run",
+      "--release",
+      "--features",
+      "image-io",
+      "--example",
+      "euroc_online_slam_vi_image_demo",
+      "--",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+      "--out-dir",
+      "target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed",
+      "--max-frames",
+      "400",
+      "--gravity",
+      "0,0,-9.81",
+      "--keyframe-min-translation",
+      "0.1",
+      "--covisibility-local-ba",
+      "--covisibility-local-ba-min-keyframes",
+      "3",
+      "--covisibility-local-ba-trigger-every",
+      "1",
+      "--covisibility-local-ba-max-landmarks",
+      "200",
+      "--covisibility-local-ba-outlier-threshold-px",
+      "5.0",
+      "--covisibility-local-ba-min-active-observations",
+      "100"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "'C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe' run --release --features image-io --example euroc_online_slam_vi_image_demo -- --euroc-dir 'C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium' --out-dir 'target\\euroc_keyframe_policy_ba_active100_ab\\MH_03_medium\\fixed' --max-frames 400 --gravity 0,0,-9.81 --keyframe-min-translation 0.1 --covisibility-local-ba --covisibility-local-ba-min-keyframes 3 --covisibility-local-ba-trigger-every 1 --covisibility-local-ba-max-landmarks 200 --covisibility-local-ba-outlier-threshold-px 5.0 --covisibility-local-ba-min-active-observations 100"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "demo_args": "--gravity 0,0,-9.81 --keyframe-min-translation 0.1 --covisibility-local-ba --covisibility-local-ba-min-keyframes 3 --covisibility-local-ba-trigger-every 1 --covisibility-local-ba-max-landmarks 200 --covisibility-local-ba-outlier-threshold-px 5.0 --covisibility-local-ba-min-active-observations 100",
+      "max_frames": 400,
+      "min_tracked_landmarks": 20,
+      "tracked_landmark_ratio": 0.9,
+      "variant": "fixed"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-19T12:02:23Z",
+  "dataset": {
+    "checksum": null,
+    "checksum_method": null,
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 1.3592
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1372
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.8
+    },
+    {
+      "implementation": null,
+      "name": "frames_recorded",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 400
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 44
+    },
+    {
+      "implementation": null,
+      "name": "map_landmarks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1500
+    },
+    {
+      "implementation": null,
+      "name": "imu_factors_staged",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 26
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 42
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_map_used_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_map_mean_size",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0.0
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_decision_rows",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 400
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_selected_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 44
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_tracked_landmark_drop_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_thresholds_met_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 33
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_relocalized_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 10
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_translation_too_small_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 146
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_frame_gap_too_small_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 130
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_no_mapping_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 80
+    }
+  ],
+  "models": [],
+  "notes": null,
+  "result_kind": "visloc_run",
+  "run_id": "euroc-keyframe-tracked-landmark-drop-MH_03_medium-fixed-20260619T120208Z",
+  "schema_version": 1,
+  "status": "success"
+}

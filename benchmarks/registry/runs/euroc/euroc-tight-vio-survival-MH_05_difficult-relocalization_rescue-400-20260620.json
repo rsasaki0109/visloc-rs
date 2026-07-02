@@ -1,0 +1,245 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\slam_trajectory.csv",
+      "sha256": "76590ad6077b600f4921e07529b70398b1790c3668ee46f367e10d6755c15a91"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\slam_errors.csv",
+      "sha256": "a043127b22485c2a499968dbefc528158eb8a5df99514bece4ebcbb6c1d891eb"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\summary.txt",
+      "sha256": "adffe3df24f2955c41ae9c86fdaee54f71b78a42d316581f4007157159c28b9e"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\vi_init_log.txt",
+      "sha256": "4face215d07daad8718e7741525cff45cdb51220584a450664ce3a1832f56215"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\motion_vi_init_log.txt",
+      "sha256": "c1202ea628bf72ea41ed66218e0f26136ff823d726e145a0d5acddf76bc7ff67"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\keyframe_decisions.csv",
+      "sha256": "4bd0ee84c824ef151768efc84ce7e01125175957cc334ecc13e105f4e166f5ef"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400\\covisibility_ba_log.txt",
+      "sha256": "cda6ae034569d1a72ccce80a2449bf7ae606042732a224b35d3fcf8a7a3cc4b2"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-tight-vio-survival",
+    "name": "EuRoC tight VIO tracking survival rescue smoke",
+    "protocol": "MH_05_difficult 400-frame HOG/cross-check local-VI-BA smoke; pose-prior quality gate, early rescue keyframes, relocalization, adaptive local VI-BA velocity gate",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      ".targetreleaseexampleseuroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:UsersrsasaWorkspaceoldsimple_visual_slameuroc_mavmachine_hallmachine_hallMH_05_difficult",
+      "--out-dir",
+      "targettracking_survival_diagMH_05_difficultpose_jump_3p0_gap2_min80r50_reloc_400",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "3.0",
+      "--tracking-min-inliers",
+      "80",
+      "--tracking-min-inlier-ratio",
+      "0.5",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keyframe-min-frame-gap",
+      "2",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-adaptive-velocity-gate",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--relocalization-enabled",
+      "--relocalization-min-inliers",
+      "80",
+      "--relocalization-min-inlier-ratio",
+      "0.5"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult --out-dir target\\tracking_survival_diag\\MH_05_difficult\\pose_jump_3p0_gap2_min80r50_reloc_400 --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 3.0 --tracking-min-inliers 80 --tracking-min-inlier-ratio 0.5 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keyframe-min-frame-gap 2 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-adaptive-velocity-gate --local-vi-ba-reject-writeback-above 1.0 --relocalization-enabled --relocalization-min-inliers 80 --relocalization-min-inlier-ratio 0.5"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "keyframe_min_frame_gap": 2,
+      "keyframe_min_translation": 0.1,
+      "local_vi_ba_adaptive_velocity_gate": true,
+      "local_vi_ba_reject_writeback_above": 1.0,
+      "max_frames": 400,
+      "max_pose_jump_meters": 3.0,
+      "relocalization_enabled": true,
+      "relocalization_min_inlier_ratio": 0.5,
+      "relocalization_min_inliers": 80,
+      "tracking_min_inlier_ratio": 0.5,
+      "tracking_min_inliers": 80,
+      "variant": "relocalization_rescue"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T11:12:11Z",
+  "dataset": {
+    "checksum": "b48d86ed282b4eaa0c1d31b9f6b6178bb9c1b6beb3df4b952dbc8128d0fc9a13",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult",
+    "sequence": "MH_05_difficult",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0355
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0351
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.668611
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.158
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 5
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_attempts",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 340
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_adaptive_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_mirrors_into_imu_motion_model",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory cross-sequence tracking-survival rescue on MH_05. Tracking success is essentially neutral versus the adaptive-gate 400-frame baseline (0.155 to 0.158) while rigid ATE regresses slightly (0.0292 m to 0.0355 m). Not a headline claim.",
+  "result_kind": "exploratory",
+  "run_id": "euroc-tight-vio-survival-MH_05_difficult-relocalization_rescue-400-20260620",
+  "schema_version": 1,
+  "status": "success"
+}

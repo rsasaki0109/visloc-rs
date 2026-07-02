@@ -1,0 +1,176 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\adaptive_depth_gate_kitti00_smoke\\adaptive\\summary.txt",
+      "sha256": "1c9d26ebb5b5c8f7ead261b7e672459a6ab5c92345cdaad0c469b16e2523e392"
+    },
+    {
+      "exists": true,
+      "kind": "depth_gate_diagnostics",
+      "path": "target\\adaptive_depth_gate_kitti00_smoke\\adaptive\\frontend_depth_gate_diagnostics.csv",
+      "sha256": "1eeb94d2c018808a32bc4f74552b0afd62c9e6993f10331d4283c5a86d7365da"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\adaptive_depth_gate_kitti00_smoke\\adaptive\\vo_poses.txt",
+      "sha256": "d779208b424e491e12a656ce8bc6601d6b33e77ecab4a957e9fc7bb64135f6bd"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/interfaces.md"
+    ],
+    "id": "kitti-adaptive-depth-gate-smoke",
+    "name": "KITTI adaptive stereo depth-gate smoke",
+    "protocol": "2-frame release smoke on stride-20 KITTI seq00 subset; deep frontend cap 300; BA disabled; diagnostic gate artifact, not a trajectory benchmark claim",
+    "script": "examples/online_slam_stereo_vo_kitti_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "cargo",
+      "run",
+      "--release",
+      "--features",
+      "image-io",
+      "--example",
+      "online_slam_stereo_vo_kitti_demo",
+      "--",
+      "--image-left",
+      "target/adaptive_depth_gate_kitti00_smoke_data/image_0",
+      "--image-right",
+      "target/adaptive_depth_gate_kitti00_smoke_data/image_1",
+      "--calib",
+      "target/adaptive_depth_gate_kitti00_smoke_data/calib.txt",
+      "--max-frames",
+      "2",
+      "--frame-stride",
+      "1",
+      "--no-stereo-ba",
+      "--frontend",
+      "deep",
+      "--deep-max-features",
+      "300",
+      "--relative-pose-iterations",
+      "200",
+      "--min-pnp-inliers",
+      "6",
+      "--gt-poses",
+      "target/adaptive_depth_gate_kitti00_smoke_data/poses_00.txt",
+      "--gt-original-stride",
+      "20",
+      "--progress-every",
+      "1",
+      "--out-dir",
+      "target/adaptive_depth_gate_kitti00_smoke/adaptive"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "cargo run --release --features image-io --example online_slam_stereo_vo_kitti_demo -- --image-left target/adaptive_depth_gate_kitti00_smoke_data/image_0 --image-right target/adaptive_depth_gate_kitti00_smoke_data/image_1 --calib target/adaptive_depth_gate_kitti00_smoke_data/calib.txt --max-frames 2 --frame-stride 1 --no-stereo-ba --frontend deep --deep-max-features 300 --relative-pose-iterations 200 --min-pnp-inliers 6 --gt-poses target/adaptive_depth_gate_kitti00_smoke_data/poses_00.txt --gt-original-stride 20 --progress-every 1 --out-dir target/adaptive_depth_gate_kitti00_smoke/adaptive"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "deep_max_features": 300,
+      "depth_gate": "adaptive",
+      "frame_stride": 1,
+      "frontend": "deep",
+      "max_frames": 2,
+      "relative_pose_iterations": 200,
+      "source_stride": 20,
+      "stereo_ba": false
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T03:02:32Z",
+  "dataset": {
+    "checksum": "892e15f703c484dc01cff76896586532d5bc96a2008863f08bb4f90280c07e94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "KITTI odometry",
+    "path": "target/adaptive_depth_gate_kitti00_smoke_data",
+    "sequence": "00",
+    "version": "odometry grayscale, stride-20 local subset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 2
+    },
+    {
+      "implementation": null,
+      "name": "candidates_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 219
+    },
+    {
+      "implementation": null,
+      "name": "accepted_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 206.5
+    },
+    {
+      "implementation": null,
+      "name": "effective_min_depth_m_mean",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "depth_quantile_m_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 14.380565
+    },
+    {
+      "implementation": null,
+      "name": "vo_ate_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 16.4839
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory smoke only: verifies adaptive default records diagnostics and remains at the fixed 3m floor on this far-field KITTI subset.",
+  "result_kind": "visloc_run",
+  "run_id": "kitti-adaptive-depth-gate-smoke-00-adaptive-20260620T020000Z",
+  "schema_version": 1,
+  "status": "success"
+}
