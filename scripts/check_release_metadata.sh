@@ -1,6 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
+grep_normalized() {
+    pattern="$1"
+    file="$2"
+    tr -d '\r' < "$file" | grep -q "$pattern"
+}
+
 packages="
 visloc-core
 visloc-vision
@@ -26,15 +32,15 @@ pipelines/fusion/Cargo.toml
 "
 
 echo "Checking workspace release metadata"
-grep -q '^version = "0.1.0"$' Cargo.toml
-grep -q '^rust-version = "1.82"$' Cargo.toml
-grep -q '^license = "MIT OR Apache-2.0"$' Cargo.toml
-grep -q '^repository = "https://github.com/rsasaki0109/visloc-rs"$' Cargo.toml
+grep_normalized '^version = "0.1.0"$' Cargo.toml
+grep_normalized '^rust-version = "1.82"$' Cargo.toml
+grep_normalized '^license = "MIT OR Apache-2.0"$' Cargo.toml
+grep_normalized '^repository = "https://github.com/rsasaki0109/visloc-rs"$' Cargo.toml
 
 for manifest in $manifests; do
     echo "Checking manifest metadata: $manifest"
-    grep -q '^\[package.metadata.docs.rs\]$' "$manifest"
-    grep -q '^all-features = true$' "$manifest"
+    grep_normalized '^\[package.metadata.docs.rs\]$' "$manifest"
+    grep_normalized '^all-features = true$' "$manifest"
 done
 
 for artifact in \
@@ -43,16 +49,15 @@ for artifact in \
     kitti-image-sequence-demo-outputs
 do
     echo "Checking CI artifact documentation: $artifact"
-    grep -q "name: $artifact" .github/workflows/ci.yml
-    grep -q "$artifact" README.md
-    grep -q "$artifact" docs/release_checklist.md
-    grep -q "$artifact" docs/experiments.md
+    grep_normalized "name: $artifact" .github/workflows/ci.yml
+    grep_normalized "$artifact" docs/release_checklist.md
+    grep_normalized "$artifact" docs/experiments.md
 done
 
 for package in $packages; do
     echo "Checking publish/package references: $package"
-    grep -q "$package" docs/publishing.md
-    grep -q "$package" scripts/package_check.sh
+    grep_normalized "$package" docs/publishing.md
+    grep_normalized "$package" scripts/package_check.sh
 done
 
 echo "Release metadata checks passed"

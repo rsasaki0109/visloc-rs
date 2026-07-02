@@ -17,7 +17,21 @@ use visloc_rs::io::colmap::ColmapMapProvider;
 use visloc_rs::vision::matching::BruteForceMatcher;
 ```
 
+Root-level item re-exports such as `visloc_rs::Camera` and `visloc_rs::Pose`
+remain available for convenience, but new docs and examples should treat the
+prelude and the crate modules (`visloc_rs::core`, `visloc_rs::localization`,
+`visloc_rs::vision`, and so on) as the canonical import paths.
+
 For v1.0, the prelude should remain additive where practical. New common entry points may be added, but existing prelude items should not be removed without a documented migration.
+
+## Feature Support
+
+The stable lightweight surface is `--no-default-features`, default features, and
+`image-io`. These are the Tier 1 configurations documented in
+[feature_matrix.md](feature_matrix.md) and checked by `scripts/check_feature_matrix.sh`.
+ONNX Runtime and CUDA paths are opt-in deployment features; they should not be
+used to justify visual-only benchmark claims unless the benchmark registry
+records the feature flags, model hashes, command, and hardware.
 
 ## Map-Based Localization
 
@@ -56,6 +70,7 @@ The following layers are useful but still expected to evolve before 1.0:
 
 - `LocalMappingPipeline`
 - `OnlineSlamPipeline`
+- covisibility local BA and pose-graph refinement configuration/results
 - `FramePriorSource`
 - covariance and timestamp helper types
 
@@ -94,4 +109,11 @@ The explicit module paths still work. The prelude is now the recommended entry p
 
 ### Keep SLAM Expectations Explicit
 
-`OnlineSlamPipeline` is currently an MVP composition over tracking and local mapping. It reports lightweight loop-closure candidates, but it does not implement global pose graph optimization, dense mapping, or production bundle adjustment. Applications that only need map-based localization should keep using `LocalizationPipeline` and `Tracker`.
+`OnlineSlamPipeline` is currently a foundation-layer composition over tracking
+and local mapping. It exposes loop-closure candidates, optional covisibility
+local BA, optional pose-graph refinement, VI initialization / local VI-BA
+building blocks, and relocalization hooks, but these are not a production full
+SLAM guarantee. Applications that only need map-based localization should keep
+using `LocalizationPipeline` and `Tracker`, and applications that enable the
+SLAM-stage options should keep their benchmark claims tied to the exact
+configuration and registry artifacts that were run.

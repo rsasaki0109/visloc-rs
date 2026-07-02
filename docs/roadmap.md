@@ -14,7 +14,7 @@ The long-term shape is:
 4. Add local mapping and lightweight keyframe policies.
 5. Grow into online Visual SLAM with incremental map updates.
 6. Add a deep visual odometry frontend as an optional tracking path.
-7. Add loop-closure candidate detection and later pose-graph optimization hooks.
+7. Add loop-closure candidate detection and opt-in pose-graph optimization hooks.
 8. Add visual-inertial and GNSS priors/fusion.
 
 ## Near-Term Technical Bets
@@ -30,12 +30,14 @@ Two goals should drive the next public demos:
   step is replacing the fixed demo frontend with a real classical or learned
   implementation in sequence demos. The two-view match text parser is the first
   file-backed bridge for externally generated matcher output.
-- **Loop-closure candidate detection.** The first loop-closure milestone should
-  detect and report candidates, then geometrically verify them. Lightweight
-  shared-landmark candidate reporting and HTML/SVG candidate-edge reporting now
-  exist in `visloc-slam`; full global pose graph optimization can come later.
-  The demo value is showing that the system recognizes a previously visited
-  place and exposes the candidate clearly.
+- **Loop-closure candidate detection and refinement.** The first loop-closure
+  milestone detects, reports, and geometrically verifies candidates. Lightweight
+  shared-landmark candidate reporting, HTML/SVG candidate-edge reporting,
+  verified loop constraints, and opt-in pose-graph refinement now exist in
+  `visloc-slam`; production-grade global SLAM remains a separate claim. The
+  demo value is showing that the system recognizes a previously visited place,
+  exposes the candidate clearly, and can feed measured constraints into the
+  optimization building blocks.
 
 Current Deep VO / loop-closure milestone details are tracked in
 [progress.md](progress.md). Development updates should stay grounded in
@@ -215,7 +217,7 @@ Focus:
 - Keyframe/image similarity interfaces
 - Geometric verification through reusable matching and pose-estimation components
 - Demo visualization for candidate links in a sequence trajectory
-- Hooks for future pose-graph constraints
+- Hooks for pose-graph constraints
 
 Out of scope:
 

@@ -46,11 +46,28 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: API stability allowlist
+        run: cargo test --test api_stability -- --nocapture
+
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Benchmark registry
+        run: |
+          python3 scripts/benchmark_registry.py validate benchmarks/registry/readme_claims_v1.json benchmarks/registry/claim_matrix_v1.json benchmarks/registry/runs
+          python3 scripts/benchmark_registry.py check-generated
+
       - name: Documentation links
         run: scripts/check_docs_links.sh
 
+      - name: Release metadata
+        run: scripts/check_release_metadata.sh
+
       - name: Examples
         run: scripts/run_examples.sh
+
+      - name: Trajectory evaluation
+        run: scripts/check_trajectory_evaluation.sh
 
       - name: GNSS demo outputs
         run: scripts/check_gnss_demo_outputs.sh
@@ -90,3 +107,31 @@ jobs:
 
       - name: Package
         run: scripts/package_check.sh
+
+  feature-matrix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        feature:
+          - name: no-default
+            command: cargo check --workspace --all-targets --no-default-features
+          - name: default
+            command: cargo check --workspace --all-targets
+          - name: image-io
+            command: cargo check --workspace --all-targets --features image-io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-matrix-${{ matrix.os }}-${{ matrix.feature.name }}
+
+      - name: Check ${{ matrix.feature.name }}
+        run: ${{ matrix.feature.command }}
