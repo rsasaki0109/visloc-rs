@@ -49,7 +49,9 @@ Real automotive and UAV datasets often keep images, image timestamps, and GNSS l
 4. `FramePriorSyncEvaluationConfig` checks whether the sync coverage is good enough before tracking.
 5. `ImageTracker` localizes each image using a GNSS-derived submap prior.
 
-This is still Visual Localization, not full SLAM. The purpose is to make real dataset plumbing visible and testable before larger online SLAM or fusion backends are added.
+This is still Visual Localization, not full SLAM. The purpose is to make real
+dataset plumbing visible and testable while keeping SLAM-stage optimization and
+tightly-coupled fusion experiments in their own examples and benchmark records.
 
 ## CI Artifact
 

@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
+grep_normalized() {
+    pattern="$1"
+    file="$2"
+    tr -d '\r' < "$file" | grep -q "$pattern"
+}
+
 packages="
 visloc-core
 visloc-vision
@@ -27,8 +38,8 @@ pipelines/fusion/Cargo.toml
 
 for manifest in $manifests; do
     echo "Checking docs.rs metadata: $manifest"
-    grep -q '^\[package.metadata.docs.rs\]$' "$manifest"
-    grep -q '^all-features = true$' "$manifest"
+    grep_normalized '^\[package.metadata.docs.rs\]$' "$manifest"
+    grep_normalized '^all-features = true$' "$manifest"
 done
 
 for package in $packages; do

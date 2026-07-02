@@ -37,7 +37,11 @@ The visual-localization core is still the important part:
 5. PnP + RANSAC estimates the camera pose.
 6. Reports expose tracking state, priors, inliers, reprojection error, and trajectory output.
 
-This is a practical bridge toward automotive or UAV localization demos: the sequence and prior plumbing exists, while full SLAM, loop closure, global bundle adjustment, and tightly-coupled fusion remain intentionally out of scope for now.
+This is a practical bridge toward automotive or UAV localization demos: the
+sequence and prior plumbing exists, while production full SLAM and
+tightly-coupled fusion remain intentionally out of scope for this demo. Loop
+closure, pose-graph, and BA experiments live in the separate SLAM examples and
+benchmark docs, not in the GNSS-prior tracking smoke path.
 
 ## CI Artifact
 

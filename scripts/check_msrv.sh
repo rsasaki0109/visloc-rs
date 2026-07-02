@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
+if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
 # The 1.82 MSRV guarantee covers the core library and the `image-io` demo path.
 #
 # It deliberately does NOT cover the opt-in `onnx-inference` feature: that pulls

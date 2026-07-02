@@ -25,7 +25,7 @@ matches=$(mktemp)
 trap 'rm -f "$matches"' EXIT
 {
     printf '%s\n' README.md
-    find docs -type f -name '*.md' | sort
+    git ls-files --cached --others --exclude-standard -- 'docs/*.md' | sort
 } | while IFS= read -r file; do
     [ -f "$file" ] || continue
     (grep -n -o '\[[^][]*\]([^)]*)' "$file" || true) | sed "s|^|$file:|"

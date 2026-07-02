@@ -21,6 +21,14 @@ limitations, and runnable tests rather than by a completion percentage.
 
 Completed pieces:
 
+- Adaptive stereo depth gate evidence is now registry-backed for a minimal
+  KITTI seq00 diagnostic smoke: adaptive default and legacy fixed-3m replay
+  both record `effective_min_depth_m_mean=3 m` on the same far-field subset,
+  with per-frame diagnostics summarized in
+  `docs/generated/kitti_adaptive_depth_gate_smoke.md`; the reduced-feature
+  6-frame adaptive failure is retained in the same registry-backed summary.
+  This is non-regression evidence for the gate policy, not a trajectory
+  benchmark claim.
 - `VisualOdometryFrontend` and `VisualOdometryPriorProvider` boundaries exist.
 - VO-derived pose priors can narrow tracking candidates.
 - Externally generated two-view match files can be parsed.
@@ -49,7 +57,7 @@ Completed pieces:
   `loop_closure_constraints_from_candidates`) lifts each verified candidate
   into a stand-alone constraint (`from_keyframe_id`, `to_keyframe_id`,
   `relative_pose`, `inlier_count`, `inlier_ratio`, `mean_sampson_error`,
-  `score`) that a future pose-graph backend can consume.
+  `score`) that the pose-graph / BA consumers can consume.
 - `PoseGraph` skeleton (nodes = `BTreeMap<u64, Pose>`, edges =
   `PoseGraphEdge { from, to, measurement, kind, weight }`,
   anchor = `Option<u64>`) plus `PoseGraphEdgeKind::{Sequential, LoopClosure}`,
@@ -738,6 +746,17 @@ Completed pieces:
   **`5.0180 %`** (-17.7 %) with the v0.5 BA refiner (`--ba-max-init-
   residual 3 --ba-min-track-count 2000 --ba-huber-delta 3`); BA refined
   12,400 tracks / 54,608 observations in 11 LM iterations on this slice.
+- EuRoC MH_05 covisibility local BA now has an opt-in pre-solve
+  boundary-support gate that rejects large optimized windows when too few
+  fixed boundary keyframes anchor them. The diagnostic
+  [boundary-support sweep](generated/euroc_covisibility_mh05_boundary_support_gate_sweep.md)
+  keeps the 400-frame MH_05 quality-gate configuration fixed and compares
+  `none/0`, `7/2`, and `10/2`: `7/2` is rejected because it loses tracking
+  (`0.215` vs `0.265`), while `10/2` is a candidate because it preserves the
+  quality-gate-only tracking and ATE while converting two post-solve quality
+  rejects into cheaper boundary-support rejects and reducing mean trigger time
+  from `304.495 ms` to `254.946 ms`. This is exploratory evidence for one
+  failure mode, not a default-policy or headline benchmark claim.
 - `visloc_slam::refine_stereo_vo_with_ba` provides a multi-frame Schur BA
   refiner that lifts a stereo VO trajectory by chaining per-pair temporal
   matches into forward feature tracks, initialising each landmark from its

@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
+if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
+  PATH="$HOME/.cargo/bin:$PATH"
+  export PATH
+fi
+
 output_root="target/visloc_trajectory_eval_check"
 rm -rf "$output_root"
 mkdir -p "$output_root"
