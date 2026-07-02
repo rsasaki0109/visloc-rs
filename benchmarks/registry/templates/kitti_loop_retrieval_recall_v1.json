@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "run_id": "kitti-loop-retrieval-recall-seq02-YYYYMMDDTHHMMSSZ",
+  "created_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "result_kind": "exploratory",
+  "claim_scope": "exploratory",
+  "status": "success",
+  "failure_reason": null,
+  "benchmark": {
+    "id": "kitti-loop-retrieval-recall",
+    "name": "KITTI loop retrieval recall",
+    "script": "scripts/eval_loop_retrieval_recall.py",
+    "protocol": "pose-derived true-revisit recall@K over gated loop retrieval candidates; no PnP/PGO score",
+    "docs": ["docs/kitti_multiseq_benchmark.md"]
+  },
+  "dataset": {
+    "name": "KITTI odometry",
+    "sequence": "02",
+    "version": "KITTI odometry grayscale",
+    "path": null,
+    "checksum": null,
+    "checksum_method": null
+  },
+  "git": {
+    "commit": null,
+    "branch": null,
+    "dirty": false
+  },
+  "build": {
+    "cargo_lock_sha256": null,
+    "rustc": null,
+    "cargo": null,
+    "features": [],
+    "profile": null,
+    "target": null
+  },
+  "command": {
+    "raw": "python scripts/eval_loop_retrieval_recall.py --candidates target/kitti_seq02_full/loop_candidates.csv --poses <KITTI>/poses_02.txt --input-kind raw_appearance_candidates --distance-threshold-m 10 --min-temporal-gap 50 --min-path-length-m 5 --ks 1 5 20",
+    "argv": [],
+    "cwd": null
+  },
+  "hardware": {
+    "os": null,
+    "machine": null,
+    "processor": null,
+    "hostname": null,
+    "gpu": null,
+    "notes": null
+  },
+  "config": {
+    "seed": null,
+    "params": {
+      "input_kind": "raw_appearance_candidates",
+      "distance_threshold_m": 10.0,
+      "min_temporal_gap": 50,
+      "min_path_length_m": 5.0,
+      "ks": [1, 5, 20]
+    },
+    "config_files": []
+  },
+  "models": [],
+  "metrics": [
+    {
+      "name": "vlad_k_64_recall_at_20",
+      "value": null,
+      "unit": "ratio",
+      "primary": true,
+      "implementation": "scripts/eval_loop_retrieval_recall.py",
+      "source_artifact": "recall_json"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "candidate_csv_0",
+      "path": "target/kitti_seq02_full/loop_candidates.csv",
+      "sha256": null,
+      "exists": false
+    },
+    {
+      "kind": "verification_diagnostics_csv_0",
+      "path": "target/kitti_seq02_full/loop_candidate_verifications.csv",
+      "sha256": null,
+      "exists": false
+    },
+    {
+      "kind": "poses",
+      "path": "<KITTI>/poses_02.txt",
+      "sha256": null,
+      "exists": false
+    },
+    {
+      "kind": "recall_json",
+      "path": "target/kitti_loop_retrieval_recall/seq02/<stamp>/retrieval_recall.json",
+      "sha256": null,
+      "exists": false
+    }
+  ],
+  "notes": "Template only. Use scripts/capture_kitti_loop_retrieval_recall.py after a loop-closure run has written loop_candidates.csv."
+}

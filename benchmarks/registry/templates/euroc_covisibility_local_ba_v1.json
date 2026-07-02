@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "run_id": "euroc-covisibility-local-ba-sequence-YYYYMMDDTHHMMSSZ",
+  "created_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "result_kind": "visloc_run",
+  "claim_scope": "exploratory",
+  "status": "success",
+  "failure_reason": null,
+  "benchmark": {
+    "id": "euroc-covisibility-local-ba",
+    "name": "EuRoC online SLAM covisibility local BA A/B",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs",
+    "protocol": "same EuRoC image/IMU run with OnlineSlamConfig::covisibility_local_ba disabled versus enabled; compare DNF, tracking success, ATE, keyframes, and covisibility BA diagnostics",
+    "docs": ["docs/motion_based_vi_alignment.md"]
+  },
+  "dataset": {
+    "name": "EuRoC MAV",
+    "sequence": "MH_01_easy",
+    "version": "ASL EuRoC MAV dataset",
+    "path": null,
+    "checksum": null,
+    "checksum_method": null
+  },
+  "git": {
+    "commit": null,
+    "branch": null,
+    "dirty": false
+  },
+  "build": {
+    "cargo_lock_sha256": null,
+    "rustc": null,
+    "cargo": null,
+    "features": ["image-io"],
+    "profile": "release",
+    "target": null
+  },
+  "command": {
+    "raw": "cargo run --release --features image-io --example euroc_online_slam_vi_image_demo -- --euroc-dir <EUROC_SEQUENCE_DIR> --out-dir target/euroc_covisibility_local_ba/<sequence>/enabled --max-frames 1500 --covisibility-local-ba --covisibility-local-ba-min-keyframes 3 --covisibility-local-ba-trigger-every 1 --covisibility-local-ba-min-active-observations 1 --covisibility-local-ba-fallback-min-boundary-observations none",
+    "argv": [],
+    "cwd": null
+  },
+  "hardware": {
+    "os": null,
+    "machine": null,
+    "processor": null,
+    "hostname": null,
+    "gpu": null,
+    "notes": null
+  },
+  "config": {
+    "seed": null,
+    "params": {
+      "covisibility_local_ba_enabled": true,
+      "covisibility_local_ba_min_keyframes": 3,
+      "covisibility_local_ba_trigger_every": 1,
+      "covisibility_local_ba_max_neighbor_keyframes": 10,
+      "covisibility_local_ba_min_shared": 15,
+      "covisibility_local_ba_max_boundary_keyframes": 10,
+      "covisibility_local_ba_min_boundary_observations": 5,
+      "covisibility_local_ba_fallback_min_boundary_observations": null,
+      "covisibility_local_ba_min_active_observations": 1,
+      "covisibility_local_ba_outlier_threshold_px": 5.0,
+      "covisibility_local_ba_remove_outliers": false
+    },
+    "config_files": []
+  },
+  "models": [],
+  "metrics": [
+    {
+      "name": "ate_rigid_rmse_m",
+      "value": null,
+      "unit": "m",
+      "primary": true,
+      "implementation": "EuRoC demo rigid ATE from summary.txt",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "tracking_success_rate",
+      "value": null,
+      "unit": "ratio",
+      "primary": false,
+      "implementation": "tracking_successes / frames_recorded from summary.txt",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_successes",
+      "value": null,
+      "unit": "count",
+      "primary": false,
+      "implementation": "OnlineSlamResult::covisibility_local_ba success count",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_active_observation_gate_failures",
+      "value": null,
+      "unit": "count",
+      "primary": false,
+      "implementation": "EuRoC demo count of covisibility BA skips caused by CovisibilityLocalBaConfig::min_active_observations",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_boundary_fallback_active_gate_failures",
+      "value": null,
+      "unit": "count",
+      "primary": false,
+      "implementation": "EuRoC demo count of active-observation gate failures after fallback boundary-keyframe selection supplied local landmarks",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_no_local_landmarks_failures",
+      "value": null,
+      "unit": "count",
+      "primary": false,
+      "implementation": "EuRoC demo count of covisibility BA selection failures with no local landmarks",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_boundary_fallback_successes",
+      "value": null,
+      "unit": "count",
+      "primary": false,
+      "implementation": "EuRoC demo count of successful covisibility BA solves that used fallback boundary-keyframe selection",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_elapsed_ms_mean",
+      "value": null,
+      "unit": "ms",
+      "primary": false,
+      "implementation": "Mean wall-clock elapsed time over covisibility BA triggers, including selection failures",
+      "source_artifact": "summary"
+    },
+    {
+      "name": "covisibility_local_ba_elapsed_ms_max",
+      "value": null,
+      "unit": "ms",
+      "primary": false,
+      "implementation": "Maximum wall-clock elapsed time over covisibility BA triggers, including selection failures",
+      "source_artifact": "summary"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "trajectory",
+      "path": "target/euroc_covisibility_local_ba/<sequence>/enabled/slam_trajectory.csv",
+      "sha256": null,
+      "exists": false
+    },
+    {
+      "kind": "summary",
+      "path": "target/euroc_covisibility_local_ba/<sequence>/enabled/summary.txt",
+      "sha256": null,
+      "exists": false
+    },
+    {
+      "kind": "covisibility_ba_log",
+      "path": "target/euroc_covisibility_local_ba/<sequence>/enabled/covisibility_ba_log.txt",
+      "sha256": null,
+      "exists": false
+    }
+  ],
+  "notes": "Template only. Use scripts/benchmark_registry.py capture for real runs and keep the matching disabled-baseline manifest next to the enabled run."
+}

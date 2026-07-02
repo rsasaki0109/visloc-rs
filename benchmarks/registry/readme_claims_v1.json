@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "target": "README.md#benchmarks",
+  "notes": "Public README benchmark rows rendered by scripts/benchmark_registry.py render-readme. claim_kind separates registered run evidence from historical docs and external published numbers.",
+  "claims": [
+    {
+      "benchmark": "**KITTI multi-sequence published-baseline comparison**",
+      "result_markdown": "one uniform full-stack config over 00/02/05/06/07/09; narrow published-baseline wins on seq00 (**1.23 m vs ORB-SLAM2 1.3 m**) and seq09 (**2.07 m vs ORB-SLAM2 3.2 m**), with seq00/05/06 in the OV2SLAM-RT accuracy band. This is not a leaderboard or ORB-SLAM3 claim; the run also records real-world frontend failure-mode fixes.",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/kitti_multiseq_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**EuRoC MH_03 / MH_05 full pipeline**",
+      "result_markdown": "stereo visual loop-closure + BA on MH_03 / MH_05: **0.057 m / 0.072 m** ATE. The claim matrix marks ORB-SLAM3 comparisons as behind (**~2.4x / ~1.4x**), OV2SLAM as near, and VINS-Fusion stereo as a stereo-only win; this is not a tight-VIO claim.",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/euroc_loop_closure_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**TUM RGB-D fr1_xyz / fr1_desk**",
+      "result_markdown": "indoor handheld via **virtual stereo** (depth as a synthetic right image, zero backend changes): **0.014 m / 0.026 m** ATE, compared against published ORB-SLAM2 RGB-D ranges in the claim matrix; loop closure is a **6x** lever on the revisit-heavy desk.",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/tum_rgbd_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**KITTI seq00 loop closure**",
+      "result_markdown": "open VO 36.3 m -> **2.6 m** Sim(3) ATE (**14x**), 35 verified loops",
+      "claim_kind": "documented_historical",
+      "source_docs": ["docs/kitti_loop_closure_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**EuRoC MH_03 SfM reconstruction**",
+      "result_markdown": "merged multi-view tracks + global BA: mean reprojection **4.08 px -> 1.04 px**, 179 k tracks, COLMAP export for 3DGS / MVS",
+      "claim_kind": "documented_historical",
+      "source_docs": ["docs/euroc_sfm_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**Sequential SfM vs COLMAP (metric video)**",
+      "result_markdown": "same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) - **~117x faster, ~17-33x more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.)",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/sfm_vs_colmap_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**Unordered SfM (real photo collections)**",
+      "result_markdown": "Orderless monocular photos -> VLAD view graph -> incremental reconstruction (robust multi-seed init, P3P register, scale-gauge-fixed BA, iterative track filter), vs **COLMAP's own model** with an independent SuperPoint frontend: **COLMAP South Building** (128 photos) **128/128 reg, 1.09 cm**; **Gerrard Hall** (100 photos, 5616x3744 OPENCV) **98/100, 0.68 cm** (3/100 single-seed) - both **0.1 % of extent**. EuRoC V2_03 orbit **31/31, 1.08 cm**",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/unordered_sfm_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "COLMAP South Building localization",
+      "result_markdown": "deep frontend gives **+37% to +98%** more verified inliers as the viewpoint gap grows",
+      "claim_kind": "documented_historical",
+      "source_docs": ["docs/public_data_demo.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "**Multi-session lifelong mapping (7-Scenes)**",
+      "result_markdown": "a map bootstrapped from one session is **grown across later visits by relocalization alone** (no GT poses): learned EigenPlaces retrieval integrates **126 vs 120** later-session keyframes loose / **106 vs 93** strict-gate vs bag-of-features, the gap widening as the gate tightens, and its merges are **~0.09 m vs ~0.14 m** accurate - a cleaner lifelong map (test median **0.059 m vs 0.144 m**)",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/multi_session_lifelong_benchmark.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "Pose-graph optimization (SE-Sync `.g2o`)",
+      "result_markdown": "**ties GTSAM 4.x LM** on `parking`/`sphere`/`cubicle`; **beats** it on `torus3D` (2.4e4 vs 6.0e4) and `rim` (8.3e4 vs 6.1e5)",
+      "claim_kind": "mixed",
+      "source_docs": ["docs/pgo_internals.md"],
+      "evidence_run_ids": []
+    },
+    {
+      "benchmark": "Outlier-robust PGO (GNC)",
+      "result_markdown": "`sphere2500` + 30 wrong loops: L2 **89x** baseline, GNC **1.0x** (30/30 rejected)",
+      "claim_kind": "documented_historical",
+      "source_docs": ["docs/pgo_internals.md"],
+      "evidence_run_ids": []
+    }
+  ]
+}
