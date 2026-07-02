@@ -168,6 +168,23 @@ pub enum CovisibilityLocalBaError {
         observation_count: usize,
         max_outlier_observation_ratio: f64,
     },
+    /// Write-back rejected because too large a fraction of the solved
+    /// optimized landmarks landed behind (or on) an observing optimized
+    /// camera. Signals a degenerate/under-constrained solve; see
+    /// [`behind_camera_optimized_landmark_ratio`].
+    BehindCameraGateRejected {
+        behind_camera_landmark_ratio: f64,
+        max_behind_camera_landmark_ratio: f64,
+    },
+    /// Write-back rejected because the selected window did not carry enough
+    /// fixed boundary keyframes relative to its optimized keyframes; see
+    /// [`fixed_to_optimized_ratio_satisfied`].
+    FixedSupportRatioRejected {
+        optimized_keyframe_count: usize,
+        fixed_keyframe_count: usize,
+        required_fixed_keyframes: usize,
+        min_fixed_to_optimized_ratio: f64,
+    },
     Ba(BaError),
 }
 
@@ -209,6 +226,22 @@ impl std::fmt::Display for CovisibilityLocalBaError {
             } => write!(
                 f,
                 "covisibility local BA rejected by quality gate: {outlier_observation_count}/{observation_count} outlier observations exceeds ratio {max_outlier_observation_ratio}"
+            ),
+            Self::BehindCameraGateRejected {
+                behind_camera_landmark_ratio,
+                max_behind_camera_landmark_ratio,
+            } => write!(
+                f,
+                "covisibility local BA rejected by behind-camera gate: {behind_camera_landmark_ratio} behind-camera landmark ratio exceeds max {max_behind_camera_landmark_ratio}"
+            ),
+            Self::FixedSupportRatioRejected {
+                optimized_keyframe_count,
+                fixed_keyframe_count,
+                required_fixed_keyframes,
+                min_fixed_to_optimized_ratio,
+            } => write!(
+                f,
+                "covisibility local BA rejected by fixed-support ratio gate: {fixed_keyframe_count} fixed boundary keyframes below required {required_fixed_keyframes} for {optimized_keyframe_count} optimized keyframes at ratio {min_fixed_to_optimized_ratio}"
             ),
             Self::Ba(err) => write!(f, "bundle adjustment failed: {err}"),
         }
@@ -743,6 +776,100 @@ fn mean_reprojection_px(ba: &BundleAdjustment) -> f64 {
     }
 }
 
+/// Number of fixed boundary keyframes a solve must carry to satisfy
+/// [`fixed_to_optimized_ratio_satisfied`].
+///
+/// Semantics: `required = ceil(optimized_keyframe_count * ratio)`. A
+/// non-positive or non-finite ratio disables the requirement (returns `0`).
+pub fn required_fixed_keyframes(optimized_keyframe_count: usize, ratio: f64) -> usize {
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return 0;
+    }
+    (optimized_keyframe_count as f64 * ratio).ceil() as usize
+}
+
+/// Write-back adequacy predicate for the fixed-anchor ratio gate.
+///
+/// Returns `true` (adequately anchored) when
+/// `fixed_keyframe_count >= ceil(optimized_keyframe_count * ratio)`.
+/// This is the *ratio* form of the fixed-boundary requirement; the absolute
+/// floor form lives on [`CovisibilityLocalBaConfig::boundary_support_min_fixed_keyframes`].
+pub fn fixed_to_optimized_ratio_satisfied(
+    optimized_keyframe_count: usize,
+    fixed_keyframe_count: usize,
+    ratio: f64,
+) -> bool {
+    fixed_keyframe_count >= required_fixed_keyframes(optimized_keyframe_count, ratio)
+}
+
+/// Fraction of the selected optimized landmarks that project behind (or onto)
+/// at least one observing optimized camera in `map`.
+///
+/// Intended to run against the *solved* map (post write-back on a candidate
+/// clone) so a degenerate/under-constrained solve — where optimized landmarks
+/// collapse behind the optimized cameras — can be detected and its write-back
+/// rejected. Uses the same [`Camera::project`] / [`Pose::transform_world_point`]
+/// path as [`selected_outlier_keys`], but unlike [`mean_reprojection_px`],
+/// which silently skips landmarks that fail to project, a non-positive
+/// camera-frame depth (or a `None` projection) is counted here as a hard
+/// degeneracy.
+///
+/// Only cameras in [`CovisibilityLocalBaSelection::optimized_keyframe_ids`]
+/// (the variable-pose set a bad solve corrupts) are scored; fixed boundary
+/// keyframes anchor the gauge and are ignored. A landmark counts as degenerate
+/// if it lands behind *any* optimized camera that observes it. Returns `None`
+/// when no optimized camera observes any selected landmark (nothing to score).
+pub fn behind_camera_optimized_landmark_ratio(
+    map: &VisualMap,
+    selection: &CovisibilityLocalBaSelection,
+) -> Option<f64> {
+    let active_kf = map.keyframes.get(&selection.active_keyframe_id)?;
+    let camera = map.cameras.get(&active_kf.frame.camera_id)?;
+
+    let mut considered = 0usize;
+    let mut degenerate = 0usize;
+    for landmark_id in &selection.landmark_ids {
+        let Some(landmark) = map.landmarks.get(landmark_id) else {
+            continue;
+        };
+        let mut observed_by_optimized = false;
+        let mut behind = false;
+        for keyframe_id in &selection.optimized_keyframe_ids {
+            let Some(keyframe) = map.keyframes.get(keyframe_id) else {
+                continue;
+            };
+            let Some(pose) = keyframe.frame.pose.as_ref() else {
+                continue;
+            };
+            if !keyframe
+                .observations
+                .iter()
+                .any(|obs| obs.landmark_id == *landmark_id)
+            {
+                continue;
+            }
+            observed_by_optimized = true;
+            let point_cam = pose.transform_world_point(&landmark.position);
+            if point_cam.z <= 0.0 || camera.project(&point_cam).is_none() {
+                behind = true;
+                break;
+            }
+        }
+        if observed_by_optimized {
+            considered += 1;
+            if behind {
+                degenerate += 1;
+            }
+        }
+    }
+
+    if considered == 0 {
+        None
+    } else {
+        Some(degenerate as f64 / considered as f64)
+    }
+}
+
 fn selected_outlier_keys(
     map: &VisualMap,
     camera: &Camera,
@@ -1081,5 +1208,59 @@ mod tests {
             .observations
             .iter()
             .any(|obs| { obs.frame_id == 2 && obs.keypoint_index == keypoint_index }));
+    }
+
+    fn behind_camera_test_config() -> CovisibilityLocalBaConfig {
+        CovisibilityLocalBaConfig {
+            max_neighbor_keyframes: 1,
+            min_shared_landmarks: 1,
+            max_boundary_keyframes: 2,
+            min_boundary_observations: 1,
+            min_observations_per_landmark: 2,
+            ..CovisibilityLocalBaConfig::default()
+        }
+    }
+
+    #[test]
+    fn behind_camera_ratio_is_zero_for_healthy_window() {
+        let (map, _) = synthetic_map();
+        let config = behind_camera_test_config();
+        let selection = select_covisibility_local_ba_window(&map, 2, &config).unwrap();
+
+        // All synthetic landmarks sit ~5 m in front of the cameras.
+        let ratio = behind_camera_optimized_landmark_ratio(&map, &selection).unwrap();
+        assert!(ratio.abs() < 1e-9, "healthy window ratio {ratio}");
+    }
+
+    #[test]
+    fn behind_camera_ratio_is_high_when_optimized_landmarks_collapse_behind() {
+        let (mut map, _) = synthetic_map();
+        let config = behind_camera_test_config();
+        let selection = select_covisibility_local_ba_window(&map, 2, &config).unwrap();
+
+        // Simulate a degenerate solve: drive every selected landmark behind the
+        // (identity-rotation) optimized cameras, whose centres sit near z = 0.
+        for landmark_id in &selection.landmark_ids {
+            if let Some(landmark) = map.landmarks.get_mut(landmark_id) {
+                landmark.position.z = -10.0;
+            }
+        }
+
+        let ratio = behind_camera_optimized_landmark_ratio(&map, &selection).unwrap();
+        assert!(ratio > 0.5, "collapsed window ratio {ratio}");
+    }
+
+    #[test]
+    fn fixed_to_optimized_ratio_gate_semantics() {
+        // required = ceil(optimized * ratio); satisfied = fixed >= required.
+        // optimized=7, r=0.34 -> ceil(2.38)=3, so fixed=1 is rejected.
+        assert_eq!(required_fixed_keyframes(7, 0.34), 3);
+        assert!(!fixed_to_optimized_ratio_satisfied(7, 1, 0.34));
+        // optimized=3, r=0.34 -> ceil(1.02)=2, so fixed=2 is accepted.
+        assert_eq!(required_fixed_keyframes(3, 0.34), 2);
+        assert!(fixed_to_optimized_ratio_satisfied(3, 2, 0.34));
+        // A non-positive ratio disables the requirement (always satisfied).
+        assert_eq!(required_fixed_keyframes(7, 0.0), 0);
+        assert!(fixed_to_optimized_ratio_satisfied(7, 0, 0.0));
     }
 }
