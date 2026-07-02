@@ -808,8 +808,8 @@ pub fn fixed_to_optimized_ratio_satisfied(
 /// Intended to run against the *solved* map (post write-back on a candidate
 /// clone) so a degenerate/under-constrained solve — where optimized landmarks
 /// collapse behind the optimized cameras — can be detected and its write-back
-/// rejected. Uses the same [`Camera::project`] / [`Pose::transform_world_point`]
-/// path as [`selected_outlier_keys`], but unlike [`mean_reprojection_px`],
+/// rejected. Uses the same [`Camera::project`] / `Pose::transform_world_point`
+/// path as `selected_outlier_keys`, but unlike `mean_reprojection_px`,
 /// which silently skips landmarks that fail to project, a non-positive
 /// camera-frame depth (or a `None` projection) is counted here as a hard
 /// degeneracy.
