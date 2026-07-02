@@ -31,7 +31,7 @@
 //! ([`PnPLoopClosureVerifier::verify`], [`LoopClosureConstraint`], [`PoseGraph`])
 //! over raw feature sets instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Matrix6, Point2, Point3, Vector6};
 use rayon::prelude::*;
@@ -39,16 +39,18 @@ use rayon::prelude::*;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
-use visloc_vision::matching::{BruteForceMatcher, Matcher};
+use visloc_vision::matching::{BruteForceMatcher, DescriptorMatch, Matcher};
 use visloc_vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::ransac::PnPRansac;
 use visloc_vision::stereo_vo::StereoFeature;
+use visloc_vision::two_view::TwoViewCorrespondence;
 
 use crate::gnc::{GncConfig, AUTO_SCALE_K};
 use crate::{
     relative_world_to_camera, BaConfig, BaObservation, BaStereoObservation, BundleAdjustment,
-    LinearSolver, LoopClosureConstraint, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
+    EssentialMatrixLoopClosureVerifier, LinearSolver, LoopClosureConstraint,
+    LoopClosureVerificationFailureReason, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
     PoseGraph, PoseGraphEdgeKind, PoseGraphError, PoseGraphGncResult, PoseGraphSe3Config,
     RobustKernel,
 };
@@ -105,6 +107,16 @@ pub struct VoLoopClosureConfig {
     pub verifier: PnPLoopClosureVerifierConfig,
     /// PnP RANSAC backend used by the verifier.
     pub ransac: PnPRansac,
+    /// Before PnP, optionally retain only correspondences that are also
+    /// essential-matrix inliers under the same loop-pair match set. This is an
+    /// opt-in diagnostic/policy lever for long-baseline loop candidates where
+    /// 2D-2D geometry is strong but stereo-lifted 2D-3D correspondences are
+    /// noisy. `false` keeps the historical PnP input unchanged.
+    pub pnp_essential_inlier_filter: bool,
+    /// Bias loop PnP RANSAC sampling by descriptor-match confidence when
+    /// enough finite positive confidences are available and their spread is
+    /// meaningful. `false` keeps historical uniform sampling.
+    pub pnp_confidence_weighted_sampling: bool,
     /// SE(3) pose-graph solver configuration.
     pub se3: PoseGraphSe3Config,
     /// GNC robust-optimization configuration.
@@ -154,6 +166,8 @@ impl Default for VoLoopClosureConfig {
             match_ratio: Some(0.8),
             verifier: PnPLoopClosureVerifierConfig::default(),
             ransac: PnPRansac::default(),
+            pnp_essential_inlier_filter: false,
+            pnp_confidence_weighted_sampling: false,
             se3: PoseGraphSe3Config {
                 robust_kernel: RobustKernel::None,
                 linear_solver: LinearSolver::Sparse,
@@ -181,6 +195,117 @@ pub struct LoopCandidatePair {
     pub similarity: f32,
 }
 
+/// Geometry-verification diagnostics for one appearance-proposed loop
+/// candidate. This is intended for benchmark artifacts and failure analysis:
+/// it records candidates that were never attempted because of
+/// `max_verifications` as well as candidates rejected by PnP.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopCandidateVerificationDiagnostic {
+    /// Earlier (revisited) frame index.
+    pub older: usize,
+    /// Later (query) frame index.
+    pub newer: usize,
+    /// Appearance similarity that proposed the pair.
+    pub similarity: f32,
+    /// Whether the expensive descriptor-match + PnP verifier was run.
+    pub attempted: bool,
+    /// Raw left-descriptor match count between the newer and older frames.
+    pub match_count: usize,
+    /// Matcher source used for the row (`bruteforce`, `external`, or
+    /// `not_run`).
+    pub match_source: String,
+    /// Matches that survived the older-frame stereo-depth lookup and were
+    /// supplied to PnP as 2D-3D correspondences.
+    pub pnp_correspondence_count: usize,
+    /// Stereo-lifted 2D-3D correspondences before optional essential-inlier
+    /// filtering.
+    pub pnp_unfiltered_correspondence_count: usize,
+    /// PnP input policy used (`none`, `essential_inliers`, or
+    /// `essential_unverified`).
+    pub pnp_filter: String,
+    /// Whether PnP RANSAC used descriptor-match confidence for sampling.
+    pub pnp_weighted_sampling: bool,
+    /// Confidence-weight policy decision (`disabled`, `enabled`,
+    /// `missing_confidence`, `insufficient_confidence`, or
+    /// `low_confidence_spread`).
+    pub pnp_weight_policy: String,
+    /// Number of PnP correspondences with finite positive confidence values.
+    pub pnp_weight_confidence_count: usize,
+    /// Ratio `max(confidence) / min(confidence)` across valid confidence
+    /// values. `0.0` when no finite positive confidences are present.
+    pub pnp_weight_confidence_spread: f32,
+    /// 2D-2D correspondences supplied to essential-matrix verification.
+    pub essential_correspondence_count: usize,
+    /// Whether the same match set passed essential-matrix verification.
+    pub essential_verified: bool,
+    /// Essential-matrix verifier rejection label.
+    pub essential_failure_reason: Option<String>,
+    /// Essential-matrix RANSAC inlier count.
+    pub essential_inlier_count: usize,
+    /// Essential-matrix RANSAC inlier ratio.
+    pub essential_inlier_ratio: f64,
+    /// Essential-matrix mean Sampson error in normalized image-plane units.
+    pub essential_mean_sampson_error: f64,
+    /// Essential-matrix verifier score.
+    pub essential_score: f64,
+    /// Whether essential-matrix verification recovered a relative pose.
+    pub essential_has_relative_pose: bool,
+    /// True only when the candidate produced a loop constraint consumed by PGO.
+    pub verified: bool,
+    /// Rejection label. Existing verifier failures use their enum debug name;
+    /// VO-path-specific failures use short snake_case labels.
+    pub failure_reason: Option<String>,
+    /// PnP inlier count reported by the verifier.
+    pub inlier_count: usize,
+    /// PnP inlier ratio reported by the verifier.
+    pub inlier_ratio: f64,
+    /// Mean Sampson error from essential-matrix verifiers. For the current PnP
+    /// path this is usually `0.0`; prefer `mean_reprojection_error_px`.
+    pub mean_sampson_error: f64,
+    /// Mean reprojection error in pixels for PnP verification.
+    pub mean_reprojection_error_px: Option<f64>,
+    /// Verifier score, useful for ranking accepted and near-miss candidates.
+    pub score: f64,
+    /// Whether the verifier recovered a relative pose at all.
+    pub has_relative_pose: bool,
+}
+
+impl LoopCandidateVerificationDiagnostic {
+    fn not_attempted(candidate: &LoopCandidatePair) -> Self {
+        Self {
+            older: candidate.older,
+            newer: candidate.newer,
+            similarity: candidate.similarity,
+            attempted: false,
+            match_count: 0,
+            match_source: "not_run".to_string(),
+            pnp_correspondence_count: 0,
+            pnp_unfiltered_correspondence_count: 0,
+            pnp_filter: "not_run".to_string(),
+            pnp_weighted_sampling: false,
+            pnp_weight_policy: "not_run".to_string(),
+            pnp_weight_confidence_count: 0,
+            pnp_weight_confidence_spread: 0.0,
+            essential_correspondence_count: 0,
+            essential_verified: false,
+            essential_failure_reason: Some("not_attempted".to_string()),
+            essential_inlier_count: 0,
+            essential_inlier_ratio: 0.0,
+            essential_mean_sampson_error: 0.0,
+            essential_score: 0.0,
+            essential_has_relative_pose: false,
+            verified: false,
+            failure_reason: Some("not_attempted".to_string()),
+            inlier_count: 0,
+            inlier_ratio: 0.0,
+            mean_sampson_error: 0.0,
+            mean_reprojection_error_px: None,
+            score: 0.0,
+            has_relative_pose: false,
+        }
+    }
+}
+
 /// Output of [`close_loops_on_vo_trajectory`].
 #[derive(Debug, Clone)]
 pub struct VoLoopClosureResult {
@@ -189,6 +314,13 @@ pub struct VoLoopClosureResult {
     pub refined_poses: Vec<Pose>,
     /// Verified metric loop constraints fed into the pose graph.
     pub loop_constraints: Vec<LoopClosureConstraint>,
+    /// Appearance-proposed loop candidates after temporal/path-length gates and
+    /// before geometric verification. This is the retrieval-stage artifact used
+    /// to measure recall@K independently of PnP/PGO.
+    pub candidate_pairs: Vec<LoopCandidatePair>,
+    /// Per-candidate geometry-verification diagnostics, ordered like
+    /// `candidate_pairs`.
+    pub verification_diagnostics: Vec<LoopCandidateVerificationDiagnostic>,
     /// Appearance-proposed candidate count (pre-verification).
     pub candidate_count: usize,
     /// GNC solver report. `None` when no loop was verified (PGO is skipped and
@@ -344,6 +476,213 @@ struct LoopBaCorrespondence {
     newer_xy: Point2<f64>,
 }
 
+#[derive(Debug, Clone)]
+struct PnpLoopCorrespondenceEntry {
+    two_view_index: usize,
+    correspondence: Correspondence2D3D,
+    ba_correspondence: LoopBaCorrespondence,
+}
+
+#[derive(Debug, Clone)]
+struct LoopCandidateVerificationOutcome {
+    diagnostic: LoopCandidateVerificationDiagnostic,
+    verified: Option<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PnpWeightPolicy {
+    weights: Option<Vec<f32>>,
+    label: &'static str,
+    confidence_count: usize,
+    confidence_spread: f32,
+}
+
+fn select_pnp_confidence_weights(
+    requested: bool,
+    entries: &[PnpLoopCorrespondenceEntry],
+    min_confidence_count: usize,
+) -> PnpWeightPolicy {
+    if !requested {
+        return PnpWeightPolicy {
+            weights: None,
+            label: "disabled",
+            confidence_count: 0,
+            confidence_spread: 0.0,
+        };
+    }
+
+    let mut confidence_count = 0usize;
+    let mut min_confidence = f32::INFINITY;
+    let mut max_confidence = 0.0f32;
+    for entry in entries {
+        if let Some(confidence) = entry.correspondence.confidence {
+            if confidence.is_finite() && confidence > 0.0 {
+                confidence_count += 1;
+                min_confidence = min_confidence.min(confidence);
+                max_confidence = max_confidence.max(confidence);
+            }
+        }
+    }
+    if confidence_count == 0 {
+        return PnpWeightPolicy {
+            weights: None,
+            label: "missing_confidence",
+            confidence_count,
+            confidence_spread: 0.0,
+        };
+    }
+
+    let confidence_spread = if min_confidence.is_finite() && min_confidence > 0.0 {
+        max_confidence / min_confidence
+    } else {
+        0.0
+    };
+    let required = min_confidence_count.max(4);
+    if confidence_count < required {
+        return PnpWeightPolicy {
+            weights: None,
+            label: "insufficient_confidence",
+            confidence_count,
+            confidence_spread,
+        };
+    }
+    // Weighted sampling only helps when the matcher is actually expressing a
+    // preference. Near-uniform scores add nondeterministic ordering pressure
+    // without useful signal, so keep those candidates on the historical uniform
+    // path.
+    if confidence_spread < 1.05 {
+        return PnpWeightPolicy {
+            weights: None,
+            label: "low_confidence_spread",
+            confidence_count,
+            confidence_spread,
+        };
+    }
+
+    PnpWeightPolicy {
+        weights: Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .correspondence
+                        .confidence
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .unwrap_or(min_confidence)
+                })
+                .collect(),
+        ),
+        label: "enabled",
+        confidence_count,
+        confidence_spread,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EssentialLoopVerificationDiagnostic {
+    correspondence_count: usize,
+    verified: bool,
+    failure_reason: Option<LoopClosureVerificationFailureReason>,
+    inlier_count: usize,
+    inlier_ratio: f64,
+    mean_sampson_error: f64,
+    score: f64,
+    has_relative_pose: bool,
+    inliers: Vec<usize>,
+}
+
+fn verify_loop_candidate_essential(
+    verifier: &EssentialMatrixLoopClosureVerifier,
+    correspondences: &[TwoViewCorrespondence],
+    weights: Option<&[f32]>,
+    camera: &Camera,
+) -> EssentialLoopVerificationDiagnostic {
+    let correspondence_count = correspondences.len();
+    let minimum = verifier
+        .estimator
+        .ransac
+        .estimator
+        .min_correspondences
+        .max(verifier.config.min_inliers);
+    if correspondence_count < minimum {
+        return EssentialLoopVerificationDiagnostic {
+            correspondence_count,
+            verified: false,
+            failure_reason: Some(LoopClosureVerificationFailureReason::InsufficientCorrespondences),
+            inlier_count: 0,
+            inlier_ratio: 0.0,
+            mean_sampson_error: f64::INFINITY,
+            score: 0.0,
+            has_relative_pose: false,
+            inliers: Vec::new(),
+        };
+    }
+
+    let relative_pose = match weights {
+        Some(w) if w.len() == correspondences.len() => {
+            verifier.estimator.estimate_with_scale_and_weights(
+                correspondences,
+                camera,
+                verifier.config.default_translation_scale,
+                w,
+            )
+        }
+        _ => verifier.estimator.estimate_with_scale(
+            correspondences,
+            camera,
+            verifier.config.default_translation_scale,
+        ),
+    };
+    let Some(relative_pose) = relative_pose else {
+        return EssentialLoopVerificationDiagnostic {
+            correspondence_count,
+            verified: false,
+            failure_reason: Some(LoopClosureVerificationFailureReason::EssentialEstimationFailed),
+            inlier_count: 0,
+            inlier_ratio: 0.0,
+            mean_sampson_error: f64::INFINITY,
+            score: 0.0,
+            has_relative_pose: false,
+            inliers: Vec::new(),
+        };
+    };
+
+    let inlier_count = relative_pose.inliers.len();
+    let inlier_ratio = inlier_count as f64 / correspondence_count as f64;
+    let mean_sampson = relative_pose.mean_sampson_error;
+    let mut failure_reason = None;
+    if inlier_count < verifier.config.min_inliers {
+        failure_reason = Some(LoopClosureVerificationFailureReason::TooFewInliers);
+    } else if inlier_ratio < verifier.config.min_inlier_ratio {
+        failure_reason = Some(LoopClosureVerificationFailureReason::LowInlierRatio);
+    } else if mean_sampson > verifier.config.max_mean_sampson_error {
+        failure_reason = Some(LoopClosureVerificationFailureReason::HighSampsonError);
+    }
+    let inlier_volume = inlier_ratio * inlier_count as f64;
+    let denominator = mean_sampson.max(1.0e-6);
+    let score = if denominator.is_finite() {
+        inlier_volume / denominator
+    } else {
+        inlier_volume
+    };
+
+    EssentialLoopVerificationDiagnostic {
+        correspondence_count,
+        verified: failure_reason.is_none(),
+        failure_reason,
+        inlier_count,
+        inlier_ratio,
+        mean_sampson_error: mean_sampson,
+        score,
+        has_relative_pose: true,
+        inliers: relative_pose.inliers,
+    }
+}
+
+fn verification_failure_label(reason: LoopClosureVerificationFailureReason) -> String {
+    format!("{reason:?}")
+}
+
 /// Geometrically verify one candidate pair. Matches the newer frame's left
 /// descriptors against the older frame's, lifts the older keypoints to world
 /// 3D via the older frame's stereo depth and pose, and runs PnP. Returns a
@@ -356,11 +695,16 @@ fn verify_loop_candidate(
     poses: &[Pose],
     left_features: &[FeatureSet],
     stereo_per_frame: &[Vec<StereoFeature>],
-    older: usize,
-    newer: usize,
+    candidate: &LoopCandidatePair,
     matcher: &BruteForceMatcher,
     verifier: &PnPLoopClosureVerifier,
-) -> Option<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)> {
+    essential_verifier: &EssentialMatrixLoopClosureVerifier,
+    pnp_essential_inlier_filter: bool,
+    pnp_confidence_weighted_sampling: bool,
+    external_matches: Option<&[DescriptorMatch]>,
+) -> LoopCandidateVerificationOutcome {
+    let older = candidate.older;
+    let newer = candidate.newer;
     let older_pose = &poses[older];
     let camera_to_world = older_pose.camera_to_world();
 
@@ -372,21 +716,23 @@ fn verify_loop_candidate(
     for stereo in &stereo_per_frame[older] {
         stereo_by_index.insert(stereo.left_index, (stereo.point_cam, stereo.disparity));
     }
-    if stereo_by_index.is_empty() {
-        return None;
-    }
 
-    let matches = matcher.match_descriptors(
-        &left_features[newer].descriptors,
-        &left_features[older].descriptors,
-    );
-    let mut correspondences = Vec::with_capacity(matches.len());
-    let mut ba_correspondences = Vec::with_capacity(matches.len());
-    for descriptor_match in &matches {
-        let Some(&(point_cam, disparity)) = stereo_by_index.get(&descriptor_match.train_index)
-        else {
-            continue;
-        };
+    let owned_matches;
+    let (matches, match_source): (&[DescriptorMatch], &str) = match external_matches {
+        Some(matches) => (matches, "external"),
+        None => {
+            owned_matches = matcher.match_descriptors(
+                &left_features[newer].descriptors,
+                &left_features[older].descriptors,
+            );
+            (&owned_matches, "bruteforce")
+        }
+    };
+    let mut pnp_entries = Vec::with_capacity(matches.len());
+    let mut two_view_correspondences = Vec::with_capacity(matches.len());
+    let mut weights = Vec::with_capacity(matches.len());
+    let mut any_confidence = false;
+    for descriptor_match in matches {
         let Some(&point2d) = left_features[newer]
             .keypoints
             .get(descriptor_match.query_index)
@@ -399,36 +745,151 @@ fn verify_loop_candidate(
         else {
             continue;
         };
-        correspondences.push(Correspondence2D3D {
-            point2d,
-            point3d: camera_to_world.transform_point(&point_cam),
-            confidence: descriptor_match.confidence,
+        let two_view_index = two_view_correspondences.len();
+        two_view_correspondences.push(TwoViewCorrespondence {
+            previous_xy: older_xy,
+            current_xy: point2d,
         });
-        ba_correspondences.push(LoopBaCorrespondence {
-            older_xy,
-            older_point_cam: point_cam,
-            disparity,
-            newer_xy: point2d,
+        if let Some(confidence) = descriptor_match.confidence {
+            any_confidence = true;
+            weights.push(confidence);
+        } else {
+            weights.push(1.0);
+        }
+        let Some(&(point_cam, disparity)) = stereo_by_index.get(&descriptor_match.train_index)
+        else {
+            continue;
+        };
+        pnp_entries.push(PnpLoopCorrespondenceEntry {
+            two_view_index,
+            correspondence: Correspondence2D3D {
+                point2d,
+                point3d: camera_to_world.transform_point(&point_cam),
+                confidence: descriptor_match.confidence,
+            },
+            ba_correspondence: LoopBaCorrespondence {
+                older_xy,
+                older_point_cam: point_cam,
+                disparity,
+                newer_xy: point2d,
+            },
         });
     }
 
-    let verification = verifier.verify(&correspondences, older_pose, camera);
+    let weights_slice = if any_confidence {
+        Some(weights.as_slice())
+    } else {
+        None
+    };
+    let essential_verification = verify_loop_candidate_essential(
+        essential_verifier,
+        &two_view_correspondences,
+        weights_slice,
+        camera,
+    );
+    let pnp_unfiltered_correspondence_count = pnp_entries.len();
+    let (pnp_filter, filtered_entries): (&str, Vec<PnpLoopCorrespondenceEntry>) =
+        if pnp_essential_inlier_filter {
+            if essential_verification.verified {
+                let inlier_set: HashSet<usize> =
+                    essential_verification.inliers.iter().copied().collect();
+                (
+                    "essential_inliers",
+                    pnp_entries
+                        .iter()
+                        .filter(|entry| inlier_set.contains(&entry.two_view_index))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                ("essential_unverified", pnp_entries)
+            }
+        } else {
+            ("none", pnp_entries)
+        };
+    let correspondences: Vec<Correspondence2D3D> = filtered_entries
+        .iter()
+        .map(|entry| entry.correspondence.clone())
+        .collect();
+    let ba_correspondences: Vec<LoopBaCorrespondence> = filtered_entries
+        .iter()
+        .map(|entry| entry.ba_correspondence)
+        .collect();
+    let pnp_weight_policy = select_pnp_confidence_weights(
+        pnp_confidence_weighted_sampling,
+        &filtered_entries,
+        verifier.config.min_inliers,
+    );
+    let verification = verifier.verify_with_weights(
+        &correspondences,
+        older_pose,
+        camera,
+        pnp_weight_policy.weights.as_deref(),
+    );
+    let has_relative_pose = verification.relative_pose.is_some();
+    let mut diagnostic = LoopCandidateVerificationDiagnostic {
+        older,
+        newer,
+        similarity: candidate.similarity,
+        attempted: true,
+        match_count: matches.len(),
+        match_source: match_source.to_string(),
+        pnp_correspondence_count: correspondences.len(),
+        pnp_unfiltered_correspondence_count,
+        pnp_filter: pnp_filter.to_string(),
+        pnp_weighted_sampling: pnp_weight_policy.weights.is_some(),
+        pnp_weight_policy: pnp_weight_policy.label.to_string(),
+        pnp_weight_confidence_count: pnp_weight_policy.confidence_count,
+        pnp_weight_confidence_spread: pnp_weight_policy.confidence_spread,
+        essential_correspondence_count: essential_verification.correspondence_count,
+        essential_verified: essential_verification.verified,
+        essential_failure_reason: essential_verification
+            .failure_reason
+            .map(verification_failure_label),
+        essential_inlier_count: essential_verification.inlier_count,
+        essential_inlier_ratio: essential_verification.inlier_ratio,
+        essential_mean_sampson_error: essential_verification.mean_sampson_error,
+        essential_score: essential_verification.score,
+        essential_has_relative_pose: essential_verification.has_relative_pose,
+        verified: false,
+        failure_reason: verification.failure_reason.map(verification_failure_label),
+        inlier_count: verification.inlier_count,
+        inlier_ratio: verification.inlier_ratio,
+        mean_sampson_error: verification.mean_sampson_error,
+        mean_reprojection_error_px: verification.mean_reprojection_error_px,
+        score: verification.score,
+        has_relative_pose,
+    };
     if !verification.verified {
-        return None;
+        return LoopCandidateVerificationOutcome {
+            diagnostic,
+            verified: None,
+        };
     }
-    let relative_pose = verification.relative_pose.clone()?;
-    Some((
-        LoopClosureConstraint {
-            from_keyframe_id: older as u64,
-            to_keyframe_id: newer as u64,
-            relative_pose,
-            inlier_count: verification.inlier_count,
-            inlier_ratio: verification.inlier_ratio,
-            mean_sampson_error: verification.mean_sampson_error,
-            score: verification.score,
-        },
-        ba_correspondences,
-    ))
+    let Some(relative_pose) = verification.relative_pose.clone() else {
+        diagnostic.failure_reason = Some("missing_relative_pose".to_string());
+        return LoopCandidateVerificationOutcome {
+            diagnostic,
+            verified: None,
+        };
+    };
+    diagnostic.verified = true;
+    diagnostic.failure_reason = None;
+    LoopCandidateVerificationOutcome {
+        diagnostic,
+        verified: Some((
+            LoopClosureConstraint {
+                from_keyframe_id: older as u64,
+                to_keyframe_id: newer as u64,
+                relative_pose,
+                inlier_count: verification.inlier_count,
+                inlier_ratio: verification.inlier_ratio,
+                mean_sampson_error: verification.mean_sampson_error,
+                score: verification.score,
+            },
+            ba_correspondences,
+        )),
+    }
 }
 
 /// Re-grind one verified loop's relative pose with a local two-view bundle
@@ -663,6 +1124,31 @@ pub fn close_loops_on_vo_trajectory(
     )
 }
 
+/// Like [`close_loops_on_vo_trajectory`], but use caller-supplied descriptor
+/// matches for selected loop candidates. The key is `(older, newer)` and the
+/// match convention is `query_index = newer left feature`,
+/// `train_index = older left feature`. Candidates without an entry fall back to
+/// the built-in brute-force descriptor matcher.
+pub fn close_loops_on_vo_trajectory_with_loop_matches(
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    loop_matches: &HashMap<(usize, usize), Vec<DescriptorMatch>>,
+    config: &VoLoopClosureConfig,
+) -> Result<VoLoopClosureResult, VoLoopClosureError> {
+    let globals = compute_frame_globals(left_features, config)?;
+    close_loops_on_vo_trajectory_with_globals_impl(
+        camera,
+        poses,
+        left_features,
+        stereo_per_frame,
+        &globals,
+        Some(loop_matches),
+        config,
+    )
+}
+
 /// Like [`close_loops_on_vo_trajectory`] but with the per-frame *global
 /// descriptors* supplied by the caller instead of computed internally as a
 /// k-means VLAD over the local SuperPoint descriptors.
@@ -687,6 +1173,51 @@ pub fn close_loops_on_vo_trajectory_with_globals(
     left_features: &[FeatureSet],
     stereo_per_frame: &[Vec<StereoFeature>],
     globals: &[Vec<f32>],
+    config: &VoLoopClosureConfig,
+) -> Result<VoLoopClosureResult, VoLoopClosureError> {
+    close_loops_on_vo_trajectory_with_globals_impl(
+        camera,
+        poses,
+        left_features,
+        stereo_per_frame,
+        globals,
+        None,
+        config,
+    )
+}
+
+/// Like [`close_loops_on_vo_trajectory_with_globals`], but use caller-supplied
+/// descriptor matches for selected loop candidates. The key is `(older, newer)`
+/// and the match convention is `query_index = newer left feature`,
+/// `train_index = older left feature`. Candidates without an entry fall back to
+/// the built-in brute-force descriptor matcher.
+pub fn close_loops_on_vo_trajectory_with_globals_and_loop_matches(
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    globals: &[Vec<f32>],
+    loop_matches: &HashMap<(usize, usize), Vec<DescriptorMatch>>,
+    config: &VoLoopClosureConfig,
+) -> Result<VoLoopClosureResult, VoLoopClosureError> {
+    close_loops_on_vo_trajectory_with_globals_impl(
+        camera,
+        poses,
+        left_features,
+        stereo_per_frame,
+        globals,
+        Some(loop_matches),
+        config,
+    )
+}
+
+fn close_loops_on_vo_trajectory_with_globals_impl(
+    camera: &Camera,
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    stereo_per_frame: &[Vec<StereoFeature>],
+    globals: &[Vec<f32>],
+    loop_matches: Option<&HashMap<(usize, usize), Vec<DescriptorMatch>>>,
     config: &VoLoopClosureConfig,
 ) -> Result<VoLoopClosureResult, VoLoopClosureError> {
     let n = poses.len();
@@ -718,6 +1249,7 @@ pub fn close_loops_on_vo_trajectory_with_globals(
         ratio: config.match_ratio,
     };
     let verifier = PnPLoopClosureVerifier::new(config.ransac, config.verifier);
+    let essential_verifier = EssentialMatrixLoopClosureVerifier::default();
 
     // Verify in descending appearance similarity so a `max_verifications` cap
     // spends the (expensive) geometric stage on the most promising pairs first.
@@ -736,19 +1268,42 @@ pub fn close_loops_on_vo_trajectory_with_globals(
     // so verify in parallel. The PnP RANSAC seed is fixed, so results are
     // thread-count-independent; `collect` preserves the (similarity-sorted)
     // order so the pose graph's edge order is deterministic.
-    let verified: Vec<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)> = to_verify
+    let outcomes: Vec<LoopCandidateVerificationOutcome> = to_verify
         .par_iter()
-        .filter_map(|candidate| {
+        .map(|candidate| {
             verify_loop_candidate(
                 camera,
                 poses,
                 left_features,
                 stereo_per_frame,
-                candidate.older,
-                candidate.newer,
+                candidate,
                 &matcher,
                 &verifier,
+                &essential_verifier,
+                config.pnp_essential_inlier_filter,
+                config.pnp_confidence_weighted_sampling,
+                loop_matches
+                    .and_then(|matches| matches.get(&(candidate.older, candidate.newer)))
+                    .map(Vec::as_slice),
             )
+        })
+        .collect();
+    let mut verified: Vec<(LoopClosureConstraint, Vec<LoopBaCorrespondence>)> = Vec::new();
+    let mut diagnostics_by_pair: HashMap<(usize, usize), LoopCandidateVerificationDiagnostic> =
+        HashMap::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        let diagnostic = outcome.diagnostic;
+        if let Some(verified_loop) = outcome.verified {
+            verified.push(verified_loop);
+        }
+        diagnostics_by_pair.insert((diagnostic.older, diagnostic.newer), diagnostic);
+    }
+    let verification_diagnostics: Vec<LoopCandidateVerificationDiagnostic> = candidates
+        .iter()
+        .map(|candidate| {
+            diagnostics_by_pair
+                .remove(&(candidate.older, candidate.newer))
+                .unwrap_or_else(|| LoopCandidateVerificationDiagnostic::not_attempted(candidate))
         })
         .collect();
 
@@ -790,6 +1345,8 @@ pub fn close_loops_on_vo_trajectory_with_globals(
         return Ok(VoLoopClosureResult {
             refined_poses: poses.to_vec(),
             loop_constraints,
+            candidate_pairs: candidates.clone(),
+            verification_diagnostics,
             candidate_count: candidates.len(),
             gnc: None,
         });
@@ -835,6 +1392,8 @@ pub fn close_loops_on_vo_trajectory_with_globals(
     Ok(VoLoopClosureResult {
         refined_poses,
         loop_constraints,
+        candidate_pairs: candidates.clone(),
+        verification_diagnostics,
         candidate_count: candidates.len(),
         gnc: Some(gnc),
     })
@@ -848,6 +1407,62 @@ mod tests {
 
     fn camera() -> Camera {
         Camera::pinhole(0, 1280, 480, 600.0, 600.0, 640.0, 240.0)
+    }
+
+    fn pnp_entry(confidence: Option<f32>) -> PnpLoopCorrespondenceEntry {
+        let xy = Point2::new(10.0, 20.0);
+        let point = Point3::new(0.1, 0.2, 3.0);
+        PnpLoopCorrespondenceEntry {
+            two_view_index: 0,
+            correspondence: Correspondence2D3D {
+                point2d: xy,
+                point3d: point,
+                confidence,
+            },
+            ba_correspondence: LoopBaCorrespondence {
+                older_xy: xy,
+                older_point_cam: point,
+                disparity: 10.0,
+                newer_xy: xy,
+            },
+        }
+    }
+
+    #[test]
+    fn pnp_confidence_weight_policy_uses_weights_only_with_real_signal() {
+        let strong = [0.2, 0.9, 0.4, 0.8, 0.3, 0.7, 0.5, 0.6]
+            .into_iter()
+            .map(|confidence| pnp_entry(Some(confidence)))
+            .collect::<Vec<_>>();
+        let policy = select_pnp_confidence_weights(true, &strong, 8);
+        assert_eq!(policy.label, "enabled");
+        assert_eq!(policy.confidence_count, 8);
+        assert!(policy.confidence_spread > 4.0);
+        assert_eq!(policy.weights.as_ref().map(Vec::len), Some(strong.len()));
+
+        let uniform = vec![pnp_entry(Some(0.5)); 8];
+        let policy = select_pnp_confidence_weights(true, &uniform, 8);
+        assert_eq!(policy.label, "low_confidence_spread");
+        assert!(policy.weights.is_none());
+
+        let missing = vec![pnp_entry(None); 8];
+        let policy = select_pnp_confidence_weights(true, &missing, 8);
+        assert_eq!(policy.label, "missing_confidence");
+        assert!(policy.weights.is_none());
+
+        let insufficient = vec![
+            pnp_entry(Some(0.1)),
+            pnp_entry(Some(0.9)),
+            pnp_entry(Some(0.4)),
+        ];
+        let policy = select_pnp_confidence_weights(true, &insufficient, 8);
+        assert_eq!(policy.label, "insufficient_confidence");
+        assert_eq!(policy.confidence_count, 3);
+        assert!(policy.weights.is_none());
+
+        let disabled = select_pnp_confidence_weights(false, &strong, 8);
+        assert_eq!(disabled.label, "disabled");
+        assert!(disabled.weights.is_none());
     }
 
     /// A landmark's descriptor: a deterministic, *continuous* per-id vector so
@@ -1027,6 +1642,19 @@ mod tests {
             result.verified_count(),
             result.candidate_count
         );
+        assert_eq!(result.candidate_pairs.len(), result.candidate_count);
+        assert_eq!(
+            result.verification_diagnostics.len(),
+            result.candidate_count
+        );
+        assert_eq!(
+            result
+                .verification_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.verified)
+                .count(),
+            result.verified_count()
+        );
 
         let before = ate_rmse(&vo_poses, &true_poses);
         let after = ate_rmse(&result.refined_poses, &true_poses);
@@ -1078,6 +1706,15 @@ mod tests {
         assert_eq!(result.verified_count(), 0);
         assert!(result.gnc.is_none());
         assert_eq!(result.refined_poses.len(), n);
+        assert_eq!(result.candidate_pairs.len(), result.candidate_count);
+        assert_eq!(
+            result.verification_diagnostics.len(),
+            result.candidate_count
+        );
+        assert!(result
+            .verification_diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.verified));
     }
 
     /// The two-view loop refinement recovers a loop edge biased by *noisy older

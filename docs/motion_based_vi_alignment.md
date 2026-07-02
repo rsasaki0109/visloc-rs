@@ -358,6 +358,31 @@ two opt-in CLI knobs:
   frozen** at their pre-BA linearisation points and writes only the
   refined poses + velocities back. The discarded bias updates were
   fitting noise into the wrong cost-surface minimum.
+* `--local-vi-ba-reject-writeback-above <ratio>` — stricter local
+  VI-BA quality gate. Maps to
+  `OnlineSlamLocalBaConfig::reject_writeback_when_cost_ratio_above`.
+  When the selected BA result has `final_cost / initial_cost > ratio`,
+  the trigger returns diagnostics but skips all map/state writeback.
+  This is the safety valve for tight-VIO experiments where a bad IMU
+  factor would otherwise corrupt the visual map.
+* `--local-vi-ba-reject-velocity-above <m/s>` — refined-velocity
+  quality gate on local VI-BA. Maps to
+  `OnlineSlamLocalBaConfig::reject_writeback_when_velocity_norm_above_mps`.
+  When any refined in-window `||velocity_world||` exceeds the cap, the
+  trigger returns diagnostics but skips all map/state writeback. This
+  catches non-physical tight-VIO solves that reduce cost by injecting
+  bad velocity state.
+* `--local-vi-ba-adaptive-velocity-gate` — adaptive refined-velocity
+  quality gate on local VI-BA. Maps to
+  `OnlineSlamLocalBaConfig::adaptive_velocity_gate`. The threshold is
+  derived per trigger from the local window's existing velocity state
+  plus pose-delta / IMU-`dt` finite differences and IMU-predicted
+  next-keyframe velocities, then bounded by the configured quantile,
+  multiplier, margin, and min/max limits. This is the preferred
+  diagnostics path after the fixed-cap smoke showed that a raw 10 m/s
+  cap is too sequence-dependent; keep
+  `--local-vi-ba-reject-velocity-above` only as an optional safety
+  ceiling or A/B control.
 
 A 4-cell A/B grid (each on top of `--motion-vi-init --local-vi-ba`)
 isolates the contribution of each knob:
@@ -2164,7 +2189,7 @@ cargo run --release --features image-io \
 **Path forward (post-Phase-20).** With the every-frame gate + floor pair stabilised, the next levers are no longer about VI-init / motion-VI timing — they sit upstream at the tracker / mapper:
 
 1. **Tracker survivability on V-class sequences.** V1/V2 tracking_success_rate is still ~5–6 % at 1500 frames. Most of the trajectory is reconstructed from a tiny minority of frames; growing this would simultaneously lift ATE accuracy AND grow KF count past motion-VI-init's `min_keyframes` gate. The candidate is `--motion-vi-init-min-keyframes 2` (just-determined 9-DOF / 9-eq system) paired with a Tikhonov-style bias-drift prior to suppress the degenerate intermediate-KF biases the Phase-18 doc flagged.
-2. **KF count on V-class sequences.** `KeyframePolicy` still emits only 2 KFs per 1500-frame V1/V2 run. The bottleneck is parallax (slow indoor hover) — a covisibility-aware KF promotion criterion (ORB-SLAM3's "if the local map's tracked landmarks drop below 90 % of the last KF's, promote") would lift the count without needing artificial min_translation tuning.
+2. **KF count on V-class sequences.** `KeyframePolicy` now exposes an opt-in tracked-landmark-drop trigger (`--keyframe-tracked-landmark-ratio`, guarded by `--keyframe-min-tracked-landmarks-for-ratio`) so V1/V2 can promote keyframes when PnP inlier support falls relative to the last keyframe even if translation is still small. This is the ORB-SLAM-style local-map-point drop lever; it still needs V-class A/B runs before any metric claim.
 3. **MH-class motion-VI-init upgrade to VIBA2.** MH_01 fires VIBA1 at scale=1.0 with 3 KFs / 2 factors; the natural next iteration is enabling `--motion-vi-init-recover-scale` so VIBA2's outer scale-recovery loop runs against the same factors. This would only matter once monocular bootstrap depth becomes the binding ATE constraint (currently stereo bootstrap dominates).
 
 ## Phase-21 follow-up validation — universal tracker cliff (diagnostic, negative result)
@@ -2703,3 +2728,314 @@ See `docs/superpoint_onnx_runtime_plan.md` for the activation contract, model so
 **Shipped.** `rust-toolchain.toml` pins the channel to `1.94.0` with `minimal` profile + `rustfmt` / `clippy` components. Bump policy: re-run V2_01 strict / V1_01 strict baselines and update the empirical-results ledger in `docs/binary_determinism_findings.md` when the channel changes. New `scripts/verify_binary_determinism.sh` runs a three-step protocol (clean build → V2_01 strict; same binary → second run; touch source + rebuild → third run) and writes `target/binary_determinism_verify/COMPARE.md` with side-by-side ATE numbers — intended for re-execution after every channel bump and every significant tracker / PnP refactor. New `docs/binary_determinism_findings.md` is the single-source-of-truth for the problem statement, hypothesis-ranking (four candidates), mitigations status, and the ledger table.
 
 **What is *not* shipped.** Kahan / Neumaier summation, P3P closed-form RANSAC, and `-Cllvm-args=-fp-contract=off` are documented as conditional next-step levers — gated on the toolchain pin proving insufficient against the ledger numbers. The findings doc lays out the decision gates so a future contributor can decide based on data, not speculation.
+
+## Tracking-survival rescue follow-up (2026-06-20)
+
+**Question.** After the local-VI-BA adaptive velocity gate, the remaining
+Machine Hall failure mode is not "bad VI writeback" but tracker survival:
+primary PnP drops too early, leaving the VI stages with too few keyframes
+and stale visual corrections. This pass tested whether the existing
+relocalization-on-tracker-death path can rescue those short trajectories
+under one fixed 400-frame config:
+
+`--motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 3.0 --tracking-min-inliers 80 --tracking-min-inlier-ratio 0.5 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keyframe-min-frame-gap 2 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-adaptive-velocity-gate --local-vi-ba-reject-writeback-above 1.0 --relocalization-enabled --relocalization-min-inliers 80 --relocalization-min-inlier-ratio 0.5`
+
+**400-frame result.**
+
+| sequence      | baseline tracking | rescue tracking | rescue reloc s/a | rescue KFs | rescue rigid ATE | rescue sim scale | reading |
+|---------------|------------------:|----------------:|-----------------:|-----------:|-----------------:|-----------------:|---------|
+| MH_01_easy    | 0.080             | 0.168           | 6 / 339          | 18         | 0.0555 m         | 0.957            | improves tracking and rigid ATE |
+| MH_03_medium  | 0.055             | 0.573           | 2 / 173          | 12         | 0.0933 m         | 0.057            | large survival win, but scale is suspect |
+| MH_05_difficult | 0.155           | 0.158           | 3 / 340          | 5          | 0.0355 m         | 0.669            | mostly neutral, slight ATE regression |
+
+The run manifests are registered as
+`euroc-tight-vio-survival-*-relocalization_rescue-400-20260620.json`.
+They are evidence for a recovery direction, not a recommended default.
+
+**Long-run blocker.** The same global-relocalization config on
+MH_03_medium for 1500 frames exceeded a 30-minute run budget and had to be
+stopped. The bottleneck is repeated full-map recovery PnP on every failed
+frame after tracking death, not local VI-BA runtime.
+
+**Shipped diagnostic knob.** `OnlineSlamRelocalizationConfig` now has
+`attempt_interval_frames` with default `1`, preserving the existing
+every-failed-frame behaviour. The EuRoC image demo exposes it as
+`--relocalization-attempt-interval-frames <N>` and records the value in
+`summary.txt`.
+
+**Interval throttle is not the accuracy fix.** On MH_03_medium / 400,
+intervals 2, 3, 5, and 10 reduced or bounded the number of attempts, but
+none preserved the every-frame rescue's accuracy profile:
+
+| attempt interval | tracking | reloc s/a | rigid ATE | sim scale | reading |
+|-----------------:|---------:|----------:|----------:|----------:|---------|
+| 2                | 0.120    | 1 / 178   | 0.1527 m  | 0.189     | loses most survival and scale |
+| 3                | 0.560    | 2 / 61    | 0.5919 m  | 0.020     | survival holds, metric pose collapses |
+| 5                | 0.555    | 1 / 37    | 0.6327 m  | 0.024     | runtime improves, wrong scale |
+| 10               | 0.532    | 1 / 20    | 0.8129 m  | 0.028     | runtime improves, wrong scale |
+
+**Conclusion.** Recovery PnP can materially extend Machine Hall tracking,
+but simple attempt throttling is only a runtime / diagnostic control. The
+next viable intervention is a post-acceptance quality gate that checks
+trajectory-scale consistency or pose continuity before accepting the
+relocalized pose, rather than accepting fewer of the same candidate set.
+
+**Pose-continuity gate follow-up.** The library now exposes
+`OnlineSlamRelocalizationConfig::max_translation_per_frame_from_last_success_meters`
+as an opt-in post-acceptance gate. The EuRoC demo flag is
+`--relocalization-max-translation-per-frame-from-last-success-meters <m/frame>`.
+`OnlineSlamRelocalizationStats` and the demo summary also report the measured
+translation-per-frame diagnostic for every recovery candidate and for accepted
+recoveries.
+
+On MH_03_medium / 400, this gate is useful instrumentation but not a fix:
+
+| max m/frame | tracking | reloc s/a | success tx/frame max | rigid ATE | sim scale | reading |
+|------------:|---------:|----------:|---------------------:|----------:|----------:|---------|
+| 0.10        | 0.573    | 2 / 173   | 0.0972               | 0.0933 m  | 0.057     | identical to ungated rescue; both recoveries pass |
+| 0.05        | 0.552    | 1 / 180   | 0.0005               | 0.1917 m  | 0.085     | rejects one recovery but worsens rigid ATE |
+
+This rules out a pure pose-continuity cap as the MH_03 scale-collapse fix.
+The bad recovery can be smooth enough, in frame-normalized translation, to
+look plausible. The next gate needs scale evidence: e.g. consistency of
+tracked landmark depth/disparity distribution, multi-frame recovered-scale
+stability, or a local map geometry check before accepting the recovery.
+
+**Median inlier-depth ratio follow-up.** The library now also exposes
+`min_inlier_depth_median_ratio_to_last_success` /
+`max_inlier_depth_median_ratio_to_last_success`. The diagnostic is measured on
+the recovery PnP inlier landmark set:
+
+`median(depth_recovered(inlier_landmarks)) / median(depth_last_success(inlier_landmarks))`
+
+The EuRoC demo flags are
+`--relocalization-min-inlier-depth-median-ratio-to-last-success <ratio>` and
+`--relocalization-max-inlier-depth-median-ratio-to-last-success <ratio>`.
+
+On MH_03_medium / 400, ungated rescue reports accepted-recovery depth ratios
+in a very normal-looking band (`0.9476` and `1.0464`) even though the final
+similarity scale is `0.057`. A tight `0.95..1.05` gate is therefore not a
+clean separator:
+
+| depth-ratio gate | tracking | reloc s/a | accepted ratio range | rigid ATE | sim scale | reading |
+|-----------------:|---------:|----------:|---------------------:|----------:|----------:|---------|
+| none             | 0.573    | 2 / 173   | 0.9476-1.0464        | 0.0933 m  | 0.057     | survival win, scale collapse |
+| 0.95..1.05       | 0.083    | 2 / 369   | 0.9837-1.0035        | 0.0976 m  | 0.209     | kills survival, still not metric |
+
+This rules out a single-frame median-depth-ratio cap as the fix. The next
+credible scale-aware recovery gate needs multi-frame evidence: require a
+recovery to stay consistent over a short confirmation window before it can
+seed new keyframes / VI state, or verify the recovered pose against a
+covisibility-selected local submap with triangulation-depth consistency.
+
+**Confirmation-window follow-up.** The library now exposes
+`confirmation_required_recoveries` and
+`confirmation_max_translation_per_frame_meters`. With
+`confirmation_required_recoveries = 1` the legacy immediate-accept behaviour is
+preserved. With values above one, a recovery hypothesis that clears the PnP /
+IMU / continuity / depth-ratio gates is held as pending; the tracker is only
+overwritten when enough consecutive recovery hypotheses are mutually close in
+camera-centre translation per frame.
+
+On MH_03_medium / 400, a two-recovery confirmation window is too conservative
+for the current HOG recovery signal:
+
+| confirmation config | tracking | gate passes | waiting | reloc s/a | rigid ATE | sim scale | reading |
+|---------------------|---------:|------------:|--------:|----------:|----------:|----------:|---------|
+| required=2, max=0.2 m/frame | 0.120 | 5 | 4 | 1 / 353 | 0.1527 m | 0.189 | accepts too late; loses survival |
+| required=2, max=1.0 m/frame | 0.120 | 5 | 4 | 1 / 353 | 0.1527 m | 0.189 | same result; translation cap not the limiter |
+
+This confirms the deeper issue: accepted-quality recovery hypotheses are too
+sparse. A confirmation window is useful infrastructure, but it cannot rescue
+MH_03 until the front-end produces more frequent correct recovery candidates.
+The next practical direction is to improve candidate generation or verification
+before confirmation: covisibility-local descriptor stores, stronger
+place-recognition candidate seeding, or a tracker-side recovery mode that keeps
+using a candidate pose for feature prediction without immediately promoting it
+to the map / VI state.
+
+**Covisibility-local recovery descriptor store follow-up.** The library now
+exposes `OnlineSlamRelocalizationConfig::covisibility_local_map` and
+`OnlineSlamRelocalizationCovisibilityConfig`. When enabled, recovery PnP first
+builds a descriptor store from landmarks observed by the last successful
+keyframe (or the nearest previous map keyframe) plus high-covisibility
+neighbours. If the selected local store is unavailable or smaller than
+`min_local_map_landmarks`, the code falls back to the existing full-map /
+recent-window policy. It can also retry the broader store after a failed local
+attempt, with a frame-interval throttle so a long lost-tracking segment does
+not run full-map recovery on every frame. The EuRoC image demo exposes this as
+`--relocalization-covisibility-max-keyframes`,
+`--relocalization-covisibility-min-shared`,
+`--relocalization-covisibility-min-landmarks`,
+`--relocalization-covisibility-broader-fallback-interval-frames`, and
+`--relocalization-covisibility-compare-broader-store`; `summary.txt` records
+descriptor store sizes, covisibility usage, broader retry usage, and interval
+skips.
+
+On MH_03_medium / 400, the wiring works but the policy is not a win:
+
+| recovery descriptor store | tracking | reloc s/a | descriptor store mean | local used | broader retries | rigid ATE | sim scale | reading |
+|---------------------------|---------:|----------:|----------------------:|-----------:|----------------:|----------:|----------:|---------|
+| full map                  | 0.573    | 2 / 173   | 1500.0                | 0          | 0               | 0.0933 m  | 0.057     | best survival in this smoke, still wrong scale |
+| covis max=10, shared>=15, min landmarks=30 | 0.215 | 4 / 318 | 98.0 | 318 | 0 | 0.2747 m | 0.057 | local store fires, but loses most survival |
+| covis max=10, shared>=1, min landmarks=1   | 0.215 | 4 / 318 | 98.0 | 318 | 0 | 0.2747 m | 0.057 | relaxing neighbour threshold changes nothing |
+| covis + unbounded broader fallback | DNF | n/a | n/a | n/a | every frame | n/a | n/a | timed out after 10 minutes; residual process was killed |
+| covis + broader fallback every 10 frames | 0.532 | 1 / 188 | 269.1 | 168 | 20 retries / 168 skips | 0.8129 m | 0.028 | runtime bounded, but trajectory is worse than full map |
+| covis + broader fallback every 10 frames + compare broader | 0.532 | 1 / 188 | 269.1 | 168 | 20 retries / 168 skips | 0.8129 m | 0.028 | broader comparison did not change selected recoveries |
+
+This rules out the last-successful-keyframe covisibility descriptor store as
+the MH_03 fix, both local-only and local-first-with-fallback. It removes some
+full-map ambiguity, but it also removes too much matching recall; adding a
+bounded broader retry recovers runtime but not the trajectory. The next useful
+candidate-generation step should move upstream to place-recognition candidate
+generation plus geometric verification, or to a motion-prior-constrained
+recovery window. Recovery should be seeded by true revisits / plausible motion,
+not only by the last successful keyframe's neighbourhood.
+
+**Appearance-retrieval recovery descriptor store follow-up.** The next narrow
+test added `OnlineSlamRelocalizationConfig::appearance_retrieval_map` and
+`OnlineSlamRelocalizationAppearanceConfig`. This policy ranks older keyframes
+by cosine similarity between the failed frame's mean local descriptor and each
+keyframe's mean local descriptor, builds a recovery descriptor store from the
+top retrieved keyframes' observed landmarks, and optionally retries the broader
+store on a bounded interval. This is deliberately not a learned VPR backend; it
+is the smallest in-pipeline place-recognition seed needed to test whether
+keyframe retrieval helps recovery before adding an ONNX global descriptor.
+
+On MH_03_medium / 400 with HOG descriptors and broader fallback every 10
+frames:
+
+| recovery descriptor store | tracking | reloc s/a | descriptor store mean | appearance used | broader retries | rigid ATE | sim scale | reading |
+|---------------------------|---------:|----------:|----------------------:|----------------:|----------------:|----------:|----------:|---------|
+| full map                  | 0.573    | 2 / 173   | 1500.0                | 0               | 0               | 0.0933 m  | 0.057     | comparison point |
+| appearance top-5          | 0.573    | 2 / 173   | 1487.0                | 149 / 168       | 19 retries / 147 skips | 0.0933 m | 0.057 | top-5 observes almost the whole map |
+| appearance top-1          | 0.573    | 2 / 173   | 559.9                 | 149 / 168       | 19 retries / 147 skips | 0.0933 m | 0.057 | store is narrower, trajectory unchanged |
+
+The EuRoC demo now also writes
+`relocalization_appearance_candidates.csv` with one row per retrieved
+keyframe candidate (`query_frame_id`, `matched_keyframe_id`, score, rank, and
+the recovery gate outcomes). The demo also writes `frame_groundtruth.csv`
+with every processed cam0 frame's GT camera centre; retrieval recall should use
+that file, not `slam_errors.csv`, when failed recovery-query frames must stay in
+the denominator. For recovery-scoped candidate CSVs, pass
+`--query-ids-from-candidates` to `scripts/eval_loop_retrieval_recall.py` so the
+denominator is the emitted recovery-query set instead of every pose row.
+`scripts/capture_euroc_relocalization_retrieval_recall.py` wraps that evaluator
+and captures the recall JSON/Markdown, per-attempt candidate diagnostics, and
+`summary.txt` metrics into the benchmark registry. The companion diagnostic
+script, `scripts/diagnose_relocalization_candidates.py`, joins the candidate
+CSV to `frame_groundtruth.csv` and reports whether the top-1 candidate was
+pose-near, whether any candidate was pose-near, and whether the recovery gates
+accepted it. Use this when recall is high but `relocalization_successes` stays
+low; it separates candidate generation misses from PnP / acceptance failures.
+The EuRoC image demo also writes `relocalization_attempts.csv`, one row per
+recovery attempt, with the PnP inlier count, inlier ratio, mean reprojection
+error, continuity/depth-ratio diagnostics, per-gate pass bits, and a first
+`reject_reason`. That file is the quickest way to determine why a correct
+retrieval candidate still failed to recover tracking.
+For recovery-free candidate-generation A/Bs, run the EuRoC demo with
+`--export-frame-appearance-descriptors`, then feed
+`frame_appearance_descriptors.csv` plus `keyframe_decisions.csv` to
+`scripts/export_retrieval_candidates_from_descriptors.py` before evaluating the
+resulting candidate CSV. `scripts/capture_euroc_descriptor_retrieval_recall.py`
+wraps those two steps and registers the generated candidate CSV, descriptor CSV,
+recall JSON/Markdown, candidate diagnostics, and run artifacts together.
+
+On a later MH_03_medium / 400 descriptor-export rerun, the recovery candidates
+were all pose-near under the 1 m / 30-frame gate, but almost every attempt was
+rejected downstream:
+
+| candidate source | query scope | candidates / attempts | eligible queries | recall@1 | top1 true rejected | tracking | reloc s/a | reading |
+|------------------|-------------|----------------------:|-----------------:|---------:|-------------------:|---------:|----------:|---------|
+| online appearance top-1 | candidate queries | 19 / 19 | 19 | 1.0000 | 18 | 0.532 | 1 / 20 | retrieval is not the limiter in this short run |
+| offline descriptor cosine top-20 | candidate queries | 3512 / 370 | 370 | 1.0000 | n/a | 0.532 | n/a | candidate generation alone is easy in this prefix |
+
+This short-prefix result should not be used as a place-recognition win claim:
+the offline descriptor run has no recovery gates, and the longer 1200-frame
+all-frame-GT run below still shows poor top-20 recall. The useful conclusion is
+narrower: for this 400-frame rerun, recovery fails after a correct top-1
+candidate is available, so the next debugging target is geometric verification
+or recovery acceptance rather than candidate ranking. With
+`relocalization_attempts.csv` enabled, the same run breaks down as:
+
+| reject reason | attempts | reading |
+|---------------|---------:|---------|
+| accepted | 1 | only one recovery clears all gates |
+| min_inliers | 14 | PnP finds a pose but too few inlier landmarks |
+| min_inlier_ratio | 3 | enough raw inliers, but too many outlier correspondences |
+| no_pnp_solution | 2 | no usable recovery pose |
+
+So the next targeted recovery improvement is not a stronger top-K ranking for
+this prefix; it is better geometric verification / correspondence filtering for
+the retrieved keyframe store, or a tracker-side recovery mode that uses the
+retrieved pose to improve matching before committing it to the map.
+
+Two immediate A/Bs narrow that down further:
+
+| recovery setting | tracking | reloc s/a | reject summary | store mean | rigid ATE | sim scale | reading |
+|------------------|---------:|----------:|----------------|-----------:|----------:|----------:|---------|
+| top-1, no broader fallback, min ratio 0.5 | 0.532 | 1 / 20 | accepted 1, min-ratio 2, min-inliers 6, no-PnP 11 | 633.9 | 0.8129 m | 0.028 | top-1 store is often too narrow for PnP |
+| top-3, no broader fallback, min ratio 0.5 | 0.532 | 1 / 20 | accepted 1, min-ratio 2, min-inliers 10, no-PnP 7 | 843.1 | 0.8129 m | 0.028 | fewer no-PnP cases, still no extra accepted recoveries |
+| top-5, no broader fallback, min ratio 0.5 | 0.532 | 1 / 20 | accepted 1, min-ratio 3, min-inliers 14, no-PnP 2 | 1500.0 | 0.8129 m | 0.028 | effectively full-map again |
+| top-1, broader fallback, min ratio 0.3 | 0.562 | 3 / 19 | accepted 3, min-ratio 1, min-inliers 14, no-PnP 1 | 1500.0 | 0.0550 m | 0.210 | promising acceptance-threshold result, not yet a default |
+
+Lowering the recovery inlier-ratio gate from 0.5 to 0.3 accepts the three
+high-inlier / moderate-ratio hypotheses and improves rigid ATE on this prefix.
+It is not yet a release claim: the motion-VI initializer no longer reaches its
+keyframe requirement within 400 frames (`motion_vi_init_succeeded_frame=None`),
+and the similarity scale still indicates a short-trajectory / scale-diagnostic
+edge case. The next validation should run the same `min_inlier_ratio=0.3`
+setting on longer MH_03 and on at least one easier sequence to check whether it
+is a general recovery threshold or a prefix-specific rescue.
+
+The first cross-sequence 400-frame smoke suggests `0.3` is a plausible
+recovery threshold, but not a proven default:
+
+| sequence | min ratio | tracking | reloc s/a | reject summary | rigid ATE | sim scale | motion-VI | reading |
+|----------|----------:|---------:|----------:|----------------|----------:|----------:|-----------|---------|
+| MH_01_easy | 0.5 | 0.085 | 3 / 39 | accepted 3, min-ratio 4, min-inliers 19, no-PnP 13 | 0.0406 m | 1.029 | not initialised | baseline |
+| MH_01_easy | 0.3 | 0.095 | 4 / 39 | accepted 4, min-ratio 1, min-inliers 20, no-PnP 14 | 0.0396 m | 1.028 | not initialised | small positive |
+| MH_03_medium | 0.5 | 0.532 | 1 / 20 | accepted 1, min-ratio 3, min-inliers 14, no-PnP 2 | 0.8129 m | 0.028 | frame 213 | bad recovery survival |
+| MH_03_medium | 0.3 | 0.562 | 3 / 19 | accepted 3, min-ratio 1, min-inliers 14, no-PnP 1 | 0.0550 m | 0.210 | not initialised | strong short-prefix win |
+| MH_05_difficult | 0.5 | 0.150 | 1 / 35 | accepted 1, min-inliers 12, no-PnP 22 | 0.0239 m | 0.697 | not initialised | neutral |
+| MH_05_difficult | 0.3 | 0.150 | 1 / 35 | accepted 1, min-inliers 12, no-PnP 22 | 0.0239 m | 0.697 | not initialised | neutral |
+
+An MH_03 / 1200-frame run with the same `0.3` gate and attempt interval 10 did
+not finish within 10 minutes and wrote no summary. Treat that as a runtime
+warning rather than an accuracy result: longer validation needs either a wider
+attempt interval, a bounded recovery budget, or an offline replay of
+`relocalization_attempts.csv`-style diagnostics before this gate can become a
+default.
+
+The bounded-budget follow-up shipped
+`--relocalization-max-consecutive-failed-attempts <N>`, which stops expensive
+recovery PnP after `N` consecutive failed attempts until primary tracking or a
+relocalization success resets the counter. On the same MH_03 / 1200-frame
+configuration with `N=20`, the run completed with 34 relocalization attempts,
+3 successes, and 658 budget skips. This is a runtime-control win, not a new
+accuracy claim: skipped frames do not emit appearance candidates, so retrieval
+recall is measured only over attempted recovery-query frames.
+
+Using `scripts/eval_loop_retrieval_recall.py` on the 400-frame smoke and the
+run's `slam_errors.csv` gave recall@1/5/20 = 1.0 for top-1 and top-5, but only
+two recovery-query frames were pose-eligible true revisits at the 1 m / 30-frame
+gate. Re-running top-1 on 1200 frames with broader fallback disabled and
+relocalization attempts throttled to every 5 frames produced a more useful
+all-frame-GT diagnostic:
+
+| run | poses used for recall | candidates | eligible queries | recall@1 | recall@5 | recall@20 | top1 FP | tracking | reloc s/a | reading |
+|-----|-----------------------|-----------:|-----------------:|---------:|---------:|----------:|--------:|---------:|----------:|---------|
+| 400 top-1 fallback i10 | `slam_errors.csv` | 168 | 2 | 1.0000 | 1.0000 | 1.0000 | 0.0000 | 0.573 | 2 / 173 | too few eligible queries |
+| 1200 top-1 no-broader i5 | `frame_groundtruth.csv` | 195 | 107 | 0.3458 | 0.3458 | 0.3458 | 0.6542 | 0.185 | 1 / 197 | top-1 candidate generation is weak |
+| 1200 top-1 recovery, top-20 log | `frame_groundtruth.csv` | 2991 | 107 | 0.3458 | 0.3458 | 0.3551 | 0.6542 | 0.185 | 1 / 197 | increasing K does not recover recall |
+| 1200 top-1 fallback i10 budget20 | `frame_groundtruth.csv` | 206 | 27 | 0.7037 | 0.7037 | 0.7407 | 0.2963 | 0.188 | 3 / 34 | bounded runtime; 658 skipped frames shrink the recall denominator |
+
+This is useful infrastructure but not an ORB-SLAM3-level fix. Mean-descriptor
+retrieval can reduce the first-pass descriptor store without hurting the short
+smoke, but the longer all-frame-GT recall shows that mean-HOG retrieval misses
+most eligible revisits when every attempted recovery frame is evaluated. The
+budgeted run makes the long smoke tractable, but it does that by suppressing
+many failed recovery attempts, not by proving better place recognition. The
+next retrieval investment should be a real global descriptor /
+candidate-recall benchmark with geometric verification, not more tuning of mean
+HOG descriptor cosine thresholds.

@@ -17,6 +17,7 @@
 //! Feature rows use `X Y SCORE D0 D1 ...`.
 //! Match rows use `QUERY_IDX TRAIN_IDX CONFIDENCE [DISTANCE]`.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,18 +25,23 @@ use std::path::{Path, PathBuf};
 use nalgebra::Vector3;
 use visloc_rs::{
     close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
-    parse_kitti_calibration_txt, parse_kitti_oxts_timestamps_txt, parse_stereo_vo_imu_samples_txt,
+    close_loops_on_vo_trajectory_with_globals_and_loop_matches,
+    close_loops_on_vo_trajectory_with_loop_matches, parse_kitti_calibration_txt,
+    parse_kitti_oxts_timestamps_txt, parse_stereo_vo_imu_samples_txt,
     read_external_deep_features_txt, read_external_deep_matches_txt, read_kitti_oxts_dir,
     reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba, slice_imu_samples_for_keyframes,
     write_colmap_binary_model_for_3dgs, write_colmap_reconstruction_for_3dgs,
     write_colmap_text_model_for_3dgs, write_online_ba_imu_state_csv, BaConfig, Camera,
     DescriptorMatch, GravityPrior, KabschRansacConfig, LandmarkInit, LinearSolver,
-    OnlineStereoVoBa, OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose,
-    PoseTrajectory, PositionPrior, PositionPriorObservation, RobustKernel, StereoRelativePoseMode,
-    StereoVoBaConfig, StereoVoBaImuInput, StereoVoBaImuSample, StereoVoFrontend,
-    StereoVoFrontendConfig, StereoVoPairDiagnostics, TrackingEvent, TrackingState,
-    TrajectorySample, VoLoopClosureConfig,
+    LoopCandidatePair, LoopCandidateVerificationDiagnostic, OnlineStereoVoBa,
+    OnlineStereoVoBaConfig, PerPoseGravityObservation, PerPoseGravityPrior, Pose, PoseTrajectory,
+    PositionPrior, PositionPriorObservation, RobustKernel, StereoDepthGate,
+    StereoDepthGateDiagnostics, StereoRelativePoseMode, StereoVoBaConfig, StereoVoBaImuInput,
+    StereoVoBaImuSample, StereoVoFrontend, StereoVoFrontendConfig, StereoVoPairDiagnostics,
+    TrackingEvent, TrackingState, TrajectorySample, VoLoopClosureConfig,
 };
+
+type LoopMatchesByPair = HashMap<(usize, usize), Vec<DescriptorMatch>>;
 
 #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
 use visloc_rs::io::images::read_common_image;
@@ -63,7 +69,7 @@ struct InProcessFrontend {
     right_dir: PathBuf,
     // Previous left-frame SuperPoint keypoints + descriptors, for the temporal
     // (previous-left -> current-left) match.
-    prev_left: Option<(Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>)>,
+    prev_left: Option<KeypointsWithDescriptors>,
 }
 
 #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
@@ -73,6 +79,10 @@ type FrameInputs = (
     Vec<DescriptorMatch>,
     Option<Vec<DescriptorMatch>>,
 );
+
+/// Previous left-frame SuperPoint keypoints paired with their descriptors.
+#[cfg(all(feature = "onnx-inference", feature = "image-io"))]
+type KeypointsWithDescriptors = (Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>);
 
 #[cfg(all(feature = "onnx-inference", feature = "image-io"))]
 impl InProcessFrontend {
@@ -245,6 +255,9 @@ struct CliArgs {
     loop_two_view_ba: bool,
     loop_edge_information: bool,
     loop_global_descriptor_file: Option<PathBuf>,
+    loop_matches_dir: Option<PathBuf>,
+    loop_pnp_essential_inlier_filter: bool,
+    loop_pnp_confidence_weighted_sampling: bool,
     loop_min_inlier_ratio: Option<f64>,
     loop_min_inliers: Option<usize>,
     ba_gravity_prior_weight: Option<f64>,
@@ -315,6 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(min_depth) = args.min_depth_m {
         config.stereo.min_depth_m = min_depth;
+        config.stereo.depth_gate = StereoDepthGate::fixed();
     }
     let config = config;
     if args.online_ba && args.enable_ba {
@@ -860,6 +874,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_verifications: args.loop_max_verifications,
             refine_loops_two_view: args.loop_two_view_ba,
             loop_edge_information: args.loop_edge_information,
+            pnp_essential_inlier_filter: args.loop_pnp_essential_inlier_filter,
+            pnp_confidence_weighted_sampling: args.loop_pnp_confidence_weighted_sampling,
             verifier,
             ..VoLoopClosureConfig::default()
         };
@@ -890,20 +906,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => None,
         };
+        let retrieval_label = match &learned_globals {
+            Some(_) => "learned-vpr".to_string(),
+            None => format!("vlad(k={})", args.loop_vocab_k),
+        };
+        let loop_matches = match &args.loop_matches_dir {
+            Some(dir) => {
+                let matches = load_loop_matches_dir(dir)?;
+                println!(
+                    "loaded {} external loop-match files from {}",
+                    matches.len(),
+                    dir.display()
+                );
+                Some(matches)
+            }
+            None => None,
+        };
         println!(
             "running LOOP-CLOSURE PGO: poses={} min_frame_gap={} min_similarity={:.2} \
              retrieval={} max_candidates_per_frame={}",
             online_runner.frontend.poses.len(),
             args.loop_min_frame_gap,
             args.loop_min_similarity,
-            match &learned_globals {
-                Some(_) => "learned-vpr".to_string(),
-                None => format!("vlad(k={})", args.loop_vocab_k),
-            },
+            retrieval_label,
             args.loop_max_candidates_per_frame,
         );
-        let loop_result = match &learned_globals {
-            Some(globals) => close_loops_on_vo_trajectory_with_globals(
+        let loop_result = match (&learned_globals, &loop_matches) {
+            (Some(globals), Some(matches)) => {
+                close_loops_on_vo_trajectory_with_globals_and_loop_matches(
+                    &online_runner.frontend.camera,
+                    &online_runner.frontend.poses,
+                    &online_runner.frontend.left_features,
+                    &online_runner.frontend.stereo_per_frame,
+                    globals,
+                    matches,
+                    &loop_cfg,
+                )
+            }
+            (Some(globals), None) => close_loops_on_vo_trajectory_with_globals(
                 &online_runner.frontend.camera,
                 &online_runner.frontend.poses,
                 &online_runner.frontend.left_features,
@@ -911,7 +951,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 globals,
                 &loop_cfg,
             ),
-            None => close_loops_on_vo_trajectory(
+            (None, Some(matches)) => close_loops_on_vo_trajectory_with_loop_matches(
+                &online_runner.frontend.camera,
+                &online_runner.frontend.poses,
+                &online_runner.frontend.left_features,
+                &online_runner.frontend.stereo_per_frame,
+                matches,
+                &loop_cfg,
+            ),
+            (None, None) => close_loops_on_vo_trajectory(
                 &online_runner.frontend.camera,
                 &online_runner.frontend.poses,
                 &online_runner.frontend.left_features,
@@ -921,6 +969,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         match loop_result {
             Ok(result) => {
+                let candidate_csv = args.out_dir.join("loop_candidates.csv");
+                write_loop_candidates_csv(
+                    &candidate_csv,
+                    &result.candidate_pairs,
+                    &retrieval_label,
+                )?;
+                println!("wrote {}", candidate_csv.display());
+                let verification_csv = args.out_dir.join("loop_candidate_verifications.csv");
+                write_loop_candidate_verifications_csv(
+                    &verification_csv,
+                    &result.verification_diagnostics,
+                    &retrieval_label,
+                )?;
+                println!("wrote {}", verification_csv.display());
                 match &result.gnc {
                     Some(gnc) => println!(
                         "LOOP-CLOSURE PGO: candidates={} verified_loops={} cost {:.6} -> {:.6} \
@@ -986,13 +1048,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.out_dir.join("frontend_pair_diagnostics.csv"),
         &frontend.pair_diagnostics,
     )?;
+    write_depth_gate_diagnostics_csv(
+        &args.out_dir.join("frontend_depth_gate_diagnostics.csv"),
+        &frontend.stereo_depth_gate_diagnostics,
+    )?;
     fs::write(
         args.out_dir.join("summary.txt"),
         format!(
-            "frames={} pairs={} trajectory_length_m={:.6}\n",
+            "frames={} pairs={} trajectory_length_m={:.6}\n\
+             stereo_depth_gate={}\n\
+             stereo_min_depth_m={:.6}\n",
             frontend.frame_count(),
             frontend.pair_diagnostics.len(),
             frontend.trajectory_length_m(),
+            stereo_depth_gate_label(&frontend.config.stereo.depth_gate),
+            frontend.config.stereo.min_depth_m,
         ),
     )?;
 
@@ -1472,6 +1542,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut loop_two_view_ba: bool = false;
     let mut loop_edge_information: bool = false;
     let mut loop_global_descriptor_file: Option<PathBuf> = None;
+    let mut loop_matches_dir: Option<PathBuf> = None;
+    let mut loop_pnp_essential_inlier_filter: bool = false;
+    let mut loop_pnp_confidence_weighted_sampling: bool = false;
     let mut loop_min_inlier_ratio: Option<f64> = None;
     let mut loop_min_inliers: Option<usize> = None;
     let mut loop_min_frame_gap: usize = 50;
@@ -1635,7 +1708,13 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 args.remove(i);
             }
             "--min-depth" => {
-                min_depth_m = Some(args.remove(i + 1).parse()?);
+                let value = args.remove(i + 1).parse::<f64>()?;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(
+                        format!("--min-depth must be finite and positive, got {value}").into(),
+                    );
+                }
+                min_depth_m = Some(value);
                 args.remove(i);
             }
             "--min-stereo-confidence" => {
@@ -1734,6 +1813,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--global-descriptor-file" => {
                 args.remove(i);
                 loop_global_descriptor_file = Some(PathBuf::from(args.remove(i)));
+            }
+            "--loop-matches-dir" => {
+                args.remove(i);
+                loop_matches_dir = Some(PathBuf::from(args.remove(i)));
+            }
+            "--loop-pnp-essential-inliers" => {
+                loop_pnp_essential_inlier_filter = true;
+                args.remove(i);
+            }
+            "--loop-pnp-confidence-weights" => {
+                loop_pnp_confidence_weighted_sampling = true;
+                args.remove(i);
             }
             "--loop-min-inlier-ratio" => {
                 args.remove(i);
@@ -1972,6 +2063,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         loop_two_view_ba,
         loop_edge_information,
         loop_global_descriptor_file,
+        loop_matches_dir,
+        loop_pnp_essential_inlier_filter,
+        loop_pnp_confidence_weighted_sampling,
         loop_min_inlier_ratio,
         loop_min_inliers,
         loop_min_frame_gap,
@@ -2060,9 +2154,8 @@ fn print_usage() {
          fast-then-decelerating stretch lock the translation to the stale \
          median forever (rescued values feed the history); 0.45 restricts the \
          rescue to genuinely weak consensus like the other rescues \
-         [--min-depth <m>]  minimum accepted stereo-triangulated depth \
-         (default 3.0, tuned for vehicle/hall scale; indoor room-scale \
-         scenes need ~0.5 or the near-field landmarks are all rejected) \
+         [--min-depth <m>]  force the legacy fixed minimum stereo depth \
+         (adaptive by default; this flag is for A/B and exact old-run replay) \
          [--min-stereo-confidence <0..1, default 0.5>] \
          [--min-temporal-confidence <0..1, default 0.5>] \
          [--ba-position-prior-poses <kitti_poses.txt>]  one-shot BA absolute \
@@ -2136,6 +2229,15 @@ fn print_usage() {
          verification (descending similarity first); bounds the per-pair \
          brute-force matching cost on long sequences. 0 = verify all \
          (default 400)\n \
+         [--loop-matches-dir <dir>]  optional external loop candidate matches \
+         named loop_OLDER_NEWER_matches.txt, query=newer/train=older; used for \
+         matching-stage A/B before PnP, with missing pairs falling back to BF\n \
+         [--loop-pnp-essential-inliers]  before PnP, keep only matches that are \
+         essential-matrix inliers under the same candidate-pair match set; \
+         opt-in diagnostic/policy A/B for long-baseline loop verification\n \
+         [--loop-pnp-confidence-weights]  bias loop PnP RANSAC sampling by \
+         descriptor-match confidence when enough non-uniform confidences are \
+         available; opt-in A/B for LightGlue candidate-pair matches\n \
          [--loop-two-view-ba]  re-grind each verified loop's relative pose with a \
          local two-view bundle adjustment (older pose fixed, newer pose + shared \
          landmarks free, older stereo a soft metric anchor) before the pose graph; \
@@ -2199,6 +2301,30 @@ fn temporal_matches_name(frame_id: usize) -> String {
     format!("frame_{frame_id:06}_temporal_matches.txt")
 }
 
+fn parse_loop_matches_name(path: &Path) -> Option<(usize, usize)> {
+    let stem = path.file_stem()?.to_str()?;
+    let rest = stem.strip_prefix("loop_")?;
+    let rest = rest.strip_suffix("_matches").unwrap_or(rest);
+    let (older_raw, newer_raw) = rest.split_once('_')?;
+    Some((older_raw.parse().ok()?, newer_raw.parse().ok()?))
+}
+
+fn load_loop_matches_dir(dir: &Path) -> Result<LoopMatchesByPair, Box<dyn std::error::Error>> {
+    let mut out = HashMap::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("txt") {
+            continue;
+        }
+        let Some((older, newer)) = parse_loop_matches_name(&path) else {
+            continue;
+        };
+        let matches = read_external_deep_matches_txt(&path)?.into_descriptor_matches();
+        out.insert((older, newer), matches);
+    }
+    Ok(out)
+}
+
 fn write_trajectory_csv(
     path: &Path,
     centers: &[nalgebra::Point3<f64>],
@@ -2252,6 +2378,117 @@ pnp_mean_reprojection_error_px,kabsch_mean_residual_m\n",
     }
     fs::write(path, text)?;
     Ok(())
+}
+
+fn write_depth_gate_diagnostics_csv(
+    path: &Path,
+    diagnostics: &[StereoDepthGateDiagnostics],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut text = String::from(
+        "frame_id,adaptive,candidates,accepted,effective_min_depth_m,effective_max_depth_m,\
+depth_quantile_m,disparity_uncertainty_min_px\n",
+    );
+    for (frame_id, row) in diagnostics.iter().enumerate() {
+        text.push_str(&format!(
+            "{},{},{},{},{:.6},{:.6},{},{}\n",
+            frame_id,
+            row.adaptive,
+            row.candidate_count,
+            row.accepted_count,
+            row.effective_min_depth_m,
+            row.effective_max_depth_m,
+            optional_f64(row.depth_quantile_m),
+            optional_f64(row.disparity_uncertainty_min_px),
+        ));
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+fn write_loop_candidates_csv(
+    path: &Path,
+    candidates: &[LoopCandidatePair],
+    retrieval_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut text = String::from("frontend,matched_keyframe_id,query_frame_id,score\n");
+    let label = csv_cell(retrieval_label);
+    for candidate in candidates {
+        text.push_str(&format!(
+            "{},{},{},{:.8}\n",
+            label, candidate.older, candidate.newer, candidate.similarity
+        ));
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+fn write_loop_candidate_verifications_csv(
+    path: &Path,
+    diagnostics: &[LoopCandidateVerificationDiagnostic],
+    retrieval_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut text = String::from(
+        "frontend,matched_keyframe_id,query_frame_id,score,attempted,match_count,match_source,\
+pnp_correspondence_count,pnp_unfiltered_correspondence_count,pnp_filter,\
+pnp_weighted_sampling,pnp_weight_policy,pnp_weight_confidence_count,\
+pnp_weight_confidence_spread,\
+verified,failure_reason,inlier_count,inlier_ratio,\
+mean_sampson_error,mean_reprojection_error_px,verification_score,has_relative_pose,\
+essential_correspondence_count,essential_verified,essential_failure_reason,\
+essential_inlier_count,essential_inlier_ratio,essential_mean_sampson_error,\
+essential_score,essential_has_relative_pose\n",
+    );
+    let label = csv_cell(retrieval_label);
+    for diagnostic in diagnostics {
+        let failure_reason = diagnostic.failure_reason.as_deref().unwrap_or_default();
+        let essential_failure_reason = diagnostic
+            .essential_failure_reason
+            .as_deref()
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "{},{},{},{:.8},{},{},{},{},{},{},{},{},{},{:.6},{},{},{},{:.6},{:.6},{},{:.6},{},{},{},{},{},{:.6},{:.6},{:.6},{}\n",
+            label,
+            diagnostic.older,
+            diagnostic.newer,
+            diagnostic.similarity,
+            diagnostic.attempted,
+            diagnostic.match_count,
+            diagnostic.match_source,
+            diagnostic.pnp_correspondence_count,
+            diagnostic.pnp_unfiltered_correspondence_count,
+            diagnostic.pnp_filter,
+            diagnostic.pnp_weighted_sampling,
+            diagnostic.pnp_weight_policy,
+            diagnostic.pnp_weight_confidence_count,
+            diagnostic.pnp_weight_confidence_spread,
+            diagnostic.verified,
+            csv_cell(failure_reason),
+            diagnostic.inlier_count,
+            diagnostic.inlier_ratio,
+            diagnostic.mean_sampson_error,
+            optional_f64(diagnostic.mean_reprojection_error_px),
+            diagnostic.score,
+            diagnostic.has_relative_pose,
+            diagnostic.essential_correspondence_count,
+            diagnostic.essential_verified,
+            csv_cell(essential_failure_reason),
+            diagnostic.essential_inlier_count,
+            diagnostic.essential_inlier_ratio,
+            diagnostic.essential_mean_sampson_error,
+            diagnostic.essential_score,
+            diagnostic.essential_has_relative_pose,
+        ));
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.chars().any(|c| matches!(c, ',' | '"' | '\n' | '\r')) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 fn imu_window_name(frame_id: usize) -> String {
@@ -2386,4 +2623,11 @@ fn optional_f32(value: Option<f32>) -> String {
         .filter(|value| value.is_finite())
         .map(|value| format!("{value:.6}"))
         .unwrap_or_default()
+}
+
+fn stereo_depth_gate_label(gate: &StereoDepthGate) -> &'static str {
+    match gate {
+        StereoDepthGate::Fixed => "fixed",
+        StereoDepthGate::Adaptive(_) => "adaptive",
+    }
 }

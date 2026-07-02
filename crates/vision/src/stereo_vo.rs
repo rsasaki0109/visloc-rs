@@ -45,6 +45,109 @@ pub struct StereoFeature {
     pub point_cam: Point3<f64>,
 }
 
+/// Runtime policy for the lower stereo-depth gate.
+///
+/// [`StereoDepthGate::Fixed`] preserves the historical
+/// [`StereoFeatureConfig::min_depth_m`] behavior. The adaptive policy keeps
+/// that fixed path available for A/B runs while letting production-style
+/// frontends choose a per-frame lower bound from the observed stereo-depth
+/// distribution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StereoDepthGate {
+    Fixed,
+    Adaptive(StereoAdaptiveDepthGateConfig),
+}
+
+impl StereoDepthGate {
+    pub fn fixed() -> Self {
+        Self::Fixed
+    }
+
+    pub fn adaptive() -> Self {
+        Self::Adaptive(StereoAdaptiveDepthGateConfig::default())
+    }
+}
+
+impl Default for StereoDepthGate {
+    fn default() -> Self {
+        Self::Adaptive(StereoAdaptiveDepthGateConfig::default())
+    }
+}
+
+/// Configuration for [`StereoDepthGate::Adaptive`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StereoAdaptiveDepthGateConfig {
+    /// Minimum number of geometrically plausible stereo candidates required
+    /// before the adaptive policy replaces the fixed lower-depth gate.
+    pub min_candidate_count: usize,
+    /// Lower quantile of the per-frame depth distribution used as the scene
+    /// scale anchor. Values near 0.2 ignore sparse near-field outliers while
+    /// still following close-approach scenes.
+    pub depth_quantile: f64,
+    /// Multiplier applied to `depth_quantile` before bounding. Values below
+    /// one keep points slightly nearer than the robust scene-scale anchor.
+    pub depth_quantile_scale: f64,
+    /// Absolute safety floor for the effective lower-depth gate.
+    pub min_depth_floor_m: f64,
+    /// Absolute safety ceiling for the effective lower-depth gate. This keeps
+    /// automotive/hall-scale scenes close to the historical 3 m behavior.
+    pub max_adaptive_min_depth_m: f64,
+    /// Assumed 1-sigma disparity noise. Combined with
+    /// `max_relative_depth_uncertainty` to reject far-field samples whose
+    /// stereo depth is dominated by disparity noise.
+    pub disparity_noise_px: f64,
+    /// Maximum accepted relative depth uncertainty implied by disparity noise:
+    /// `sigma_z / z ~= sigma_disparity / disparity`.
+    pub max_relative_depth_uncertainty: f64,
+    /// Fractional hysteresis band around the previous effective gate. Proposed
+    /// updates inside this band keep the prior gate to prevent frame-to-frame
+    /// threshold chatter.
+    pub hysteresis_ratio: f64,
+}
+
+impl Default for StereoAdaptiveDepthGateConfig {
+    fn default() -> Self {
+        Self {
+            min_candidate_count: 20,
+            depth_quantile: 0.20,
+            depth_quantile_scale: 0.85,
+            min_depth_floor_m: 0.35,
+            max_adaptive_min_depth_m: 3.0,
+            disparity_noise_px: 0.5,
+            max_relative_depth_uncertainty: 0.5,
+            hysteresis_ratio: 0.15,
+        }
+    }
+}
+
+/// Stateful memory for adaptive stereo-depth gating.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StereoDepthGateState {
+    effective_min_depth_m: Option<f64>,
+}
+
+impl StereoDepthGateState {
+    pub fn reset(&mut self) {
+        self.effective_min_depth_m = None;
+    }
+
+    pub fn effective_min_depth_m(&self) -> Option<f64> {
+        self.effective_min_depth_m
+    }
+}
+
+/// Per-frame diagnostics emitted by the stereo-depth gate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StereoDepthGateDiagnostics {
+    pub adaptive: bool,
+    pub candidate_count: usize,
+    pub accepted_count: usize,
+    pub effective_min_depth_m: f64,
+    pub effective_max_depth_m: f64,
+    pub depth_quantile_m: Option<f64>,
+    pub disparity_uncertainty_min_px: Option<f64>,
+}
+
 /// Configuration for [`triangulate_stereo_features`]. Defaults are tuned for
 /// rectified KITTI imagery.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,16 +162,21 @@ pub struct StereoFeatureConfig {
     /// rectification is imperfect); reject so triangulation does not blend
     /// in a Y-direction error.
     pub max_row_residual_px: f64,
-    /// Minimum `Z` (depth) accepted in the left camera's frame. Points
-    /// nearer than this disappear behind / below the camera within one
-    /// frame on a moving vehicle; their stereo disparity is noise-dominated
-    /// because the L↔R parallax dwarfs descriptor sub-pixel accuracy.
+    /// Fixed-policy minimum `Z` (depth) accepted in the left camera's frame,
+    /// and the adaptive-policy fallback before enough candidates establish a
+    /// scene scale. Points nearer than this disappear behind / below the
+    /// camera within one frame on a moving vehicle; on room-scale datasets the
+    /// adaptive gate can lower the effective value without changing this A/B
+    /// baseline.
     pub min_depth_m: f64,
     /// Maximum `Z` (depth) accepted in the left camera's frame. KITTI sky
     /// pixels triangulate to `Z ≫ 100 m` because their disparity is at the
     /// matcher's noise floor — those points are useless for downstream
     /// pose estimation and inflate landmark counts.
     pub max_depth_m: f64,
+    /// Lower-depth gate policy. Set to [`StereoDepthGate::Fixed`] to reproduce
+    /// the historical `min_depth_m` behavior exactly.
+    pub depth_gate: StereoDepthGate,
     /// Lowe's ratio threshold for the row-restricted L↔R descriptor search.
     /// `Some(0.85)` keeps matches whose best-distance / second-best-distance
     /// in the same row band is strictly below the threshold. `None`
@@ -84,6 +192,7 @@ impl Default for StereoFeatureConfig {
             max_row_residual_px: 1.5,
             min_depth_m: 3.0,
             max_depth_m: 80.0,
+            depth_gate: StereoDepthGate::default(),
             ratio: Some(0.85),
         }
     }
@@ -113,10 +222,22 @@ pub fn triangulate_stereo_features(
     baseline: f64,
     config: &StereoFeatureConfig,
 ) -> Vec<StereoFeature> {
+    triangulate_stereo_features_with_depth_state(left, right, camera, baseline, config, None)
+        .features
+}
+
+fn triangulate_stereo_features_with_depth_state(
+    left: &FeatureSet,
+    right: &FeatureSet,
+    camera: &Camera,
+    baseline: f64,
+    config: &StereoFeatureConfig,
+    state: Option<&mut StereoDepthGateState>,
+) -> StereoDepthGateOutcome {
     if left.is_empty() || right.is_empty() {
-        return Vec::new();
+        return empty_stereo_depth_gate_outcome(config);
     }
-    let mut out: Vec<StereoFeature> = Vec::with_capacity(left.len() / 2);
+    let mut candidates: Vec<StereoFeature> = Vec::with_capacity(left.len() / 2);
     for (l_idx, l_kp) in left.keypoints.iter().enumerate() {
         let l_desc = &left.descriptors[l_idx];
         // Row-restricted descriptor search: only consider right keypoints
@@ -174,17 +295,14 @@ pub fn triangulate_stereo_features(
         if !point.coords.iter().all(|v| v.is_finite()) {
             continue;
         }
-        if point.z < config.min_depth_m || point.z > config.max_depth_m {
-            continue;
-        }
-        out.push(StereoFeature {
+        candidates.push(StereoFeature {
             left_index: l_idx,
             right_index: r_idx,
             disparity,
             point_cam: point,
         });
     }
-    out
+    apply_stereo_depth_gate(candidates, config, state)
 }
 
 /// Triangulate explicit rectified-stereo matches into metric 3D points.
@@ -202,11 +320,26 @@ pub fn triangulate_stereo_feature_matches(
     baseline: f64,
     config: &StereoFeatureConfig,
 ) -> Vec<StereoFeature> {
+    triangulate_stereo_feature_matches_with_depth_state(
+        left, right, matches, camera, baseline, config, None,
+    )
+    .features
+}
+
+fn triangulate_stereo_feature_matches_with_depth_state(
+    left: &FeatureSet,
+    right: &FeatureSet,
+    matches: &[DescriptorMatch],
+    camera: &Camera,
+    baseline: f64,
+    config: &StereoFeatureConfig,
+    state: Option<&mut StereoDepthGateState>,
+) -> StereoDepthGateOutcome {
     if left.is_empty() || right.is_empty() || matches.is_empty() {
-        return Vec::new();
+        return empty_stereo_depth_gate_outcome(config);
     }
 
-    let mut out = Vec::with_capacity(matches.len());
+    let mut candidates = Vec::with_capacity(matches.len());
     for descriptor_match in matches {
         let Some(l_kp) = left.keypoints.get(descriptor_match.query_index) else {
             continue;
@@ -233,17 +366,193 @@ pub fn triangulate_stereo_feature_matches(
         if !point.coords.iter().all(|v| v.is_finite()) {
             continue;
         }
-        if point.z < config.min_depth_m || point.z > config.max_depth_m {
-            continue;
-        }
-        out.push(StereoFeature {
+        candidates.push(StereoFeature {
             left_index: descriptor_match.query_index,
             right_index: descriptor_match.train_index,
             disparity,
             point_cam: point,
         });
     }
-    out
+    apply_stereo_depth_gate(candidates, config, state)
+}
+
+struct StereoDepthGateOutcome {
+    features: Vec<StereoFeature>,
+    diagnostics: StereoDepthGateDiagnostics,
+}
+
+fn empty_stereo_depth_gate_outcome(config: &StereoFeatureConfig) -> StereoDepthGateOutcome {
+    StereoDepthGateOutcome {
+        features: Vec::new(),
+        diagnostics: StereoDepthGateDiagnostics {
+            adaptive: false,
+            candidate_count: 0,
+            accepted_count: 0,
+            effective_min_depth_m: config.min_depth_m,
+            effective_max_depth_m: config.max_depth_m,
+            depth_quantile_m: None,
+            disparity_uncertainty_min_px: None,
+        },
+    }
+}
+
+fn apply_stereo_depth_gate(
+    candidates: Vec<StereoFeature>,
+    config: &StereoFeatureConfig,
+    state: Option<&mut StereoDepthGateState>,
+) -> StereoDepthGateOutcome {
+    match config.depth_gate {
+        StereoDepthGate::Fixed => apply_fixed_stereo_depth_gate(candidates, config),
+        StereoDepthGate::Adaptive(adaptive) => {
+            apply_adaptive_stereo_depth_gate(candidates, config, adaptive, state)
+        }
+    }
+}
+
+fn apply_fixed_stereo_depth_gate(
+    candidates: Vec<StereoFeature>,
+    config: &StereoFeatureConfig,
+) -> StereoDepthGateOutcome {
+    let candidate_count = candidates.len();
+    let features: Vec<_> = candidates
+        .into_iter()
+        .filter(|feature| {
+            feature.point_cam.z >= config.min_depth_m && feature.point_cam.z <= config.max_depth_m
+        })
+        .collect();
+    let accepted_count = features.len();
+    StereoDepthGateOutcome {
+        features,
+        diagnostics: StereoDepthGateDiagnostics {
+            adaptive: false,
+            candidate_count,
+            accepted_count,
+            effective_min_depth_m: config.min_depth_m,
+            effective_max_depth_m: config.max_depth_m,
+            depth_quantile_m: None,
+            disparity_uncertainty_min_px: None,
+        },
+    }
+}
+
+fn apply_adaptive_stereo_depth_gate(
+    candidates: Vec<StereoFeature>,
+    config: &StereoFeatureConfig,
+    adaptive: StereoAdaptiveDepthGateConfig,
+    state: Option<&mut StereoDepthGateState>,
+) -> StereoDepthGateOutcome {
+    let candidate_count = candidates.len();
+    let uncertainty_min_disparity_px = adaptive_uncertainty_min_disparity_px(config, &adaptive);
+    let bounded_depths: Vec<f64> = candidates
+        .iter()
+        .filter(|feature| {
+            stereo_candidate_passes_safety_gates(feature, config, uncertainty_min_disparity_px)
+        })
+        .map(|feature| feature.point_cam.z)
+        .collect();
+    let depth_quantile_m = if bounded_depths.len() >= adaptive.min_candidate_count {
+        robust_quantile(&bounded_depths, adaptive.depth_quantile)
+    } else {
+        None
+    };
+    let previous_effective_min_depth_m = state
+        .as_ref()
+        .and_then(|state| state.effective_min_depth_m());
+    let raw_effective_min_depth_m = depth_quantile_m
+        .map(|depth| {
+            let max_effective_min_depth_m = adaptive
+                .max_adaptive_min_depth_m
+                .min(config.max_depth_m)
+                .max(adaptive.min_depth_floor_m);
+            (depth * adaptive.depth_quantile_scale)
+                .clamp(adaptive.min_depth_floor_m, max_effective_min_depth_m)
+        })
+        .or(previous_effective_min_depth_m)
+        .unwrap_or(config.min_depth_m);
+    let effective_min_depth_m = apply_depth_hysteresis(raw_effective_min_depth_m, adaptive, state);
+
+    let features: Vec<_> = candidates
+        .into_iter()
+        .filter(|feature| {
+            stereo_candidate_passes_safety_gates(feature, config, uncertainty_min_disparity_px)
+                && feature.point_cam.z >= effective_min_depth_m
+        })
+        .collect();
+    let accepted_count = features.len();
+    StereoDepthGateOutcome {
+        features,
+        diagnostics: StereoDepthGateDiagnostics {
+            adaptive: depth_quantile_m.is_some(),
+            candidate_count,
+            accepted_count,
+            effective_min_depth_m,
+            effective_max_depth_m: config.max_depth_m,
+            depth_quantile_m,
+            disparity_uncertainty_min_px: Some(uncertainty_min_disparity_px),
+        },
+    }
+}
+
+fn adaptive_uncertainty_min_disparity_px(
+    config: &StereoFeatureConfig,
+    adaptive: &StereoAdaptiveDepthGateConfig,
+) -> f64 {
+    let uncertainty_floor = if adaptive.disparity_noise_px.is_finite()
+        && adaptive.disparity_noise_px > 0.0
+        && adaptive.max_relative_depth_uncertainty.is_finite()
+        && adaptive.max_relative_depth_uncertainty > 0.0
+    {
+        adaptive.disparity_noise_px / adaptive.max_relative_depth_uncertainty
+    } else {
+        config.min_disparity_px
+    };
+    config.min_disparity_px.max(uncertainty_floor)
+}
+
+fn stereo_candidate_passes_safety_gates(
+    feature: &StereoFeature,
+    config: &StereoFeatureConfig,
+    uncertainty_min_disparity_px: f64,
+) -> bool {
+    feature.point_cam.z.is_finite()
+        && feature.point_cam.z > 0.0
+        && feature.point_cam.z <= config.max_depth_m
+        && feature.disparity >= uncertainty_min_disparity_px
+}
+
+fn robust_quantile(values: &[f64], quantile: f64) -> Option<f64> {
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let q = quantile.clamp(0.0, 1.0);
+    let rank = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted.get(rank).copied()
+}
+
+fn apply_depth_hysteresis(
+    proposed_min_depth_m: f64,
+    adaptive: StereoAdaptiveDepthGateConfig,
+    state: Option<&mut StereoDepthGateState>,
+) -> f64 {
+    let Some(state) = state else {
+        return proposed_min_depth_m;
+    };
+    let Some(previous) = state.effective_min_depth_m else {
+        state.effective_min_depth_m = Some(proposed_min_depth_m);
+        return proposed_min_depth_m;
+    };
+    let ratio = adaptive.hysteresis_ratio.clamp(0.0, 0.95);
+    let lower = previous * (1.0 - ratio);
+    let upper = previous * (1.0 + ratio);
+    let effective = if proposed_min_depth_m >= lower && proposed_min_depth_m <= upper {
+        previous
+    } else {
+        proposed_min_depth_m
+    };
+    state.effective_min_depth_m = Some(effective);
+    effective
 }
 
 /// One pair of metric 3D points (frame `a` and frame `b`) believed to be the
@@ -1570,6 +1879,7 @@ impl Default for StereoVoFrontendConfig {
                 max_row_residual_px: 2.0,
                 min_depth_m: 3.0,
                 max_depth_m: 80.0,
+                depth_gate: StereoDepthGate::default(),
                 ratio: Some(0.85),
             },
             kabsch: KabschRansacConfig {
@@ -1702,6 +2012,7 @@ where
 
     extractor: E,
     matcher: M,
+    depth_gate_state: StereoDepthGateState,
 
     /// World-frame pose for every processed frame, beginning with the
     /// identity pose at the seed frame.
@@ -1728,6 +2039,9 @@ where
     /// actually selected. Kept separate from `kabsch_inlier_counts` because
     /// the latter is a legacy name used by existing examples.
     pub pair_diagnostics: Vec<StereoVoPairDiagnostics>,
+    /// Per-frame lower-depth gate diagnostics. One entry is appended for
+    /// every processed stereo frame, including the seed frame.
+    pub stereo_depth_gate_diagnostics: Vec<StereoDepthGateDiagnostics>,
     /// Per-pair temporal matches actually used (after row-gate and
     /// confidence filters). One entry per pose pair, i.e. `poses.len() - 1`
     /// entries after the seed frame. Captured so downstream multi-frame BA
@@ -1774,6 +2088,7 @@ where
             config,
             extractor,
             matcher,
+            depth_gate_state: StereoDepthGateState::default(),
             poses: Vec::new(),
             left_features: Vec::new(),
             right_features: Vec::new(),
@@ -1784,6 +2099,7 @@ where
             per_pair_rotation_vectors: Vec::new(),
             kabsch_inlier_counts: Vec::new(),
             pair_diagnostics: Vec::new(),
+            stereo_depth_gate_diagnostics: Vec::new(),
             temporal_matches_per_pair: Vec::new(),
         }
     }
@@ -1840,24 +2156,28 @@ where
         stereo_matches: Option<&[DescriptorMatch]>,
         temporal_matches: Option<&[DescriptorMatch]>,
     ) -> Result<Pose, StereoVoError> {
-        let stereo = if let Some(stereo_matches) = stereo_matches {
-            triangulate_stereo_feature_matches(
+        let stereo_outcome = if let Some(stereo_matches) = stereo_matches {
+            triangulate_stereo_feature_matches_with_depth_state(
                 &left_features,
                 &right_features,
                 stereo_matches,
                 &self.camera,
                 self.baseline,
                 &self.config.stereo,
+                Some(&mut self.depth_gate_state),
             )
         } else {
-            triangulate_stereo_features(
+            triangulate_stereo_features_with_depth_state(
                 &left_features,
                 &right_features,
                 &self.camera,
                 self.baseline,
                 &self.config.stereo,
+                Some(&mut self.depth_gate_state),
             )
         };
+        let stereo_depth_gate_diagnostics = stereo_outcome.diagnostics;
+        let stereo = stereo_outcome.features;
 
         let new_pose = if let (Some(prev_left), Some(prev_stereo)) =
             (self.left_features.last(), self.stereo_per_frame.last())
@@ -2131,6 +2451,8 @@ where
         self.left_features.push(left_features);
         self.right_features.push(right_features);
         self.stereo_per_frame.push(stereo);
+        self.stereo_depth_gate_diagnostics
+            .push(stereo_depth_gate_diagnostics);
         Ok(new_pose)
     }
 
@@ -2585,6 +2907,10 @@ mod tests {
     #[test]
     fn default_rescue_config_keeps_adopted_guardrails() {
         let config = StereoVoFrontendConfig::default();
+        assert!(matches!(
+            config.stereo.depth_gate,
+            StereoDepthGate::Adaptive(_)
+        ));
         assert_eq!(config.motion_scale_rescue_min_history, 20);
         assert_eq!(config.motion_scale_rescue_min_median_translation_m, 1.5);
         assert_eq!(config.motion_scale_rescue_min_translation_ratio, 0.97);
@@ -2636,6 +2962,125 @@ mod tests {
         assert_eq!(
             config.temporal_auto_confidence_max_median_rotation_deg,
             Some(0.45)
+        );
+    }
+
+    #[test]
+    fn fixed_depth_gate_preserves_legacy_min_depth_behavior() {
+        let camera = camera();
+        let baseline = 0.5;
+        let (left, right) = stereo_feature_sets_for_depths(&camera, baseline, &[1.5, 1.7, 2.0]);
+        let stereo = triangulate_stereo_features(
+            &left,
+            &right,
+            &camera,
+            baseline,
+            &StereoFeatureConfig {
+                depth_gate: StereoDepthGate::fixed(),
+                ratio: None,
+                ..StereoFeatureConfig::default()
+            },
+        );
+        assert!(
+            stereo.is_empty(),
+            "fixed 3 m min-depth gate should reject room-scale points"
+        );
+    }
+
+    #[test]
+    fn adaptive_depth_gate_lowers_min_depth_for_room_scale_frames() {
+        let camera = camera();
+        let baseline = 0.5;
+        let depths: Vec<f64> = (0..30).map(|i| 1.5 + (i as f64) * 0.02).collect();
+        let (left, right) = stereo_feature_sets_for_depths(&camera, baseline, &depths);
+        let mut state = StereoDepthGateState::default();
+        let outcome = triangulate_stereo_features_with_depth_state(
+            &left,
+            &right,
+            &camera,
+            baseline,
+            &StereoFeatureConfig {
+                ratio: None,
+                ..StereoFeatureConfig::default()
+            },
+            Some(&mut state),
+        );
+
+        assert!(outcome.diagnostics.adaptive);
+        assert!(
+            outcome.diagnostics.effective_min_depth_m < 3.0,
+            "room-scale effective min depth should drop below the legacy 3 m gate, got {}",
+            outcome.diagnostics.effective_min_depth_m
+        );
+        assert_eq!(outcome.features.len(), depths.len());
+    }
+
+    #[test]
+    fn adaptive_depth_gate_keeps_far_scene_floor_against_near_outlier() {
+        let camera = camera();
+        let baseline = 0.5;
+        let mut depths = vec![0.8];
+        depths.extend((0..29).map(|i| 12.0 + (i as f64) * 0.1));
+        let (left, right) = stereo_feature_sets_for_depths(&camera, baseline, &depths);
+        let outcome = triangulate_stereo_features_with_depth_state(
+            &left,
+            &right,
+            &camera,
+            baseline,
+            &StereoFeatureConfig {
+                ratio: None,
+                ..StereoFeatureConfig::default()
+            },
+            None,
+        );
+
+        assert!(outcome.diagnostics.adaptive);
+        assert_eq!(outcome.diagnostics.effective_min_depth_m, 3.0);
+        assert_eq!(outcome.features.len(), depths.len() - 1);
+        assert!(
+            outcome
+                .features
+                .iter()
+                .all(|feature| feature.point_cam.z >= 3.0),
+            "near outlier should not pass the hall-scale adaptive gate"
+        );
+    }
+
+    #[test]
+    fn adaptive_depth_gate_hysteresis_keeps_small_updates_stable() {
+        let camera = camera();
+        let baseline = 0.5;
+        let far_depths: Vec<f64> = (0..30).map(|i| 12.0 + (i as f64) * 0.1).collect();
+        let (far_left, far_right) = stereo_feature_sets_for_depths(&camera, baseline, &far_depths);
+        let mid_depths: Vec<f64> = (0..30).map(|i| 3.35 + (i as f64) * 0.01).collect();
+        let (mid_left, mid_right) = stereo_feature_sets_for_depths(&camera, baseline, &mid_depths);
+        let mut state = StereoDepthGateState::default();
+        let config = StereoFeatureConfig {
+            ratio: None,
+            ..StereoFeatureConfig::default()
+        };
+
+        let first = triangulate_stereo_features_with_depth_state(
+            &far_left,
+            &far_right,
+            &camera,
+            baseline,
+            &config,
+            Some(&mut state),
+        );
+        let second = triangulate_stereo_features_with_depth_state(
+            &mid_left,
+            &mid_right,
+            &camera,
+            baseline,
+            &config,
+            Some(&mut state),
+        );
+
+        assert_eq!(first.diagnostics.effective_min_depth_m, 3.0);
+        assert_eq!(
+            second.diagnostics.effective_min_depth_m, 3.0,
+            "mid-scale proposal is inside the hysteresis band and should keep the prior gate"
         );
     }
 
@@ -2876,6 +3321,30 @@ mod tests {
         let kps: Vec<Point2<f64>> = keypoints.iter().map(|(_, p)| *p).collect();
         let descriptors: Vec<Vec<f32>> = keypoints.iter().map(|(id, _)| vec![*id as f32]).collect();
         FeatureSet::new(kps, descriptors).expect("synthetic FeatureSet")
+    }
+
+    fn stereo_feature_sets_for_depths(
+        camera: &Camera,
+        baseline: f64,
+        depths: &[f64],
+    ) -> (FeatureSet, FeatureSet) {
+        let (fx, _, _, _) = camera.intrinsics().unwrap();
+        let pose = Pose::identity();
+        let mut left_kps = Vec::with_capacity(depths.len());
+        let mut right_kps = Vec::with_capacity(depths.len());
+        for (id, depth) in depths.iter().copied().enumerate() {
+            let x = ((id % 7) as f64 - 3.0) * 0.04;
+            let y = ((id / 7) as f64 - 2.0) * 0.03;
+            let point = Point3::new(x, y, depth);
+            let left = project(camera, &pose, &point);
+            let right = Point2::new(left.x - fx * baseline / depth, left.y);
+            left_kps.push((id, left));
+            right_kps.push((id, right));
+        }
+        (
+            synthetic_feature_set(&left_kps),
+            synthetic_feature_set(&right_kps),
+        )
     }
 
     fn descriptor_match(query_index: usize, train_index: usize) -> DescriptorMatch {

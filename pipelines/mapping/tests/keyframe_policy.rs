@@ -11,6 +11,17 @@ fn pose_at(center: Vector3<f64>) -> Pose {
 }
 
 fn success_result(frame_id: u64, event: TrackingEvent, center: Vector3<f64>) -> TrackingResult {
+    success_result_with_inliers(frame_id, event, center, 0)
+}
+
+fn success_result_with_inliers(
+    frame_id: u64,
+    event: TrackingEvent,
+    center: Vector3<f64>,
+    inlier_count: usize,
+) -> TrackingResult {
+    let inliers: Vec<usize> = (0..inlier_count).collect();
+    let inlier_landmark_ids: Vec<u64> = (0..inlier_count).map(|idx| idx as u64 + 1).collect();
     TrackingResult {
         frame_id,
         state: TrackingState::Tracking,
@@ -25,13 +36,13 @@ fn success_result(frame_id: u64, event: TrackingEvent, center: Vector3<f64>) -> 
         map_stats: Default::default(),
         localization: LocalizationResult::success(LocalizationSuccess {
             pose: pose_at(center),
-            candidate_landmark_count: 0,
-            match_count: 0,
-            correspondence_count: 0,
-            inliers: Vec::new(),
-            inlier_query_indices: Vec::new(),
-            inlier_landmark_ids: Vec::new(),
-            inlier_reprojection_errors: Vec::new(),
+            candidate_landmark_count: inlier_count,
+            match_count: inlier_count,
+            correspondence_count: inlier_count,
+            inliers: inliers.clone(),
+            inlier_query_indices: inliers,
+            inlier_landmark_ids,
+            inlier_reprojection_errors: vec![0.0; inlier_count],
             mean_reprojection_error: 0.0,
             median_reprojection_error: 0.0,
             max_reprojection_error: 0.0,
@@ -100,6 +111,7 @@ fn applies_frame_gap_and_translation_thresholds() {
         min_frame_id_gap: 3,
         min_translation: 1.0,
         select_relocalized_frames: true,
+        ..KeyframePolicyConfig::default()
     });
 
     assert!(
@@ -162,6 +174,7 @@ fn can_select_relocalized_frame_immediately() {
         min_frame_id_gap: 100,
         min_translation: 100.0,
         select_relocalized_frames: true,
+        ..KeyframePolicyConfig::default()
     });
 
     assert!(
@@ -201,5 +214,141 @@ fn reset_clears_keyframe_policy_state() {
 
     assert_eq!(policy.last_keyframe_frame_id(), None);
     assert!(policy.last_keyframe_pose().is_none());
+    assert_eq!(policy.last_keyframe_tracked_landmark_count(), None);
     assert_eq!(policy.selected_keyframe_count(), 0);
+}
+
+#[test]
+fn can_select_when_tracked_landmarks_drop_after_frame_gap() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 3,
+        min_translation: 10.0,
+        select_relocalized_frames: true,
+        tracked_landmark_keyframe_ratio: Some(0.9),
+        min_tracked_landmarks_for_quality_keyframe: 20,
+    });
+
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                100
+            ))
+            .selected
+    );
+    assert_eq!(policy.last_keyframe_tracked_landmark_count(), Some(100));
+
+    let gap_rejection = policy.evaluate(&success_result_with_inliers(
+        12,
+        TrackingEvent::Tracked,
+        Vector3::new(0.1, 0.0, 0.0),
+        50,
+    ));
+    assert!(!gap_rejection.selected);
+    assert_eq!(
+        gap_rejection.reason,
+        KeyframeDecisionReason::FrameIdGapTooSmall {
+            frame_id_gap: 2,
+            min_frame_id_gap: 3,
+        }
+    );
+
+    let selected = policy.evaluate(&success_result_with_inliers(
+        13,
+        TrackingEvent::Tracked,
+        Vector3::new(0.1, 0.0, 0.0),
+        80,
+    ));
+
+    assert!(selected.selected);
+    assert_eq!(
+        selected.reason,
+        KeyframeDecisionReason::TrackedLandmarkDrop {
+            frame_id_gap: 3,
+            tracked_landmarks: 80,
+            last_keyframe_tracked_landmarks: 100,
+            min_tracked_landmark_ratio: 0.9,
+        }
+    );
+    assert_eq!(policy.last_keyframe_tracked_landmark_count(), Some(80));
+    assert_eq!(policy.selected_keyframe_count(), 2);
+}
+
+#[test]
+fn tracked_landmark_drop_respects_reference_count_floor() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 1,
+        min_translation: 10.0,
+        select_relocalized_frames: true,
+        tracked_landmark_keyframe_ratio: Some(0.9),
+        min_tracked_landmarks_for_quality_keyframe: 20,
+    });
+
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                10
+            ))
+            .selected
+    );
+
+    let rejected = policy.evaluate(&success_result_with_inliers(
+        11,
+        TrackingEvent::Tracked,
+        Vector3::new(0.1, 0.0, 0.0),
+        5,
+    ));
+
+    assert!(!rejected.selected);
+    assert_eq!(
+        rejected.reason,
+        KeyframeDecisionReason::TranslationTooSmall {
+            translation: 0.1,
+            min_translation: 10.0,
+        }
+    );
+}
+
+#[test]
+fn tracked_landmark_drop_respects_current_count_floor() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 1,
+        min_translation: 10.0,
+        select_relocalized_frames: true,
+        tracked_landmark_keyframe_ratio: Some(0.9),
+        min_tracked_landmarks_for_quality_keyframe: 20,
+    });
+
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                100
+            ))
+            .selected
+    );
+
+    let rejected = policy.evaluate(&success_result_with_inliers(
+        11,
+        TrackingEvent::Tracked,
+        Vector3::new(0.1, 0.0, 0.0),
+        5,
+    ));
+
+    assert!(!rejected.selected);
+    assert_eq!(
+        rejected.reason,
+        KeyframeDecisionReason::TranslationTooSmall {
+            translation: 0.1,
+            min_translation: 10.0,
+        }
+    );
+    assert_eq!(policy.last_keyframe_tracked_landmark_count(), Some(100));
 }

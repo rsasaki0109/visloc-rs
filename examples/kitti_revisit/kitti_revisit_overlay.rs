@@ -12,6 +12,10 @@ use super::kitti_revisit_cli::FrontendChoice;
 use super::kitti_revisit_format::html_escape;
 use super::kitti_revisit_frontend::FrontendReport;
 
+// Rendering entry point that threads the report, calibration, verifier, and the
+// three asset paths through to the SVG writer; a struct wrapper would only move
+// the same fields around without simplifying callers.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_match_overlay_svg(
     report: &FrontendReport,
     strongest: &LoopClosureCandidate,

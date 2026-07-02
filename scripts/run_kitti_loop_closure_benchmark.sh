@@ -28,6 +28,7 @@ set -eu
 data_root="${KITTI_LC_DATA_ROOT:-$HOME/datasets/kitti_seq00_full2}"
 gt_poses="${KITTI_LC_GT_POSES:-$data_root/poses_00_stride2.txt}"
 out_dir="${KITTI_LC_OUT_DIR:-target/kitti_loop_closure_benchmark}"
+sequence="${KITTI_LC_SEQUENCE:-00}"
 frames="${KITTI_LC_FRAMES:-2271}"
 start_frame="${KITTI_LC_START_FRAME:-0}"
 frame_stride="${KITTI_LC_FRAME_STRIDE:-1}"
@@ -44,6 +45,11 @@ loop_vocab_k="${KITTI_LC_LOOP_VOCAB_K:-64}"
 loop_max_candidates="${KITTI_LC_LOOP_MAX_CANDIDATES:-3}"
 loop_max_verifications="${KITTI_LC_LOOP_MAX_VERIFICATIONS:-400}"
 python_bin="${KITTI_LC_PYTHON:-python3}"
+capture_retrieval_recall="${KITTI_LC_CAPTURE_RETRIEVAL_RECALL:-0}"
+retrieval_distance_threshold="${KITTI_LC_RETRIEVAL_DISTANCE_THRESHOLD:-10}"
+retrieval_ks="${KITTI_LC_RETRIEVAL_KS:-1 5 20}"
+retrieval_registry_dir="${KITTI_LC_RETRIEVAL_REGISTRY_DIR:-benchmarks/registry/runs/kitti}"
+retrieval_dnf_if_recall_at="${KITTI_LC_RETRIEVAL_DNF_IF_RECALL_AT:-}"
 skip_export=0
 
 usage() {
@@ -53,6 +59,8 @@ usage: scripts/run_kitti_loop_closure_benchmark.sh [options]
 Measure ATE before/after metric loop closure on a loopy KITTI sequence.
 
 Options:
+  --sequence <id>            KITTI odometry sequence label for registry
+                             capture (default 00)
   --data-root <dir>          seqXX dir with image_0, image_1, calib.txt
   --gt-poses <file>          KITTI 3x4 GT poses matching the exported frames
   --out-dir <dir>            benchmark output root
@@ -69,12 +77,26 @@ Options:
   --loop-min-similarity <x>  min VLAD cosine similarity (default 0.2)
   --python <bin>             python with torch+lightglue (default python3)
   --skip-export              reuse already-exported features
+  --capture-retrieval-recall
+                             evaluate loop/loop_candidates.csv and capture a
+                             benchmark-registry manifest (default off)
+  --retrieval-distance-threshold <m>
+                             true-revisit pose distance for recall capture
+                             (default 10)
+  --retrieval-ks "<k...>"    recall@K values for recall capture
+                             (default "1 5 20")
+  --retrieval-registry-dir <dir>
+                             registry output dir for recall capture
+                             (default benchmarks/registry/runs/kitti)
+  --retrieval-dnf-if-recall-at <K=VALUE>
+                             optional recall gate, e.g. 20=0.01
   -h, --help                 show this help
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --sequence) sequence="$2"; shift 2 ;;
     --data-root) data_root="$2"; shift 2 ;;
     --gt-poses) gt_poses="$2"; shift 2 ;;
     --out-dir) out_dir="$2"; shift 2 ;;
@@ -90,6 +112,11 @@ while [ "$#" -gt 0 ]; do
     --loop-min-similarity) loop_min_similarity="$2"; shift 2 ;;
     --python) python_bin="$2"; shift 2 ;;
     --skip-export) skip_export=1; shift ;;
+    --capture-retrieval-recall) capture_retrieval_recall=1; shift ;;
+    --retrieval-distance-threshold) retrieval_distance_threshold="$2"; shift 2 ;;
+    --retrieval-ks) retrieval_ks="$2"; shift 2 ;;
+    --retrieval-registry-dir) retrieval_registry_dir="$2"; shift 2 ;;
+    --retrieval-dnf-if-recall-at) retrieval_dnf_if_recall_at="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -243,3 +270,41 @@ text = "\n".join(lines) + "\n"
 (root / "summary.md").write_text(text)
 print(text)
 PY
+
+if [ "$capture_retrieval_recall" -eq 1 ]; then
+  candidates_csv="$out_dir/loop/loop_candidates.csv"
+  [ -s "$candidates_csv" ] || {
+    echo "missing loop candidate CSV for retrieval recall capture: $candidates_csv" >&2
+    exit 2
+  }
+
+  echo "# Capturing KITTI loop retrieval recall"
+  if [ -n "$retrieval_dnf_if_recall_at" ]; then
+    # shellcheck disable=SC2086
+    "$python_bin" scripts/capture_kitti_loop_retrieval_recall.py \
+      --sequence "$sequence" \
+      --candidates "$candidates_csv" \
+      --poses "$out_dir/gt_poses.txt" \
+      --dataset-path "$data_root" \
+      --distance-threshold-m "$retrieval_distance_threshold" \
+      --min-temporal-gap "$loop_min_frame_gap" \
+      --min-path-length-m "$loop_min_path_length" \
+      --ks $retrieval_ks \
+      --out-dir "$out_dir/loop/retrieval_recall" \
+      --registry-dir "$retrieval_registry_dir" \
+      --dnf-if-recall-at "$retrieval_dnf_if_recall_at"
+  else
+    # shellcheck disable=SC2086
+    "$python_bin" scripts/capture_kitti_loop_retrieval_recall.py \
+      --sequence "$sequence" \
+      --candidates "$candidates_csv" \
+      --poses "$out_dir/gt_poses.txt" \
+      --dataset-path "$data_root" \
+      --distance-threshold-m "$retrieval_distance_threshold" \
+      --min-temporal-gap "$loop_min_frame_gap" \
+      --min-path-length-m "$loop_min_path_length" \
+      --ks $retrieval_ks \
+      --out-dir "$out_dir/loop/retrieval_recall" \
+      --registry-dir "$retrieval_registry_dir"
+  fi
+fi

@@ -21,7 +21,9 @@
 //!    gauge-fixed; everything else is free.
 //! 4. Runs `BundleAdjustment::optimize` with the user-supplied
 //!    [`BaConfig`].
-//! 5. Writes the refined poses back into `map.keyframes[*].frame.pose` and
+//! 5. Optionally rejects writeback when the optimiser fails the configured
+//!    cost-ratio or velocity quality gate.
+//! 6. Writes the refined poses back into `map.keyframes[*].frame.pose` and
 //!    `map.landmarks[*].position`, and writes the refined `(velocity, bias_gyro,
 //!    bias_acc)` back into the per-keyframe state table so the next trigger
 //!    starts from the new linearisation point.
@@ -38,6 +40,49 @@ use visloc_core::types::{Camera, VisualMap};
 use crate::bundle::{BaConfig, BaObservation, BaResult, BundleAdjustment};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::LinearSolver;
+
+/// Adaptive refined-velocity writeback gate for [`OnlineSlamLocalBaConfig`].
+///
+/// The gate builds a per-trigger reference envelope from the current
+/// in-window velocity state, pose-delta / IMU-`dt` finite differences,
+/// and IMU-predicted next-keyframe velocities, then rejects BA writeback
+/// only when the refined max velocity exceeds `quantile(reference) *
+/// multiplier + margin_mps`, after lower/upper bounds are applied. This
+/// keeps a raw fixed `m/s` threshold available as a safety ceiling while
+/// making the main decision relative to the local motion scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdaptiveVelocityGateConfig {
+    /// Robust reference quantile in `[0, 1]`. Values outside the range are
+    /// clamped at use-site so ad-hoc experiment configs cannot panic.
+    pub reference_quantile: f64,
+    /// Multiplier applied to the robust reference velocity.
+    pub multiplier: f64,
+    /// Additive slack in m/s after the multiplier.
+    pub margin_mps: f64,
+    /// Minimum threshold in m/s, after multiplier/slack.
+    pub min_threshold_mps: f64,
+    /// Optional hard upper bound in m/s. Use the legacy fixed velocity
+    /// gate for an unconditional ceiling; this field keeps the adaptive
+    /// threshold itself bounded for experiments.
+    pub max_threshold_mps: Option<f64>,
+    /// Minimum number of finite reference velocities required before the
+    /// adaptive gate is active. If fewer samples are available, the gate
+    /// reports `None` and does not reject.
+    pub min_reference_count: usize,
+}
+
+impl Default for AdaptiveVelocityGateConfig {
+    fn default() -> Self {
+        Self {
+            reference_quantile: 0.8,
+            multiplier: 2.5,
+            margin_mps: 1.0,
+            min_threshold_mps: 3.0,
+            max_threshold_mps: None,
+            min_reference_count: 2,
+        }
+    }
+}
 
 /// Configuration for the sliding-window local VI-BA stage.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +124,40 @@ pub struct OnlineSlamLocalBaConfig {
     /// `Some(0.9)`: the BA must reduce cost by at least 10 % per
     /// trigger or the bias updates are discarded.
     pub freeze_biases_when_cost_ratio_above: Option<f64>,
+    /// Writeback quality gate: when the selected BA result has
+    /// `final_cost / initial_cost > threshold`, the trigger returns
+    /// diagnostics but does **not** write refined poses, landmarks,
+    /// velocities, or biases back to the map/state. This is stricter
+    /// than [`Self::freeze_biases_when_cost_ratio_above`]: the freeze
+    /// fallback still accepts pose/velocity/landmark updates from a
+    /// re-solve, while this gate treats the whole local VI-BA result as
+    /// untrusted.
+    ///
+    /// `None` (default) preserves legacy behaviour. Start conservative
+    /// in experiments, for example `Some(1.0)` to reject passes that do
+    /// not reduce cost at all, or lower values when bad IMU factors are
+    /// known to destabilize tracking.
+    pub reject_writeback_when_cost_ratio_above: Option<f64>,
+    /// Writeback velocity sanity gate: when any refined in-window
+    /// `||velocity_world||` exceeds this threshold, the trigger returns
+    /// diagnostics but skips all map/state writeback. This catches the
+    /// common tight-VIO failure mode where the visual residuals can be
+    /// fit only by pushing keyframe velocities to non-physical values.
+    ///
+    /// `None` (default) preserves legacy behaviour. EuRoC indoor runs
+    /// can start with a conservative `Some(10.0)` and then tighten once
+    /// dataset-specific velocity envelopes are measured.
+    pub reject_writeback_when_velocity_norm_above_mps: Option<f64>,
+    /// Adaptive writeback velocity gate. Unlike
+    /// [`Self::reject_writeback_when_velocity_norm_above_mps`], this is
+    /// not a raw scene-scale `m/s` threshold. It derives a per-trigger
+    /// threshold from the current local-window motion envelope and rejects
+    /// only when the refined velocity is large relative to that envelope.
+    ///
+    /// `None` (default) preserves legacy behaviour. Keep the fixed gate
+    /// available as a safety ceiling for A/B runs; use this gate for the
+    /// primary "is this solve locally plausible?" decision.
+    pub adaptive_velocity_gate: Option<AdaptiveVelocityGateConfig>,
     /// Threshold-gated IMU factor re-linearisation. When `Some((g, a))`,
     /// before each BA pass the stage walks `state.factor_history` and
     /// re-bakes any factor whose stored `bias_*_linearisation` differs
@@ -138,6 +217,9 @@ impl Default for OnlineSlamLocalBaConfig {
             bias_gyro_init: Vector3::zeros(),
             bias_acc_init: Vector3::zeros(),
             freeze_biases_when_cost_ratio_above: None,
+            reject_writeback_when_cost_ratio_above: None,
+            reject_writeback_when_velocity_norm_above_mps: None,
+            adaptive_velocity_gate: None,
             relinearise_imu_factor_bias_thresholds: None,
             run_at_vi_init_promotion: false,
         }
@@ -219,14 +301,42 @@ pub struct OnlineSlamLocalBaStats {
     /// Optimiser outcome; carries the LM trace + final / initial cost.
     /// When [`Self::bias_frozen`] is `true` this is the SECOND-pass
     /// result (the one used for writeback); the first-pass trace is
-    /// dropped on the floor.
+    /// dropped on the floor. When [`Self::quality_gate_rejected`] is
+    /// `true`, this result was NOT written back.
     pub ba_result: BaResult,
+    /// `final_cost / initial_cost` for [`Self::ba_result`]. Uses `0.0`
+    /// when `initial_cost == 0.0` because there was no residual energy
+    /// to reduce.
+    pub cost_ratio: f64,
+    /// Maximum refined in-window `||velocity_world||` in m/s from the
+    /// selected BA result. This is reported even when writeback is
+    /// rejected so runners can tune the velocity sanity gate.
+    pub max_refined_velocity_norm_mps: f64,
+    /// Adaptive velocity threshold used for this trigger, if the
+    /// adaptive gate was enabled and enough finite local reference
+    /// velocities were available.
+    pub adaptive_velocity_gate_threshold_mps: Option<f64>,
     /// `true` when the conditioning fallback in
     /// [`OnlineSlamLocalBaConfig::freeze_biases_when_cost_ratio_above`]
     /// fired this trigger. The window was re-solved with biases gauge-
     /// frozen at their pre-BA linearisation points, and the BA's bias
     /// updates were NOT written back into the state table.
     pub bias_frozen: bool,
+    /// `true` when
+    /// [`OnlineSlamLocalBaConfig::reject_writeback_when_cost_ratio_above`]
+    /// rejected the selected BA result. The returned diagnostics describe
+    /// the rejected solve, but map poses, landmarks, velocities, and
+    /// biases were left unchanged.
+    pub quality_gate_rejected: bool,
+    /// `true` when the cost-ratio part of the writeback quality gate
+    /// rejected this trigger.
+    pub cost_ratio_gate_rejected: bool,
+    /// `true` when the refined-velocity part of the writeback quality
+    /// gate rejected this trigger.
+    pub velocity_gate_rejected: bool,
+    /// `true` when the adaptive refined-velocity gate rejected this
+    /// trigger.
+    pub adaptive_velocity_gate_rejected: bool,
     /// Number of IMU factors whose stored `bias_*_linearisation` was
     /// refreshed by the threshold-gated re-linearisation pass driven by
     /// [`OnlineSlamLocalBaConfig::relinearise_imu_factor_bias_thresholds`].
@@ -235,6 +345,136 @@ pub struct OnlineSlamLocalBaStats {
     /// `state.factor_history` whole-vector ensures future windows
     /// inherit the up-to-date linearisation point.
     pub relinearised_factor_count: usize,
+}
+
+fn ba_cost_ratio(result: &BaResult) -> f64 {
+    if result.initial_cost > 0.0 {
+        result.final_cost / result.initial_cost
+    } else {
+        0.0
+    }
+}
+
+fn compute_max_refined_velocity_norm_mps(ba: &BundleAdjustment, window_ids: &[u64]) -> f64 {
+    window_ids
+        .iter()
+        .filter_map(|kf_id| ba.velocities.get(kf_id))
+        .map(|velocity| velocity.norm())
+        .fold(0.0_f64, f64::max)
+}
+
+fn robust_quantile(values: &mut Vec<f64>, quantile: f64) -> Option<f64> {
+    values.retain(|value| value.is_finite() && *value >= 0.0);
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let q = quantile.clamp(0.0, 1.0);
+    let idx = ((values.len() - 1) as f64 * q).ceil() as usize;
+    values.get(idx).copied()
+}
+
+fn pose_delta_velocity_norms_for_window(
+    map: &VisualMap,
+    factors: &[ImuPreintegrationFactor],
+) -> Vec<f64> {
+    let mut norms = Vec::new();
+    for factor in factors {
+        let dt = factor.delta.delta_time;
+        if dt <= 0.0 || !dt.is_finite() {
+            continue;
+        }
+        let Some(prev_center) = map
+            .keyframes
+            .get(&factor.keyframe_id_from)
+            .and_then(|kf| kf.frame.pose.as_ref())
+            .map(|pose| pose.camera_center_world())
+        else {
+            continue;
+        };
+        let Some(curr_center) = map
+            .keyframes
+            .get(&factor.keyframe_id_to)
+            .and_then(|kf| kf.frame.pose.as_ref())
+            .map(|pose| pose.camera_center_world())
+        else {
+            continue;
+        };
+        let velocity_norm = ((curr_center - prev_center) / dt).norm();
+        if velocity_norm.is_finite() {
+            norms.push(velocity_norm);
+        }
+    }
+    norms
+}
+
+fn imu_predicted_velocity_norms_for_window(
+    map: &VisualMap,
+    state: &OnlineSlamLocalBaState,
+    factors: &[ImuPreintegrationFactor],
+) -> Vec<f64> {
+    let mut norms = Vec::new();
+    for factor in factors {
+        let dt = factor.delta.delta_time;
+        if dt <= 0.0 || !dt.is_finite() {
+            continue;
+        }
+        let Some(from_state) = state.keyframe_state.get(&factor.keyframe_id_from) else {
+            continue;
+        };
+        let Some(rotation_body_to_world) = map
+            .keyframes
+            .get(&factor.keyframe_id_from)
+            .and_then(|kf| kf.frame.pose.as_ref())
+            .map(|pose| pose.world_to_camera.rotation.inverse())
+        else {
+            continue;
+        };
+        let predicted_velocity = from_state.velocity_world
+            + factor.gravity_world * dt
+            + rotation_body_to_world * factor.delta.delta_velocity;
+        let norm = predicted_velocity.norm();
+        if norm.is_finite() {
+            norms.push(norm);
+        }
+    }
+    norms
+}
+
+fn compute_adaptive_velocity_gate_threshold_mps(
+    map: &VisualMap,
+    state: &OnlineSlamLocalBaState,
+    window_ids: &[u64],
+    factors: &[ImuPreintegrationFactor],
+    config: &AdaptiveVelocityGateConfig,
+) -> Option<f64> {
+    let mut reference_norms: Vec<f64> = window_ids
+        .iter()
+        .filter_map(|kf_id| state.keyframe_state.get(kf_id))
+        .map(|slot| slot.velocity_world.norm())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .collect();
+    reference_norms.extend(pose_delta_velocity_norms_for_window(map, factors));
+    reference_norms.extend(imu_predicted_velocity_norms_for_window(map, state, factors));
+    if reference_norms.len() < config.min_reference_count.max(1) {
+        return None;
+    }
+
+    let reference = robust_quantile(&mut reference_norms, config.reference_quantile)?;
+    let multiplier = config.multiplier.max(0.0);
+    let margin = config.margin_mps.max(0.0);
+    let min_threshold = config.min_threshold_mps.max(0.0);
+    let mut threshold = reference * multiplier + margin;
+    if !threshold.is_finite() {
+        return None;
+    }
+    threshold = threshold.max(min_threshold);
+    if let Some(max_threshold) = config.max_threshold_mps {
+        if max_threshold.is_finite() && max_threshold >= 0.0 {
+            threshold = threshold.min(max_threshold);
+        }
+    }
+    Some(threshold)
 }
 
 /// Run one local VI-BA trigger over `map`'s trailing window of keyframes.
@@ -430,10 +670,7 @@ pub fn run_local_vi_ba(
     // frozen so the LM can only update poses + velocities + landmarks.
     let mut bias_frozen = false;
     if let Some(threshold) = state.config.freeze_biases_when_cost_ratio_above {
-        let initial = ba_result.initial_cost;
-        let final_ = ba_result.final_cost;
-        // Guard against initial_cost == 0 (no residuals — nothing to refine).
-        let ratio = if initial > 0.0 { final_ / initial } else { 0.0 };
+        let ratio = ba_cost_ratio(&ba_result);
         if ratio > threshold {
             let (mut ba_frozen, _) = build_ba(true)?;
             match ba_frozen.optimize(&state.config.ba_config) {
@@ -450,6 +687,52 @@ pub fn run_local_vi_ba(
                 }
             }
         }
+    }
+
+    let cost_ratio = ba_cost_ratio(&ba_result);
+    let max_refined_velocity_norm_mps = compute_max_refined_velocity_norm_mps(&ba, &window_ids);
+    let adaptive_velocity_gate_threshold_mps = state
+        .config
+        .adaptive_velocity_gate
+        .as_ref()
+        .and_then(|config| {
+            compute_adaptive_velocity_gate_threshold_mps(
+                map,
+                state,
+                &window_ids,
+                &in_window_factors,
+                config,
+            )
+        });
+    let cost_ratio_gate_rejected = state
+        .config
+        .reject_writeback_when_cost_ratio_above
+        .is_some_and(|threshold| cost_ratio > threshold);
+    let velocity_gate_rejected = state
+        .config
+        .reject_writeback_when_velocity_norm_above_mps
+        .is_some_and(|threshold| max_refined_velocity_norm_mps > threshold);
+    let adaptive_velocity_gate_rejected = adaptive_velocity_gate_threshold_mps
+        .is_some_and(|threshold| max_refined_velocity_norm_mps > threshold);
+    let quality_gate_rejected =
+        cost_ratio_gate_rejected || velocity_gate_rejected || adaptive_velocity_gate_rejected;
+    if quality_gate_rejected {
+        return Some(OnlineSlamLocalBaStats {
+            window_keyframe_ids: window_ids,
+            landmark_count: active_landmarks.len(),
+            observation_count,
+            imu_factor_count,
+            ba_result,
+            cost_ratio,
+            max_refined_velocity_norm_mps,
+            adaptive_velocity_gate_threshold_mps,
+            bias_frozen,
+            quality_gate_rejected,
+            cost_ratio_gate_rejected,
+            velocity_gate_rejected,
+            adaptive_velocity_gate_rejected,
+            relinearised_factor_count,
+        });
     }
 
     // Write refined poses + landmarks back to the map.
@@ -490,7 +773,14 @@ pub fn run_local_vi_ba(
         observation_count,
         imu_factor_count,
         ba_result,
+        cost_ratio,
+        max_refined_velocity_norm_mps,
+        adaptive_velocity_gate_threshold_mps,
         bias_frozen,
+        quality_gate_rejected,
+        cost_ratio_gate_rejected,
+        velocity_gate_rejected,
+        adaptive_velocity_gate_rejected,
         relinearised_factor_count,
     })
 }
@@ -1137,6 +1427,154 @@ mod tests {
                 assert!(da < 1.0e-9, "bias_acc drift on kf {kf_id}: {da}");
             }
         }
+    }
+
+    #[test]
+    fn local_vi_ba_quality_gate_rejects_writeback() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map
+            .keyframes
+            .get(&20)
+            .and_then(|kf| kf.frame.pose.clone())
+            .expect("kf 20 has pose");
+        let original_landmark_1 = map.landmarks.get(&1).expect("landmark exists").position;
+
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            // Force the branch deterministically for the unit test. Normal
+            // callers should use a non-negative ratio such as 1.0.
+            reject_writeback_when_cost_ratio_above: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        for kf_id in [10u64, 20, 30] {
+            state.keyframe_state.insert(
+                kf_id,
+                KeyframeImuState {
+                    velocity_world: Vector3::new(kf_id as f64, 0.5, -0.25),
+                    bias_gyro: Vector3::new(0.01, -0.02, 0.03),
+                    bias_acc: Vector3::new(0.1, -0.2, 0.3),
+                },
+            );
+        }
+        let original_keyframe_state = state.keyframe_state.clone();
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(result.cost_ratio_gate_rejected);
+        assert!(!result.velocity_gate_rejected);
+        assert!(result.cost_ratio.is_finite());
+        assert!(result.max_refined_velocity_norm_mps.is_finite());
+        assert_eq!(
+            map.keyframes
+                .get(&20)
+                .and_then(|kf| kf.frame.pose.clone())
+                .expect("kf 20 has pose"),
+            original_pose_20,
+            "rejected VI-BA must not write poses back"
+        );
+        assert_eq!(
+            map.landmarks.get(&1).expect("landmark exists").position,
+            original_landmark_1,
+            "rejected VI-BA must not write landmarks back"
+        );
+        assert_eq!(
+            state.keyframe_state, original_keyframe_state,
+            "rejected VI-BA must not write velocity/bias slots back"
+        );
+    }
+
+    #[test]
+    fn local_vi_ba_velocity_gate_rejects_writeback() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map
+            .keyframes
+            .get(&20)
+            .and_then(|kf| kf.frame.pose.clone())
+            .expect("kf 20 has pose");
+
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            // Force the branch deterministically for the unit test. Normal
+            // callers should use a non-negative physical velocity cap.
+            reject_writeback_when_velocity_norm_above_mps: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(!result.cost_ratio_gate_rejected);
+        assert!(result.velocity_gate_rejected);
+        assert!(result.max_refined_velocity_norm_mps.is_finite());
+        assert_eq!(
+            map.keyframes
+                .get(&20)
+                .and_then(|kf| kf.frame.pose.clone())
+                .expect("kf 20 has pose"),
+            original_pose_20,
+            "velocity-gated VI-BA must not write poses back"
+        );
+    }
+
+    #[test]
+    fn local_vi_ba_adaptive_velocity_gate_rejects_writeback() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map
+            .keyframes
+            .get(&20)
+            .and_then(|kf| kf.frame.pose.clone())
+            .expect("kf 20 has pose");
+
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            adaptive_velocity_gate: Some(AdaptiveVelocityGateConfig {
+                // Force the branch deterministically: the synthetic test
+                // window has finite reference velocities, so a zero threshold
+                // must reject any non-zero refined velocity.
+                reference_quantile: 0.5,
+                multiplier: 0.0,
+                margin_mps: 0.0,
+                min_threshold_mps: 0.0,
+                max_threshold_mps: None,
+                min_reference_count: 1,
+            }),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(!result.cost_ratio_gate_rejected);
+        assert!(!result.velocity_gate_rejected);
+        assert!(result.adaptive_velocity_gate_rejected);
+        assert_eq!(result.adaptive_velocity_gate_threshold_mps, Some(0.0));
+        assert_eq!(
+            map.keyframes
+                .get(&20)
+                .and_then(|kf| kf.frame.pose.clone())
+                .expect("kf 20 has pose"),
+            original_pose_20,
+            "adaptive velocity-gated VI-BA must not write poses back"
+        );
     }
 
     #[test]

@@ -15,6 +15,13 @@ pub use bundle::{
     PositionPriorObservation,
 };
 
+pub mod covisibility_ba;
+pub use covisibility_ba::{
+    refine_visual_map_with_covisibility_ba, select_covisibility_local_ba_window,
+    CovisibilityKeyframeScore, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
+    CovisibilityLocalBaResult, CovisibilityLocalBaSelection,
+};
+
 pub mod incremental_sfm;
 pub use incremental_sfm::{
     incremental_sfm, IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult,
@@ -59,16 +66,18 @@ pub use online_stereo_vo_ba::{
 pub mod vo_loop_closure;
 pub use vo_loop_closure::{
     close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
-    detect_loop_candidates, LoopCandidatePair, VoLoopClosureConfig, VoLoopClosureError,
+    close_loops_on_vo_trajectory_with_globals_and_loop_matches,
+    close_loops_on_vo_trajectory_with_loop_matches, detect_loop_candidates, LoopCandidatePair,
+    LoopCandidateVerificationDiagnostic, VoLoopClosureConfig, VoLoopClosureError,
     VoLoopClosureResult,
 };
 
 pub mod online_slam_vi_ba;
 pub use online_slam_vi_ba::{
     estimate_scale_from_factors, run_inertial_only_vi_ba, run_local_vi_ba,
-    run_viba2_inertial_with_scale, InertialOnlyViBaStats, KeyframeImuState,
-    OnlineSlamLocalBaConfig, OnlineSlamLocalBaState, OnlineSlamLocalBaStats, Viba2Config,
-    Viba2Stats,
+    run_viba2_inertial_with_scale, AdaptiveVelocityGateConfig, InertialOnlyViBaStats,
+    KeyframeImuState, OnlineSlamLocalBaConfig, OnlineSlamLocalBaState, OnlineSlamLocalBaStats,
+    Viba2Config, Viba2Stats,
 };
 
 pub mod vi_initializer;

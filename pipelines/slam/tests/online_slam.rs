@@ -7,13 +7,16 @@ use visloc_slam::{
     correspondences_2d3d_for_loop_candidate, loop_closure_constraints_from_candidates,
     online_slam_results_to_html_report, relative_world_to_camera, scan_pairwise_loop_closures,
     verify_loop_closure_candidates, verify_loop_closure_candidates_hybrid,
-    verify_loop_closure_candidates_pnp, AppearanceLoopScannerSettings,
-    EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig,
-    LinearSolver, LoopClosureConfig, LoopClosureConstraint, LoopClosureVerificationFailureReason,
-    LoopClosureVerifierConfig, OnlineSlamConfig, OnlineSlamImuConfig,
-    OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline, OnlineSlamRelocalizationConfig,
-    PairwiseKeyframeView, PairwiseLoopClosureScannerConfig, PnPLoopClosureVerifier,
-    PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
+    verify_loop_closure_candidates_pnp, AppearanceLoopScannerSettings, CovisibilityLocalBaConfig,
+    CovisibilityLocalBaError, EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier,
+    HybridLoopClosureVerifierConfig, LinearSolver, LoopClosureConfig, LoopClosureConstraint,
+    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, OnlineSlamConfig,
+    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamImuConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
+    OnlineSlamRelocalizationAppearanceConfig, OnlineSlamRelocalizationConfig,
+    OnlineSlamRelocalizationCovisibilityConfig, PairwiseKeyframeView,
+    PairwiseLoopClosureScannerConfig, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
+    PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -81,6 +84,7 @@ fn online_slam_tracks_and_applies_keyframe_update() {
     assert_eq!(result.map_keyframe_count, 1);
     assert_eq!(result.map_landmark_count, 6);
     assert!(result.mapping.as_ref().unwrap().keyframe_decision.selected);
+    assert!(result.covisibility_local_ba.is_none());
     assert!(!result.has_loop_closure_candidate());
     assert_eq!(slam.map().keyframes.len(), 1);
     assert!(slam.map().validate().is_valid());
@@ -146,6 +150,7 @@ fn slam_pipeline_with_imu(
             },
             imu: Some(OnlineSlamImuConfig::default()),
             local_vi_ba: None,
+            covisibility_local_ba: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -427,6 +432,7 @@ fn online_slam_imu_factor_propagates_gravity_weights_and_bias_linearisation() {
             },
             imu: Some(custom_imu_config.clone()),
             local_vi_ba: None,
+            covisibility_local_ba: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -614,6 +620,7 @@ fn online_slam_runs_local_vi_ba_when_factor_emitted() {
                 gravity_world: Vector3::zeros(),
                 ..OnlineSlamLocalBaConfig::default()
             }),
+            covisibility_local_ba: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -658,6 +665,162 @@ fn online_slam_runs_local_vi_ba_when_factor_emitted() {
     let vi_state = slam.local_vi_ba_state.as_ref().unwrap();
     assert!(vi_state.keyframe_state.is_empty());
     assert!(vi_state.factor_history.is_empty());
+}
+
+#[test]
+fn online_slam_runs_covisibility_local_ba_on_new_keyframe_trigger() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+    let (_, third_frame) = map_and_frame_with_extra_landmarks(50, 1, Vector3::new(3.0, 0.0, 0.0));
+    let mut slam = OnlineSlamPipeline::new(
+        map,
+        Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+        LocalMappingPipeline::default(),
+        OnlineSlamConfig {
+            apply_map_updates: true,
+            loop_closure: LoopClosureConfig {
+                min_frame_id_gap: 5,
+                min_shared_landmarks: 4,
+                min_shared_landmark_ratio_percent: 50,
+                ..LoopClosureConfig::default()
+            },
+            imu: None,
+            local_vi_ba: None,
+            covisibility_local_ba: Some(OnlineSlamCovisibilityLocalBaConfig {
+                min_keyframes: 3,
+                trigger_every_new_keyframes: 1,
+                max_outlier_observation_ratio: None,
+                ba: CovisibilityLocalBaConfig {
+                    max_neighbor_keyframes: 1,
+                    min_shared_landmarks: 4,
+                    max_boundary_keyframes: 1,
+                    min_boundary_observations: 1,
+                    min_observations_per_landmark: 2,
+                    ..CovisibilityLocalBaConfig::default()
+                },
+            }),
+            vi_init: None,
+            vi_motion_init: None,
+            keep_pre_promotion_imu_factors: false,
+            pose_graph_refinement: None,
+            relocalization: None,
+        },
+    );
+
+    let r1 = slam.process_frame(&first_frame, []);
+    assert!(r1.tracking_succeeded());
+    assert!(
+        r1.covisibility_local_ba.is_none(),
+        "min_keyframes should skip startup"
+    );
+
+    let r2 = slam.process_frame(&second_frame, []);
+    assert!(r2.tracking_succeeded());
+    assert!(
+        r2.covisibility_local_ba.is_none(),
+        "min_keyframes should skip until the third keyframe"
+    );
+
+    let r3 = slam.process_frame(&third_frame, []);
+    assert!(r3.tracking_succeeded());
+    let stats = r3
+        .covisibility_local_ba
+        .as_ref()
+        .expect("covisibility local BA should run on the third keyframe");
+    assert!(stats.success, "unexpected BA error: {:?}", stats.error);
+    assert_eq!(stats.active_keyframe_id, 50);
+    assert_eq!(stats.map_keyframe_count, 3);
+    assert!(stats.elapsed_ms >= 0.0);
+    assert!(stats.error.is_none());
+    assert!(stats.ba_result.is_some());
+    assert!(stats.updated_keyframe_count >= 1);
+    assert!(stats.updated_landmark_count > 0);
+    assert!(stats.observation_count > 0);
+    assert_eq!(stats.outlier_observation_ratio, Some(0.0));
+    assert!(!stats.quality_gate_rejected);
+
+    let selection = stats.selection.as_ref().expect("selection diagnostics");
+    assert_eq!(selection.active_keyframe_id, 50);
+    assert_eq!(selection.optimized_keyframe_ids[0], 50);
+    assert_eq!(selection.optimized_keyframe_ids.len(), 2);
+    assert_eq!(selection.fixed_keyframe_ids.len(), 1);
+    assert_eq!(selection.landmark_ids.len(), 12);
+    assert!(selection.observation_count > 0);
+}
+
+#[test]
+fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+    let (_, third_frame) = map_and_frame_with_extra_landmarks(50, 1, Vector3::new(3.0, 0.0, 0.0));
+    let mut slam = OnlineSlamPipeline::new(
+        map,
+        Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+        LocalMappingPipeline::default(),
+        OnlineSlamConfig {
+            apply_map_updates: true,
+            loop_closure: LoopClosureConfig {
+                min_frame_id_gap: 5,
+                min_shared_landmarks: 4,
+                min_shared_landmark_ratio_percent: 50,
+                ..LoopClosureConfig::default()
+            },
+            imu: None,
+            local_vi_ba: None,
+            covisibility_local_ba: Some(OnlineSlamCovisibilityLocalBaConfig {
+                min_keyframes: 3,
+                trigger_every_new_keyframes: 1,
+                max_outlier_observation_ratio: Some(0.0),
+                ba: CovisibilityLocalBaConfig {
+                    max_neighbor_keyframes: 1,
+                    min_shared_landmarks: 4,
+                    max_boundary_keyframes: 1,
+                    min_boundary_observations: 1,
+                    min_observations_per_landmark: 2,
+                    outlier_reprojection_threshold_px: Some(1.0),
+                    ..CovisibilityLocalBaConfig::default()
+                },
+            }),
+            vi_init: None,
+            vi_motion_init: None,
+            keep_pre_promotion_imu_factors: false,
+            pose_graph_refinement: None,
+            relocalization: None,
+        },
+    );
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    assert!(slam.process_frame(&second_frame, []).tracking_succeeded());
+
+    let corrupted_xy = {
+        let map = slam.map_mut();
+        let observation = map
+            .keyframes
+            .get_mut(&30)
+            .and_then(|kf| kf.observations.get_mut(0))
+            .expect("second keyframe should carry observations");
+        observation.xy.x += 100.0;
+        observation.xy
+    };
+
+    let result = slam.process_frame(&third_frame, []);
+    assert!(result.tracking_succeeded());
+    let stats = result
+        .covisibility_local_ba
+        .as_ref()
+        .expect("covisibility BA should run on the third keyframe");
+
+    assert!(!stats.success);
+    assert!(stats.quality_gate_rejected);
+    assert_eq!(stats.updated_keyframe_count, 0);
+    assert_eq!(stats.updated_landmark_count, 0);
+    assert!(stats.outlier_observation_count > 0);
+    assert!(matches!(
+        stats.error.as_ref(),
+        Some(CovisibilityLocalBaError::QualityGateRejected { .. })
+    ));
+    assert_eq!(slam.map().keyframes.len(), 3);
+    assert_eq!(slam.map().keyframes[&30].observations[0].xy, corrupted_xy);
 }
 
 #[test]
@@ -2876,6 +3039,7 @@ mod vi_init_integration {
                 },
                 imu: Some(imu_config_z_up()),
                 local_vi_ba,
+                covisibility_local_ba: None,
                 vi_init: Some(config),
                 vi_motion_init: None,
                 keep_pre_promotion_imu_factors: false,
@@ -3516,6 +3680,7 @@ mod vi_motion_init_integration {
                     ..OnlineSlamImuConfig::default()
                 }),
                 local_vi_ba: None,
+                covisibility_local_ba: None,
                 vi_init: Some(OnlineSlamViInitConfig {
                     initializer: VisualInertialInitializerConfig {
                         // Make the static stage hard to fire: jacked-up
@@ -3634,6 +3799,7 @@ mod vi_motion_init_integration {
                     ..OnlineSlamImuConfig::default()
                 }),
                 local_vi_ba: None,
+                covisibility_local_ba: None,
                 vi_init: Some(OnlineSlamViInitConfig {
                     initializer: VisualInertialInitializerConfig {
                         gravity_world: z_up_gravity,
@@ -4469,9 +4635,17 @@ mod relocalization_on_tracker_death {
         map: VisualMap,
         config: OnlineSlamRelocalizationConfig,
     ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        pipeline_with_relocalization_and_tracking_config(map, config, TrackingConfig::default())
+    }
+
+    fn pipeline_with_relocalization_and_tracking_config(
+        map: VisualMap,
+        config: OnlineSlamRelocalizationConfig,
+        tracking_config: TrackingConfig,
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
         OnlineSlamPipeline::new(
             map,
-            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            Tracker::new(LocalizationPipeline::default(), tracking_config),
             LocalMappingPipeline::default(),
             OnlineSlamConfig {
                 apply_map_updates: true,
@@ -4535,7 +4709,16 @@ mod relocalization_on_tracker_death {
                 max_mean_reprojection_error: Some(50.0),
                 pose_prior_candidate_radius_meters: None,
                 recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
                 max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
             },
         );
         // First, successfully track + register KF#10 with the correct
@@ -4599,7 +4782,16 @@ mod relocalization_on_tracker_death {
                 max_mean_reprojection_error: Some(0.01),
                 pose_prior_candidate_radius_meters: None,
                 recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
                 max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
             },
         );
         let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
@@ -4620,6 +4812,652 @@ mod relocalization_on_tracker_death {
         let state = slam.relocalization_state.as_ref().unwrap();
         assert_eq!(state.trigger_count, 1);
         assert_eq!(state.success_count, 0);
+    }
+
+    #[test]
+    fn relocalization_attempt_interval_skips_nearby_failed_frames() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 9999,
+                min_inlier_ratio: 0.99,
+                max_mean_reprojection_error: Some(0.01),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 5,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+        );
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let _ = slam.process_frame(&f0, []);
+
+        let mut f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        f1.keypoints.clear();
+        f1.descriptors.clear();
+        let r1 = slam.process_frame(&f1, []);
+        assert!(r1
+            .relocalization
+            .as_ref()
+            .is_some_and(|stats| stats.attempted));
+        assert_eq!(slam.relocalization_state.as_ref().unwrap().trigger_count, 1);
+
+        let mut f2 = frame_at(22, Vector3::new(1.7, 0.0, 0.0), &points, &camera, &map);
+        f2.keypoints.clear();
+        f2.descriptors.clear();
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.relocalization.is_none());
+        let state = slam.relocalization_state.as_ref().unwrap();
+        assert_eq!(state.trigger_count, 1);
+        assert_eq!(state.last_attempt_frame_id, Some(20));
+
+        let mut f3 = frame_at(25, Vector3::new(2.0, 0.0, 0.0), &points, &camera, &map);
+        f3.keypoints.clear();
+        f3.descriptors.clear();
+        let r3 = slam.process_frame(&f3, []);
+        assert!(r3
+            .relocalization
+            .as_ref()
+            .is_some_and(|stats| stats.attempted));
+        assert_eq!(slam.relocalization_state.as_ref().unwrap().trigger_count, 2);
+    }
+
+    #[test]
+    fn relocalization_attempt_budget_skips_after_consecutive_failure_cap() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 9999,
+                min_inlier_ratio: 0.99,
+                max_mean_reprojection_error: Some(0.01),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: Some(1),
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+        );
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let _ = slam.process_frame(&f0, []);
+
+        let mut f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        f1.keypoints.clear();
+        f1.descriptors.clear();
+        let r1 = slam.process_frame(&f1, []);
+        assert!(r1
+            .relocalization
+            .as_ref()
+            .is_some_and(|stats| stats.attempted));
+        let state = slam.relocalization_state.as_ref().unwrap();
+        assert_eq!(state.trigger_count, 1);
+        assert_eq!(state.success_count, 0);
+        assert_eq!(state.consecutive_failed_attempts, 1);
+        assert_eq!(state.budget_skip_count, 0);
+
+        let mut f2 = frame_at(21, Vector3::new(1.6, 0.0, 0.0), &points, &camera, &map);
+        f2.keypoints.clear();
+        f2.descriptors.clear();
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.relocalization.is_none());
+        let state = slam.relocalization_state.as_ref().unwrap();
+        assert_eq!(state.trigger_count, 1);
+        assert_eq!(state.last_attempt_frame_id, Some(20));
+        assert_eq!(state.consecutive_failed_attempts, 1);
+        assert_eq!(state.budget_skip_count, 1);
+    }
+
+    #[test]
+    fn relocalization_covisibility_store_uses_last_successful_keyframe() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: Some(OnlineSlamRelocalizationCovisibilityConfig {
+                    max_neighbor_keyframes: Some(2),
+                    min_shared_landmarks: 1,
+                    min_local_map_landmarks: 1,
+                    fallback_to_broader_store_on_failure: true,
+                    broader_store_retry_interval_frames: 1,
+                    compare_broader_store_on_success: false,
+                }),
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded() && r0.map_was_updated());
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(stats.used_covisibility_local_descriptor_store);
+        assert_eq!(stats.covisibility_reference_keyframe_id, Some(10));
+        assert_eq!(stats.descriptor_store_landmark_count, points.len());
+        assert_eq!(
+            stats.covisibility_local_descriptor_store_landmark_count,
+            Some(points.len())
+        );
+        assert!(!stats.tried_broader_descriptor_store_fallback);
+        assert!(!stats.used_broader_descriptor_store_fallback);
+        assert!(stats.succeeded);
+        assert!(r1.tracking_succeeded());
+    }
+
+    #[test]
+    fn relocalization_covisibility_store_falls_back_to_broader_store_when_too_weak() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: Some(OnlineSlamRelocalizationCovisibilityConfig {
+                    max_neighbor_keyframes: Some(2),
+                    min_shared_landmarks: 1,
+                    min_local_map_landmarks: 1,
+                    fallback_to_broader_store_on_failure: true,
+                    broader_store_retry_interval_frames: 1,
+                    compare_broader_store_on_success: false,
+                }),
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded() && r0.map_was_updated());
+
+        let map_mut = slam.map_mut();
+        map_mut
+            .keyframes
+            .get_mut(&10)
+            .expect("seed keyframe was inserted")
+            .observations
+            .retain(|observation| observation.landmark_id <= 3);
+        for landmark in map_mut.landmarks.values_mut() {
+            if landmark.id > 3 {
+                landmark
+                    .observations
+                    .retain(|observation| observation.frame_id != 10);
+            }
+        }
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(stats.tried_covisibility_local_descriptor_store);
+        assert!(!stats.used_covisibility_local_descriptor_store);
+        assert!(stats.tried_broader_descriptor_store_fallback);
+        assert!(!stats.broader_descriptor_store_retry_skipped_by_interval);
+        assert!(stats.used_broader_descriptor_store_fallback);
+        assert_eq!(stats.covisibility_reference_keyframe_id, Some(10));
+        assert_eq!(
+            stats.covisibility_local_descriptor_store_landmark_count,
+            Some(3)
+        );
+        assert_eq!(
+            stats.broader_descriptor_store_landmark_count,
+            Some(points.len())
+        );
+        assert_eq!(stats.descriptor_store_landmark_count, points.len());
+        assert!(stats.succeeded);
+        assert!(r1.tracking_succeeded());
+    }
+
+    #[test]
+    fn relocalization_appearance_store_uses_retrieved_keyframe_landmarks() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: Some(OnlineSlamRelocalizationAppearanceConfig {
+                    max_keyframes: 1,
+                    candidate_log_limit: None,
+                    min_similarity: 0.0,
+                    exclude_recent_frame_gap: 1,
+                    min_local_map_landmarks: 1,
+                    fallback_to_broader_store_on_failure: true,
+                    broader_store_retry_interval_frames: 1,
+                    compare_broader_store_on_success: false,
+                }),
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded() && r0.map_was_updated());
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(stats.tried_appearance_descriptor_store);
+        assert!(stats.used_appearance_descriptor_store);
+        assert_eq!(stats.appearance_best_keyframe_id, Some(10));
+        assert_eq!(stats.appearance_candidate_keyframe_count, 1);
+        assert_eq!(stats.appearance_candidates.len(), 1);
+        assert_eq!(stats.appearance_candidates[0].keyframe_id, 10);
+        assert_eq!(
+            stats.appearance_descriptor_store_landmark_count,
+            Some(points.len())
+        );
+        assert!(!stats.tried_broader_descriptor_store_fallback);
+        assert!(stats.succeeded);
+        assert!(r1.tracking_succeeded());
+    }
+
+    #[test]
+    fn relocalization_appearance_store_falls_back_to_broader_store_on_gate_failure() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 9999,
+                min_inlier_ratio: 0.99,
+                max_mean_reprojection_error: Some(0.01),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: Some(OnlineSlamRelocalizationAppearanceConfig {
+                    max_keyframes: 1,
+                    candidate_log_limit: None,
+                    min_similarity: 0.0,
+                    exclude_recent_frame_gap: 1,
+                    min_local_map_landmarks: 1,
+                    fallback_to_broader_store_on_failure: true,
+                    broader_store_retry_interval_frames: 1,
+                    compare_broader_store_on_success: false,
+                }),
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded() && r0.map_was_updated());
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(stats.tried_appearance_descriptor_store);
+        assert!(!stats.used_appearance_descriptor_store);
+        assert!(stats.tried_broader_descriptor_store_fallback);
+        assert!(stats.used_broader_descriptor_store_fallback);
+        assert_eq!(stats.appearance_best_keyframe_id, Some(10));
+        assert_eq!(
+            stats.appearance_descriptor_store_landmark_count,
+            Some(points.len())
+        );
+        assert!(!stats.succeeded);
+        assert!(!r1.tracking_succeeded());
+    }
+
+    #[test]
+    fn relocalization_appearance_candidate_log_limit_does_not_expand_recovery_store() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: Some(OnlineSlamRelocalizationAppearanceConfig {
+                    max_keyframes: 1,
+                    candidate_log_limit: Some(2),
+                    min_similarity: 0.0,
+                    exclude_recent_frame_gap: 1,
+                    min_local_map_landmarks: 1,
+                    fallback_to_broader_store_on_failure: false,
+                    broader_store_retry_interval_frames: 1,
+                    compare_broader_store_on_success: false,
+                }),
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(1.2),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded() && r0.map_was_updated());
+
+        let f1 = frame_at(20, Vector3::new(1.1, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        assert!(r1.tracking_succeeded() && r1.map_was_updated());
+
+        let f2 = frame_at(30, Vector3::new(2.5, 0.0, 0.0), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        let stats = r2
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(stats.used_appearance_descriptor_store);
+        assert_eq!(stats.appearance_candidate_keyframe_count, 2);
+        assert_eq!(
+            stats
+                .appearance_descriptor_store_landmark_count
+                .expect("appearance store size"),
+            points.len()
+        );
+        assert_eq!(
+            stats
+                .appearance_candidates
+                .iter()
+                .map(|candidate| candidate.keyframe_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+    }
+
+    #[test]
+    fn relocalization_pose_continuity_gate_rejects_large_frame_normalized_jump() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: Some(0.05),
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded());
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        assert!(!r1.tracking_succeeded());
+        assert!(matches!(
+            r1.tracking.tracking_failure_reason,
+            Some(visloc_tracking::TrackingFailureReason::PosePriorTranslationErrorExceeded { .. })
+        ));
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(!stats.succeeded);
+        assert!(stats.inlier_count >= 6);
+        assert!(stats.inlier_ratio >= 0.3);
+        assert!(stats.translation_from_last_success_meters.unwrap() > 1.0);
+        assert!(
+            stats
+                .translation_per_frame_from_last_success_meters
+                .unwrap()
+                > 0.05
+        );
+        let state = slam.relocalization_state.as_ref().unwrap();
+        assert_eq!(state.trigger_count, 1);
+        assert_eq!(state.success_count, 0);
+        assert_eq!(state.last_success_frame_id, None);
+    }
+
+    #[test]
+    fn relocalization_depth_ratio_gate_rejects_scale_inconsistent_recovery() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: Some(0.8),
+                max_inlier_depth_median_ratio_to_last_success: Some(1.25),
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded());
+
+        let f1 = frame_at(20, Vector3::new(0.0, 0.0, 3.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        assert!(!r1.tracking_succeeded());
+        let stats = r1
+            .relocalization
+            .as_ref()
+            .expect("relocalization stats present when primary tracking failed");
+        assert!(stats.attempted);
+        assert!(!stats.succeeded);
+        assert!(stats.inlier_count >= 6);
+        let ratio = stats
+            .inlier_depth_median_ratio_to_last_success
+            .expect("depth-ratio diagnostic populated");
+        assert!(
+            ratio < 0.8,
+            "expected recovered inlier depth ratio below gate, got {ratio}"
+        );
+        assert_eq!(slam.relocalization_state.as_ref().unwrap().success_count, 0);
+    }
+
+    #[test]
+    fn relocalization_confirmation_window_waits_for_consistent_second_recovery() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_relocalization_and_tracking_config(
+            map.clone(),
+            OnlineSlamRelocalizationConfig {
+                min_inliers: 6,
+                min_inlier_ratio: 0.3,
+                max_mean_reprojection_error: Some(50.0),
+                pose_prior_candidate_radius_meters: None,
+                recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
+                max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 2,
+                confirmation_max_translation_per_frame_meters: Some(0.2),
+            },
+            TrackingConfig {
+                max_pose_prior_translation_error: Some(0.1),
+                ..TrackingConfig::default()
+            },
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        let r0 = slam.process_frame(&f0, []);
+        assert!(r0.tracking_succeeded());
+
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        assert!(!r1.tracking_succeeded());
+        let stats1 = r1
+            .relocalization
+            .as_ref()
+            .expect("first recovery candidate should be reported");
+        assert!(stats1.passed_acceptance_gates);
+        assert!(!stats1.succeeded);
+        assert_eq!(stats1.confirmation_count, 1);
+        assert_eq!(stats1.confirmation_required_count, 2);
+        assert_eq!(slam.relocalization_state.as_ref().unwrap().success_count, 0);
+        assert_eq!(
+            slam.relocalization_state
+                .as_ref()
+                .unwrap()
+                .pending_confirmation
+                .as_ref()
+                .map(|pending| pending.count),
+            Some(1)
+        );
+
+        let f2 = frame_at(21, Vector3::new(1.55, 0.0, 0.0), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        let stats2 = r2
+            .relocalization
+            .as_ref()
+            .expect("second recovery candidate should be reported");
+        assert!(stats2.passed_acceptance_gates);
+        assert!(stats2.succeeded);
+        assert_eq!(stats2.confirmation_count, 2);
+        assert!(stats2
+            .confirmation_translation_per_frame_from_previous_meters
+            .is_some_and(|actual| actual <= 0.2));
+        assert!(r2.tracking_succeeded());
+        let state = slam.relocalization_state.as_ref().unwrap();
+        assert_eq!(state.success_count, 1);
+        assert_eq!(state.last_success_frame_id, Some(21));
+        assert!(state.pending_confirmation.is_none());
     }
 
     #[test]
@@ -4645,7 +5483,16 @@ mod relocalization_on_tracker_death {
                 max_mean_reprojection_error: Some(50.0),
                 pose_prior_candidate_radius_meters: Some(5.0),
                 recent_keyframe_window: None,
+                covisibility_local_map: None,
+                appearance_retrieval_map: None,
                 max_translation_from_imu_prediction_meters: None,
+                attempt_interval_frames: 1,
+                max_consecutive_failed_attempts: None,
+                max_translation_per_frame_from_last_success_meters: None,
+                min_inlier_depth_median_ratio_to_last_success: None,
+                max_inlier_depth_median_ratio_to_last_success: None,
+                confirmation_required_recoveries: 1,
+                confirmation_max_translation_per_frame_meters: None,
             },
         );
         let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
@@ -4690,7 +5537,10 @@ mod relocalization_on_tracker_death {
         let state = slam.relocalization_state.as_ref().unwrap();
         assert_eq!(state.trigger_count, 0);
         assert_eq!(state.success_count, 0);
+        assert_eq!(state.consecutive_failed_attempts, 0);
+        assert_eq!(state.budget_skip_count, 0);
         assert!(state.last_attempt_frame_id.is_none());
+        assert!(state.last_broader_descriptor_store_retry_frame_id.is_none());
         assert!(state.last_success_frame_id.is_none());
     }
 }

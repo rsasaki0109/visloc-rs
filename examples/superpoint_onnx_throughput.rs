@@ -131,8 +131,8 @@ fn main() {
     let (w, h) = (frames[0].width(), frames[0].height());
     println!("loaded {} frames, {}x{}", frames.len(), w, h);
     println!(
-        "{:<14} {:>5} {:>11} {:>13} {:>11}   {}",
-        "backend", "n", "wall", "latency", "throughput", "sanity"
+        "{:<14} {:>5} {:>11} {:>13} {:>11}   sanity",
+        "backend", "n", "wall", "latency", "throughput"
     );
 
     let run_cpu = args.backend == "cpu" || args.backend == "both";

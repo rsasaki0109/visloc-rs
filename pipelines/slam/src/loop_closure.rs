@@ -331,6 +331,29 @@ where
         keyframe_pose: &Pose,
         camera: &Camera,
     ) -> LoopClosureVerification {
+        self.verify_impl(correspondences, keyframe_pose, camera, None)
+    }
+
+    /// Run PnP RANSAC with optional confidence-weighted sampling. This keeps the
+    /// same acceptance thresholds as [`Self::verify`] but lets matchers such as
+    /// LightGlue bias RANSAC toward high-confidence correspondences.
+    pub fn verify_with_weights(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        keyframe_pose: &Pose,
+        camera: &Camera,
+        weights: Option<&[f32]>,
+    ) -> LoopClosureVerification {
+        self.verify_impl(correspondences, keyframe_pose, camera, weights)
+    }
+
+    fn verify_impl(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        keyframe_pose: &Pose,
+        camera: &Camera,
+        weights: Option<&[f32]>,
+    ) -> LoopClosureVerification {
         let correspondence_count = correspondences.len();
         if correspondence_count < self.config.min_inliers {
             return LoopClosureVerification {
@@ -348,7 +371,19 @@ where
             };
         }
 
-        let Some(report) = self.ransac.estimate(correspondences, camera) else {
+        let report = match weights {
+            Some(weights)
+                if weights.len() == correspondence_count
+                    && weights
+                        .iter()
+                        .any(|value| value.is_finite() && *value > 0.0) =>
+            {
+                self.ransac
+                    .estimate_with_weights(correspondences, camera, weights)
+            }
+            _ => self.ransac.estimate(correspondences, camera),
+        };
+        let Some(report) = report else {
             return LoopClosureVerification {
                 verified: false,
                 correspondence_count,

@@ -115,16 +115,18 @@ use visloc_rs::vision::stereo_bootstrap::{
 #[cfg(feature = "image-io")]
 use visloc_rs::{
     read_external_deep_features_txt, umeyama_similarity_transform, AdaptiveImuPoseMotionModel,
-    AdaptiveImuPoseMotionModelConfig, AdaptiveMotionMode, BruteForceMatcher,
-    ConstantPoseMotionModel, ConstantVelocityMotionModel, CovisibilityLocalMapConfig,
+    AdaptiveImuPoseMotionModelConfig, AdaptiveMotionMode, AdaptiveVelocityGateConfig,
+    BruteForceMatcher, ConstantPoseMotionModel, ConstantVelocityMotionModel,
+    CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalMapConfig,
     CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel, ImuPredictiveMotionModelConfig,
-    ImuVelocityRefreshPolicy, KeyframePolicyConfig, LocalMappingPipeline, LocalizationConfig,
-    LocalizationPipeline, LoopClosureConfig, Matcher, MotionBasedViInitializerConfig, MotionModel,
-    MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher, OnlineSlamConfig,
+    ImuVelocityRefreshPolicy, KeyframeDecisionReason, KeyframePolicyConfig, LocalMappingPipeline,
+    LocalizationConfig, LocalizationPipeline, LoopClosureConfig, Matcher,
+    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
+    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
     OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
-    OnlineSlamViInitConfig, SimpleKeyframePolicy, Tracker, TrackingConfig, TrackingResult,
-    TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent, Viba2Config,
-    VisualInertialInitializerConfig,
+    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, SimpleKeyframePolicy, Tracker,
+    TrackingConfig, TrackingResult, TrajectorySimilarityTransform, ViInitFallback,
+    ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
 };
 
 /// Runtime-dispatched motion model. Both inner models implement
@@ -135,6 +137,7 @@ use visloc_rs::{
 /// downstream pipeline construction.
 #[cfg(feature = "image-io")]
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum DemoMotionModel {
     Pose(ConstantPoseMotionModel),
     Velocity(ConstantVelocityMotionModel),
@@ -639,6 +642,36 @@ struct CliArgs {
     /// updates are discarded. `None` (the default) preserves the legacy
     /// always-update-biases behaviour.
     local_vi_ba_freeze_biases_above: Option<f64>,
+    /// When `Some(v)`, rejects the entire local VI-BA writeback when
+    /// the selected solve has `final_cost / initial_cost > v`. This is
+    /// a stricter safety gate than `local_vi_ba_freeze_biases_above`:
+    /// rejected passes return diagnostics but leave map poses,
+    /// landmarks, velocities, and biases untouched.
+    local_vi_ba_reject_writeback_above: Option<f64>,
+    /// When `Some(v)`, rejects the entire local VI-BA writeback when
+    /// any refined in-window `||velocity_world|| > v`. This catches
+    /// non-physical tight-VIO updates that can still reduce reprojection
+    /// cost by injecting bad velocity state.
+    local_vi_ba_reject_velocity_above_mps: Option<f64>,
+    /// Enable the adaptive local VI-BA refined-velocity writeback gate.
+    /// The gate derives a per-trigger velocity threshold from the local
+    /// window's existing velocity state, pose-delta / IMU-`dt` finite
+    /// differences, and IMU-predicted next-keyframe velocities, avoiding
+    /// a raw scene-scale `m/s` threshold as the primary decision.
+    local_vi_ba_adaptive_velocity_gate: bool,
+    /// Adaptive local VI-BA velocity gate robust reference quantile.
+    local_vi_ba_adaptive_velocity_quantile: f64,
+    /// Adaptive local VI-BA velocity gate multiplier.
+    local_vi_ba_adaptive_velocity_multiplier: f64,
+    /// Adaptive local VI-BA velocity gate additive slack in m/s.
+    local_vi_ba_adaptive_velocity_margin_mps: f64,
+    /// Adaptive local VI-BA velocity gate lower bound in m/s.
+    local_vi_ba_adaptive_velocity_min_mps: f64,
+    /// Optional adaptive local VI-BA velocity gate upper bound in m/s.
+    local_vi_ba_adaptive_velocity_max_mps: Option<f64>,
+    /// Minimum finite local velocity references required before the
+    /// adaptive local VI-BA velocity gate can reject writeback.
+    local_vi_ba_adaptive_velocity_min_references: usize,
     /// When `Some(v)`, runs the motion-VI post-solve velocity sanity
     /// gate: if any per-keyframe `||velocity_world|| > v`, the inner LM
     /// result is rejected and the stage stays in `Waiting`. `None`
@@ -654,6 +687,53 @@ struct CliArgs {
     /// to enter the covisibility-derived local map. Only used when
     /// `covisibility_local_map_max_keyframes` is set.
     covisibility_local_map_min_shared: usize,
+    /// Opt into visual-only covisibility local BA inside
+    /// `OnlineSlamPipeline`. This is distinct from the tracker-side
+    /// covisibility local map: it runs a backend BA solve after newly
+    /// applied keyframes, using co-visible keyframes and fixed boundary
+    /// keyframes from the accumulated `VisualMap`. Off by default so
+    /// baseline runs stay unchanged.
+    covisibility_local_ba_enabled: bool,
+    /// Minimum map keyframe count before online covisibility local BA
+    /// can run. Skips startup windows that cannot anchor a useful local
+    /// solve.
+    covisibility_local_ba_min_keyframes: usize,
+    /// Run online covisibility local BA after every N newly-applied
+    /// keyframes. Values below 1 are rejected during argument parsing.
+    covisibility_local_ba_trigger_every: usize,
+    /// Maximum optimized co-visible neighbor keyframes, excluding the
+    /// active keyframe.
+    covisibility_local_ba_max_neighbor_keyframes: usize,
+    /// Minimum shared landmarks for a keyframe to become an optimized
+    /// covisibility-BA neighbor.
+    covisibility_local_ba_min_shared: usize,
+    /// Maximum fixed boundary keyframes that observe the selected local
+    /// landmarks.
+    covisibility_local_ba_max_boundary_keyframes: usize,
+    /// Minimum local-landmark observations for a keyframe to become a
+    /// fixed boundary keyframe.
+    covisibility_local_ba_min_boundary_observations: usize,
+    /// Optional lower fixed-boundary threshold used only when the primary
+    /// boundary threshold produces no local BA landmarks.
+    covisibility_local_ba_fallback_min_boundary_observations: Option<usize>,
+    /// Optional cap on local landmarks passed to the BA solve.
+    covisibility_local_ba_max_landmarks: Option<usize>,
+    /// Minimum selected local-landmark observations on the active keyframe
+    /// before online covisibility local BA is allowed to run.
+    covisibility_local_ba_min_active_observations: usize,
+    /// Optional post-BA reprojection threshold for outlier diagnostics.
+    covisibility_local_ba_outlier_threshold_px: Option<f64>,
+    /// Remove post-BA observations above
+    /// `covisibility_local_ba_outlier_threshold_px`.
+    covisibility_local_ba_remove_outliers: bool,
+    /// Reject covisibility BA map write-back when post-BA outlier
+    /// observations exceed this fraction of selected observations.
+    covisibility_local_ba_max_outlier_observation_ratio: Option<f64>,
+    /// Optional pre-solve guard for large optimized windows with too few
+    /// fixed boundary keyframes.
+    covisibility_local_ba_boundary_support_min_optimized_keyframes: Option<usize>,
+    /// Fixed-boundary keyframe floor used with the boundary-support guard.
+    covisibility_local_ba_boundary_support_min_fixed_keyframes: usize,
     /// When `Some(d)`, rejects a tracked frame whose PnP camera-centre
     /// drifts more than `d` metres from the motion-model pose prior
     /// (`ConstantPoseMotionModel` returns the last successful pose, so
@@ -664,6 +744,19 @@ struct CliArgs {
     /// (~0.5 m/s walking pace, 50 ms cam0 cadence) values in the
     /// `0.2`–`1.0` m range are reasonable.
     max_pose_jump_meters: Option<f64>,
+    /// Minimum PnP inlier count required after localization. Defaults
+    /// to `0`, preserving legacy behaviour. Useful when relaxing
+    /// pose-prior gates: frames with only a handful of correspondences
+    /// should not refresh the tracker or enter the map.
+    tracking_min_inliers: usize,
+    /// Minimum PnP inlier ratio required after localization. Defaults
+    /// to `0.0`, preserving legacy behaviour. Combine with
+    /// `tracking_min_inliers` to separate visual-rescue frames from
+    /// near-lost outliers.
+    tracking_min_inlier_ratio: f64,
+    /// Optional mean reprojection error ceiling for accepted
+    /// localizations. Defaults to `None`.
+    tracking_max_reprojection_error: Option<f64>,
     /// Override the tracker's PnP RANSAC reprojection-error inlier
     /// threshold (`LocalizationConfig::reprojection_threshold`,
     /// default 4.0 px). Larger values admit more correspondences as
@@ -776,6 +869,20 @@ struct CliArgs {
     /// around `0.05–0.2 m` register a useful keyframe stream on EuRoC
     /// without flooding the map.
     keyframe_min_translation: Option<f64>,
+    /// Override `KeyframePolicyConfig.min_frame_id_gap`. Lower values
+    /// allow earlier rescue keyframes when tracking quality drops soon
+    /// after a promotion; `None` preserves the library default.
+    keyframe_min_frame_gap: Option<u64>,
+    /// When `Some(r)`, also promotes a keyframe after the normal
+    /// frame-id gap if the current PnP inlier count drops to `r` times
+    /// the last keyframe's tracked-landmark count. This mirrors the
+    /// ORB-SLAM-style "tracked local-map points dropped" trigger while
+    /// keeping the existing metric translation threshold for A/B.
+    keyframe_tracked_landmark_ratio: Option<f64>,
+    /// Reference/current-count floor for `keyframe_tracked_landmark_ratio`.
+    /// Prevents sparse startup frames or nearly-lost frames from making
+    /// the ratio trigger look artificially severe.
+    keyframe_min_tracked_landmarks_for_ratio: usize,
     /// Override `VisualInertialInitializerConfig.min_samples`; default
     /// `50`. Lowering accelerates VI-init promotion so more KFs
     /// register POST-init and feed the local-VI-BA chain.
@@ -836,6 +943,11 @@ struct CliArgs {
     /// `--features onnx-inference`; otherwise the first `extract()`
     /// call fails with `FeatureDisabled`.
     superpoint_onnx_model: Option<PathBuf>,
+    /// Export one L2-normalized mean local descriptor per processed cam0
+    /// frame to `frame_appearance_descriptors.csv`. This is a diagnostic
+    /// input for offline retrieval-candidate recall scripts; it does not
+    /// affect tracking, mapping, or recovery.
+    export_frame_appearance_descriptors: bool,
     /// Phase-16 lever. When `true`, sets
     /// `OnlineSlamLocalBaConfig.run_at_vi_init_promotion = true` so
     /// the local-VI-BA pass fires at the same `process_frame` that
@@ -926,6 +1038,79 @@ struct CliArgs {
     /// Phase-26 #2 diagnosis. `None` preserves Phase-23 #1
     /// no-IMU-sanity-check behaviour.
     relocalization_max_translation_from_imu_prediction_meters: Option<f64>,
+    /// Minimum frame-id gap between relocalization attempts. Default
+    /// `1` preserves the existing every-failed-frame behaviour.
+    relocalization_attempt_interval_frames: u64,
+    /// Optional cap on consecutive failed relocalization attempts while
+    /// the primary tracker remains lost. `None` keeps the legacy
+    /// unbounded retry behaviour.
+    relocalization_max_consecutive_failed_attempts: Option<u64>,
+    /// Optional pose-continuity gate on accepted relocalization
+    /// candidates. When `Some(max_m_per_frame)`, the recovered camera
+    /// centre must stay within this translation-per-frame budget from
+    /// the last successful tracker pose. `None` preserves the existing
+    /// acceptance behaviour.
+    relocalization_max_translation_per_frame_from_last_success_meters: Option<f64>,
+    /// Optional lower bound for recovery inlier median-depth ratio vs
+    /// the last successful pose, measured on the same inlier landmarks.
+    relocalization_min_inlier_depth_median_ratio_to_last_success: Option<f64>,
+    /// Optional upper bound for recovery inlier median-depth ratio vs
+    /// the last successful pose.
+    relocalization_max_inlier_depth_median_ratio_to_last_success: Option<f64>,
+    /// Enable covisibility-local recovery descriptor-store selection
+    /// and cap the number of neighbor keyframes. `None` keeps the
+    /// existing full-map / recent-window recovery store.
+    relocalization_covisibility_max_keyframes: Option<usize>,
+    /// Minimum shared landmarks for a neighbor keyframe to enter the
+    /// recovery covisibility store.
+    relocalization_covisibility_min_shared: usize,
+    /// Minimum descriptor count required to use the recovery
+    /// covisibility store; otherwise the demo falls back to the
+    /// broader recovery descriptor store.
+    relocalization_covisibility_min_landmarks: usize,
+    /// Retry with the broader full-map / recent-window recovery store
+    /// when the covisibility-local first pass fails the acceptance
+    /// gates.
+    relocalization_covisibility_broader_fallback: bool,
+    /// Minimum frame-id gap between broader descriptor-store retries.
+    relocalization_covisibility_broader_fallback_interval_frames: u64,
+    /// Also run the broader store when the covisibility-local first
+    /// pass succeeds, then keep the accepted result with the stronger
+    /// inlier / reprojection score.
+    relocalization_covisibility_compare_broader_store: bool,
+    /// Enable appearance-retrieval recovery descriptor-store selection
+    /// and cap the number of retrieved keyframes. `None` keeps this
+    /// policy disabled.
+    relocalization_appearance_max_keyframes: Option<usize>,
+    /// Optional cap on ranked appearance candidates written to
+    /// `relocalization_appearance_candidates.csv`. This can be higher
+    /// than `relocalization_appearance_max_keyframes` to evaluate
+    /// retrieval recall@K without increasing recovery-PnP cost.
+    relocalization_appearance_candidate_log_limit: Option<usize>,
+    /// Minimum mean-descriptor cosine similarity for a retrieved
+    /// keyframe to seed recovery.
+    relocalization_appearance_min_similarity: f32,
+    /// Exclude keyframes within this frame-id gap from appearance
+    /// retrieval.
+    relocalization_appearance_exclude_recent_frame_gap: u64,
+    /// Minimum descriptor count required to use the appearance-retrieval
+    /// recovery store.
+    relocalization_appearance_min_landmarks: usize,
+    /// Retry with the broader full-map / recent-window recovery store
+    /// when the appearance first pass fails the acceptance gates.
+    relocalization_appearance_broader_fallback: bool,
+    /// Minimum frame-id gap between broader descriptor-store retries
+    /// after an appearance first pass.
+    relocalization_appearance_broader_fallback_interval_frames: u64,
+    /// Also run the broader store when the appearance first pass
+    /// succeeds, then keep the accepted result with the stronger score.
+    relocalization_appearance_compare_broader_store: bool,
+    /// Number of consecutive recovery hypotheses required before the
+    /// tracker accepts relocalization. `1` preserves immediate accept.
+    relocalization_confirmation_required_recoveries: usize,
+    /// Optional max translation per frame between consecutive recovery
+    /// hypotheses inside the confirmation window.
+    relocalization_confirmation_max_translation_per_frame_meters: Option<f64>,
 }
 
 #[cfg(feature = "image-io")]
@@ -955,10 +1140,44 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut motion_vi_init_recover_scale: bool = false;
     let mut local_vi_ba_enabled: bool = false;
     let mut local_vi_ba_freeze_biases_above: Option<f64> = None;
+    let mut local_vi_ba_reject_writeback_above: Option<f64> = None;
+    let mut local_vi_ba_reject_velocity_above_mps: Option<f64> = None;
+    let mut local_vi_ba_adaptive_velocity_gate: bool = false;
+    let default_adaptive_velocity_gate = AdaptiveVelocityGateConfig::default();
+    let mut local_vi_ba_adaptive_velocity_quantile: f64 =
+        default_adaptive_velocity_gate.reference_quantile;
+    let mut local_vi_ba_adaptive_velocity_multiplier: f64 =
+        default_adaptive_velocity_gate.multiplier;
+    let mut local_vi_ba_adaptive_velocity_margin_mps: f64 =
+        default_adaptive_velocity_gate.margin_mps;
+    let mut local_vi_ba_adaptive_velocity_min_mps: f64 =
+        default_adaptive_velocity_gate.min_threshold_mps;
+    let mut local_vi_ba_adaptive_velocity_max_mps: Option<f64> =
+        default_adaptive_velocity_gate.max_threshold_mps;
+    let mut local_vi_ba_adaptive_velocity_min_references: usize =
+        default_adaptive_velocity_gate.min_reference_count;
     let mut motion_vi_init_max_velocity_mps: Option<f64> = None;
     let mut covisibility_local_map_max_keyframes: Option<usize> = None;
     let mut covisibility_local_map_min_shared: usize = 15;
+    let mut covisibility_local_ba_enabled: bool = false;
+    let mut covisibility_local_ba_min_keyframes: usize = 3;
+    let mut covisibility_local_ba_trigger_every: usize = 1;
+    let mut covisibility_local_ba_max_neighbor_keyframes: usize = 10;
+    let mut covisibility_local_ba_min_shared: usize = 15;
+    let mut covisibility_local_ba_max_boundary_keyframes: usize = 10;
+    let mut covisibility_local_ba_min_boundary_observations: usize = 5;
+    let mut covisibility_local_ba_fallback_min_boundary_observations: Option<usize> = None;
+    let mut covisibility_local_ba_max_landmarks: Option<usize> = None;
+    let mut covisibility_local_ba_min_active_observations: usize = 1;
+    let mut covisibility_local_ba_outlier_threshold_px: Option<f64> = Some(5.0);
+    let mut covisibility_local_ba_remove_outliers: bool = false;
+    let mut covisibility_local_ba_max_outlier_observation_ratio: Option<f64> = None;
+    let mut covisibility_local_ba_boundary_support_min_optimized_keyframes: Option<usize> = None;
+    let mut covisibility_local_ba_boundary_support_min_fixed_keyframes: usize = 0;
     let mut max_pose_jump_meters: Option<f64> = None;
+    let mut tracking_min_inliers: usize = 0;
+    let mut tracking_min_inlier_ratio: f64 = 0.0;
+    let mut tracking_max_reprojection_error: Option<f64> = None;
     let mut pnp_pose_prior_warm_start: bool = false;
     let mut pnp_reprojection_threshold_px: Option<f64> = None;
     let mut motion_model: MotionModelKind = MotionModelKind::Pose;
@@ -971,6 +1190,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut hog_min_corner_score: f32 = 0.05;
     let mut hog_orient: bool = false;
     let mut keyframe_min_translation: Option<f64> = None;
+    let mut keyframe_min_frame_gap: Option<u64> = None;
+    let mut keyframe_tracked_landmark_ratio: Option<f64> = None;
+    let mut keyframe_min_tracked_landmarks_for_ratio: usize = 20;
     let mut vi_init_min_samples: Option<usize> = None;
     let mut vi_init_min_stationary_window_seconds: Option<f64> = None;
     let mut keep_pre_promotion_imu_factors: bool = false;
@@ -978,6 +1200,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut superpoint_features_dir: Option<PathBuf> = None;
     let mut superpoint_cam1_features_dir: Option<PathBuf> = None;
     let mut superpoint_onnx_model: Option<PathBuf> = None;
+    let mut export_frame_appearance_descriptors: bool = false;
     let mut run_local_vi_ba_at_vi_init_promotion: bool = false;
     let mut relocalization_enabled: bool = false;
     let mut relocalization_min_inliers: usize = 20;
@@ -986,6 +1209,27 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut relocalization_pose_prior_radius_meters: Option<f64> = None;
     let mut relocalization_recent_keyframe_window: Option<usize> = None;
     let mut relocalization_max_translation_from_imu_prediction_meters: Option<f64> = None;
+    let mut relocalization_attempt_interval_frames: u64 = 1;
+    let mut relocalization_max_consecutive_failed_attempts: Option<u64> = None;
+    let mut relocalization_max_translation_per_frame_from_last_success_meters: Option<f64> = None;
+    let mut relocalization_min_inlier_depth_median_ratio_to_last_success: Option<f64> = None;
+    let mut relocalization_max_inlier_depth_median_ratio_to_last_success: Option<f64> = None;
+    let mut relocalization_covisibility_max_keyframes: Option<usize> = None;
+    let mut relocalization_covisibility_min_shared: usize = 15;
+    let mut relocalization_covisibility_min_landmarks: usize = 30;
+    let mut relocalization_covisibility_broader_fallback: bool = true;
+    let mut relocalization_covisibility_broader_fallback_interval_frames: u64 = 10;
+    let mut relocalization_covisibility_compare_broader_store: bool = false;
+    let mut relocalization_appearance_max_keyframes: Option<usize> = None;
+    let mut relocalization_appearance_candidate_log_limit: Option<usize> = None;
+    let mut relocalization_appearance_min_similarity: f32 = 0.2;
+    let mut relocalization_appearance_exclude_recent_frame_gap: u64 = 30;
+    let mut relocalization_appearance_min_landmarks: usize = 30;
+    let mut relocalization_appearance_broader_fallback: bool = true;
+    let mut relocalization_appearance_broader_fallback_interval_frames: u64 = 10;
+    let mut relocalization_appearance_compare_broader_store: bool = false;
+    let mut relocalization_confirmation_required_recoveries: usize = 1;
+    let mut relocalization_confirmation_max_translation_per_frame_meters: Option<f64> = None;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
     let i = 0;
@@ -1116,6 +1360,66 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 local_vi_ba_freeze_biases_above = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--local-vi-ba-reject-writeback-above" => {
+                local_vi_ba_reject_writeback_above = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--local-vi-ba-reject-velocity-above" => {
+                let threshold: f64 = args.remove(i + 1).parse()?;
+                if threshold < 0.0 {
+                    return Err("--local-vi-ba-reject-velocity-above must be >= 0".into());
+                }
+                local_vi_ba_reject_velocity_above_mps = Some(threshold);
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-gate" => {
+                local_vi_ba_adaptive_velocity_gate = true;
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-quantile" => {
+                let value: f64 = args.remove(i + 1).parse()?;
+                if !(0.0..=1.0).contains(&value) {
+                    return Err("--local-vi-ba-adaptive-velocity-quantile must be in [0, 1]".into());
+                }
+                local_vi_ba_adaptive_velocity_quantile = value;
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-multiplier" => {
+                let value: f64 = args.remove(i + 1).parse()?;
+                if value < 0.0 {
+                    return Err("--local-vi-ba-adaptive-velocity-multiplier must be >= 0".into());
+                }
+                local_vi_ba_adaptive_velocity_multiplier = value;
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-margin" => {
+                let value: f64 = args.remove(i + 1).parse()?;
+                if value < 0.0 {
+                    return Err("--local-vi-ba-adaptive-velocity-margin must be >= 0".into());
+                }
+                local_vi_ba_adaptive_velocity_margin_mps = value;
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-min" => {
+                let value: f64 = args.remove(i + 1).parse()?;
+                if value < 0.0 {
+                    return Err("--local-vi-ba-adaptive-velocity-min must be >= 0".into());
+                }
+                local_vi_ba_adaptive_velocity_min_mps = value;
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-max" => {
+                let value: f64 = args.remove(i + 1).parse()?;
+                if value < 0.0 {
+                    return Err("--local-vi-ba-adaptive-velocity-max must be >= 0".into());
+                }
+                local_vi_ba_adaptive_velocity_max_mps = Some(value);
+                args.remove(i);
+            }
+            "--local-vi-ba-adaptive-velocity-min-references" => {
+                local_vi_ba_adaptive_velocity_min_references = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--motion-vi-init-max-velocity" => {
                 motion_vi_init_max_velocity_mps = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -1128,8 +1432,114 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 covisibility_local_map_min_shared = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--covisibility-local-ba" => {
+                covisibility_local_ba_enabled = true;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-min-keyframes" => {
+                covisibility_local_ba_min_keyframes = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-trigger-every" => {
+                covisibility_local_ba_trigger_every = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-neighbor-keyframes" => {
+                covisibility_local_ba_max_neighbor_keyframes = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-min-shared" => {
+                covisibility_local_ba_min_shared = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-boundary-keyframes" => {
+                covisibility_local_ba_max_boundary_keyframes = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-min-boundary-observations" => {
+                covisibility_local_ba_min_boundary_observations = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-fallback-min-boundary-observations" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_fallback_min_boundary_observations =
+                    if raw.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(raw.parse()?)
+                    };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-landmarks" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_max_landmarks = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-min-active-observations" => {
+                covisibility_local_ba_min_active_observations = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-outlier-threshold-px" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_outlier_threshold_px = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-remove-outliers" => {
+                covisibility_local_ba_remove_outliers = true;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-outlier-observation-ratio" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_max_outlier_observation_ratio =
+                    if raw.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(raw.parse()?)
+                    };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-boundary-support-min-optimized-keyframes" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_boundary_support_min_optimized_keyframes =
+                    if raw.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(raw.parse()?)
+                    };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-boundary-support-min-fixed-keyframes" => {
+                covisibility_local_ba_boundary_support_min_fixed_keyframes =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--max-pose-jump-meters" => {
                 max_pose_jump_meters = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--tracking-min-inliers" => {
+                tracking_min_inliers = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--tracking-min-inlier-ratio" => {
+                tracking_min_inlier_ratio = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--tracking-max-reprojection-error" => {
+                let raw = args.remove(i + 1);
+                tracking_max_reprojection_error = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
                 args.remove(i);
             }
             "--pnp-pose-prior-warm-start" => {
@@ -1200,6 +1610,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 superpoint_onnx_model = Some(PathBuf::from(args.remove(i + 1)));
                 args.remove(i);
             }
+            "--export-frame-appearance-descriptors" => {
+                export_frame_appearance_descriptors = true;
+                args.remove(i);
+            }
             "--run-local-vi-ba-at-vi-init-promotion" => {
                 run_local_vi_ba_at_vi_init_promotion = true;
                 args.remove(i);
@@ -1218,6 +1632,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--keyframe-min-translation" => {
                 keyframe_min_translation = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--keyframe-min-frame-gap" => {
+                keyframe_min_frame_gap = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--keyframe-tracked-landmark-ratio" => {
+                keyframe_tracked_landmark_ratio = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--keyframe-min-tracked-landmarks-for-ratio" => {
+                keyframe_min_tracked_landmarks_for_ratio = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
             "--vi-init-min-samples" => {
@@ -1285,6 +1711,96 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--relocalization-attempt-interval-frames" => {
+                relocalization_attempt_interval_frames = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-max-consecutive-failed-attempts" => {
+                relocalization_max_consecutive_failed_attempts = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-max-translation-per-frame-from-last-success-meters" => {
+                relocalization_max_translation_per_frame_from_last_success_meters =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-min-inlier-depth-median-ratio-to-last-success" => {
+                relocalization_min_inlier_depth_median_ratio_to_last_success =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-max-inlier-depth-median-ratio-to-last-success" => {
+                relocalization_max_inlier_depth_median_ratio_to_last_success =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-covisibility-max-keyframes" => {
+                relocalization_covisibility_max_keyframes = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-covisibility-min-shared" => {
+                relocalization_covisibility_min_shared = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-covisibility-min-landmarks" => {
+                relocalization_covisibility_min_landmarks = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-covisibility-no-broader-fallback" => {
+                relocalization_covisibility_broader_fallback = false;
+                args.remove(i);
+            }
+            "--relocalization-covisibility-broader-fallback-interval-frames" => {
+                relocalization_covisibility_broader_fallback_interval_frames =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-covisibility-compare-broader-store" => {
+                relocalization_covisibility_compare_broader_store = true;
+                args.remove(i);
+            }
+            "--relocalization-appearance-max-keyframes" => {
+                relocalization_appearance_max_keyframes = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-appearance-candidate-log-limit" => {
+                relocalization_appearance_candidate_log_limit = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--relocalization-appearance-min-similarity" => {
+                relocalization_appearance_min_similarity = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-appearance-exclude-recent-frame-gap" => {
+                relocalization_appearance_exclude_recent_frame_gap = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-appearance-min-landmarks" => {
+                relocalization_appearance_min_landmarks = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-appearance-no-broader-fallback" => {
+                relocalization_appearance_broader_fallback = false;
+                args.remove(i);
+            }
+            "--relocalization-appearance-broader-fallback-interval-frames" => {
+                relocalization_appearance_broader_fallback_interval_frames =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-appearance-compare-broader-store" => {
+                relocalization_appearance_compare_broader_store = true;
+                args.remove(i);
+            }
+            "--relocalization-confirmation-required-recoveries" => {
+                relocalization_confirmation_required_recoveries = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--relocalization-confirmation-max-translation-per-frame-meters" => {
+                relocalization_confirmation_max_translation_per_frame_meters =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -1292,6 +1808,172 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
     if bootstrap_depth_meters <= 0.0 {
         return Err("--bootstrap-depth must be positive".into());
+    }
+    if let Some(ratio) = keyframe_tracked_landmark_ratio {
+        if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+            return Err("--keyframe-tracked-landmark-ratio must be in [0, 1]".into());
+        }
+        if keyframe_min_tracked_landmarks_for_ratio == 0 {
+            return Err("--keyframe-min-tracked-landmarks-for-ratio must be >= 1".into());
+        }
+    }
+    if let Some(gap) = keyframe_min_frame_gap {
+        if gap == 0 {
+            return Err("--keyframe-min-frame-gap must be >= 1".into());
+        }
+    }
+    if !tracking_min_inlier_ratio.is_finite() || !(0.0..=1.0).contains(&tracking_min_inlier_ratio) {
+        return Err("--tracking-min-inlier-ratio must be in [0, 1]".into());
+    }
+    if let Some(max_reprojection_error) = tracking_max_reprojection_error {
+        if !max_reprojection_error.is_finite() || max_reprojection_error <= 0.0 {
+            return Err("--tracking-max-reprojection-error must be positive or 'none'".into());
+        }
+    }
+    if relocalization_attempt_interval_frames == 0 {
+        return Err("--relocalization-attempt-interval-frames must be >= 1".into());
+    }
+    if let Some(max_attempts) = relocalization_max_consecutive_failed_attempts {
+        if max_attempts == 0 {
+            return Err("--relocalization-max-consecutive-failed-attempts must be >= 1".into());
+        }
+    }
+    if let Some(max_per_frame) = relocalization_max_translation_per_frame_from_last_success_meters {
+        if !max_per_frame.is_finite() || max_per_frame <= 0.0 {
+            return Err("--relocalization-max-translation-per-frame-from-last-success-meters must be positive".into());
+        }
+    }
+    if let Some(min_ratio) = relocalization_min_inlier_depth_median_ratio_to_last_success {
+        if !min_ratio.is_finite() || min_ratio <= 0.0 {
+            return Err(
+                "--relocalization-min-inlier-depth-median-ratio-to-last-success must be positive"
+                    .into(),
+            );
+        }
+    }
+    if let Some(max_ratio) = relocalization_max_inlier_depth_median_ratio_to_last_success {
+        if !max_ratio.is_finite() || max_ratio <= 0.0 {
+            return Err(
+                "--relocalization-max-inlier-depth-median-ratio-to-last-success must be positive"
+                    .into(),
+            );
+        }
+    }
+    if let (Some(min_ratio), Some(max_ratio)) = (
+        relocalization_min_inlier_depth_median_ratio_to_last_success,
+        relocalization_max_inlier_depth_median_ratio_to_last_success,
+    ) {
+        if min_ratio > max_ratio {
+            return Err("--relocalization-min-inlier-depth-median-ratio-to-last-success must be <= --relocalization-max-inlier-depth-median-ratio-to-last-success".into());
+        }
+    }
+    if let Some(max_keyframes) = relocalization_covisibility_max_keyframes {
+        if max_keyframes == 0 {
+            return Err("--relocalization-covisibility-max-keyframes must be >= 1".into());
+        }
+    }
+    if relocalization_covisibility_min_shared == 0 {
+        return Err("--relocalization-covisibility-min-shared must be >= 1".into());
+    }
+    if relocalization_covisibility_min_landmarks == 0 {
+        return Err("--relocalization-covisibility-min-landmarks must be >= 1".into());
+    }
+    if relocalization_covisibility_broader_fallback_interval_frames == 0 {
+        return Err(
+            "--relocalization-covisibility-broader-fallback-interval-frames must be >= 1".into(),
+        );
+    }
+    if let Some(max_keyframes) = relocalization_appearance_max_keyframes {
+        if max_keyframes == 0 {
+            return Err("--relocalization-appearance-max-keyframes must be >= 1".into());
+        }
+    }
+    if let Some(candidate_log_limit) = relocalization_appearance_candidate_log_limit {
+        if candidate_log_limit == 0 {
+            return Err("--relocalization-appearance-candidate-log-limit must be >= 1".into());
+        }
+    }
+    if !relocalization_appearance_min_similarity.is_finite() {
+        return Err("--relocalization-appearance-min-similarity must be finite".into());
+    }
+    if relocalization_appearance_min_landmarks == 0 {
+        return Err("--relocalization-appearance-min-landmarks must be >= 1".into());
+    }
+    if relocalization_appearance_broader_fallback_interval_frames == 0 {
+        return Err(
+            "--relocalization-appearance-broader-fallback-interval-frames must be >= 1".into(),
+        );
+    }
+    if relocalization_confirmation_required_recoveries == 0 {
+        return Err("--relocalization-confirmation-required-recoveries must be >= 1".into());
+    }
+    if let Some(max_per_frame) = relocalization_confirmation_max_translation_per_frame_meters {
+        if !max_per_frame.is_finite() || max_per_frame <= 0.0 {
+            return Err(
+                "--relocalization-confirmation-max-translation-per-frame-meters must be positive"
+                    .into(),
+            );
+        }
+    }
+    if covisibility_local_ba_enabled {
+        if covisibility_local_ba_min_keyframes == 0 {
+            return Err("--covisibility-local-ba-min-keyframes must be >= 1".into());
+        }
+        if covisibility_local_ba_trigger_every == 0 {
+            return Err("--covisibility-local-ba-trigger-every must be >= 1".into());
+        }
+        if covisibility_local_ba_min_shared == 0 {
+            return Err("--covisibility-local-ba-min-shared must be >= 1".into());
+        }
+        if covisibility_local_ba_min_active_observations == 0 {
+            return Err("--covisibility-local-ba-min-active-observations must be >= 1".into());
+        }
+        if let Some(fallback_min) = covisibility_local_ba_fallback_min_boundary_observations {
+            if fallback_min == 0 {
+                return Err(
+                    "--covisibility-local-ba-fallback-min-boundary-observations must be >= 1 or 'none'"
+                        .into(),
+                );
+            }
+        }
+        if let Some(px) = covisibility_local_ba_outlier_threshold_px {
+            if !px.is_finite() || px <= 0.0 {
+                return Err(
+                    "--covisibility-local-ba-outlier-threshold-px must be positive or 'none'"
+                        .into(),
+                );
+            }
+        }
+        if covisibility_local_ba_remove_outliers
+            && covisibility_local_ba_outlier_threshold_px.is_none()
+        {
+            return Err(
+                "--covisibility-local-ba-remove-outliers requires an outlier threshold".into(),
+            );
+        }
+        if let Some(ratio) = covisibility_local_ba_max_outlier_observation_ratio {
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(
+                    "--covisibility-local-ba-max-outlier-observation-ratio must be in [0, 1]"
+                        .into(),
+                );
+            }
+        }
+        if let Some(min_optimized) = covisibility_local_ba_boundary_support_min_optimized_keyframes
+        {
+            if min_optimized < 1 {
+                return Err(
+                    "--covisibility-local-ba-boundary-support-min-optimized-keyframes must be >= 1 or 'none'"
+                        .into(),
+                );
+            }
+            if covisibility_local_ba_boundary_support_min_fixed_keyframes < 1 {
+                return Err(
+                    "--covisibility-local-ba-boundary-support-min-fixed-keyframes must be >= 1 when boundary support gate is enabled"
+                        .into(),
+                );
+            }
+        }
     }
     Ok(CliArgs {
         euroc_dir,
@@ -1318,10 +2000,37 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         motion_vi_init_recover_scale,
         local_vi_ba_enabled,
         local_vi_ba_freeze_biases_above,
+        local_vi_ba_reject_writeback_above,
+        local_vi_ba_reject_velocity_above_mps,
+        local_vi_ba_adaptive_velocity_gate,
+        local_vi_ba_adaptive_velocity_quantile,
+        local_vi_ba_adaptive_velocity_multiplier,
+        local_vi_ba_adaptive_velocity_margin_mps,
+        local_vi_ba_adaptive_velocity_min_mps,
+        local_vi_ba_adaptive_velocity_max_mps,
+        local_vi_ba_adaptive_velocity_min_references,
         motion_vi_init_max_velocity_mps,
         covisibility_local_map_max_keyframes,
         covisibility_local_map_min_shared,
+        covisibility_local_ba_enabled,
+        covisibility_local_ba_min_keyframes,
+        covisibility_local_ba_trigger_every,
+        covisibility_local_ba_max_neighbor_keyframes,
+        covisibility_local_ba_min_shared,
+        covisibility_local_ba_max_boundary_keyframes,
+        covisibility_local_ba_min_boundary_observations,
+        covisibility_local_ba_fallback_min_boundary_observations,
+        covisibility_local_ba_max_landmarks,
+        covisibility_local_ba_min_active_observations,
+        covisibility_local_ba_outlier_threshold_px,
+        covisibility_local_ba_remove_outliers,
+        covisibility_local_ba_max_outlier_observation_ratio,
+        covisibility_local_ba_boundary_support_min_optimized_keyframes,
+        covisibility_local_ba_boundary_support_min_fixed_keyframes,
         max_pose_jump_meters,
+        tracking_min_inliers,
+        tracking_min_inlier_ratio,
+        tracking_max_reprojection_error,
         pnp_pose_prior_warm_start,
         pnp_reprojection_threshold_px,
         motion_model,
@@ -1334,6 +2043,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         hog_min_corner_score,
         hog_orient,
         keyframe_min_translation,
+        keyframe_min_frame_gap,
+        keyframe_tracked_landmark_ratio,
+        keyframe_min_tracked_landmarks_for_ratio,
         vi_init_min_samples,
         vi_init_min_stationary_window_seconds,
         keep_pre_promotion_imu_factors,
@@ -1341,6 +2053,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         superpoint_features_dir,
         superpoint_cam1_features_dir,
         superpoint_onnx_model,
+        export_frame_appearance_descriptors,
         run_local_vi_ba_at_vi_init_promotion,
         relocalization_enabled,
         relocalization_min_inliers,
@@ -1349,6 +2062,27 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         relocalization_pose_prior_radius_meters,
         relocalization_recent_keyframe_window,
         relocalization_max_translation_from_imu_prediction_meters,
+        relocalization_attempt_interval_frames,
+        relocalization_max_consecutive_failed_attempts,
+        relocalization_max_translation_per_frame_from_last_success_meters,
+        relocalization_min_inlier_depth_median_ratio_to_last_success,
+        relocalization_max_inlier_depth_median_ratio_to_last_success,
+        relocalization_covisibility_max_keyframes,
+        relocalization_covisibility_min_shared,
+        relocalization_covisibility_min_landmarks,
+        relocalization_covisibility_broader_fallback,
+        relocalization_covisibility_broader_fallback_interval_frames,
+        relocalization_covisibility_compare_broader_store,
+        relocalization_appearance_max_keyframes,
+        relocalization_appearance_candidate_log_limit,
+        relocalization_appearance_min_similarity,
+        relocalization_appearance_exclude_recent_frame_gap,
+        relocalization_appearance_min_landmarks,
+        relocalization_appearance_broader_fallback,
+        relocalization_appearance_broader_fallback_interval_frames,
+        relocalization_appearance_compare_broader_store,
+        relocalization_confirmation_required_recoveries,
+        relocalization_confirmation_max_translation_per_frame_meters,
     })
 }
 
@@ -1532,6 +2266,40 @@ fn frame_from_features(frame_id: u64, camera_id: u64, features: &FeatureSet) -> 
 }
 
 #[cfg(feature = "image-io")]
+fn normalized_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let first = descriptors.first()?;
+    if first.is_empty() {
+        return None;
+    }
+    let dim = first.len();
+    let mut mean = vec![0.0f32; dim];
+    let mut count = 0usize;
+    for descriptor in descriptors {
+        if descriptor.len() != dim {
+            return None;
+        }
+        for (acc, value) in mean.iter_mut().zip(descriptor) {
+            *acc += *value;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let inv = 1.0 / count as f32;
+    for value in &mut mean {
+        *value *= inv;
+    }
+    let norm = mean.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut mean {
+            *value /= norm;
+        }
+    }
+    Some(mean)
+}
+
+#[cfg(feature = "image-io")]
 fn nearest_ground_truth(
     samples: &[EurocGroundTruthSample],
     target_ts: i128,
@@ -1597,6 +2365,241 @@ fn format_motion_vi_init_event(event: &MotionViInitializationEvent) -> String {
             result.scale,
             result.viba2_iterations_run,
             result.trigger_translation_meters,
+        ),
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn format_optional_frame_id(frame_id: Option<u64>) -> String {
+    frame_id.map(|id| id.to_string()).unwrap_or_default()
+}
+
+#[cfg(feature = "image-io")]
+fn format_optional_usize(value: Option<usize>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+#[cfg(feature = "image-io")]
+fn format_optional_f64(value: Option<f64>) -> String {
+    value.map(|value| format!("{value:.9}")).unwrap_or_default()
+}
+
+#[cfg(feature = "image-io")]
+fn bool_as_u8(value: bool) -> u8 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn quote_csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelocalizationAttemptGateStatus {
+    success_pass: bool,
+    min_inliers_pass: bool,
+    min_inlier_ratio_pass: bool,
+    reprojection_pass: bool,
+    continuity_pass: bool,
+    depth_ratio_pass: bool,
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RelocalizationAttemptGateConfig {
+    min_inliers: usize,
+    min_inlier_ratio: f64,
+    max_reprojection_error: Option<f64>,
+    max_translation_per_frame_from_last_success_meters: Option<f64>,
+    min_inlier_depth_median_ratio_to_last_success: Option<f64>,
+    max_inlier_depth_median_ratio_to_last_success: Option<f64>,
+}
+
+#[cfg(feature = "image-io")]
+impl RelocalizationAttemptGateConfig {
+    fn from_args(args: &CliArgs) -> Self {
+        Self {
+            min_inliers: args.relocalization_min_inliers,
+            min_inlier_ratio: args.relocalization_min_inlier_ratio,
+            max_reprojection_error: args.relocalization_max_reprojection_error,
+            max_translation_per_frame_from_last_success_meters: args
+                .relocalization_max_translation_per_frame_from_last_success_meters,
+            min_inlier_depth_median_ratio_to_last_success: args
+                .relocalization_min_inlier_depth_median_ratio_to_last_success,
+            max_inlier_depth_median_ratio_to_last_success: args
+                .relocalization_max_inlier_depth_median_ratio_to_last_success,
+        }
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn relocalization_attempt_gate_status(
+    stats: &OnlineSlamRelocalizationStats,
+    config: RelocalizationAttemptGateConfig,
+) -> RelocalizationAttemptGateStatus {
+    let reprojection_pass = match (config.max_reprojection_error, stats.mean_reprojection_error) {
+        (Some(max), Some(actual)) => actual <= max,
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
+    let continuity_pass = match (
+        config.max_translation_per_frame_from_last_success_meters,
+        stats.translation_per_frame_from_last_success_meters,
+    ) {
+        (Some(max), Some(actual)) => actual <= max,
+        (Some(_), None) => true,
+        (None, _) => true,
+    };
+    let depth_ratio_pass = match stats.inlier_depth_median_ratio_to_last_success {
+        Some(ratio) => {
+            config
+                .min_inlier_depth_median_ratio_to_last_success
+                .is_none_or(|min| ratio >= min)
+                && config
+                    .max_inlier_depth_median_ratio_to_last_success
+                    .is_none_or(|max| ratio <= max)
+        }
+        None => true,
+    };
+    RelocalizationAttemptGateStatus {
+        success_pass: stats.localization_success,
+        min_inliers_pass: stats.inlier_count >= config.min_inliers,
+        min_inlier_ratio_pass: stats.inlier_ratio >= config.min_inlier_ratio,
+        reprojection_pass,
+        continuity_pass,
+        depth_ratio_pass,
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn relocalization_attempt_reject_reason(
+    stats: &OnlineSlamRelocalizationStats,
+    gates: RelocalizationAttemptGateStatus,
+) -> &'static str {
+    if stats.succeeded {
+        "accepted"
+    } else if !gates.success_pass {
+        "no_pnp_solution"
+    } else if !gates.min_inliers_pass {
+        "min_inliers"
+    } else if !gates.min_inlier_ratio_pass {
+        "min_inlier_ratio"
+    } else if !gates.reprojection_pass {
+        "max_reprojection_error"
+    } else if !gates.continuity_pass {
+        "translation_per_frame_from_last_success"
+    } else if !gates.depth_ratio_pass {
+        "inlier_depth_median_ratio_to_last_success"
+    } else if stats.passed_acceptance_gates
+        && stats.confirmation_count < stats.confirmation_required_count
+    {
+        "confirmation_waiting"
+    } else if stats.passed_acceptance_gates {
+        "tracker_acceptance"
+    } else {
+        "unknown_gate"
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn keyframe_reason_csv_fields(
+    reason: &KeyframeDecisionReason,
+) -> (&'static str, String, String, String, String, String, String) {
+    match reason {
+        KeyframeDecisionReason::NotLocalized => (
+            "NotLocalized",
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::MissingPose => (
+            "MissingPose",
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::FirstSuccessfulFrame => (
+            "FirstSuccessfulFrame",
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::Relocalized => (
+            "Relocalized",
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::TrackedLandmarkDrop {
+            frame_id_gap,
+            tracked_landmarks,
+            last_keyframe_tracked_landmarks,
+            min_tracked_landmark_ratio,
+        } => (
+            "TrackedLandmarkDrop",
+            frame_id_gap.to_string(),
+            String::new(),
+            String::new(),
+            tracked_landmarks.to_string(),
+            last_keyframe_tracked_landmarks.to_string(),
+            format!("{min_tracked_landmark_ratio:.6}"),
+        ),
+        KeyframeDecisionReason::ThresholdsMet {
+            frame_id_gap,
+            translation,
+        } => (
+            "ThresholdsMet",
+            frame_id_gap.to_string(),
+            format!("{translation:.6}"),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::FrameIdGapTooSmall {
+            frame_id_gap,
+            min_frame_id_gap: _,
+        } => (
+            "FrameIdGapTooSmall",
+            frame_id_gap.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        KeyframeDecisionReason::TranslationTooSmall {
+            translation,
+            min_translation,
+        } => (
+            "TranslationTooSmall",
+            String::new(),
+            format!("{translation:.6}"),
+            format!("{min_translation:.6}"),
+            String::new(),
+            String::new(),
+            String::new(),
         ),
     }
 }
@@ -1940,9 +2943,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(OnlineSlamLocalBaConfig {
             gravity_world: args.gravity_world,
             freeze_biases_when_cost_ratio_above: args.local_vi_ba_freeze_biases_above,
+            reject_writeback_when_cost_ratio_above: args.local_vi_ba_reject_writeback_above,
+            reject_writeback_when_velocity_norm_above_mps: args
+                .local_vi_ba_reject_velocity_above_mps,
+            adaptive_velocity_gate: args.local_vi_ba_adaptive_velocity_gate.then_some(
+                AdaptiveVelocityGateConfig {
+                    reference_quantile: args.local_vi_ba_adaptive_velocity_quantile,
+                    multiplier: args.local_vi_ba_adaptive_velocity_multiplier,
+                    margin_mps: args.local_vi_ba_adaptive_velocity_margin_mps,
+                    min_threshold_mps: args.local_vi_ba_adaptive_velocity_min_mps,
+                    max_threshold_mps: args.local_vi_ba_adaptive_velocity_max_mps,
+                    min_reference_count: args.local_vi_ba_adaptive_velocity_min_references,
+                },
+            ),
             relinearise_imu_factor_bias_thresholds: args.relinearise_imu_factor_bias_thresholds,
             run_at_vi_init_promotion: args.run_local_vi_ba_at_vi_init_promotion,
             ..OnlineSlamLocalBaConfig::default()
+        })
+    } else {
+        None
+    };
+    let covisibility_local_ba_config = if args.covisibility_local_ba_enabled {
+        Some(OnlineSlamCovisibilityLocalBaConfig {
+            min_keyframes: args.covisibility_local_ba_min_keyframes,
+            trigger_every_new_keyframes: args.covisibility_local_ba_trigger_every,
+            max_outlier_observation_ratio: args.covisibility_local_ba_max_outlier_observation_ratio,
+            ba: CovisibilityLocalBaConfig {
+                max_neighbor_keyframes: args.covisibility_local_ba_max_neighbor_keyframes,
+                min_shared_landmarks: args.covisibility_local_ba_min_shared,
+                max_boundary_keyframes: args.covisibility_local_ba_max_boundary_keyframes,
+                min_boundary_observations: args.covisibility_local_ba_min_boundary_observations,
+                fallback_min_boundary_observations: args
+                    .covisibility_local_ba_fallback_min_boundary_observations,
+                max_landmarks: args.covisibility_local_ba_max_landmarks,
+                min_active_observations: args.covisibility_local_ba_min_active_observations,
+                boundary_support_min_optimized_keyframes: args
+                    .covisibility_local_ba_boundary_support_min_optimized_keyframes,
+                boundary_support_min_fixed_keyframes: args
+                    .covisibility_local_ba_boundary_support_min_fixed_keyframes,
+                outlier_reprojection_threshold_px: args.covisibility_local_ba_outlier_threshold_px,
+                remove_outlier_observations: args.covisibility_local_ba_remove_outliers,
+                ..CovisibilityLocalBaConfig::default()
+            },
         })
     } else {
         None
@@ -1954,9 +2996,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_shared_landmarks: args.covisibility_local_map_min_shared,
             ..CovisibilityLocalMapConfig::default()
         });
+    let relocalization_covisibility_config =
+        args.relocalization_covisibility_max_keyframes
+            .map(
+                |max_keyframes| visloc_rs::OnlineSlamRelocalizationCovisibilityConfig {
+                    max_neighbor_keyframes: Some(max_keyframes),
+                    min_shared_landmarks: args.relocalization_covisibility_min_shared,
+                    min_local_map_landmarks: args.relocalization_covisibility_min_landmarks,
+                    fallback_to_broader_store_on_failure: args
+                        .relocalization_covisibility_broader_fallback,
+                    broader_store_retry_interval_frames: args
+                        .relocalization_covisibility_broader_fallback_interval_frames,
+                    compare_broader_store_on_success: args
+                        .relocalization_covisibility_compare_broader_store,
+                },
+            );
+    let relocalization_appearance_config =
+        args.relocalization_appearance_max_keyframes
+            .map(
+                |max_keyframes| visloc_rs::OnlineSlamRelocalizationAppearanceConfig {
+                    max_keyframes,
+                    candidate_log_limit: args.relocalization_appearance_candidate_log_limit,
+                    min_similarity: args.relocalization_appearance_min_similarity,
+                    exclude_recent_frame_gap: args
+                        .relocalization_appearance_exclude_recent_frame_gap,
+                    min_local_map_landmarks: args.relocalization_appearance_min_landmarks,
+                    fallback_to_broader_store_on_failure: args
+                        .relocalization_appearance_broader_fallback,
+                    broader_store_retry_interval_frames: args
+                        .relocalization_appearance_broader_fallback_interval_frames,
+                    compare_broader_store_on_success: args
+                        .relocalization_appearance_compare_broader_store,
+                },
+            );
     let tracking_config = TrackingConfig {
         covisibility_local_map: covisibility_config,
         max_pose_prior_translation_error: args.max_pose_jump_meters,
+        min_inliers: args.tracking_min_inliers,
+        min_inlier_ratio: args.tracking_min_inlier_ratio,
+        max_mean_reprojection_error: args.tracking_max_reprojection_error,
         pnp_pose_prior_warm_start: args.pnp_pose_prior_warm_start,
         ..TrackingConfig::default()
     };
@@ -2029,6 +3107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(m) = args.keyframe_min_translation {
             cfg.min_translation = m;
         }
+        if let Some(gap) = args.keyframe_min_frame_gap {
+            cfg.min_frame_id_gap = gap;
+        }
+        cfg.tracked_landmark_keyframe_ratio = args.keyframe_tracked_landmark_ratio;
+        cfg.min_tracked_landmarks_for_quality_keyframe =
+            args.keyframe_min_tracked_landmarks_for_ratio;
         cfg
     };
     let local_mapping = LocalMappingPipeline {
@@ -2044,6 +3128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop_closure: LoopClosureConfig::default(),
             imu: Some(imu_config),
             local_vi_ba: local_vi_ba_config,
+            covisibility_local_ba: covisibility_local_ba_config,
             vi_init: Some(vi_init_config),
             vi_motion_init: vi_motion_init_config,
             keep_pre_promotion_imu_factors: args.keep_pre_promotion_imu_factors,
@@ -2056,8 +3141,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pose_prior_candidate_radius_meters: args
                         .relocalization_pose_prior_radius_meters,
                     recent_keyframe_window: args.relocalization_recent_keyframe_window,
+                    covisibility_local_map: relocalization_covisibility_config,
+                    appearance_retrieval_map: relocalization_appearance_config,
                     max_translation_from_imu_prediction_meters: args
                         .relocalization_max_translation_from_imu_prediction_meters,
+                    attempt_interval_frames: args.relocalization_attempt_interval_frames,
+                    max_consecutive_failed_attempts: args
+                        .relocalization_max_consecutive_failed_attempts,
+                    max_translation_per_frame_from_last_success_meters: args
+                        .relocalization_max_translation_per_frame_from_last_success_meters,
+                    min_inlier_depth_median_ratio_to_last_success: args
+                        .relocalization_min_inlier_depth_median_ratio_to_last_success,
+                    max_inlier_depth_median_ratio_to_last_success: args
+                        .relocalization_max_inlier_depth_median_ratio_to_last_success,
+                    confirmation_required_recoveries: args
+                        .relocalization_confirmation_required_recoveries,
+                    confirmation_max_translation_per_frame_meters: args
+                        .relocalization_confirmation_max_translation_per_frame_meters,
                 })
             } else {
                 None
@@ -2068,16 +3168,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&args.out_dir)?;
     let traj_path = args.out_dir.join("slam_trajectory.csv");
     let err_path = args.out_dir.join("slam_errors.csv");
+    let frame_groundtruth_path = args.out_dir.join("frame_groundtruth.csv");
+    let frame_appearance_descriptors_path = args.out_dir.join("frame_appearance_descriptors.csv");
     let vi_init_log_path = args.out_dir.join("vi_init_log.txt");
     let motion_vi_init_log_path = args.out_dir.join("motion_vi_init_log.txt");
+    let covisibility_local_ba_log_path = args.out_dir.join("covisibility_ba_log.txt");
+    let keyframe_decision_log_path = args.out_dir.join("keyframe_decisions.csv");
+    let relocalization_appearance_candidates_path = args
+        .out_dir
+        .join("relocalization_appearance_candidates.csv");
+    let relocalization_attempts_path = args.out_dir.join("relocalization_attempts.csv");
 
     let mut traj_csv =
         String::from("timestamp_ns,frame_idx,px,py,pz,qw,qx,qy,qz,tracking_success\n");
     let mut err_csv = String::from(
         "timestamp_ns,frame_idx,gt_px,gt_py,gt_pz,est_px,est_py,est_pz,position_error_m,orientation_error_deg\n",
     );
+    let mut frame_groundtruth_csv = String::from("timestamp_ns,frame_idx,gt_px,gt_py,gt_pz\n");
+    let mut frame_appearance_descriptor_rows: Vec<String> = Vec::new();
+    let mut frame_appearance_descriptor_dim: Option<usize> = None;
+    let mut frame_appearance_descriptor_count = 0usize;
     let mut vi_init_log = String::new();
     let mut motion_vi_init_log = String::new();
+    let mut covisibility_local_ba_log = String::from(
+        "frame_idx,timestamp_ns,success,error,elapsed_ms,optimized_keyframes,fixed_keyframes,landmarks,observations,boundary_fallback_used,mean_reprojection_before_px,mean_reprojection_after_px,updated_keyframes,updated_landmarks,outlier_observations,outlier_observation_ratio,quality_gate_rejected,removed_observations\n",
+    );
+    let mut keyframe_decision_log = String::from(
+        "frame_idx,timestamp_ns,tracking_success,selected,reason,last_keyframe_frame_id,selected_keyframe_count,localization_inliers,localization_inlier_ratio,frame_id_gap,translation_m,min_translation_m,tracked_landmarks,last_keyframe_tracked_landmarks,min_tracked_landmark_ratio,tracking_failure_reason\n",
+    );
+    let mut relocalization_appearance_candidates_csv = String::from(
+        "query_frame_id,matched_keyframe_id,score,rank,timestamp_ns,descriptor_store_landmark_count,appearance_descriptor_store_landmark_count,recovery_attempted,recovery_succeeded,passed_acceptance_gates,used_appearance_store,used_broader_fallback\n",
+    );
+    let mut relocalization_attempts_csv = String::from(
+        "frame_idx,timestamp_ns,attempted,succeeded,localization_success,reject_reason,inlier_count,min_inliers,min_inliers_pass,inlier_ratio,min_inlier_ratio,min_inlier_ratio_pass,correspondence_count,mean_reprojection_error,max_reprojection_error,reprojection_pass,translation_per_frame_from_last_success_meters,max_translation_per_frame_from_last_success_meters,continuity_pass,inlier_depth_median_ratio_to_last_success,min_inlier_depth_median_ratio_to_last_success,max_inlier_depth_median_ratio_to_last_success,depth_ratio_pass,passed_acceptance_gates,confirmation_count,confirmation_required_count,confirmation_translation_per_frame_from_previous_meters,descriptor_store_landmark_count,covisibility_local_descriptor_store_landmark_count,appearance_descriptor_store_landmark_count,broader_descriptor_store_landmark_count,tried_covisibility_store,used_covisibility_store,tried_appearance_store,used_appearance_store,tried_broader_fallback,broader_fallback_skipped_by_interval,used_broader_fallback\n",
+    );
 
     let frame_cap = if args.max_frames == 0 {
         usize::MAX
@@ -2098,6 +3222,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tracking_successes = 0usize;
     let mut relocalization_attempts = 0u64;
     let mut relocalization_successes = 0u64;
+    let mut relocalization_gate_passes = 0u64;
+    let mut relocalization_confirmation_waiting = 0u64;
+    let mut relocalization_confirmation_tx_per_frame_count = 0u64;
+    let mut relocalization_confirmation_tx_per_frame_sum = 0.0f64;
+    let mut relocalization_confirmation_tx_per_frame_max: Option<f64> = None;
+    let mut relocalization_tx_per_frame_count = 0u64;
+    let mut relocalization_tx_per_frame_sum = 0.0f64;
+    let mut relocalization_tx_per_frame_max: Option<f64> = None;
+    let mut relocalization_success_tx_per_frame_count = 0u64;
+    let mut relocalization_success_tx_per_frame_sum = 0.0f64;
+    let mut relocalization_success_tx_per_frame_max: Option<f64> = None;
+    let mut relocalization_depth_ratio_count = 0u64;
+    let mut relocalization_depth_ratio_sum = 0.0f64;
+    let mut relocalization_depth_ratio_min: Option<f64> = None;
+    let mut relocalization_depth_ratio_max: Option<f64> = None;
+    let mut relocalization_success_depth_ratio_count = 0u64;
+    let mut relocalization_success_depth_ratio_sum = 0.0f64;
+    let mut relocalization_success_depth_ratio_min: Option<f64> = None;
+    let mut relocalization_success_depth_ratio_max: Option<f64> = None;
+    let mut relocalization_descriptor_store_count_observations = 0u64;
+    let mut relocalization_descriptor_store_count_sum = 0usize;
+    let mut relocalization_descriptor_store_count_min: Option<usize> = None;
+    let mut relocalization_descriptor_store_count_max: Option<usize> = None;
+    let mut relocalization_covisibility_descriptor_store_tried_frames = 0u64;
+    let mut relocalization_covisibility_descriptor_store_used_frames = 0u64;
+    let mut relocalization_appearance_descriptor_store_tried_frames = 0u64;
+    let mut relocalization_appearance_descriptor_store_used_frames = 0u64;
+    let mut relocalization_appearance_candidate_keyframe_count_observations = 0u64;
+    let mut relocalization_appearance_candidate_keyframe_count_sum = 0usize;
+    let mut relocalization_appearance_best_similarity_count = 0u64;
+    let mut relocalization_appearance_best_similarity_sum = 0.0f64;
+    let mut relocalization_appearance_best_similarity_max: Option<f32> = None;
+    let mut relocalization_broader_descriptor_store_retry_frames = 0u64;
+    let mut relocalization_broader_descriptor_store_retry_interval_skips = 0u64;
+    let mut relocalization_broader_descriptor_store_used_frames = 0u64;
+    let mut relocalization_covisibility_reference_keyframe_count = 0u64;
     let mut covisibility_local_map_frames = 0usize;
     let mut covisibility_local_map_size_sum: usize = 0;
     let mut feature_count_sum: usize = 0;
@@ -2130,9 +3290,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut local_vi_ba_mirrors: usize = 0;
     let mut imu_factors_staged: usize = 0;
     let mut local_vi_ba_relinearised_factor_total: usize = 0;
+    let mut local_vi_ba_quality_gate_rejections: usize = 0;
+    let mut local_vi_ba_cost_ratio_gate_rejections: usize = 0;
+    let mut local_vi_ba_velocity_gate_rejections: usize = 0;
+    let mut local_vi_ba_adaptive_velocity_gate_rejections: usize = 0;
+    let mut local_vi_ba_last_adaptive_velocity_threshold_mps: Option<f64> = None;
     let mut last_mirrored_velocity_world: Option<Vector3<f64>> = None;
     let mut last_mirrored_bias_gyro: Option<Vector3<f64>> = None;
     let mut last_mirrored_bias_acc: Option<Vector3<f64>> = None;
+    let mut covisibility_local_ba_triggers: usize = 0;
+    let mut covisibility_local_ba_successes: usize = 0;
+    let mut covisibility_local_ba_failures: usize = 0;
+    let mut covisibility_local_ba_updated_keyframes_total: usize = 0;
+    let mut covisibility_local_ba_updated_landmarks_total: usize = 0;
+    let mut covisibility_local_ba_removed_observations_total: usize = 0;
+    let mut covisibility_local_ba_boundary_fallback_successes: usize = 0;
+    let mut covisibility_local_ba_reprojection_before_sum: f64 = 0.0;
+    let mut covisibility_local_ba_reprojection_after_sum: f64 = 0.0;
+    let mut covisibility_local_ba_elapsed_ms_total: f64 = 0.0;
+    let mut covisibility_local_ba_elapsed_ms_max: f64 = 0.0;
+    let mut covisibility_local_ba_last_error: Option<String> = None;
+    let mut covisibility_local_ba_active_observation_gate_failures: usize = 0;
+    let mut covisibility_local_ba_boundary_fallback_active_gate_failures: usize = 0;
+    let mut covisibility_local_ba_no_local_landmarks_failures: usize = 0;
+    let mut covisibility_local_ba_no_observations_failures: usize = 0;
+    let mut covisibility_local_ba_solver_failures: usize = 0;
+    let mut covisibility_local_ba_quality_gate_failures: usize = 0;
+    let mut covisibility_local_ba_boundary_support_failures: usize = 0;
+    let mut covisibility_local_ba_other_failures: usize = 0;
 
     for (frame_idx, image_entry) in dataset.cam0_images.iter().enumerate().skip(seed_frame_idx) {
         if frames_recorded >= frame_cap {
@@ -2182,6 +3367,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         feature_count_sum += features.len();
         feature_count_min = feature_count_min.min(features.len());
         feature_count_max = feature_count_max.max(features.len());
+        if args.export_frame_appearance_descriptors {
+            if let Some(mean) = normalized_mean_descriptor(&features.descriptors) {
+                if let Some(dim) = frame_appearance_descriptor_dim {
+                    if dim != mean.len() {
+                        return Err(format!(
+                            "frame_idx={frame_idx}: appearance descriptor dim {} != {dim}",
+                            mean.len()
+                        )
+                        .into());
+                    }
+                } else {
+                    frame_appearance_descriptor_dim = Some(mean.len());
+                }
+                let values = mean
+                    .iter()
+                    .map(|value| format!("{value:.9}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                frame_appearance_descriptor_rows.push(format!(
+                    "{},{frame_idx},{},{}\n",
+                    image_entry.timestamp_nanoseconds,
+                    features.descriptors.len(),
+                    values
+                ));
+                frame_appearance_descriptor_count += 1;
+            }
+        }
         let frame = frame_from_features(frame_idx as u64, camera_id, &features);
 
         let result = slam.process_frame(&frame, []);
@@ -2201,10 +3413,244 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(reloc) = result.relocalization.as_ref() {
             if reloc.attempted {
                 relocalization_attempts += 1;
+                let gate_config = RelocalizationAttemptGateConfig::from_args(&args);
+                let gates = relocalization_attempt_gate_status(reloc, gate_config);
+                let reject_reason = relocalization_attempt_reject_reason(reloc, gates);
+                relocalization_attempts_csv.push_str(&format!(
+                    "{frame_idx},{},{},{},{},{},{},{},{},{:.9},{:.9},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    image_entry.timestamp_nanoseconds,
+                    bool_as_u8(reloc.attempted),
+                    bool_as_u8(reloc.succeeded),
+                    bool_as_u8(reloc.localization_success),
+                    quote_csv_field(reject_reason),
+                    reloc.inlier_count,
+                    args.relocalization_min_inliers,
+                    bool_as_u8(gates.min_inliers_pass),
+                    reloc.inlier_ratio,
+                    args.relocalization_min_inlier_ratio,
+                    bool_as_u8(gates.min_inlier_ratio_pass),
+                    reloc.correspondence_count,
+                    format_optional_f64(reloc.mean_reprojection_error),
+                    format_optional_f64(args.relocalization_max_reprojection_error),
+                    bool_as_u8(gates.reprojection_pass),
+                    format_optional_f64(reloc.translation_per_frame_from_last_success_meters),
+                    format_optional_f64(
+                        args.relocalization_max_translation_per_frame_from_last_success_meters
+                    ),
+                    bool_as_u8(gates.continuity_pass),
+                    format_optional_f64(reloc.inlier_depth_median_ratio_to_last_success),
+                    format_optional_f64(
+                        args.relocalization_min_inlier_depth_median_ratio_to_last_success
+                    ),
+                    format_optional_f64(
+                        args.relocalization_max_inlier_depth_median_ratio_to_last_success
+                    ),
+                    bool_as_u8(gates.depth_ratio_pass),
+                    bool_as_u8(reloc.passed_acceptance_gates),
+                    reloc.confirmation_count,
+                    reloc.confirmation_required_count,
+                    format_optional_f64(
+                        reloc.confirmation_translation_per_frame_from_previous_meters
+                    ),
+                    reloc.descriptor_store_landmark_count,
+                    format_optional_usize(reloc.covisibility_local_descriptor_store_landmark_count),
+                    format_optional_usize(reloc.appearance_descriptor_store_landmark_count),
+                    format_optional_usize(reloc.broader_descriptor_store_landmark_count),
+                    bool_as_u8(reloc.tried_covisibility_local_descriptor_store),
+                    bool_as_u8(reloc.used_covisibility_local_descriptor_store),
+                    bool_as_u8(reloc.tried_appearance_descriptor_store),
+                    bool_as_u8(reloc.used_appearance_descriptor_store),
+                    bool_as_u8(reloc.tried_broader_descriptor_store_fallback),
+                    bool_as_u8(reloc.broader_descriptor_store_retry_skipped_by_interval),
+                    bool_as_u8(reloc.used_broader_descriptor_store_fallback),
+                ));
+                relocalization_descriptor_store_count_observations += 1;
+                relocalization_descriptor_store_count_sum += reloc.descriptor_store_landmark_count;
+                relocalization_descriptor_store_count_min = Some(
+                    relocalization_descriptor_store_count_min
+                        .map_or(reloc.descriptor_store_landmark_count, |current| {
+                            current.min(reloc.descriptor_store_landmark_count)
+                        }),
+                );
+                relocalization_descriptor_store_count_max = Some(
+                    relocalization_descriptor_store_count_max
+                        .map_or(reloc.descriptor_store_landmark_count, |current| {
+                            current.max(reloc.descriptor_store_landmark_count)
+                        }),
+                );
+                if reloc.tried_covisibility_local_descriptor_store {
+                    relocalization_covisibility_descriptor_store_tried_frames += 1;
+                }
+                if reloc.used_covisibility_local_descriptor_store {
+                    relocalization_covisibility_descriptor_store_used_frames += 1;
+                }
+                if reloc.tried_appearance_descriptor_store {
+                    relocalization_appearance_descriptor_store_tried_frames += 1;
+                    relocalization_appearance_candidate_keyframe_count_observations += 1;
+                    relocalization_appearance_candidate_keyframe_count_sum +=
+                        reloc.appearance_candidate_keyframe_count;
+                }
+                if reloc.used_appearance_descriptor_store {
+                    relocalization_appearance_descriptor_store_used_frames += 1;
+                }
+                if let Some(similarity) = reloc.appearance_best_similarity {
+                    relocalization_appearance_best_similarity_count += 1;
+                    relocalization_appearance_best_similarity_sum += similarity as f64;
+                    relocalization_appearance_best_similarity_max = Some(
+                        relocalization_appearance_best_similarity_max
+                            .map_or(similarity, |current| current.max(similarity)),
+                    );
+                }
+                for (rank, candidate) in reloc.appearance_candidates.iter().enumerate() {
+                    relocalization_appearance_candidates_csv.push_str(&format!(
+                        "{},{},{:.9},{},{},{},{},{},{},{},{},{}\n",
+                        frame_idx,
+                        candidate.keyframe_id,
+                        candidate.similarity,
+                        rank + 1,
+                        image_entry.timestamp_nanoseconds,
+                        reloc.descriptor_store_landmark_count,
+                        reloc
+                            .appearance_descriptor_store_landmark_count
+                            .map(|count| count.to_string())
+                            .unwrap_or_default(),
+                        reloc.attempted as u8,
+                        reloc.succeeded as u8,
+                        reloc.passed_acceptance_gates as u8,
+                        reloc.used_appearance_descriptor_store as u8,
+                        reloc.used_broader_descriptor_store_fallback as u8
+                    ));
+                }
+                if reloc.tried_broader_descriptor_store_fallback {
+                    relocalization_broader_descriptor_store_retry_frames += 1;
+                }
+                if reloc.broader_descriptor_store_retry_skipped_by_interval {
+                    relocalization_broader_descriptor_store_retry_interval_skips += 1;
+                }
+                if reloc.used_broader_descriptor_store_fallback {
+                    relocalization_broader_descriptor_store_used_frames += 1;
+                }
+                if reloc.covisibility_reference_keyframe_id.is_some() {
+                    relocalization_covisibility_reference_keyframe_count += 1;
+                }
+            }
+            if reloc.passed_acceptance_gates {
+                relocalization_gate_passes += 1;
+                if !reloc.succeeded {
+                    relocalization_confirmation_waiting += 1;
+                }
+            }
+            if let Some(tx_per_frame) =
+                reloc.confirmation_translation_per_frame_from_previous_meters
+            {
+                relocalization_confirmation_tx_per_frame_count += 1;
+                relocalization_confirmation_tx_per_frame_sum += tx_per_frame;
+                relocalization_confirmation_tx_per_frame_max = Some(
+                    relocalization_confirmation_tx_per_frame_max
+                        .map(|current| current.max(tx_per_frame))
+                        .unwrap_or(tx_per_frame),
+                );
+            }
+            if let Some(tx_per_frame) = reloc.translation_per_frame_from_last_success_meters {
+                relocalization_tx_per_frame_count += 1;
+                relocalization_tx_per_frame_sum += tx_per_frame;
+                relocalization_tx_per_frame_max = Some(
+                    relocalization_tx_per_frame_max
+                        .map(|current| current.max(tx_per_frame))
+                        .unwrap_or(tx_per_frame),
+                );
+            }
+            if let Some(depth_ratio) = reloc.inlier_depth_median_ratio_to_last_success {
+                relocalization_depth_ratio_count += 1;
+                relocalization_depth_ratio_sum += depth_ratio;
+                relocalization_depth_ratio_min = Some(
+                    relocalization_depth_ratio_min
+                        .map(|current| current.min(depth_ratio))
+                        .unwrap_or(depth_ratio),
+                );
+                relocalization_depth_ratio_max = Some(
+                    relocalization_depth_ratio_max
+                        .map(|current| current.max(depth_ratio))
+                        .unwrap_or(depth_ratio),
+                );
             }
             if reloc.succeeded {
                 relocalization_successes += 1;
+                if let Some(tx_per_frame) = reloc.translation_per_frame_from_last_success_meters {
+                    relocalization_success_tx_per_frame_count += 1;
+                    relocalization_success_tx_per_frame_sum += tx_per_frame;
+                    relocalization_success_tx_per_frame_max = Some(
+                        relocalization_success_tx_per_frame_max
+                            .map(|current| current.max(tx_per_frame))
+                            .unwrap_or(tx_per_frame),
+                    );
+                }
+                if let Some(depth_ratio) = reloc.inlier_depth_median_ratio_to_last_success {
+                    relocalization_success_depth_ratio_count += 1;
+                    relocalization_success_depth_ratio_sum += depth_ratio;
+                    relocalization_success_depth_ratio_min = Some(
+                        relocalization_success_depth_ratio_min
+                            .map(|current| current.min(depth_ratio))
+                            .unwrap_or(depth_ratio),
+                    );
+                    relocalization_success_depth_ratio_max = Some(
+                        relocalization_success_depth_ratio_max
+                            .map(|current| current.max(depth_ratio))
+                            .unwrap_or(depth_ratio),
+                    );
+                }
             }
+        }
+        if let Some(mapping) = result.mapping.as_ref() {
+            let decision = &mapping.keyframe_decision;
+            let tracking_failure_reason = result
+                .tracking
+                .tracking_failure_reason
+                .as_ref()
+                .map(|reason| quote_csv_field(&format!("{reason:?}")))
+                .unwrap_or_default();
+            let (
+                reason,
+                frame_id_gap,
+                translation_m,
+                min_translation_m,
+                tracked_landmarks,
+                last_keyframe_tracked_landmarks,
+                min_tracked_landmark_ratio,
+            ) = keyframe_reason_csv_fields(&decision.reason);
+            keyframe_decision_log.push_str(&format!(
+                "{frame_idx},{},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{}\n",
+                image_entry.timestamp_nanoseconds,
+                if success { 1 } else { 0 },
+                if decision.selected { 1 } else { 0 },
+                reason,
+                format_optional_frame_id(decision.last_keyframe_frame_id),
+                decision.selected_keyframe_count,
+                result.tracking.localization.inlier_count,
+                result.tracking.localization.inlier_ratio,
+                frame_id_gap,
+                translation_m,
+                min_translation_m,
+                tracked_landmarks,
+                last_keyframe_tracked_landmarks,
+                min_tracked_landmark_ratio,
+                tracking_failure_reason,
+            ));
+        } else {
+            let tracking_failure_reason = result
+                .tracking
+                .tracking_failure_reason
+                .as_ref()
+                .map(|reason| quote_csv_field(&format!("{reason:?}")))
+                .unwrap_or_default();
+            keyframe_decision_log.push_str(&format!(
+                "{frame_idx},{},{},0,NoMapping,,,{},{:.6},,,,,,,{}\n",
+                image_entry.timestamp_nanoseconds,
+                if success { 1 } else { 0 },
+                result.tracking.localization.inlier_count,
+                result.tracking.localization.inlier_ratio,
+                tracking_failure_reason,
+            ));
         }
 
         // Refresh the IMU motion model's `velocity_world` from the
@@ -2248,7 +3694,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(stats) = result.local_vi_ba.as_ref() {
             local_vi_ba_triggers += 1;
             local_vi_ba_relinearised_factor_total += stats.relinearised_factor_count;
-            if !stats.bias_frozen {
+            if stats.quality_gate_rejected {
+                local_vi_ba_quality_gate_rejections += 1;
+            }
+            if stats.cost_ratio_gate_rejected {
+                local_vi_ba_cost_ratio_gate_rejections += 1;
+            }
+            if stats.velocity_gate_rejected {
+                local_vi_ba_velocity_gate_rejections += 1;
+            }
+            if stats.adaptive_velocity_gate_rejected {
+                local_vi_ba_adaptive_velocity_gate_rejections += 1;
+            }
+            local_vi_ba_last_adaptive_velocity_threshold_mps =
+                stats.adaptive_velocity_gate_threshold_mps;
+            if !stats.bias_frozen && !stats.quality_gate_rejected {
                 if let (Some(state), Some(latest_kf)) = (
                     slam.local_vi_ba_state.as_ref(),
                     stats.window_keyframe_ids.last().copied(),
@@ -2266,6 +3726,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+        if let Some(stats) = result.covisibility_local_ba.as_ref() {
+            covisibility_local_ba_triggers += 1;
+            covisibility_local_ba_elapsed_ms_total += stats.elapsed_ms;
+            covisibility_local_ba_elapsed_ms_max =
+                covisibility_local_ba_elapsed_ms_max.max(stats.elapsed_ms);
+            if stats.success {
+                covisibility_local_ba_successes += 1;
+                covisibility_local_ba_updated_keyframes_total += stats.updated_keyframe_count;
+                covisibility_local_ba_updated_landmarks_total += stats.updated_landmark_count;
+                covisibility_local_ba_removed_observations_total += stats.removed_observation_count;
+                if let (Some(before), Some(after)) = (
+                    stats.mean_reprojection_before_px,
+                    stats.mean_reprojection_after_px,
+                ) {
+                    covisibility_local_ba_reprojection_before_sum += before;
+                    covisibility_local_ba_reprojection_after_sum += after;
+                }
+                if stats
+                    .selection
+                    .as_ref()
+                    .map(|selection| selection.boundary_fallback_used)
+                    .unwrap_or(false)
+                {
+                    covisibility_local_ba_boundary_fallback_successes += 1;
+                }
+            } else {
+                covisibility_local_ba_failures += 1;
+                match stats.error.as_ref() {
+                    Some(CovisibilityLocalBaError::InsufficientActiveObservations {
+                        boundary_fallback_used,
+                        ..
+                    }) => {
+                        covisibility_local_ba_active_observation_gate_failures += 1;
+                        if *boundary_fallback_used {
+                            covisibility_local_ba_boundary_fallback_active_gate_failures += 1;
+                        }
+                    }
+                    Some(CovisibilityLocalBaError::NoLocalLandmarks) => {
+                        covisibility_local_ba_no_local_landmarks_failures += 1;
+                    }
+                    Some(CovisibilityLocalBaError::NoObservations) => {
+                        covisibility_local_ba_no_observations_failures += 1;
+                    }
+                    Some(CovisibilityLocalBaError::QualityGateRejected { .. }) => {
+                        covisibility_local_ba_quality_gate_failures += 1;
+                    }
+                    Some(CovisibilityLocalBaError::InsufficientBoundaryKeyframes { .. }) => {
+                        covisibility_local_ba_boundary_support_failures += 1;
+                    }
+                    Some(CovisibilityLocalBaError::Ba(_)) => {
+                        covisibility_local_ba_solver_failures += 1;
+                    }
+                    Some(_) | None => {
+                        covisibility_local_ba_other_failures += 1;
+                    }
+                }
+                covisibility_local_ba_last_error = stats.error.as_ref().map(|err| err.to_string());
+            }
+            let error = stats
+                .error
+                .as_ref()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let (
+                optimized_keyframes,
+                fixed_keyframes,
+                landmarks,
+                observations,
+                boundary_fallback_used,
+            ) = if let Some(selection) = stats.selection.as_ref() {
+                (
+                    selection.optimized_keyframe_ids.len(),
+                    selection.fixed_keyframe_ids.len(),
+                    selection.landmark_ids.len(),
+                    selection.observation_count,
+                    selection.boundary_fallback_used,
+                )
+            } else if let Some(CovisibilityLocalBaError::InsufficientBoundaryKeyframes {
+                optimized_keyframe_count,
+                fixed_keyframe_count,
+                boundary_fallback_used,
+                ..
+            }) = stats.error.as_ref()
+            {
+                (
+                    *optimized_keyframe_count,
+                    *fixed_keyframe_count,
+                    0,
+                    0,
+                    *boundary_fallback_used,
+                )
+            } else {
+                (0, 0, 0, 0, false)
+            };
+            covisibility_local_ba_log.push_str(&format!(
+                "{frame_idx},{},{},{},{:.6},{optimized_keyframes},{fixed_keyframes},{landmarks},{observations},{boundary_fallback_used},{:?},{:?},{},{},{},{:?},{},{}\n",
+                image_entry.timestamp_nanoseconds,
+                stats.success,
+                error.replace(',', ";"),
+                stats.elapsed_ms,
+                stats.mean_reprojection_before_px,
+                stats.mean_reprojection_after_px,
+                stats.updated_keyframe_count,
+                stats.updated_landmark_count,
+                stats.outlier_observation_count,
+                stats.outlier_observation_ratio,
+                stats.quality_gate_rejected,
+                stats.removed_observation_count,
+            ));
         }
         if let Some(size) = result.tracking.covisibility_local_map_size {
             covisibility_local_map_frames += 1;
@@ -2329,6 +3899,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 camera_center_world.z,
             )
         };
+        frame_groundtruth_csv.push_str(&format!(
+            "{},{frame_idx},{:.6},{:.6},{:.6}\n",
+            image_entry.timestamp_nanoseconds, gt_center_x, gt_center_y, gt_center_z,
+        ));
 
         if let (Some(center), Some(rot_wc)) = (estimated_center, estimated_rotation_wc) {
             let q = rot_wc;
@@ -2385,8 +3959,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::write(&traj_path, traj_csv)?;
     fs::write(&err_path, err_csv)?;
+    fs::write(&frame_groundtruth_path, frame_groundtruth_csv)?;
+    if args.export_frame_appearance_descriptors {
+        let mut csv = String::from("timestamp_ns,frame_idx,descriptor_count");
+        if let Some(dim) = frame_appearance_descriptor_dim {
+            for i in 0..dim {
+                csv.push_str(&format!(",d{i}"));
+            }
+        }
+        csv.push('\n');
+        for row in &frame_appearance_descriptor_rows {
+            csv.push_str(row);
+        }
+        fs::write(&frame_appearance_descriptors_path, csv)?;
+    }
     fs::write(&vi_init_log_path, &vi_init_log)?;
     fs::write(&motion_vi_init_log_path, &motion_vi_init_log)?;
+    fs::write(&covisibility_local_ba_log_path, &covisibility_local_ba_log)?;
+    fs::write(&keyframe_decision_log_path, &keyframe_decision_log)?;
+    fs::write(
+        &relocalization_appearance_candidates_path,
+        &relocalization_appearance_candidates_csv,
+    )?;
+    fs::write(&relocalization_attempts_path, &relocalization_attempts_csv)?;
 
     // Dump the metric landmark cloud (world frame) so downstream tools can seed
     // a 3D Gaussian Splat from real on-surface SLAM points instead of random
@@ -2456,6 +4051,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         feature_count_min
     };
+    let covisibility_local_ba_mean_reprojection_before_px = if covisibility_local_ba_successes > 0 {
+        Some(covisibility_local_ba_reprojection_before_sum / covisibility_local_ba_successes as f64)
+    } else {
+        None
+    };
+    let covisibility_local_ba_mean_reprojection_after_px = if covisibility_local_ba_successes > 0 {
+        Some(covisibility_local_ba_reprojection_after_sum / covisibility_local_ba_successes as f64)
+    } else {
+        None
+    };
+    let covisibility_local_ba_elapsed_ms_mean = if covisibility_local_ba_triggers > 0 {
+        Some(covisibility_local_ba_elapsed_ms_total / covisibility_local_ba_triggers as f64)
+    } else {
+        None
+    };
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -2474,6 +4084,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          feature_count_mean={mean_features:.1}\n\
          feature_count_min={feature_count_min}\n\
          feature_count_max={feature_count_max}\n\
+         frame_appearance_descriptors_exported={appearance_descriptors_exported}\n\
+         frame_appearance_descriptor_count={appearance_descriptor_count}\n\
          map_keyframes={map_keyframes}\n\
          map_landmarks={map_landmarks}\n\
          vi_init_first_event_frame={vi_first:?}\n\
@@ -2487,12 +4099,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          motion_vi_init_status_final={final_motion_vi_status:?}\n\
          local_vi_ba_enabled={local_vi_ba_enabled}\n\
          local_vi_ba_freeze_biases_above={local_vi_ba_freeze:?}\n\
+         local_vi_ba_reject_writeback_above={local_vi_ba_reject_writeback:?}\n\
+         local_vi_ba_reject_velocity_above_mps={local_vi_ba_reject_velocity:?}\n\
+         local_vi_ba_adaptive_velocity_gate={local_vi_ba_adaptive_velocity_gate}\n\
+         local_vi_ba_adaptive_velocity_quantile={local_vi_ba_adaptive_velocity_quantile:.3}\n\
+         local_vi_ba_adaptive_velocity_multiplier={local_vi_ba_adaptive_velocity_multiplier:.3}\n\
+         local_vi_ba_adaptive_velocity_margin_mps={local_vi_ba_adaptive_velocity_margin_mps:.3}\n\
+         local_vi_ba_adaptive_velocity_min_mps={local_vi_ba_adaptive_velocity_min_mps:.3}\n\
+         local_vi_ba_adaptive_velocity_max_mps={local_vi_ba_adaptive_velocity_max_mps:?}\n\
+         local_vi_ba_adaptive_velocity_min_references={local_vi_ba_adaptive_velocity_min_references}\n\
          motion_vi_init_max_velocity_mps={motion_vi_max_vel:?}\n\
          covisibility_local_map_max_keyframes={covisibility_max_kf:?}\n\
          covisibility_local_map_min_shared={covisibility_min_shared}\n\
          covisibility_local_map_used_frames={covisibility_used_frames}\n\
          covisibility_local_map_mean_size={covisibility_mean_size:.2}\n\
+         covisibility_local_ba_enabled={covis_ba_enabled}\n\
+         covisibility_local_ba_min_keyframes={covis_ba_min_keyframes}\n\
+         covisibility_local_ba_trigger_every={covis_ba_trigger_every}\n\
+         covisibility_local_ba_max_neighbor_keyframes={covis_ba_max_neighbors}\n\
+         covisibility_local_ba_min_shared={covis_ba_min_shared}\n\
+         covisibility_local_ba_max_boundary_keyframes={covis_ba_max_boundary}\n\
+         covisibility_local_ba_min_boundary_observations={covis_ba_min_boundary_obs}\n\
+         covisibility_local_ba_fallback_min_boundary_observations={covis_ba_fallback_min_boundary_obs:?}\n\
+         covisibility_local_ba_max_landmarks={covis_ba_max_landmarks:?}\n\
+         covisibility_local_ba_min_active_observations={covis_ba_min_active_obs}\n\
+         covisibility_local_ba_outlier_threshold_px={covis_ba_outlier_threshold:?}\n\
+         covisibility_local_ba_remove_outliers={covis_ba_remove_outliers}\n\
+         covisibility_local_ba_max_outlier_observation_ratio={covis_ba_max_outlier_ratio:?}\n\
+         covisibility_local_ba_boundary_support_min_optimized_keyframes={covis_ba_boundary_support_min_optimized:?}\n\
+         covisibility_local_ba_boundary_support_min_fixed_keyframes={covis_ba_boundary_support_min_fixed}\n\
+         covisibility_local_ba_triggers={covis_ba_triggers}\n\
+         covisibility_local_ba_successes={covis_ba_successes}\n\
+         covisibility_local_ba_failures={covis_ba_failures}\n\
+         covisibility_local_ba_active_observation_gate_failures={covis_ba_active_gate_failures}\n\
+         covisibility_local_ba_boundary_fallback_active_gate_failures={covis_ba_boundary_fallback_active_gate_failures}\n\
+         covisibility_local_ba_quality_gate_failures={covis_ba_quality_gate_failures}\n\
+         covisibility_local_ba_boundary_support_failures={covis_ba_boundary_support_failures}\n\
+         covisibility_local_ba_no_local_landmarks_failures={covis_ba_no_local_landmarks_failures}\n\
+         covisibility_local_ba_no_observations_failures={covis_ba_no_observations_failures}\n\
+         covisibility_local_ba_solver_failures={covis_ba_solver_failures}\n\
+         covisibility_local_ba_other_failures={covis_ba_other_failures}\n\
+         covisibility_local_ba_boundary_fallback_successes={covis_ba_boundary_fallback_successes}\n\
+         covisibility_local_ba_updated_keyframes_total={covis_ba_updated_keyframes}\n\
+         covisibility_local_ba_updated_landmarks_total={covis_ba_updated_landmarks}\n\
+         covisibility_local_ba_removed_observations_total={covis_ba_removed_observations}\n\
+         covisibility_local_ba_mean_reprojection_before_px={covis_ba_mean_before:?}\n\
+         covisibility_local_ba_mean_reprojection_after_px={covis_ba_mean_after:?}\n\
+         covisibility_local_ba_elapsed_ms_total={covis_ba_elapsed_ms_total:.6}\n\
+         covisibility_local_ba_elapsed_ms_mean={covis_ba_elapsed_ms_mean:?}\n\
+         covisibility_local_ba_elapsed_ms_max={covis_ba_elapsed_ms_max:.6}\n\
+         covisibility_local_ba_last_error={covis_ba_last_error:?}\n\
          max_pose_jump_meters={max_pose_jump:?}\n\
+         tracking_min_inliers={tracking_min_inliers}\n\
+         tracking_min_inlier_ratio={tracking_min_inlier_ratio:.6}\n\
+         tracking_max_reprojection_error={tracking_max_reprojection_error:?}\n\
          pnp_pose_prior_warm_start={pnp_warm_start}\n\
          pnp_reprojection_threshold_px={pnp_reproj_thresh:?}\n\
          motion_model={motion_model_kind}\n\
@@ -2512,6 +4172,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          superpoint_cam1_features_dir={superpoint_cam1_features_dir:?}\n\
          superpoint_onnx_model={superpoint_onnx_model:?}\n\
          keyframe_min_translation={kf_min_translation:?}\n\
+         keyframe_min_frame_gap={kf_min_frame_gap:?}\n\
+         keyframe_tracked_landmark_ratio={kf_tracked_ratio:?}\n\
+         keyframe_min_tracked_landmarks_for_ratio={kf_min_tracked_for_ratio}\n\
          keep_pre_promotion_imu_factors={keep_pre_promotion}\n\
          relinearise_imu_factor_bias_thresholds={relinearise_thresholds:?}\n\
          run_local_vi_ba_at_vi_init_promotion={run_at_promotion}\n\
@@ -2521,13 +4184,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          relocalization_max_mean_reprojection_error={reloc_max_rep_err:?}\n\
          relocalization_pose_prior_radius={reloc_pose_prior_radius:?}\n\
          relocalization_recent_keyframe_window={reloc_recent_kf_window:?}\n\
+         relocalization_covisibility_max_keyframes={reloc_covis_max_kf:?}\n\
+         relocalization_covisibility_min_shared={reloc_covis_min_shared}\n\
+         relocalization_covisibility_min_landmarks={reloc_covis_min_landmarks}\n\
+         relocalization_covisibility_broader_fallback={reloc_covis_broader_fallback}\n\
+         relocalization_covisibility_broader_fallback_interval_frames={reloc_covis_broader_fallback_interval_frames}\n\
+         relocalization_covisibility_compare_broader_store={reloc_covis_compare_broader}\n\
+         relocalization_appearance_max_keyframes={reloc_appearance_max_kf:?}\n\
+         relocalization_appearance_candidate_log_limit={reloc_appearance_candidate_log_limit:?}\n\
+         relocalization_appearance_min_similarity={reloc_appearance_min_similarity:.6}\n\
+         relocalization_appearance_exclude_recent_frame_gap={reloc_appearance_exclude_recent_frame_gap}\n\
+         relocalization_appearance_min_landmarks={reloc_appearance_min_landmarks}\n\
+         relocalization_appearance_broader_fallback={reloc_appearance_broader_fallback}\n\
+         relocalization_appearance_broader_fallback_interval_frames={reloc_appearance_broader_fallback_interval_frames}\n\
+         relocalization_appearance_compare_broader_store={reloc_appearance_compare_broader}\n\
          relocalization_max_translation_from_imu_prediction_meters={reloc_max_tx_from_imu:?}\n\
+         relocalization_attempt_interval_frames={reloc_attempt_interval_frames}\n\
+         relocalization_max_consecutive_failed_attempts={reloc_max_consecutive_failed_attempts:?}\n\
+         relocalization_max_translation_per_frame_from_last_success_meters={reloc_max_tx_per_frame_from_last_success:?}\n\
+         relocalization_min_inlier_depth_median_ratio_to_last_success={reloc_min_depth_ratio_to_last_success:?}\n\
+         relocalization_max_inlier_depth_median_ratio_to_last_success={reloc_max_depth_ratio_to_last_success:?}\n\
+         relocalization_confirmation_required_recoveries={reloc_confirmation_required}\n\
+         relocalization_confirmation_max_translation_per_frame_meters={reloc_confirmation_max_tx_per_frame:?}\n\
          relocalization_attempts={reloc_attempts}\n\
          relocalization_successes={reloc_successes}\n\
+         relocalization_gate_passes={reloc_gate_passes}\n\
+         relocalization_descriptor_store_landmark_count_observations={reloc_descriptor_store_count_observations}\n\
+         relocalization_descriptor_store_landmark_count_mean={reloc_descriptor_store_count_mean:?}\n\
+         relocalization_descriptor_store_landmark_count_min={reloc_descriptor_store_count_min:?}\n\
+         relocalization_descriptor_store_landmark_count_max={reloc_descriptor_store_count_max:?}\n\
+         relocalization_covisibility_descriptor_store_tried_frames={reloc_covis_descriptor_store_tried_frames}\n\
+         relocalization_covisibility_descriptor_store_used_frames={reloc_covis_descriptor_store_used_frames}\n\
+         relocalization_appearance_descriptor_store_tried_frames={reloc_appearance_descriptor_store_tried_frames}\n\
+         relocalization_appearance_descriptor_store_used_frames={reloc_appearance_descriptor_store_used_frames}\n\
+         relocalization_appearance_candidate_keyframe_count_observations={reloc_appearance_candidate_count_observations}\n\
+         relocalization_appearance_candidate_keyframe_count_mean={reloc_appearance_candidate_count_mean:?}\n\
+         relocalization_appearance_best_similarity_count={reloc_appearance_best_similarity_count}\n\
+         relocalization_appearance_best_similarity_mean={reloc_appearance_best_similarity_mean:?}\n\
+         relocalization_appearance_best_similarity_max={reloc_appearance_best_similarity_max:?}\n\
+         relocalization_broader_descriptor_store_retry_frames={reloc_broader_descriptor_store_retry_frames}\n\
+         relocalization_broader_descriptor_store_retry_interval_skips={reloc_broader_descriptor_store_retry_interval_skips}\n\
+         relocalization_broader_descriptor_store_used_frames={reloc_broader_descriptor_store_used_frames}\n\
+         relocalization_budget_skips={reloc_budget_skips}\n\
+         relocalization_covisibility_reference_keyframe_count={reloc_covis_reference_keyframe_count}\n\
+         relocalization_confirmation_waiting={reloc_confirmation_waiting}\n\
+         relocalization_confirmation_translation_per_frame_from_previous_count={reloc_confirmation_tx_per_frame_count}\n\
+         relocalization_confirmation_translation_per_frame_from_previous_mean={reloc_confirmation_tx_per_frame_mean:?}\n\
+         relocalization_confirmation_translation_per_frame_from_previous_max={reloc_confirmation_tx_per_frame_max:?}\n\
+         relocalization_translation_per_frame_from_last_success_count={reloc_tx_per_frame_count}\n\
+         relocalization_translation_per_frame_from_last_success_mean={reloc_tx_per_frame_mean:?}\n\
+         relocalization_translation_per_frame_from_last_success_max={reloc_tx_per_frame_max:?}\n\
+         relocalization_success_translation_per_frame_from_last_success_count={reloc_success_tx_per_frame_count}\n\
+         relocalization_success_translation_per_frame_from_last_success_mean={reloc_success_tx_per_frame_mean:?}\n\
+         relocalization_success_translation_per_frame_from_last_success_max={reloc_success_tx_per_frame_max:?}\n\
+         relocalization_inlier_depth_median_ratio_to_last_success_count={reloc_depth_ratio_count}\n\
+         relocalization_inlier_depth_median_ratio_to_last_success_mean={reloc_depth_ratio_mean:?}\n\
+         relocalization_inlier_depth_median_ratio_to_last_success_min={reloc_depth_ratio_min:?}\n\
+         relocalization_inlier_depth_median_ratio_to_last_success_max={reloc_depth_ratio_max:?}\n\
+         relocalization_success_inlier_depth_median_ratio_to_last_success_count={reloc_success_depth_ratio_count}\n\
+         relocalization_success_inlier_depth_median_ratio_to_last_success_mean={reloc_success_depth_ratio_mean:?}\n\
+         relocalization_success_inlier_depth_median_ratio_to_last_success_min={reloc_success_depth_ratio_min:?}\n\
+         relocalization_success_inlier_depth_median_ratio_to_last_success_max={reloc_success_depth_ratio_max:?}\n\
          vi_init_try_initialize_on_every_frame={vi_init_try_every_frame}\n\
          imu_factors_staged={imu_factors_staged}\n\
          local_vi_ba_triggers={local_vi_ba_triggers}\n\
          local_vi_ba_relinearised_factor_total={local_vi_ba_relinearised_factor_total}\n\
+         local_vi_ba_quality_gate_rejections={local_vi_ba_quality_gate_rejections}\n\
+         local_vi_ba_cost_ratio_gate_rejections={local_vi_ba_cost_ratio_gate_rejections}\n\
+         local_vi_ba_velocity_gate_rejections={local_vi_ba_velocity_gate_rejections}\n\
+         local_vi_ba_adaptive_velocity_gate_rejections={local_vi_ba_adaptive_velocity_gate_rejections}\n\
+         local_vi_ba_last_adaptive_velocity_threshold_mps={local_vi_ba_last_adaptive_velocity_threshold_mps:?}\n\
          local_vi_ba_mirrors_into_imu_motion_model={local_vi_ba_mirrors}\n\
          last_mirrored_velocity_world={last_mirrored_v:?}\n\
          last_mirrored_bias_gyro={last_mirrored_bg:?}\n\
@@ -2556,6 +4282,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stereo_bootstrap_matches_count = stereo_bootstrap_matches.len(),
         bootstrap_depth = args.bootstrap_depth_meters,
         bootstrap_landmarks = seed_features.len(),
+        appearance_descriptors_exported = args.export_frame_appearance_descriptors,
+        appearance_descriptor_count = frame_appearance_descriptor_count,
         vi_first = vi_init_first_event_at_frame,
         vi_succeeded = vi_init_succeeded_at_frame,
         motion_enabled = args.motion_vi_init_enabled,
@@ -2565,6 +4293,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         motion_iters = motion_vi_init_viba2_iterations,
         local_vi_ba_enabled = args.local_vi_ba_enabled,
         local_vi_ba_freeze = args.local_vi_ba_freeze_biases_above,
+        local_vi_ba_reject_writeback = args.local_vi_ba_reject_writeback_above,
+        local_vi_ba_reject_velocity = args.local_vi_ba_reject_velocity_above_mps,
+        local_vi_ba_adaptive_velocity_gate = args.local_vi_ba_adaptive_velocity_gate,
+        local_vi_ba_adaptive_velocity_quantile = args.local_vi_ba_adaptive_velocity_quantile,
+        local_vi_ba_adaptive_velocity_multiplier = args.local_vi_ba_adaptive_velocity_multiplier,
+        local_vi_ba_adaptive_velocity_margin_mps =
+            args.local_vi_ba_adaptive_velocity_margin_mps,
+        local_vi_ba_adaptive_velocity_min_mps = args.local_vi_ba_adaptive_velocity_min_mps,
+        local_vi_ba_adaptive_velocity_max_mps = args.local_vi_ba_adaptive_velocity_max_mps,
+        local_vi_ba_adaptive_velocity_min_references =
+            args.local_vi_ba_adaptive_velocity_min_references,
         motion_vi_max_vel = args.motion_vi_init_max_velocity_mps,
         covisibility_max_kf = args.covisibility_local_map_max_keyframes,
         covisibility_min_shared = args.covisibility_local_map_min_shared,
@@ -2574,7 +4313,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         },
+        covis_ba_enabled = args.covisibility_local_ba_enabled,
+        covis_ba_min_keyframes = args.covisibility_local_ba_min_keyframes,
+        covis_ba_trigger_every = args.covisibility_local_ba_trigger_every,
+        covis_ba_max_neighbors = args.covisibility_local_ba_max_neighbor_keyframes,
+        covis_ba_min_shared = args.covisibility_local_ba_min_shared,
+        covis_ba_max_boundary = args.covisibility_local_ba_max_boundary_keyframes,
+        covis_ba_min_boundary_obs = args.covisibility_local_ba_min_boundary_observations,
+        covis_ba_fallback_min_boundary_obs = args
+            .covisibility_local_ba_fallback_min_boundary_observations,
+        covis_ba_max_landmarks = args.covisibility_local_ba_max_landmarks,
+        covis_ba_min_active_obs = args.covisibility_local_ba_min_active_observations,
+        covis_ba_outlier_threshold = args.covisibility_local_ba_outlier_threshold_px,
+        covis_ba_remove_outliers = args.covisibility_local_ba_remove_outliers,
+        covis_ba_max_outlier_ratio = args.covisibility_local_ba_max_outlier_observation_ratio,
+        covis_ba_boundary_support_min_optimized = args
+            .covisibility_local_ba_boundary_support_min_optimized_keyframes,
+        covis_ba_boundary_support_min_fixed = args
+            .covisibility_local_ba_boundary_support_min_fixed_keyframes,
+        covis_ba_triggers = covisibility_local_ba_triggers,
+        covis_ba_successes = covisibility_local_ba_successes,
+        covis_ba_failures = covisibility_local_ba_failures,
+        covis_ba_active_gate_failures = covisibility_local_ba_active_observation_gate_failures,
+        covis_ba_boundary_fallback_active_gate_failures =
+            covisibility_local_ba_boundary_fallback_active_gate_failures,
+        covis_ba_quality_gate_failures = covisibility_local_ba_quality_gate_failures,
+        covis_ba_boundary_support_failures =
+            covisibility_local_ba_boundary_support_failures,
+        covis_ba_no_local_landmarks_failures = covisibility_local_ba_no_local_landmarks_failures,
+        covis_ba_no_observations_failures = covisibility_local_ba_no_observations_failures,
+        covis_ba_solver_failures = covisibility_local_ba_solver_failures,
+        covis_ba_other_failures = covisibility_local_ba_other_failures,
+        covis_ba_boundary_fallback_successes =
+            covisibility_local_ba_boundary_fallback_successes,
+        covis_ba_updated_keyframes = covisibility_local_ba_updated_keyframes_total,
+        covis_ba_updated_landmarks = covisibility_local_ba_updated_landmarks_total,
+        covis_ba_removed_observations = covisibility_local_ba_removed_observations_total,
+        covis_ba_mean_before = covisibility_local_ba_mean_reprojection_before_px,
+        covis_ba_mean_after = covisibility_local_ba_mean_reprojection_after_px,
+        covis_ba_elapsed_ms_total = covisibility_local_ba_elapsed_ms_total,
+        covis_ba_elapsed_ms_mean = covisibility_local_ba_elapsed_ms_mean,
+        covis_ba_elapsed_ms_max = covisibility_local_ba_elapsed_ms_max,
+        covis_ba_last_error = covisibility_local_ba_last_error,
         max_pose_jump = args.max_pose_jump_meters,
+        tracking_min_inliers = args.tracking_min_inliers,
+        tracking_min_inlier_ratio = args.tracking_min_inlier_ratio,
+        tracking_max_reprojection_error = args.tracking_max_reprojection_error,
         pnp_warm_start = args.pnp_pose_prior_warm_start,
         pnp_reproj_thresh = args.pnp_reprojection_threshold_px,
         motion_model_kind = match args.motion_model {
@@ -2628,6 +4412,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         superpoint_cam1_features_dir = args.superpoint_cam1_features_dir,
         superpoint_onnx_model = args.superpoint_onnx_model,
         kf_min_translation = args.keyframe_min_translation,
+        kf_min_frame_gap = args.keyframe_min_frame_gap,
+        kf_tracked_ratio = args.keyframe_tracked_landmark_ratio,
+        kf_min_tracked_for_ratio = args.keyframe_min_tracked_landmarks_for_ratio,
         keep_pre_promotion = args.keep_pre_promotion_imu_factors,
         relinearise_thresholds = args.relinearise_imu_factor_bias_thresholds,
         run_at_promotion = args.run_local_vi_ba_at_vi_init_promotion,
@@ -2637,13 +4424,160 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reloc_max_rep_err = args.relocalization_max_reprojection_error,
         reloc_pose_prior_radius = args.relocalization_pose_prior_radius_meters,
         reloc_recent_kf_window = args.relocalization_recent_keyframe_window,
+        reloc_covis_max_kf = args.relocalization_covisibility_max_keyframes,
+        reloc_covis_min_shared = args.relocalization_covisibility_min_shared,
+        reloc_covis_min_landmarks = args.relocalization_covisibility_min_landmarks,
+        reloc_covis_broader_fallback = args.relocalization_covisibility_broader_fallback,
+        reloc_covis_broader_fallback_interval_frames = args
+            .relocalization_covisibility_broader_fallback_interval_frames,
+        reloc_covis_compare_broader = args.relocalization_covisibility_compare_broader_store,
+        reloc_appearance_max_kf = args.relocalization_appearance_max_keyframes,
+        reloc_appearance_candidate_log_limit =
+            args.relocalization_appearance_candidate_log_limit,
+        reloc_appearance_min_similarity = args.relocalization_appearance_min_similarity,
+        reloc_appearance_exclude_recent_frame_gap = args
+            .relocalization_appearance_exclude_recent_frame_gap,
+        reloc_appearance_min_landmarks = args.relocalization_appearance_min_landmarks,
+        reloc_appearance_broader_fallback = args.relocalization_appearance_broader_fallback,
+        reloc_appearance_broader_fallback_interval_frames = args
+            .relocalization_appearance_broader_fallback_interval_frames,
+        reloc_appearance_compare_broader = args.relocalization_appearance_compare_broader_store,
         reloc_max_tx_from_imu = args.relocalization_max_translation_from_imu_prediction_meters,
+        reloc_attempt_interval_frames = args.relocalization_attempt_interval_frames,
+        reloc_max_consecutive_failed_attempts =
+            args.relocalization_max_consecutive_failed_attempts,
+        reloc_max_tx_per_frame_from_last_success = args
+            .relocalization_max_translation_per_frame_from_last_success_meters,
+        reloc_min_depth_ratio_to_last_success = args
+            .relocalization_min_inlier_depth_median_ratio_to_last_success,
+        reloc_max_depth_ratio_to_last_success = args
+            .relocalization_max_inlier_depth_median_ratio_to_last_success,
+        reloc_confirmation_required = args.relocalization_confirmation_required_recoveries,
+        reloc_confirmation_max_tx_per_frame = args
+            .relocalization_confirmation_max_translation_per_frame_meters,
         reloc_attempts = relocalization_attempts,
         reloc_successes = relocalization_successes,
+        reloc_gate_passes = relocalization_gate_passes,
+        reloc_descriptor_store_count_observations =
+            relocalization_descriptor_store_count_observations,
+        reloc_descriptor_store_count_mean =
+            if relocalization_descriptor_store_count_observations > 0 {
+                Some(
+                    relocalization_descriptor_store_count_sum as f64
+                        / relocalization_descriptor_store_count_observations as f64,
+                )
+            } else {
+                None
+            },
+        reloc_descriptor_store_count_min = relocalization_descriptor_store_count_min,
+        reloc_descriptor_store_count_max = relocalization_descriptor_store_count_max,
+        reloc_covis_descriptor_store_tried_frames =
+            relocalization_covisibility_descriptor_store_tried_frames,
+        reloc_covis_descriptor_store_used_frames =
+            relocalization_covisibility_descriptor_store_used_frames,
+        reloc_appearance_descriptor_store_tried_frames =
+            relocalization_appearance_descriptor_store_tried_frames,
+        reloc_appearance_descriptor_store_used_frames =
+            relocalization_appearance_descriptor_store_used_frames,
+        reloc_appearance_candidate_count_observations =
+            relocalization_appearance_candidate_keyframe_count_observations,
+        reloc_appearance_candidate_count_mean =
+            if relocalization_appearance_candidate_keyframe_count_observations > 0 {
+                Some(
+                    relocalization_appearance_candidate_keyframe_count_sum as f64
+                        / relocalization_appearance_candidate_keyframe_count_observations as f64,
+                )
+            } else {
+                None
+            },
+        reloc_appearance_best_similarity_count =
+            relocalization_appearance_best_similarity_count,
+        reloc_appearance_best_similarity_mean =
+            if relocalization_appearance_best_similarity_count > 0 {
+                Some(
+                    relocalization_appearance_best_similarity_sum
+                        / relocalization_appearance_best_similarity_count as f64,
+                )
+            } else {
+                None
+            },
+        reloc_appearance_best_similarity_max = relocalization_appearance_best_similarity_max,
+        reloc_broader_descriptor_store_retry_frames =
+            relocalization_broader_descriptor_store_retry_frames,
+        reloc_broader_descriptor_store_retry_interval_skips =
+            relocalization_broader_descriptor_store_retry_interval_skips,
+        reloc_broader_descriptor_store_used_frames =
+            relocalization_broader_descriptor_store_used_frames,
+        reloc_budget_skips = slam
+            .relocalization_state
+            .as_ref()
+            .map(|state| state.budget_skip_count)
+            .unwrap_or(0),
+        reloc_covis_reference_keyframe_count =
+            relocalization_covisibility_reference_keyframe_count,
+        reloc_confirmation_waiting = relocalization_confirmation_waiting,
+        reloc_confirmation_tx_per_frame_count = relocalization_confirmation_tx_per_frame_count,
+        reloc_confirmation_tx_per_frame_mean = if relocalization_confirmation_tx_per_frame_count
+            > 0
+        {
+            Some(
+                relocalization_confirmation_tx_per_frame_sum
+                    / relocalization_confirmation_tx_per_frame_count as f64,
+            )
+        } else {
+            None
+        },
+        reloc_confirmation_tx_per_frame_max = relocalization_confirmation_tx_per_frame_max,
+        reloc_tx_per_frame_count = relocalization_tx_per_frame_count,
+        reloc_tx_per_frame_mean = if relocalization_tx_per_frame_count > 0 {
+            Some(
+                relocalization_tx_per_frame_sum
+                    / relocalization_tx_per_frame_count as f64,
+            )
+        } else {
+            None
+        },
+        reloc_tx_per_frame_max = relocalization_tx_per_frame_max,
+        reloc_success_tx_per_frame_count = relocalization_success_tx_per_frame_count,
+        reloc_success_tx_per_frame_mean = if relocalization_success_tx_per_frame_count > 0 {
+            Some(
+                relocalization_success_tx_per_frame_sum
+                    / relocalization_success_tx_per_frame_count as f64,
+            )
+        } else {
+            None
+        },
+        reloc_success_tx_per_frame_max = relocalization_success_tx_per_frame_max,
+        reloc_depth_ratio_count = relocalization_depth_ratio_count,
+        reloc_depth_ratio_mean = if relocalization_depth_ratio_count > 0 {
+            Some(relocalization_depth_ratio_sum / relocalization_depth_ratio_count as f64)
+        } else {
+            None
+        },
+        reloc_depth_ratio_min = relocalization_depth_ratio_min,
+        reloc_depth_ratio_max = relocalization_depth_ratio_max,
+        reloc_success_depth_ratio_count = relocalization_success_depth_ratio_count,
+        reloc_success_depth_ratio_mean = if relocalization_success_depth_ratio_count > 0 {
+            Some(
+                relocalization_success_depth_ratio_sum
+                    / relocalization_success_depth_ratio_count as f64,
+            )
+        } else {
+            None
+        },
+        reloc_success_depth_ratio_min = relocalization_success_depth_ratio_min,
+        reloc_success_depth_ratio_max = relocalization_success_depth_ratio_max,
         vi_init_try_every_frame = args.vi_init_try_initialize_on_every_frame,
         imu_factors_staged = imu_factors_staged,
         local_vi_ba_triggers = local_vi_ba_triggers,
         local_vi_ba_relinearised_factor_total = local_vi_ba_relinearised_factor_total,
+        local_vi_ba_quality_gate_rejections = local_vi_ba_quality_gate_rejections,
+        local_vi_ba_cost_ratio_gate_rejections = local_vi_ba_cost_ratio_gate_rejections,
+        local_vi_ba_velocity_gate_rejections = local_vi_ba_velocity_gate_rejections,
+        local_vi_ba_adaptive_velocity_gate_rejections =
+            local_vi_ba_adaptive_velocity_gate_rejections,
+        local_vi_ba_last_adaptive_velocity_threshold_mps =
+            local_vi_ba_last_adaptive_velocity_threshold_mps,
         local_vi_ba_mirrors = local_vi_ba_mirrors,
         last_mirrored_v = last_mirrored_velocity_world.map(|v| [v.x, v.y, v.z]),
         last_mirrored_bg = last_mirrored_bias_gyro.map(|v| [v.x, v.y, v.z]),
@@ -2654,12 +4588,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
     println!(
-        "wrote {}, {}, {}, {} (+ summary.txt)",
+        "wrote {}, {}, {}, {}, {}, {}, {}, {}, {} (+ summary.txt)",
         traj_path.display(),
         err_path.display(),
+        frame_groundtruth_path.display(),
         vi_init_log_path.display(),
         motion_vi_init_log_path.display(),
+        covisibility_local_ba_log_path.display(),
+        keyframe_decision_log_path.display(),
+        relocalization_appearance_candidates_path.display(),
+        relocalization_attempts_path.display(),
     );
+    if args.export_frame_appearance_descriptors {
+        println!("wrote {}", frame_appearance_descriptors_path.display());
+    }
     Ok(())
 }
 
@@ -2759,6 +4701,74 @@ mod tests {
         assert_eq!(frame.camera_id, 1);
         assert_eq!(frame.keypoints, features.keypoints);
         assert_eq!(frame.descriptors, features.descriptors);
+    }
+
+    #[test]
+    fn normalized_mean_descriptor_averages_and_l2_normalizes() {
+        let mean = normalized_mean_descriptor(&[vec![2.0, 0.0], vec![0.0, 2.0]])
+            .expect("non-empty descriptor set");
+
+        assert!((mean[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-6);
+        assert!((mean[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-6);
+        assert_eq!(normalized_mean_descriptor(&[]), None);
+    }
+
+    #[test]
+    fn relocalization_attempt_reject_reason_reports_first_failed_gate() {
+        let config = RelocalizationAttemptGateConfig {
+            min_inliers: 20,
+            min_inlier_ratio: 0.5,
+            max_reprojection_error: Some(8.0),
+            max_translation_per_frame_from_last_success_meters: None,
+            min_inlier_depth_median_ratio_to_last_success: None,
+            max_inlier_depth_median_ratio_to_last_success: None,
+        };
+        let stats = OnlineSlamRelocalizationStats {
+            attempted: true,
+            localization_success: true,
+            inlier_count: 30,
+            inlier_ratio: 0.8,
+            mean_reprojection_error: Some(9.0),
+            ..Default::default()
+        };
+
+        let gates = relocalization_attempt_gate_status(&stats, config);
+
+        assert!(!gates.reprojection_pass);
+        assert_eq!(
+            relocalization_attempt_reject_reason(&stats, gates),
+            "max_reprojection_error"
+        );
+    }
+
+    #[test]
+    fn relocalization_attempt_reject_reason_reports_confirmation_waiting() {
+        let config = RelocalizationAttemptGateConfig {
+            min_inliers: 20,
+            min_inlier_ratio: 0.5,
+            max_reprojection_error: Some(8.0),
+            max_translation_per_frame_from_last_success_meters: None,
+            min_inlier_depth_median_ratio_to_last_success: None,
+            max_inlier_depth_median_ratio_to_last_success: None,
+        };
+        let stats = OnlineSlamRelocalizationStats {
+            attempted: true,
+            localization_success: true,
+            inlier_count: 30,
+            inlier_ratio: 0.8,
+            mean_reprojection_error: Some(2.0),
+            passed_acceptance_gates: true,
+            confirmation_count: 1,
+            confirmation_required_count: 2,
+            ..Default::default()
+        };
+
+        let gates = relocalization_attempt_gate_status(&stats, config);
+
+        assert_eq!(
+            relocalization_attempt_reject_reason(&stats, gates),
+            "confirmation_waiting"
+        );
     }
 
     #[test]

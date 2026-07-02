@@ -125,16 +125,22 @@ def main() -> int:
     counter = {"done": 0, "bytes": 0}
     fetch_start = time.time()
 
+    thread_state = threading.local()
+
+    def thread_remote_zip() -> remotezip.RemoteZip:
+        local_rz = getattr(thread_state, "remote_zip", None)
+        if local_rz is None:
+            local_rz = remotezip.RemoteZip(KITTI_URL)
+            thread_state.remote_zip = local_rz
+        return local_rz
+
     def fetch_one(name_and_path: tuple[str, Path]) -> int:
         name, local_path = name_and_path
-        local_rz = remotezip.RemoteZip(KITTI_URL)
-        try:
-            with local_rz.open(name) as src, open(local_path, "wb") as dst:
-                data = src.read()
-                dst.write(data)
-                size = len(data)
-        finally:
-            local_rz.close()
+        local_rz = thread_remote_zip()
+        with local_rz.open(name) as src, open(local_path, "wb") as dst:
+            data = src.read()
+            dst.write(data)
+            size = len(data)
         with fetch_lock:
             counter["done"] += 1
             counter["bytes"] += size

@@ -42,6 +42,12 @@ use visloc_rs::{
     TrajectorySample, VoLoopClosureConfig,
 };
 
+/// Rectified stereo intrinsics: `(fx, fy, cx, cy, baseline_m)`.
+type StereoIntrinsics = (f64, f64, f64, f64, f64);
+
+/// SuperPoint keypoints paired with their per-point descriptors for one frame.
+type KeypointsWithDescriptors = (Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>);
+
 struct Args {
     images_dir: PathBuf,
     left_subdir: String,
@@ -138,7 +144,7 @@ fn kitti_stereo_calibration(
     calib_path: &Path,
     projection_left: &str,
     projection_right: &str,
-) -> Result<(f64, f64, f64, f64, f64), Box<dyn std::error::Error>> {
+) -> Result<StereoIntrinsics, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(calib_path)?;
     let projections = parse_kitti_calibration_txt(&text)?;
     let left = projections
@@ -254,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     // Previous left-frame SuperPoint keypoints+descriptors, for the temporal match.
-    let mut prev_left: Option<(Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>)> = None;
+    let mut prev_left: Option<KeypointsWithDescriptors> = None;
     // Temporal matches per consecutive pair (frame i -> i+1), accumulated only when
     // an SfM-grade COLMAP export is requested — the merged multi-view tracks the
     // reconstruction stitches need them. `all_temporal_matches[i]` links frame i to
