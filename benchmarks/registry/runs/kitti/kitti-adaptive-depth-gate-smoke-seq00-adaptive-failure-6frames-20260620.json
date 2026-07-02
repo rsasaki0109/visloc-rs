@@ -1,0 +1,149 @@
+{
+  "artifacts": [],
+  "benchmark": {
+    "docs": [
+      "docs/interfaces.md"
+    ],
+    "id": "kitti-adaptive-depth-gate-smoke",
+    "name": "KITTI adaptive stereo depth-gate smoke",
+    "protocol": "6-frame release smoke on stride-20 KITTI seq00 subset; deep frontend cap 300; BA disabled; failure manifest retained for audit",
+    "script": "examples/online_slam_stereo_vo_kitti_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "cargo",
+      "run",
+      "--release",
+      "--features",
+      "image-io",
+      "--example",
+      "online_slam_stereo_vo_kitti_demo",
+      "--",
+      "--image-left",
+      "target/adaptive_depth_gate_kitti00_smoke_data/image_0",
+      "--image-right",
+      "target/adaptive_depth_gate_kitti00_smoke_data/image_1",
+      "--calib",
+      "target/adaptive_depth_gate_kitti00_smoke_data/calib.txt",
+      "--max-frames",
+      "6",
+      "--frame-stride",
+      "1",
+      "--no-stereo-ba",
+      "--frontend",
+      "deep",
+      "--deep-max-features",
+      "300",
+      "--relative-pose-iterations",
+      "200",
+      "--min-pnp-inliers",
+      "6",
+      "--gt-poses",
+      "target/adaptive_depth_gate_kitti00_smoke_data/poses_00.txt",
+      "--gt-original-stride",
+      "20",
+      "--progress-every",
+      "1",
+      "--out-dir",
+      "target/adaptive_depth_gate_kitti00_smoke/adaptive"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "cargo run --release --features image-io --example online_slam_stereo_vo_kitti_demo -- --image-left target/adaptive_depth_gate_kitti00_smoke_data/image_0 --image-right target/adaptive_depth_gate_kitti00_smoke_data/image_1 --calib target/adaptive_depth_gate_kitti00_smoke_data/calib.txt --max-frames 6 --frame-stride 1 --no-stereo-ba --frontend deep --deep-max-features 300 --relative-pose-iterations 200 --min-pnp-inliers 6 --gt-poses target/adaptive_depth_gate_kitti00_smoke_data/poses_00.txt --gt-original-stride 20 --progress-every 1 --out-dir target/adaptive_depth_gate_kitti00_smoke/adaptive"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "deep_max_features": 300,
+      "depth_gate": "adaptive",
+      "frame_stride": 1,
+      "frontend": "deep",
+      "max_frames": 6,
+      "relative_pose_iterations": 200,
+      "source_stride": 20,
+      "stereo_ba": false
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T03:02:32Z",
+  "dataset": {
+    "checksum": "892e15f703c484dc01cff76896586532d5bc96a2008863f08bb4f90280c07e94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "KITTI odometry",
+    "path": "target/adaptive_depth_gate_kitti00_smoke_data",
+    "sequence": "00",
+    "version": "odometry grayscale, stride-20 local subset"
+  },
+  "failure_reason": "KabschFailed { pair_index: 1, correspondence_count: 81, min_inliers: 8 } during 6-frame adaptive smoke",
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "frames_requested",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 6
+    },
+    {
+      "implementation": null,
+      "name": "frame_pairs_completed",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "failed_pair_index",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "kabsch_correspondence_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 81
+    },
+    {
+      "implementation": null,
+      "name": "kabsch_min_inliers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 8
+    }
+  ],
+  "models": [],
+  "notes": "Failure retained intentionally: the reduced-feature 6-frame smoke reached pair 0->1 then failed relative-pose estimation on pair index 1; the 2-frame smoke is the diagnostic success artifact.",
+  "result_kind": "visloc_run",
+  "run_id": "kitti-adaptive-depth-gate-smoke-00-adaptive-failure-6frames-20260620T020002Z",
+  "schema_version": 1,
+  "status": "failure"
+}

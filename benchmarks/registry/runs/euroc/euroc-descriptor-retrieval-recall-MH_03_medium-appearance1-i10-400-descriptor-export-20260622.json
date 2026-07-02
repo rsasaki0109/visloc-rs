@@ -1,0 +1,507 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "frame_groundtruth",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\frame_groundtruth.csv",
+      "sha256": "604bd33522c3cf1e18793b6b4b9878e8cf26345d6c72a4d985c5e893c1c82e06"
+    },
+    {
+      "exists": true,
+      "kind": "recall_json",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\retrieval_recall.json",
+      "sha256": "b91b1803d49cea49c83da737f86ffa4656f7f250d1ab1709dd4734cc628a5e47"
+    },
+    {
+      "exists": true,
+      "kind": "recall_markdown",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\retrieval_recall.md",
+      "sha256": "ad0b6c96476da7dbec660a308403fff39bc238c7b450cd86db96a5bfd35cd7f7"
+    },
+    {
+      "exists": true,
+      "kind": "candidate_diagnostics_json",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\candidate_diagnostics.json",
+      "sha256": "d7997fb1b99b5f60d23e4e395424ea3194892a1114d872b01563d2699881d27f"
+    },
+    {
+      "exists": true,
+      "kind": "candidate_diagnostics_markdown",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\candidate_diagnostics.md",
+      "sha256": "ed4e7247fbb5e7f48f9f1c078aa87f9afd7f1de825f1772f907b925904bdd166"
+    },
+    {
+      "exists": true,
+      "kind": "candidate_diagnostics_csv",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\candidate_diagnostics.csv",
+      "sha256": "7380d027540909bb1fa4b15eed2986cae5fd5965e4e6fa682598c09f3ae6befd"
+    },
+    {
+      "exists": true,
+      "kind": "candidate_csv_0",
+      "path": "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\descriptor_retrieval_candidates.csv",
+      "sha256": "7fdf9ed61f289f5bc9c382dcc39b80d01fc22129f5fef0ad45f0212626bb81d1"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\summary.txt",
+      "sha256": "43144d111242a5ec48f17f84b09d1589933b2d037802f75b888765cbb0500dfc"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\slam_trajectory.csv",
+      "sha256": "77559d47c84ba102f2a96e20f62834f12064a8df792d83037b1ad45af538a059"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\slam_errors.csv",
+      "sha256": "6e3ebcda91b760002e4ca47123f6930289600cd9e38979cf866a4eb62274e9cd"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\motion_vi_init_log.txt",
+      "sha256": "5ee0a36900cab3736e0dd5f1d2705f9ef1e20fe5f1d49b798ce03b4d7cd3af90"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\keyframe_decisions.csv",
+      "sha256": "52f1a918556067bf3fb67431b7a38f1383d76bfbe355f7d0d7f02477422f98df"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\covisibility_ba_log.txt",
+      "sha256": "cda6ae034569d1a72ccce80a2449bf7ae606042732a224b35d3fcf8a7a3cc4b2"
+    },
+    {
+      "exists": true,
+      "kind": "relocalization_appearance_candidates",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\relocalization_appearance_candidates.csv",
+      "sha256": "c05cadd3d369f0531361fbb1a8ae618a6f8be8000c5cf561ce561f61f5e7592b"
+    },
+    {
+      "exists": true,
+      "kind": "frame_appearance_descriptors",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\frame_appearance_descriptors.csv",
+      "sha256": "9b9d69084edd49467c88c3087a9dfe17124580004c52fa992b5958233c840d23"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\keyframe_decisions.csv",
+      "sha256": "52f1a918556067bf3fb67431b7a38f1383d76bfbe355f7d0d7f02477422f98df"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-descriptor-retrieval-recall",
+    "name": "EuRoC descriptor retrieval recall",
+    "protocol": "pose-derived true-revisit recall@K over offline descriptor-cosine EuRoC retrieval candidates; no recovery PnP score",
+    "script": "scripts/eval_loop_retrieval_recall.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io",
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "C:\\Users\\rsasa\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "scripts/export_retrieval_candidates_from_descriptors.py",
+      "--descriptors",
+      "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\frame_appearance_descriptors.csv",
+      "--top-k",
+      "20",
+      "--exclude-recent-frame-gap",
+      "30",
+      "--frontend",
+      "descriptor_cosine",
+      "--out",
+      "target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\descriptor_retrieval_candidates.csv",
+      "--keyframe-decisions",
+      "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\keyframe_decisions.csv",
+      "--min-similarity",
+      "0.2"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "'C:\\Users\\rsasa\\AppData\\Local\\Programs\\Python\\Python312\\python.exe' scripts/export_retrieval_candidates_from_descriptors.py --descriptors 'target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\frame_appearance_descriptors.csv' --top-k 20 --exclude-recent-frame-gap 30 --frontend descriptor_cosine --out 'target\\euroc_descriptor_retrieval_recall\\MH_03_medium\\appearance1_i10_400_descriptor_export\\descriptor_retrieval_candidates.csv' --keyframe-decisions 'target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\keyframe_decisions.csv' --min-similarity 0.2"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "descriptor_csv": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\frame_appearance_descriptors.csv",
+      "distance_threshold_m": 1.0,
+      "exclude_recent_frame_gap": 30,
+      "frontend": "descriptor_cosine",
+      "input_kind": "descriptor_retrieval_candidates",
+      "keyframe_decisions": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400_descriptor_export\\keyframe_decisions.csv",
+      "ks": [
+        1,
+        5,
+        20
+      ],
+      "min_path_length_m": "None",
+      "min_similarity": 0.2,
+      "min_temporal_gap": 30,
+      "query_scope": "candidate_queries",
+      "sequence": "MH_03_medium",
+      "top_k": 20
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-22T03:52:23Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.532
+    },
+    {
+      "implementation": null,
+      "name": "frames_recorded",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 400
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 15
+    },
+    {
+      "implementation": null,
+      "name": "map_landmarks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1500
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_attempts",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 20
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_gate_passes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_descriptor_store_landmark_count_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1500.0
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_descriptor_store_tried_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 19
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_descriptor_store_used_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_candidate_keyframe_count_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6.947368421052632
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_best_similarity_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.9768937763414884
+    },
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.8129
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0261
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.027574
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_candidate_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3512
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_query_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_queries_with_candidates",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_eligible_query_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_mrr",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_mean_first_relevant_rank",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "rank",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_top1_false_positive_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_recall_at_1",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_recall_at_5",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_recall_at_20",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_mean_precision_at_1",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_mean_precision_at_5",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.8783783783783784
+    },
+    {
+      "implementation": null,
+      "name": "retrieval_mean_precision_at_20",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.4745945945945946
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_attempt_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_recovery_status_known_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_gate_status_known_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_success_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_gate_pass_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_top1_relevant_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_any_relevant_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 370
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_top1_relevant_acceptance_known_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_top1_relevant_rejected_count",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "candidate_diag_top1_relevant_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    }
+  ],
+  "models": [],
+  "notes": "Offline descriptor-cosine candidate generation on short MH_03 prefix; no recovery gates, not an end-to-end SLAM score.",
+  "result_kind": "visloc_run",
+  "run_id": "euroc-descriptor-retrieval-recall-MH_03_medium-appearance1-i10-400-descriptor-export-20260622",
+  "schema_version": 1,
+  "status": "success"
+}

@@ -1,0 +1,249 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\slam_trajectory.csv",
+      "sha256": "cc57c4302ec10658dd67fb8cd4c1bbc15d3b70c6dc52b4bca143142b3c30b2b4"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\slam_errors.csv",
+      "sha256": "d95db85cb0584fdcb357353708059bfac524cbd207324c99eef7ce0b8feddea7"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\summary.txt",
+      "sha256": "fd1588183fa39a64baae7911c382551a494cf4a9fed81548bd1dfb202870da1c"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\motion_vi_init_log.txt",
+      "sha256": "d889f52032ee74c756728c405cca3e16e535ad8d599eacdc33a2fb799e3924b3"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity\\keyframe_decisions.csv",
+      "sha256": "7816966b32c413dcc29e7f79d67ff16f4aa7bc8c9ad95509fe74196727b5536e"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-tight-vio-local-ba-gates",
+    "name": "EuRoC tight VIO local BA writeback gates smoke",
+    "protocol": "MH_03_medium 400-frame HOG/cross-check local-VI-BA smoke; compare local VI-BA writeback gates",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      ".targetreleaseexampleseuroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:UsersrsasaWorkspaceoldsimple_visual_slameuroc_mavmachine_hallmachine_hallMH_03_medium",
+      "--out-dir",
+      "targettight_vio_gate_smokeMH_03_mediumadaptive_velocity",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--local-vi-ba-adaptive-velocity-gate"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium --out-dir target\\tight_vio_gate_smoke\\MH_03_medium\\adaptive_velocity --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-reject-writeback-above 1.0 --local-vi-ba-adaptive-velocity-gate"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "local_vi_ba_adaptive_velocity_gate": true,
+      "local_vi_ba_adaptive_velocity_margin_mps": 1.0,
+      "local_vi_ba_adaptive_velocity_min_mps": 3.0,
+      "local_vi_ba_adaptive_velocity_min_references": 2,
+      "local_vi_ba_adaptive_velocity_multiplier": 2.5,
+      "local_vi_ba_adaptive_velocity_quantile": 0.8,
+      "local_vi_ba_reject_writeback_above": 1.0,
+      "max_frames": 400,
+      "variant": "adaptive_velocity"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T09:28:37Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0203
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0198
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.839159
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.055
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2
+    },
+    {
+      "implementation": null,
+      "name": "imu_factors_staged",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_quality_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_cost_ratio_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_adaptive_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_last_adaptive_velocity_threshold_mps",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m/s",
+      "value": 36.2162862818481
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_mirrors_into_imu_motion_model",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory smoke for adaptive local VI-BA writeback gate. Adaptive velocity gate avoids the fixed 10 m/s false rejection on this MH_03 400-frame run.",
+  "result_kind": "exploratory",
+  "run_id": "euroc-tight-vio-gate-MH_03_medium-adaptive_velocity-20260620",
+  "schema_version": 1,
+  "status": "success"
+}

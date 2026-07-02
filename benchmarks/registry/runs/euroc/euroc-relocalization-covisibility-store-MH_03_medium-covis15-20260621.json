@@ -1,0 +1,228 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\slam_trajectory.csv",
+      "sha256": "5eabb4861f9f21652f62ec5ef212727cca95b46edb8f7b6cf8ffb319914e4770"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\slam_errors.csv",
+      "sha256": "1357c4b33a56267f41439540756c0bc2a82416454ad76a558fde2f3e86354b1b"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\summary.txt",
+      "sha256": "61ba124a555a58a84da55c24793aac23af306f96e00e5e536fdb50b13e138f84"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\motion_vi_init_log.txt",
+      "sha256": "6a66cc7212256231d24067077505cd9f7310f512a774aa48dd56aea4c2447e5f"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\keyframe_decisions.csv",
+      "sha256": "0a8cb8dc32000837ed0426b015fc27e5534e0f8556b80b1c1932b8c4e27ccec1"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400\\covisibility_ba_log.txt",
+      "sha256": "cda6ae034569d1a72ccce80a2449bf7ae606042732a224b35d3fcf8a7a3cc4b2"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-relocalization-covisibility-store",
+    "name": "EuRoC relocalization covisibility descriptor store smoke",
+    "protocol": "MH_03_medium 400-frame HOG/cross-check recovery PnP; compare full-map vs covisibility-local recovery descriptor stores",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      ".targetreleaseexampleseuroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:UsersrsasaWorkspaceoldsimple_visual_slameuroc_mavmachine_hallmachine_hallMH_03_medium",
+      "--out-dir",
+      "targettracking_survival_diagMH_03_mediumpose_jump_3p0_gap2_min80r50_reloc_covis10_400",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "3.0",
+      "--tracking-min-inliers",
+      "80",
+      "--tracking-min-inlier-ratio",
+      "0.5",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keyframe-min-frame-gap",
+      "2",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-adaptive-velocity-gate",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--relocalization-enabled",
+      "--relocalization-min-inliers",
+      "80",
+      "--relocalization-min-inlier-ratio",
+      "0.5",
+      "--relocalization-covisibility-max-keyframes",
+      "10",
+      "--relocalization-covisibility-min-shared",
+      "15",
+      "--relocalization-covisibility-min-landmarks",
+      "30"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium --out-dir target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_covis10_400 --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 3.0 --tracking-min-inliers 80 --tracking-min-inlier-ratio 0.5 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keyframe-min-frame-gap 2 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-adaptive-velocity-gate --local-vi-ba-reject-writeback-above 1.0 --relocalization-enabled --relocalization-min-inliers 80 --relocalization-min-inlier-ratio 0.5 --relocalization-covisibility-max-keyframes 10 --relocalization-covisibility-min-shared 15 --relocalization-covisibility-min-landmarks 30"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "max_frames": 400,
+      "relocalization_covisibility_max_keyframes": 10,
+      "relocalization_covisibility_min_landmarks": 30,
+      "relocalization_covisibility_min_shared": 15,
+      "variant": "covis15_min30"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T23:01:02Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.215
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_attempts",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 318
+    },
+    {
+      "implementation": null,
+      "name": "descriptor_store_landmark_count_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 97.9748427672956
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_covisibility_descriptor_store_used_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 318
+    },
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.2747
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0492
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.056604
+    }
+  ],
+  "models": [],
+  "notes": "Negative result: covisibility-local recovery descriptor store reduces candidate descriptors but loses tracking survival on MH_03.",
+  "result_kind": "visloc_run",
+  "run_id": "euroc-relocalization-covisibility-store-MH_03_medium-covis15-20260621",
+  "schema_version": 1,
+  "status": "success"
+}

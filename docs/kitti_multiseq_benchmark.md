@@ -17,7 +17,7 @@ monocular systems are an order of magnitude off in metric terms
 | seq | length | visloc-rs SE(3) | visloc-rs Sim(3) | loops | ORB-SLAM2 | OV2SLAM (RT) |
 | --- | -----: | --------------: | ---------------: | ----: | --------: | -----------: |
 | 00  | 3724 m | **1.23 m**      | 0.97 m           |    34 | 1.3 m     | 1.17 m |
-| 02  | 5067 m | 12.66 m †       | 12.66 m          |     0 | 5.7 m     | 6.24 m |
+| 02  | 5067 m | 12.66 m †       | 12.66 m          |     1 | 5.7 m     | 6.24 m |
 | 05  | 2206 m | 1.62 m          | 1.38 m           |   165 | 0.8 m     | 1.44 m |
 | 06  | 1233 m | **1.42 m**      | 1.25 m           |    77 | 0.8 m     | 1.27 m |
 | 07  | 695 m  | 2.33 m          | 2.14 m           |    66 | 0.5 m     | 0.37 m |
@@ -29,9 +29,12 @@ monocular systems are an order of magnitude off in metric terms
 - ORB-SLAM2's column is its *non-real-time* configuration; in OV2SLAM's
   Table V the real-time ORB-SLAM2 reads 10.74 m on seq00 with frequent
   failures. The comparison column here is the strongest published number.
-- † seq02 is the honest failure: the VLAD retrieval never proposes the true
-  revisits (see below), so the loop stage is a no-op and the number is pure
-  open drift.
+- † seq02 is the honest failure in the default policy: raw appearance
+  candidates include true revisits, but the default loop verifier accepts only
+  one weakly useful edge, so the trajectory remains near open-drift accuracy.
+  External LightGlue loop matches plus guarded confidence-weighted PnP improve
+  this sequence in an opt-in run, but seq00 non-regression currently blocks
+  promoting that policy to the uniform benchmark configuration.
 
 Reproduce one sequence (downloads + exports + runs + evaluates):
 
@@ -40,8 +43,15 @@ python3 scripts/fetch_kitti_seq00_images.py --sequence 05 --stride 1 \
     --max-frames 99999 --cameras image_0,image_1 --also-fetch-poses \
     --out-dir ~/datasets/kitti_seq05_full
 scripts/run_kitti_multiseq_benchmark.sh --sequence 05 \
-    --data-root ~/datasets/kitti_seq05_full
+    --data-root ~/datasets/kitti_seq05_full \
+    --capture-run-registry
 ```
+
+`--capture-run-registry` writes `full/evaluation.json` plus a
+`kitti-multiseq` run manifest with ATE, loop count, command/config, trajectory,
+VO log, and diagnostic CSV artifacts. Retrieval-recall manifests remain a
+separate opt-in (`--capture-retrieval-recall`) because they measure the
+candidate stage rather than the final trajectory.
 
 ## What this benchmark caught: three real-world failure modes
 
@@ -95,18 +105,78 @@ Both fixes are measured **bit-identical** on KITTI seq00 and EuRoC MH_03
 (the gates never arm there) — they only ever engage on the failure they
 target.
 
-### 3. seq02 — vegetation defeats the VLAD retrieval (open problem)
+### 3. seq02 — candidate recall exists; acceptance policy is the open problem
 
-seq02 has genuine loops (the final ~470 frames re-traverse two earlier
-zones), and the PnP verifier is healthy: replaying the verification recipe
-offline on true revisit pairs gives 290–380 inliers at ratios 0.61–0.73,
-comfortably past both gates. But the sequence-trained VLAD vocabulary
-saturates on vegetation: the true pairs never appear among the proposals at
-any setting tried (similarity 0.1, 10 candidates/frame, verify-all = 42 325
-verifications, vocab k 64→256 — all 0 verified). ORB-SLAM2's DBoW2 uses a
-large offline-trained binary vocabulary, which is a different class of place
-recognition. Closing this gap needs a stronger retrieval (offline vocabulary
-or a learned global descriptor), not a better verifier or optimizer.
+seq02 has genuine loops (the final ~470 frames re-traverse two earlier zones).
+The first diagnosis blamed the sequence-trained VLAD vocabulary, but the
+registry-backed recall evaluator changed that conclusion: on the file-backed
+CPU/512 run, raw appearance candidates reach recall@1/5/20 = 0.7515 over
+eligible true-revisit queries. Retrieval is therefore not the only bottleneck.
+
+The current default still accepts only one loop edge and leaves the sequence at
+12.66 m ATE. Replaying external Python LightGlue matches for 400 loop
+candidates showed a sharp split: 383/400 pass a 2D-2D essential-matrix
+diagnostic, while PnP accepts only 1/400 without confidence-weighted sampling.
+Filtering PnP down to essential inliers stayed at 1/400 and slightly regressed
+ATE (12.6603 m -> 12.6906 m).
+
+Guarded confidence-weighted PnP is the useful diagnostic so far. With external
+LightGlue loop matches and `--loop-pnp-confidence-weights`, seq02 improves to
+5.8106 m SE(3) / 5.6977 m Sim(3), accepting two loop edges
+(`1015->4261`, `1944->4528`). The guard only enables weights when enough
+finite, non-uniform confidences are present and otherwise falls back to uniform
+sampling.
+
+That policy is **not** the default. On seq00 at 2000 frames, where accepted
+loops are already present, the built-in brute-force loop matcher verifies 117
+loops at 1.2064 m SE(3) / 1.1299 m Sim(3), while external LightGlue loop
+matches regress to 1.2416 m / 1.1747 m unweighted and 1.2419 m / 1.1711 m
+with guarded confidence weights. The external loop-match path is therefore an
+opt-in per-sequence diagnostic until it passes a broader non-regression matrix.
+The representative registry manifests are:
+`kitti-multiseq-seq02-external-lightglue-confweights-guarded-20260619`
+(positive exploratory seq02),
+`kitti-multiseq-seq00-2000-baseline-bf-20260619` (seq00 baseline),
+`kitti-multiseq-seq00-2000-external-lightglue-unweighted-20260619`, and
+`kitti-multiseq-seq00-2000-external-lightglue-confweights-guarded-20260619`
+(negative seq00 non-regression evidence).
+
+Use `scripts/eval_loop_retrieval_recall.py` to keep future seq02 work honest.
+It labels true revisits from KITTI poses, applies the same temporal/path-length
+gates as the loop stage, and reports recall@K/MRR over the candidate CSV. The
+multiseq runner can capture this evidence alongside the trajectory artifacts
+and write a benchmark-registry manifest:
+
+```sh
+scripts/run_kitti_multiseq_benchmark.sh --sequence 02 \
+  --data-root ~/datasets/kitti_seq02_full \
+  --capture-retrieval-recall \
+  --retrieval-dnf-if-recall-at 20=0.01
+```
+
+This writes `full/loop_candidates.csv`, `full/retrieval_recall/`, and a
+`kitti_loop_retrieval_recall_v1` manifest under
+`benchmarks/registry/runs/kitti/`. For standalone experiments, run the
+evaluator directly on raw appearance candidates when available; running it on
+post-verification candidate files is still useful, but should be labelled as
+post-geometry recall:
+
+```sh
+python scripts/eval_loop_retrieval_recall.py \
+  --candidates target/kitti_seq02_full/loop_candidates.csv \
+  --poses ~/datasets/kitti_seq02_full/poses_02.txt \
+  --input-kind raw_appearance_candidates \
+  --distance-threshold-m 10 \
+  --min-temporal-gap 50 \
+  --min-path-length-m 5 \
+  --ks 1 5 20 \
+  --out-json target/kitti_seq02_retrieval/retrieval_recall.json
+```
+
+This keeps the next seq02 iteration honest: a retriever change should improve
+true-revisit recall@K and false-top1 rate, while a verifier change should be
+judged by accepted-loop precision, ATE, and seq00/05/09 non-regression before
+it is allowed into the uniform benchmark configuration.
 
 ## The BA init-residual gate: a second dynamic-object channel
 
@@ -153,6 +223,12 @@ One configuration for all six sequences (the same stack as the
 --loop-min-frame-gap 50 --loop-min-path-length 5 --loop-min-similarity 0.2
 --loop-vocab-k 64 --loop-max-candidates-per-frame 3 --loop-max-verifications 400
 ```
+
+The external loop-match A/B flags (`--loop-matches-dir`,
+`--loop-pnp-essential-inliers`, `--loop-pnp-confidence-weights`) are excluded
+from this default configuration. Results using them must be labelled
+exploratory or per-sequence opt-in unless they pass the same multi-sequence
+non-regression bar as the table above.
 
 Published comparison numbers: ORB-SLAM2 (arXiv:1610.06475, Table I) and
 OV2SLAM (arXiv:2102.04060, Table V); both papers evaluate translation ATE

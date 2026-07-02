@@ -1,0 +1,275 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\slam_trajectory.csv",
+      "sha256": "3a3c8d10e1df1c5a8849c2dd09ac974a8dfd5ca35630e0020e13d5fbe81f1ee0"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\slam_errors.csv",
+      "sha256": "c45b34964f314ae3b1cef0cff235f124ef6454c0dc9fbfdbdad8bd1deea7b999"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\summary.txt",
+      "sha256": "a2c9c1cbc7e38a9872427e6a6b85696314ec986b9561f08a49bcdb385ffe6ee8"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\motion_vi_init_log.txt",
+      "sha256": "58cdf8768f4061026cc5dc111c7af2fa8de44da3384ebcbdeb07b4aad7c37499"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\keyframe_decisions.csv",
+      "sha256": "916c9393fcda74e3989f3a840979ab6a681b61313e2eb282c95f2d369da49157"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400\\covisibility_ba_log.txt",
+      "sha256": "cda6ae034569d1a72ccce80a2449bf7ae606042732a224b35d3fcf8a7a3cc4b2"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-relocalization-appearance-store",
+    "name": "EuRoC relocalization appearance descriptor store smoke",
+    "protocol": "MH_03_medium 400-frame HOG/cross-check recovery PnP; mean-descriptor appearance-retrieval top-1 recovery store with bounded broader fallback",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      ".targetreleaseexampleseuroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:UsersrsasaWorkspaceoldsimple_visual_slameuroc_mavmachine_hallmachine_hallMH_03_medium",
+      "--out-dir",
+      "targettracking_survival_diagMH_03_mediumpose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "3.0",
+      "--tracking-min-inliers",
+      "80",
+      "--tracking-min-inlier-ratio",
+      "0.5",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keyframe-min-frame-gap",
+      "2",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-adaptive-velocity-gate",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--relocalization-enabled",
+      "--relocalization-min-inliers",
+      "80",
+      "--relocalization-min-inlier-ratio",
+      "0.5",
+      "--relocalization-appearance-max-keyframes",
+      "1",
+      "--relocalization-appearance-min-similarity",
+      "0.2",
+      "--relocalization-appearance-exclude-recent-frame-gap",
+      "30",
+      "--relocalization-appearance-min-landmarks",
+      "30",
+      "--relocalization-appearance-broader-fallback-interval-frames",
+      "10"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium --out-dir target\\tracking_survival_diag\\MH_03_medium\\pose_jump_3p0_gap2_min80r50_reloc_appearance1_i10_400 --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 3.0 --tracking-min-inliers 80 --tracking-min-inlier-ratio 0.5 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keyframe-min-frame-gap 2 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-adaptive-velocity-gate --local-vi-ba-reject-writeback-above 1.0 --relocalization-enabled --relocalization-min-inliers 80 --relocalization-min-inlier-ratio 0.5 --relocalization-appearance-max-keyframes 1 --relocalization-appearance-min-similarity 0.2 --relocalization-appearance-exclude-recent-frame-gap 30 --relocalization-appearance-min-landmarks 30 --relocalization-appearance-broader-fallback-interval-frames 10"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "max_frames": 400,
+      "relocalization_appearance_broader_fallback": true,
+      "relocalization_appearance_broader_fallback_interval_frames": 10,
+      "relocalization_appearance_exclude_recent_frame_gap": 30,
+      "relocalization_appearance_max_keyframes": 1,
+      "relocalization_appearance_min_landmarks": 30,
+      "relocalization_appearance_min_similarity": 0.2,
+      "variant": "appearance_top1_fallback_i10"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-21T00:03:52Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.573
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_attempts",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 173
+    },
+    {
+      "implementation": null,
+      "name": "descriptor_store_landmark_count_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 559.9075144508671
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_descriptor_store_tried_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 168
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_descriptor_store_used_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 149
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_candidate_keyframe_count_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6.0
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_appearance_best_similarity_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.9711436419969514
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_broader_descriptor_store_retry_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 19
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_broader_descriptor_store_retry_interval_skips",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 147
+    },
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0933
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0334
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.057183
+    }
+  ],
+  "models": [],
+  "notes": "Negative result: mean-descriptor appearance top-1 narrows the first-pass store but leaves MH_03 trajectory scale unchanged versus full-map recovery.",
+  "result_kind": "visloc_run",
+  "run_id": "euroc-relocalization-appearance-store-MH_03_medium-top1-fallback-i10-20260621",
+  "schema_version": 1,
+  "status": "success"
+}

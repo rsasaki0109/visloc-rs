@@ -1,0 +1,191 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation_json",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\evaluation.json",
+      "sha256": "1e8a224602565f3f9ac881d1e40ddf8f4c215f6afb2a2d95df91e1d7f5688604"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\vo_poses.txt",
+      "sha256": "7aa07b1e6f6b32e57e60a595c770e256184f1369bd2fe33d2b5549e0c5a00cf2"
+    },
+    {
+      "exists": true,
+      "kind": "ground_truth",
+      "path": "C:\\Users\\rsasa\\datasets\\kitti_seq02_full\\poses_02.txt",
+      "sha256": "8e6c37071db06dfc31db9c2f354bfeb4bb23d1fa2ab28937cb27dae03dc49812"
+    },
+    {
+      "exists": true,
+      "kind": "vo_log",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\vo.log",
+      "sha256": "b3abba49c15919574418106966070b35b24f36f4c802fcc9c3c4868243fa0d88"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\summary.txt",
+      "sha256": "1e8e5e8eb0bbeed703f2fe337094d9dd84b6e7ea7d1c2fdb4b0bc4e9aba74dfb"
+    },
+    {
+      "exists": true,
+      "kind": "vo_csv",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\vo.csv",
+      "sha256": "bbc0d7dd7e13079040806a6b62fafd48c3a4ab8a4f56d11c3e42a8f192603edf"
+    },
+    {
+      "exists": true,
+      "kind": "frontend_pair_diagnostics",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\frontend_pair_diagnostics.csv",
+      "sha256": "e6097f0e52f7256653b279dca17795e97fb1aeb522f45fd836778ec5b055b513"
+    },
+    {
+      "exists": true,
+      "kind": "frontend_depth_gate_diagnostics",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\frontend_depth_gate_diagnostics.csv",
+      "sha256": "45f374e374d485248385360445a56b87be0450e1162cf46695331172bca8cb5e"
+    },
+    {
+      "exists": true,
+      "kind": "loop_candidates",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\loop_candidates.csv",
+      "sha256": "9ab8b667a057c6929326b52f71137705de01140b2ad23ac776024e49a5497628"
+    },
+    {
+      "exists": true,
+      "kind": "loop_candidate_verifications",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_looplg_attempted400_confweights_guarded\\full\\loop_candidate_verifications.csv",
+      "sha256": "23f78d79af147db7968c1a5d78c0914451365930829023ea835a91442b3c20dd"
+    },
+    {
+      "exists": true,
+      "kind": "features_dir",
+      "path": "target\\kitti_multiseq\\seq02_cpu512_diag\\external_deep",
+      "sha256": null
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/kitti_multiseq_benchmark.md"
+    ],
+    "id": "kitti-multiseq",
+    "name": "KITTI multi-sequence full-stack",
+    "protocol": "full-stack stereo VO with online BA and loop closure; Umeyama SE(3)/Sim(3) ATE RMSE against KITTI odometry poses",
+    "script": "scripts/run_kitti_multiseq_benchmark.sh"
+  },
+  "build": {
+    "cargo": null,
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": null,
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "scripts/run_kitti_multiseq_benchmark.sh",
+      "--sequence",
+      "02",
+      "--data-root",
+      "C:Usersrsasadatasetskitti_seq02_full",
+      "--out-dir",
+      "target/kitti_multiseq/seq02_cpu512_looplg_attempted400_confweights_guarded",
+      "--features-dir",
+      "target/kitti_multiseq/seq02_cpu512_diag/external_deep",
+      "--frames",
+      "4661",
+      "--device",
+      "cpu",
+      "--skip-export",
+      "--loop-matches-dir",
+      "target/kitti_multiseq/seq02_lightglue_loop_pairs_attempted400_cpu/matches",
+      "--loop-pnp-confidence-weights",
+      "--capture-run-registry"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scripts/run_kitti_multiseq_benchmark.sh --sequence 02 --data-root C:\\Users\\rsasa\\datasets\\kitti_seq02_full --out-dir target/kitti_multiseq/seq02_cpu512_looplg_attempted400_confweights_guarded --features-dir target/kitti_multiseq/seq02_cpu512_diag/external_deep --frames 4661 --device cpu --skip-export --loop-matches-dir target/kitti_multiseq/seq02_lightglue_loop_pairs_attempted400_cpu/matches --loop-pnp-confidence-weights --capture-run-registry"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "device": "cpu",
+      "frames": 4661,
+      "loop_matches_dir": "target/kitti_multiseq/seq02_lightglue_loop_pairs_attempted400_cpu/matches",
+      "loop_pnp_confidence_weights": 1,
+      "loop_pnp_essential_inliers": 0,
+      "max_keypoints": 512,
+      "sequence": "02",
+      "skip_export": 1
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-19T08:49:23Z",
+  "dataset": {
+    "checksum": null,
+    "checksum_method": null,
+    "name": "KITTI odometry",
+    "path": "C:\\Users\\rsasa\\datasets\\kitti_seq02_full",
+    "sequence": "02",
+    "version": "KITTI odometry grayscale"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rmse_se3_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 5.81057895363482
+    },
+    {
+      "implementation": null,
+      "name": "ate_rmse_sim3_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 5.697701032713047
+    },
+    {
+      "implementation": null,
+      "name": "frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4661
+    },
+    {
+      "implementation": null,
+      "name": "verified_loops",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2
+    }
+  ],
+  "models": [],
+  "notes": "exploratory positive seq02 result; not default because seq00 2000 non-regression fails",
+  "result_kind": "visloc_run",
+  "run_id": "kitti-multiseq-seq02-external-lightglue-confweights-guarded-20260619",
+  "schema_version": 1,
+  "status": "success"
+}

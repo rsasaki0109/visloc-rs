@@ -1,0 +1,230 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\slam_trajectory.csv",
+      "sha256": "2827e4c594adecbbfd0b0ca09abb3b5170cad8c67d550ee8fc805502bad4b977"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\slam_errors.csv",
+      "sha256": "6a4db67530c7bb063764b6302e3674e351c1af58a67b2dd3ebb3040f7028e120"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\summary.txt",
+      "sha256": "8827e481c9671b099ec687532679dfa8c616e0bfb42c705dc115bb618c4bdd9b"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\motion_vi_init_log.txt",
+      "sha256": "0ab03c227e097fbc90b9696d52a6ad57fc1a1bebab49571b4e455722602b49e8"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tight_vio_gate_smoke\\MH_03_medium\\gated\\keyframe_decisions.csv",
+      "sha256": "ac2fb5ce7d71a6313b5cab1840968b86245fc612bcec34b2e9a3d9e4bd890d63"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-tight-vio-local-ba-gates",
+    "name": "EuRoC tight VIO local BA writeback gates smoke",
+    "protocol": "400-frame HOG/cross-check local-VI-BA smoke; compare local VI-BA writeback gates",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+      "--out-dir",
+      "target\\tight_vio_gate_smoke\\MH_03_medium\\gated",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--local-vi-ba-reject-velocity-above",
+      "10.0"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "'.\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe' --euroc-dir 'C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium' --out-dir 'target\\tight_vio_gate_smoke\\MH_03_medium\\gated' --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-reject-writeback-above 1.0 --local-vi-ba-reject-velocity-above 10.0"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "demo_args": "--max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-reject-writeback-above 1.0 --local-vi-ba-reject-velocity-above 10.0",
+      "local_vi_ba_reject_velocity_above_mps": 10.0,
+      "local_vi_ba_reject_writeback_above": 1.0,
+      "max_frames": 400,
+      "variant": "gated_10mps"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T08:55:53Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1172
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1169
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.086549
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.09
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4
+    },
+    {
+      "implementation": null,
+      "name": "imu_factors_staged",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_quality_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_cost_ratio_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_mirrors_into_imu_motion_model",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory smoke for local VI-BA writeback gates. Velocity caps below the observed refined velocity can be harmful and are not recommended as universal defaults.",
+  "result_kind": "exploratory",
+  "run_id": "euroc-tight-vio-gate-MH_03_medium-gated_10mps-20260620",
+  "schema_version": 1,
+  "status": "success"
+}

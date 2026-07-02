@@ -1,0 +1,230 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\slam_trajectory.csv",
+      "sha256": "ef573076dac3becfd39c8730f6152c42affd03bf6bd0487f16e61bb06ce6ae57"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\slam_errors.csv",
+      "sha256": "794200dd4709c87a2f47a395e17a46d95539fcc3bf0eb24d9a74cc682c8d48c7"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\summary.txt",
+      "sha256": "88fb3f6a3bc177231e004b27e4b82e520e8886a3f37215d8c9007dfe0885ef8d"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\vi_init_log.txt",
+      "sha256": "fa4e5fc333e007a5840d2153ba6ecc8c979e92e103c207e898930a90bde5cb63"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\motion_vi_init_log.txt",
+      "sha256": "e89b57cba527ffd4b0f975c08bfc61c5ed458796f0c3fed918662707953c2e15"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps\\keyframe_decisions.csv",
+      "sha256": "d12b95cfb0ecbadd250fce6b93a2633b4e2dc5913b416c4610c423c2ed428212"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-tight-vio-local-ba-gates",
+    "name": "EuRoC tight VIO local BA writeback gates smoke",
+    "protocol": "MH_01_easy 400-frame HOG/cross-check local-VI-BA smoke; compare local VI-BA writeback gates",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_01_easy",
+      "--out-dir",
+      "target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps",
+      "--max-frames",
+      "400",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1",
+      "--local-vi-ba-reject-writeback-above",
+      "1.0",
+      "--local-vi-ba-reject-velocity-above",
+      "1.0"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "'.\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe' --euroc-dir 'C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_01_easy' --out-dir 'target\\tight_vio_gate_smoke\\MH_01_easy\\velocity_tripwire_1mps' --max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-reject-writeback-above 1.0 --local-vi-ba-reject-velocity-above 1.0"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "demo_args": "--max-frames 400 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1 --local-vi-ba-reject-writeback-above 1.0 --local-vi-ba-reject-velocity-above 1.0",
+      "local_vi_ba_reject_velocity_above_mps": 1.0,
+      "local_vi_ba_reject_writeback_above": 1.0,
+      "max_frames": 400,
+      "variant": "velocity_tripwire_1mps"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T08:48:08Z",
+  "dataset": {
+    "checksum": "ca18bb77e66e0244f37afd4c3f6e5c9c1184df320ad959b22877e0640496143c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_01_easy",
+    "sequence": "MH_01_easy",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.055
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0549
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.025906
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.2
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 14
+    },
+    {
+      "implementation": null,
+      "name": "imu_factors_staged",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 13
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 8
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_quality_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 8
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_cost_ratio_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 8
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_mirrors_into_imu_motion_model",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory smoke for local VI-BA writeback gates. The 1 m/s cap is an intentional tripwire, not a recommended production threshold.",
+  "result_kind": "exploratory",
+  "run_id": "euroc-tight-vio-gate-MH_01_easy-velocity_tripwire_1mps-20260620",
+  "schema_version": 1,
+  "status": "success"
+}

@@ -1,0 +1,232 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\slam_trajectory.csv",
+      "sha256": "42e2af2b08309001191ef322c29b2fd0ad0d26d7ce9ed77108a02f3a6e5c82bd"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\slam_errors.csv",
+      "sha256": "d95db85cb0584fdcb357353708059bfac524cbd207324c99eef7ce0b8feddea7"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\summary.txt",
+      "sha256": "241cb6fd9ea2b592f9e35f6186f15662cb0bcd09380e4af24554701438766d3a"
+    },
+    {
+      "exists": true,
+      "kind": "vi_init_log",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\vi_init_log.txt",
+      "sha256": "faa28efddabdaf7a4cedb0b51089b42b68de925c629ec29287a50bea07952567"
+    },
+    {
+      "exists": true,
+      "kind": "motion_vi_init_log",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\motion_vi_init_log.txt",
+      "sha256": "d889f52032ee74c756728c405cca3e16e535ad8d599eacdc33a2fb799e3924b3"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "target\\tight_vio_gate_long\\MH_03_medium\\baseline\\keyframe_decisions.csv",
+      "sha256": "3a36709f4e3d7f1c67ed932a98426af6e3b93ec315df21e3269a86e94083c0f5"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md"
+    ],
+    "id": "euroc-tight-vio-local-ba-gates",
+    "name": "EuRoC tight VIO local BA writeback gates smoke",
+    "protocol": "MH_03_medium 1500-frame HOG/cross-check local-VI-BA smoke; compare adaptive local VI-BA writeback gate",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      ".targetreleaseexampleseuroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:UsersrsasaWorkspaceoldsimple_visual_slameuroc_mavmachine_hallmachine_hallMH_03_medium",
+      "--out-dir",
+      "targettight_vio_gate_longMH_03_mediumbaseline",
+      "--max-frames",
+      "1500",
+      "--motion-vi-init",
+      "--local-vi-ba",
+      "--covisibility-local-map-max-keyframes",
+      "10",
+      "--covisibility-local-map-min-shared",
+      "15",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--motion-model",
+      "imu",
+      "--pnp-pose-prior-warm-start",
+      "--vi-init-gyro-std-limit",
+      "0.5",
+      "--vi-init-accel-std-limit",
+      "5.0",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--keep-pre-promotion-imu-factors",
+      "--relinearise-imu-factor-bias-thresholds",
+      "0.01,0.1"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": ".\\target\\release\\examples\\euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium --out-dir target\\tight_vio_gate_long\\MH_03_medium\\baseline --max-frames 1500 --motion-vi-init --local-vi-ba --covisibility-local-map-max-keyframes 10 --covisibility-local-map-min-shared 15 --max-pose-jump-meters 0.2 --motion-model imu --pnp-pose-prior-warm-start --vi-init-gyro-std-limit 0.5 --vi-init-accel-std-limit 5.0 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --keep-pre-promotion-imu-factors --relinearise-imu-factor-bias-thresholds 0.01,0.1"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "local_vi_ba_adaptive_velocity_gate": false,
+      "max_frames": 1500,
+      "variant": "baseline"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-06-20T10:10:21Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "eb7242e21ad560737809160ab6e1a8d5cf1cb4a5",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0203
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0198
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.839159
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.015
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2
+    },
+    {
+      "implementation": null,
+      "name": "imu_factors_staged",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_quality_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_cost_ratio_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_adaptive_velocity_gate_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "local_vi_ba_mirrors_into_imu_motion_model",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1
+    }
+  ],
+  "models": [],
+  "notes": "Exploratory 1500-frame baseline for adaptive local VI-BA writeback gate on MH_03.",
+  "result_kind": "exploratory",
+  "run_id": "euroc-tight-vio-gate-MH_03_medium-baseline-1500-20260620",
+  "schema_version": 1,
+  "status": "success"
+}
