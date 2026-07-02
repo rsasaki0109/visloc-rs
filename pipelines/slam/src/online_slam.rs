@@ -169,6 +169,24 @@ pub struct OnlineSlamCovisibilityLocalBaConfig {
     /// selected observation count, the clone is discarded and the live map is
     /// left unchanged. `None` preserves the legacy direct write-back path.
     pub max_outlier_observation_ratio: Option<f64>,
+    /// Optional post-solve behind-camera degeneracy gate. When `Some(r)`, BA
+    /// runs on a cloned map first; if the fraction of solved optimized
+    /// landmarks that project behind (or onto) an observing optimized camera
+    /// exceeds `r`, the clone is discarded and the live map is left unchanged.
+    /// Targets degenerate/under-constrained solves that would otherwise
+    /// corrupt the map on write-back. `None` (default) leaves this gate off.
+    /// See [`crate::behind_camera_optimized_landmark_ratio`].
+    pub max_behind_camera_landmark_ratio: Option<f64>,
+    /// Optional post-solve fixed-anchor adequacy gate expressed as a ratio.
+    /// When `Some(r)`, the write-back is rejected unless
+    /// `fixed_keyframe_count >= ceil(optimized_keyframe_count * r)`. This is
+    /// the ratio form of the fixed-boundary requirement (the absolute-floor
+    /// form lives on
+    /// [`CovisibilityLocalBaConfig::boundary_support_min_fixed_keyframes`]).
+    /// Evaluated on the selected window after the solve, so diagnostics still
+    /// record what would have been optimized. `None` (default) leaves it off.
+    /// See [`crate::fixed_to_optimized_ratio_satisfied`].
+    pub min_fixed_to_optimized_ratio: Option<f64>,
     /// Window selection, optimizer, robust loss, and outlier handling
     /// settings for the actual covisibility BA solve.
     pub ba: CovisibilityLocalBaConfig,
@@ -180,6 +198,8 @@ impl Default for OnlineSlamCovisibilityLocalBaConfig {
             min_keyframes: 2,
             trigger_every_new_keyframes: 1,
             max_outlier_observation_ratio: None,
+            max_behind_camera_landmark_ratio: None,
+            min_fixed_to_optimized_ratio: None,
             ba: CovisibilityLocalBaConfig::default(),
         }
     }
@@ -2381,28 +2401,32 @@ where
         }
 
         let started = Instant::now();
-        let result = if config.max_outlier_observation_ratio.is_some() {
+        // The clone-and-check write-back path activates when any conditioning
+        // gate is configured. It solves on a cloned map, evaluates every
+        // configured gate against the solved candidate, and only commits the
+        // clone into the live map if none fire. If any gate rejects, the live
+        // map is left untouched (safe no-op) and the rejection reason is
+        // surfaced on the returned stats' `error`.
+        let conditioning_gate_active = config.max_outlier_observation_ratio.is_some()
+            || config.max_behind_camera_landmark_ratio.is_some()
+            || config.min_fixed_to_optimized_ratio.is_some();
+        let result = if conditioning_gate_active {
             let mut candidate_map = self.map.clone();
             let result =
                 refine_visual_map_with_covisibility_ba(&mut candidate_map, frame.id, &config.ba);
             if let Ok(ref result) = result {
-                let ratio = outlier_observation_ratio(
+                let outlier_ratio = outlier_observation_ratio(
                     result.outlier_observation_count,
                     result.selection.observation_count,
                 );
-                if let Some(max_ratio) = config.max_outlier_observation_ratio {
-                    if ratio.unwrap_or(0.0) > max_ratio {
-                        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-                        return Some(OnlineSlamCovisibilityLocalBaStats {
+                let make_rejection =
+                    |error: CovisibilityLocalBaError, quality_gate_rejected: bool| {
+                        OnlineSlamCovisibilityLocalBaStats {
                             active_keyframe_id: frame.id,
                             map_keyframe_count,
-                            elapsed_ms,
+                            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                             success: false,
-                            error: Some(CovisibilityLocalBaError::QualityGateRejected {
-                                outlier_observation_count: result.outlier_observation_count,
-                                observation_count: result.selection.observation_count,
-                                max_outlier_observation_ratio: max_ratio,
-                            }),
+                            error: Some(error),
                             selection: Some(result.selection.clone()),
                             ba_result: Some(result.ba_result.clone()),
                             mean_reprojection_before_px: Some(result.mean_reprojection_before_px),
@@ -2411,12 +2435,67 @@ where
                             updated_landmark_count: 0,
                             outlier_observation_count: result.outlier_observation_count,
                             observation_count: result.selection.observation_count,
-                            outlier_observation_ratio: ratio,
-                            quality_gate_rejected: true,
+                            outlier_observation_ratio: outlier_ratio,
+                            quality_gate_rejected,
                             removed_observation_count: 0,
-                        });
+                        }
+                    };
+
+                let optimized_keyframe_count = result.selection.optimized_keyframe_ids.len();
+                let fixed_keyframe_count = result.selection.fixed_keyframe_ids.len();
+
+                // Fixed-anchor adequacy (ratio form).
+                if let Some(min_ratio) = config.min_fixed_to_optimized_ratio {
+                    if !fixed_to_optimized_ratio_satisfied(
+                        optimized_keyframe_count,
+                        fixed_keyframe_count,
+                        min_ratio,
+                    ) {
+                        return Some(make_rejection(
+                            CovisibilityLocalBaError::FixedSupportRatioRejected {
+                                optimized_keyframe_count,
+                                fixed_keyframe_count,
+                                required_fixed_keyframes: required_fixed_keyframes(
+                                    optimized_keyframe_count,
+                                    min_ratio,
+                                ),
+                                min_fixed_to_optimized_ratio: min_ratio,
+                            },
+                            false,
+                        ));
                     }
                 }
+
+                // Behind-camera degeneracy (evaluated on the solved clone).
+                if let Some(max_behind) = config.max_behind_camera_landmark_ratio {
+                    let behind_ratio =
+                        behind_camera_optimized_landmark_ratio(&candidate_map, &result.selection)
+                            .unwrap_or(0.0);
+                    if behind_ratio > max_behind {
+                        return Some(make_rejection(
+                            CovisibilityLocalBaError::BehindCameraGateRejected {
+                                behind_camera_landmark_ratio: behind_ratio,
+                                max_behind_camera_landmark_ratio: max_behind,
+                            },
+                            false,
+                        ));
+                    }
+                }
+
+                // Outlier-observation ratio (legacy quality gate).
+                if let Some(max_ratio) = config.max_outlier_observation_ratio {
+                    if outlier_ratio.unwrap_or(0.0) > max_ratio {
+                        return Some(make_rejection(
+                            CovisibilityLocalBaError::QualityGateRejected {
+                                outlier_observation_count: result.outlier_observation_count,
+                                observation_count: result.selection.observation_count,
+                                max_outlier_observation_ratio: max_ratio,
+                            },
+                            true,
+                        ));
+                    }
+                }
+
                 self.map = candidate_map;
             }
             result

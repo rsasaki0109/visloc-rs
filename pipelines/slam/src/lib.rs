@@ -17,9 +17,10 @@ pub use bundle::{
 
 pub mod covisibility_ba;
 pub use covisibility_ba::{
-    refine_visual_map_with_covisibility_ba, select_covisibility_local_ba_window,
-    CovisibilityKeyframeScore, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
-    CovisibilityLocalBaResult, CovisibilityLocalBaSelection,
+    behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,
+    refine_visual_map_with_covisibility_ba, required_fixed_keyframes,
+    select_covisibility_local_ba_window, CovisibilityKeyframeScore, CovisibilityLocalBaConfig,
+    CovisibilityLocalBaError, CovisibilityLocalBaResult, CovisibilityLocalBaSelection,
 };
 
 pub mod incremental_sfm;

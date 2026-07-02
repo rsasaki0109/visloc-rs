@@ -734,6 +734,13 @@ struct CliArgs {
     covisibility_local_ba_boundary_support_min_optimized_keyframes: Option<usize>,
     /// Fixed-boundary keyframe floor used with the boundary-support guard.
     covisibility_local_ba_boundary_support_min_fixed_keyframes: usize,
+    /// Reject covisibility BA map write-back when the fraction of solved
+    /// optimized landmarks projecting behind an observing optimized camera
+    /// exceeds this value. Off (`None`) by default.
+    covisibility_local_ba_max_behind_camera_ratio: Option<f64>,
+    /// Reject covisibility BA map write-back unless
+    /// `fixed >= ceil(optimized * ratio)`. Off (`None`) by default.
+    covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64>,
     /// When `Some(d)`, rejects a tracked frame whose PnP camera-centre
     /// drifts more than `d` metres from the motion-model pose prior
     /// (`ConstantPoseMotionModel` returns the last successful pose, so
@@ -1174,6 +1181,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_max_outlier_observation_ratio: Option<f64> = None;
     let mut covisibility_local_ba_boundary_support_min_optimized_keyframes: Option<usize> = None;
     let mut covisibility_local_ba_boundary_support_min_fixed_keyframes: usize = 0;
+    let mut covisibility_local_ba_max_behind_camera_ratio: Option<f64> = None;
+    let mut covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64> = None;
     let mut max_pose_jump_meters: Option<f64> = None;
     let mut tracking_min_inliers: usize = 0;
     let mut tracking_min_inlier_ratio: f64 = 0.0;
@@ -1519,6 +1528,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--covisibility-local-ba-boundary-support-min-fixed-keyframes" => {
                 covisibility_local_ba_boundary_support_min_fixed_keyframes =
                     args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-behind-camera-ratio" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_max_behind_camera_ratio = if raw.eq_ignore_ascii_case("none")
+                {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-min-fixed-to-optimized-ratio" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_min_fixed_to_optimized_ratio =
+                    if raw.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(raw.parse()?)
+                    };
                 args.remove(i);
             }
             "--max-pose-jump-meters" => {
@@ -1959,6 +1988,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 );
             }
         }
+        if let Some(ratio) = covisibility_local_ba_max_behind_camera_ratio {
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(
+                    "--covisibility-local-ba-max-behind-camera-ratio must be in [0, 1] or 'none'"
+                        .into(),
+                );
+            }
+        }
+        if let Some(ratio) = covisibility_local_ba_min_fixed_to_optimized_ratio {
+            if !(ratio.is_finite() && ratio > 0.0) {
+                return Err(
+                    "--covisibility-local-ba-min-fixed-to-optimized-ratio must be > 0 or 'none'"
+                        .into(),
+                );
+            }
+        }
         if let Some(min_optimized) = covisibility_local_ba_boundary_support_min_optimized_keyframes
         {
             if min_optimized < 1 {
@@ -2027,6 +2072,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         covisibility_local_ba_max_outlier_observation_ratio,
         covisibility_local_ba_boundary_support_min_optimized_keyframes,
         covisibility_local_ba_boundary_support_min_fixed_keyframes,
+        covisibility_local_ba_max_behind_camera_ratio,
+        covisibility_local_ba_min_fixed_to_optimized_ratio,
         max_pose_jump_meters,
         tracking_min_inliers,
         tracking_min_inlier_ratio,
@@ -2968,6 +3015,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_keyframes: args.covisibility_local_ba_min_keyframes,
             trigger_every_new_keyframes: args.covisibility_local_ba_trigger_every,
             max_outlier_observation_ratio: args.covisibility_local_ba_max_outlier_observation_ratio,
+            max_behind_camera_landmark_ratio: args.covisibility_local_ba_max_behind_camera_ratio,
+            min_fixed_to_optimized_ratio: args.covisibility_local_ba_min_fixed_to_optimized_ratio,
             ba: CovisibilityLocalBaConfig {
                 max_neighbor_keyframes: args.covisibility_local_ba_max_neighbor_keyframes,
                 min_shared_landmarks: args.covisibility_local_ba_min_shared,
@@ -3317,6 +3366,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_solver_failures: usize = 0;
     let mut covisibility_local_ba_quality_gate_failures: usize = 0;
     let mut covisibility_local_ba_boundary_support_failures: usize = 0;
+    let mut covisibility_local_ba_behind_camera_gate_failures: usize = 0;
+    let mut covisibility_local_ba_fixed_ratio_gate_failures: usize = 0;
     let mut covisibility_local_ba_other_failures: usize = 0;
 
     for (frame_idx, image_entry) in dataset.cam0_images.iter().enumerate().skip(seed_frame_idx) {
@@ -3776,6 +3827,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(CovisibilityLocalBaError::InsufficientBoundaryKeyframes { .. }) => {
                         covisibility_local_ba_boundary_support_failures += 1;
                     }
+                    Some(CovisibilityLocalBaError::BehindCameraGateRejected { .. }) => {
+                        covisibility_local_ba_behind_camera_gate_failures += 1;
+                    }
+                    Some(CovisibilityLocalBaError::FixedSupportRatioRejected { .. }) => {
+                        covisibility_local_ba_fixed_ratio_gate_failures += 1;
+                    }
                     Some(CovisibilityLocalBaError::Ba(_)) => {
                         covisibility_local_ba_solver_failures += 1;
                     }
@@ -4128,6 +4185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_max_outlier_observation_ratio={covis_ba_max_outlier_ratio:?}\n\
          covisibility_local_ba_boundary_support_min_optimized_keyframes={covis_ba_boundary_support_min_optimized:?}\n\
          covisibility_local_ba_boundary_support_min_fixed_keyframes={covis_ba_boundary_support_min_fixed}\n\
+         covisibility_local_ba_max_behind_camera_ratio={covis_ba_max_behind_camera_ratio:?}\n\
+         covisibility_local_ba_min_fixed_to_optimized_ratio={covis_ba_min_fixed_to_optimized_ratio:?}\n\
          covisibility_local_ba_triggers={covis_ba_triggers}\n\
          covisibility_local_ba_successes={covis_ba_successes}\n\
          covisibility_local_ba_failures={covis_ba_failures}\n\
@@ -4135,6 +4194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_boundary_fallback_active_gate_failures={covis_ba_boundary_fallback_active_gate_failures}\n\
          covisibility_local_ba_quality_gate_failures={covis_ba_quality_gate_failures}\n\
          covisibility_local_ba_boundary_support_failures={covis_ba_boundary_support_failures}\n\
+         covisibility_local_ba_behind_camera_gate_failures={covis_ba_behind_camera_gate_failures}\n\
+         covisibility_local_ba_fixed_ratio_gate_failures={covis_ba_fixed_ratio_gate_failures}\n\
          covisibility_local_ba_no_local_landmarks_failures={covis_ba_no_local_landmarks_failures}\n\
          covisibility_local_ba_no_observations_failures={covis_ba_no_observations_failures}\n\
          covisibility_local_ba_solver_failures={covis_ba_solver_failures}\n\
@@ -4331,6 +4392,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .covisibility_local_ba_boundary_support_min_optimized_keyframes,
         covis_ba_boundary_support_min_fixed = args
             .covisibility_local_ba_boundary_support_min_fixed_keyframes,
+        covis_ba_max_behind_camera_ratio = args.covisibility_local_ba_max_behind_camera_ratio,
+        covis_ba_min_fixed_to_optimized_ratio =
+            args.covisibility_local_ba_min_fixed_to_optimized_ratio,
         covis_ba_triggers = covisibility_local_ba_triggers,
         covis_ba_successes = covisibility_local_ba_successes,
         covis_ba_failures = covisibility_local_ba_failures,
@@ -4340,6 +4404,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_quality_gate_failures = covisibility_local_ba_quality_gate_failures,
         covis_ba_boundary_support_failures =
             covisibility_local_ba_boundary_support_failures,
+        covis_ba_behind_camera_gate_failures =
+            covisibility_local_ba_behind_camera_gate_failures,
+        covis_ba_fixed_ratio_gate_failures = covisibility_local_ba_fixed_ratio_gate_failures,
         covis_ba_no_local_landmarks_failures = covisibility_local_ba_no_local_landmarks_failures,
         covis_ba_no_observations_failures = covisibility_local_ba_no_observations_failures,
         covis_ba_solver_failures = covisibility_local_ba_solver_failures,

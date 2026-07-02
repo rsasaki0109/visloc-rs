@@ -690,6 +690,8 @@ fn online_slam_runs_covisibility_local_ba_on_new_keyframe_trigger() {
                 min_keyframes: 3,
                 trigger_every_new_keyframes: 1,
                 max_outlier_observation_ratio: None,
+                max_behind_camera_landmark_ratio: None,
+                min_fixed_to_optimized_ratio: None,
                 ba: CovisibilityLocalBaConfig {
                     max_neighbor_keyframes: 1,
                     min_shared_landmarks: 4,
@@ -771,6 +773,8 @@ fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
                 min_keyframes: 3,
                 trigger_every_new_keyframes: 1,
                 max_outlier_observation_ratio: Some(0.0),
+                max_behind_camera_landmark_ratio: None,
+                min_fixed_to_optimized_ratio: None,
                 ba: CovisibilityLocalBaConfig {
                     max_neighbor_keyframes: 1,
                     min_shared_landmarks: 4,
@@ -821,6 +825,115 @@ fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
     ));
     assert_eq!(slam.map().keyframes.len(), 3);
     assert_eq!(slam.map().keyframes[&30].observations[0].xy, corrupted_xy);
+}
+
+// Drives the opt-in fixed-anchor-ratio write-back gate end-to-end. The healthy
+// covisibility trigger selects optimized=2 / fixed=1 on the third keyframe;
+// with `min_fixed_to_optimized_ratio = Some(0.6)` the required fixed count is
+// ceil(2 * 0.6) = 2 > 1, so the write-back is rejected and the active keyframe
+// pose must match the no-BA baseline. With the gate off the same solve commits
+// and moves the pose. (The behind-camera detector is unit-tested directly in
+// `covisibility_ba.rs`; forcing a genuine behind-camera solve through the online
+// pipeline is not feasible with the healthy front-facing fixtures here.)
+#[test]
+fn online_covisibility_local_ba_fixed_ratio_gate_rejects_writeback() {
+    fn run_active_keyframe_center(
+        covisibility: Option<OnlineSlamCovisibilityLocalBaConfig>,
+    ) -> (Option<bool>, usize, Point3<f64>) {
+        let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+        let (_, second_frame) =
+            map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+        let (_, third_frame) =
+            map_and_frame_with_extra_landmarks(50, 1, Vector3::new(3.0, 0.0, 0.0));
+        let mut slam = OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 5,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 50,
+                    ..LoopClosureConfig::default()
+                },
+                imu: None,
+                local_vi_ba: None,
+                covisibility_local_ba: covisibility,
+                vi_init: None,
+                vi_motion_init: None,
+                keep_pre_promotion_imu_factors: false,
+                pose_graph_refinement: None,
+                relocalization: None,
+            },
+        );
+        assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+        assert!(slam.process_frame(&second_frame, []).tracking_succeeded());
+        let result = slam.process_frame(&third_frame, []);
+        assert!(result.tracking_succeeded());
+        let (success, updated) = match result.covisibility_local_ba.as_ref() {
+            Some(stats) => {
+                if !stats.success {
+                    assert!(matches!(
+                        stats.error.as_ref(),
+                        Some(CovisibilityLocalBaError::FixedSupportRatioRejected { .. })
+                    ));
+                }
+                (Some(stats.success), stats.updated_keyframe_count)
+            }
+            None => (None, 0),
+        };
+        let center = slam.map().keyframes[&50]
+            .frame
+            .pose
+            .as_ref()
+            .expect("active keyframe pose")
+            .camera_center_world();
+        (success, updated, center)
+    }
+
+    fn config(min_fixed_to_optimized_ratio: Option<f64>) -> OnlineSlamCovisibilityLocalBaConfig {
+        OnlineSlamCovisibilityLocalBaConfig {
+            min_keyframes: 3,
+            trigger_every_new_keyframes: 1,
+            max_outlier_observation_ratio: None,
+            max_behind_camera_landmark_ratio: None,
+            min_fixed_to_optimized_ratio,
+            ba: CovisibilityLocalBaConfig {
+                max_neighbor_keyframes: 1,
+                min_shared_landmarks: 4,
+                max_boundary_keyframes: 1,
+                min_boundary_observations: 1,
+                min_observations_per_landmark: 2,
+                ..CovisibilityLocalBaConfig::default()
+            },
+        }
+    }
+
+    // Baseline: covisibility BA disabled entirely -> the pristine tracked pose.
+    let (_, _, baseline_center) = run_active_keyframe_center(None);
+
+    // Gate off: the solve runs and commits its refined poses/landmarks back into
+    // the map (`updated_keyframe_count >= 1`).
+    let (off_success, off_updated, _off_center) = run_active_keyframe_center(Some(config(None)));
+    assert_eq!(off_success, Some(true));
+    assert!(
+        off_updated >= 1,
+        "gate-off run should write refined poses back into the map"
+    );
+
+    // Gate on: the write-back is rejected, nothing is committed, and the map is
+    // bit-identical to the no-BA baseline.
+    let (on_success, on_updated, on_center) = run_active_keyframe_center(Some(config(Some(0.6))));
+    assert_eq!(on_success, Some(false));
+    assert_eq!(
+        on_updated, 0,
+        "gate-on rejection must not commit any keyframe update"
+    );
+    assert_eq!(
+        on_center, baseline_center,
+        "gate-on rejection must leave the active keyframe pose unchanged"
+    );
 }
 
 #[test]
