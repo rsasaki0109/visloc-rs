@@ -50,7 +50,9 @@ jobs:
         run: cargo test --test api_stability -- --nocapture
 
       - name: Python tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py'
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pillow
+          python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Benchmark registry
         run: |
