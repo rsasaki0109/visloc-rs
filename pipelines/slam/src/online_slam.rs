@@ -2,6 +2,7 @@
 //! refinement state, IMU coupling, and the [`OnlineSlamPipeline`] itself.
 
 use super::*;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamConfig {
@@ -26,6 +27,14 @@ pub struct OnlineSlamConfig {
     /// VI-BA stage simply never fires. `None` (default) keeps the
     /// pipeline appearance-only on the critical path.
     pub local_vi_ba: Option<OnlineSlamLocalBaConfig>,
+    /// Optional visual-only covisibility local BA stage triggered after
+    /// a new keyframe has been applied to the map. Unlike
+    /// [`OnlineSlamLocalBaConfig`], this stage does not require IMU
+    /// factors; it selects high-covisibility neighbor keyframes and
+    /// fixed boundary keyframes around the active keyframe, then runs
+    /// [`crate::refine_visual_map_with_covisibility_ba`]. `None`
+    /// (default) preserves the existing online pipeline behavior.
+    pub covisibility_local_ba: Option<OnlineSlamCovisibilityLocalBaConfig>,
     /// Optional auto-bootstrap stage that runs a
     /// [`crate::VisualInertialInitializer`] over the pipeline's incoming
     /// IMU stream and atomically promotes the recovered
@@ -134,6 +143,7 @@ impl Default for OnlineSlamConfig {
             loop_closure: LoopClosureConfig::default(),
             imu: None,
             local_vi_ba: None,
+            covisibility_local_ba: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -141,6 +151,62 @@ impl Default for OnlineSlamConfig {
             relocalization: None,
         }
     }
+}
+
+/// Per-session configuration for visual-only covisibility local BA inside
+/// [`OnlineSlamPipeline`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamCovisibilityLocalBaConfig {
+    /// Minimum number of keyframes in the map before the stage may run.
+    /// Clamped to at least `1`. The default skips the first keyframe so
+    /// startup does not report a predictable "no local landmarks" solve.
+    pub min_keyframes: usize,
+    /// Run after every N newly-applied keyframes. Clamped to at least
+    /// `1`; `1` runs on every eligible new keyframe.
+    pub trigger_every_new_keyframes: usize,
+    /// Optional post-solve quality gate. When `Some(r)`, BA runs on a
+    /// cloned map first; if post-BA outlier observations exceed `r` of the
+    /// selected observation count, the clone is discarded and the live map is
+    /// left unchanged. `None` preserves the legacy direct write-back path.
+    pub max_outlier_observation_ratio: Option<f64>,
+    /// Window selection, optimizer, robust loss, and outlier handling
+    /// settings for the actual covisibility BA solve.
+    pub ba: CovisibilityLocalBaConfig,
+}
+
+impl Default for OnlineSlamCovisibilityLocalBaConfig {
+    fn default() -> Self {
+        Self {
+            min_keyframes: 2,
+            trigger_every_new_keyframes: 1,
+            max_outlier_observation_ratio: None,
+            ba: CovisibilityLocalBaConfig::default(),
+        }
+    }
+}
+
+/// Per-frame outcome of the visual-only covisibility local BA stage.
+/// Exposed on [`OnlineSlamResult::covisibility_local_ba`]; `Some` only
+/// when the stage was configured, a new keyframe was applied, and the
+/// trigger interval fired.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamCovisibilityLocalBaStats {
+    pub active_keyframe_id: u64,
+    pub map_keyframe_count: usize,
+    pub elapsed_ms: f64,
+    pub success: bool,
+    pub error: Option<CovisibilityLocalBaError>,
+    pub selection: Option<CovisibilityLocalBaSelection>,
+    pub ba_result: Option<BaResult>,
+    pub mean_reprojection_before_px: Option<f64>,
+    pub mean_reprojection_after_px: Option<f64>,
+    pub updated_keyframe_count: usize,
+    pub updated_landmark_count: usize,
+    pub outlier_observation_count: usize,
+    pub observation_count: usize,
+    pub outlier_observation_ratio: Option<f64>,
+    pub quality_gate_rejected: bool,
+    pub removed_observation_count: usize,
 }
 
 /// Per-session configuration for the relocalization-on-tracker-death
@@ -192,6 +258,25 @@ pub struct OnlineSlamRelocalizationConfig {
     /// true pose; the active-frontier window targets that failure
     /// mode by excluding stale landmarks from consideration.
     pub recent_keyframe_window: Option<usize>,
+    /// Optional covisibility-local recovery descriptor store. When
+    /// `Some(config)`, recovery PnP restricts descriptor matching to
+    /// landmarks observed by the last successful keyframe (or the most
+    /// recent keyframe before it) plus its high-covisibility neighbors.
+    /// This targets full-map ambiguity without requiring a place-
+    /// recognition backend. If the local set cannot be built or is too
+    /// small, recovery falls back to the existing full-map / recent-
+    /// window policy.
+    pub covisibility_local_map: Option<OnlineSlamRelocalizationCovisibilityConfig>,
+    /// Optional appearance-retrieval recovery descriptor store. When
+    /// `Some(config)`, recovery PnP first ranks existing keyframes by
+    /// cosine similarity between the failed frame's mean local descriptor
+    /// and each keyframe's mean local descriptor, then restricts matching
+    /// to landmarks observed by the top retrieved keyframes. This is a
+    /// lightweight place-recognition seed for relocalization; stronger
+    /// learned global descriptors can replace the mean-descriptor signal
+    /// behind the same policy later. `None` (default) keeps the existing
+    /// full-map / recent-window / covisibility policy.
+    pub appearance_retrieval_map: Option<OnlineSlamRelocalizationAppearanceConfig>,
     /// Phase-26 #4b post-acceptance IMU sanity check. When
     /// `Some(max_translation_m)`, recoveries that otherwise pass the
     /// inlier-count / inlier-ratio / reprojection-error gates are
@@ -205,6 +290,50 @@ pub struct OnlineSlamRelocalizationConfig {
     /// where the camera is; a coarse translation gate filters out
     /// those drift-incompatible recoveries cheaply.
     pub max_translation_from_imu_prediction_meters: Option<f64>,
+    /// Minimum frame-id gap between expensive recovery PnP attempts.
+    /// `1` preserves the original behaviour of trying on every failed
+    /// frame. Larger values throttle global relocalization on long
+    /// sequences where repeated full-map recovery dominates runtime.
+    /// Values below `1` are treated as `1`.
+    pub attempt_interval_frames: u64,
+    /// Optional cap on consecutive failed relocalization attempts while
+    /// the primary tracker remains lost. When `Some(max)`, the
+    /// relocalizer stops running after `max` failed attempts until
+    /// primary tracking or relocalization succeeds again. `None`
+    /// preserves the legacy unbounded retry behaviour.
+    pub max_consecutive_failed_attempts: Option<u64>,
+    /// Optional pose-continuity gate against the last successfully
+    /// tracked/relocalized pose. When `Some(max_m_per_frame)`,
+    /// recoveries that pass the PnP gates are further rejected if the
+    /// camera-centre translation from the last successful pose divided
+    /// by the frame-id gap is greater than `max_m_per_frame`. `None`
+    /// (default) preserves the legacy behaviour. This timestamp-free
+    /// gate is intended for demos / datasets where frame ids are dense
+    /// enough to make "meters per frame" a useful continuity proxy.
+    pub max_translation_per_frame_from_last_success_meters: Option<f64>,
+    /// Optional lower bound on the median-depth ratio between the
+    /// recovered pose and the last successful pose, measured on the
+    /// recovery PnP inlier landmarks:
+    /// `median(depth_recovered(inliers)) / median(depth_last_success(inliers))`.
+    /// `None` disables the lower-bound gate.
+    pub min_inlier_depth_median_ratio_to_last_success: Option<f64>,
+    /// Optional upper bound on the same median-depth ratio. `None`
+    /// disables the upper-bound gate. This is a scale-aware recovery
+    /// sanity check: a PnP solution can be smooth in translation while
+    /// placing the matched map landmarks at an implausibly different
+    /// depth scale.
+    pub max_inlier_depth_median_ratio_to_last_success: Option<f64>,
+    /// Number of consecutive recovery hypotheses that must pass the
+    /// gates before the tracker state is overwritten. `1` preserves
+    /// the legacy immediate-accept behaviour; larger values turn the
+    /// relocalizer into a short confirmation window.
+    pub confirmation_required_recoveries: usize,
+    /// Optional continuity gate between consecutive recovery
+    /// hypotheses in the confirmation window. When `Some(max)`, the
+    /// camera-centre translation from the previous pending recovery to
+    /// the current recovery, divided by frame-id gap, must be <= `max`
+    /// or the confirmation chain restarts at the current recovery.
+    pub confirmation_max_translation_per_frame_meters: Option<f64>,
 }
 
 impl Default for OnlineSlamRelocalizationConfig {
@@ -215,9 +344,118 @@ impl Default for OnlineSlamRelocalizationConfig {
             max_mean_reprojection_error: Some(8.0),
             pose_prior_candidate_radius_meters: None,
             recent_keyframe_window: None,
+            covisibility_local_map: None,
+            appearance_retrieval_map: None,
             max_translation_from_imu_prediction_meters: None,
+            attempt_interval_frames: 1,
+            max_consecutive_failed_attempts: None,
+            max_translation_per_frame_from_last_success_meters: None,
+            min_inlier_depth_median_ratio_to_last_success: None,
+            max_inlier_depth_median_ratio_to_last_success: None,
+            confirmation_required_recoveries: 1,
+            confirmation_max_translation_per_frame_meters: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnlineSlamRelocalizationCovisibilityConfig {
+    /// Cap on number of co-visible neighbor keyframes to include. The
+    /// reference keyframe itself is always included. `None` means no
+    /// cap.
+    pub max_neighbor_keyframes: Option<usize>,
+    /// Minimum shared landmarks required for a neighbor keyframe to
+    /// enter the local descriptor store.
+    pub min_shared_landmarks: usize,
+    /// If the selected descriptor store has fewer descriptors than
+    /// this, fall back to the broader recovery descriptor store.
+    pub min_local_map_landmarks: usize,
+    /// When the covisibility-local store is available but its recovery
+    /// result fails the configured acceptance gates, retry the same
+    /// recovery attempt with the broader full-map / recent-window
+    /// descriptor store. This keeps the local store as a precision
+    /// first pass while preserving recall on frames where the local
+    /// neighbourhood is too narrow.
+    pub fallback_to_broader_store_on_failure: bool,
+    /// Minimum frame-id gap between broader descriptor-store retries
+    /// after a covisibility-local first pass. Values below `1` are
+    /// treated as `1`. This bounds the cost of local-first recovery on
+    /// long dead-tracking stretches.
+    pub broader_store_retry_interval_frames: u64,
+    /// When true, also run the broader descriptor store even if the
+    /// covisibility-local result passed the acceptance gates, then keep
+    /// the accepted result with the stronger inlier/reprojection score.
+    /// Off by default because it roughly doubles recovery-PnP cost.
+    pub compare_broader_store_on_success: bool,
+}
+
+impl Default for OnlineSlamRelocalizationCovisibilityConfig {
+    fn default() -> Self {
+        Self {
+            max_neighbor_keyframes: Some(10),
+            min_shared_landmarks: 15,
+            min_local_map_landmarks: 30,
+            fallback_to_broader_store_on_failure: true,
+            broader_store_retry_interval_frames: 10,
+            compare_broader_store_on_success: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamRelocalizationAppearanceConfig {
+    /// Keep at most this many appearance-nearest keyframes as recovery
+    /// map seeds. Values below `1` are treated as `1`.
+    pub max_keyframes: usize,
+    /// Optional cap for ranked appearance candidates reported through
+    /// [`OnlineSlamRelocalizationStats::appearance_candidates`].
+    /// `None` preserves the recovery-store cap (`max_keyframes`). Set
+    /// this higher than `max_keyframes` to evaluate top-K retrieval
+    /// recall without increasing recovery-PnP cost.
+    pub candidate_log_limit: Option<usize>,
+    /// Minimum cosine similarity between the failed frame's mean local
+    /// descriptor and a keyframe's mean local descriptor.
+    pub min_similarity: f32,
+    /// Exclude keyframes whose frame-id gap to the failed frame is
+    /// smaller than this. This avoids using only near-temporal frames as
+    /// a fake "retrieval" signal. `0` disables the exclusion.
+    pub exclude_recent_frame_gap: u64,
+    /// If the retrieved keyframes observe fewer descriptors than this,
+    /// fall back to the broader recovery descriptor store.
+    pub min_local_map_landmarks: usize,
+    /// Retry the broader full-map / recent-window descriptor store when
+    /// the appearance-retrieval first pass fails the acceptance gates.
+    pub fallback_to_broader_store_on_failure: bool,
+    /// Minimum frame-id gap between broader descriptor-store retries
+    /// after an appearance-retrieval first pass. Values below `1` are
+    /// treated as `1`.
+    pub broader_store_retry_interval_frames: u64,
+    /// When true, also run the broader descriptor store even if the
+    /// appearance-retrieval result passed the gates, then keep the
+    /// accepted result with the stronger inlier/reprojection score.
+    pub compare_broader_store_on_success: bool,
+}
+
+impl Default for OnlineSlamRelocalizationAppearanceConfig {
+    fn default() -> Self {
+        Self {
+            max_keyframes: 5,
+            candidate_log_limit: None,
+            min_similarity: 0.2,
+            exclude_recent_frame_gap: 30,
+            min_local_map_landmarks: 30,
+            fallback_to_broader_store_on_failure: true,
+            broader_store_retry_interval_frames: 10,
+            compare_broader_store_on_success: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamRelocalizationPendingConfirmation {
+    pub frame_id: u64,
+    pub pose: Pose,
+    pub count: usize,
 }
 
 /// Running state for the relocalization-on-tracker-death stage. Lives
@@ -232,8 +470,12 @@ pub struct OnlineSlamRelocalizationState {
     pub localizer: LocalizationPipeline,
     pub trigger_count: u64,
     pub success_count: u64,
+    pub consecutive_failed_attempts: u64,
+    pub budget_skip_count: u64,
     pub last_attempt_frame_id: Option<u64>,
+    pub last_broader_descriptor_store_retry_frame_id: Option<u64>,
     pub last_success_frame_id: Option<u64>,
+    pub pending_confirmation: Option<OnlineSlamRelocalizationPendingConfirmation>,
 }
 
 impl PartialEq for OnlineSlamRelocalizationState {
@@ -245,8 +487,13 @@ impl PartialEq for OnlineSlamRelocalizationState {
         self.config == other.config
             && self.trigger_count == other.trigger_count
             && self.success_count == other.success_count
+            && self.consecutive_failed_attempts == other.consecutive_failed_attempts
+            && self.budget_skip_count == other.budget_skip_count
             && self.last_attempt_frame_id == other.last_attempt_frame_id
+            && self.last_broader_descriptor_store_retry_frame_id
+                == other.last_broader_descriptor_store_retry_frame_id
             && self.last_success_frame_id == other.last_success_frame_id
+            && self.pending_confirmation == other.pending_confirmation
     }
 }
 
@@ -257,17 +504,33 @@ impl OnlineSlamRelocalizationState {
             localizer: LocalizationPipeline::default(),
             trigger_count: 0,
             success_count: 0,
+            consecutive_failed_attempts: 0,
+            budget_skip_count: 0,
             last_attempt_frame_id: None,
+            last_broader_descriptor_store_retry_frame_id: None,
             last_success_frame_id: None,
+            pending_confirmation: None,
         }
     }
 
     fn reset(&mut self) {
         self.trigger_count = 0;
         self.success_count = 0;
+        self.consecutive_failed_attempts = 0;
+        self.budget_skip_count = 0;
         self.last_attempt_frame_id = None;
+        self.last_broader_descriptor_store_retry_frame_id = None;
         self.last_success_frame_id = None;
+        self.pending_confirmation = None;
     }
+}
+
+/// One appearance-retrieval keyframe candidate considered by the
+/// relocalization recovery path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnlineSlamRelocalizationAppearanceCandidate {
+    pub keyframe_id: u64,
+    pub similarity: f32,
 }
 
 /// Per-frame outcome of the relocalization-on-tracker-death stage.
@@ -279,6 +542,10 @@ impl OnlineSlamRelocalizationState {
 pub struct OnlineSlamRelocalizationStats {
     /// `true` iff the stage ran its localizer this frame.
     pub attempted: bool,
+    /// `true` iff the recovery localizer produced a successful PnP
+    /// result before the relocalization-specific acceptance gates were
+    /// applied.
+    pub localization_success: bool,
     /// `true` iff the recovered solution cleared every gate AND the
     /// tracker accepted it via `accept_relocalization_result`.
     pub succeeded: bool,
@@ -291,6 +558,386 @@ pub struct OnlineSlamRelocalizationStats {
     pub correspondence_count: usize,
     /// Mean reprojection error reported by the recovery PnP solve.
     pub mean_reprojection_error: Option<f64>,
+    /// Camera-centre translation between the last successful tracked
+    /// pose and the recovered pose, if both are available.
+    pub translation_from_last_success_meters: Option<f64>,
+    /// `translation_from_last_success_meters` divided by the frame-id
+    /// gap to the last successful frame, if both are available. This is
+    /// populated even when the optional continuity gate is disabled so
+    /// runners can inspect candidate recoveries before choosing a cap.
+    pub translation_per_frame_from_last_success_meters: Option<f64>,
+    /// Median positive depth of recovery-PnP inlier landmarks under
+    /// the recovered pose.
+    pub inlier_depth_median_meters: Option<f64>,
+    /// Median positive depth of the same inlier landmarks under the
+    /// last successful tracker pose.
+    pub last_success_inlier_depth_median_meters: Option<f64>,
+    /// `inlier_depth_median_meters / last_success_inlier_depth_median_meters`.
+    /// Populated even when the optional depth-ratio gate is disabled.
+    pub inlier_depth_median_ratio_to_last_success: Option<f64>,
+    /// True when the recovered solution cleared the configured PnP,
+    /// IMU, continuity, and depth-ratio gates before the optional
+    /// confirmation window was applied.
+    pub passed_acceptance_gates: bool,
+    /// Current consecutive confirmation count after processing this
+    /// recovery candidate. Zero when the acceptance gates failed.
+    pub confirmation_count: usize,
+    /// Required confirmation count configured for this attempt. Values
+    /// below one are reported as one.
+    pub confirmation_required_count: usize,
+    /// Camera-centre translation per frame between the previous
+    /// pending recovery and this candidate, if a previous pending
+    /// recovery existed.
+    pub confirmation_translation_per_frame_from_previous_meters: Option<f64>,
+    /// Number of descriptors available to the recovery localizer after
+    /// applying any full-map / active-frontier / covisibility-local
+    /// store selection.
+    pub descriptor_store_landmark_count: usize,
+    /// Number of descriptors in the covisibility-local recovery store
+    /// when that store was built.
+    pub covisibility_local_descriptor_store_landmark_count: Option<usize>,
+    /// Number of descriptors in the appearance-retrieval recovery store
+    /// when that store was built and used as the first pass.
+    pub appearance_descriptor_store_landmark_count: Option<usize>,
+    /// Number of descriptors in the broader full-map / recent-window
+    /// recovery store when a broader retry was attempted.
+    pub broader_descriptor_store_landmark_count: Option<usize>,
+    /// True when the recovery attempt tried the covisibility-local
+    /// descriptor store before any optional broader retry.
+    pub tried_covisibility_local_descriptor_store: bool,
+    /// True when the selected recovery result came from the
+    /// covisibility-local descriptor store.
+    pub used_covisibility_local_descriptor_store: bool,
+    /// True when the recovery attempt tried the appearance-retrieval
+    /// descriptor store before any optional broader retry.
+    pub tried_appearance_descriptor_store: bool,
+    /// True when the selected recovery result came from the
+    /// appearance-retrieval descriptor store.
+    pub used_appearance_descriptor_store: bool,
+    /// True when the broader full-map / recent-window descriptor store
+    /// was attempted after a narrow first pass.
+    pub tried_broader_descriptor_store_fallback: bool,
+    /// True when a broader retry would otherwise have run but was
+    /// skipped by `broader_store_retry_interval_frames`.
+    pub broader_descriptor_store_retry_skipped_by_interval: bool,
+    /// True when the selected recovery result came from a broader retry
+    /// rather than the covisibility-local first pass.
+    pub used_broader_descriptor_store_fallback: bool,
+    /// Reference keyframe used for covisibility-local recovery store
+    /// selection.
+    pub covisibility_reference_keyframe_id: Option<u64>,
+    /// Number of keyframes that passed the appearance similarity /
+    /// temporal-gap filters.
+    pub appearance_candidate_keyframe_count: usize,
+    /// Highest appearance similarity among retrieved keyframes.
+    pub appearance_best_similarity: Option<f32>,
+    /// Best retrieved keyframe id by appearance similarity.
+    pub appearance_best_keyframe_id: Option<u64>,
+    /// Top retrieved keyframes retained for the appearance-retrieval
+    /// recovery store, sorted by descending similarity. Empty when the
+    /// appearance policy was disabled or no candidate passed its filters.
+    pub appearance_candidates: Vec<OnlineSlamRelocalizationAppearanceCandidate>,
+}
+
+fn median_positive_depth_for_landmarks(
+    map: &VisualMap,
+    pose: &Pose,
+    landmark_ids: &[u64],
+) -> Option<f64> {
+    let mut depths: Vec<f64> = landmark_ids
+        .iter()
+        .filter_map(|landmark_id| map.landmarks.get(landmark_id))
+        .map(|landmark| pose.transform_world_point(&landmark.position).z)
+        .filter(|depth| depth.is_finite() && *depth > 0.0)
+        .collect();
+    if depths.is_empty() {
+        return None;
+    }
+    depths.sort_by(|left, right| left.total_cmp(right));
+    let mid = depths.len() / 2;
+    if depths.len() % 2 == 0 {
+        Some((depths[mid - 1] + depths[mid]) * 0.5)
+    } else {
+        Some(depths[mid])
+    }
+}
+
+fn relocalization_pick_covisibility_reference_keyframe(
+    map: &VisualMap,
+    last_id: u64,
+) -> Option<u64> {
+    if map.keyframes.contains_key(&last_id) {
+        return Some(last_id);
+    }
+    let mut best: Option<u64> = None;
+    for keyframe_id in map.keyframes.keys() {
+        if *keyframe_id > last_id {
+            continue;
+        }
+        match best {
+            None => best = Some(*keyframe_id),
+            Some(current) if *keyframe_id > current => best = Some(*keyframe_id),
+            _ => {}
+        }
+    }
+    best
+}
+
+fn relocalization_covisibility_descriptor_store(
+    map: &VisualMap,
+    reference_keyframe_id: u64,
+    config: &OnlineSlamRelocalizationCovisibilityConfig,
+) -> Option<visloc_core::types::LandmarkDescriptorStore> {
+    let reference_keyframe = map.keyframes.get(&reference_keyframe_id)?;
+    let reference_landmarks: std::collections::HashSet<u64> = reference_keyframe
+        .observations
+        .iter()
+        .map(|observation| observation.landmark_id)
+        .collect();
+    if reference_landmarks.is_empty() {
+        return None;
+    }
+
+    let mut local_landmarks = reference_landmarks.clone();
+    let mut shared_counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for landmark_id in &reference_landmarks {
+        let Some(landmark) = map.landmarks.get(landmark_id) else {
+            continue;
+        };
+        for observation in &landmark.observations {
+            let keyframe_id = observation.frame_id;
+            if keyframe_id == reference_keyframe_id || !map.keyframes.contains_key(&keyframe_id) {
+                continue;
+            }
+            *shared_counts.entry(keyframe_id).or_insert(0) += 1;
+        }
+    }
+
+    let mut ranked_neighbors: Vec<(u64, usize)> = shared_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= config.min_shared_landmarks)
+        .collect();
+    ranked_neighbors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if let Some(cap) = config.max_neighbor_keyframes {
+        ranked_neighbors.truncate(cap);
+    }
+
+    for (keyframe_id, _) in ranked_neighbors {
+        if let Some(keyframe) = map.keyframes.get(&keyframe_id) {
+            for observation in &keyframe.observations {
+                local_landmarks.insert(observation.landmark_id);
+            }
+        }
+    }
+
+    let mut local_landmark_ids: Vec<u64> = local_landmarks.into_iter().collect();
+    local_landmark_ids.sort_unstable();
+    let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+    for landmark_id in local_landmark_ids {
+        if let Some(descriptor) = map
+            .landmarks
+            .get(&landmark_id)
+            .and_then(|landmark| landmark.descriptor.as_ref())
+        {
+            store.insert(landmark_id, descriptor.clone());
+        }
+    }
+    if store.len() < config.min_local_map_landmarks {
+        return None;
+    }
+    Some(store)
+}
+
+struct RelocalizationAppearanceDescriptorStore {
+    store: visloc_core::types::LandmarkDescriptorStore,
+    candidate_keyframe_count: usize,
+    best_keyframe_id: Option<u64>,
+    best_similarity: Option<f32>,
+    candidates: Vec<OnlineSlamRelocalizationAppearanceCandidate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelocalizationDescriptorStoreKind {
+    Broader,
+    CovisibilityLocal,
+    AppearanceRetrieval,
+}
+
+fn relocalization_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let first = descriptors.first()?;
+    if first.is_empty()
+        || descriptors
+            .iter()
+            .any(|descriptor| descriptor.len() != first.len())
+    {
+        return None;
+    }
+    let mut mean = vec![0.0_f32; first.len()];
+    for descriptor in descriptors {
+        for (acc, value) in mean.iter_mut().zip(descriptor) {
+            *acc += *value;
+        }
+    }
+    let inv_count = 1.0_f32 / descriptors.len() as f32;
+    let mut norm = 0.0_f32;
+    for value in &mut mean {
+        *value *= inv_count;
+        norm += *value * *value;
+    }
+    let norm = norm.sqrt();
+    if norm <= 1.0e-12 {
+        return None;
+    }
+    for value in &mut mean {
+        *value /= norm;
+    }
+    Some(mean)
+}
+
+fn relocalization_descriptor_cosine(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = left.iter().zip(right).map(|(l, r)| l * r).sum();
+    let left_norm = left.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let right_norm = right.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if left_norm <= 1.0e-12 || right_norm <= 1.0e-12 {
+        0.0
+    } else {
+        dot / (left_norm * right_norm)
+    }
+}
+
+fn relocalization_appearance_descriptor_store(
+    map: &VisualMap,
+    frame: &Frame,
+    config: &OnlineSlamRelocalizationAppearanceConfig,
+) -> Option<RelocalizationAppearanceDescriptorStore> {
+    let query_descriptor = relocalization_mean_descriptor(&frame.descriptors)?;
+    let mut ranked_keyframes: Vec<(u64, f32)> = Vec::new();
+    for (keyframe_id, keyframe) in &map.keyframes {
+        if *keyframe_id >= frame.id {
+            continue;
+        }
+        if frame.id.saturating_sub(*keyframe_id) < config.exclude_recent_frame_gap {
+            continue;
+        }
+        let Some(keyframe_descriptor) = relocalization_mean_descriptor(&keyframe.frame.descriptors)
+        else {
+            continue;
+        };
+        let similarity = relocalization_descriptor_cosine(&query_descriptor, &keyframe_descriptor);
+        if similarity >= config.min_similarity {
+            ranked_keyframes.push((*keyframe_id, similarity));
+        }
+    }
+    ranked_keyframes.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let candidate_keyframe_count = ranked_keyframes.len();
+    let best_keyframe_id = ranked_keyframes
+        .first()
+        .map(|(keyframe_id, _)| *keyframe_id);
+    let best_similarity = ranked_keyframes.first().map(|(_, similarity)| *similarity);
+    let recovery_keyframe_count = config.max_keyframes.max(1);
+    let log_keyframe_count = config
+        .candidate_log_limit
+        .unwrap_or(recovery_keyframe_count)
+        .max(1);
+    let candidates: Vec<OnlineSlamRelocalizationAppearanceCandidate> = ranked_keyframes
+        .iter()
+        .take(log_keyframe_count)
+        .map(
+            |(keyframe_id, similarity)| OnlineSlamRelocalizationAppearanceCandidate {
+                keyframe_id: *keyframe_id,
+                similarity: *similarity,
+            },
+        )
+        .collect();
+
+    let mut landmark_ids = std::collections::HashSet::new();
+    for (keyframe_id, _) in ranked_keyframes.iter().take(recovery_keyframe_count) {
+        if let Some(keyframe) = map.keyframes.get(keyframe_id) {
+            for observation in &keyframe.observations {
+                landmark_ids.insert(observation.landmark_id);
+            }
+        }
+    }
+    let mut landmark_ids: Vec<u64> = landmark_ids.into_iter().collect();
+    landmark_ids.sort_unstable();
+    let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+    for landmark_id in landmark_ids {
+        if let Some(descriptor) = map
+            .landmarks
+            .get(&landmark_id)
+            .and_then(|landmark| landmark.descriptor.as_ref())
+        {
+            store.insert(landmark_id, descriptor.clone());
+        }
+    }
+    if store.len() < config.min_local_map_landmarks {
+        return None;
+    }
+    Some(RelocalizationAppearanceDescriptorStore {
+        store,
+        candidate_keyframe_count,
+        best_keyframe_id,
+        best_similarity,
+        candidates,
+    })
+}
+
+fn relocalization_recent_keyframe_descriptor_store(
+    map: &VisualMap,
+    recent_keyframe_window: Option<usize>,
+) -> visloc_core::types::LandmarkDescriptorStore {
+    match recent_keyframe_window {
+        Some(window) if window > 0 => {
+            let mut keyframe_ids: Vec<u64> = map.keyframes.keys().copied().collect();
+            keyframe_ids.sort();
+            let start = keyframe_ids.len().saturating_sub(window);
+            let mut active_landmark_ids: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
+            for keyframe_id in &keyframe_ids[start..] {
+                if let Some(keyframe) = map.keyframes.get(keyframe_id) {
+                    for observation in &keyframe.observations {
+                        active_landmark_ids.insert(observation.landmark_id);
+                    }
+                }
+            }
+            let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+            let mut landmark_ids: Vec<u64> = active_landmark_ids.into_iter().collect();
+            landmark_ids.sort_unstable();
+            for landmark_id in landmark_ids {
+                if let Some(descriptor) = map
+                    .landmarks
+                    .get(&landmark_id)
+                    .and_then(|landmark| landmark.descriptor.as_ref())
+                {
+                    store.insert(landmark_id, descriptor.clone());
+                }
+            }
+            store
+        }
+        _ => visloc_core::types::LandmarkDescriptorStore::from_visual_map(map),
+    }
+}
+
+fn relocalization_result_has_better_score(
+    candidate: &visloc_core::types::LocalizationResult,
+    incumbent: &visloc_core::types::LocalizationResult,
+) -> bool {
+    candidate.inlier_count > incumbent.inlier_count
+        || (candidate.inlier_count == incumbent.inlier_count
+            && match (candidate.reprojection_error, incumbent.reprojection_error) {
+                (Some(candidate_error), Some(incumbent_error)) => candidate_error < incumbent_error,
+                (Some(_), None) => true,
+                _ => false,
+            })
 }
 
 /// Per-session configuration for the online loop-closure + pose-graph
@@ -910,6 +1557,13 @@ where
         let vi_motion_init =
             self.run_motion_vi_init_step(frame, applied_update.as_ref(), imu_factor.as_ref());
 
+        // Visual-only covisibility local BA runs after the per-keyframe
+        // visual/VI stages so the map reflects the just-finalised active
+        // keyframe, and before pose-graph refinement so PGO mirrors the
+        // post-local-BA pose.
+        let covisibility_local_ba =
+            self.maybe_run_covisibility_local_ba(frame, applied_update.as_ref());
+
         // Online loop-closure + pose-graph refinement runs LAST so the
         // graph mirrors the just-finalised keyframe pose (post local-VI-
         // BA) before PGO write-back. No-op when the stage is disabled or
@@ -932,6 +1586,7 @@ where
             map_landmark_count: self.map.landmarks.len(),
             vi_init,
             vi_motion_init,
+            covisibility_local_ba,
             pose_graph_refinement,
             relocalization: relocalization_stats,
         }
@@ -955,123 +1610,455 @@ where
     ) -> Option<OnlineSlamRelocalizationStats> {
         let state = self.relocalization_state.as_mut()?;
         if tracking.localization.success {
+            state.consecutive_failed_attempts = 0;
+            state.pending_confirmation = None;
             return None;
+        }
+        if state
+            .config
+            .max_consecutive_failed_attempts
+            .is_some_and(|max| state.consecutive_failed_attempts >= max)
+        {
+            state.budget_skip_count = state.budget_skip_count.saturating_add(1);
+            return None;
+        }
+        let attempt_interval_frames = state.config.attempt_interval_frames.max(1);
+        if let Some(last_attempt_frame_id) = state.last_attempt_frame_id {
+            if frame.id.saturating_sub(last_attempt_frame_id) < attempt_interval_frames {
+                return None;
+            }
         }
         state.trigger_count += 1;
         state.last_attempt_frame_id = Some(frame.id);
-        // Build a one-shot descriptor store from the current map so the
-        // recovery localizer matches against every landmark, not just
-        // the local-map subset the tracker's covisibility filter may
-        // have used. When the Phase-26 #4a active-frontier window is
-        // configured, restrict to landmarks observed by the most recent
-        // N keyframes — this drops stale landmarks that Phase-26 #2
-        // showed admit wrong-scale geometrically-self-consistent
-        // recoveries.
-        let descriptor_store = match state.config.recent_keyframe_window {
-            Some(window) if window > 0 => {
-                let mut keyframe_ids: Vec<u64> = self.map.keyframes.keys().copied().collect();
-                keyframe_ids.sort();
-                let start = keyframe_ids.len().saturating_sub(window);
-                let mut active_landmark_ids: std::collections::HashSet<u64> =
-                    std::collections::HashSet::new();
-                for kf_id in &keyframe_ids[start..] {
-                    if let Some(kf) = self.map.keyframes.get(kf_id) {
-                        for observation in &kf.observations {
-                            active_landmark_ids.insert(observation.landmark_id);
-                        }
-                    }
-                }
-                let mut store = visloc_core::types::LandmarkDescriptorStore::new();
-                for (lid, landmark) in &self.map.landmarks {
-                    if active_landmark_ids.contains(lid) {
-                        if let Some(descriptor) = landmark.descriptor.as_ref() {
-                            store.insert(*lid, descriptor.clone());
-                        }
-                    }
-                }
-                store
-            }
-            _ => visloc_core::types::LandmarkDescriptorStore::from_visual_map(&self.map),
-        };
-        // When `pose_prior_candidate_radius_meters` is set, thread the
-        // tracker's per-frame motion-model prediction into the recovery
-        // PnP — both as the RANSAC warm-start hypothesis and as a
-        // candidate-landmark filter (only landmarks within the radius
-        // of the prior's camera centre are considered). When `None`,
-        // fall back to the no-prior global PnP that Phase-23 #1 shipped.
-        let pose_prior = if state.config.pose_prior_candidate_radius_meters.is_some() {
-            self.tracker.pose_prior_for_frame(frame)
-        } else {
-            None
-        };
-        let candidate_radius = state.config.pose_prior_candidate_radius_meters;
-        let recovered = if pose_prior.is_some() {
-            state
-                .localizer
-                .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
-                    frame,
-                    &self.map,
-                    &descriptor_store,
-                    pose_prior.as_ref(),
-                    candidate_radius,
-                )
-        } else {
-            state.localizer.localize_frame_with_descriptor_store(
-                frame,
-                &self.map,
-                &descriptor_store,
-            )
-        };
-        let mut stats = OnlineSlamRelocalizationStats {
-            attempted: true,
-            succeeded: false,
-            inlier_count: recovered.inlier_count,
-            inlier_ratio: recovered.inlier_ratio,
-            correspondence_count: recovered.correspondence_count,
-            mean_reprojection_error: recovered.reprojection_error,
-        };
-        let basic_accept = recovered.success
-            && recovered.inlier_count >= state.config.min_inliers
-            && recovered.inlier_ratio >= state.config.min_inlier_ratio
-            && match (
-                state.config.max_mean_reprojection_error,
-                recovered.reprojection_error,
-            ) {
-                (Some(max), Some(actual)) => actual <= max,
-                (Some(_), None) => false,
-                (None, _) => true,
-            };
-        // Phase-26 #4b post-acceptance IMU sanity check. When the
-        // configured `max_translation_from_imu_prediction_meters` is
-        // set AND a per-frame IMU prediction is available AND the
-        // recovered pose has a camera centre, reject recoveries whose
-        // recovered camera centre lies further from the IMU's
-        // predicted centre than the threshold. Targets Phase-26 #2's
-        // V1_01 false-positive failure mode where the recovery PnP
-        // accepted geometrically self-consistent but wrong-scale
-        // solutions far from the IMU's belief about where the camera
-        // was.
-        let imu_accept =
-            if let Some(max_dist) = state.config.max_translation_from_imu_prediction_meters {
-                match (
-                    self.tracker.pose_prior_for_frame(frame),
-                    recovered.pose.as_ref(),
-                ) {
-                    (Some(predicted), Some(recovered_pose)) => {
-                        let predicted_centre = predicted.world_to_camera.inverse().translation;
-                        let recovered_centre = recovered_pose.world_to_camera.inverse().translation;
-                        (recovered_centre - predicted_centre).norm() <= max_dist
-                    }
-                    // No prediction available (e.g. tracker just bootstrapped)
-                    // ⇒ do not gate; preserves recovery on cold-start.
-                    _ => true,
-                }
+        let (recovered, mut stats, accept, tried_broader_descriptor_store) = {
+            let pose_prior = if state.config.pose_prior_candidate_radius_meters.is_some() {
+                self.tracker.pose_prior_for_frame(frame)
             } else {
-                true
+                None
             };
-        let accept = basic_accept && imu_accept;
+            let candidate_radius = state.config.pose_prior_candidate_radius_meters;
+            let localize_with_store =
+                |descriptor_store: &visloc_core::types::LandmarkDescriptorStore| {
+                    if pose_prior.is_some() {
+                        state
+                            .localizer
+                            .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
+                                frame,
+                                &self.map,
+                                descriptor_store,
+                                pose_prior.as_ref(),
+                                candidate_radius,
+                            )
+                    } else {
+                        state.localizer.localize_frame_with_descriptor_store(
+                            frame,
+                            &self.map,
+                            descriptor_store,
+                        )
+                    }
+                };
+            let build_attempt_stats =
+                |recovered: &visloc_core::types::LocalizationResult,
+                 descriptor_store_landmark_count: usize,
+                 covisibility_local_descriptor_store_landmark_count: Option<usize>,
+                 appearance_descriptor_store_landmark_count: Option<usize>,
+                 broader_descriptor_store_landmark_count: Option<usize>,
+                 tried_covisibility_local_descriptor_store: bool,
+                 used_covisibility_local_descriptor_store: bool,
+                 tried_appearance_descriptor_store: bool,
+                 used_appearance_descriptor_store: bool,
+                 tried_broader_descriptor_store_fallback: bool,
+                 broader_descriptor_store_retry_skipped_by_interval: bool,
+                 used_broader_descriptor_store_fallback: bool,
+                 covisibility_reference_keyframe_id: Option<u64>,
+                 appearance_candidate_keyframe_count: usize,
+                 appearance_best_similarity: Option<f32>,
+                 appearance_best_keyframe_id: Option<u64>,
+                 appearance_candidates: Vec<OnlineSlamRelocalizationAppearanceCandidate>| {
+                    let mut stats = OnlineSlamRelocalizationStats {
+                        attempted: true,
+                        localization_success: recovered.success,
+                        succeeded: false,
+                        inlier_count: recovered.inlier_count,
+                        inlier_ratio: recovered.inlier_ratio,
+                        correspondence_count: recovered.correspondence_count,
+                        mean_reprojection_error: recovered.reprojection_error,
+                        translation_from_last_success_meters: None,
+                        translation_per_frame_from_last_success_meters: None,
+                        inlier_depth_median_meters: None,
+                        last_success_inlier_depth_median_meters: None,
+                        inlier_depth_median_ratio_to_last_success: None,
+                        passed_acceptance_gates: false,
+                        confirmation_count: 0,
+                        confirmation_required_count: state
+                            .config
+                            .confirmation_required_recoveries
+                            .max(1),
+                        confirmation_translation_per_frame_from_previous_meters: None,
+                        descriptor_store_landmark_count,
+                        covisibility_local_descriptor_store_landmark_count,
+                        appearance_descriptor_store_landmark_count,
+                        broader_descriptor_store_landmark_count,
+                        tried_covisibility_local_descriptor_store,
+                        used_covisibility_local_descriptor_store,
+                        tried_appearance_descriptor_store,
+                        used_appearance_descriptor_store,
+                        tried_broader_descriptor_store_fallback,
+                        broader_descriptor_store_retry_skipped_by_interval,
+                        used_broader_descriptor_store_fallback,
+                        covisibility_reference_keyframe_id,
+                        appearance_candidate_keyframe_count,
+                        appearance_best_similarity,
+                        appearance_best_keyframe_id,
+                        appearance_candidates,
+                    };
+                    if let (Some(last_pose), Some(recovered_pose)) =
+                        (self.tracker.last_successful_pose(), recovered.pose.as_ref())
+                    {
+                        let translation = (recovered_pose.camera_center_world()
+                            - last_pose.camera_center_world())
+                        .norm();
+                        stats.translation_from_last_success_meters = Some(translation);
+                        if let Some(last_frame_id) = self.tracker.last_successful_frame_id() {
+                            let frame_gap = frame.id.saturating_sub(last_frame_id).max(1) as f64;
+                            stats.translation_per_frame_from_last_success_meters =
+                                Some(translation / frame_gap);
+                        }
+                        stats.inlier_depth_median_meters = median_positive_depth_for_landmarks(
+                            &self.map,
+                            recovered_pose,
+                            &recovered.inlier_landmark_ids,
+                        );
+                        stats.last_success_inlier_depth_median_meters =
+                            median_positive_depth_for_landmarks(
+                                &self.map,
+                                last_pose,
+                                &recovered.inlier_landmark_ids,
+                            );
+                        if let (Some(recovered_depth), Some(last_depth)) = (
+                            stats.inlier_depth_median_meters,
+                            stats.last_success_inlier_depth_median_meters,
+                        ) {
+                            if last_depth > 0.0 {
+                                stats.inlier_depth_median_ratio_to_last_success =
+                                    Some(recovered_depth / last_depth);
+                            }
+                        }
+                    }
+                    let basic_accept = recovered.success
+                        && recovered.inlier_count >= state.config.min_inliers
+                        && recovered.inlier_ratio >= state.config.min_inlier_ratio
+                        && match (
+                            state.config.max_mean_reprojection_error,
+                            recovered.reprojection_error,
+                        ) {
+                            (Some(max), Some(actual)) => actual <= max,
+                            (Some(_), None) => false,
+                            (None, _) => true,
+                        };
+                    let imu_accept = if let Some(max_dist) =
+                        state.config.max_translation_from_imu_prediction_meters
+                    {
+                        match (
+                            self.tracker.pose_prior_for_frame(frame),
+                            recovered.pose.as_ref(),
+                        ) {
+                            (Some(predicted), Some(recovered_pose)) => {
+                                let predicted_centre =
+                                    predicted.world_to_camera.inverse().translation;
+                                let recovered_centre =
+                                    recovered_pose.world_to_camera.inverse().translation;
+                                (recovered_centre - predicted_centre).norm() <= max_dist
+                            }
+                            _ => true,
+                        }
+                    } else {
+                        true
+                    };
+                    let continuity_accept = match (
+                        state
+                            .config
+                            .max_translation_per_frame_from_last_success_meters,
+                        stats.translation_per_frame_from_last_success_meters,
+                    ) {
+                        (Some(max), Some(actual)) => actual <= max,
+                        (Some(_), None) => true,
+                        (None, _) => true,
+                    };
+                    let depth_ratio_accept = match stats.inlier_depth_median_ratio_to_last_success {
+                        Some(ratio) => {
+                            state
+                                .config
+                                .min_inlier_depth_median_ratio_to_last_success
+                                .is_none_or(|min| ratio >= min)
+                                && state
+                                    .config
+                                    .max_inlier_depth_median_ratio_to_last_success
+                                    .is_none_or(|max| ratio <= max)
+                        }
+                        None => true,
+                    };
+                    let accept =
+                        basic_accept && imu_accept && continuity_accept && depth_ratio_accept;
+                    stats.passed_acceptance_gates = accept;
+                    (stats, accept)
+                };
+
+            let mut broader_descriptor_store =
+                Some(relocalization_recent_keyframe_descriptor_store(
+                    &self.map,
+                    state.config.recent_keyframe_window,
+                ));
+            let appearance_store =
+                state
+                    .config
+                    .appearance_retrieval_map
+                    .as_ref()
+                    .and_then(|appearance_config| {
+                        relocalization_appearance_descriptor_store(
+                            &self.map,
+                            frame,
+                            appearance_config,
+                        )
+                    });
+            let covis_store =
+                state
+                    .config
+                    .covisibility_local_map
+                    .as_ref()
+                    .and_then(|covis_config| {
+                        self.tracker
+                            .last_successful_frame_id()
+                            .and_then(|last_id| {
+                                relocalization_pick_covisibility_reference_keyframe(
+                                    &self.map, last_id,
+                                )
+                            })
+                            .and_then(|reference_id| {
+                                relocalization_covisibility_descriptor_store(
+                                    &self.map,
+                                    reference_id,
+                                    covis_config,
+                                )
+                                .map(|store| (reference_id, store))
+                            })
+                    });
+            let (
+                initial_descriptor_store,
+                initial_store_kind,
+                reference_keyframe_id,
+                appearance_candidate_keyframe_count,
+                appearance_best_similarity,
+                appearance_best_keyframe_id,
+                appearance_candidates,
+            ) = if let Some(appearance) = appearance_store {
+                (
+                    appearance.store,
+                    RelocalizationDescriptorStoreKind::AppearanceRetrieval,
+                    None,
+                    appearance.candidate_keyframe_count,
+                    appearance.best_similarity,
+                    appearance.best_keyframe_id,
+                    appearance.candidates,
+                )
+            } else if let Some((reference_keyframe_id, store)) = covis_store {
+                (
+                    store,
+                    RelocalizationDescriptorStoreKind::CovisibilityLocal,
+                    Some(reference_keyframe_id),
+                    0,
+                    None,
+                    None,
+                    Vec::new(),
+                )
+            } else {
+                (
+                    broader_descriptor_store
+                        .take()
+                        .expect("broader descriptor store was built"),
+                    RelocalizationDescriptorStoreKind::Broader,
+                    None,
+                    0,
+                    None,
+                    None,
+                    Vec::new(),
+                )
+            };
+            let fallback_to_broader_store_on_failure = match initial_store_kind {
+                RelocalizationDescriptorStoreKind::AppearanceRetrieval => state
+                    .config
+                    .appearance_retrieval_map
+                    .as_ref()
+                    .is_some_and(|config| config.fallback_to_broader_store_on_failure),
+                RelocalizationDescriptorStoreKind::CovisibilityLocal => state
+                    .config
+                    .covisibility_local_map
+                    .as_ref()
+                    .is_some_and(|config| config.fallback_to_broader_store_on_failure),
+                RelocalizationDescriptorStoreKind::Broader => false,
+            };
+            let compare_broader_store_on_success = match initial_store_kind {
+                RelocalizationDescriptorStoreKind::AppearanceRetrieval => state
+                    .config
+                    .appearance_retrieval_map
+                    .as_ref()
+                    .is_some_and(|config| config.compare_broader_store_on_success),
+                RelocalizationDescriptorStoreKind::CovisibilityLocal => state
+                    .config
+                    .covisibility_local_map
+                    .as_ref()
+                    .is_some_and(|config| config.compare_broader_store_on_success),
+                RelocalizationDescriptorStoreKind::Broader => false,
+            };
+            let broader_store_retry_interval_frames = match initial_store_kind {
+                RelocalizationDescriptorStoreKind::AppearanceRetrieval => state
+                    .config
+                    .appearance_retrieval_map
+                    .as_ref()
+                    .map(|config| config.broader_store_retry_interval_frames.max(1))
+                    .unwrap_or(1),
+                RelocalizationDescriptorStoreKind::CovisibilityLocal => state
+                    .config
+                    .covisibility_local_map
+                    .as_ref()
+                    .map(|config| config.broader_store_retry_interval_frames.max(1))
+                    .unwrap_or(1),
+                RelocalizationDescriptorStoreKind::Broader => 1,
+            };
+            let broader_retry_interval_allows = state
+                .last_broader_descriptor_store_retry_frame_id
+                .is_none_or(|last_frame_id| {
+                    frame.id.saturating_sub(last_frame_id) >= broader_store_retry_interval_frames
+                });
+            let initial_is_covisibility =
+                initial_store_kind == RelocalizationDescriptorStoreKind::CovisibilityLocal;
+            let initial_is_appearance =
+                initial_store_kind == RelocalizationDescriptorStoreKind::AppearanceRetrieval;
+            let initial_is_narrow =
+                initial_store_kind != RelocalizationDescriptorStoreKind::Broader;
+            let covisibility_local_descriptor_store_landmark_count =
+                initial_is_covisibility.then_some(initial_descriptor_store.len());
+            let appearance_descriptor_store_landmark_count =
+                initial_is_appearance.then_some(initial_descriptor_store.len());
+            let mut recovered = localize_with_store(&initial_descriptor_store);
+            let (mut stats, mut accept) = build_attempt_stats(
+                &recovered,
+                initial_descriptor_store.len(),
+                covisibility_local_descriptor_store_landmark_count,
+                appearance_descriptor_store_landmark_count,
+                None,
+                initial_is_covisibility,
+                initial_is_covisibility,
+                initial_is_appearance,
+                initial_is_appearance,
+                false,
+                false,
+                false,
+                reference_keyframe_id,
+                appearance_candidate_keyframe_count,
+                appearance_best_similarity,
+                appearance_best_keyframe_id,
+                appearance_candidates.clone(),
+            );
+            let wants_broader_retry = initial_is_narrow
+                && ((!accept && fallback_to_broader_store_on_failure)
+                    || (accept && compare_broader_store_on_success));
+            let should_try_broader = wants_broader_retry && broader_retry_interval_allows;
+            if wants_broader_retry && !broader_retry_interval_allows {
+                stats.broader_descriptor_store_retry_skipped_by_interval = true;
+            }
+            if should_try_broader {
+                let broader_store = broader_descriptor_store.take().unwrap_or_else(|| {
+                    relocalization_recent_keyframe_descriptor_store(
+                        &self.map,
+                        state.config.recent_keyframe_window,
+                    )
+                });
+                let broader_store_len = broader_store.len();
+                let broader_recovered = localize_with_store(&broader_store);
+                let (broader_stats, broader_accept) = build_attempt_stats(
+                    &broader_recovered,
+                    broader_store_len,
+                    covisibility_local_descriptor_store_landmark_count,
+                    appearance_descriptor_store_landmark_count,
+                    Some(broader_store_len),
+                    initial_is_covisibility,
+                    false,
+                    initial_is_appearance,
+                    false,
+                    true,
+                    false,
+                    true,
+                    reference_keyframe_id,
+                    appearance_candidate_keyframe_count,
+                    appearance_best_similarity,
+                    appearance_best_keyframe_id,
+                    appearance_candidates.clone(),
+                );
+                stats.tried_broader_descriptor_store_fallback = true;
+                stats.broader_descriptor_store_landmark_count = Some(broader_store_len);
+                let use_broader = if !accept {
+                    true
+                } else {
+                    broader_accept
+                        && relocalization_result_has_better_score(&broader_recovered, &recovered)
+                };
+                if use_broader {
+                    recovered = broader_recovered;
+                    stats = broader_stats;
+                    accept = broader_accept;
+                }
+            }
+            (recovered, stats, accept, should_try_broader)
+        };
+        if tried_broader_descriptor_store {
+            state.last_broader_descriptor_store_retry_frame_id = Some(frame.id);
+        }
         if !accept {
+            state.consecutive_failed_attempts = state.consecutive_failed_attempts.saturating_add(1);
+            state.pending_confirmation = None;
             return Some(stats);
+        }
+        let confirmation_required = state.config.confirmation_required_recoveries.max(1);
+        stats.confirmation_required_count = confirmation_required;
+        if confirmation_required > 1 {
+            let Some(recovered_pose) = recovered.pose.as_ref() else {
+                state.consecutive_failed_attempts =
+                    state.consecutive_failed_attempts.saturating_add(1);
+                state.pending_confirmation = None;
+                stats.passed_acceptance_gates = false;
+                return Some(stats);
+            };
+            let mut confirmation_count = 1usize;
+            if let Some(pending) = state.pending_confirmation.as_ref() {
+                let translation = (recovered_pose.camera_center_world()
+                    - pending.pose.camera_center_world())
+                .norm();
+                let frame_gap = frame.id.saturating_sub(pending.frame_id).max(1) as f64;
+                let translation_per_frame = translation / frame_gap;
+                stats.confirmation_translation_per_frame_from_previous_meters =
+                    Some(translation_per_frame);
+                let chain_is_consistent = state
+                    .config
+                    .confirmation_max_translation_per_frame_meters
+                    .is_none_or(|max| translation_per_frame <= max);
+                if chain_is_consistent {
+                    confirmation_count = pending.count.saturating_add(1);
+                }
+            }
+            stats.confirmation_count = confirmation_count;
+            if confirmation_count < confirmation_required {
+                state.pending_confirmation = Some(OnlineSlamRelocalizationPendingConfirmation {
+                    frame_id: frame.id,
+                    pose: recovered_pose.clone(),
+                    count: confirmation_count,
+                });
+                return Some(stats);
+            }
+            state.pending_confirmation = None;
+        } else {
+            stats.confirmation_count = 1;
+            state.pending_confirmation = None;
         }
         let recovered_tracking = TrackingResult {
             frame_id: frame.id,
@@ -1091,6 +2078,7 @@ where
         self.tracker
             .accept_relocalization_result(recovered_tracking.clone());
         state.success_count += 1;
+        state.consecutive_failed_attempts = 0;
         state.last_success_frame_id = Some(frame.id);
         stats.succeeded = true;
         *tracking = recovered_tracking;
@@ -1362,6 +2350,125 @@ where
             return None;
         }
         crate::online_slam_vi_ba::run_local_vi_ba(&mut self.map, state)
+    }
+
+    /// Run visual-only covisibility local BA when a new keyframe has just
+    /// entered the map and the configured trigger interval fires. No-op
+    /// when disabled, when the mapper only staged-but-did-not-apply the
+    /// keyframe, or while the map is still below the configured minimum
+    /// keyframe count.
+    fn maybe_run_covisibility_local_ba(
+        &mut self,
+        frame: &Frame,
+        applied_update: Option<&AppliedMapUpdate>,
+    ) -> Option<OnlineSlamCovisibilityLocalBaStats> {
+        let config = self.config.covisibility_local_ba.clone()?;
+        let added_new_keyframe = applied_update
+            .map(|a| a.keyframe_count > 0)
+            .unwrap_or(false);
+        if !added_new_keyframe {
+            return None;
+        }
+
+        let map_keyframe_count = self.map.keyframes.len();
+        if map_keyframe_count < config.min_keyframes.max(1) {
+            return None;
+        }
+
+        let trigger_every = config.trigger_every_new_keyframes.max(1);
+        if map_keyframe_count % trigger_every != 0 {
+            return None;
+        }
+
+        let started = Instant::now();
+        let result = if config.max_outlier_observation_ratio.is_some() {
+            let mut candidate_map = self.map.clone();
+            let result =
+                refine_visual_map_with_covisibility_ba(&mut candidate_map, frame.id, &config.ba);
+            if let Ok(ref result) = result {
+                let ratio = outlier_observation_ratio(
+                    result.outlier_observation_count,
+                    result.selection.observation_count,
+                );
+                if let Some(max_ratio) = config.max_outlier_observation_ratio {
+                    if ratio.unwrap_or(0.0) > max_ratio {
+                        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        return Some(OnlineSlamCovisibilityLocalBaStats {
+                            active_keyframe_id: frame.id,
+                            map_keyframe_count,
+                            elapsed_ms,
+                            success: false,
+                            error: Some(CovisibilityLocalBaError::QualityGateRejected {
+                                outlier_observation_count: result.outlier_observation_count,
+                                observation_count: result.selection.observation_count,
+                                max_outlier_observation_ratio: max_ratio,
+                            }),
+                            selection: Some(result.selection.clone()),
+                            ba_result: Some(result.ba_result.clone()),
+                            mean_reprojection_before_px: Some(result.mean_reprojection_before_px),
+                            mean_reprojection_after_px: Some(result.mean_reprojection_after_px),
+                            updated_keyframe_count: 0,
+                            updated_landmark_count: 0,
+                            outlier_observation_count: result.outlier_observation_count,
+                            observation_count: result.selection.observation_count,
+                            outlier_observation_ratio: ratio,
+                            quality_gate_rejected: true,
+                            removed_observation_count: 0,
+                        });
+                    }
+                }
+                self.map = candidate_map;
+            }
+            result
+        } else {
+            refine_visual_map_with_covisibility_ba(&mut self.map, frame.id, &config.ba)
+        };
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        match result {
+            Ok(result) => {
+                let observation_count = result.selection.observation_count;
+                Some(OnlineSlamCovisibilityLocalBaStats {
+                    active_keyframe_id: frame.id,
+                    map_keyframe_count,
+                    elapsed_ms,
+                    success: true,
+                    error: None,
+                    selection: Some(result.selection),
+                    ba_result: Some(result.ba_result),
+                    mean_reprojection_before_px: Some(result.mean_reprojection_before_px),
+                    mean_reprojection_after_px: Some(result.mean_reprojection_after_px),
+                    updated_keyframe_count: result.updated_keyframe_count,
+                    updated_landmark_count: result.updated_landmark_count,
+                    outlier_observation_count: result.outlier_observation_count,
+                    observation_count,
+                    outlier_observation_ratio: outlier_observation_ratio(
+                        result.outlier_observation_count,
+                        observation_count,
+                    ),
+                    quality_gate_rejected: false,
+                    removed_observation_count: result.removed_observation_count,
+                })
+            }
+            Err(error) => Some(OnlineSlamCovisibilityLocalBaStats {
+                active_keyframe_id: frame.id,
+                map_keyframe_count,
+                elapsed_ms,
+                success: false,
+                error: Some(error),
+                selection: None,
+                ba_result: None,
+                mean_reprojection_before_px: None,
+                mean_reprojection_after_px: None,
+                updated_keyframe_count: 0,
+                updated_landmark_count: 0,
+                outlier_observation_count: 0,
+                observation_count: 0,
+                outlier_observation_ratio: None,
+                quality_gate_rejected: false,
+                removed_observation_count: 0,
+            }),
+        }
     }
 
     fn stage_imu_factor_on_new_keyframe(
@@ -1830,6 +2937,13 @@ pub struct OnlineSlamResult {
     /// otherwise (disabled, no new factor, or the window was too short
     /// to refine).
     pub local_vi_ba: Option<OnlineSlamLocalBaStats>,
+    /// Visual-only covisibility local BA outcome when
+    /// [`OnlineSlamConfig::covisibility_local_ba`] is enabled and the
+    /// current `process_frame` call triggered the solve. `None`
+    /// otherwise (disabled, no newly-applied keyframe, below the
+    /// configured minimum keyframe count, or skipped by the trigger
+    /// interval).
+    pub covisibility_local_ba: Option<OnlineSlamCovisibilityLocalBaStats>,
     pub map_keyframe_count: usize,
     pub map_landmark_count: usize,
     /// State-transition event from the auto-bootstrap stage. `Some`
@@ -1877,6 +2991,14 @@ impl OnlineSlamResult {
 
     pub fn has_loop_closure_candidate(&self) -> bool {
         !self.loop_closure_candidates.is_empty()
+    }
+}
+
+fn outlier_observation_ratio(outlier_count: usize, observation_count: usize) -> Option<f64> {
+    if observation_count == 0 {
+        None
+    } else {
+        Some(outlier_count as f64 / observation_count as f64)
     }
 }
 

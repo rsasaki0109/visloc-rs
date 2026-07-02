@@ -503,6 +503,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop_closure: LoopClosureConfig::default(),
             imu: Some(imu_config),
             local_vi_ba: None,
+            covisibility_local_ba: None,
             vi_init: Some(vi_init_config),
             vi_motion_init: vi_motion_init_config,
             keep_pre_promotion_imu_factors: false,

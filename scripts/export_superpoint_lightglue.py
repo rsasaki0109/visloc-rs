@@ -48,6 +48,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames", type=int, default=None)
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--extension", default=".png")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help=(
+            "In sequence/mono mode, skip output files that already exist. "
+            "For stereo sequence resumes, skipped left features are recomputed "
+            "in memory so the next missing temporal match remains correct."
+        ),
+    )
     args = parser.parse_args()
 
     pair_mode = args.image0 is not None or args.image1 is not None
@@ -182,7 +191,24 @@ def frame_temporal_matches_name(frame_index: int) -> str:
     return f"frame_{frame_index:06}_temporal_matches.txt"
 
 
+def sequence_frame_outputs_exist(out_dir: Path, frame_index: int) -> bool:
+    required = [
+        out_dir / frame_left_features_name(frame_index),
+        out_dir / frame_right_features_name(frame_index),
+        out_dir / frame_stereo_matches_name(frame_index),
+    ]
+    if frame_index > 0:
+        required.append(out_dir / frame_temporal_matches_name(frame_index))
+    return all(path.exists() and path.stat().st_size > 0 for path in required)
+
+
 def export_pair(args: argparse.Namespace, extractor: Any, matcher: Any, load_image: Any, rbd: Any) -> None:
+    if args.skip_existing and all(
+        (args.out_dir / name).exists() and (args.out_dir / name).stat().st_size > 0
+        for name in ("image0_features.txt", "image1_features.txt", "matches.txt")
+    ):
+        print("pair outputs already exist; skipping", flush=True)
+        return
     image0 = load_image(args.image0).to(args.resolved_device)
     image1 = load_image(args.image1).to(args.resolved_device)
 
@@ -204,8 +230,19 @@ def export_sequence(
 ) -> None:
     pairs = selected_frame_pairs(args)
     previous_left_features: dict[str, Any] | None = None
+    previous_left_path: Path | None = None
 
     for frame_index, (left_path, right_path) in enumerate(pairs):
+        if args.skip_existing and sequence_frame_outputs_exist(args.out_dir, frame_index):
+            previous_left_features = None
+            previous_left_path = left_path
+            if frame_index % 25 == 0:
+                print(
+                    f"frame {frame_index:06}: left={left_path.name} right={right_path.name} skipped",
+                    flush=True,
+                )
+            continue
+
         left_image = load_image(left_path).to(args.resolved_device)
         right_image = load_image(right_path).to(args.resolved_device)
         left_features = extractor.extract(left_image)
@@ -215,6 +252,10 @@ def export_sequence(
         write_features(args.out_dir / frame_left_features_name(frame_index), rbd(left_features))
         write_features(args.out_dir / frame_right_features_name(frame_index), rbd(right_features))
         write_matches(args.out_dir / frame_stereo_matches_name(frame_index), rbd(stereo_matches))
+
+        if previous_left_features is None and previous_left_path is not None:
+            previous_left_image = load_image(previous_left_path).to(args.resolved_device)
+            previous_left_features = extractor.extract(previous_left_image)
 
         if previous_left_features is not None:
             temporal_matches = matcher(
@@ -226,6 +267,7 @@ def export_sequence(
             )
 
         previous_left_features = left_features
+        previous_left_path = left_path
         print(
             f"frame {frame_index:06}: left={left_path.name} right={right_path.name}",
             flush=True,
@@ -250,11 +292,14 @@ def export_mono(
 ) -> None:
     frames = selected_mono_frames(args)
     for frame_index, frame_path in enumerate(frames):
+        output = args.out_dir / frame_mono_features_name(frame_index)
+        if args.skip_existing and output.exists() and output.stat().st_size > 0:
+            if frame_index % 25 == 0:
+                print(f"frame {frame_index:06}: {frame_path.name} skipped", flush=True)
+            continue
         image = load_image(frame_path).to(args.resolved_device)
         features = extractor.extract(image)
-        write_features(
-            args.out_dir / frame_mono_features_name(frame_index), rbd(features)
-        )
+        write_features(output, rbd(features))
         if frame_index % 25 == 0:
             print(f"frame {frame_index:06}: {frame_path.name}", flush=True)
 

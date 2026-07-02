@@ -69,6 +69,9 @@ use nalgebra::{Matrix3, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
 use rayon::prelude::*;
 use visloc_rs::prelude::*;
 
+/// Per-frame keypoints paired with their descriptors.
+type KeypointsWithDescriptors = (Vec<Point2<f64>>, Vec<Vec<f32>>);
+
 struct Args {
     dataset: PathBuf,
     train_seqs: Vec<u32>,
@@ -326,7 +329,7 @@ fn per_keyframe_best_pose(
     for corrs in groups {
         if let Some(r) = estimator.estimate(corrs, camera) {
             if r.inliers.len() >= min_inliers
-                && best.as_ref().map_or(true, |(_, n)| r.inliers.len() > *n)
+                && best.as_ref().is_none_or(|(_, n)| r.inliers.len() > *n)
             {
                 best = Some((r.pose, r.inliers.len()));
             }
@@ -350,7 +353,7 @@ fn frame_features(
     extractor: &CornerFeatureExtractor,
     seq: u32,
     idx: usize,
-) -> Result<Option<(Vec<Point2<f64>>, Vec<Vec<f32>>)>, Box<dyn Error>> {
+) -> Result<Option<KeypointsWithDescriptors>, Box<dyn Error>> {
     if let Some(dir) = &args.sp_features_dir {
         let path = dir.join(format!("seq-{seq:02}_frame-{idx:06}.txt"));
         if !path.exists() {
@@ -643,7 +646,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     if r.inliers.len() >= args.min_inliers
                                         && best_pose
                                             .as_ref()
-                                            .map_or(true, |(_, n)| r.inliers.len() > *n)
+                                            .is_none_or(|(_, n)| r.inliers.len() > *n)
                                     {
                                         best_pose = Some((r.pose, r.inliers.len()));
                                     }

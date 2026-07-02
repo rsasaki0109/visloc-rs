@@ -38,6 +38,16 @@ device="${KITTI_MS_DEVICE:-cuda}"
 max_keypoints="${KITTI_MS_MAX_KEYPOINTS:-2048}"
 python_bin="${KITTI_MS_PYTHON:-python3}"
 ba_max_init_residual="${KITTI_MS_BA_MAX_INIT_RESIDUAL:-}"
+capture_retrieval_recall="${KITTI_MS_CAPTURE_RETRIEVAL_RECALL:-0}"
+retrieval_distance_threshold="${KITTI_MS_RETRIEVAL_DISTANCE_THRESHOLD:-10}"
+retrieval_ks="${KITTI_MS_RETRIEVAL_KS:-1 5 20}"
+retrieval_registry_dir="${KITTI_MS_RETRIEVAL_REGISTRY_DIR:-benchmarks/registry/runs/kitti}"
+retrieval_dnf_if_recall_at="${KITTI_MS_RETRIEVAL_DNF_IF_RECALL_AT:-}"
+capture_run_registry="${KITTI_MS_CAPTURE_RUN_REGISTRY:-0}"
+run_registry_dir="${KITTI_MS_RUN_REGISTRY_DIR:-benchmarks/registry/runs/kitti}"
+loop_matches_dir="${KITTI_MS_LOOP_MATCHES_DIR:-}"
+loop_pnp_essential_inliers="${KITTI_MS_LOOP_PNP_ESSENTIAL_INLIERS:-0}"
+loop_pnp_confidence_weights="${KITTI_MS_LOOP_PNP_CONFIDENCE_WEIGHTS:-0}"
 skip_export=0
 
 usage() {
@@ -62,6 +72,37 @@ Options:
                          (helps 00/05/07 + EuRoC, hurts 06/09 — see the doc)
   --python <bin>         python with torch+lightglue (default python3)
   --skip-export          reuse already-exported features
+  --capture-retrieval-recall
+                         evaluate full/loop_candidates.csv and capture a
+                         benchmark-registry manifest for seq02-style recall
+                         diagnosis (default off)
+  --retrieval-distance-threshold <m>
+                         true-revisit pose distance for recall capture
+                         (default 10)
+  --retrieval-ks "<k...>"
+                         recall@K values for recall capture (default "1 5 20")
+  --retrieval-registry-dir <dir>
+                         registry output dir for recall capture
+                         (default benchmarks/registry/runs/kitti)
+  --retrieval-dnf-if-recall-at <K=VALUE>
+                         optional recall gate, e.g. 20=0.01
+  --capture-run-registry
+                         capture ATE/loop metrics and trajectory artifacts as
+                         a full KITTI run benchmark-registry manifest
+                         (default off)
+  --run-registry-dir <dir>
+                         registry output dir for full run capture
+                         (default benchmarks/registry/runs/kitti)
+  --loop-matches-dir <dir>
+                         optional external loop_OLDER_NEWER_matches.txt files
+                         for loop-verifier matching A/B
+  --loop-pnp-essential-inliers
+                         send only essential-matrix inlier matches to PnP
+                         during loop verification (default off)
+  --loop-pnp-confidence-weights
+                         bias loop PnP RANSAC sampling by descriptor-match
+                         confidence when enough non-uniform confidences are
+                         available (default off)
   -h, --help             show this help
 EOF
 }
@@ -77,6 +118,16 @@ while [ "$#" -gt 0 ]; do
     --ba-max-init-residual) ba_max_init_residual="$2"; shift 2 ;;
     --python) python_bin="$2"; shift 2 ;;
     --skip-export) skip_export=1; shift ;;
+    --capture-retrieval-recall) capture_retrieval_recall=1; shift ;;
+    --retrieval-distance-threshold) retrieval_distance_threshold="$2"; shift 2 ;;
+    --retrieval-ks) retrieval_ks="$2"; shift 2 ;;
+    --retrieval-registry-dir) retrieval_registry_dir="$2"; shift 2 ;;
+    --retrieval-dnf-if-recall-at) retrieval_dnf_if_recall_at="$2"; shift 2 ;;
+    --capture-run-registry) capture_run_registry=1; shift ;;
+    --run-registry-dir) run_registry_dir="$2"; shift 2 ;;
+    --loop-matches-dir) loop_matches_dir="$2"; shift 2 ;;
+    --loop-pnp-essential-inliers) loop_pnp_essential_inliers=1; shift ;;
+    --loop-pnp-confidence-weights) loop_pnp_confidence_weights=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -132,12 +183,25 @@ set -- \
 if [ -n "$ba_max_init_residual" ]; then
   set -- "$@" --ba-max-init-residual "$ba_max_init_residual"
 fi
+if [ -n "$loop_matches_dir" ]; then
+  set -- "$@" --loop-matches-dir "$loop_matches_dir"
+fi
+if [ "$loop_pnp_essential_inliers" -eq 1 ]; then
+  set -- "$@" --loop-pnp-essential-inliers
+fi
+if [ "$loop_pnp_confidence_weights" -eq 1 ]; then
+  set -- "$@" --loop-pnp-confidence-weights
+fi
 mkdir -p "$out_dir/full"
 ./target/release/examples/stereo_vo_external_deep_files "$@" \
   > "$out_dir/full/vo.log" 2>&1
 
-"$python_bin" - "$out_dir/full/vo_poses.txt" "$gt_poses" "$sequence" <<'PY'
+evaluation_json="$out_dir/full/evaluation.json"
+"$python_bin" - "$out_dir/full/vo_poses.txt" "$gt_poses" "$sequence" "$evaluation_json" <<'PY'
+import json
 import sys
+from pathlib import Path
+
 import numpy as np
 
 
@@ -171,6 +235,101 @@ est, gt = est[:n], gt[:n]
 se3 = umeyama_rmse(est, gt, False)
 sim3 = umeyama_rmse(est, gt, True)
 print(f"seq{sys.argv[3]}  frames={n}  ATE rmse SE3={se3:.4f} m  Sim3={sim3:.4f} m")
+Path(sys.argv[4]).write_text(
+    json.dumps(
+        {
+            "sequence": sys.argv[3],
+            "frames": int(n),
+            "ate_rmse_se3_m": se3,
+            "ate_rmse_sim3_m": sim3,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
 PY
 
 grep -o 'verified_loops=[0-9]*' "$out_dir/full/vo.log" | head -1 || true
+
+if [ "$capture_run_registry" -eq 1 ]; then
+  echo "# Capturing KITTI full-run registry manifest"
+  run_claim_scope="supporting"
+  if [ -n "$loop_matches_dir" ] || [ "$loop_pnp_essential_inliers" -eq 1 ] || [ "$loop_pnp_confidence_weights" -eq 1 ]; then
+    run_claim_scope="exploratory"
+  fi
+  run_registry_command="scripts/run_kitti_multiseq_benchmark.sh --sequence $sequence --data-root $data_root --out-dir $out_dir --features-dir $features_dir --frames $frames --device $device"
+  if [ "$skip_export" -eq 1 ]; then
+    run_registry_command="$run_registry_command --skip-export"
+  fi
+  if [ -n "$ba_max_init_residual" ]; then
+    run_registry_command="$run_registry_command --ba-max-init-residual $ba_max_init_residual"
+  fi
+  if [ -n "$loop_matches_dir" ]; then
+    run_registry_command="$run_registry_command --loop-matches-dir $loop_matches_dir"
+  fi
+  if [ "$loop_pnp_essential_inliers" -eq 1 ]; then
+    run_registry_command="$run_registry_command --loop-pnp-essential-inliers"
+  fi
+  if [ "$loop_pnp_confidence_weights" -eq 1 ]; then
+    run_registry_command="$run_registry_command --loop-pnp-confidence-weights"
+  fi
+  "$python_bin" scripts/capture_kitti_multiseq_run.py \
+    --sequence "$sequence" \
+    --evaluation-json "$evaluation_json" \
+    --vo-log "$out_dir/full/vo.log" \
+    --vo-poses "$out_dir/full/vo_poses.txt" \
+    --poses "$gt_poses" \
+    --dataset-path "$data_root" \
+    --features-dir "$features_dir" \
+    --out-dir "$out_dir/full" \
+    --registry-dir "$run_registry_dir" \
+    --claim-scope "$run_claim_scope" \
+    --command "$run_registry_command" \
+    --config "device=$device" \
+    --config "max_keypoints=$max_keypoints" \
+    --config "skip_export=$skip_export" \
+    --config "ba_max_init_residual=${ba_max_init_residual:-null}" \
+    --config "loop_matches_dir=${loop_matches_dir:-null}" \
+    --config "loop_pnp_essential_inliers=$loop_pnp_essential_inliers" \
+    --config "loop_pnp_confidence_weights=$loop_pnp_confidence_weights"
+fi
+
+if [ "$capture_retrieval_recall" -eq 1 ]; then
+  candidates_csv="$out_dir/full/loop_candidates.csv"
+  [ -s "$candidates_csv" ] || {
+    echo "missing loop candidate CSV for retrieval recall capture: $candidates_csv" >&2
+    exit 2
+  }
+
+  echo "# Capturing KITTI loop retrieval recall"
+  if [ -n "$retrieval_dnf_if_recall_at" ]; then
+    # shellcheck disable=SC2086
+    "$python_bin" scripts/capture_kitti_loop_retrieval_recall.py \
+      --sequence "$sequence" \
+      --candidates "$candidates_csv" \
+      --poses "$gt_poses" \
+      --dataset-path "$data_root" \
+      --distance-threshold-m "$retrieval_distance_threshold" \
+      --min-temporal-gap 50 \
+      --min-path-length-m 5 \
+      --ks $retrieval_ks \
+      --out-dir "$out_dir/full/retrieval_recall" \
+      --registry-dir "$retrieval_registry_dir" \
+      --dnf-if-recall-at "$retrieval_dnf_if_recall_at"
+  else
+    # shellcheck disable=SC2086
+    "$python_bin" scripts/capture_kitti_loop_retrieval_recall.py \
+      --sequence "$sequence" \
+      --candidates "$candidates_csv" \
+      --poses "$gt_poses" \
+      --dataset-path "$data_root" \
+      --distance-threshold-m "$retrieval_distance_threshold" \
+      --min-temporal-gap 50 \
+      --min-path-length-m 5 \
+      --ks $retrieval_ks \
+      --out-dir "$out_dir/full/retrieval_recall" \
+      --registry-dir "$retrieval_registry_dir"
+  fi
+fi

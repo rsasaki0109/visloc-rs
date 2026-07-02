@@ -23,6 +23,8 @@ pub struct KeyframePolicyConfig {
     pub min_frame_id_gap: u64,
     pub min_translation: f64,
     pub select_relocalized_frames: bool,
+    pub tracked_landmark_keyframe_ratio: Option<f64>,
+    pub min_tracked_landmarks_for_quality_keyframe: usize,
 }
 
 impl Default for KeyframePolicyConfig {
@@ -31,6 +33,8 @@ impl Default for KeyframePolicyConfig {
             min_frame_id_gap: 5,
             min_translation: 1.0,
             select_relocalized_frames: true,
+            tracked_landmark_keyframe_ratio: None,
+            min_tracked_landmarks_for_quality_keyframe: 20,
         }
     }
 }
@@ -50,6 +54,12 @@ pub enum KeyframeDecisionReason {
     MissingPose,
     FirstSuccessfulFrame,
     Relocalized,
+    TrackedLandmarkDrop {
+        frame_id_gap: u64,
+        tracked_landmarks: usize,
+        last_keyframe_tracked_landmarks: usize,
+        min_tracked_landmark_ratio: f64,
+    },
     ThresholdsMet {
         frame_id_gap: u64,
         translation: f64,
@@ -69,6 +79,7 @@ pub struct SimpleKeyframePolicy {
     config: KeyframePolicyConfig,
     last_keyframe_frame_id: Option<FrameId>,
     last_keyframe_pose: Option<Pose>,
+    last_keyframe_tracked_landmark_count: Option<usize>,
     selected_keyframe_count: usize,
 }
 
@@ -78,6 +89,7 @@ impl SimpleKeyframePolicy {
             config,
             last_keyframe_frame_id: None,
             last_keyframe_pose: None,
+            last_keyframe_tracked_landmark_count: None,
             selected_keyframe_count: 0,
         }
     }
@@ -98,6 +110,10 @@ impl SimpleKeyframePolicy {
         self.selected_keyframe_count
     }
 
+    pub fn last_keyframe_tracked_landmark_count(&self) -> Option<usize> {
+        self.last_keyframe_tracked_landmark_count
+    }
+
     fn selected(
         &mut self,
         result: &TrackingResult,
@@ -106,6 +122,7 @@ impl SimpleKeyframePolicy {
     ) -> KeyframeDecision {
         self.last_keyframe_frame_id = Some(result.frame_id);
         self.last_keyframe_pose = Some(pose.clone());
+        self.last_keyframe_tracked_landmark_count = Some(result.localization.inlier_count);
         self.selected_keyframe_count += 1;
         self.decision(result.frame_id, true, reason)
     }
@@ -131,6 +148,42 @@ impl SimpleKeyframePolicy {
             last_keyframe_frame_id: self.last_keyframe_frame_id,
             selected_keyframe_count: self.selected_keyframe_count,
         }
+    }
+
+    fn tracked_landmark_drop_reason(
+        &self,
+        result: &TrackingResult,
+        frame_id_gap: u64,
+    ) -> Option<KeyframeDecisionReason> {
+        let min_tracked_landmark_ratio = self.config.tracked_landmark_keyframe_ratio?;
+        if !(0.0..=1.0).contains(&min_tracked_landmark_ratio) {
+            return None;
+        }
+
+        let last_keyframe_tracked_landmarks = self.last_keyframe_tracked_landmark_count?;
+        if last_keyframe_tracked_landmarks < self.config.min_tracked_landmarks_for_quality_keyframe
+        {
+            return None;
+        }
+
+        let tracked_landmarks = result.localization.inlier_count;
+        if tracked_landmarks < self.config.min_tracked_landmarks_for_quality_keyframe {
+            return None;
+        }
+
+        let threshold = last_keyframe_tracked_landmarks as f64 * min_tracked_landmark_ratio;
+        if tracked_landmarks < last_keyframe_tracked_landmarks
+            && (tracked_landmarks as f64) <= threshold
+        {
+            return Some(KeyframeDecisionReason::TrackedLandmarkDrop {
+                frame_id_gap,
+                tracked_landmarks,
+                last_keyframe_tracked_landmarks,
+                min_tracked_landmark_ratio,
+            });
+        }
+
+        None
     }
 }
 
@@ -163,6 +216,10 @@ impl KeyframePolicy for SimpleKeyframePolicy {
             );
         }
 
+        if let Some(reason) = self.tracked_landmark_drop_reason(result, frame_id_gap) {
+            return self.selected(result, pose, reason);
+        }
+
         let translation = self
             .last_keyframe_pose
             .as_ref()
@@ -191,6 +248,7 @@ impl KeyframePolicy for SimpleKeyframePolicy {
     fn reset(&mut self) {
         self.last_keyframe_frame_id = None;
         self.last_keyframe_pose = None;
+        self.last_keyframe_tracked_landmark_count = None;
         self.selected_keyframe_count = 0;
     }
 }

@@ -130,7 +130,7 @@ pub fn online_slam_results_to_html_report(results: &[OnlineSlamResult]) -> Strin
         .filter_map(|candidate| LoopClosureConstraint::from_verified_candidate(candidate))
         .collect();
     output.push_str("<section class=\"panel\">\n<h2>Loop Closure Constraints</h2>\n");
-    output.push_str("<p class=\"sub\">Each row is a verified candidate turned into a `LoopClosureConstraint` ready for a future pose-graph layer. No global optimization runs in this report.</p>\n");
+    output.push_str("<p class=\"sub\">Each row is a verified candidate turned into a `LoopClosureConstraint` ready for the pose-graph / BA consumers. This report visualizes constraints only; it does not run optimization.</p>\n");
     output.push_str("<table><thead><tr><th>from keyframe</th><th>to keyframe</th><th>inliers</th><th>inlier ratio</th><th>mean Sampson</th><th>score</th><th>relative translation</th></tr></thead><tbody>\n");
     if constraints.is_empty() {
         output.push_str("<tr><td colspan=\"7\">no verified loop constraints</td></tr>\n");

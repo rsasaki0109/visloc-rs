@@ -108,8 +108,9 @@ use visloc_rs::vision::matching::{
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::stereo_vo::{
     estimate_relative_pose_kabsch_ransac, extend_stereo_tracks_via_projection, KabschRansacConfig,
-    StereoPairCorrespondence, StereoRelativePoseMode, StereoRelativePoseSource, StereoVoFrontend,
-    StereoVoFrontendConfig, StereoVoPairDiagnostics, TrackExtensionConfig,
+    StereoDepthGate, StereoDepthGateDiagnostics, StereoPairCorrespondence, StereoRelativePoseMode,
+    StereoRelativePoseSource, StereoVoFrontend, StereoVoFrontendConfig, StereoVoPairDiagnostics,
+    TrackExtensionConfig,
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::stereo_vo::{StereoFeature, StereoVoError};
@@ -220,6 +221,9 @@ struct CliArgs {
     /// Optional comma-separated max-depth hypotheses for guarded PnP
     /// candidate selection.
     pnp_depth_hypotheses_m: Vec<f64>,
+    /// Optional fixed lower stereo-depth gate for legacy A/B runs. Leaving it
+    /// unset uses the adaptive per-frame depth gate.
+    min_depth_m: Option<f64>,
     /// Refine the selected relative pose against current left/right stereo
     /// reprojection residuals.
     stereo_pose_refinement: bool,
@@ -309,6 +313,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pnp_reprojection_threshold_px: f64 = 3.32;
     let mut pnp_max_depth_m: Option<f64> = None;
     let mut pnp_depth_hypotheses_m: Vec<f64> = Vec::new();
+    let mut min_depth_m: Option<f64> = None;
     let mut stereo_pose_refinement = false;
     let mut stereo_vertical_alignment = false;
     let mut motion_scale_rescue_min_translation_ratio: Option<f64> = None;
@@ -475,6 +480,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pnp_depth_hypotheses_m = parse_depth_hypotheses(&args.remove(i + 1))?;
                 args.remove(i);
             }
+            "--min-depth" => {
+                let value = args.remove(i + 1).parse::<f64>()?;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(
+                        format!("--min-depth must be finite and positive, got {value}").into(),
+                    );
+                }
+                min_depth_m = Some(value);
+                args.remove(i);
+            }
             "--stereo-pose-refinement" => {
                 stereo_pose_refinement = true;
                 args.remove(i);
@@ -582,6 +597,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         pnp_reprojection_threshold_px,
         pnp_max_depth_m,
         pnp_depth_hypotheses_m,
+        min_depth_m,
         stereo_pose_refinement,
         stereo_vertical_alignment,
         motion_scale_rescue_min_translation_ratio,
@@ -629,6 +645,14 @@ fn parse_relative_pose_mode(
         "pnp" | "pnp-then-kabsch" => Ok(StereoRelativePoseMode::PnpThenKabsch),
         "kabsch" | "kabsch-then-pnp" => Ok(StereoRelativePoseMode::KabschThenPnp),
         other => Err(format!("--relative-pose-mode must be pnp|kabsch, got {other}").into()),
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn stereo_depth_gate_label(gate: &StereoDepthGate) -> &'static str {
+    match gate {
+        StereoDepthGate::Fixed => "fixed",
+        StereoDepthGate::Adaptive(_) => "adaptive",
     }
 }
 
@@ -735,6 +759,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temporal_max_row_delta_px: args.temporal_max_row_delta_px,
         ..StereoVoFrontendConfig::default()
     };
+    if let Some(min_depth) = args.min_depth_m {
+        frontend_config.stereo.min_depth_m = min_depth;
+        frontend_config.stereo.depth_gate = StereoDepthGate::fixed();
+    }
     if let Some(ratio) = args.motion_scale_rescue_min_translation_ratio {
         frontend_config.motion_scale_rescue_min_translation_ratio = ratio;
     }
@@ -749,13 +777,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         StereoFrontendChoice::Deep => "deep (HogLike + MutualSoftmax)",
     };
     println!(
-        "frontend: {} (deep_max_features={} deep_descriptor_clip={} deep_min_confidence={} deep_temperature={} relative_pose_iterations={} pnp_reprojection_threshold_px={} pnp_max_depth_m={:?} pnp_depth_hypotheses_m={:?} pnp_adaptive_depth_hypothesis_m={:?} pnp_adaptive_depth_min_primary_inlier_ratio={} pnp_early_stop_min_iterations={} pnp_early_stop_inlier_ratio={:?} pnp_kabsch_challenge_max_inlier_ratio={} pnp_kabsch_challenge_min_3d_inlier_gain={} pnp_kabsch_challenge_max_residual_ratio={} motion_scale_rescue_min_history={} motion_scale_rescue_min_median_translation_m={} motion_scale_rescue_min_translation_ratio={} motion_scale_rescue_max_translation_ratio={} motion_scale_rescue_target_percentile={} motion_scale_rescue_max_pnp_inlier_ratio={} translation_direction_rescue_min_history={} translation_direction_rescue_min_median_translation_m={} translation_direction_rescue_max_angle_deg={} translation_direction_rescue_max_pnp_inlier_ratio={} rotation_spike_rescue_min_history={} rotation_spike_rescue_min_angle_deg={} rotation_spike_rescue_max_angle_ratio={} rotation_spike_rescue_max_pnp_inlier_ratio={} rotation_vector_rescue_min_history={} rotation_vector_rescue_min_median_translation_m={} rotation_vector_rescue_max_delta_deg={} rotation_vector_rescue_max_pnp_inlier_ratio={} stereo_pose_refinement={} stereo_vertical_alignment={} stereo_vertical_alignment_min_pairs={} stereo_vertical_alignment_max_correction_m={} stereo_pose_refinement_auto_min_history={} stereo_pose_refinement_auto_min_median_translation_m={} stereo_pose_refinement_auto_max_pnp_inlier_ratio={} relative_pose_mode={:?} temporal_max_row_delta_px={:?} temporal_auto_max_row_delta_px={:?} temporal_auto_min_history={} temporal_auto_min_median_translation_m={} temporal_auto_min_confidence={:?} temporal_auto_confidence_min_history={} temporal_auto_confidence_min_median_translation_m={} temporal_auto_confidence_curve_min_median_translation_m={:?} temporal_auto_confidence_curve_min_median_rotation_deg={:?} temporal_auto_confidence_max_median_rotation_deg={:?} progress_every={})",
+        "frontend: {} (deep_max_features={} deep_descriptor_clip={} deep_min_confidence={} deep_temperature={} relative_pose_iterations={} stereo_depth_gate={} stereo_min_depth_m={} pnp_reprojection_threshold_px={} pnp_max_depth_m={:?} pnp_depth_hypotheses_m={:?} pnp_adaptive_depth_hypothesis_m={:?} pnp_adaptive_depth_min_primary_inlier_ratio={} pnp_early_stop_min_iterations={} pnp_early_stop_inlier_ratio={:?} pnp_kabsch_challenge_max_inlier_ratio={} pnp_kabsch_challenge_min_3d_inlier_gain={} pnp_kabsch_challenge_max_residual_ratio={} motion_scale_rescue_min_history={} motion_scale_rescue_min_median_translation_m={} motion_scale_rescue_min_translation_ratio={} motion_scale_rescue_max_translation_ratio={} motion_scale_rescue_target_percentile={} motion_scale_rescue_max_pnp_inlier_ratio={} translation_direction_rescue_min_history={} translation_direction_rescue_min_median_translation_m={} translation_direction_rescue_max_angle_deg={} translation_direction_rescue_max_pnp_inlier_ratio={} rotation_spike_rescue_min_history={} rotation_spike_rescue_min_angle_deg={} rotation_spike_rescue_max_angle_ratio={} rotation_spike_rescue_max_pnp_inlier_ratio={} rotation_vector_rescue_min_history={} rotation_vector_rescue_min_median_translation_m={} rotation_vector_rescue_max_delta_deg={} rotation_vector_rescue_max_pnp_inlier_ratio={} stereo_pose_refinement={} stereo_vertical_alignment={} stereo_vertical_alignment_min_pairs={} stereo_vertical_alignment_max_correction_m={} stereo_pose_refinement_auto_min_history={} stereo_pose_refinement_auto_min_median_translation_m={} stereo_pose_refinement_auto_max_pnp_inlier_ratio={} relative_pose_mode={:?} temporal_max_row_delta_px={:?} temporal_auto_max_row_delta_px={:?} temporal_auto_min_history={} temporal_auto_min_median_translation_m={} temporal_auto_min_confidence={:?} temporal_auto_confidence_min_history={} temporal_auto_confidence_min_median_translation_m={} temporal_auto_confidence_curve_min_median_translation_m={:?} temporal_auto_confidence_curve_min_median_rotation_deg={:?} temporal_auto_confidence_max_median_rotation_deg={:?} progress_every={})",
         frontend_label,
         args.deep_max_features,
         args.deep_descriptor_clip,
         args.deep_min_confidence,
         args.deep_temperature,
         args.relative_pose_iterations,
+        stereo_depth_gate_label(&frontend_config.stereo.depth_gate),
+        frontend_config.stereo.min_depth_m,
         args.pnp_reprojection_threshold_px,
         args.pnp_max_depth_m,
         args.pnp_depth_hypotheses_m,
@@ -826,6 +856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         per_pair_translation_m,
         kabsch_inlier_counts,
         pair_diagnostics,
+        depth_gate_diagnostics,
     } = frontend_state;
     let stereo_counts: Vec<usize> = stereo_per_frame.iter().map(|s| s.len()).collect();
     println!(
@@ -858,6 +889,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_pair_diagnostics_csv(
         &args.out_dir.join("frontend_pair_diagnostics.csv"),
         &pair_diagnostics,
+    )?;
+    write_depth_gate_diagnostics_csv(
+        &args.out_dir.join("frontend_depth_gate_diagnostics.csv"),
+        &depth_gate_diagnostics,
     )?;
     write_stereo_ground_profile_csv(
         &args.out_dir.join("stereo_ground_profile.csv"),
@@ -1728,6 +1763,7 @@ struct FrontendState {
     per_pair_translation_m: Vec<f64>,
     kabsch_inlier_counts: Vec<usize>,
     pair_diagnostics: Vec<StereoVoPairDiagnostics>,
+    depth_gate_diagnostics: Vec<StereoDepthGateDiagnostics>,
 }
 
 #[cfg(feature = "image-io")]
@@ -1758,6 +1794,7 @@ fn run_stereo_vo_frontend(
                 per_pair_translation_m: frontend.per_pair_translation_m,
                 kabsch_inlier_counts: frontend.kabsch_inlier_counts,
                 pair_diagnostics: frontend.pair_diagnostics,
+                depth_gate_diagnostics: frontend.stereo_depth_gate_diagnostics,
             })
         }
         StereoFrontendChoice::Deep => {
@@ -1792,6 +1829,7 @@ fn run_stereo_vo_frontend(
                 per_pair_translation_m: frontend.per_pair_translation_m,
                 kabsch_inlier_counts: frontend.kabsch_inlier_counts,
                 pair_diagnostics: frontend.pair_diagnostics,
+                depth_gate_diagnostics: frontend.stereo_depth_gate_diagnostics,
             })
         }
     }
@@ -1911,6 +1949,32 @@ kabsch_mean_residual_m\n",
             row.rotation_vector_rescued,
             optional_f64(row.pnp_mean_reprojection_error_px),
             optional_f64(row.kabsch_mean_residual_m),
+        ));
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+#[cfg(feature = "image-io")]
+fn write_depth_gate_diagnostics_csv(
+    path: &Path,
+    diagnostics: &[StereoDepthGateDiagnostics],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut text = String::from(
+        "frame_id,adaptive,candidates,accepted,effective_min_depth_m,effective_max_depth_m,\
+depth_quantile_m,disparity_uncertainty_min_px\n",
+    );
+    for (frame_id, row) in diagnostics.iter().enumerate() {
+        text.push_str(&format!(
+            "{},{},{},{},{:.6},{:.6},{},{}\n",
+            frame_id,
+            row.adaptive,
+            row.candidate_count,
+            row.accepted_count,
+            row.effective_min_depth_m,
+            row.effective_max_depth_m,
+            optional_f64(row.depth_quantile_m),
+            optional_f64(row.disparity_uncertainty_min_px),
         ));
     }
     fs::write(path, text)?;
