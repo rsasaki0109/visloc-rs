@@ -1,0 +1,14 @@
+# Benchmark Claim Matrix
+
+Generated from `benchmarks/registry/claim_matrix_v1.json`. This matrix keeps comparison claims scoped by sequence, sensor mode, metric, protocol, and evidence class. A `behind` verdict is an explicit non-win, not a marketing claim.
+
+| comparison | mode / protocol | visloc | reference | verdict | evidence |
+| --- | --- | ---: | ---: | --- | --- |
+| EuRoC MH_03 loop-closure pipeline<br>ORB-SLAM3 | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs ORB-SLAM3 published Table II | 0.057 m | ORB-SLAM3 0.024 m | behind<br>Current public claim is within ~2.4x of ORB-SLAM3, not a win. | docs: docs/euroc_loop_closure_benchmark.md |
+| EuRoC MH_03 loop-closure pipeline<br>OV2SLAM | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs OV2SLAM published real-time accuracy | 0.057 m | OV2SLAM 0.04 m | near<br>Same accuracy regime, but not a strict win on MH_03. | docs: docs/euroc_loop_closure_benchmark.md |
+| EuRoC MH_03 loop-closure pipeline<br>VINS-Fusion stereo | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs VINS-Fusion stereo published row | 0.057 m | VINS-Fusion stereo 0.33 m | win<br>Documented EuRoC stereo-only comparison; do not mix with tight VIO claims. | docs: docs/euroc_loop_closure_benchmark.md |
+| EuRoC MH_05 loop-closure pipeline<br>ORB-SLAM3 | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs ORB-SLAM3 published Table II | 0.072 m | ORB-SLAM3 0.052 m | behind<br>Closest documented ORB-SLAM3 gap in the current public EuRoC table: within ~1.4x. | docs: docs/euroc_loop_closure_benchmark.md |
+| EuRoC MH_05 loop-closure pipeline<br>OV2SLAM | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs OV2SLAM published real-time accuracy | 0.072 m | OV2SLAM 0.07 m | near<br>Effectively OV2SLAM-class on this public row. | docs: docs/euroc_loop_closure_benchmark.md |
+| EuRoC MH_05 loop-closure pipeline<br>VINS-Fusion stereo | stereo visual<br>ATE RMSE SE(3), m<br>visloc loop-closure + BA pipeline vs VINS-Fusion stereo published row | 0.072 m | VINS-Fusion stereo 0.50 m | win<br>Documented EuRoC stereo-only comparison; do not mix with tight VIO claims. | docs: docs/euroc_loop_closure_benchmark.md |
+| KITTI odometry seq00<br>ORB-SLAM2 | stereo visual<br>ATE RMSE SE(3), m<br>visloc uniform full-stack config over KITTI 00/02/05/06/07/09 vs ORB-SLAM2 published Table I | 1.23 m | ORB-SLAM2 1.3 m | win<br>Narrow per-sequence win against published non-real-time ORB-SLAM2 ATE, not an ORB-SLAM3 or leaderboard claim. | docs: docs/kitti_multiseq_benchmark.md |
+| KITTI odometry seq09<br>ORB-SLAM2 | stereo visual<br>ATE RMSE SE(3), m<br>visloc uniform full-stack config over KITTI 00/02/05/06/07/09 vs ORB-SLAM2 published Table I | 2.07 m | ORB-SLAM2 3.2 m | win<br>Narrow per-sequence win against published ORB-SLAM2 ATE. | docs: docs/kitti_multiseq_benchmark.md |

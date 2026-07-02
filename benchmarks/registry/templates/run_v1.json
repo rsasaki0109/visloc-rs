@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "run_id": "benchmark-id-sequence-YYYYMMDDTHHMMSSZ",
+  "created_utc": "YYYY-MM-DDTHH:MM:SSZ",
+  "result_kind": "visloc_run",
+  "claim_scope": "exploratory",
+  "status": "success",
+  "failure_reason": null,
+  "benchmark": {
+    "id": "kitti-multiseq",
+    "name": "KITTI multi-sequence full-stack stereo SLAM",
+    "script": "scripts/run_kitti_multiseq_benchmark.sh",
+    "protocol": "uniform full-stack config, sequence-level ATE and KITTI odometry metrics",
+    "docs": ["docs/kitti_multiseq_benchmark.md"]
+  },
+  "dataset": {
+    "name": "KITTI odometry",
+    "sequence": "00",
+    "version": "odometry color/grayscale 2012",
+    "path": null,
+    "checksum": null,
+    "checksum_method": null
+  },
+  "git": {
+    "commit": null,
+    "branch": null,
+    "dirty": false
+  },
+  "build": {
+    "cargo_lock_sha256": null,
+    "rustc": null,
+    "cargo": null,
+    "features": ["image-io"],
+    "profile": "release",
+    "target": null
+  },
+  "command": {
+    "raw": null,
+    "argv": [],
+    "cwd": null
+  },
+  "hardware": {
+    "os": null,
+    "machine": null,
+    "processor": null,
+    "hostname": null,
+    "gpu": null,
+    "notes": null
+  },
+  "config": {
+    "seed": null,
+    "params": {},
+    "config_files": []
+  },
+  "models": [],
+  "metrics": [
+    {
+      "name": "ate_rmse_se3_m",
+      "value": 1.23,
+      "unit": "m",
+      "primary": true,
+      "implementation": "Umeyama SE(3) ATE RMSE",
+      "source_artifact": "ate_eval/error_summary.json"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "trajectory",
+      "path": "target/kitti_multiseq/seq00/full/vo_poses.txt",
+      "sha256": null,
+      "exists": false
+    }
+  ],
+  "notes": "Template only. Use scripts/benchmark_registry.py capture for real runs."
+}

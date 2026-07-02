@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rsasaki0109.github.io/visloc-rs/benchmarks/registry/schema_v1.json",
+  "title": "visloc-rs benchmark run manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_utc",
+    "result_kind",
+    "claim_scope",
+    "status",
+    "benchmark",
+    "dataset",
+    "git",
+    "build",
+    "command",
+    "hardware",
+    "config",
+    "models",
+    "metrics",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "created_utc": { "type": "string" },
+    "result_kind": {
+      "enum": ["visloc_run", "external_published", "external_rerun", "exploratory"]
+    },
+    "claim_scope": {
+      "enum": ["headline", "supporting", "exploratory", "negative"]
+    },
+    "status": { "enum": ["success", "dnf", "failure"] },
+    "failure_reason": { "type": ["string", "null"] },
+    "benchmark": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "script": { "type": ["string", "null"] },
+        "protocol": { "type": ["string", "null"] },
+        "docs": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "dataset": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "sequence": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "checksum": { "type": ["string", "null"] },
+        "checksum_method": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "git": {
+      "type": "object",
+      "required": ["commit", "dirty"],
+      "properties": {
+        "commit": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "dirty": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "build": {
+      "type": "object",
+      "required": ["cargo_lock_sha256", "features"],
+      "properties": {
+        "cargo_lock_sha256": { "type": ["string", "null"] },
+        "rustc": { "type": ["string", "null"] },
+        "cargo": { "type": ["string", "null"] },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "profile": { "type": ["string", "null"] },
+        "target": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "command": {
+      "type": "object",
+      "required": ["raw", "argv", "cwd"],
+      "properties": {
+        "raw": { "type": ["string", "null"] },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "hardware": {
+      "type": "object",
+      "required": ["os", "machine"],
+      "properties": {
+        "os": { "type": "string" },
+        "machine": { "type": "string" },
+        "processor": { "type": ["string", "null"] },
+        "hostname": { "type": ["string", "null"] },
+        "gpu": { "type": ["string", "null"] },
+        "notes": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "config": {
+      "type": "object",
+      "required": ["seed", "params", "config_files"],
+      "properties": {
+        "seed": { "type": ["string", "number", "integer", "null"] },
+        "params": { "type": "object" },
+        "config_files": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "sha256", "exists"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": ["string", "null"] },
+          "exists": { "type": "boolean" },
+          "source": { "type": ["string", "null"] },
+          "license": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "value", "unit", "primary", "implementation", "source_artifact"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": {},
+          "unit": { "type": ["string", "null"] },
+          "primary": { "type": "boolean" },
+          "implementation": { "type": ["string", "null"] },
+          "source_artifact": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path", "sha256", "exists"],
+        "properties": {
+          "kind": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": ["string", "null"] },
+          "exists": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "notes": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}
