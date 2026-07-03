@@ -1,0 +1,355 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate\\slam_trajectory.csv",
+      "sha256": "f8a10a4e4456d4e790d8d9df2663edd7fba2de655a63c65b6b54d044210a3191"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate\\slam_errors.csv",
+      "sha256": "8a5d3331b06073ec992a2751838fa3a2cce1a7a43bb9117307ccd77ce766bddc"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate\\summary.txt",
+      "sha256": "6daa3b5de53f442fce575b07e3e20a85d979a1de8e743e357d8f4e7b8e9d93ce"
+    },
+    {
+      "exists": true,
+      "kind": "covisibility_ba_log",
+      "path": "C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate\\covisibility_ba_log.txt",
+      "sha256": "cca744995478b63db11a7ca37803523154b23634bbc5a5fc5f6b1392c6ef576d"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/motion_based_vi_alignment.md",
+      "docs/generated/euroc_covisibility_mh05_writeback_gate.md"
+    ],
+    "id": "euroc-covisibility-local-ba",
+    "name": "EuRoC online SLAM covisibility local BA A/B",
+    "protocol": "disabled/enabled_nogate/enabled_gate OnlineSlamConfig::covisibility_local_ba A/B/C on identical EuRoC image/IMU command; enabled_gate additionally sets CovisibilityLocalBaConfig::max_behind_camera_landmark_ratio and min_fixed_to_optimized_ratio write-back conditioning gates",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+    "features": [
+      "image-io"
+    ],
+    "profile": "dev",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "cargo",
+      "run",
+      "--features",
+      "image-io",
+      "--example",
+      "euroc_online_slam_vi_image_demo",
+      "--",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult",
+      "--out-dir",
+      "C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate",
+      "--max-frames",
+      "400",
+      "--gravity",
+      "0,0,-9.81",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--stereo-bootstrap-strict",
+      "--covisibility-local-ba",
+      "--covisibility-local-ba-min-keyframes",
+      "3",
+      "--covisibility-local-ba-trigger-every",
+      "1",
+      "--covisibility-local-ba-max-neighbor-keyframes",
+      "10",
+      "--covisibility-local-ba-min-shared",
+      "15",
+      "--covisibility-local-ba-max-boundary-keyframes",
+      "10",
+      "--covisibility-local-ba-min-boundary-observations",
+      "5",
+      "--covisibility-local-ba-fallback-min-boundary-observations",
+      "none",
+      "--covisibility-local-ba-min-active-observations",
+      "20",
+      "--covisibility-local-ba-outlier-threshold-px",
+      "5.0",
+      "--covisibility-local-ba-max-landmarks",
+      "200"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "cargo run --features image-io --example euroc_online_slam_vi_image_demo -- --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult --out-dir C:\\Users\\rsasa\\Workspace\\visloc-rs\\target\\covis_gate_verify\\MH_05_difficult\\enabled_nogate --max-frames 400 --gravity 0,0,-9.81 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --max-pose-jump-meters 0.2 --stereo-bootstrap-strict --covisibility-local-ba --covisibility-local-ba-min-keyframes 3 --covisibility-local-ba-trigger-every 1 --covisibility-local-ba-max-neighbor-keyframes 10 --covisibility-local-ba-min-shared 15 --covisibility-local-ba-max-boundary-keyframes 10 --covisibility-local-ba-min-boundary-observations 5 --covisibility-local-ba-fallback-min-boundary-observations none --covisibility-local-ba-min-active-observations 20 --covisibility-local-ba-outlier-threshold-px 5.0 --covisibility-local-ba-max-landmarks 200"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "covisibility_local_ba_boundary_support_min_fixed_keyframes": 0,
+      "covisibility_local_ba_boundary_support_min_optimized_keyframes": "none",
+      "covisibility_local_ba_fallback_min_boundary_observations": "none",
+      "covisibility_local_ba_max_behind_camera_ratio": "none",
+      "covisibility_local_ba_max_boundary_keyframes": 10,
+      "covisibility_local_ba_max_landmarks": 200,
+      "covisibility_local_ba_max_neighbor_keyframes": 10,
+      "covisibility_local_ba_max_outlier_observation_ratio": "none",
+      "covisibility_local_ba_min_active_observations": 20,
+      "covisibility_local_ba_min_boundary_observations": 5,
+      "covisibility_local_ba_min_fixed_to_optimized_ratio": "none",
+      "covisibility_local_ba_min_keyframes": 3,
+      "covisibility_local_ba_min_shared": 15,
+      "covisibility_local_ba_outlier_threshold_px": 5.0,
+      "covisibility_local_ba_remove_outliers": "False",
+      "covisibility_local_ba_trigger_every": 1,
+      "demo_args": "--gravity 0,0,-9.81 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --max-pose-jump-meters 0.2 --stereo-bootstrap-strict",
+      "max_frames": 400,
+      "variant": "writeback_gate_enabled_nogate"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-03T00:00:00Z",
+  "dataset": {
+    "checksum": "not-computed",
+    "checksum_method": "not-computed-post-hoc-manifest",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_05_difficult",
+    "sequence": "MH_05_difficult",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "e3fda4e8a36b717605c9c71d66933f7c8f1a6e71",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.1683
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0888
+    },
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.22
+    },
+    {
+      "implementation": null,
+      "name": "frames_recorded",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 400
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 19
+    },
+    {
+      "implementation": null,
+      "name": "map_landmarks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 140
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_triggers",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 17
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 11
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_active_observation_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_boundary_fallback_active_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_quality_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_boundary_support_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_behind_camera_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_fixed_ratio_gate_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_no_local_landmarks_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 11
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_no_observations_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_solver_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_other_failures",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_boundary_fallback_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_mean_reprojection_before_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.565147982811547
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_mean_reprojection_after_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.23378220349665657
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_total",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 12.5635
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_mean",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 0.739029411764706
+    },
+    {
+      "implementation": null,
+      "name": "covisibility_local_ba_elapsed_ms_max",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ms",
+      "value": 4.119
+    }
+  ],
+  "models": [],
+  "notes": "Verified-negative covisibility-local-BA write-back gate evidence (PR #37 follow-up). Enabled arm with both write-back gates off (covisibility_local_ba_max_behind_camera_ratio=none, covisibility_local_ba_min_fixed_to_optimized_ratio=none). Manifest reconstructed post-hoc from completed target/covis_gate_verify run artifacts; dataset checksum intentionally not recomputed.",
+  "result_kind": "visloc_run",
+  "run_id": "euroc-covisibility-local-ba-writeback_gate_enabled_nogate-MH_05_difficult-20260703T000000Z",
+  "schema_version": 1,
+  "status": "success"
+}

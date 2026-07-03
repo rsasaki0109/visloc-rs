@@ -186,6 +186,7 @@ python -m unittest \
   tests.test_summarize_euroc_covisibility_ab \
   tests.test_summarize_euroc_covisibility_mh05_boundary_support_gate \
   tests.test_summarize_euroc_covisibility_mh05_mitigation \
+  tests.test_summarize_euroc_covisibility_mh05_writeback_gate \
   tests.test_summarize_euroc_covisibility_runtime_sweep \
   tests.test_summarize_euroc_covisibility_window_sweep
 python scripts/benchmark_registry.py check-generated

@@ -757,6 +757,20 @@ Completed pieces:
   rejects into cheaper boundary-support rejects and reducing mean trigger time
   from `304.495 ms` to `254.946 ms`. This is exploratory evidence for one
   failure mode, not a default-policy or headline benchmark claim.
+- Covisibility local BA gained two opt-in write-back conditioning gates,
+  `--covisibility-local-ba-max-behind-camera-ratio` and
+  `--covisibility-local-ba-min-fixed-to-optimized-ratio`, and the follow-up
+  400-frame MH_01/MH_03/MH_05
+  [write-back gate verification](generated/euroc_covisibility_mh05_writeback_gate.md)
+  is a verified-negative result: the gates cannot make covisibility local BA
+  beat the disabled baseline on all three sequences at once. MH_01 and MH_03
+  win or nearly win, but MH_05 still regresses (`0.565` disabled vs `0.258`
+  enabled+gate) because the behind-camera gate never fires on any sequence at
+  this ratio (the corrupting solves keep low post-BA reprojection error, so
+  the failure is global drift from locally-consistent solves, not
+  behind-camera degeneracy) and the fixed-ratio gate only reaches MH_05 parity
+  at a no-op setting that rejects every solve. Covisibility local BA remains
+  an explicit opt-in feature, not a default-safe one.
 - `visloc_slam::refine_stereo_vo_with_ba` provides a multi-frame Schur BA
   refiner that lifts a stereo VO trajectory by chaining per-pair temporal
   matches into forward feature tracks, initialising each landmark from its
