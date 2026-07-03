@@ -130,6 +130,9 @@ Primary paths:
 - `scripts/summarize_sfm_vs_colmap.py`
 - `docs/generated/sfm_vs_colmap_headtohead.md`
 - `tests/test_summarize_sfm_vs_colmap.py`
+- `scripts/summarize_inprocess_deep_slam.py`
+- `docs/generated/inprocess_deep_slam_wallclock.md`
+- `tests/test_summarize_inprocess_deep_slam.py`
 
 Change set (2026-07-03): Phase 2 of `docs/next_development_plan.md` formalizes
 the existing EuRoC MH_03_medium SfM-vs-COLMAP head-to-head
@@ -141,12 +144,25 @@ COLMAP arm is an explicitly provenance-marked prior-run reference
 (`result_kind=external_rerun`), not reproduced this session; no new numbers
 were measured.
 
+Change set (2026-07-03): Phase 3 of `docs/next_development_plan.md` formalizes
+the existing single-binary in-process deep-stereo-SLAM end-to-end wall-clock
+result (`docs/inprocess_slam_benchmark.md`, EuRoC MH_03_medium, 2700-frame) as
+registry evidence: two run manifests under
+`benchmarks/registry/runs/euroc/inprocess-deep-slam-*`, the
+`summarize_inprocess_deep_slam.py` summarizer wired into `check-generated`,
+and the generated `docs/generated/inprocess_deep_slam_wallclock.md` table
+(front-end, dependency, wall-clock, verified loops, ATE SE(3), ATE Sim(3)).
+Both arms (in-process ONNX vs file-based pre-export) are an explicitly
+provenance-marked documented prior GPU run (Windows CUDA ONNX Runtime
+provider DLLs, cuDNN 9, and a PyTorch export are all needed for a local
+re-run and are impractical for this pass); no new numbers were measured.
+
 Validation:
 
 ```sh
 python scripts/benchmark_registry.py validate benchmarks/registry/readme_claims_v1.json benchmarks/registry/claim_matrix_v1.json benchmarks/registry/runs
 python scripts/benchmark_registry.py check-generated
-python -m unittest tests.test_benchmark_registry tests.test_capture_kitti_multiseq_run tests.test_capture_kitti_loop_retrieval_recall tests.test_summarize_sfm_vs_colmap
+python -m unittest tests.test_benchmark_registry tests.test_capture_kitti_multiseq_run tests.test_capture_kitti_loop_retrieval_recall tests.test_summarize_sfm_vs_colmap tests.test_summarize_inprocess_deep_slam
 ```
 
 Residual risk:

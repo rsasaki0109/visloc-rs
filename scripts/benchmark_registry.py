@@ -62,6 +62,11 @@ from summarize_sfm_vs_colmap import (
     missing_expected_runs as missing_sfm_vs_colmap_runs,
     render as render_sfm_vs_colmap,
 )
+from summarize_inprocess_deep_slam import (
+    load_latest_runs as load_inprocess_deep_slam_runs,
+    missing_expected_runs as missing_inprocess_deep_slam_runs,
+    render as render_inprocess_deep_slam,
+)
 from summarize_euroc_covisibility_runtime_sweep import (
     load_latest_runs as load_covisibility_runtime_runs,
     missing_expected_runs as missing_covisibility_runtime_runs,
@@ -781,6 +786,13 @@ def check_generated(args: argparse.Namespace) -> int:
             "docs/generated/sfm_vs_colmap_headtohead.md",
         )
     )
+    inprocess_deep_slam_path = Path(
+        getattr(
+            args,
+            "inprocess_deep_slam",
+            "docs/generated/inprocess_deep_slam_wallclock.md",
+        )
+    )
     registry_dir = args.registry_dir
 
     claims = json.loads(claims_path.read_text(encoding="utf-8"))
@@ -1218,6 +1230,26 @@ def check_generated(args: argparse.Namespace) -> int:
         sfm_vs_colmap_args,
         sfm_vs_colmap_runs,
     )
+    inprocess_deep_slam_args = argparse.Namespace(
+        registry_dir=Path(
+            getattr(
+                args,
+                "inprocess_deep_slam_registry_dir",
+                "benchmarks/registry/runs/euroc",
+            )
+        ),
+        out=inprocess_deep_slam_path,
+        sequence=getattr(args, "inprocess_deep_slam_sequence", "MH_03_medium"),
+    )
+    inprocess_deep_slam_runs = load_inprocess_deep_slam_runs(inprocess_deep_slam_args)
+    expected_inprocess_deep_slam = render_inprocess_deep_slam(
+        inprocess_deep_slam_args,
+        inprocess_deep_slam_runs,
+    )
+    missing_inprocess_deep_slam = missing_inprocess_deep_slam_runs(
+        inprocess_deep_slam_args,
+        inprocess_deep_slam_runs,
+    )
 
     stale = 0
     if readme_path.read_text(encoding="utf-8") != expected_readme:
@@ -1534,6 +1566,26 @@ def check_generated(args: argparse.Namespace) -> int:
             print(f"  engine={engine}", file=sys.stderr)
         print(
             "  regenerate with the visloc and colmap sfm-vs-colmap MH_03_medium runs",
+            file=sys.stderr,
+        )
+        stale = 1
+    if (
+        not inprocess_deep_slam_path.exists()
+        or inprocess_deep_slam_path.read_text(encoding="utf-8") != expected_inprocess_deep_slam
+    ):
+        report_stale(
+            inprocess_deep_slam_path,
+            "python scripts/summarize_inprocess_deep_slam.py "
+            f"--registry-dir {inprocess_deep_slam_args.registry_dir} "
+            f"--out {inprocess_deep_slam_path}",
+        )
+        stale = 1
+    if missing_inprocess_deep_slam:
+        print("missing inprocess-deep-slam-wallclock registry run(s):", file=sys.stderr)
+        for frontend in missing_inprocess_deep_slam:
+            print(f"  frontend={frontend}", file=sys.stderr)
+        print(
+            "  regenerate with the onnx and file_based inprocess-deep-slam MH_03_medium runs",
             file=sys.stderr,
         )
         stale = 1
@@ -1925,6 +1977,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="benchmarks/registry/runs/euroc",
     )
     gen.add_argument("--sfm-vs-colmap-sequence", default="MH_03_medium")
+    gen.add_argument(
+        "--inprocess-deep-slam",
+        default="docs/generated/inprocess_deep_slam_wallclock.md",
+    )
+    gen.add_argument(
+        "--inprocess-deep-slam-registry-dir",
+        default="benchmarks/registry/runs/euroc",
+    )
+    gen.add_argument("--inprocess-deep-slam-sequence", default="MH_03_medium")
     gen.set_defaults(func=check_generated)
     return parser
 

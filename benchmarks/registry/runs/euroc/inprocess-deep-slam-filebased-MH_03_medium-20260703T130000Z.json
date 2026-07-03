@@ -1,0 +1,146 @@
+{
+ "artifacts": [
+  {
+   "exists": true,
+   "kind": "benchmark_doc",
+   "path": "docs/inprocess_slam_benchmark.md",
+   "sha256": "24d6133e09ded34bf9d547ce3a57b06669f63f58b9e19950adbc2a516ccf42f6"
+  },
+  {
+   "exists": true,
+   "kind": "3dgs_figure",
+   "path": "docs/assets/deep_stereo_slam_v203_3dgs.png",
+   "sha256": "11223c1b46390a293cedf98809621bef826fc29ed88dd2a3d577be94c7702483"
+  }
+ ],
+ "benchmark": {
+  "docs": [
+   "docs/inprocess_slam_benchmark.md",
+   "docs/generated/inprocess_deep_slam_wallclock.md"
+  ],
+  "id": "inprocess-deep-slam-wallclock",
+  "name": "Single-binary deep stereo SLAM: in-process ONNX vs file-based front-end, end-to-end wall-clock (EuRoC MH_03_medium)",
+  "protocol": "Same rectified EuRoC MH_03_medium 2700-frame stereo image stream driven through the same Rust binary (stereo_vo_external_deep_files) and the same loop-closure/BA configuration (--online-ba --online-ba-window 10 --online-ba-history 20 --loop-closure --loop-min-frame-gap 200 --loop-two-view-ba --loop-edge-information), varying only where features and matches come from: --in-process-onnx computes SuperPoint + LightGlue per frame in-process via ONNX Runtime (GPU); the file-based comparator reads pre-exported --features-dir features (Python + PyTorch export, about 30 GB on disk). Both trajectories are scored with the same evo_ape against the timestamped Vicon/Leica ground truth.",
+  "script": "examples/stereo_vo_external_deep_files"
+ },
+ "build": {
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+  "features": [
+   "image-io"
+  ],
+  "profile": "release",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "target": null
+ },
+ "claim_scope": "supporting",
+ "command": {
+  "argv": [
+   "stereo_vo_external_deep_files",
+   "--images-dir",
+   "/tmp/MH_03_rect",
+   "--calib",
+   "/tmp/MH_03_rect/calib.txt",
+   "--features-dir",
+   "/tmp/sp_lg_MH_03",
+   "--frames",
+   "2700",
+   "--online-ba",
+   "--online-ba-window",
+   "10",
+   "--online-ba-history",
+   "20",
+   "--loop-closure",
+   "--loop-min-frame-gap",
+   "200",
+   "--loop-two-view-ba",
+   "--loop-edge-information",
+   "--out-dir",
+   "target/deep_slam_mh03_file_based"
+  ],
+  "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+  "raw": "stereo_vo_external_deep_files --images-dir /tmp/MH_03_rect --calib /tmp/MH_03_rect/calib.txt --features-dir /tmp/sp_lg_MH_03 --frames 2700 --online-ba --online-ba-window 10 --online-ba-history 20 --loop-closure --loop-min-frame-gap 200 --loop-two-view-ba --loop-edge-information --out-dir target/deep_slam_mh03_file_based  # documented prior GPU run invocation; NOT re-run in this session"
+ },
+ "config": {
+  "config_files": [],
+  "params": {
+   "frames": 2700,
+   "frontend": "file_based",
+   "loop_closure_config": "--online-ba --online-ba-window 10 --online-ba-history 20 --loop-closure --loop-min-frame-gap 200 --loop-two-view-ba --loop-edge-information",
+   "sensor_mode": "stereo",
+   "sequence": "MH_03_medium"
+  },
+  "seed": null
+ },
+ "created_utc": "2026-07-03T13:00:00Z",
+ "dataset": {
+  "checksum": "not-computed",
+  "checksum_method": "not-computed-post-hoc-manifest",
+  "name": "EuRoC MAV",
+  "path": null,
+  "sequence": "MH_03_medium",
+  "version": "ASL EuRoC MAV dataset, full 2700 frames"
+ },
+ "failure_reason": null,
+ "git": {
+  "branch": "docs/inprocess-deep-slam-wallclock-registry",
+  "commit": "e19cb9b747a37e016fc89703a9f12bec1397509c",
+  "dirty": true
+ },
+ "hardware": {
+  "gpu": "NVIDIA CUDA GPU (same documented prior-run machine as the in-process arm; this file-based arm does not exercise the CUDA ONNX Runtime provider)",
+  "hostname": "DESKTOP-PTSK105",
+  "machine": "AMD64",
+  "notes": "Windows CUDA ONNX Runtime provider DLLs + cuDNN 9 are not set up in this session, so this GPU run is not reproduced locally; see notes/provenance below.",
+  "os": "Windows-11-10.0.26300-SP0",
+  "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+ },
+ "metrics": [
+  {
+   "implementation": "stereo_vo_external_deep_files --features-dir reading pre-exported Python/PyTorch SuperPoint + LightGlue features from disk (about 30 GB dump), same --online-ba --loop-closure config",
+   "name": "wall_clock",
+   "primary": true,
+   "source_artifact": "docs/inprocess_slam_benchmark.md",
+   "unit": "s",
+   "value": 289
+  },
+  {
+   "implementation": null,
+   "name": "verified_loops",
+   "primary": false,
+   "source_artifact": "docs/inprocess_slam_benchmark.md",
+   "unit": "count",
+   "value": 319
+  },
+  {
+   "implementation": "evo_ape, SE(3) rigid alignment against Vicon/Leica ground truth",
+   "name": "ate_se3",
+   "primary": true,
+   "source_artifact": "docs/inprocess_slam_benchmark.md",
+   "unit": "m",
+   "value": 0.066
+  },
+  {
+   "implementation": "evo_ape, Sim(3) alignment against Vicon/Leica ground truth",
+   "name": "ate_sim3",
+   "primary": false,
+   "source_artifact": "docs/inprocess_slam_benchmark.md",
+   "unit": "m",
+   "value": 0.057
+  },
+  {
+   "implementation": null,
+   "name": "dependency",
+   "primary": false,
+   "source_artifact": "docs/inprocess_slam_benchmark.md",
+   "unit": null,
+   "value": "Python + PyTorch + ~30 GB feature dump"
+  }
+ ],
+ "models": [],
+ "notes": "Phase 3 registry formalization of the existing single-binary in-process deep-stereo-SLAM end-to-end wall-clock result documented in docs/inprocess_slam_benchmark.md (EuRoC MH_03_medium, full 2700 frames). This is the file-based comparator arm: stereo_vo_external_deep_files reads pre-exported SuperPoint + LightGlue features from --features-dir, produced by a separate Python + PyTorch export pass and stored as an about-30-GB on-disk feature dump; identical downstream windowed online BA, loop closure, and pose-graph optimization as the in-process ONNX arm. PROVENANCE: this manifest formalizes a documented prior GPU run (docs/inprocess_slam_benchmark.md); it is NOT reproduced in this session. A local re-run needs Windows CUDA ONNX Runtime provider DLLs plus cuDNN 9 plus a PyTorch SuperPoint/LightGlue ONNX export, which is impractical for this evidence-formalization pass. ACCURACY CAVEAT: the two arms are NOT bit-identical. The file-based features were exported by a separate Python SuperPoint pass, so the keypoint sets differ slightly from the in-process ONNX export's own selection (top-1500 above a 0.005 score gate); given the same features, the ONNX LightGlue matches ARE bit-identical to the Python reference (1500/1500 indices agree, docs/lightglue_onnx_benchmark.md). The small ATE difference between the two arms is therefore attributable to the front-end's keypoint selection, not the matcher. Both arms land within about 2.4x of ORB-SLAM3 on this flight.",
+ "result_kind": "visloc_run",
+ "run_id": "inprocess-deep-slam-filebased-MH_03_medium-20260703T130000Z",
+ "schema_version": 1,
+ "status": "success"
+}

@@ -21,6 +21,26 @@ limitations, and runnable tests rather than by a completion percentage.
 
 Completed pieces:
 
+- **Phase 3 (next_development_plan.md) — single-binary deep-SLAM wall-clock
+  is now registry-backed.** The existing end-to-end wall-clock result
+  documented in `docs/inprocess_slam_benchmark.md` (EuRoC MH_03_medium,
+  2700-frame, in-process ONNX SuperPoint+LightGlue vs file-based pre-export)
+  is formalized as two run manifests under `benchmarks/registry/runs/euroc/`
+  (`inprocess-deep-slam-onnx-...`, `inprocess-deep-slam-filebased-...`), a new
+  `scripts/summarize_inprocess_deep_slam.py` summarizer wired into
+  `scripts/benchmark_registry.py check-generated`, and the generated table in
+  `docs/generated/inprocess_deep_slam_wallclock.md` (front-end, dependency,
+  wall-clock, verified loops, ATE SE(3), ATE Sim(3)). This is a docs/evidence
+  pass only — this GPU run needs Windows CUDA ONNX Runtime provider DLLs,
+  cuDNN 9, and a PyTorch SuperPoint/LightGlue ONNX export, all impractical to
+  set up locally, so both manifests are an explicitly provenance-marked
+  documented prior GPU run, not reproduced this session; no new numbers were
+  measured. The generated doc keeps the existing honest caveats: the two arms
+  are not bit-identical (the file-based keypoint sets differ from the
+  separate Python SuperPoint export pass, though the ONNX LightGlue matcher
+  is bit-identical to the Python reference given the same features), and both
+  land within ~2.4x of ORB-SLAM3 on this flight. README's single-binary deep
+  stereo pipeline row now links to the generated doc.
 - **Phase 2 (next_development_plan.md) — SfM-vs-COLMAP head-to-head is now
   registry-backed.** The existing EuRoC MH_03_medium (2700-frame) head-to-head
   documented in `docs/sfm_vs_colmap_benchmark.md` is formalized as two run
