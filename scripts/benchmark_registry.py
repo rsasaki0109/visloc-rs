@@ -52,6 +52,11 @@ from summarize_euroc_covisibility_mh05_boundary_support_gate import (
     parse_gate as parse_covisibility_mh05_boundary_support_gate,
     render as render_covisibility_mh05_boundary_support_gate,
 )
+from summarize_euroc_covisibility_mh05_writeback_gate import (
+    load_latest_runs as load_covisibility_mh05_writeback_gate_runs,
+    missing_expected_runs as missing_covisibility_mh05_writeback_gate_runs,
+    render as render_covisibility_mh05_writeback_gate,
+)
 from summarize_euroc_covisibility_runtime_sweep import (
     load_latest_runs as load_covisibility_runtime_runs,
     missing_expected_runs as missing_covisibility_runtime_runs,
@@ -757,6 +762,13 @@ def check_generated(args: argparse.Namespace) -> int:
     covisibility_mh05_boundary_support_gate_sweep_path = Path(
         args.covisibility_mh05_boundary_support_gate_sweep
     )
+    covisibility_mh05_writeback_gate_path = Path(
+        getattr(
+            args,
+            "covisibility_mh05_writeback_gate",
+            "docs/generated/euroc_covisibility_mh05_writeback_gate.md",
+        )
+    )
     registry_dir = args.registry_dir
 
     claims = json.loads(claims_path.read_text(encoding="utf-8"))
@@ -1144,6 +1156,36 @@ def check_generated(args: argparse.Namespace) -> int:
             covisibility_mh05_boundary_support_gate_sweep_runs,
         )
     )
+    mh05_writeback_gate_args = argparse.Namespace(
+        registry_dir=Path(
+            getattr(
+                args,
+                "covisibility_mh05_writeback_gate_registry_dir",
+                "benchmarks/registry/runs/euroc",
+            )
+        ),
+        out=covisibility_mh05_writeback_gate_path,
+        sequence=getattr(args, "covisibility_mh05_writeback_gate_sequence", None)
+        or ["MH_01_easy", "MH_03_medium", "MH_05_difficult"],
+        max_frames=getattr(args, "covisibility_mh05_writeback_gate_max_frames", 400),
+        max_behind_camera_ratio=getattr(
+            args, "covisibility_mh05_writeback_gate_max_behind_camera_ratio", "0.3"
+        ),
+        min_fixed_to_optimized_ratio=getattr(
+            args, "covisibility_mh05_writeback_gate_min_fixed_to_optimized_ratio", "0.34"
+        ),
+    )
+    covisibility_mh05_writeback_gate_runs = load_covisibility_mh05_writeback_gate_runs(
+        mh05_writeback_gate_args,
+    )
+    expected_covisibility_mh05_writeback_gate = render_covisibility_mh05_writeback_gate(
+        mh05_writeback_gate_args,
+        covisibility_mh05_writeback_gate_runs,
+    )
+    missing_covisibility_mh05_writeback_gate = missing_covisibility_mh05_writeback_gate_runs(
+        mh05_writeback_gate_args,
+        covisibility_mh05_writeback_gate_runs,
+    )
 
     stale = 0
     if readme_path.read_text(encoding="utf-8") != expected_readme:
@@ -1419,6 +1461,27 @@ def check_generated(args: argparse.Namespace) -> int:
             print(f"  config={label}", file=sys.stderr)
         print(
             "  regenerate with the MH_05 quality-gate-only, boundary7/2, and boundary10/2 covisibility runs",
+            file=sys.stderr,
+        )
+        stale = 1
+    if (
+        not covisibility_mh05_writeback_gate_path.exists()
+        or covisibility_mh05_writeback_gate_path.read_text(encoding="utf-8")
+        != expected_covisibility_mh05_writeback_gate
+    ):
+        report_stale(
+            covisibility_mh05_writeback_gate_path,
+            "python scripts/summarize_euroc_covisibility_mh05_writeback_gate.py "
+            f"--registry-dir {args.covisibility_mh05_writeback_gate_registry_dir} "
+            f"--out {covisibility_mh05_writeback_gate_path}",
+        )
+        stale = 1
+    if missing_covisibility_mh05_writeback_gate:
+        print("missing covisibility MH_05 write-back gate registry run(s):", file=sys.stderr)
+        for sequence, variant in missing_covisibility_mh05_writeback_gate:
+            print(f"  sequence={sequence} variant={variant}", file=sys.stderr)
+        print(
+            "  regenerate with the disabled/enabled_nogate/enabled_gate covis_gate_verify runs",
             file=sys.stderr,
         )
         stale = 1
@@ -1781,6 +1844,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         type=parse_covisibility_mh05_boundary_support_gate,
         default=None,
+    )
+    gen.add_argument(
+        "--covisibility-mh05-writeback-gate",
+        default="docs/generated/euroc_covisibility_mh05_writeback_gate.md",
+    )
+    gen.add_argument(
+        "--covisibility-mh05-writeback-gate-registry-dir",
+        default="benchmarks/registry/runs/euroc",
+    )
+    gen.add_argument(
+        "--covisibility-mh05-writeback-gate-sequence",
+        action="append",
+        default=None,
+    )
+    gen.add_argument("--covisibility-mh05-writeback-gate-max-frames", type=int, default=400)
+    gen.add_argument("--covisibility-mh05-writeback-gate-max-behind-camera-ratio", default="0.3")
+    gen.add_argument(
+        "--covisibility-mh05-writeback-gate-min-fixed-to-optimized-ratio",
+        default="0.34",
     )
     gen.set_defaults(func=check_generated)
     return parser
