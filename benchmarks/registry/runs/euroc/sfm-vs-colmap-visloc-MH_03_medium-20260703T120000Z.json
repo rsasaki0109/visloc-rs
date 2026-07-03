@@ -1,0 +1,160 @@
+{
+ "artifacts": [
+  {
+   "exists": true,
+   "kind": "benchmark_doc",
+   "path": "docs/sfm_vs_colmap_benchmark.md",
+   "sha256": "f3ac939ae597ca1da1760608a88f1edea3f701f60071c6c9f8ce4a86f9ef483d"
+  },
+  {
+   "exists": true,
+   "kind": "trajectory_figure",
+   "path": "docs/assets/sfm_vs_colmap_mh03.png",
+   "sha256": "55c5df100c1165292d092a55a3af56d96e71e9dd8824fae8ded3b4e1aeaef3dc"
+  }
+ ],
+ "benchmark": {
+  "docs": [
+   "docs/sfm_vs_colmap_benchmark.md",
+   "docs/generated/sfm_vs_colmap_headtohead.md"
+  ],
+  "id": "sfm-vs-colmap",
+  "name": "Sequential SfM vs COLMAP head-to-head (metric video)",
+  "protocol": "Same rectified EuRoC MH_03_medium 2700-frame stereo image stream reconstructed by both engines and scored against the same timestamped Vicon/Leica ground truth with the same evo_ape tooling (DROID/DPVO same-tool battle pattern). visloc arm: stereo VO + online windowed BA + loop-closure pose-graph optimization -> merged multi-view tracks -> COLMAP model export (stereo_vo_external_deep_files --sfm-colmap-out), metric scale by construction from the rectified stereo baseline. COLMAP arm: monocular sequential_matcher + incremental mapper (SIFT frontend), scale-free, Sim(3)-aligned to ground truth.",
+  "script": "examples/stereo_vo_external_deep_files"
+ },
+ "build": {
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "cargo_lock_sha256": "c4c1aaea1dad9da8f7ebaf46e635431b518eae7658fb662638281164d1c0616e",
+  "features": [
+   "image-io"
+  ],
+  "profile": "dev",
+  "target": null
+ },
+ "claim_scope": "headline",
+ "command": {
+  "argv": [
+   "scripts/run_sfm_vs_colmap_battle.sh",
+   "--rect-dir",
+   "/tmp/MH_03_rect",
+   "--feat-dir",
+   "/tmp/sp_MH_03",
+   "--gt",
+   "/tmp/MH_03_gt.tum",
+   "--frames",
+   "2700",
+   "--out-dir",
+   "target/sfm_vs_colmap"
+  ],
+  "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+  "raw": "scripts/run_sfm_vs_colmap_battle.sh --rect-dir /tmp/MH_03_rect --feat-dir /tmp/sp_MH_03 --gt /tmp/MH_03_gt.tum --frames 2700 --out-dir target/sfm_vs_colmap"
+ },
+ "config": {
+  "config_files": [],
+  "params": {
+   "engine": "visloc",
+   "frames": 2700,
+   "export_ba_iterations": 5,
+   "export_ba_iterations_note": "deliberate 5-iteration cap on the COLMAP-model export BA so it polishes structure without re-deforming the loop-closed trajectory; a full 30-iteration export BA reaches 0.94px reprojection but pulls trajectory ATE out to 0.21m",
+   "sequence": "MH_03_medium",
+   "sensor_mode": "stereo"
+  },
+  "seed": null
+ },
+ "created_utc": "2026-07-03T12:00:00Z",
+ "dataset": {
+  "checksum": "not-computed",
+  "checksum_method": "not-computed-post-hoc-manifest",
+  "name": "EuRoC MAV",
+  "path": null,
+  "sequence": "MH_03_medium",
+  "version": "ASL EuRoC MAV dataset, full 2700 frames"
+ },
+ "failure_reason": null,
+ "git": {
+  "branch": "docs/sfm-vs-colmap-headtohead-registry",
+  "commit": "38afcc8f534f6cd38315b18bd1351fe614c2f3c9",
+  "dirty": true
+ },
+ "hardware": {
+  "gpu": null,
+  "hostname": "DESKTOP-PTSK105",
+  "machine": "AMD64",
+  "notes": "Single CPU machine; no CUDA involved in either arm.",
+  "os": "Windows-11-10.0.26300-SP0",
+  "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+ },
+ "metrics": [
+  {
+   "implementation": "visloc stereo VO + online windowed BA + loop-closure pose-graph optimization + merged multi-view tracks + COLMAP model export",
+   "name": "wall_clock",
+   "primary": true,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "min",
+   "value": 6
+  },
+  {
+   "implementation": null,
+   "name": "registered_frames",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "count",
+   "value": 2700
+  },
+  {
+   "implementation": null,
+   "name": "registration_rate",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "ratio",
+   "value": 1.0
+  },
+  {
+   "implementation": null,
+   "name": "mean_reprojection",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "px",
+   "value": 2.6
+  },
+  {
+   "implementation": "evo_ape, Sim(3) alignment against Vicon/Leica ground truth, scored on the exported COLMAP model",
+   "name": "ate_sim3",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "m",
+   "value": 0.13
+  },
+  {
+   "implementation": "evo_ape, SE(3) rigid alignment against Vicon/Leica ground truth, scored on the loop-closed VO trajectory before COLMAP-model export",
+   "name": "ate_se3_metric",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "m",
+   "value": 0.066
+  },
+  {
+   "implementation": null,
+   "name": "metric_scale",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": null,
+   "value": true
+  },
+  {
+   "implementation": null,
+   "name": "downstream_3dgs",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": null,
+   "value": "blurry"
+  }
+ ],
+ "models": [],
+ "notes": "Phase 2 registry formalization of the existing sequential SfM vs COLMAP head-to-head documented in docs/sfm_vs_colmap_benchmark.md (EuRoC MH_03_medium, full 2700 frames). This is the visloc-rs arm: stereo VO + loop-closure SfM, metric scale by construction. The 2.60px mean_reprojection is a deliberate knob (5-iteration COLMAP-export BA cap), not an accuracy ceiling -- a full 30-iteration export BA reaches 0.94px reprojection but pulls trajectory ATE out to 0.21m (the reprojection-vs-ATE tension documented in the source doc). downstream_3dgs=\"blurry\" reflects a fly-through capture-geometry limit, not a pose defect: the same forward-flight geometry produces blur for any pose source including COLMAP, whereas the V2_03 orbit sequence (better capture geometry) renders crisp (l1 ~= 0.006) and this same MH_03/MH_05-style forward-flight blur (l1 ~= 0.24 on MH_05) is a capture-geometry property, not something covisibility or loop-closure quality changes. Numbers are taken verbatim from docs/sfm_vs_colmap_benchmark.md; not re-run in this session (this is a fast, cheap arm -- 6 minutes -- so a re-run is plausible in principle, but this manifest formalizes the already-documented result rather than re-executing it).",
+ "result_kind": "visloc_run",
+ "run_id": "sfm-vs-colmap-visloc-MH_03_medium-20260703T120000Z",
+ "schema_version": 1,
+ "status": "success"
+}

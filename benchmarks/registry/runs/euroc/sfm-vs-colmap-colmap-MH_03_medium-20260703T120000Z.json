@@ -1,0 +1,151 @@
+{
+ "artifacts": [
+  {
+   "exists": true,
+   "kind": "benchmark_doc",
+   "path": "docs/sfm_vs_colmap_benchmark.md",
+   "sha256": "f3ac939ae597ca1da1760608a88f1edea3f701f60071c6c9f8ce4a86f9ef483d"
+  },
+  {
+   "exists": true,
+   "kind": "trajectory_figure",
+   "path": "docs/assets/sfm_vs_colmap_mh03.png",
+   "sha256": "55c5df100c1165292d092a55a3af56d96e71e9dd8824fae8ded3b4e1aeaef3dc"
+  }
+ ],
+ "benchmark": {
+  "docs": [
+   "docs/sfm_vs_colmap_benchmark.md",
+   "docs/generated/sfm_vs_colmap_headtohead.md"
+  ],
+  "id": "sfm-vs-colmap",
+  "name": "Sequential SfM vs COLMAP head-to-head (metric video)",
+  "protocol": "Same rectified EuRoC MH_03_medium 2700-frame stereo image stream reconstructed by both engines and scored against the same timestamped Vicon/Leica ground truth with the same evo_ape tooling (DROID/DPVO same-tool battle pattern). COLMAP arm: monocular sequential_matcher + incremental mapper (its SIFT frontend), scale-free, so its trajectory needs a Sim(3) (scale-fitted) alignment to the metric ground truth."
+ },
+ "build": {
+  "cargo": null,
+  "cargo_lock_sha256": null,
+  "features": [],
+  "profile": null,
+  "target": null
+ },
+ "claim_scope": "supporting",
+ "command": {
+  "argv": [
+   "scripts/run_sfm_vs_colmap_battle.sh",
+   "--rect-dir",
+   "/tmp/MH_03_rect",
+   "--feat-dir",
+   "/tmp/sp_MH_03",
+   "--gt",
+   "/tmp/MH_03_gt.tum",
+   "--frames",
+   "2700",
+   "--out-dir",
+   "target/sfm_vs_colmap"
+  ],
+  "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+  "raw": "scripts/run_sfm_vs_colmap_battle.sh --rect-dir /tmp/MH_03_rect --feat-dir /tmp/sp_MH_03 --gt /tmp/MH_03_gt.tum --frames 2700 --out-dir target/sfm_vs_colmap  # documented prior invocation; COLMAP mapper stage alone took ~11.5h, full run 11.7h -- NOT re-run in this session"
+ },
+ "config": {
+  "config_files": [],
+  "params": {
+   "engine": "colmap",
+   "colmap_version": "4.0.3",
+   "cuda": false,
+   "frames": 2700,
+   "matcher": "sequential_matcher",
+   "mapper": "incremental mapper (global BA interleaved per registration)",
+   "sequence": "MH_03_medium",
+   "sensor_mode": "monocular"
+  },
+  "seed": null
+ },
+ "created_utc": "2026-07-03T12:00:00Z",
+ "dataset": {
+  "checksum": "not-computed",
+  "checksum_method": "not-computed-post-hoc-manifest",
+  "name": "EuRoC MAV",
+  "path": null,
+  "sequence": "MH_03_medium",
+  "version": "ASL EuRoC MAV dataset, full 2700 frames"
+ },
+ "failure_reason": null,
+ "git": {
+  "branch": "docs/sfm-vs-colmap-headtohead-registry",
+  "commit": "38afcc8f534f6cd38315b18bd1351fe614c2f3c9",
+  "dirty": true
+ },
+ "hardware": {
+  "gpu": null,
+  "hostname": "DESKTOP-PTSK105",
+  "machine": "AMD64",
+  "notes": "Single CPU machine; COLMAP 4.0.3 built/run without CUDA.",
+  "os": "Windows-11-10.0.26300-SP0",
+  "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+ },
+ "metrics": [
+  {
+   "implementation": "COLMAP 4.0.3 sequential_matcher + incremental mapper, no CUDA (mapper stage alone ~11.5h of the 11.7h total)",
+   "name": "wall_clock",
+   "primary": true,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "h",
+   "value": 11.7
+  },
+  {
+   "implementation": null,
+   "name": "registered_frames",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "count",
+   "value": 2700
+  },
+  {
+   "implementation": null,
+   "name": "registration_rate",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "ratio",
+   "value": 1.0
+  },
+  {
+   "implementation": null,
+   "name": "mean_reprojection",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "px",
+   "value": 0.58
+  },
+  {
+   "implementation": "evo_ape, Sim(3) (scale-absorbed) alignment against Vicon/Leica ground truth; monocular reconstruction is scale-free so Sim(3) alignment is required",
+   "name": "ate_sim3",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": "m",
+   "value": 2.18
+  },
+  {
+   "implementation": null,
+   "name": "metric_scale",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": null,
+   "value": false
+  },
+  {
+   "implementation": null,
+   "name": "downstream_3dgs",
+   "primary": false,
+   "source_artifact": "docs/sfm_vs_colmap_benchmark.md",
+   "unit": null,
+   "value": "blurry"
+  }
+ ],
+ "models": [],
+ "notes": "PRIOR-RUN reference, NOT reproduced in this session. COLMAP 4.0.3, no CUDA, single CPU machine, per docs/sfm_vs_colmap_benchmark.md. The documented wall-clock cost (11.7h total, mapper stage alone ~11.5h, reaching only ~310/2700 frames after 31 minutes because the incremental mapper's interleaved global BA is super-linear in registered-image count) makes a local re-run impractical for this evidence-formalization pass; COLMAP is also not installed on this machine. This manifest therefore captures the already-documented, previously-executed COLMAP result as registry evidence rather than re-executing it. build.cargo_lock_sha256/rustc/cargo are null because this run does not exercise the visloc-rs Rust build at all (COLMAP is an external tool); result_kind=external_rerun and claim_scope=supporting reflect that this is a comparison reference, not a visloc-rs claim in its own right. downstream_3dgs=\"blurry\" is the same fly-through capture-geometry limit as the visloc arm -- identical for both engines on this forward-flight sequence, not a pose-quality difference between them. Honest scope note: this MH_03 metric-video result is NOT a claim that visloc-rs beats COLMAP on COLMAP's unordered-photo home turf -- on the 300-frame monocular subset (both engines monocular, scored the same way) COLMAP wins, 0.37cm vs visloc 1.64cm; see docs/sfm_vs_colmap_benchmark.md and docs/generated/sfm_vs_colmap_headtohead.md for that comparison.",
+ "result_kind": "external_rerun",
+ "run_id": "sfm-vs-colmap-colmap-MH_03_medium-20260703T120000Z",
+ "schema_version": 1,
+ "status": "success"
+}
