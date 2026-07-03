@@ -127,13 +127,26 @@ Primary paths:
 - `tests/test_benchmark_registry.py`
 - `tests/test_capture_kitti_multiseq_run.py`
 - `tests/test_capture_kitti_loop_retrieval_recall.py`
+- `scripts/summarize_sfm_vs_colmap.py`
+- `docs/generated/sfm_vs_colmap_headtohead.md`
+- `tests/test_summarize_sfm_vs_colmap.py`
+
+Change set (2026-07-03): Phase 2 of `docs/next_development_plan.md` formalizes
+the existing EuRoC MH_03_medium SfM-vs-COLMAP head-to-head
+(`docs/sfm_vs_colmap_benchmark.md`) as registry evidence: two run manifests
+under `benchmarks/registry/runs/euroc/sfm-vs-colmap-*`, the
+`summarize_sfm_vs_colmap.py` summarizer wired into `check-generated`, and the
+generated `docs/generated/sfm_vs_colmap_headtohead.md` 5-metric table. The
+COLMAP arm is an explicitly provenance-marked prior-run reference
+(`result_kind=external_rerun`), not reproduced this session; no new numbers
+were measured.
 
 Validation:
 
 ```sh
 python scripts/benchmark_registry.py validate benchmarks/registry/readme_claims_v1.json benchmarks/registry/claim_matrix_v1.json benchmarks/registry/runs
 python scripts/benchmark_registry.py check-generated
-python -m unittest tests.test_benchmark_registry tests.test_capture_kitti_multiseq_run tests.test_capture_kitti_loop_retrieval_recall
+python -m unittest tests.test_benchmark_registry tests.test_capture_kitti_multiseq_run tests.test_capture_kitti_loop_retrieval_recall tests.test_summarize_sfm_vs_colmap
 ```
 
 Residual risk:

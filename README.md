@@ -101,7 +101,7 @@ Details and reproduction: [KITTI multi-sequence published-baseline comparison](d
 [EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
 [TUM RGB-D (virtual stereo)](docs/tum_rgbd_benchmark.md) ·
 [EuRoC SfM reconstruction](docs/euroc_sfm_benchmark.md) ·
-[sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ·
+[sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ([registry evidence](docs/generated/sfm_vs_colmap_headtohead.md)) ·
 [unordered SfM](docs/unordered_sfm_benchmark.md) ·
 [learned retrieval for relocalization](docs/learned_retrieval_relocalization.md) ·
 [multi-session lifelong mapping](docs/multi_session_lifelong_benchmark.md) ·

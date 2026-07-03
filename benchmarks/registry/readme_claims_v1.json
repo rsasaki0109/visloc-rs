@@ -42,8 +42,11 @@
       "benchmark": "**Sequential SfM vs COLMAP (metric video)**",
       "result_markdown": "same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) - **~117x faster, ~17-33x more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.)",
       "claim_kind": "mixed",
-      "source_docs": ["docs/sfm_vs_colmap_benchmark.md"],
-      "evidence_run_ids": []
+      "source_docs": ["docs/sfm_vs_colmap_benchmark.md", "docs/generated/sfm_vs_colmap_headtohead.md"],
+      "evidence_run_ids": [
+        "sfm-vs-colmap-visloc-MH_03_medium-20260703T120000Z",
+        "sfm-vs-colmap-colmap-MH_03_medium-20260703T120000Z"
+      ]
     },
     {
       "benchmark": "**Unordered SfM (real photo collections)**",

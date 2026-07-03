@@ -21,6 +21,24 @@ limitations, and runnable tests rather than by a completion percentage.
 
 Completed pieces:
 
+- **Phase 2 (next_development_plan.md) — SfM-vs-COLMAP head-to-head is now
+  registry-backed.** The existing EuRoC MH_03_medium (2700-frame) head-to-head
+  documented in `docs/sfm_vs_colmap_benchmark.md` is formalized as two run
+  manifests under `benchmarks/registry/runs/euroc/` (`sfm-vs-colmap-visloc-...`,
+  `sfm-vs-colmap-colmap-...`), a new `scripts/summarize_sfm_vs_colmap.py`
+  summarizer wired into `scripts/benchmark_registry.py check-generated`, and
+  the generated 5-metric table in `docs/generated/sfm_vs_colmap_headtohead.md`
+  (wall-clock, registration rate, ATE-vs-GT, mean reprojection, downstream
+  3DGS quality). This is a docs/evidence pass only — COLMAP is not installed
+  locally and its arm's documented 11.7 h wall-clock cost makes a local
+  re-run impractical, so the COLMAP manifest is an explicitly provenance-marked
+  prior-run reference (`result_kind=external_rerun`), not reproduced this
+  session; no new numbers were measured. The generated doc keeps the existing
+  honest caveats: the stereo-vs-monocular asymmetry is the thesis (not COLMAP's
+  unordered-photo home turf), COLMAP still wins the 300-frame monocular subset
+  (0.37 cm vs visloc 1.64 cm), and the downstream 3DGS blur is capture-geometry-
+  limited for both engines. README's SfM-vs-COLMAP pillar line now links to the
+  generated doc.
 - Adaptive stereo depth gate evidence is now registry-backed for a minimal
   KITTI seq00 diagnostic smoke: adaptive default and legacy fixed-3m replay
   both record `effective_min_depth_m_mean=3 m` on the same far-field subset,

@@ -57,6 +57,11 @@ from summarize_euroc_covisibility_mh05_writeback_gate import (
     missing_expected_runs as missing_covisibility_mh05_writeback_gate_runs,
     render as render_covisibility_mh05_writeback_gate,
 )
+from summarize_sfm_vs_colmap import (
+    load_latest_runs as load_sfm_vs_colmap_runs,
+    missing_expected_runs as missing_sfm_vs_colmap_runs,
+    render as render_sfm_vs_colmap,
+)
 from summarize_euroc_covisibility_runtime_sweep import (
     load_latest_runs as load_covisibility_runtime_runs,
     missing_expected_runs as missing_covisibility_runtime_runs,
@@ -769,6 +774,13 @@ def check_generated(args: argparse.Namespace) -> int:
             "docs/generated/euroc_covisibility_mh05_writeback_gate.md",
         )
     )
+    sfm_vs_colmap_path = Path(
+        getattr(
+            args,
+            "sfm_vs_colmap",
+            "docs/generated/sfm_vs_colmap_headtohead.md",
+        )
+    )
     registry_dir = args.registry_dir
 
     claims = json.loads(claims_path.read_text(encoding="utf-8"))
@@ -1186,6 +1198,26 @@ def check_generated(args: argparse.Namespace) -> int:
         mh05_writeback_gate_args,
         covisibility_mh05_writeback_gate_runs,
     )
+    sfm_vs_colmap_args = argparse.Namespace(
+        registry_dir=Path(
+            getattr(
+                args,
+                "sfm_vs_colmap_registry_dir",
+                "benchmarks/registry/runs/euroc",
+            )
+        ),
+        out=sfm_vs_colmap_path,
+        sequence=getattr(args, "sfm_vs_colmap_sequence", "MH_03_medium"),
+    )
+    sfm_vs_colmap_runs = load_sfm_vs_colmap_runs(sfm_vs_colmap_args)
+    expected_sfm_vs_colmap = render_sfm_vs_colmap(
+        sfm_vs_colmap_args,
+        sfm_vs_colmap_runs,
+    )
+    missing_sfm_vs_colmap = missing_sfm_vs_colmap_runs(
+        sfm_vs_colmap_args,
+        sfm_vs_colmap_runs,
+    )
 
     stale = 0
     if readme_path.read_text(encoding="utf-8") != expected_readme:
@@ -1482,6 +1514,26 @@ def check_generated(args: argparse.Namespace) -> int:
             print(f"  sequence={sequence} variant={variant}", file=sys.stderr)
         print(
             "  regenerate with the disabled/enabled_nogate/enabled_gate covis_gate_verify runs",
+            file=sys.stderr,
+        )
+        stale = 1
+    if (
+        not sfm_vs_colmap_path.exists()
+        or sfm_vs_colmap_path.read_text(encoding="utf-8") != expected_sfm_vs_colmap
+    ):
+        report_stale(
+            sfm_vs_colmap_path,
+            "python scripts/summarize_sfm_vs_colmap.py "
+            f"--registry-dir {sfm_vs_colmap_args.registry_dir} "
+            f"--out {sfm_vs_colmap_path}",
+        )
+        stale = 1
+    if missing_sfm_vs_colmap:
+        print("missing sfm-vs-colmap registry run(s):", file=sys.stderr)
+        for engine in missing_sfm_vs_colmap:
+            print(f"  engine={engine}", file=sys.stderr)
+        print(
+            "  regenerate with the visloc and colmap sfm-vs-colmap MH_03_medium runs",
             file=sys.stderr,
         )
         stale = 1
@@ -1864,6 +1916,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--covisibility-mh05-writeback-gate-min-fixed-to-optimized-ratio",
         default="0.34",
     )
+    gen.add_argument(
+        "--sfm-vs-colmap",
+        default="docs/generated/sfm_vs_colmap_headtohead.md",
+    )
+    gen.add_argument(
+        "--sfm-vs-colmap-registry-dir",
+        default="benchmarks/registry/runs/euroc",
+    )
+    gen.add_argument("--sfm-vs-colmap-sequence", default="MH_03_medium")
     gen.set_defaults(func=check_generated)
     return parser
 
