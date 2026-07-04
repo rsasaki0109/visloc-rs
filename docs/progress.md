@@ -809,6 +809,16 @@ Completed pieces:
   behind-camera degeneracy) and the fixed-ratio gate only reaches MH_05 parity
   at a no-op setting that rejects every solve. Covisibility local BA remains
   an explicit opt-in feature, not a default-safe one.
+- A `--covisibility-local-ba-anchor-weight 10` gauge/global-anchoring prior
+  pins each optimized keyframe's camera centre towards its pre-BA estimate.
+  The 400-frame MH_01/MH_03/MH_05
+  [anchor gate](generated/euroc_covisibility_anchor_gate.md) evidence shows
+  this is the first covisibility-BA configuration to beat the disabled
+  baseline on the primary `ate_rigid_rmse_m` metric on all three sequences at
+  once (MH_01 `0.0561` vs `0.0642`, MH_03 `0.0634` vs `0.0648`, MH_05 `0.0884`
+  vs `0.1139`), reversing the prior MH_05 no-anchor regression (`0.1683`).
+  `tracking_success_rate` is not a simultaneous win (MH_03/MH_05 dip below
+  disabled), so covisibility local BA stays an explicit opt-in feature.
 - `visloc_slam::refine_stereo_vo_with_ba` provides a multi-frame Schur BA
   refiner that lifts a stereo VO trajectory by chaining per-pair temporal
   matches into forward feature tracks, initialising each landmark from its

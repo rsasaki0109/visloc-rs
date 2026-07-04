@@ -8,10 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nalgebra::Vector3;
 use visloc_core::types::{Camera, FrameId, LandmarkId, Observation, VisualMap};
 
 use crate::{
-    BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, LinearSolver, RobustKernel,
+    BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, LinearSolver, PositionPrior,
+    PositionPriorObservation, RobustKernel,
 };
 
 /// A keyframe ranked by how many selected landmarks it shares.
@@ -99,6 +101,15 @@ pub struct CovisibilityLocalBaConfig {
     /// [`Self::outlier_reprojection_threshold_px`] are removed from both
     /// keyframes and landmarks after a successful BA.
     pub remove_outlier_observations: bool,
+    /// Optional gauge/global-anchoring prior weight. When `Some(w)` with a
+    /// finite `w > 0`, every optimized (non-fixed) keyframe in the window gets
+    /// an absolute camera-center prior pulling it toward its pre-BA (tracking)
+    /// estimate with per-axis weight `w` (cost `Σ w·‖C − C_pre‖²`). This pins
+    /// the local window's gauge to the global map so a locally-consistent solve
+    /// cannot drift the whole window — the EuRoC MH_05 covisibility-BA failure
+    /// mode. `None` (default) leaves the solve anchored only by its fixed
+    /// boundary keyframes (legacy behavior).
+    pub pose_anchor_prior_weight: Option<f64>,
     /// Underlying Schur-complement BA configuration.
     pub ba_config: BaConfig,
 }
@@ -118,6 +129,7 @@ impl Default for CovisibilityLocalBaConfig {
             max_landmarks: None,
             outlier_reprojection_threshold_px: Some(5.0),
             remove_outlier_observations: false,
+            pose_anchor_prior_weight: None,
             ba_config: BaConfig {
                 max_iterations: 12,
                 robust_kernel: RobustKernel::Huber { delta: 3.0 },
@@ -452,7 +464,7 @@ pub fn refine_visual_map_with_covisibility_ba(
         ))?
         .clone();
 
-    let mut ba = build_ba_from_selection(map, &camera, &selection)?;
+    let mut ba = build_ba_from_selection(map, &camera, &selection, config)?;
     let mean_reprojection_before_px = mean_reprojection_px(&ba);
     let ba_result = ba.optimize(&config.ba_config)?;
     let mean_reprojection_after_px = mean_reprojection_px(&ba);
@@ -514,6 +526,7 @@ fn build_ba_from_selection(
     map: &VisualMap,
     camera: &Camera,
     selection: &CovisibilityLocalBaSelection,
+    config: &CovisibilityLocalBaConfig,
 ) -> Result<BundleAdjustment, CovisibilityLocalBaError> {
     let mut ba = BundleAdjustment::new(camera.clone());
 
@@ -574,6 +587,28 @@ fn build_ba_from_selection(
                     landmark_id: obs.landmark_id,
                     xy: obs.xy,
                 });
+            }
+        }
+    }
+
+    if let Some(weight) = config.pose_anchor_prior_weight {
+        if weight.is_finite() && weight > 0.0 {
+            let mut prior = PositionPrior::new();
+            for keyframe_id in &selection.optimized_keyframe_ids {
+                if ba.fixed_poses.contains(keyframe_id) {
+                    continue;
+                }
+                let Some(pose) = ba.poses.get(keyframe_id) else {
+                    continue;
+                };
+                prior.push(PositionPriorObservation {
+                    keyframe_id: *keyframe_id,
+                    camera_center_world: pose.camera_center_world(),
+                    axis_weights: Vector3::new(weight, weight, weight),
+                });
+            }
+            if !prior.observations.is_empty() {
+                ba.set_position_prior(prior);
             }
         }
     }
@@ -1262,5 +1297,76 @@ mod tests {
         // A non-positive ratio disables the requirement (always satisfied).
         assert_eq!(required_fixed_keyframes(7, 0.0), 0);
         assert!(fixed_to_optimized_ratio_satisfied(7, 0, 0.0));
+    }
+
+    #[test]
+    fn pose_anchor_prior_pins_window_gauge() {
+        // `synthetic_map` already perturbs keyframes 0 and 2 away from the true
+        // geometry before BA runs, so there is real pose motion for an unanchored
+        // solve to make and for the anchor prior to resist.
+        let (map, _) = synthetic_map();
+        let base_config = CovisibilityLocalBaConfig {
+            max_neighbor_keyframes: 1,
+            min_shared_landmarks: 1,
+            max_boundary_keyframes: 2,
+            min_boundary_observations: 1,
+            min_observations_per_landmark: 2,
+            ..CovisibilityLocalBaConfig::default()
+        };
+
+        let initial_centers: BTreeMap<FrameId, Point3<f64>> = map
+            .keyframes
+            .iter()
+            .map(|(id, kf)| (*id, kf.frame.pose.as_ref().unwrap().camera_center_world()))
+            .collect();
+
+        let displacement = |refined_map: &VisualMap, optimized_ids: &[FrameId]| -> f64 {
+            optimized_ids
+                .iter()
+                .map(|id| {
+                    let after = refined_map.keyframes[id]
+                        .frame
+                        .pose
+                        .as_ref()
+                        .unwrap()
+                        .camera_center_world();
+                    (after - initial_centers[id]).norm()
+                })
+                .sum()
+        };
+
+        let mut unanchored_map = map.clone();
+        let unanchored_config = CovisibilityLocalBaConfig {
+            pose_anchor_prior_weight: None,
+            ..base_config.clone()
+        };
+        let unanchored_result =
+            refine_visual_map_with_covisibility_ba(&mut unanchored_map, 2, &unanchored_config)
+                .unwrap();
+        let unanchored_displacement = displacement(
+            &unanchored_map,
+            &unanchored_result.selection.optimized_keyframe_ids,
+        );
+
+        let mut anchored_map = map.clone();
+        let anchored_config = CovisibilityLocalBaConfig {
+            pose_anchor_prior_weight: Some(1.0e6),
+            ..base_config
+        };
+        let anchored_result =
+            refine_visual_map_with_covisibility_ba(&mut anchored_map, 2, &anchored_config).unwrap();
+        let anchored_displacement = displacement(
+            &anchored_map,
+            &anchored_result.selection.optimized_keyframe_ids,
+        );
+
+        assert!(
+            unanchored_displacement > 1e-6,
+            "expected the unanchored BA to move the window, got {unanchored_displacement}"
+        );
+        assert!(
+            anchored_displacement < unanchored_displacement,
+            "anchored displacement {anchored_displacement} should be smaller than unanchored {unanchored_displacement}"
+        );
     }
 }

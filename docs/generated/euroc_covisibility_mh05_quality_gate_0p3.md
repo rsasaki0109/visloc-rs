@@ -9,7 +9,7 @@ and boundary support gate `none/0`; only BA start/trigger cadence changes.
 
 | config | tracking | rigid ATE m | sim ATE m | map keyframes | BA triggers | BA success | BA fail | quality reject | boundary support | no-local-landmarks | mean ms | run id |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| disabled | 0.565 | 0.1139 | 0.1118 | 42 | 0 | 0 | 0 |  |  | 0 |  | euroc-covisibility-local-ba-MH_05_difficult-disabled-20260619T211409Z |
+| disabled | 0.565 | 0.1139 | 0.1118 | 42 | 0 | 0 | 0 | 0 | 0 | 0 |  | euroc-covisibility-local-ba-MH_05_difficult-disabled-20260703T170345Z |
 | enabled min3/every1 | 0.265 | 0.1614 | 0.1003 | 27 | 25 | 12 | 13 | 4 |  | 9 | 304.495 | euroc-covisibility-local-ba-MH_05_difficult-enabled-20260619T224943Z |
 | enabled min6/every3 | 0.445 | 0.1142 | 0.1065 | 42 | 13 | 12 | 1 | 0 |  | 1 | 889.080 | euroc-covisibility-local-ba-MH_05_difficult-enabled-20260619T230410Z |
 | enabled min10/every5 | 0.525 | 0.1255 | 0.1243 | 43 | 7 | 7 | 0 | 0 |  | 0 | 965.021 | euroc-covisibility-local-ba-MH_05_difficult-enabled-20260619T230841Z |

@@ -9,7 +9,7 @@ and boundary support gate `10/2`; only BA start/trigger cadence changes.
 
 | config | tracking | rigid ATE m | sim ATE m | map keyframes | BA triggers | BA success | BA fail | quality reject | boundary support | no-local-landmarks | mean ms | run id |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| disabled | 0.565 | 0.1139 | 0.1118 | 42 | 0 | 0 | 0 |  |  | 0 |  | euroc-covisibility-local-ba-MH_05_difficult-disabled-20260619T211409Z |
+| disabled | 0.565 | 0.1139 | 0.1118 | 42 | 0 | 0 | 0 | 0 | 0 | 0 |  | euroc-covisibility-local-ba-MH_05_difficult-disabled-20260703T170345Z |
 | enabled min3/every1 boundary10 | 0.265 | 0.1614 | 0.1003 | 27 | 25 | 12 | 13 | 2 | 2 | 9 | 254.946 | euroc-covisibility-local-ba-MH_05_difficult-enabled-20260620T011742Z |
 
 Notes:

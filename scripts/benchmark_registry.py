@@ -57,6 +57,11 @@ from summarize_euroc_covisibility_mh05_writeback_gate import (
     missing_expected_runs as missing_covisibility_mh05_writeback_gate_runs,
     render as render_covisibility_mh05_writeback_gate,
 )
+from summarize_euroc_covisibility_anchor_gate import (
+    load_latest_runs as load_covisibility_anchor_gate_runs,
+    missing_expected_runs as missing_covisibility_anchor_gate_runs,
+    render as render_covisibility_anchor_gate,
+)
 from summarize_sfm_vs_colmap import (
     load_latest_runs as load_sfm_vs_colmap_runs,
     missing_expected_runs as missing_sfm_vs_colmap_runs,
@@ -779,6 +784,13 @@ def check_generated(args: argparse.Namespace) -> int:
             "docs/generated/euroc_covisibility_mh05_writeback_gate.md",
         )
     )
+    covisibility_anchor_gate_path = Path(
+        getattr(
+            args,
+            "covisibility_anchor_gate",
+            "docs/generated/euroc_covisibility_anchor_gate.md",
+        )
+    )
     sfm_vs_colmap_path = Path(
         getattr(
             args,
@@ -1210,6 +1222,30 @@ def check_generated(args: argparse.Namespace) -> int:
         mh05_writeback_gate_args,
         covisibility_mh05_writeback_gate_runs,
     )
+    covisibility_anchor_gate_args = argparse.Namespace(
+        registry_dir=Path(
+            getattr(
+                args,
+                "covisibility_anchor_gate_registry_dir",
+                "benchmarks/registry/runs/euroc",
+            )
+        ),
+        out=covisibility_anchor_gate_path,
+        sequence=getattr(args, "covisibility_anchor_gate_sequence", None)
+        or ["MH_01_easy", "MH_03_medium", "MH_05_difficult"],
+        max_frames=getattr(args, "covisibility_anchor_gate_max_frames", 400),
+    )
+    covisibility_anchor_gate_runs = load_covisibility_anchor_gate_runs(
+        covisibility_anchor_gate_args,
+    )
+    expected_covisibility_anchor_gate = render_covisibility_anchor_gate(
+        covisibility_anchor_gate_args,
+        covisibility_anchor_gate_runs,
+    )
+    missing_covisibility_anchor_gate = missing_covisibility_anchor_gate_runs(
+        covisibility_anchor_gate_args,
+        covisibility_anchor_gate_runs,
+    )
     sfm_vs_colmap_args = argparse.Namespace(
         registry_dir=Path(
             getattr(
@@ -1546,6 +1582,27 @@ def check_generated(args: argparse.Namespace) -> int:
             print(f"  sequence={sequence} variant={variant}", file=sys.stderr)
         print(
             "  regenerate with the disabled/enabled_nogate/enabled_gate covis_gate_verify runs",
+            file=sys.stderr,
+        )
+        stale = 1
+    if (
+        not covisibility_anchor_gate_path.exists()
+        or covisibility_anchor_gate_path.read_text(encoding="utf-8")
+        != expected_covisibility_anchor_gate
+    ):
+        report_stale(
+            covisibility_anchor_gate_path,
+            "python scripts/summarize_euroc_covisibility_anchor_gate.py "
+            f"--registry-dir {covisibility_anchor_gate_args.registry_dir} "
+            f"--out {covisibility_anchor_gate_path}",
+        )
+        stale = 1
+    if missing_covisibility_anchor_gate:
+        print("missing covisibility anchor-gate registry run(s):", file=sys.stderr)
+        for sequence, variant in missing_covisibility_anchor_gate:
+            print(f"  sequence={sequence} variant={variant}", file=sys.stderr)
+        print(
+            "  regenerate with the disabled/enabled (anchor w=10) covis_anchor_gate runs",
             file=sys.stderr,
         )
         stale = 1
@@ -1968,6 +2025,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--covisibility-mh05-writeback-gate-min-fixed-to-optimized-ratio",
         default="0.34",
     )
+    gen.add_argument(
+        "--covisibility-anchor-gate",
+        default="docs/generated/euroc_covisibility_anchor_gate.md",
+    )
+    gen.add_argument(
+        "--covisibility-anchor-gate-registry-dir",
+        default="benchmarks/registry/runs/euroc",
+    )
+    gen.add_argument(
+        "--covisibility-anchor-gate-sequence",
+        action="append",
+        default=None,
+    )
+    gen.add_argument("--covisibility-anchor-gate-max-frames", type=int, default=400)
     gen.add_argument(
         "--sfm-vs-colmap",
         default="docs/generated/sfm_vs_colmap_headtohead.md",
