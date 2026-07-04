@@ -741,6 +741,9 @@ struct CliArgs {
     /// Reject covisibility BA map write-back unless
     /// `fixed >= ceil(optimized * ratio)`. Off (`None`) by default.
     covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64>,
+    /// Optional gauge/global-anchoring pose-prior weight for optimized
+    /// covisibility-BA keyframes. Off (`None`) by default.
+    covisibility_local_ba_anchor_weight: Option<f64>,
     /// When `Some(d)`, rejects a tracked frame whose PnP camera-centre
     /// drifts more than `d` metres from the motion-model pose prior
     /// (`ConstantPoseMotionModel` returns the last successful pose, so
@@ -1183,6 +1186,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_boundary_support_min_fixed_keyframes: usize = 0;
     let mut covisibility_local_ba_max_behind_camera_ratio: Option<f64> = None;
     let mut covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64> = None;
+    let mut covisibility_local_ba_anchor_weight: Option<f64> = None;
     let mut max_pose_jump_meters: Option<f64> = None;
     let mut tracking_min_inliers: usize = 0;
     let mut tracking_min_inlier_ratio: f64 = 0.0;
@@ -1548,6 +1552,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     } else {
                         Some(raw.parse()?)
                     };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-anchor-weight" => {
+                covisibility_local_ba_anchor_weight = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--max-pose-jump-meters" => {
@@ -2074,6 +2082,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         covisibility_local_ba_boundary_support_min_fixed_keyframes,
         covisibility_local_ba_max_behind_camera_ratio,
         covisibility_local_ba_min_fixed_to_optimized_ratio,
+        covisibility_local_ba_anchor_weight,
         max_pose_jump_meters,
         tracking_min_inliers,
         tracking_min_inlier_ratio,
@@ -3032,6 +3041,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .covisibility_local_ba_boundary_support_min_fixed_keyframes,
                 outlier_reprojection_threshold_px: args.covisibility_local_ba_outlier_threshold_px,
                 remove_outlier_observations: args.covisibility_local_ba_remove_outliers,
+                pose_anchor_prior_weight: args.covisibility_local_ba_anchor_weight,
                 ..CovisibilityLocalBaConfig::default()
             },
         })

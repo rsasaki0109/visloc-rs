@@ -216,6 +216,7 @@ python -m unittest \
   tests.test_summarize_euroc_covisibility_mh05_boundary_support_gate \
   tests.test_summarize_euroc_covisibility_mh05_mitigation \
   tests.test_summarize_euroc_covisibility_mh05_writeback_gate \
+  tests.test_summarize_euroc_covisibility_anchor_gate \
   tests.test_summarize_euroc_covisibility_runtime_sweep \
   tests.test_summarize_euroc_covisibility_window_sweep
 python scripts/benchmark_registry.py check-generated
@@ -227,6 +228,13 @@ Residual risk:
   still has a tracking regression under the main enabled configuration.
 - Runtime spikes are now measured, but wider datasets and longer windows should
   be benchmarked before considering a default.
+- A `--covisibility-local-ba-anchor-weight 10` gauge-anchoring prior (see the
+  [anchor gate](generated/euroc_covisibility_anchor_gate.md) registry
+  evidence) makes covisibility local BA beat the disabled baseline on the
+  primary `ate_rigid_rmse_m` metric on MH_01/MH_03/MH_05 simultaneously and
+  reverses the MH_05 ATE regression, but `tracking_success_rate` is not a
+  simultaneous win (MH_03/MH_05 dip below disabled), so the feature stays
+  opt-in rather than becoming a new default.
 
 ## P1 KITTI Seq02 Loop Retrieval And Verification Diagnostics
 

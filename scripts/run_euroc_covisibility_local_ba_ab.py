@@ -138,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         help="minimum fixed boundary keyframes required when the boundary support gate is enabled",
     )
     parser.add_argument(
+        "--anchor-weight",
+        type=float,
+        default=None,
+        help="optional gauge/global-anchoring pose-prior weight for optimized keyframes; pins the local window to the global map to fight MH_05-style global drift",
+    )
+    parser.add_argument(
         "--dnf-if-tracking-success-below",
         type=float,
         default=None,
@@ -311,6 +317,8 @@ def enabled_flags(args: argparse.Namespace) -> list[str]:
                 str(args.boundary_support_min_fixed_keyframes),
             ]
         )
+    if args.anchor_weight is not None:
+        flags.extend(["--covisibility-local-ba-anchor-weight", str(args.anchor_weight)])
     return flags
 
 
@@ -408,6 +416,7 @@ def capture_manifest(
             "covisibility_local_ba_max_outlier_observation_ratio": args.max_outlier_observation_ratio,
             "covisibility_local_ba_boundary_support_min_optimized_keyframes": args.boundary_support_min_optimized_keyframes,
             "covisibility_local_ba_boundary_support_min_fixed_keyframes": args.boundary_support_min_fixed_keyframes,
+            "covisibility_local_ba_anchor_weight": args.anchor_weight,
         }.items():
             cmd.extend(["--config", f"{key}={value}"])
     if failure_reason:
@@ -483,6 +492,8 @@ def main() -> int:
         raise SystemExit(
             "--boundary-support-min-fixed-keyframes requires --boundary-support-min-optimized-keyframes"
         )
+    if args.anchor_weight is not None and not (args.anchor_weight > 0.0 and math.isfinite(args.anchor_weight)):
+        raise SystemExit("--anchor-weight must be a finite positive number")
     if (
         args.fallback_min_boundary_observations is not None
         and args.fallback_min_boundary_observations.lower() != "none"
