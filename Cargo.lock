@@ -744,6 +744,7 @@ dependencies = [
  "nalgebra",
  "visloc-core",
  "visloc-tracking",
+ "visloc-vision",
 ]
 
 [[package]]

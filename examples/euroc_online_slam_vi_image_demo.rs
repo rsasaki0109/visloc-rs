@@ -114,19 +114,20 @@ use visloc_rs::vision::stereo_bootstrap::{
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::{
-    read_external_deep_features_txt, umeyama_similarity_transform, AdaptiveImuPoseMotionModel,
-    AdaptiveImuPoseMotionModelConfig, AdaptiveMotionMode, AdaptiveVelocityGateConfig,
-    BruteForceMatcher, ConstantPoseMotionModel, ConstantVelocityMotionModel,
-    CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalMapConfig,
-    CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel, ImuPredictiveMotionModelConfig,
-    ImuVelocityRefreshPolicy, KeyframeDecisionReason, KeyframePolicyConfig, LocalMappingPipeline,
-    LocalizationConfig, LocalizationPipeline, LoopClosureConfig, Matcher,
-    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
-    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
-    OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
-    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, SimpleKeyframePolicy, Tracker,
-    TrackingConfig, TrackingResult, TrajectorySimilarityTransform, ViInitFallback,
-    ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
+    build_stereo_replenish_candidates, read_external_deep_features_txt,
+    umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
+    AdaptiveMotionMode, AdaptiveVelocityGateConfig, BruteForceMatcher, ConstantPoseMotionModel,
+    ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
+    CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel,
+    ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
+    KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalizationConfig,
+    LocalizationPipeline, LoopClosureConfig, Matcher, MotionBasedViInitializerConfig, MotionModel,
+    MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher, OnlineSlamConfig,
+    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig,
+    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
+    SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig, TrackingResult,
+    TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent, Viba2Config,
+    VisualInertialInitializerConfig,
 };
 
 /// Runtime-dispatched motion model. Both inner models implement
@@ -744,6 +745,37 @@ struct CliArgs {
     /// Optional gauge/global-anchoring pose-prior weight for optimized
     /// covisibility-BA keyframes. Off (`None`) by default.
     covisibility_local_ba_anchor_weight: Option<f64>,
+    /// When `true`, replenishes the map beyond the stereo bootstrap by
+    /// stereo-matching each frame's cam0 keypoints that tracking did NOT
+    /// match to an existing landmark against a freshly loaded/undistorted
+    /// cam1 image, triangulating the survivors, and staging them as
+    /// `LandmarkCandidate`s for `process_frame`. Off by default so the
+    /// map stays frozen at the bootstrap landmark count, preserving
+    /// legacy behaviour.
+    stereo_landmark_replenish: bool,
+    /// Cap on new replenishment candidates built per frame. Only
+    /// meaningful when `stereo_landmark_replenish` is set.
+    stereo_landmark_replenish_max_per_frame: usize,
+    /// Radius (px) around the reprojected anchor pixel within which a real
+    /// detected anchor-keyframe keypoint must exist. Maps to
+    /// [`StereoReplenishConfig::anchor_keypoint_match_radius_px`].
+    stereo_landmark_replenish_anchor_match_radius_px: Option<f64>,
+    /// Optional descriptor-distance gate on the borrowed anchor keypoint.
+    /// Maps to [`StereoReplenishConfig::anchor_keypoint_max_descriptor_distance`].
+    stereo_landmark_replenish_anchor_max_descriptor_distance: Option<f32>,
+    /// Radius (px) for geometric duplicate suppression against the anchor
+    /// keyframe's own landmarks. Maps to
+    /// [`StereoReplenishConfig::duplicate_suppression_radius_px`].
+    stereo_landmark_replenish_duplicate_radius_px: Option<f64>,
+    /// Minimum anchor↔current parallax (degrees). Maps to
+    /// [`StereoReplenishConfig::min_parallax_deg`].
+    stereo_landmark_replenish_min_parallax_deg: Option<f64>,
+    /// Minimum triangulated depth (m). Maps to
+    /// [`StereoReplenishConfig::min_depth_meters`].
+    stereo_landmark_replenish_min_depth_meters: Option<f64>,
+    /// Maximum triangulated depth (m). Maps to
+    /// [`StereoReplenishConfig::max_depth_meters`].
+    stereo_landmark_replenish_max_depth_meters: Option<f64>,
     /// When `Some(d)`, rejects a tracked frame whose PnP camera-centre
     /// drifts more than `d` metres from the motion-model pose prior
     /// (`ConstantPoseMotionModel` returns the last successful pose, so
@@ -1187,6 +1219,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_max_behind_camera_ratio: Option<f64> = None;
     let mut covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64> = None;
     let mut covisibility_local_ba_anchor_weight: Option<f64> = None;
+    let mut stereo_landmark_replenish: bool = false;
+    let mut stereo_landmark_replenish_max_per_frame: usize = 100;
+    let mut stereo_landmark_replenish_anchor_match_radius_px: Option<f64> = None;
+    let mut stereo_landmark_replenish_anchor_max_descriptor_distance: Option<f32> = None;
+    let mut stereo_landmark_replenish_duplicate_radius_px: Option<f64> = None;
+    let mut stereo_landmark_replenish_min_parallax_deg: Option<f64> = None;
+    let mut stereo_landmark_replenish_min_depth_meters: Option<f64> = None;
+    let mut stereo_landmark_replenish_max_depth_meters: Option<f64> = None;
     let mut max_pose_jump_meters: Option<f64> = None;
     let mut tracking_min_inliers: usize = 0;
     let mut tracking_min_inlier_ratio: f64 = 0.0;
@@ -1556,6 +1596,40 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--covisibility-local-ba-anchor-weight" => {
                 covisibility_local_ba_anchor_weight = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish" => {
+                stereo_landmark_replenish = true;
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-max-per-frame" => {
+                stereo_landmark_replenish_max_per_frame = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-anchor-match-radius-px" => {
+                stereo_landmark_replenish_anchor_match_radius_px =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-anchor-max-descriptor-distance" => {
+                stereo_landmark_replenish_anchor_max_descriptor_distance =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-duplicate-radius-px" => {
+                stereo_landmark_replenish_duplicate_radius_px = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-min-parallax-deg" => {
+                stereo_landmark_replenish_min_parallax_deg = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-min-depth-meters" => {
+                stereo_landmark_replenish_min_depth_meters = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--stereo-landmark-replenish-max-depth-meters" => {
+                stereo_landmark_replenish_max_depth_meters = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--max-pose-jump-meters" => {
@@ -2083,6 +2157,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         covisibility_local_ba_max_behind_camera_ratio,
         covisibility_local_ba_min_fixed_to_optimized_ratio,
         covisibility_local_ba_anchor_weight,
+        stereo_landmark_replenish,
+        stereo_landmark_replenish_max_per_frame,
+        stereo_landmark_replenish_anchor_match_radius_px,
+        stereo_landmark_replenish_anchor_max_descriptor_distance,
+        stereo_landmark_replenish_duplicate_radius_px,
+        stereo_landmark_replenish_min_parallax_deg,
+        stereo_landmark_replenish_min_depth_meters,
+        stereo_landmark_replenish_max_depth_meters,
         max_pose_jump_meters,
         tracking_min_inliers,
         tracking_min_inlier_ratio,
@@ -2210,6 +2292,16 @@ fn back_project_pixel_to_world(
     let r_wc = r_cw.inverse();
     // World point = R_cw⁻¹ · (p_cam - t_cw).
     Some(r_wc.transform_point(&Point3::from(p_cam.coords - t_cw)))
+}
+
+/// Cam1 camera model, cam0-to-cam1 extrinsic, and cam1 distortion model,
+/// computed once and shared by the seed-frame stereo bootstrap and the
+/// per-frame stereo landmark replenishment path.
+#[cfg(feature = "image-io")]
+struct Cam1StereoSetup {
+    camera: Camera,
+    cam0_to_cam1: SE3,
+    distortion: RadialTangential,
 }
 
 /// Build a [`VisualMap`] by seeding one landmark per keypoint in
@@ -2849,24 +2941,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stereo_bootstrap_matches: Vec<StereoBootstrapLandmark> = Vec::new();
     let mut stereo_cam1_features_count: usize = 0;
     let mut stereo_cam1_features_after_undistort_count: usize = 0;
-    if args.stereo_bootstrap {
+    // Shared cam1 camera/extrinsic/distortion setup, computed once whenever
+    // either the seed-frame stereo bootstrap or the per-frame stereo
+    // landmark replenishment needs to stereo-match cam0 keypoints against
+    // cam1.
+    let cam1_stereo_setup: Option<Cam1StereoSetup> = if args.stereo_bootstrap
+        || args.stereo_landmark_replenish
+    {
         let cam1_camera_id: u64 = 2;
         let cam1_camera = camera_from_cam0(&dataset.cam1_calibration, cam1_camera_id);
         let body_to_cam1 = se3_from_t_bs(&dataset.cam1_calibration.t_body_sensor);
         let cam0_to_cam1 = body_to_cam1.inverse().compose(&body_to_camera);
         let cam1_distortion = if args.undistort {
             RadialTangential::from_euroc_coefficients(
-                &dataset.cam1_calibration.distortion_coefficients,
-            )
-            .ok_or_else(|| {
-                format!(
-                    "cam1 distortion_coefficients has unexpected length ({}); expected 4 for radial-tangential. Pass --no-undistort (or --no-stereo-bootstrap) to skip.",
-                    dataset.cam1_calibration.distortion_coefficients.len(),
+                    &dataset.cam1_calibration.distortion_coefficients,
                 )
-            })?
+                .ok_or_else(|| {
+                    format!(
+                        "cam1 distortion_coefficients has unexpected length ({}); expected 4 for radial-tangential. Pass --no-undistort (or --no-stereo-bootstrap / --no stereo-landmark-replenish) to skip.",
+                        dataset.cam1_calibration.distortion_coefficients.len(),
+                    )
+                })?
         } else {
             RadialTangential::IDENTITY
         };
+        Some(Cam1StereoSetup {
+            camera: cam1_camera,
+            cam0_to_cam1,
+            distortion: cam1_distortion,
+        })
+    } else {
+        None
+    };
+    if args.stereo_bootstrap {
+        let cam1_setup = cam1_stereo_setup
+            .as_ref()
+            .expect("computed above whenever stereo_bootstrap is set");
+        let cam1_camera = &cam1_setup.camera;
+        let cam0_to_cam1 = &cam1_setup.cam0_to_cam1;
+        let cam1_distortion = &cam1_setup.distortion;
         let cam1_seed_idx = dataset
             .cam1_images
             .iter()
@@ -2900,12 +3013,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         extractor.set_camera(SuperPointCamera::Cam0);
         stereo_cam1_features_count = cam1_features_raw.len();
         let cam1_features =
-            undistort_feature_keypoints(&cam1_distortion, &cam1_camera, &cam1_features_raw);
+            undistort_feature_keypoints(cam1_distortion, cam1_camera, &cam1_features_raw);
         stereo_cam1_features_after_undistort_count = cam1_features.len();
         stereo_bootstrap_matches = bootstrap_stereo_landmarks(
             &camera,
-            &cam1_camera,
-            &cam0_to_cam1,
+            cam1_camera,
+            cam0_to_cam1,
             &seed_features,
             &cam1_features,
             &StereoBootstrapConfig::default(),
@@ -3379,6 +3492,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_behind_camera_gate_failures: usize = 0;
     let mut covisibility_local_ba_fixed_ratio_gate_failures: usize = 0;
     let mut covisibility_local_ba_other_failures: usize = 0;
+    // Stereo landmark replenishment (opt-in via `--stereo-landmark-replenish`).
+    // Candidates built from frame N's stereo match are queued here and
+    // submitted on frame N+1's `process_frame` call, once frame N's
+    // keyframe (used as the second, anchor observation) is guaranteed to
+    // already exist in the map.
+    let mut pending_replenish_candidates: Vec<LandmarkCandidate> = Vec::new();
+    let mut next_replenish_candidate_id: u64 = 1_000_000_000;
+    let mut stereo_landmark_replenish_candidates_total: usize = 0;
+    // Built once from the CLI knobs (permissive library defaults, overridden
+    // where a flag was supplied). Shared, immutable, across the frame loop.
+    let stereo_replenish_config = {
+        let defaults = StereoReplenishConfig::default();
+        StereoReplenishConfig {
+            max_candidates_per_frame: args.stereo_landmark_replenish_max_per_frame,
+            anchor_keypoint_match_radius_px: args
+                .stereo_landmark_replenish_anchor_match_radius_px
+                .unwrap_or(defaults.anchor_keypoint_match_radius_px),
+            anchor_keypoint_max_descriptor_distance: args
+                .stereo_landmark_replenish_anchor_max_descriptor_distance
+                .or(defaults.anchor_keypoint_max_descriptor_distance),
+            duplicate_suppression_radius_px: args
+                .stereo_landmark_replenish_duplicate_radius_px
+                .unwrap_or(defaults.duplicate_suppression_radius_px),
+            min_parallax_deg: args
+                .stereo_landmark_replenish_min_parallax_deg
+                .unwrap_or(defaults.min_parallax_deg),
+            min_depth_meters: args
+                .stereo_landmark_replenish_min_depth_meters
+                .unwrap_or(defaults.min_depth_meters),
+            max_depth_meters: args
+                .stereo_landmark_replenish_max_depth_meters
+                .unwrap_or(defaults.max_depth_meters),
+            bootstrap_config: defaults.bootstrap_config,
+        }
+    };
 
     for (frame_idx, image_entry) in dataset.cam0_images.iter().enumerate().skip(seed_frame_idx) {
         if frames_recorded >= frame_cap {
@@ -3457,8 +3605,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let frame = frame_from_features(frame_idx as u64, camera_id, &features);
 
-        let result = slam.process_frame(&frame, []);
+        // The most recently applied keyframe, captured *before* this
+        // frame's own `process_frame` call, anchors any replenishment
+        // candidates built below: `process_keyframe`'s triangulator only
+        // accepts observations against keyframes already present in the
+        // map, so a second (synthesised) observation against this
+        // pre-existing keyframe is what lets a same-frame stereo match
+        // become a valid two-view `LandmarkCandidate`.
+        let replenish_anchor_frame_id = if args.stereo_landmark_replenish {
+            slam.map().keyframes.keys().copied().max()
+        } else {
+            None
+        };
+        // Cloned rather than drained: `process_keyframe` only ever looks
+        // at `candidates` when this call's tracked frame is itself
+        // selected as a new keyframe (an early return skips them
+        // otherwise), so a queued candidate must survive across however
+        // many non-keyframe frames occur before the next keyframe is
+        // selected. The queue is cleared below only once a call actually
+        // considers it.
+        let candidates_to_submit: Vec<LandmarkCandidate> = if args.stereo_landmark_replenish {
+            pending_replenish_candidates.clone()
+        } else {
+            Vec::new()
+        };
+        let result = slam.process_frame(&frame, candidates_to_submit);
         let success = result.tracking_succeeded();
+        if args.stereo_landmark_replenish
+            && result
+                .mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.keyframe_decision.selected)
+        {
+            pending_replenish_candidates.clear();
+        }
         // Treat quality-gate rejections as "no estimate this frame": their
         // `localization.pose` still carries the rejected PnP result (the
         // tracker only flips `success = false`), which would otherwise leak
@@ -3470,6 +3650,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         if success {
             tracking_successes += 1;
+        }
+        // Stereo landmark replenishment: for cam0 keypoints tracking did NOT
+        // match to an existing landmark this frame, stereo-match against a
+        // freshly loaded/undistorted cam1 image and stage two-observation
+        // `LandmarkCandidate`s (this frame's real pixel + a synthesised
+        // observation reprojected into the most-recent keyframe) for
+        // submission on the *next* frame's `process_frame` call. All the
+        // matching / triangulation / gating logic (the three-defect-hardened
+        // module) lives in `build_stereo_replenish_candidates`; here we only
+        // assemble its inputs — cam1 features for this instant, the
+        // just-solved pose, and the PnP-inlier index set — and queue the
+        // result.
+        if args.stereo_landmark_replenish && success {
+            if let (Some(anchor_frame_id), Some(cam1_setup), Some(current_pose)) = (
+                replenish_anchor_frame_id,
+                cam1_stereo_setup.as_ref(),
+                tracked.as_ref(),
+            ) {
+                if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
+                    entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
+                }) {
+                    let cam1_image_path = dataset
+                        .cam1_image_dir
+                        .join(&dataset.cam1_images[cam1_idx].filename);
+                    if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
+                        extractor.set_camera(SuperPointCamera::Cam1);
+                        extractor.set_frame_idx(cam1_idx);
+                        let cam1_features_result = extractor.extract(&cam1_image);
+                        extractor.set_camera(SuperPointCamera::Cam0);
+                        if let Ok(cam1_features_raw) = cam1_features_result {
+                            let cam1_features = undistort_feature_keypoints(
+                                &cam1_setup.distortion,
+                                &cam1_setup.camera,
+                                &cam1_features_raw,
+                            );
+                            let matched_cam0_indices: std::collections::HashSet<usize> = result
+                                .tracking
+                                .localization
+                                .inlier_query_indices
+                                .iter()
+                                .copied()
+                                .collect();
+                            let new_candidates = build_stereo_replenish_candidates(
+                                slam.map(),
+                                anchor_frame_id,
+                                frame_idx as u64,
+                                &cam1_setup.camera,
+                                &cam1_setup.cam0_to_cam1,
+                                &features,
+                                &cam1_features,
+                                &matched_cam0_indices,
+                                current_pose,
+                                next_replenish_candidate_id,
+                                &stereo_replenish_config,
+                            );
+                            next_replenish_candidate_id += new_candidates.len() as u64;
+                            stereo_landmark_replenish_candidates_total += new_candidates.len();
+                            pending_replenish_candidates.extend(new_candidates);
+                        }
+                    }
+                }
+            }
         }
         if let Some(reloc) = result.relocalization.as_ref() {
             if reloc.attempted {
@@ -4146,6 +4388,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          stereo_bootstrap_cam1_features={stereo_cam1_features}\n\
          stereo_bootstrap_cam1_features_after_undistort={stereo_cam1_features_after_undistort}\n\
          stereo_bootstrap_matches={stereo_bootstrap_matches_count}\n\
+         stereo_landmark_replenish_enabled={stereo_landmark_replenish_enabled}\n\
+         stereo_landmark_replenish_max_per_frame={stereo_landmark_replenish_max_per_frame}\n\
+         stereo_landmark_replenish_candidates_total={stereo_landmark_replenish_candidates_total}\n\
          bootstrap_depth_meters={bootstrap_depth:.3}\n\
          bootstrap_landmarks={bootstrap_landmarks}\n\
          feature_count_mean={mean_features:.1}\n\
@@ -4351,6 +4596,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stereo_cam1_features = stereo_cam1_features_count,
         stereo_cam1_features_after_undistort = stereo_cam1_features_after_undistort_count,
         stereo_bootstrap_matches_count = stereo_bootstrap_matches.len(),
+        stereo_landmark_replenish_enabled = args.stereo_landmark_replenish,
+        stereo_landmark_replenish_max_per_frame = args.stereo_landmark_replenish_max_per_frame,
+        stereo_landmark_replenish_candidates_total = stereo_landmark_replenish_candidates_total,
         bootstrap_depth = args.bootstrap_depth_meters,
         bootstrap_landmarks = seed_features.len(),
         appearance_descriptors_exported = args.export_frame_appearance_descriptors,

@@ -19,3 +19,4 @@ all-features = true
 nalgebra = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-tracking = { path = "../tracking", version = "0.1.0" }
+visloc-vision = { path = "../../crates/vision", version = "0.1.0" }

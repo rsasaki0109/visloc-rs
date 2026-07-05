@@ -112,15 +112,16 @@ pub use visloc_localization::{
     RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
 };
 pub use visloc_mapping::{
-    AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason, KeyframePolicy,
-    KeyframePolicyConfig, LandmarkCandidate, LandmarkCandidateId, LandmarkCandidateMappingFailure,
-    LandmarkCandidateMappingFailureReason, LandmarkCandidateObservation,
-    LandmarkCandidateValidationConfig, LandmarkCandidateValidationIssue,
-    LandmarkCandidateValidationReport, LinearTriangulator, LocalMapWindow, LocalMapWindowConfig,
-    LocalMappingPipeline, LocalMappingResult, LocalRefinementReason, LocalRefinementResult,
-    LocalRefiner, MapUpdateValidationIssue, MapUpdateValidationReport, NoopLocalRefiner,
-    SimpleKeyframePolicy, StagedMapUpdate, TriangulatedLandmark, TriangulationConfig,
-    TriangulationFailureReason, Triangulator,
+    build_stereo_replenish_candidates, AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason,
+    KeyframePolicy, KeyframePolicyConfig, LandmarkCandidate, LandmarkCandidateId,
+    LandmarkCandidateMappingFailure, LandmarkCandidateMappingFailureReason,
+    LandmarkCandidateObservation, LandmarkCandidateValidationConfig,
+    LandmarkCandidateValidationIssue, LandmarkCandidateValidationReport, LinearTriangulator,
+    LocalMapWindow, LocalMapWindowConfig, LocalMappingPipeline, LocalMappingResult,
+    LocalRefinementReason, LocalRefinementResult, LocalRefiner, MapUpdateValidationIssue,
+    MapUpdateValidationReport, NoopLocalRefiner, SimpleKeyframePolicy, StagedMapUpdate,
+    StereoReplenishConfig, TriangulatedLandmark, TriangulationConfig, TriangulationFailureReason,
+    Triangulator,
 };
 pub use visloc_slam::{
     close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
@@ -232,7 +233,8 @@ pub use two_view_vo::{
 /// that prefer explicit imports.
 pub mod prelude {
     pub use crate::{
-        localize, localize_frame, localize_frame_with_descriptor_store, localize_frames,
+        build_stereo_replenish_candidates, localize, localize_frame,
+        localize_frame_with_descriptor_store, localize_frames,
         localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
         online_slam_results_to_html_report, parse_external_deep_features_txt,
         parse_external_deep_matches_txt, parse_two_view_matches_txt,
@@ -282,11 +284,11 @@ pub mod prelude {
         RelativePoseErrorSummary, RobustPoseEstimator, SelectableMapProvider, Sim3, Sim3Edge,
         Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats,
         Sim3PoseGraphResult, Sim3Tangent, SimpleKeyframePolicy, StagedMapUpdate,
-        StationaryRejectionReason, StereoRelativePoseMode, StereoVoPairDiagnostics, SubmapSelector,
-        TimeDelta, Timed, TimedFrame, TimedMeasurement, TimedPose, Timestamp, Tracker,
-        TrackingConfig, TrackingEvaluationConfig, TrackingEvaluationFailure,
-        TrackingEvaluationResult, TrackingEvent, TrackingFailureReason, TrackingResult,
-        TrackingState, TrackingStats, TrajectoryAlignment, TrajectoryErrorSummary,
+        StationaryRejectionReason, StereoRelativePoseMode, StereoReplenishConfig,
+        StereoVoPairDiagnostics, SubmapSelector, TimeDelta, Timed, TimedFrame, TimedMeasurement,
+        TimedPose, Timestamp, Tracker, TrackingConfig, TrackingEvaluationConfig,
+        TrackingEvaluationFailure, TrackingEvaluationResult, TrackingEvent, TrackingFailureReason,
+        TrackingResult, TrackingState, TrackingStats, TrajectoryAlignment, TrajectoryErrorSummary,
         TrajectoryEvaluationConfig, TrajectoryEvaluationFailure, TrajectoryEvaluationResult,
         TrajectoryFileError, TrajectorySample, TrajectorySimilarityTransform, TrajectorySummary,
         TrajectoryTranslationError, TriangulationConfig, TriangulationFailureReason, Triangulator,
