@@ -15,6 +15,14 @@
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero_euroc_mh01_dark.png">
+    <img src="docs/assets/hero_euroc_mh01_light.png" alt="Stereo SLAM on EuRoC MH_01: estimated trajectory against ground truth with the replenished landmark map" width="820">
+  </picture><br>
+  <sub>Online stereo SLAM on EuRoC MH_01 — estimated trajectory (tracked segments) vs ground truth, with the 6.8k-point landmark map grown by stereo landmark replenishment.</sub>
+</p>
+
 **Showcases and artifacts**
 
 - [KITTI loop-closure benchmark](docs/kitti_loop_closure_benchmark.md): seq00 drift correction and loop diagnostics.
