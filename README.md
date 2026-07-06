@@ -16,11 +16,8 @@
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero_euroc_mh01_dark.png">
-    <img src="docs/assets/hero_euroc_mh01_light.png" alt="Stereo SLAM on EuRoC MH_01: estimated trajectory against ground truth with the replenished landmark map" width="820">
-  </picture><br>
-  <sub>Online stereo SLAM on EuRoC MH_01 — estimated trajectory (tracked segments) vs ground truth, with the 6.8k-point landmark map grown by stereo landmark replenishment.</sub>
+  <img src="docs/assets/hero_euroc_mh01_slam.gif" alt="Online stereo SLAM on EuRoC MH_01: onboard camera footage beside the live map — estimated trajectory vs ground truth as stereo landmark replenishment grows the landmark map" width="820"><br>
+  <sub>Online stereo SLAM on EuRoC MH_01 — onboard camera and the live map growing in real time: estimated trajectory (tracked segment) vs ground truth, landmark map grown by stereo landmark replenishment. Still version: <a href="docs/assets/hero_euroc_mh01_light.png">light</a> · <a href="docs/assets/hero_euroc_mh01_dark.png">dark</a>.</sub>
 </p>
 
 **Showcases and artifacts**
