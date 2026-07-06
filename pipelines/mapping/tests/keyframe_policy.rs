@@ -226,6 +226,7 @@ fn can_select_when_tracked_landmarks_drop_after_frame_gap() {
         select_relocalized_frames: true,
         tracked_landmark_keyframe_ratio: Some(0.9),
         min_tracked_landmarks_for_quality_keyframe: 20,
+        ..KeyframePolicyConfig::default()
     });
 
     assert!(
@@ -284,6 +285,7 @@ fn tracked_landmark_drop_respects_reference_count_floor() {
         select_relocalized_frames: true,
         tracked_landmark_keyframe_ratio: Some(0.9),
         min_tracked_landmarks_for_quality_keyframe: 20,
+        ..KeyframePolicyConfig::default()
     });
 
     assert!(
@@ -322,6 +324,7 @@ fn tracked_landmark_drop_respects_current_count_floor() {
         select_relocalized_frames: true,
         tracked_landmark_keyframe_ratio: Some(0.9),
         min_tracked_landmarks_for_quality_keyframe: 20,
+        ..KeyframePolicyConfig::default()
     });
 
     assert!(
@@ -351,4 +354,89 @@ fn tracked_landmark_drop_respects_current_count_floor() {
         }
     );
     assert_eq!(policy.last_keyframe_tracked_landmark_count(), Some(100));
+}
+
+#[test]
+fn insufficient_tracking_quality_rejects_low_inlier_count() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 1,
+        min_translation: 0.1,
+        select_relocalized_frames: true,
+        min_inliers: Some(50),
+        ..KeyframePolicyConfig::default()
+    });
+
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                100,
+            ))
+            .selected
+    );
+
+    // Clears the frame-id-gap and translation gates, but has too few
+    // inliers, so promotion must be rejected instead of falling through
+    // to `ThresholdsMet`.
+    let rejected = policy.evaluate(&success_result_with_inliers(
+        11,
+        TrackingEvent::Tracked,
+        Vector3::new(1.0, 0.0, 0.0),
+        10,
+    ));
+
+    assert!(!rejected.selected);
+    assert_eq!(
+        rejected.reason,
+        KeyframeDecisionReason::InsufficientTrackingQuality {
+            inlier_count: 10,
+            inlier_ratio: 1.0,
+            min_inliers: Some(50),
+            min_inlier_ratio: None,
+        }
+    );
+    // The rejected frame must not have overwritten the last-keyframe state.
+    assert_eq!(policy.last_keyframe_frame_id(), Some(10));
+    assert_eq!(policy.selected_keyframe_count(), 1);
+}
+
+#[test]
+fn insufficient_tracking_quality_allows_promotion_once_thresholds_are_met() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 1,
+        min_translation: 0.1,
+        select_relocalized_frames: true,
+        min_inliers: Some(50),
+        min_inlier_ratio: Some(0.5),
+        ..KeyframePolicyConfig::default()
+    });
+
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                100,
+            ))
+            .selected
+    );
+
+    let selected = policy.evaluate(&success_result_with_inliers(
+        11,
+        TrackingEvent::Tracked,
+        Vector3::new(1.0, 0.0, 0.0),
+        80,
+    ));
+
+    assert!(selected.selected);
+    assert_eq!(
+        selected.reason,
+        KeyframeDecisionReason::ThresholdsMet {
+            frame_id_gap: 1,
+            translation: 1.0,
+        }
+    );
 }

@@ -26,6 +26,7 @@
 - [EuRoC loop-closure benchmark](docs/euroc_loop_closure_benchmark.md): MH_03 visual loop-closure evidence and limitations.
 - [Public COLMAP map-reuse demo](docs/public_data_demo.md): classical vs deep localization artifacts.
 - [Unordered SfM benchmark](docs/unordered_sfm_benchmark.md): South Building and Gerrard Hall reconstruction / 3DGS outputs.
+- [Tracking persistence benchmark](docs/tracking_persistence_benchmark.md): death-spiral diagnosis, opt-in gate fixes, and honest coverage/ATE tradeoffs on EuRoC MH.
 - [Interactive trajectory viewer](https://rsasaki0109.github.io/visloc-rs/kitti3d/) and [EuRoC splat viewer](https://rsasaki0109.github.io/visloc-rs/euroc_splat/).
 
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating

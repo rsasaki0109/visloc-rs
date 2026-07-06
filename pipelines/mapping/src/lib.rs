@@ -28,6 +28,21 @@ pub struct KeyframePolicyConfig {
     pub select_relocalized_frames: bool,
     pub tracked_landmark_keyframe_ratio: Option<f64>,
     pub min_tracked_landmarks_for_quality_keyframe: usize,
+    /// When `Some(n)`, a frame that would otherwise be promoted to a
+    /// keyframe (i.e. it already cleared the frame-id-gap and translation
+    /// gates) is instead rejected with
+    /// [`KeyframeDecisionReason::InsufficientTrackingQuality`] if its PnP
+    /// inlier count is below `n`. Guards against promoting a keyframe from
+    /// a marginal localization (e.g. a handful of inliers surviving a
+    /// tracking failure) that would poison the covisibility graph and
+    /// local map for subsequent frames. `None` (the default) preserves
+    /// legacy always-promote behaviour.
+    pub min_inliers: Option<usize>,
+    /// Companion to `min_inliers`: when `Some(r)`, also requires the PnP
+    /// inlier ratio to be at least `r`. Either configured threshold not
+    /// being met rejects the promotion. `None` (the default) preserves
+    /// legacy always-promote behaviour.
+    pub min_inlier_ratio: Option<f64>,
 }
 
 impl Default for KeyframePolicyConfig {
@@ -38,6 +53,8 @@ impl Default for KeyframePolicyConfig {
             select_relocalized_frames: true,
             tracked_landmark_keyframe_ratio: None,
             min_tracked_landmarks_for_quality_keyframe: 20,
+            min_inliers: None,
+            min_inlier_ratio: None,
         }
     }
 }
@@ -74,6 +91,12 @@ pub enum KeyframeDecisionReason {
     TranslationTooSmall {
         translation: f64,
         min_translation: f64,
+    },
+    InsufficientTrackingQuality {
+        inlier_count: usize,
+        inlier_ratio: f64,
+        min_inliers: Option<usize>,
+        min_inlier_ratio: Option<f64>,
     },
 }
 
@@ -188,6 +211,35 @@ impl SimpleKeyframePolicy {
 
         None
     }
+
+    /// When a frame has cleared the frame-id-gap and translation gates and
+    /// would otherwise be promoted, check it against the optional
+    /// `min_inliers` / `min_inlier_ratio` tracking-quality floors. Returns
+    /// `Some` (rejecting the promotion) when either configured threshold is
+    /// not met; `None` (both thresholds absent, or both satisfied) leaves
+    /// the promotion to proceed as `ThresholdsMet`.
+    fn insufficient_tracking_quality_reason(
+        &self,
+        result: &TrackingResult,
+    ) -> Option<KeyframeDecisionReason> {
+        let min_inliers = self.config.min_inliers;
+        let min_inlier_ratio = self.config.min_inlier_ratio;
+        let inlier_count = result.localization.inlier_count;
+        let inlier_ratio = result.localization.inlier_ratio;
+
+        let fails_min_inliers = min_inliers.is_some_and(|min| inlier_count < min);
+        let fails_min_inlier_ratio = min_inlier_ratio.is_some_and(|min| inlier_ratio < min);
+        if fails_min_inliers || fails_min_inlier_ratio {
+            Some(KeyframeDecisionReason::InsufficientTrackingQuality {
+                inlier_count,
+                inlier_ratio,
+                min_inliers,
+                min_inlier_ratio,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl KeyframePolicy for SimpleKeyframePolicy {
@@ -236,6 +288,10 @@ impl KeyframePolicy for SimpleKeyframePolicy {
                     min_translation: self.config.min_translation,
                 },
             );
+        }
+
+        if let Some(reason) = self.insufficient_tracking_quality_reason(result) {
+            return self.rejected(result, reason);
         }
 
         self.selected(

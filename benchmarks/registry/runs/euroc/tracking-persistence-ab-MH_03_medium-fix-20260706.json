@@ -1,0 +1,175 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\persist_ab_20260706\\MH_03_medium\\fix\\slam_trajectory.csv",
+      "sha256": "4b1516818704b20f2c96a8bff8cc086aa3cccbd3300ae6e80496e1606d0fa807"
+    },
+    {
+      "exists": true,
+      "kind": "errors",
+      "path": "E:\\visloc_archive\\persist_ab_20260706\\MH_03_medium\\fix\\slam_errors.csv",
+      "sha256": "85d81b7e0286c073639aa73425383fbac16117e29f64d010ac263900186ef633"
+    },
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "E:\\visloc_archive\\persist_ab_20260706\\MH_03_medium\\fix\\summary.txt",
+      "sha256": "307aa1f774d62ccf4354193bf2614d819e6e24bde70fd4b8495f5068ac1c27e4"
+    },
+    {
+      "exists": true,
+      "kind": "keyframe_decisions",
+      "path": "E:\\visloc_archive\\persist_ab_20260706\\MH_03_medium\\fix\\keyframe_decisions.csv",
+      "sha256": "f1ca2d8e789029c9fdc62229215a1637726de0d8c5e8f4c2f77417b2a8430eac"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/tracking_persistence_benchmark.md"
+    ],
+    "id": "tracking-persistence-ab",
+    "name": "EuRoC tracking persistence A/B (death-spiral fixes + relocalization)",
+    "protocol": "MH_03_medium full-sequence stereo HOG gated-replenish base; arm=fix",
+    "script": "examples/euroc_online_slam_vi_image_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "3c693a5d581d7a01a0384c9dd5d611b6bfac20b06aa5a20006d47dd758f1fcc8",
+    "features": [],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "euroc_online_slam_vi_image_demo.exe",
+      "--euroc-dir",
+      "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+      "--max-frames",
+      "4000",
+      "--gravity",
+      "0,0,-9.81",
+      "--feature-extractor",
+      "hog",
+      "--cross-check-matcher",
+      "--keyframe-min-translation",
+      "0.1",
+      "--max-pose-jump-meters",
+      "0.2",
+      "--stereo-bootstrap-strict",
+      "--stereo-landmark-replenish",
+      "--pose-jump-gap-scaling",
+      "--keyframe-min-inliers",
+      "15",
+      "--keyframe-min-inlier-ratio",
+      "0.1"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "euroc_online_slam_vi_image_demo.exe --euroc-dir C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium --max-frames 4000 --gravity 0,0,-9.81 --feature-extractor hog --cross-check-matcher --keyframe-min-translation 0.1 --max-pose-jump-meters 0.2 --stereo-bootstrap-strict --stereo-landmark-replenish --pose-jump-gap-scaling --keyframe-min-inliers 15 --keyframe-min-inlier-ratio 0.1"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "variant": "fix"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-06T11:31:47Z",
+  "dataset": {
+    "checksum": "5756647297b8fa3531da50bab44c1acecf9ea9d518bb92fe968f15557392501c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_03_medium",
+    "sequence": "MH_03_medium",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "d9646da01b5cd9d6a8daf919bf8724a5141c1242",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "tracking_success_rate",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.254
+    },
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.2024
+    },
+    {
+      "implementation": null,
+      "name": "ate_position_max_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 1.723
+    },
+    {
+      "implementation": null,
+      "name": "map_landmarks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6725
+    },
+    {
+      "implementation": null,
+      "name": "map_keyframes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 77
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_attempts",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "relocalization_successes",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "keyframe_insufficient_tracking_quality_rejections",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    }
+  ],
+  "models": [],
+  "notes": "fix arm vs gated-replenish baseline: coverage 17.6%->25.4%, gains a new ~165-frame healthy segment (2526-2699, ~5cm) baseline never reaches. 31/673 frames (4.6%) transient >0.5m error; excluding them RMSE 5.5cm vs baseline 3.6cm. Archived outputs at E:\\visloc_archive\\persist_ab_20260706\\MH_03_medium\\fix.",
+  "result_kind": "visloc_run",
+  "run_id": "tracking-persistence-ab-MH_03_medium-fix-20260706",
+  "schema_version": 1,
+  "status": "success"
+}

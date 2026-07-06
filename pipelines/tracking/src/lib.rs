@@ -63,6 +63,21 @@ pub struct TrackingConfig {
     /// preserve the existing behaviour where the prior is consumed only as a
     /// candidate-radius filter.
     pub pnp_pose_prior_warm_start: bool,
+    /// When `true`, scale `max_pose_prior_translation_error` by the number
+    /// of frames elapsed since the last successful track (capped at
+    /// `pose_jump_gap_scaling_max_multiplier`, floored at 1). A pose prior
+    /// that has gone stale because tracking failed for several frames in a
+    /// row is compared against a proportionally widened gate instead of the
+    /// fixed radius, so a good PnP solution arriving after a gap is not
+    /// rejected purely because the (frozen) prior is far from it. When the
+    /// immediately preceding frame tracked successfully the gap is 1 and
+    /// the gate is unchanged from today's fixed-radius behaviour. Off by
+    /// default.
+    pub pose_jump_gap_scaling: bool,
+    /// Cap on the gap-scaling multiplier applied when `pose_jump_gap_scaling`
+    /// is enabled. Prevents an extended tracking outage from inflating the
+    /// gate to an unbounded radius.
+    pub pose_jump_gap_scaling_max_multiplier: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,6 +115,8 @@ impl Default for TrackingConfig {
             max_mean_reprojection_error: None,
             covisibility_local_map: None,
             pnp_pose_prior_warm_start: false,
+            pose_jump_gap_scaling: false,
+            pose_jump_gap_scaling_max_multiplier: 10,
         }
     }
 }

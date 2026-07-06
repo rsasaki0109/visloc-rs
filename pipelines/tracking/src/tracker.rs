@@ -390,7 +390,7 @@ where
                 )
         };
         let tracking_failure_reason =
-            self.apply_tracking_quality_gate(pose_prior.as_ref(), &mut localization);
+            self.apply_tracking_quality_gate(frame.id, pose_prior.as_ref(), &mut localization);
 
         let previous_state = self.state;
         let event = if localization.success {
@@ -512,6 +512,7 @@ where
 
     fn apply_tracking_quality_gate(
         &self,
+        frame_id: FrameId,
         pose_prior: Option<&Pose>,
         localization: &mut LocalizationResult,
     ) -> Option<TrackingFailureReason> {
@@ -554,6 +555,30 @@ where
 
         let translation_error =
             (estimated_pose.camera_center_world() - pose_prior.camera_center_world()).norm();
+
+        let max_translation_error = if self.config.pose_jump_gap_scaling {
+            // The pose prior comes from the motion model, which (for the
+            // constant-pose / constant-velocity models used here) is
+            // anchored to `last_successful_pose`. If tracking has been
+            // failing for several frames, that prior is stale — it hasn't
+            // moved while the true camera pose has. Scale the gate by how
+            // long the prior has been frozen so a good post-gap PnP
+            // solution isn't rejected against a fixed radius measured from
+            // a pose the camera left several frames ago.
+            let frames_since_last_tracking_success = self
+                .last_successful_frame_id
+                .map(|last_id| frame_id.saturating_sub(last_id))
+                .unwrap_or(1)
+                .max(1);
+            let multiplier = pose_jump_gap_scaling_multiplier(
+                frames_since_last_tracking_success,
+                self.config.pose_jump_gap_scaling_max_multiplier,
+            );
+            max_translation_error * multiplier as f64
+        } else {
+            max_translation_error
+        };
+
         if translation_error <= max_translation_error {
             return None;
         }
@@ -564,6 +589,20 @@ where
             max_translation_error,
         })
     }
+}
+
+/// Multiplier applied to `max_pose_prior_translation_error` when
+/// `pose_jump_gap_scaling` is enabled: the frame gap since the last
+/// successful track, capped at `max_multiplier` and floored at 1. A gap of
+/// 1 (the common case — the immediately preceding frame tracked
+/// successfully) reproduces the unscaled gate.
+fn pose_jump_gap_scaling_multiplier(
+    frames_since_last_tracking_success: FrameId,
+    max_multiplier: usize,
+) -> FrameId {
+    frames_since_last_tracking_success
+        .min(max_multiplier as FrameId)
+        .max(1)
 }
 
 /// Resolve the reference keyframe for covisibility-based local-map selection.
@@ -1499,5 +1538,30 @@ mod covisibility_local_map_tests {
         for lm in 11..=15 {
             assert!(local.contains(&lm), "expected reference landmark {}", lm);
         }
+    }
+}
+
+#[cfg(test)]
+mod pose_jump_gap_scaling_tests {
+    use super::*;
+
+    #[test]
+    fn gap_of_one_reproduces_unscaled_gate() {
+        // The common case: the immediately preceding frame tracked
+        // successfully, so the gap is 1 and the multiplier is a no-op.
+        assert_eq!(pose_jump_gap_scaling_multiplier(1, 10), 1);
+    }
+
+    #[test]
+    fn gap_scales_up_to_the_configured_cap() {
+        assert_eq!(pose_jump_gap_scaling_multiplier(3, 10), 3);
+        assert_eq!(pose_jump_gap_scaling_multiplier(10, 10), 10);
+        assert_eq!(pose_jump_gap_scaling_multiplier(50, 10), 10);
+    }
+
+    #[test]
+    fn multiplier_never_drops_below_one_even_with_a_zero_cap() {
+        assert_eq!(pose_jump_gap_scaling_multiplier(0, 10), 1);
+        assert_eq!(pose_jump_gap_scaling_multiplier(5, 0), 1);
     }
 }

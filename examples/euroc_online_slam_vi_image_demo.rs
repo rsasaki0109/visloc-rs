@@ -786,6 +786,23 @@ struct CliArgs {
     /// (~0.5 m/s walking pace, 50 ms cam0 cadence) values in the
     /// `0.2`–`1.0` m range are reasonable.
     max_pose_jump_meters: Option<f64>,
+    /// When `true`, scale `--max-pose-jump-meters` by the number of frames
+    /// elapsed since the last successful track (capped at
+    /// `--pose-jump-gap-scaling-max-multiplier`, floored at 1) before
+    /// comparing. Addresses a permanent-tracking-loss failure mode
+    /// observed on EuRoC MH_01: a single tracking failure freezes the
+    /// motion-model pose prior (`ConstantPoseMotionModel` returns the last
+    /// successful pose), and a subsequent frame with a genuinely good PnP
+    /// solution gets rejected by the fixed-radius gate because the prior
+    /// is stale, not because the solution is bad. Scaling the gate by the
+    /// gap lets a good post-gap solution through while still catching
+    /// same-gap outliers at the original radius. Off by default; no effect
+    /// unless `--max-pose-jump-meters` is also set.
+    pose_jump_gap_scaling: bool,
+    /// Companion to `--pose-jump-gap-scaling`: caps the gap-scaling
+    /// multiplier so an extended tracking outage doesn't inflate the gate
+    /// to an unbounded radius. Defaults to `10`.
+    pose_jump_gap_scaling_max_multiplier: usize,
     /// Minimum PnP inlier count required after localization. Defaults
     /// to `0`, preserving legacy behaviour. Useful when relaxing
     /// pose-prior gates: frames with only a handful of correspondences
@@ -925,6 +942,18 @@ struct CliArgs {
     /// Prevents sparse startup frames or nearly-lost frames from making
     /// the ratio trigger look artificially severe.
     keyframe_min_tracked_landmarks_for_ratio: usize,
+    /// When `Some(n)`, rejects promoting a frame to a keyframe (even
+    /// after it clears the frame-id-gap and translation gates) if its PnP
+    /// inlier count is below `n`. Targets the EuRoC MH_01 frame-1096
+    /// failure mode where a garbage localization (4 inliers) that
+    /// survives the pose-prior gate gets promoted to a keyframe and
+    /// poisons the local map / covisibility graph for subsequent frames.
+    /// `None` (the default) preserves legacy always-promote behaviour.
+    keyframe_min_inliers: Option<usize>,
+    /// Companion to `--keyframe-min-inliers`: also requires the PnP
+    /// inlier ratio to be at least this value for a keyframe promotion to
+    /// go through. `None` (the default) preserves legacy behaviour.
+    keyframe_min_inlier_ratio: Option<f64>,
     /// Override `VisualInertialInitializerConfig.min_samples`; default
     /// `50`. Lowering accelerates VI-init promotion so more KFs
     /// register POST-init and feed the local-VI-BA chain.
@@ -1228,6 +1257,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut stereo_landmark_replenish_min_depth_meters: Option<f64> = None;
     let mut stereo_landmark_replenish_max_depth_meters: Option<f64> = None;
     let mut max_pose_jump_meters: Option<f64> = None;
+    let mut pose_jump_gap_scaling: bool = false;
+    let mut pose_jump_gap_scaling_max_multiplier: usize = 10;
     let mut tracking_min_inliers: usize = 0;
     let mut tracking_min_inlier_ratio: f64 = 0.0;
     let mut tracking_max_reprojection_error: Option<f64> = None;
@@ -1246,6 +1277,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut keyframe_min_frame_gap: Option<u64> = None;
     let mut keyframe_tracked_landmark_ratio: Option<f64> = None;
     let mut keyframe_min_tracked_landmarks_for_ratio: usize = 20;
+    let mut keyframe_min_inliers: Option<usize> = None;
+    let mut keyframe_min_inlier_ratio: Option<f64> = None;
     let mut vi_init_min_samples: Option<usize> = None;
     let mut vi_init_min_stationary_window_seconds: Option<f64> = None;
     let mut keep_pre_promotion_imu_factors: bool = false;
@@ -1636,6 +1669,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 max_pose_jump_meters = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--pose-jump-gap-scaling" => {
+                pose_jump_gap_scaling = true;
+                args.remove(i);
+            }
+            "--pose-jump-gap-scaling-max-multiplier" => {
+                pose_jump_gap_scaling_max_multiplier = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--tracking-min-inliers" => {
                 tracking_min_inliers = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1755,6 +1796,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--keyframe-min-tracked-landmarks-for-ratio" => {
                 keyframe_min_tracked_landmarks_for_ratio = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--keyframe-min-inliers" => {
+                keyframe_min_inliers = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--keyframe-min-inlier-ratio" => {
+                keyframe_min_inlier_ratio = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--vi-init-min-samples" => {
@@ -2166,6 +2215,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         stereo_landmark_replenish_min_depth_meters,
         stereo_landmark_replenish_max_depth_meters,
         max_pose_jump_meters,
+        pose_jump_gap_scaling,
+        pose_jump_gap_scaling_max_multiplier,
         tracking_min_inliers,
         tracking_min_inlier_ratio,
         tracking_max_reprojection_error,
@@ -2184,6 +2235,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         keyframe_min_frame_gap,
         keyframe_tracked_landmark_ratio,
         keyframe_min_tracked_landmarks_for_ratio,
+        keyframe_min_inliers,
+        keyframe_min_inlier_ratio,
         vi_init_min_samples,
         vi_init_min_stationary_window_seconds,
         keep_pre_promotion_imu_factors,
@@ -2749,6 +2802,15 @@ fn keyframe_reason_csv_fields(
             String::new(),
             String::new(),
         ),
+        KeyframeDecisionReason::InsufficientTrackingQuality { .. } => (
+            "InsufficientTrackingQuality",
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
     }
 }
 
@@ -3208,6 +3270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_inlier_ratio: args.tracking_min_inlier_ratio,
         max_mean_reprojection_error: args.tracking_max_reprojection_error,
         pnp_pose_prior_warm_start: args.pnp_pose_prior_warm_start,
+        pose_jump_gap_scaling: args.pose_jump_gap_scaling,
+        pose_jump_gap_scaling_max_multiplier: args.pose_jump_gap_scaling_max_multiplier,
         ..TrackingConfig::default()
     };
     let build_imu_config = || {
@@ -3285,6 +3349,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.tracked_landmark_keyframe_ratio = args.keyframe_tracked_landmark_ratio;
         cfg.min_tracked_landmarks_for_quality_keyframe =
             args.keyframe_min_tracked_landmarks_for_ratio;
+        cfg.min_inliers = args.keyframe_min_inliers;
+        cfg.min_inlier_ratio = args.keyframe_min_inlier_ratio;
         cfg
     };
     let local_mapping = LocalMappingPipeline {
@@ -3392,6 +3458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut frames_recorded = 0usize;
     let mut tracking_successes = 0usize;
+    let mut keyframe_insufficient_tracking_quality_rejections = 0usize;
     let mut relocalization_attempts = 0u64;
     let mut relocalization_successes = 0u64;
     let mut relocalization_gate_passes = 0u64;
@@ -3906,6 +3973,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(mapping) = result.mapping.as_ref() {
             let decision = &mapping.keyframe_decision;
+            if matches!(
+                decision.reason,
+                KeyframeDecisionReason::InsufficientTrackingQuality { .. }
+            ) {
+                keyframe_insufficient_tracking_quality_rejections += 1;
+            }
             let tracking_failure_reason = result
                 .tracking
                 .tracking_failure_reason
@@ -4466,6 +4539,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_elapsed_ms_max={covis_ba_elapsed_ms_max:.6}\n\
          covisibility_local_ba_last_error={covis_ba_last_error:?}\n\
          max_pose_jump_meters={max_pose_jump:?}\n\
+         pose_jump_gap_scaling={pose_jump_gap_scaling}\n\
+         pose_jump_gap_scaling_max_multiplier={pose_jump_gap_scaling_max_multiplier}\n\
          tracking_min_inliers={tracking_min_inliers}\n\
          tracking_min_inlier_ratio={tracking_min_inlier_ratio:.6}\n\
          tracking_max_reprojection_error={tracking_max_reprojection_error:?}\n\
@@ -4491,6 +4566,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          keyframe_min_frame_gap={kf_min_frame_gap:?}\n\
          keyframe_tracked_landmark_ratio={kf_tracked_ratio:?}\n\
          keyframe_min_tracked_landmarks_for_ratio={kf_min_tracked_for_ratio}\n\
+         keyframe_min_inliers={kf_min_inliers:?}\n\
+         keyframe_min_inlier_ratio={kf_min_inlier_ratio:?}\n\
+         keyframe_insufficient_tracking_quality_rejections={kf_insufficient_tracking_quality_rejections}\n\
          keep_pre_promotion_imu_factors={keep_pre_promotion}\n\
          relinearise_imu_factor_bias_thresholds={relinearise_thresholds:?}\n\
          run_local_vi_ba_at_vi_init_promotion={run_at_promotion}\n\
@@ -4681,6 +4759,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_elapsed_ms_max = covisibility_local_ba_elapsed_ms_max,
         covis_ba_last_error = covisibility_local_ba_last_error,
         max_pose_jump = args.max_pose_jump_meters,
+        pose_jump_gap_scaling = args.pose_jump_gap_scaling,
+        pose_jump_gap_scaling_max_multiplier = args.pose_jump_gap_scaling_max_multiplier,
         tracking_min_inliers = args.tracking_min_inliers,
         tracking_min_inlier_ratio = args.tracking_min_inlier_ratio,
         tracking_max_reprojection_error = args.tracking_max_reprojection_error,
@@ -4740,6 +4820,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kf_min_frame_gap = args.keyframe_min_frame_gap,
         kf_tracked_ratio = args.keyframe_tracked_landmark_ratio,
         kf_min_tracked_for_ratio = args.keyframe_min_tracked_landmarks_for_ratio,
+        kf_min_inliers = args.keyframe_min_inliers,
+        kf_min_inlier_ratio = args.keyframe_min_inlier_ratio,
+        kf_insufficient_tracking_quality_rejections =
+            keyframe_insufficient_tracking_quality_rejections,
         keep_pre_promotion = args.keep_pre_promotion_imu_factors,
         relinearise_thresholds = args.relinearise_imu_factor_bias_thresholds,
         run_at_promotion = args.run_local_vi_ba_at_vi_init_promotion,
