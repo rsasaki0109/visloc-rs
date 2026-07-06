@@ -1,0 +1,127 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "benchmark_doc",
+      "path": "docs\\sfm_vs_colmap_benchmark.md",
+      "sha256": "e97b59de13786726a69ee65e7061f4198f79bc38e281b726a421b36ba2b8fcbf"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/sfm_vs_colmap_benchmark.md"
+    ],
+    "id": "eth3d-battle-unordered",
+    "name": "Unordered SfM vs COLMAP on ETH3D laser-scan ground truth",
+    "protocol": "ETH3D high-res DSLR undistorted scene reconstructed by both engines from the same images; both scored against the laser-scanner-registered GT poses (dslr_calibration_undistorted/images.txt) by Sim(3) camera-centre RMSE (scripts/compare_sfm_sim3.py). Independent ground truth: neither engine authored the reference. Both engines given the same shared cam-0 pinhole prior (scenes carry up to 4 per-group calibrations).",
+    "script": null
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "3c693a5d581d7a01a0384c9dd5d611b6bfac20b06aa5a20006d47dd758f1fcc8",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "scratchpad",
+      "export_superpoint_scaled.py",
+      "--max-dim",
+      "3200",
+      "--max-keypoints",
+      "2048",
+      "--device",
+      "cuda;",
+      "unordered_sfm_demo",
+      "--retrieval-topk",
+      "12",
+      "--min-matches",
+      "30",
+      "--colmap-style",
+      "(driver:",
+      "scratchpad",
+      "eth3d_battle.py;",
+      "logs",
+      "at",
+      "E:/datasets/eth3d/battle/office/visloc_run/)"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scratchpad export_superpoint_scaled.py --max-dim 3200 --max-keypoints 2048 --device cuda; unordered_sfm_demo --retrieval-topk 12 --min-matches 30 --colmap-style (driver: scratchpad eth3d_battle.py; logs at E:/datasets/eth3d/battle/office/visloc_run/)"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "engine": "visloc",
+      "frontend": "superpoint_2048_cuda_maxdim3200",
+      "retrieval_topk": 12,
+      "schedule": "colmap-style"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-06T02:56:05Z",
+  "dataset": {
+    "checksum": "72efbbb9279001768b1b7bb6d3ffccc299e40af23e4b0c45a6bb222dcbdacaf9",
+    "checksum_method": "sha256_tree_v1",
+    "name": "ETH3D high-res DSLR (office)",
+    "path": "E:/datasets/eth3d/office",
+    "sequence": "office",
+    "version": "eth3d.net office_dslr_undistorted.7z"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "faf58524b5c2608cf16ce6ef0c08ad963e56a9dd",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": "Intel i7-9750H, NVIDIA GTX 1660 Ti 6GB (CUDA both frontends), Windows 11. COLMAP 4.1.0 fa8e3b3 windows-cuda; torch 2.5.1+cu121; SuperPoint extraction at max-dim 3200 (matching COLMAP's default max_image_size), keypoints scaled back to full-res.",
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_total_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 55.0
+    },
+    {
+      "implementation": null,
+      "name": "registered_images",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 18
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_rmse_cm",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.37
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_median_cm",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.26
+    }
+  ],
+  "models": [],
+  "notes": "Honest negative vs ETH3D laser GT: COLMAP ahead on common-subset accuracy on all three scenes (0.15-0.41cm vs 0.36-17.4cm). Sweep findings: --refine-intrinsics hurts on sparse view graphs; 4096kp takes courtyard 15.24->4.37cm (registration unchanged), saturates on office, worsens terrace. Companion: eth3d-battle-colmap-office-20260706.",
+  "result_kind": "visloc_run",
+  "run_id": "eth3d-battle-visloc-office-20260706",
+  "schema_version": 1,
+  "status": "success"
+}

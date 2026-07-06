@@ -315,6 +315,64 @@ speed, as VLAD retrieval does); COLMAP downscales extraction to its default
 frames. Raw per-stage logs and the second overlay figure live with the registry
 manifests (`benchmarks/registry/runs/colmap_sfm/`).
 
+## Independent ground truth: ETH3D (laser-scan GT) — COLMAP is ahead
+
+The same-machine battle above still scores against a COLMAP-authored
+reference, a metric visloc cannot "win" by construction. The **ETH3D
+high-res DSLR** scenes remove that: both engines reconstruct the undistorted
+photos and both are scored against **laser-scanner-registered ground-truth
+poses** neither engine authored (Sim(3) camera-centre RMSE, same tooling and
+machine as above; both engines are given the same cam-0 pinhole prior —
+ETH3D scenes carry up to four slightly-different per-group calibrations, so
+this is the same shared-camera handicap for both, though COLMAP's mapper may
+still refine its copy while visloc's stays fixed by default).
+
+| scene (GT images) | COLMAP 4.1 (CUDA) | visloc-rs (defaults) |
+|---|---|---|
+| courtyard (38) | **23 / 38 · 1.92 cm** | 14 / 38 · 15.24 cm |
+| terrace (23) | 8 / 23 · 0.41 cm | **23 / 23** · 12.37 cm |
+| office (26) | **26 / 26 · 0.42 cm** | 18 / 26 · 0.37 cm |
+
+Headline RMSE across different registered sets is misleading, so the decisive
+comparison restricts both models to the **cameras both engines registered**:
+
+| common subset | COLMAP | visloc-rs |
+|---|---:|---:|
+| courtyard (8) | **0.16 cm** | 0.36 cm |
+| terrace (8) | **0.41 cm** | 17.43 cm |
+| office (18) | **0.15 cm** | 0.37 cm |
+
+**Verdict: on wide-baseline, sparsely-sampled photo sets with independent
+ground truth, COLMAP is ahead** — ~2.4× tighter on the well-behaved scenes
+(0.15–0.16 vs 0.36–0.37 cm) and categorically better on terrace, where visloc
+registers everything (23 / 23 vs COLMAP's 8 / 23) but the global shape is bent:
+1.5 px mean reprojection yet tens-of-cm camera error, a locally-consistent /
+globally-wrong reconstruction COLMAP's conservative growth refuses to make.
+The two engines fail in opposite directions — COLMAP under-registers, visloc
+over-commits.
+
+A config sweep sharpens the diagnosis (visloc arm only, same scoring):
+
+- `--refine-intrinsics` **hurts everywhere here** (courtyard 15 → 31 cm,
+  terrace 12 → 76 cm, office 0.37 → 0.49 cm): on sparse view graphs the extra
+  camera DOF absorbs structure error instead of calibration error — consistent
+  with the forward-video finding above that refinement needs observable
+  geometry *and* a well-conditioned graph.
+- **SuperPoint density is a real lever but saturates.** 4096 keypoints takes
+  courtyard 15.24 → **4.37 cm** (3.5×) at unchanged registration; on office it
+  changes nothing (the indoor scene never yields 2048 detections, so the cap
+  is not binding); on terrace it makes the bend worse. The remaining
+  courtyard gap to COLMAP (4.37 vs 1.92 cm) and the registration gaps are a
+  **frontend detection-coverage and view-graph problem**, not a mapper-schedule
+  problem.
+
+This is the honest boundary of the current SfM pillar: dense orbit-style
+collections (South Building, Gerrard Hall, EuRoC subsets) are at COLMAP grade
+and faster on the same machine; **sparse wide-baseline DSLR sets are not yet
+competitive**. Raw logs and per-run manifests:
+`benchmarks/registry/runs/eth3d/`; datasets: `courtyard`, `terrace`, `office`
+`dslr_undistorted` from eth3d.net.
+
 ## Reproduce
 
 ```sh

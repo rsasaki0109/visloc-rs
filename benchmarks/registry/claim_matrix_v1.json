@@ -208,6 +208,75 @@
     "colmap-battle-colmap-gerrard-hall-20260706"
    ],
    "notes": "Speed win (2.04x) AND closer agreement with the shipped reference than COLMAP 4.1's own re-run (0.39 vs 0.55 cm) -- an agreement-with-historical-COLMAP metric, not independent GT. Registration goes to COLMAP (100/100 vs 98/100, repetitive-facade stragglers). Independent-GT accuracy verdict (e.g. ETH3D) is future work."
+  },
+  {
+   "comparison_id": "eth3d-courtyard-colmap41-lasergt",
+   "benchmark": "Unordered SfM vs COLMAP on ETH3D laser GT (courtyard)",
+   "dataset": "ETH3D high-res DSLR",
+   "sequence": "courtyard",
+   "sensor_mode": "monocular unordered photos",
+   "metric": "Sim(3) camera-centre RMSE vs laser-scan GT, cm",
+   "protocol": "Both engines end-to-end on the same machine (i7-9750H, GTX 1660 Ti, both frontends GPU), same shared cam-0 pinhole prior, scored against ETH3D laser-scanner GT poses by Sim(3) camera-centre RMSE. Common-subset RMSE (cameras both engines registered) is the fair accuracy number.",
+   "visloc_result": "14/38 reg, 15.24 cm (common-8: 0.36 cm); best sweep config kp4096: 4.37 cm",
+   "reference_system": "COLMAP 4.1.0 (CUDA, same machine)",
+   "reference_result": "23/38 reg, 1.92 cm (common-8: 0.16 cm)",
+   "verdict": "behind",
+   "claim_kind": "registered_run",
+   "claim_scope": "negative",
+   "source_docs": [
+    "docs/sfm_vs_colmap_benchmark.md"
+   ],
+   "evidence_run_ids": [
+    "eth3d-battle-visloc-courtyard-20260706",
+    "eth3d-battle-colmap-courtyard-20260706"
+   ],
+   "notes": "COLMAP ahead on accuracy and registration. SuperPoint 4096kp closes 15.24->4.37 cm but registration unchanged; --refine-intrinsics hurts (31 cm)."
+  },
+  {
+   "comparison_id": "eth3d-terrace-colmap41-lasergt",
+   "benchmark": "Unordered SfM vs COLMAP on ETH3D laser GT (terrace)",
+   "dataset": "ETH3D high-res DSLR",
+   "sequence": "terrace",
+   "sensor_mode": "monocular unordered photos",
+   "metric": "Sim(3) camera-centre RMSE vs laser-scan GT, cm",
+   "protocol": "Both engines end-to-end on the same machine (i7-9750H, GTX 1660 Ti, both frontends GPU), same shared cam-0 pinhole prior, scored against ETH3D laser-scanner GT poses by Sim(3) camera-centre RMSE. Common-subset RMSE (cameras both engines registered) is the fair accuracy number.",
+   "visloc_result": "23/23 reg, 12.37 cm (common-8: 17.43 cm)",
+   "reference_system": "COLMAP 4.1.0 (CUDA, same machine)",
+   "reference_result": "8/23 reg, 0.41 cm (common-8: 0.41 cm)",
+   "verdict": "behind",
+   "claim_kind": "registered_run",
+   "claim_scope": "negative",
+   "source_docs": [
+    "docs/sfm_vs_colmap_benchmark.md"
+   ],
+   "evidence_run_ids": [
+    "eth3d-battle-visloc-terrace-20260706",
+    "eth3d-battle-colmap-terrace-20260706"
+   ],
+   "notes": "Opposite failure modes: visloc registers all 23 but globally bent (1.5 px reproj yet tens-of-cm pose error); COLMAP precise but registers only 8/23. Accuracy verdict behind; registration count favors visloc but is hollow given the pose error."
+  },
+  {
+   "comparison_id": "eth3d-office-colmap41-lasergt",
+   "benchmark": "Unordered SfM vs COLMAP on ETH3D laser GT (office)",
+   "dataset": "ETH3D high-res DSLR",
+   "sequence": "office",
+   "sensor_mode": "monocular unordered photos",
+   "metric": "Sim(3) camera-centre RMSE vs laser-scan GT, cm",
+   "protocol": "Both engines end-to-end on the same machine (i7-9750H, GTX 1660 Ti, both frontends GPU), same shared cam-0 pinhole prior, scored against ETH3D laser-scanner GT poses by Sim(3) camera-centre RMSE. Common-subset RMSE (cameras both engines registered) is the fair accuracy number.",
+   "visloc_result": "18/26 reg, 0.37 cm (common-18: 0.37 cm)",
+   "reference_system": "COLMAP 4.1.0 (CUDA, same machine)",
+   "reference_result": "26/26 reg, 0.42 cm (common-18: 0.15 cm)",
+   "verdict": "behind",
+   "claim_kind": "registered_run",
+   "claim_scope": "negative",
+   "source_docs": [
+    "docs/sfm_vs_colmap_benchmark.md"
+   ],
+   "evidence_run_ids": [
+    "eth3d-battle-visloc-office-20260706",
+    "eth3d-battle-colmap-office-20260706"
+   ],
+   "notes": "COLMAP ahead: full registration and 2.4x tighter on the common subset. SuperPoint saturates below 2048 detections indoors, so the density lever is not binding."
   }
  ]
 }
