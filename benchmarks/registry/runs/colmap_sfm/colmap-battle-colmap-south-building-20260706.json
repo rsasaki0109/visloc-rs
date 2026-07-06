@@ -1,0 +1,146 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "benchmark_doc",
+      "path": "docs\\sfm_vs_colmap_benchmark.md",
+      "sha256": "944df204520afa3f2a60f24046c50629b897e67b8092f12e057011669ad2269e"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/sfm_vs_colmap_benchmark.md"
+    ],
+    "id": "colmap-battle-unordered",
+    "name": "Unordered SfM same-machine head-to-head vs COLMAP (home turf)",
+    "protocol": "Same-machine end-to-end head-to-head on the unordered South Building collection (128 photos, SIMPLE_RADIAL). Both engines GPU-frontend (COLMAP: SIFT+exhaustive CUDA; visloc: SuperPoint 2048kp torch cu121). Both scored against the dataset's shipped COLMAP reference sparse model by Sim(3) camera-centre RMSE (scripts/compare_sfm_sim3.py). Reference is a historical COLMAP solution, not independent ground truth.",
+    "script": null
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "3c693a5d581d7a01a0384c9dd5d611b6bfac20b06aa5a20006d47dd758f1fcc8",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "colmap",
+      "feature_extractor/exhaustive_matcher/mapper,",
+      "defaults,",
+      "--ImageReader.single_camera",
+      "1",
+      "--FeatureExtraction.use_gpu",
+      "1",
+      "--FeatureMatching.use_gpu",
+      "1",
+      "(driver:",
+      "scratchpad",
+      "colmap_battle.py;",
+      "logs",
+      "at",
+      "E:/datasets/colmap_sfm/battle/south-building/colmap_run/)"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "colmap feature_extractor/exhaustive_matcher/mapper, defaults, --ImageReader.single_camera 1 --FeatureExtraction.use_gpu 1 --FeatureMatching.use_gpu 1 (driver: scratchpad colmap_battle.py; logs at E:/datasets/colmap_sfm/battle/south-building/colmap_run/)"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "colmap_version": "4.1.0",
+      "cuda": true,
+      "engine": "colmap",
+      "matcher": "exhaustive"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-06T01:58:49Z",
+  "dataset": {
+    "checksum": "2a449f1080b092ace665e79fddd2adf438b59f4e1b5db55452f0a050bf8933a7",
+    "checksum_method": "sha256_tree_v1",
+    "name": "COLMAP South Building",
+    "path": "E:/datasets/colmap_sfm/south-building",
+    "sequence": "south-building",
+    "version": "colmap/colmap GitHub release 3.11.1 asset south-building.zip"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "fd7d06901c15869133f6d72e7b5dc14f4ef24d41",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": "Intel i7-9750H, NVIDIA GTX 1660 Ti 6GB (CUDA used by both frontends), Windows 11. COLMAP 4.1.0 commit fa8e3b3 (official windows-cuda binary); torch 2.5.1+cu121.",
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_total_s",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 829.1
+    },
+    {
+      "implementation": null,
+      "name": "wall_clock_feat_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 26.8
+    },
+    {
+      "implementation": null,
+      "name": "wall_clock_match_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 453.3
+    },
+    {
+      "implementation": null,
+      "name": "wall_clock_mapper_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 348.9
+    },
+    {
+      "implementation": null,
+      "name": "registered_images",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 128
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_rmse_cm",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.15
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_median_cm",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.13
+    }
+  ],
+  "models": [],
+  "notes": "Fresh same-machine COLMAP 4.1.0 CUDA run (external tool; build fields null). Scored vs the dataset's own shipped reference; 0.15cm is COLMAP-reproduces-COLMAP self-consistency.",
+  "result_kind": "external_rerun",
+  "run_id": "colmap-battle-colmap-south-building-20260706",
+  "schema_version": 1,
+  "status": "success"
+}

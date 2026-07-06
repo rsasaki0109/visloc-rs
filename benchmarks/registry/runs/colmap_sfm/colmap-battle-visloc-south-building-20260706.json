@@ -1,0 +1,154 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "benchmark_doc",
+      "path": "docs\\sfm_vs_colmap_benchmark.md",
+      "sha256": "944df204520afa3f2a60f24046c50629b897e67b8092f12e057011669ad2269e"
+    },
+    {
+      "exists": true,
+      "kind": "sim3_overlay",
+      "path": "docs\\assets\\colmap_battle_south_building.png",
+      "sha256": "82d2354c16c707761563f731fd7ef926fa638f9e09f898f156ffa6916e4db51a"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/sfm_vs_colmap_benchmark.md"
+    ],
+    "id": "colmap-battle-unordered",
+    "name": "Unordered SfM same-machine head-to-head vs COLMAP (home turf)",
+    "protocol": "Same-machine end-to-end head-to-head on the unordered South Building collection (128 photos, SIMPLE_RADIAL). Both engines GPU-frontend (COLMAP: SIFT+exhaustive CUDA; visloc: SuperPoint 2048kp torch cu121). Both scored against the dataset's shipped COLMAP reference sparse model by Sim(3) camera-centre RMSE (scripts/compare_sfm_sim3.py). Reference is a historical COLMAP solution, not independent ground truth.",
+    "script": null
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "3c693a5d581d7a01a0384c9dd5d611b6bfac20b06aa5a20006d47dd758f1fcc8",
+    "features": [],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "headline",
+  "command": {
+    "argv": [
+      "scripts/export_superpoint_undistorted.py",
+      "--max-keypoints",
+      "2048",
+      "--device",
+      "cuda;",
+      "unordered_sfm_demo",
+      "--retrieval-topk",
+      "12",
+      "--min-matches",
+      "30",
+      "--colmap-style",
+      "(driver:",
+      "scratchpad",
+      "colmap_battle.py;",
+      "logs",
+      "at",
+      "E:/datasets/colmap_sfm/battle/south-building/visloc_run/)"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scripts/export_superpoint_undistorted.py --max-keypoints 2048 --device cuda; unordered_sfm_demo --retrieval-topk 12 --min-matches 30 --colmap-style (driver: scratchpad colmap_battle.py; logs at E:/datasets/colmap_sfm/battle/south-building/visloc_run/)"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "engine": "visloc",
+      "frontend": "superpoint_2048_cuda",
+      "retrieval_topk": 12,
+      "schedule": "colmap-style"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-06T01:58:52Z",
+  "dataset": {
+    "checksum": "2a449f1080b092ace665e79fddd2adf438b59f4e1b5db55452f0a050bf8933a7",
+    "checksum_method": "sha256_tree_v1",
+    "name": "COLMAP South Building",
+    "path": "E:/datasets/colmap_sfm/south-building",
+    "sequence": "south-building",
+    "version": "colmap/colmap GitHub release 3.11.1 asset south-building.zip"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "fd7d06901c15869133f6d72e7b5dc14f4ef24d41",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": "Intel i7-9750H, NVIDIA GTX 1660 Ti 6GB (CUDA used by both frontends), Windows 11. COLMAP 4.1.0 commit fa8e3b3 (official windows-cuda binary); torch 2.5.1+cu121.",
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_total_s",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 310.1
+    },
+    {
+      "implementation": null,
+      "name": "wall_clock_superpoint_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 98.0
+    },
+    {
+      "implementation": null,
+      "name": "wall_clock_reconstruct_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 212.0
+    },
+    {
+      "implementation": null,
+      "name": "registered_images",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 128
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_rmse_cm",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.4
+    },
+    {
+      "implementation": null,
+      "name": "sim3_camera_centre_median_cm",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "cm",
+      "value": 0.34
+    },
+    {
+      "implementation": null,
+      "name": "speedup_total_vs_colmap",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "x",
+      "value": 2.67
+    }
+  ],
+  "models": [],
+  "notes": "visloc end-to-end 2.67x faster than same-machine COLMAP 4.1 CUDA (310.1s vs 829.1s), 128/128 registered, 0.40cm vs shipped reference (COLMAP rerun: 0.15cm). Companion run: colmap-battle-colmap-south-building-20260706.",
+  "result_kind": "visloc_run",
+  "run_id": "colmap-battle-visloc-south-building-20260706",
+  "schema_version": 1,
+  "status": "success"
+}

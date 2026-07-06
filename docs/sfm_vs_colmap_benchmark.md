@@ -256,6 +256,65 @@ tracks the post-BA pass recovers are the weakly-constrained, gate-grazing ones.
 It is therefore an opt-in density lever, not an accuracy lever, on this
 already-tight metric-video regime.
 
+## Home turf, same machine: COLMAP 4.1 (CUDA) vs visloc-rs, end to end
+
+Everything above either fights on visloc's turf (metric video) or scores visloc
+*against* COLMAP's model. This section is the missing piece: both engines run
+**end-to-end on the same machine** (i7-9750H, GTX 1660 Ti, Windows 11) over the
+same unordered photo collections — COLMAP's own example datasets — and both are
+scored against the dataset's **shipped reference reconstruction** by Sim(3)
+camera-centre RMSE. Both frontends use the GPU (COLMAP: SIFT + exhaustive
+matching with CUDA; visloc: SuperPoint 2048-kp via torch cu121). COLMAP 4.1.0
+(fa8e3b3) runs its recommended defaults for collections this size
+(`feature_extractor` → `exhaustive_matcher` → `mapper`); visloc runs
+`export_superpoint_undistorted.py` → `unordered_sfm_demo --colmap-style`
+(VLAD top-12 retrieval).
+
+| South Building (128 photos) | COLMAP 4.1 (CUDA) | visloc-rs |
+|---|---:|---:|
+| frontend | 26.8 s (SIFT GPU) | 98.0 s (SuperPoint GPU) |
+| matching + mapping | 453.3 s + 348.9 s | 212.0 s (VLAD graph + reconstruct) |
+| **total wall-clock** | 829.1 s | **310.1 s (2.7× faster)** |
+| registered | 128 / 128 | 128 / 128 |
+| Sim(3) RMSE vs reference | **0.15 cm** | 0.40 cm |
+
+| Gerrard Hall (100 photos, 5616×3744) | COLMAP 4.1 (CUDA) | visloc-rs |
+|---|---:|---:|
+| frontend | 117.6 s (SIFT GPU) | 153.4 s (SuperPoint GPU) |
+| matching + mapping | 186.5 s + 298.8 s | 142.2 s (VLAD graph + reconstruct) |
+| **total wall-clock** | 602.8 s | **295.6 s (2.0× faster)** |
+| registered | **100 / 100** | 98 / 100 |
+| Sim(3) RMSE vs reference | 0.55 cm | **0.39 cm** |
+
+![visloc-rs vs the shipped COLMAP reference on Gerrard Hall](assets/colmap_battle_gerrard_hall.png)
+
+Three take-aways, stated carefully:
+
+1. **Speed: visloc-rs is 2.0–2.7× faster end to end, with COLMAP on GPU.** The
+   structural win is the matching stage: COLMAP verifies all N·(N−1)/2 pairs
+   (8128 / 4950 pairs), while the VLAD view graph verifies only top-12
+   candidates per image. The bare mapper-vs-reconstruction stage is also
+   1.7–2.1× in visloc's favour.
+2. **Accuracy: sub-centimetre for both engines — and on Gerrard Hall visloc
+   (0.39 cm) reproduces the shipped reference more closely than COLMAP 4.1's own
+   re-run (0.55 cm).** Read that with its exact meaning: the reference *is* a
+   historical COLMAP solution, so this metric measures agreement with COLMAP's
+   own past output, on which the modern COLMAP should have every advantage. On
+   the higher-resolution, strongly-distorted OPENCV camera COLMAP 4.1's
+   self-reproducibility loosens, and visloc lands inside it.
+3. **Registration: COLMAP takes Gerrard Hall 100 / 100 vs visloc's 98 / 100** —
+   the two frames visloc drops are the known repetitive-façade stragglers (see
+   the unordered benchmark). That is the remaining robustness gap on this turf.
+
+Scope notes for honesty: the reference models are not independent ground truth
+(a laser-scanned benchmark like ETH3D is the right next step for an
+accuracy-only verdict); COLMAP's exhaustive matcher is its documented default
+for collections of this size (a vocab-tree matcher would trade recall for
+speed, as VLAD retrieval does); COLMAP downscales extraction to its default
+`max_image_size` 3200 on Gerrard Hall while SuperPoint runs the full 5616-px
+frames. Raw per-stage logs and the second overlay figure live with the registry
+manifests (`benchmarks/registry/runs/colmap_sfm/`).
+
 ## Reproduce
 
 ```sh
