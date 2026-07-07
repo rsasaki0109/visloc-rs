@@ -153,12 +153,34 @@ where
         if !result.localization.success {
             return;
         }
+        self.accept_external_tracking_success(result, true);
+    }
+
+    /// Override the tracker's per-frame history with a successful
+    /// GT-seeded segment restart (e.g. stereo re-bootstrap after
+    /// prolonged tracking loss). Same side-effect repair as
+    /// [`Self::accept_relocalization_result`] but does not increment
+    /// `relocalization_count`.
+    pub fn accept_segment_restart_result(&mut self, result: TrackingResult) {
+        if !result.localization.success {
+            return;
+        }
+        self.accept_external_tracking_success(result, false);
+    }
+
+    fn accept_external_tracking_success(
+        &mut self,
+        result: TrackingResult,
+        count_as_relocalization: bool,
+    ) {
         self.state = TrackingState::Tracking;
         self.successive_failures = 0;
         self.last_successful_frame_id = Some(result.frame_id);
         self.last_successful_pose = result.localization.pose.clone();
         self.last_result = Some(result.clone());
-        self.stats.relocalization_count += 1;
+        if count_as_relocalization {
+            self.stats.relocalization_count += 1;
+        }
         self.stats.successful_frame_count += 1;
         if result.localization.inlier_count > 0 {
             self.stats.total_inlier_count += result.localization.inlier_count;

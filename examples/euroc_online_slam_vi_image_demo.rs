@@ -92,7 +92,9 @@ use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
 #[cfg(feature = "image-io")]
 use visloc_rs::core::geometry::{Pose, SE3};
 #[cfg(feature = "image-io")]
-use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
+use visloc_rs::core::types::{
+    Camera, Frame, Keyframe, Landmark, LocalizationResult, Observation, VisualMap,
+};
 #[cfg(feature = "image-io")]
 use visloc_rs::io::euroc::{
     read_euroc_dataset_dir, EurocCameraCalibration, EurocGroundTruthSample,
@@ -120,12 +122,13 @@ use visloc_rs::{
     ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
     CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel,
     ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
-    KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalizationConfig,
-    LocalizationPipeline, LoopClosureConfig, Matcher, MotionBasedViInitializerConfig, MotionModel,
-    MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher, OnlineSlamConfig,
-    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig,
-    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
-    SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig, TrackingResult,
+    KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalMappingResult,
+    LocalizationConfig, LocalizationPipeline, LoopClosureConfig, MapProviderStats, Matcher,
+    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
+    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
+    OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
+    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, SimpleKeyframePolicy,
+    StereoReplenishConfig, Tracker, TrackingConfig, TrackingEvent, TrackingResult, TrackingState,
     TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent, Viba2Config,
     VisualInertialInitializerConfig,
 };
@@ -1182,6 +1185,12 @@ struct CliArgs {
     /// Optional max translation per frame between consecutive recovery
     /// hypotheses inside the confirmation window.
     relocalization_confirmation_max_translation_per_frame_meters: Option<f64>,
+    /// When `Some(n)`, re-seed tracking with a GT-pose stereo bootstrap
+    /// after `n` consecutive lost frames once relocalization (if enabled)
+    /// has not recovered. Default `None` preserves legacy behaviour.
+    rebootstrap_after_lost_frames: Option<usize>,
+    /// Minimum frame gap between accepted re-bootstraps. Default `60`.
+    rebootstrap_cooldown_frames: usize,
 }
 
 #[cfg(feature = "image-io")]
@@ -1316,6 +1325,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut relocalization_appearance_compare_broader_store: bool = false;
     let mut relocalization_confirmation_required_recoveries: usize = 1;
     let mut relocalization_confirmation_max_translation_per_frame_meters: Option<f64> = None;
+    let mut rebootstrap_after_lost_frames: Option<usize> = None;
+    let mut rebootstrap_cooldown_frames: usize = 60;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
     let i = 0;
@@ -1961,6 +1972,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--rebootstrap-after-lost-frames" => {
+                rebootstrap_after_lost_frames = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--rebootstrap-cooldown-frames" => {
+                rebootstrap_cooldown_frames = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -2074,6 +2093,19 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     .into(),
             );
         }
+    }
+    if let Some(lost_frames) = rebootstrap_after_lost_frames {
+        if lost_frames == 0 {
+            return Err("--rebootstrap-after-lost-frames must be >= 1".into());
+        }
+        if !stereo_bootstrap && !stereo_landmark_replenish {
+            return Err(
+                "--rebootstrap-after-lost-frames requires --stereo-bootstrap and/or --stereo-landmark-replenish (cam1 stereo matching)".into(),
+            );
+        }
+    }
+    if rebootstrap_cooldown_frames == 0 {
+        return Err("--rebootstrap-cooldown-frames must be >= 1".into());
     }
     if covisibility_local_ba_enabled {
         if covisibility_local_ba_min_keyframes == 0 {
@@ -2274,6 +2306,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         relocalization_appearance_compare_broader_store,
         relocalization_confirmation_required_recoveries,
         relocalization_confirmation_max_translation_per_frame_meters,
+        rebootstrap_after_lost_frames,
+        rebootstrap_cooldown_frames,
     })
 }
 
@@ -2417,6 +2451,121 @@ fn bootstrap_map_from_first_frame(
         map.landmarks.insert(landmark.id, landmark);
     }
     map
+}
+
+/// Mirror of [`OnlineSlamPipeline`]'s private `keyframe_from_tracking_result`.
+#[cfg(feature = "image-io")]
+fn keyframe_from_tracking_result(frame: &Frame, tracking: &TrackingResult) -> Keyframe {
+    let mut frame = frame.clone();
+    frame.pose = tracking.localization.pose.clone();
+
+    let observations = tracking
+        .localization
+        .inlier_query_indices
+        .iter()
+        .zip(tracking.localization.inlier_landmark_ids.iter())
+        .filter_map(|(keypoint_index, landmark_id)| {
+            frame.keypoints.get(*keypoint_index).map(|xy| Observation {
+                frame_id: frame.id,
+                landmark_id: *landmark_id,
+                keypoint_index: *keypoint_index,
+                xy: *xy,
+            })
+        })
+        .collect();
+
+    Keyframe {
+        frame,
+        observations,
+    }
+}
+
+/// Append stereo-triangulated landmarks to an existing map. Returns the
+/// new landmark ids in `matches` order.
+#[cfg(feature = "image-io")]
+fn append_stereo_bootstrap_landmarks_to_map(
+    map: &mut VisualMap,
+    pose_world_to_camera: &Pose,
+    features: &FeatureSet,
+    matches: &[StereoBootstrapLandmark],
+    next_landmark_id: &mut u64,
+) -> Vec<u64> {
+    let cam0_pose_camera_to_world = pose_world_to_camera.camera_to_world();
+    let mut landmark_ids = Vec::with_capacity(matches.len());
+    for survivor in matches {
+        let world_point =
+            cam0_pose_camera_to_world.transform_point(&survivor.point_left_camera_frame);
+        let id = *next_landmark_id;
+        *next_landmark_id += 1;
+        let mut landmark = Landmark::new(id, world_point);
+        landmark.descriptor = Some(features.descriptors[survivor.left_keypoint_index].clone());
+        map.landmarks.insert(id, landmark);
+        landmark_ids.push(id);
+    }
+    landmark_ids
+}
+
+/// Build a successful [`TrackingResult`] for a GT-seeded stereo re-bootstrap.
+#[cfg(feature = "image-io")]
+fn build_gt_seeded_rebootstrap_tracking_result(
+    frame_id: u64,
+    seed_pose: Pose,
+    matches: &[StereoBootstrapLandmark],
+    landmark_ids: &[u64],
+    map_stats: MapProviderStats,
+) -> TrackingResult {
+    let inlier_count = matches.len();
+    let inlier_query_indices: Vec<usize> = matches.iter().map(|m| m.left_keypoint_index).collect();
+    let inlier_landmark_ids = landmark_ids.to_vec();
+    let localization = LocalizationResult {
+        success: true,
+        pose: Some(seed_pose.clone()),
+        failure_reason: None,
+        candidate_landmark_count: inlier_count,
+        match_count: inlier_count,
+        correspondence_count: inlier_count,
+        inlier_count,
+        outlier_count: 0,
+        inlier_ratio: 1.0,
+        reprojection_error: Some(0.0),
+        median_reprojection_error: Some(0.0),
+        max_reprojection_error: Some(0.0),
+        inlier_reprojection_errors: vec![0.0; inlier_count],
+        inliers: (0..inlier_count).collect(),
+        inlier_query_indices,
+        inlier_landmark_ids,
+        estimator_diagnostics: None,
+        pose_failure_diagnostics: None,
+    };
+    TrackingResult {
+        frame_id,
+        state: TrackingState::Tracking,
+        event: TrackingEvent::Relocalized,
+        successive_failures: 0,
+        pose_prior: Some(seed_pose),
+        used_pose_prior: false,
+        used_external_localization_prior: false,
+        external_localization_prior_radius: None,
+        tracking_failure_reason: None,
+        map_landmark_count: map_stats.landmark_count,
+        map_stats,
+        localization,
+        covisibility_local_map_size: None,
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn map_provider_stats_from_map(map: &VisualMap) -> MapProviderStats {
+    MapProviderStats {
+        camera_count: map.cameras.len(),
+        landmark_count: map.landmarks.len(),
+        keyframe_count: map.keyframes.len(),
+        descriptor_count: map
+            .landmarks
+            .values()
+            .filter(|landmark| landmark.descriptor.is_some())
+            .count(),
+    }
 }
 
 /// Return a new [`FeatureSet`] whose keypoints have been mapped from
@@ -3416,11 +3565,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .out_dir
         .join("relocalization_appearance_candidates.csv");
     let relocalization_attempts_path = args.out_dir.join("relocalization_attempts.csv");
+    let rebootstrap_log_path = args.out_dir.join("rebootstrap_log.csv");
 
     let mut traj_csv =
         String::from("timestamp_ns,frame_idx,px,py,pz,qw,qx,qy,qz,tracking_success\n");
     let mut err_csv = String::from(
-        "timestamp_ns,frame_idx,gt_px,gt_py,gt_pz,est_px,est_py,est_pz,position_error_m,orientation_error_deg\n",
+        "timestamp_ns,frame_idx,segment_id,gt_px,gt_py,gt_pz,est_px,est_py,est_pz,position_error_m,orientation_error_deg\n",
     );
     let mut frame_groundtruth_csv = String::from("timestamp_ns,frame_idx,gt_px,gt_py,gt_pz\n");
     let mut frame_appearance_descriptor_rows: Vec<String> = Vec::new();
@@ -3439,6 +3589,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut relocalization_attempts_csv = String::from(
         "frame_idx,timestamp_ns,attempted,succeeded,localization_success,reject_reason,inlier_count,min_inliers,min_inliers_pass,inlier_ratio,min_inlier_ratio,min_inlier_ratio_pass,correspondence_count,mean_reprojection_error,max_reprojection_error,reprojection_pass,translation_per_frame_from_last_success_meters,max_translation_per_frame_from_last_success_meters,continuity_pass,inlier_depth_median_ratio_to_last_success,min_inlier_depth_median_ratio_to_last_success,max_inlier_depth_median_ratio_to_last_success,depth_ratio_pass,passed_acceptance_gates,confirmation_count,confirmation_required_count,confirmation_translation_per_frame_from_previous_meters,descriptor_store_landmark_count,covisibility_local_descriptor_store_landmark_count,appearance_descriptor_store_landmark_count,broader_descriptor_store_landmark_count,tried_covisibility_store,used_covisibility_store,tried_appearance_store,used_appearance_store,tried_broader_fallback,broader_fallback_skipped_by_interval,used_broader_fallback\n",
+    );
+    let mut rebootstrap_log_csv = String::from(
+        "event_idx,segment_id,frame_idx,timestamp_ns,seed_source,stereo_matches,landmarks_added,keyframe_selected,consecutive_lost_frames\n",
     );
 
     let frame_cap = if args.max_frames == 0 {
@@ -3508,6 +3661,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut motion_vi_init_succeeded_at_frame: Option<usize> = None;
     let mut motion_vi_init_recovered_scale: Option<f64> = None;
     let mut motion_vi_init_viba2_iterations: Option<usize> = None;
+
+    let rebootstrap_enabled = args.rebootstrap_after_lost_frames.is_some();
+    let mut segment_id: usize = 0;
+    let mut consecutive_lost_frames: usize = 0;
+    let mut last_rebootstrap_frame_idx: Option<usize> = None;
+    let mut rebootstrap_events: usize = 0;
+    let mut rebootstrap_event_idx: usize = 0;
+    let mut next_rebootstrap_landmark_id: u64 = 10_000_000_000;
 
     let mut estimated_positions: Vec<Point3<f64>> = Vec::new();
     let mut reference_positions: Vec<Point3<f64>> = Vec::new();
@@ -3696,8 +3857,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
-        let result = slam.process_frame(&frame, candidates_to_submit);
-        let success = result.tracking_succeeded();
+        let mut result = slam.process_frame(&frame, candidates_to_submit);
+        let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
             && result
                 .mapping
@@ -3710,11 +3871,146 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `localization.pose` still carries the rejected PnP result (the
         // tracker only flips `success = false`), which would otherwise leak
         // a known-bad pose into the trajectory CSV and ATE summation.
-        let tracked = if success {
+        let mut tracked = if success {
             result.tracking.localization.pose.clone()
         } else {
             None
         };
+        let mut rebootstrap_mapping_override: Option<LocalMappingResult> = None;
+        if rebootstrap_enabled {
+            if success {
+                consecutive_lost_frames = 0;
+            } else {
+                consecutive_lost_frames += 1;
+                let reloc_recovered = result
+                    .relocalization
+                    .as_ref()
+                    .is_some_and(|reloc| reloc.succeeded);
+                let cooldown_ok = last_rebootstrap_frame_idx
+                    .map(|last| frame_idx.saturating_sub(last) >= args.rebootstrap_cooldown_frames)
+                    .unwrap_or(true);
+                if !reloc_recovered
+                    && cooldown_ok
+                    && consecutive_lost_frames
+                        >= args.rebootstrap_after_lost_frames.unwrap_or(usize::MAX)
+                {
+                    let min_stereo_matches = args.keyframe_min_inliers.unwrap_or(15).max(1);
+                    if let (Some(cam1_setup), Some(cam1_idx)) = (
+                        cam1_stereo_setup.as_ref(),
+                        dataset.cam1_images.iter().position(|entry| {
+                            entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
+                        }),
+                    ) {
+                        let cam1_image_path = dataset
+                            .cam1_image_dir
+                            .join(&dataset.cam1_images[cam1_idx].filename);
+                        if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
+                            extractor.set_camera(SuperPointCamera::Cam1);
+                            extractor.set_frame_idx(cam1_idx);
+                            let cam1_features_result = extractor.extract(&cam1_image);
+                            extractor.set_camera(SuperPointCamera::Cam0);
+                            if let Ok(cam1_features_raw) = cam1_features_result {
+                                let cam1_features = undistort_feature_keypoints(
+                                    &cam1_setup.distortion,
+                                    &cam1_setup.camera,
+                                    &cam1_features_raw,
+                                );
+                                let stereo_matches = bootstrap_stereo_landmarks(
+                                    &camera,
+                                    &cam1_setup.camera,
+                                    &cam1_setup.cam0_to_cam1,
+                                    &features,
+                                    &cam1_features,
+                                    &StereoBootstrapConfig::default(),
+                                );
+                                if stereo_matches.len() >= min_stereo_matches {
+                                    let gt = nearest_ground_truth(
+                                        &dataset.ground_truth,
+                                        image_entry.timestamp_nanoseconds,
+                                    );
+                                    let seed_pose = world_to_camera_pose(
+                                        &gt.orientation_world,
+                                        &gt.position_world,
+                                        &body_to_camera,
+                                    );
+                                    let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
+                                        slam.map_mut(),
+                                        &seed_pose,
+                                        &features,
+                                        &stereo_matches,
+                                        &mut next_rebootstrap_landmark_id,
+                                    );
+                                    let map_stats = map_provider_stats_from_map(slam.map());
+                                    let restart_tracking =
+                                        build_gt_seeded_rebootstrap_tracking_result(
+                                            frame_idx as u64,
+                                            seed_pose,
+                                            &stereo_matches,
+                                            &landmark_ids,
+                                            map_stats,
+                                        );
+                                    slam.tracker
+                                        .accept_segment_restart_result(restart_tracking.clone());
+                                    if let Some(state) = slam.relocalization_state.as_mut() {
+                                        state.consecutive_failed_attempts = 0;
+                                        state.pending_confirmation = None;
+                                    }
+                                    pending_replenish_candidates.clear();
+                                    let keyframe =
+                                        keyframe_from_tracking_result(&frame, &restart_tracking);
+                                    let map_snapshot = slam.map().clone();
+                                    let mapping_result = slam.mapper.process_keyframe(
+                                        &map_snapshot,
+                                        &restart_tracking,
+                                        keyframe,
+                                        Vec::<LandmarkCandidate>::new(),
+                                    );
+                                    if slam.config.apply_map_updates
+                                        && mapping_result.staged_update_validation.is_valid()
+                                    {
+                                        let _ = mapping_result
+                                            .staged_update
+                                            .clone()
+                                            .apply_to(slam.map_mut());
+                                    }
+                                    rebootstrap_mapping_override = Some(mapping_result);
+                                    segment_id += 1;
+                                    rebootstrap_events += 1;
+                                    rebootstrap_event_idx += 1;
+                                    rebootstrap_log_csv.push_str(&format!(
+                                        "{rebootstrap_event_idx},{segment_id},{frame_idx},{},gt_pose,{},{},{},{}\n",
+                                        image_entry.timestamp_nanoseconds,
+                                        stereo_matches.len(),
+                                        landmark_ids.len(),
+                                        rebootstrap_mapping_override
+                                            .as_ref()
+                                            .map(|mapping| {
+                                                u8::from(mapping.keyframe_decision.selected)
+                                            })
+                                            .unwrap_or(0),
+                                        consecutive_lost_frames,
+                                    ));
+                                    last_rebootstrap_frame_idx = Some(frame_idx);
+                                    consecutive_lost_frames = 0;
+                                    result.tracking = restart_tracking;
+                                    success = true;
+                                    tracked = result.tracking.localization.pose.clone();
+                                    println!(
+                                        "rebootstrap segment_id={segment_id} frame_idx={frame_idx} stereo_matches={} landmarks_added={} keyframe_selected={}",
+                                        stereo_matches.len(),
+                                        landmark_ids.len(),
+                                        rebootstrap_mapping_override
+                                            .as_ref()
+                                            .map(|mapping| mapping.keyframe_decision.selected)
+                                            .unwrap_or(false),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if success {
             tracking_successes += 1;
         }
@@ -3971,7 +4267,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        if let Some(mapping) = result.mapping.as_ref() {
+        if let Some(mapping) = result
+            .mapping
+            .as_ref()
+            .or(rebootstrap_mapping_override.as_ref())
+        {
             let decision = &mapping.keyframe_decision;
             if matches!(
                 decision.reason,
@@ -4306,7 +4606,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gt_rotation_wc = gt.orientation_world * body_to_camera.rotation;
             let orientation_error_deg = q.rotation_to(&gt_rotation_wc).angle().to_degrees();
             err_csv.push_str(&format!(
-                "{},{frame_idx},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                "{},{frame_idx},{segment_id},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
                 image_entry.timestamp_nanoseconds,
                 gt_center_x,
                 gt_center_y,
@@ -4364,6 +4664,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &relocalization_appearance_candidates_csv,
     )?;
     fs::write(&relocalization_attempts_path, &relocalization_attempts_csv)?;
+    if rebootstrap_enabled {
+        fs::write(&rebootstrap_log_path, &rebootstrap_log_csv)?;
+    }
 
     // Dump the metric landmark cloud (world frame) so downstream tools can seed
     // a 3D Gaussian Splat from real on-surface SLAM points instead of random
@@ -4602,6 +4905,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          relocalization_confirmation_max_translation_per_frame_meters={reloc_confirmation_max_tx_per_frame:?}\n\
          relocalization_attempts={reloc_attempts}\n\
          relocalization_successes={reloc_successes}\n\
+         rebootstrap_after_lost_frames={rebootstrap_after_lost_frames:?}\n\
+         rebootstrap_cooldown_frames={rebootstrap_cooldown_frames}\n\
+         rebootstrap_events={rebootstrap_events}\n\
+         rebootstrap_final_segment_id={segment_id}\n\
          relocalization_gate_passes={reloc_gate_passes}\n\
          relocalization_descriptor_store_landmark_count_observations={reloc_descriptor_store_count_observations}\n\
          relocalization_descriptor_store_landmark_count_mean={reloc_descriptor_store_count_mean:?}\n\
@@ -4866,6 +5173,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .relocalization_confirmation_max_translation_per_frame_meters,
         reloc_attempts = relocalization_attempts,
         reloc_successes = relocalization_successes,
+        rebootstrap_after_lost_frames = args.rebootstrap_after_lost_frames,
+        rebootstrap_cooldown_frames = args.rebootstrap_cooldown_frames,
+        rebootstrap_events = rebootstrap_events,
+        segment_id = segment_id,
         reloc_gate_passes = relocalization_gate_passes,
         reloc_descriptor_store_count_observations =
             relocalization_descriptor_store_count_observations,
@@ -5008,6 +5319,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         relocalization_appearance_candidates_path.display(),
         relocalization_attempts_path.display(),
     );
+    if rebootstrap_enabled {
+        println!("wrote {}", rebootstrap_log_path.display());
+    }
     if args.export_frame_appearance_descriptors {
         println!("wrote {}", frame_appearance_descriptors_path.display());
     }
@@ -5287,5 +5601,53 @@ mod tests {
             "principal shift = {principal_shift}"
         );
         assert!(edge_shift > 5.0, "edge shift = {edge_shift}");
+    }
+
+    #[test]
+    fn gt_seeded_rebootstrap_tracking_result_marks_all_stereo_matches_inliers() {
+        let camera = camera_from_cam0(&fake_cam0(), 1);
+        let pose = Pose::identity();
+        let features = FeatureSet::new(
+            vec![Point2::new(100.0, 120.0), Point2::new(200.0, 220.0)],
+            vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        )
+        .expect("valid feature set");
+        let matches = vec![
+            StereoBootstrapLandmark {
+                left_keypoint_index: 0,
+                right_keypoint_index: 0,
+                point_left_camera_frame: Point3::new(0.1, 0.2, 2.0),
+                left_reprojection_error_pixels: 0.5,
+                right_reprojection_error_pixels: 0.5,
+            },
+            StereoBootstrapLandmark {
+                left_keypoint_index: 1,
+                right_keypoint_index: 1,
+                point_left_camera_frame: Point3::new(-0.2, 0.1, 3.0),
+                left_reprojection_error_pixels: 0.4,
+                right_reprojection_error_pixels: 0.4,
+            },
+        ];
+        let mut map = VisualMap::new();
+        map.cameras.insert(camera.id, camera);
+        let mut next_id = 100_u64;
+        let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
+            &mut map,
+            &pose,
+            &features,
+            &matches,
+            &mut next_id,
+        );
+        let stats = map_provider_stats_from_map(&map);
+        let tracking = build_gt_seeded_rebootstrap_tracking_result(
+            42,
+            pose,
+            &matches,
+            &landmark_ids,
+            stats,
+        );
+        assert!(tracking.localization.success);
+        assert_eq!(tracking.localization.inlier_count, 2);
+        assert_eq!(tracking.localization.inlier_landmark_ids, landmark_ids);
     }
 }

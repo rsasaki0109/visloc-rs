@@ -83,7 +83,7 @@ MH_05-class sequences as configured.
 - Relocalization can only recover where the (frozen) map covers the viewpoint; the
   MH_01 dead zone frames 1122-3516 are unreachable by relocalization by
   construction. Coverage beyond that needs not-losing-tracking in the first place
-  (the gate fixes) or map growth during loss (future work).
+  (the gate fixes) or map growth during loss — see the re-bootstrap follow-up below.
 - Relocalization runtime: the default broader store rebuilds a full-map descriptor
   store and brute-force-matches against every landmark **every lost frame**. On
   MH_03 (mostly-lost sequence) this made the reloc arm impractically slow
@@ -93,6 +93,43 @@ MH_05-class sequences as configured.
 - Reloc match quality is the next-order lever: 79 % of failed attempts are
   `no_pnp_solution` on ~67 garbage correspondences from full-map brute-force HOG
   matching (mean 1.8 inliers on `min_inliers` failures).
+
+## Re-bootstrap on prolonged loss (opt-in follow-up, 2026-07-07)
+
+When relocalization cannot reach an unmapped viewpoint, the demo can opt into
+**GT-seeded stereo re-bootstrap**: after `N` consecutive lost frames (and no
+successful relocalization in the same frame), re-triangulate cam0/cam1 at the
+current frame, seed the pose from ground truth (same convention as the initial
+bootstrap), append the new landmarks to the live map, and resume tracking under a
+new `segment_id`. Logged in `rebootstrap_log.csv`; `slam_errors.csv` carries
+`segment_id` per row.
+
+| Flag | Role |
+| --- | --- |
+| `--rebootstrap-after-lost-frames N` | Trigger after `N` consecutive lost frames. Default `None` (off). |
+| `--rebootstrap-cooldown-frames M` | Minimum frame gap between accepted re-bootstraps. Default `60`. |
+
+Requires cam1 stereo (`--stereo-bootstrap` and/or `--stereo-landmark-replenish`).
+**Caveat:** segment restarts are GT-seeded — honest for demo/evidence, not a
+blind recovery claim.
+
+MH_01 on top of the gated replenish + reloc + fix base (`N=30`, `M=60`):
+
+| Metric | reloc+fix base | + re-bootstrap |
+| --- | --- | --- |
+| Tracking coverage | 40.6 % | **54.8 %** |
+| Tracked frames | 1487 | 2006 |
+| Re-bootstrap events | — | 15 (segments 1–15 in dead zone) |
+| Primary segment RMSE | ~4.9 cm | seg 0: **7.4 cm** |
+| Headline RMSE (good frames) | 7.9 cm | 10.8 cm |
+| Spike frames (>0.5 m) | 14 | 109 |
+
+The dead-zone segments are shorter and noisier (per-segment RMSE 5–19 cm), but
+the README hero GIF now visibly traces the upper GT loops that reloc alone never
+reached. CLI-only sweeps (bounded covis store, appearance retrieval, relaxed
+reloc gates) did not beat this honestly: relaxed gates reached 45.0 % coverage
+with visually wobbly recoveries; re-bootstrap reaches 54.8 % with structurally
+new tracked segments.
 
 ## Reproduce
 
