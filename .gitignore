@@ -8,3 +8,4 @@ __pycache__/
 
 # ONNX model weights (regenerate via scripts/export_*_onnx.py)
 /models/*.onnx
+/models/*.onnx.data
