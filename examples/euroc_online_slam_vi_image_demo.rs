@@ -125,15 +125,15 @@ use visloc_rs::{
     KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalMappingResult,
     LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
     LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig,
-    LoopRefinementVerifier, MapProviderStats, Matcher, MotionBasedViInitializerConfig,
-    MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher,
-    OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig,
-    OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
-    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, PnPLoopClosureVerifierConfig,
-    PoseGraphSe3Config, ProjectionGuidedTrackingConfig, SimpleKeyframePolicy,
-    StereoReplenishConfig, Tracker,
-    TrackingConfig, TrackingEvent, TrackingResult, TrackingState, TrajectorySimilarityTransform,
-    ViInitFallback, ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
+    LoopRefinementSolver, LoopRefinementVerifier, MapProviderStats, Matcher,
+    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
+    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
+    OnlineSlamLocalBaConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig,
+    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
+    PnPLoopClosureVerifierConfig, PoseGraphSe3Config, ProjectionGuidedTrackingConfig,
+    SimpleKeyframePolicy, Sim3PoseGraphConfig, StereoReplenishConfig, Tracker, TrackingConfig,
+    TrackingEvent, TrackingResult, TrackingState, TrajectorySimilarityTransform, ViInitFallback,
+    ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
 };
 
 /// Runtime-dispatched motion model. Both inner models implement
@@ -1300,6 +1300,18 @@ struct CliArgs {
     /// byte-identical (only keyframe poses move on write-back). Only
     /// meaningful when `pose_graph_refinement_enabled` is set.
     pose_graph_refinement_propagate: bool,
+    /// Which pose-graph solver backs the periodic PGO trigger
+    /// (`OnlineSlamLoopClosureRefinementConfig::solver`). `"se3"`
+    /// (default) keeps the original rigid solve, byte-identical to
+    /// today's behaviour. `"sim3"` opts into the `Sim(3)` pose graph
+    /// instead, which can absorb scale drift (e.g. from a learned
+    /// projection-tracking front end) a rigid solve smears across the
+    /// whole trajectory. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set. Combining `"sim3"` with
+    /// `--pose-graph-refinement-gnc` prints a warning: `Sim3PoseGraph`
+    /// has no GNC variant yet, so the flag is silently ignored on that
+    /// path.
+    pose_graph_refinement_solver: LoopRefinementSolverKind,
 }
 
 /// CLI-selectable mirror of [`LoopRefinementVerifier`]'s variants. A
@@ -1311,6 +1323,17 @@ struct CliArgs {
 enum LoopRefinementVerifierKind {
     Essential,
     Pnp,
+}
+
+/// CLI-selectable mirror of [`LoopRefinementSolver`]'s variants (minus its
+/// `Sim3` payload config, which this demo always constructs from
+/// `Sim3PoseGraphConfig::default()` — no CLI knobs for the Sim3 solver's
+/// own LM settings yet).
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopRefinementSolverKind {
+    Se3,
+    Sim3,
 }
 
 #[cfg(feature = "image-io")]
@@ -1460,6 +1483,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_covariance_gate: Option<f64> = None;
     let mut pose_graph_refinement_verifier: LoopRefinementVerifierKind =
         LoopRefinementVerifierKind::Essential;
+    let mut pose_graph_refinement_solver: LoopRefinementSolverKind = LoopRefinementSolverKind::Se3;
     let mut pose_graph_refinement_appearance_loops: bool = false;
     let mut pose_graph_refinement_appearance_min_gap: u64 = 150;
     let mut pose_graph_refinement_appearance_max_candidates: usize = 3;
@@ -2176,6 +2200,20 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 };
                 args.remove(i);
             }
+            "--pose-graph-refinement-solver" => {
+                let kind = args.remove(i + 1);
+                pose_graph_refinement_solver = match kind.as_str() {
+                    "se3" => LoopRefinementSolverKind::Se3,
+                    "sim3" => LoopRefinementSolverKind::Sim3,
+                    other => {
+                        return Err(format!(
+                            "--pose-graph-refinement-solver: expected 'se3' or 'sim3', got {other:?}"
+                        )
+                        .into());
+                    }
+                };
+                args.remove(i);
+            }
             "--pose-graph-refinement-appearance-loops" => {
                 pose_graph_refinement_appearance_loops = true;
                 args.remove(i);
@@ -2432,6 +2470,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 return Err("--pose-graph-refinement-appearance-min-inliers must be >= 1".into());
             }
         }
+        if pose_graph_refinement_solver == LoopRefinementSolverKind::Sim3
+            && pose_graph_refinement_gnc
+        {
+            eprintln!(
+                "warning: --pose-graph-refinement-gnc has no effect with \
+                 --pose-graph-refinement-solver sim3 — Sim3PoseGraph has no GNC \
+                 robust-outlier variant yet, so the flag is silently ignored on \
+                 that path (see LoopRefinementSolver::Sim3's doc comment)."
+            );
+        }
     }
     Ok(CliArgs {
         euroc_dir,
@@ -2575,6 +2623,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         pose_graph_refinement_appearance_max_candidates,
         pose_graph_refinement_appearance_min_inliers,
         pose_graph_refinement_propagate,
+        pose_graph_refinement_solver,
     })
 }
 
@@ -3689,6 +3738,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             },
             propagate_corrections: args.pose_graph_refinement_propagate,
+            solver: match args.pose_graph_refinement_solver {
+                LoopRefinementSolverKind::Se3 => LoopRefinementSolver::Se3,
+                LoopRefinementSolverKind::Sim3 => {
+                    LoopRefinementSolver::Sim3(Sim3PoseGraphConfig::default())
+                }
+            },
         })
     } else {
         None
@@ -4083,6 +4138,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_landmarks_moved: usize = 0;
     let mut pose_graph_refinement_max_landmark_displacement_meters: f64 = 0.0;
     let mut pose_graph_refinement_tracker_corrections_applied: usize = 0;
+    // `Sim3` solver observability: the last fired solve's per-node scale
+    // spread (see `LoopRefinementSolver::Sim3` / `--pose-graph-refinement-solver
+    // sim3`). `None` on the `Se3` path (default) or before any Sim3 solve
+    // has fired.
+    let mut pose_graph_refinement_last_solve_scale_spread: Option<(f64, f64)> = None;
     // Stereo landmark replenishment (opt-in via `--stereo-landmark-replenish`).
     // Candidates built from frame N's stereo match are queued here and
     // submitted on frame N+1's `process_frame` call, once frame N's
@@ -4885,8 +4945,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(stats) = result.pose_graph_refinement.as_ref() {
             pose_graph_refinement_candidates_seen += stats.verified_candidate_count;
             pose_graph_refinement_verified_constraints += stats.accepted_count;
-            if stats.pose_graph_result.is_some() || stats.gnc_result.is_some() {
+            if stats.pose_graph_result.is_some()
+                || stats.gnc_result.is_some()
+                || stats.sim3_pose_graph_result.is_some()
+            {
                 pose_graph_refinement_pgo_solves += 1;
+            }
+            if let Some(spread) = stats.sim3_scale_spread {
+                pose_graph_refinement_last_solve_scale_spread = Some(spread);
             }
             pose_graph_refinement_pcm_rejected += stats.loop_closures_pcm_rejected;
             pose_graph_refinement_covariance_rejected += stats.loop_closures_covariance_rejected;
@@ -5352,6 +5418,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_pcm={pgr_pcm}\n\
          pose_graph_refinement_covariance_gate={pgr_covariance_gate:?}\n\
          pose_graph_refinement_verifier={pgr_verifier}\n\
+         pose_graph_refinement_solver={pgr_solver}\n\
+         pose_graph_refinement_last_solve_scale_spread={pgr_scale_spread:?}\n\
          pose_graph_refinement_candidates_seen={pgr_candidates_seen}\n\
          pose_graph_refinement_verified_constraints={pgr_verified_constraints}\n\
          pose_graph_refinement_pgo_solves={pgr_pgo_solves}\n\
@@ -5617,6 +5685,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             LoopRefinementVerifierKind::Essential => "essential",
             LoopRefinementVerifierKind::Pnp => "pnp",
         },
+        pgr_solver = match args.pose_graph_refinement_solver {
+            LoopRefinementSolverKind::Se3 => "se3",
+            LoopRefinementSolverKind::Sim3 => "sim3",
+        },
+        pgr_scale_spread = pose_graph_refinement_last_solve_scale_spread,
         pgr_candidates_seen = pose_graph_refinement_candidates_seen,
         pgr_verified_constraints = pose_graph_refinement_verified_constraints,
         pgr_pgo_solves = pose_graph_refinement_pgo_solves,

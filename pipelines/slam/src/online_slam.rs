@@ -1155,6 +1155,59 @@ pub enum LoopRefinementVerifier {
     Pnp(PnPLoopClosureVerifierConfig),
 }
 
+/// Which pose-graph solver backs
+/// [`OnlineSlamLoopClosureRefinementConfig`]'s periodic PGO trigger.
+///
+/// [`Self::Se3`] (the default) is today's rigid solve
+/// ([`PoseGraph::optimize_se3_iterative`], or
+/// [`PoseGraph::optimize_se3_gnc`] when `gnc` is set) — byte-identical
+/// behaviour for existing callers.
+///
+/// [`Self::Sim3`] instead mirrors the running graph into a parallel
+/// [`Sim3PoseGraph`] (one Sim3 node per keyframe, seeded at scale `1.0`
+/// from its current rigid pose; one Sim3 edge per sequential/loop-closure
+/// edge, likewise seeded at scale `1.0` since both the odometry chain and
+/// the PnP loop-closure verifier are metric) and solves that instead. Its
+/// extra per-node scale degree of freedom lets a loop closure absorb
+/// **scale drift** — e.g. a learned monocular-style tracker's accumulated
+/// `1.4-2.1x` scale error — that a rigid `SE(3)` graph cannot represent
+/// and instead smears as rotation/translation error across the whole
+/// trajectory (see `pipelines/slam/tests/online_slam.rs`'s
+/// `sim3_solver_recovers_scale_drift_se3_cannot` for a measured A/B on a
+/// synthetic drifted chain).
+///
+/// Write-back and correction-propagation conventions for this path
+/// (`maybe_run_loop_closure_refinement`'s `Sim3` branch): each solved
+/// node's rigid pose for `map.keyframes[*].frame.pose` is
+/// `Pose { rotation: R, translation: t / s }` (ORB-SLAM2's
+/// `OptimizeEssentialGraph` convention — dividing by scale, not
+/// multiplying, is what keeps the corrected pose's *reprojection ray*
+/// invariant, since a pinhole projection is invariant to a positive
+/// rescale of camera-frame depth); each corrected keyframe's world-frame
+/// similarity correction for landmark propagation is
+/// `Siw_new⁻¹ ∘ Siw_old` (the direct Sim(3) generalisation of the SE(3)
+/// path's `T_cw_new ∘ T_wc_old`); the tracker's `last_successful_pose` is
+/// corrected by the same correction's rotation+translation part only,
+/// with the motion model's cached world velocity additionally scaled by
+/// `correction.scale` (see [`visloc_tracking::Tracker::apply_similarity_pose_correction`]).
+///
+/// [`OnlineSlamLoopClosureRefinementConfig::gnc`] is **ignored** on this
+/// path: [`Sim3PoseGraph`] has no Graduated Non-Convexity variant yet.
+/// Callers that set both should treat it as a configuration smell (the
+/// demo CLI warns); a wrong loop closure will not be annealed out when
+/// `solver` is `Sim3`. [`OnlineSlamLoopClosureRefinementConfig::marginalization_window`]
+/// is likewise ignored on this path — [`Sim3PoseGraph`] has no
+/// fixed-lag marginalization yet, so the Sim3 mirror grows unbounded for
+/// the lifetime of the session. PCM / the covariance gate are unaffected:
+/// both screen a candidate before it enters either graph, using only the
+/// always-maintained SE(3) mirror.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum LoopRefinementSolver {
+    #[default]
+    Se3,
+    Sim3(Sim3PoseGraphConfig),
+}
+
 /// Opt-in appearance-based long-range loop-candidate source for
 /// [`OnlineSlamLoopClosureRefinementConfig`]. The shared-landmark detector
 /// (`detect_loop_closure_candidates`) can only ever propose candidates that
@@ -1340,6 +1393,12 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// behavior; ignored when `pcm` is `None`. Promotions/evictions are reported
     /// on [`OnlineSlamLoopClosureRefinementStats`] and bump the trigger counter
     /// so a reconciled graph is re-solved.
+    ///
+    /// Divergence when `solver` is [`LoopRefinementSolver::Sim3`]:
+    /// reconciliation only edits the `Se3` mirror (`graph.edges`); the
+    /// `Sim3` mirror is not reconciled to match (promoted/evicted loop
+    /// edges are not added to / removed from it), so combining both is
+    /// currently unsupported. Not exercised by tonight's Sim3 work.
     pub pcm_batch_rescreen: bool,
     /// Optional fixed-lag / sliding-window bound on the pose graph. `None`
     /// (default) keeps the full graph and re-solves it batch every trigger.
@@ -1403,6 +1462,12 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// `mean_landmark_displacement_meters`, and
     /// `tracker_correction_applied`.
     pub propagate_corrections: bool,
+    /// Which pose-graph solver backs the periodic PGO trigger. Defaults
+    /// to [`LoopRefinementSolver::Se3`] — byte-identical to this stage's
+    /// original behaviour. See [`LoopRefinementSolver`] for the `Sim3`
+    /// opt-in (scale-drift correction) and its write-back /
+    /// correction-propagation conventions.
+    pub solver: LoopRefinementSolver,
 }
 
 /// Running state for the online loop-closure + pose-graph refinement
@@ -1416,6 +1481,14 @@ pub struct OnlineSlamLoopClosureRefinementState {
     /// keyframes (in insertion order), and one loop-closure edge per
     /// verified [`LoopClosureConstraint`].
     pub graph: PoseGraph,
+    /// `Sim(3)` mirror of `graph`, maintained in lockstep (same node ids,
+    /// same edges, seeded at scale `1.0`) exactly when
+    /// `config.solver` is [`LoopRefinementSolver::Sim3`]; `None`
+    /// otherwise, so the [`LoopRefinementSolver::Se3`] default pays no
+    /// extra bookkeeping. Solved by [`Sim3PoseGraph::optimize`] on the
+    /// same trigger cadence as `graph`; see [`LoopRefinementSolver::Sim3`]
+    /// for the write-back convention.
+    pub sim3_graph: Option<Sim3PoseGraph>,
     /// Keyframe ids in the order they were first registered. The first
     /// entry is the [`PoseGraph::anchor`]; subsequent entries form the
     /// sequential edge chain.
@@ -1451,9 +1524,11 @@ pub struct OnlineSlamLoopClosureRefinementState {
 
 impl OnlineSlamLoopClosureRefinementState {
     fn new(config: OnlineSlamLoopClosureRefinementConfig) -> Self {
+        let sim3_graph = matches!(config.solver, LoopRefinementSolver::Sim3(_)).then(Sim3PoseGraph::new);
         Self {
             config,
             graph: PoseGraph::new(),
+            sim3_graph,
             keyframe_order: Vec::new(),
             verified_constraints: Vec::new(),
             pcm_deferred: Vec::new(),
@@ -1466,6 +1541,8 @@ impl OnlineSlamLoopClosureRefinementState {
     fn reset(&mut self) {
         self.appearance_descriptor_cache.clear();
         self.graph = PoseGraph::new();
+        self.sim3_graph = matches!(self.config.solver, LoopRefinementSolver::Sim3(_))
+            .then(Sim3PoseGraph::new);
         self.keyframe_order.clear();
         self.verified_constraints.clear();
         self.pcm_deferred.clear();
@@ -1500,6 +1577,19 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// threshold was met. Its `edge_weights` classify every graph edge as
     /// inlier/outlier; `pose_graph_result` is `None` on this path.
     pub gnc_result: Option<PoseGraphGncResult>,
+    /// `Some` when [`Sim3PoseGraph::optimize`] fired on this frame — i.e.
+    /// [`OnlineSlamLoopClosureRefinementConfig::solver`] is
+    /// [`LoopRefinementSolver::Sim3`] and the trigger threshold was met.
+    /// Mutually exclusive with `pose_graph_result` / `gnc_result` (always
+    /// `None` on the `Se3` path).
+    pub sim3_pose_graph_result: Option<Sim3PoseGraphResult>,
+    /// `(min, max)` per-node scale across the just-solved `Sim3PoseGraph`
+    /// when `sim3_pose_graph_result` is `Some` — observability for how
+    /// much scale drift the solve absorbed (both `1.0` when the graph is
+    /// scale-consistent; a wide spread means the solve is actively
+    /// redistributing accumulated monocular-style scale error). `None`
+    /// on the `Se3` path or when no `Sim3` solve fired this frame.
+    pub sim3_scale_spread: Option<(f64, f64)>,
     /// Number of *loop-closure* edges the GNC solver drove below the inlier
     /// threshold (weight `< 0.5`) on the solve fired this frame — the
     /// verified-but-wrong closures caught and rejected at the back-end.
@@ -2523,15 +2613,31 @@ where
         // keyframe so the absolute frame stays fixed across PGO solves.
         let prev_keyframe_id = state.keyframe_order.last().copied();
         state.graph.add_pose(new_keyframe_id, new_pose.clone());
+        if let Some(sim3_graph) = state.sim3_graph.as_mut() {
+            sim3_graph.add_pose(new_keyframe_id, sim3_at_unit_scale(&new_pose.world_to_camera));
+        }
         if state.keyframe_order.is_empty() {
             state.graph.anchor(new_keyframe_id);
+            if let Some(sim3_graph) = state.sim3_graph.as_mut() {
+                sim3_graph.anchor(new_keyframe_id);
+            }
         } else if let Some(prev_id) = prev_keyframe_id {
             if let Some(prev_pose) = state.graph.poses.get(&prev_id).cloned() {
-                state.graph.add_sequential_edge(
-                    prev_id,
-                    new_keyframe_id,
-                    relative_world_to_camera(&prev_pose, &new_pose),
-                );
+                let relative = relative_world_to_camera(&prev_pose, &new_pose);
+                if let Some(sim3_graph) = state.sim3_graph.as_mut() {
+                    // Scale-1 measurement: the odometry chain's relative
+                    // motion between two consecutive keyframes is derived
+                    // from the (already metric) tracked poses, same as the
+                    // `Se3` path's sequential edge — no independent scale
+                    // source exists between adjacent frames.
+                    sim3_graph.add_edge(
+                        prev_id,
+                        new_keyframe_id,
+                        sim3_at_unit_scale(&relative),
+                        1.0,
+                    );
+                }
+                state.graph.add_sequential_edge(prev_id, new_keyframe_id, relative);
             }
         }
         state.keyframe_order.push(new_keyframe_id);
@@ -2685,6 +2791,21 @@ where
                     admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
+                if let Some(sim3_graph) = state.sim3_graph.as_mut() {
+                    // Scale-1 measurement: the PnP verifier that produced
+                    // this constraint recovers a metric relative pose from
+                    // the map's triangulated landmarks (see
+                    // `LoopRefinementVerifier::Pnp`'s doc comment), so
+                    // there is no independent scale to encode beyond the
+                    // odometry chain's own unit-scale convention.
+                    let weight = (constraint.inlier_count as f64).max(1.0);
+                    sim3_graph.add_edge(
+                        constraint.from_keyframe_id,
+                        constraint.to_keyframe_id,
+                        sim3_at_unit_scale(&constraint.relative_pose),
+                        weight,
+                    );
+                }
                 stats.admitted_constraints.push(OnlineSlamAdmittedLoopConstraint {
                     from_keyframe_id: constraint.from_keyframe_id,
                     to_keyframe_id: constraint.to_keyframe_id,
@@ -2729,14 +2850,36 @@ where
         let trigger_threshold = state.config.trigger_every_new_constraints.max(1);
         if state.pending_since_last_trigger >= trigger_threshold {
             let pgo_config = state.config.pose_graph_config.clone();
+            let sim3_solver_config = match &state.config.solver {
+                LoopRefinementSolver::Sim3(cfg) => Some(cfg.clone()),
+                LoopRefinementSolver::Se3 => None,
+            };
             state.pending_since_last_trigger = 0;
             state.trigger_count += 1;
-            // When GNC is configured, run the robust solver so a
-            // verified-but-wrong loop closure is annealed out at the
-            // back-end; otherwise the plain M-estimator. Both paths write
-            // the optimised poses back into the map, so a wrong closure
-            // GNC rejected never reaches subsequent tracking / local-VI-BA.
-            let solved = if let Some(gnc_config) = state.config.gnc {
+            // `Sim3` solves the parallel Sim3 mirror instead of the rigid
+            // graph; `gnc` has no Sim3 counterpart yet (see
+            // `LoopRefinementSolver::Sim3`'s doc comment) so it is ignored
+            // on this path. Otherwise: when GNC is configured, run the
+            // robust solver so a verified-but-wrong loop closure is
+            // annealed out at the back-end; otherwise the plain
+            // M-estimator. All paths write the optimised poses back into
+            // the map, so a wrong closure GNC rejected never reaches
+            // subsequent tracking / local-VI-BA.
+            let solved = if let Some(sim3_config) = sim3_solver_config {
+                match state
+                    .sim3_graph
+                    .get_or_insert_with(Sim3PoseGraph::new)
+                    .optimize(&sim3_config)
+                {
+                    Ok(result) => {
+                        stats.sim3_scale_spread =
+                            state.sim3_graph.as_ref().and_then(sim3_pose_scale_spread);
+                        stats.sim3_pose_graph_result = Some(result);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else if let Some(gnc_config) = state.config.gnc {
                 match state.graph.optimize_se3_gnc(&pgo_config, &gnc_config) {
                     Ok(result) => {
                         // Count the loop-closure edges driven below the
@@ -2765,7 +2908,75 @@ where
                     Err(_) => false,
                 }
             };
-            if solved {
+            if solved && matches!(state.config.solver, LoopRefinementSolver::Sim3(_)) {
+                // Write-back convention (see `LoopRefinementSolver::Sim3`'s
+                // doc comment for the full derivation): each solved node
+                // `Siw_new` becomes the rigid pose `[R | t/s]` for
+                // `map.keyframes[*].frame.pose` — dividing the translation
+                // by the solved scale is what keeps the corrected pose's
+                // reprojection *ray* invariant (pinhole projection ignores
+                // a positive rescale of camera-frame depth). The SE(3)
+                // mirror (`state.graph.poses`) is also updated so the next
+                // keyframe's sequential edge is built from the corrected
+                // trajectory, not the stale pre-solve one.
+                let mut updated = 0usize;
+                let mut corrections: HashMap<u64, Sim3> = HashMap::new();
+                let solved_nodes: Vec<(u64, Sim3)> = state
+                    .sim3_graph
+                    .as_ref()
+                    .map(|graph| graph.poses.iter().map(|(id, s)| (*id, s.clone())).collect())
+                    .unwrap_or_default();
+                for (id, siw_new) in &solved_nodes {
+                    let Some(keyframe) = self.map.keyframes.get_mut(id) else {
+                        continue;
+                    };
+                    let new_pose = Pose {
+                        world_to_camera: SE3::new(
+                            siw_new.rotation,
+                            siw_new.translation / siw_new.scale,
+                        ),
+                    };
+                    if state.config.propagate_corrections {
+                        if let Some(old_pose) = keyframe.frame.pose.as_ref() {
+                            let siw_old = sim3_at_unit_scale(&old_pose.world_to_camera);
+                            corrections.insert(*id, siw_new.inverse().compose(&siw_old));
+                        }
+                    }
+                    keyframe.frame.pose = Some(new_pose.clone());
+                    state.graph.poses.insert(*id, new_pose);
+                    updated += 1;
+                }
+                stats.keyframes_updated = updated;
+
+                if state.config.propagate_corrections && !corrections.is_empty() {
+                    // Landmark propagation: each landmark moves with its
+                    // ANCHOR keyframe's world-frame *similarity*
+                    // `Siw_new⁻¹ ∘ Siw_old` (the direct Sim(3)
+                    // generalisation of the SE(3) path's
+                    // `T_cw_new ∘ T_wc_old`); see
+                    // `propagate_pose_graph_corrections_sim3`.
+                    let (moved, max_displacement, mean_displacement) =
+                        propagate_pose_graph_corrections_sim3(&mut self.map, &corrections);
+                    stats.landmarks_moved = moved;
+                    stats.max_landmark_displacement_meters = max_displacement;
+                    stats.mean_landmark_displacement_meters = mean_displacement;
+
+                    // Tracker/current-pose propagation: rotation+
+                    // translation into `last_successful_pose`, plus the
+                    // motion model's cached world velocity scaled by
+                    // `correction.scale` (see
+                    // `Tracker::apply_similarity_pose_correction`).
+                    if let Some((_, last_correction)) =
+                        corrections.iter().max_by_key(|(id, _)| **id)
+                    {
+                        self.tracker.apply_similarity_pose_correction(last_correction);
+                        stats.tracker_correction_applied = true;
+                    }
+                }
+                // `marginalization_window` has no effect on this path yet
+                // (`Sim3PoseGraph` has no fixed-lag marginalization) — see
+                // that field's doc comment.
+            } else if solved {
                 // Write optimised poses back into the map so subsequent
                 // tracking / local-VI-BA passes see the refined frame.
                 // When `propagate_corrections` is set, snapshot each
@@ -3607,6 +3818,90 @@ impl OnlineSlamResult {
 fn propagate_pose_graph_corrections(
     map: &mut VisualMap,
     corrections: &HashMap<u64, SE3>,
+) -> (usize, Option<f64>, Option<f64>) {
+    let mut anchor_keyframe_of_landmark: HashMap<u64, u64> = HashMap::new();
+    let mut keyframe_ids: Vec<u64> = map.keyframes.keys().copied().collect();
+    keyframe_ids.sort_unstable();
+    for keyframe_id in keyframe_ids {
+        let Some(keyframe) = map.keyframes.get(&keyframe_id) else {
+            continue;
+        };
+        for observation in &keyframe.observations {
+            anchor_keyframe_of_landmark
+                .entry(observation.landmark_id)
+                .or_insert(keyframe_id);
+        }
+    }
+
+    let mut moved = 0usize;
+    let mut max_displacement = 0.0_f64;
+    let mut sum_displacement = 0.0_f64;
+    for (landmark_id, anchor_keyframe_id) in &anchor_keyframe_of_landmark {
+        let Some(correction) = corrections.get(anchor_keyframe_id) else {
+            continue;
+        };
+        let Some(landmark) = map.landmarks.get_mut(landmark_id) else {
+            continue;
+        };
+        let old_position = landmark.position;
+        landmark.position = correction.transform_point(&old_position);
+        let displacement = (landmark.position - old_position).norm();
+        moved += 1;
+        sum_displacement += displacement;
+        if displacement > max_displacement {
+            max_displacement = displacement;
+        }
+    }
+
+    if moved == 0 {
+        (0, None, None)
+    } else {
+        (moved, Some(max_displacement), Some(sum_displacement / moved as f64))
+    }
+}
+
+/// Embed a rigid `SE(3)` transform as a `Sim(3)` value at scale `1.0`. Used
+/// to seed the [`Sim3PoseGraph`] mirror's nodes/edges from the same
+/// (metric) poses and relative measurements the `Se3` path uses, and to
+/// re-embed a keyframe's PRE-solve pose when computing its Sim3
+/// correction (see [`LoopRefinementSolver::Sim3`]'s doc comment).
+fn sim3_at_unit_scale(se3: &SE3) -> Sim3 {
+    Sim3::new(se3.rotation, se3.translation, 1.0)
+}
+
+/// `(min, max)` per-node scale across a solved [`Sim3PoseGraph`]'s nodes.
+/// `None` when the graph has no nodes (never observed in practice — the
+/// graph always has at least the anchor before a solve can fire).
+fn sim3_pose_scale_spread(graph: &Sim3PoseGraph) -> Option<(f64, f64)> {
+    let mut scales = graph.poses.values().map(|pose| pose.scale);
+    let first = scales.next()?;
+    let (min, max) = scales.fold((first, first), |(min, max), scale| {
+        (min.min(scale), max.max(scale))
+    });
+    Some((min, max))
+}
+
+/// [`LoopRefinementSolver::Sim3`]'s counterpart to
+/// [`propagate_pose_graph_corrections`]: for every landmark, derives its
+/// ANCHOR keyframe exactly as the `Se3` path does and, when that anchor's
+/// id is a key in `corrections`, moves the landmark by the anchor's
+/// **similarity** correction: `landmark.position =
+/// correction.transform_point(&landmark.position)`.
+///
+/// `corrections` maps a solved keyframe id to its world-frame `Sim(3)`
+/// correction `C_k = Siw_new⁻¹ ∘ Siw_old` — the direct `Sim(3)`
+/// generalisation of the `Se3` path's `C_k = T_cw_new ∘ T_wc_old`, where
+/// `Siw_old`/`Siw_new` are the keyframe's PRE-/POST-solve `Sim3` nodes
+/// (see [`sim3_at_unit_scale`] and [`LoopRefinementSolver::Sim3`]'s doc
+/// comment for the full derivation and why this keeps a landmark's
+/// reprojection *ray* into keyframe `k` invariant — a positive rescale of
+/// camera-frame depth does not move the pinhole-projected pixel).
+///
+/// Returns `(landmarks_moved, max_displacement_meters, mean_displacement_meters)`,
+/// mirroring [`propagate_pose_graph_corrections`]'s contract exactly.
+fn propagate_pose_graph_corrections_sim3(
+    map: &mut VisualMap,
+    corrections: &HashMap<u64, Sim3>,
 ) -> (usize, Option<f64>, Option<f64>) {
     let mut anchor_keyframe_of_landmark: HashMap<u64, u64> = HashMap::new();
     let mut keyframe_ids: Vec<u64> = map.keyframes.keys().copied().collect();

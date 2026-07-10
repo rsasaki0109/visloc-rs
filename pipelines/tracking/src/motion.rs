@@ -30,6 +30,30 @@ pub trait MotionModel {
     /// fresh from the [`Tracker`](crate::Tracker) on every call and so
     /// need no cache of their own to correct.
     fn apply_pose_correction(&mut self, _correction: &SE3) {}
+
+    /// Apply a rigid-plus-scale (`Sim(3)`) world-frame correction —
+    /// [`apply_pose_correction`](Self::apply_pose_correction)'s
+    /// counterpart for a `Sim(3)` pose-graph solve (see `visloc-slam`'s
+    /// online loop-closure refinement `Sim3` solver, which corrects
+    /// monocular-style scale drift a rigid `SE(3)` graph cannot
+    /// represent). `correction` follows the same OLD-world -> NEW-world
+    /// convention as `apply_pose_correction`, generalised with a scale
+    /// factor: `p_new = correction.transform_point(&p_old)`.
+    ///
+    /// The default projects `correction` down to its rotation+translation
+    /// `SE(3)` part (dropping scale) and forwards to
+    /// [`apply_pose_correction`](Self::apply_pose_correction) — correct
+    /// for any cached poses, since
+    /// [`crate::Tracker::apply_similarity_pose_correction`] applies the
+    /// caller-visible `last_successful_pose` update itself. Models that
+    /// also cache a world-frame *velocity* (a vector, not a point —
+    /// translation does not apply, but the scale does: a Sim(3)
+    /// correction scales a vector by `s * R`) must override this to also
+    /// multiply that cached velocity by `correction.scale`.
+    fn apply_similarity_correction(&mut self, correction: &Sim3) {
+        let se3_part = SE3::new(correction.rotation, correction.translation);
+        self.apply_pose_correction(&se3_part);
+    }
 }
 
 pub trait VisualOdometryFrontend {
@@ -489,6 +513,16 @@ impl MotionModel for ImuPredictiveMotionModel {
             pose.world_to_camera = pose.world_to_camera.compose(&correction.inverse());
         }
     }
+
+    fn apply_similarity_correction(&mut self, correction: &Sim3) {
+        let se3_part = SE3::new(correction.rotation, correction.translation);
+        self.apply_pose_correction(&se3_part);
+        // `velocity_world` is a vector, so the Sim(3) correction acts on
+        // it as `s * R * v` (translation does not apply to a vector) —
+        // the rotation was already applied by `apply_pose_correction`
+        // above, so only the extra scale factor is left to fold in.
+        self.velocity_world *= correction.scale;
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -909,6 +943,28 @@ impl MotionModel for AdaptiveImuPoseMotionModel {
         self.imu.apply_pose_correction(correction);
         self.pose.apply_pose_correction(correction);
         let inverse = correction.inverse();
+        for pose in [
+            self.oldest_successful_pose.as_mut(),
+            self.previous_successful_pose.as_mut(),
+            self.latest_successful_pose.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            pose.world_to_camera = pose.world_to_camera.compose(&inverse);
+        }
+    }
+
+    fn apply_similarity_correction(&mut self, correction: &Sim3) {
+        self.imu.apply_similarity_correction(correction);
+        self.pose.apply_similarity_correction(correction);
+        // The finite-difference smoother poses are rigid `Pose`s; fold
+        // in the rotation+translation part the same way
+        // `apply_pose_correction` does above (their velocity role is
+        // recomputed fresh from pose differences, so there is no cached
+        // velocity vector here to additionally scale).
+        let se3_part = SE3::new(correction.rotation, correction.translation);
+        let inverse = se3_part.inverse();
         for pose in [
             self.oldest_successful_pose.as_mut(),
             self.previous_successful_pose.as_mut(),

@@ -114,7 +114,7 @@ use nalgebra::{
     DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, Quaternion, Rotation3, UnitQuaternion,
     Vector3, Vector6,
 };
-use visloc_core::geometry::{Pose, SE3};
+use visloc_core::geometry::{Pose, Sim3, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::{

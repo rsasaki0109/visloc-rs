@@ -19,8 +19,9 @@ use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{Camera, Frame, Landmark, VisualMap};
 use visloc_rs::{
     LocalMappingPipeline, LocalizationPipeline, LoopClosureConfig, LoopClosureVerifierConfig,
-    LoopRefinementVerifier, OnlineSlamConfig, OnlineSlamLoopClosureRefinementConfig,
-    OnlineSlamPipeline, PoseGraphSe3Config, Tracker, TrackingConfig,
+    LoopRefinementSolver, LoopRefinementVerifier, OnlineSlamConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline, PoseGraphSe3Config, Tracker,
+    TrackingConfig,
 };
 
 const KEYFRAME_IDS: [u64; 6] = [10, 20, 30, 40, 50, 60];
@@ -90,6 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trigger_every_new_constraints: 1,
                 appearance_candidates: None,
                 propagate_corrections: false,
+                solver: LoopRefinementSolver::Se3,
             }),
             ..OnlineSlamConfig::default()
         },

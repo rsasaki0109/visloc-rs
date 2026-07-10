@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use nalgebra::{Matrix3, Point3, Quaternion, Rotation3, UnitQuaternion, Vector3};
-use visloc_core::geometry::{Pose, SE3};
+use visloc_core::geometry::{Pose, Sim3, SE3};
 use visloc_core::types::{
     CameraId, Frame, FrameId, LandmarkDescriptorStore, LocalizationFailureReason,
     LocalizationResult, QueryImage, VisualMap,

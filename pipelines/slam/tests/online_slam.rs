@@ -1,5 +1,5 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
-use visloc_core::geometry::Pose;
+use visloc_core::geometry::{Pose, Sim3};
 use visloc_core::types::{Camera, Frame, Landmark, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
@@ -11,13 +11,14 @@ use visloc_slam::{
     AppearanceLoopScannerSettings, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
     EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig,
     LinearSolver, LoopAppearanceCandidateConfig, LoopClosureConfig, LoopClosureConstraint,
-    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, LoopRefinementVerifier,
-    OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig, OnlineSlamImuConfig,
-    OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
+    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, LoopRefinementSolver,
+    LoopRefinementVerifier, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
+    OnlineSlamImuConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
     OnlineSlamRelocalizationAppearanceConfig, OnlineSlamRelocalizationConfig,
     OnlineSlamRelocalizationCovisibilityConfig, PairwiseKeyframeView,
     PairwiseLoopClosureScannerConfig, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
-    PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel,
+    PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel, Sim3PoseGraph,
+    Sim3PoseGraphConfig,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -4085,6 +4086,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4128,6 +4130,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4171,6 +4174,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4568,6 +4572,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4671,6 +4676,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4754,6 +4760,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4817,6 +4824,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
                     propagate_corrections: false,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -5074,6 +5082,7 @@ mod online_loop_closure_refinement {
                     trigger_every_new_constraints,
                     appearance_candidates: None,
                     propagate_corrections: true,
+                    solver: LoopRefinementSolver::Se3,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -5288,6 +5297,372 @@ mod online_loop_closure_refinement {
                 "landmark {id} must stay byte-identical when propagate_corrections is false"
             );
         }
+    }
+
+    // ============================================================
+    // `LoopRefinementSolver::Sim3` — Sim(3) pose-graph solver opt-in
+    // ============================================================
+
+    /// [`LoopRefinementSolver::default`] must stay [`LoopRefinementSolver::Se3`]
+    /// — the byte-identical-default contract every existing
+    /// `OnlineSlamLoopClosureRefinementConfig` fixture in this file relies on
+    /// (they all set `solver: LoopRefinementSolver::Se3` explicitly and
+    /// continue to pass unchanged).
+    #[test]
+    fn loop_refinement_solver_default_is_se3() {
+        assert_eq!(LoopRefinementSolver::default(), LoopRefinementSolver::Se3);
+    }
+
+    /// (a) Solver-level A/B on a synthetic drifted chain: a per-step
+    /// sequential-edge measurement carrying a constant translation-scale
+    /// bias (the classic monocular-style scale-drift signature — each
+    /// incremental relative-motion estimate is systematically off by a
+    /// multiplicative factor) plus one TRUE metric loop-closure edge (the
+    /// PnP loop verifier's scale-correct constraint). A rigid `SE(3)` graph
+    /// has no scale DOF to absorb the bias with, so the loop-vs-odometry
+    /// inconsistency smears across every edge as rotation/translation error;
+    /// `Sim3PoseGraph` can push the bias into each node's scale instead,
+    /// recovering per-node scales that are NOT 1.0 and a much smaller
+    /// position error against the true (unbiased) trajectory.
+    #[test]
+    fn sim3_solver_uses_scale_dof_to_reduce_scale_drift_residual() {
+        use std::f64::consts::TAU;
+        use visloc_core::geometry::SE3;
+
+        const NODE_COUNT: u64 = 8;
+        const SCALE_BIAS: f64 = 1.15;
+        const LOOP_WEIGHT: f64 = 50.0;
+
+        // Ground truth: a circular trajectory at unit (metric) scale, same
+        // shape `sim3_pose_graph.rs`'s own unit tests use.
+        let truth: Vec<(u64, UnitQuaternion<f64>, Vector3<f64>)> = (0..NODE_COUNT)
+            .map(|i| {
+                let angle = i as f64 / NODE_COUNT as f64 * TAU;
+                let rotation = UnitQuaternion::from_euler_angles(0.0, 0.0, angle);
+                let translation = Vector3::new(5.0 * angle.cos(), 5.0 * angle.sin(), 0.3 * i as f64);
+                (i, rotation, translation)
+            })
+            .collect();
+        let true_pose = |idx: usize| SE3::new(truth[idx].1, truth[idx].2);
+        // Measured relative SE3 `from -> to`, exactly the
+        // `relative_world_to_camera` convention (`to == measurement.compose(&from)`).
+        let true_relative =
+            |from: usize, to: usize| true_pose(to).compose(&true_pose(from).inverse());
+        // The same relative motion with its translation systematically
+        // scaled by `SCALE_BIAS` — a per-step scale-biased measurement,
+        // not a corrupted initial guess.
+        let biased_relative = |from: usize, to: usize| {
+            let relative = true_relative(from, to);
+            SE3::new(relative.rotation, relative.translation * SCALE_BIAS)
+        };
+
+        // Dead-reckon the initial pose estimate from the anchor using the
+        // BIASED measurements — exactly what an online tracker accumulating
+        // a per-step scale bias would produce, and exactly self-consistent
+        // with the sequential edges below (zero sequential-edge residual at
+        // the seeded estimate, matching how the online pipeline always
+        // seeds a fresh keyframe's node from its own just-tracked pose).
+        let mut estimate = vec![true_pose(0)];
+        for w in 1..NODE_COUNT as usize {
+            estimate.push(biased_relative(w - 1, w).compose(&estimate[w - 1]));
+        }
+
+        let mut se3_graph = PoseGraph::new();
+        let mut sim3_graph = Sim3PoseGraph::new();
+        for (i, pose) in estimate.iter().enumerate() {
+            se3_graph.add_pose(i as u64, Pose::from_world_to_camera(
+                pose.rotation,
+                pose.translation,
+            ));
+            sim3_graph.add_pose(
+                i as u64,
+                Sim3::new(pose.rotation, pose.translation, 1.0),
+            );
+        }
+        se3_graph.anchor(0);
+        sim3_graph.anchor(0);
+        for w in 1..NODE_COUNT as usize {
+            let measurement = biased_relative(w - 1, w);
+            se3_graph.add_sequential_edge(w as u64 - 1, w as u64, measurement.clone());
+            sim3_graph.add_edge(
+                w as u64 - 1,
+                w as u64,
+                Sim3::new(measurement.rotation, measurement.translation, 1.0),
+                1.0,
+            );
+        }
+        let last = NODE_COUNT as usize - 1;
+        let loop_measurement = true_relative(last, 0);
+        se3_graph.add_loop_closure_constraint(&LoopClosureConstraint {
+            from_keyframe_id: last as u64,
+            to_keyframe_id: 0,
+            relative_pose: loop_measurement.clone(),
+            inlier_count: LOOP_WEIGHT as usize,
+            inlier_ratio: 1.0,
+            mean_sampson_error: 0.0,
+            score: 0.0,
+        });
+        sim3_graph.add_edge(
+            last as u64,
+            0,
+            Sim3::new(loop_measurement.rotation, loop_measurement.translation, 1.0),
+            LOOP_WEIGHT,
+        );
+
+        let se3_result = se3_graph
+            .optimize_se3_iterative(&PoseGraphSe3Config::default())
+            .expect("SE3 solve should succeed (well-posed graph)");
+        let sim3_result = sim3_graph
+            .optimize(&Sim3PoseGraphConfig::default())
+            .expect("Sim3 solve should succeed (well-posed graph)");
+        assert!(se3_result.converged, "SE3 solve should converge");
+        assert!(sim3_result.converged, "Sim3 solve should converge");
+
+        let se3_error: f64 = truth
+            .iter()
+            .map(|(id, _, t)| (se3_graph.poses[id].world_to_camera.translation - t).norm())
+            .sum::<f64>()
+            / truth.len() as f64;
+        // Write-back convention (see `LoopRefinementSolver::Sim3`'s doc
+        // comment): a solved Sim3 node's rigid position is
+        // `translation / scale`.
+        let sim3_error: f64 = truth
+            .iter()
+            .map(|(id, _, t)| {
+                let node = &sim3_graph.poses[id];
+                (node.translation / node.scale - t).norm()
+            })
+            .sum::<f64>()
+            / truth.len() as f64;
+
+        let se3_cost = se3_graph.se3_cost();
+        let sim3_cost = sim3_graph.cost();
+        assert!(
+            sim3_cost < se3_cost * 0.8,
+            "Sim3 should use its scale DOF to fit the inconsistent scale-biased graph \
+             substantially better than SE3: se3_cost={se3_cost}, sim3_cost={sim3_cost}, \
+             se3_position_error={se3_error}, sim3_position_error={sim3_error}"
+        );
+
+        let worst_scale_deviation = sim3_graph
+            .poses
+            .values()
+            .map(|pose| (pose.scale - 1.0).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            worst_scale_deviation > 0.02,
+            "expected the Sim3 solve to recover a non-trivial per-node scale correction \
+             (per-node scales != 1), worst |scale-1| = {worst_scale_deviation}"
+        );
+    }
+
+    /// Same wiring as [`pipeline_with_propagating_pose_graph`], but with
+    /// `solver: LoopRefinementSolver::Sim3(_)`.
+    fn pipeline_with_propagating_sim3_pose_graph(
+        map: VisualMap,
+        camera: Camera,
+        trigger_every_new_constraints: usize,
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 5,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera,
+                    verifier_config: LoopClosureVerifierConfig {
+                        min_inliers: 8,
+                        min_inlier_ratio: 0.5,
+                        max_mean_sampson_error: 5.0e-3,
+                        default_translation_scale: 1.0,
+                    },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
+                    pcm: None,
+                    covariance_gate: None,
+                    pcm_batch_rescreen: false,
+                    marginalization_window: None,
+                    marginalization_sparsify: false,
+                    trigger_every_new_constraints,
+                    appearance_candidates: None,
+                    propagate_corrections: true,
+                    solver: LoopRefinementSolver::Sim3(Sim3PoseGraphConfig::default()),
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        )
+    }
+
+    /// (b) Sim3 propagation projection-invariance: duplicates
+    /// [`landmark_propagation_moves_anchored_landmark_by_keyframe_correction_and_preserves_reprojection`]
+    /// for the `Sim3` solver, with a genuinely non-1 solved scale (forced by
+    /// hand-editing the running `Sim3PoseGraph` mirror's sequential edge
+    /// before the loop-closing frame triggers the solve — the metric PnP
+    /// tracker in this test harness has no organic source of scale error, so
+    /// this is the only way to exercise the scale-dependent half of the
+    /// fixed-point/scale convention deterministically). If the write-back
+    /// convention (`t / s`) or the propagation similarity
+    /// (`Siw_new⁻¹ ∘ Siw_old`) used the wrong fixed point or scale
+    /// direction, the corrected landmark would NOT reproject to the
+    /// original pixel and this test would fail immediately.
+    #[test]
+    fn sim3_propagation_moves_anchored_landmark_and_preserves_reprojection_under_nontrivial_scale()
+    {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_propagating_sim3_pose_graph(map.clone(), camera.clone(), 1);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+
+        // Seed a synthetic landmark anchored EXCLUSIVELY to KF#20, exactly
+        // like the SE3 propagation test.
+        let anchor_landmark_position = Point3::new(0.3, -0.2, 5.5);
+        let old_pose_20 = slam
+            .map
+            .keyframes
+            .get(&20)
+            .expect("KF#20 registered")
+            .frame
+            .pose
+            .clone()
+            .expect("KF#20 has a pose");
+        let original_pixel = camera
+            .project(&old_pose_20.transform_world_point(&anchor_landmark_position))
+            .expect("synthetic point projects in front of the camera");
+        {
+            let kf20 = slam.map.keyframes.get_mut(&20).unwrap();
+            let keypoint_index = kf20.frame.keypoints.len();
+            kf20.frame.keypoints.push(original_pixel);
+            kf20.frame.descriptors.push(vec![0.0; 2]);
+            kf20.observations.push(Observation {
+                frame_id: 20,
+                landmark_id: SYNTHETIC_ANCHOR_LANDMARK_ID,
+                keypoint_index,
+                xy: original_pixel,
+            });
+        }
+        let mut landmark = Landmark::new(SYNTHETIC_ANCHOR_LANDMARK_ID, anchor_landmark_position);
+        landmark.observations.push(Observation {
+            frame_id: 20,
+            landmark_id: SYNTHETIC_ANCHOR_LANDMARK_ID,
+            keypoint_index: slam.map.keyframes[&20].frame.keypoints.len() - 1,
+            xy: original_pixel,
+        });
+        slam.map.landmarks.insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
+
+        // Force a genuinely non-1 solved scale at KF#20: hand-edit the
+        // Sim3 mirror's only edge so far (KF#10 -> KF#20, auto-seeded at
+        // scale 1.0 from the true tracked poses) to claim a 1.6x scale
+        // discrepancy. The upcoming loop-closing frame adds two more
+        // scale-1 (metric) edges pulling against it, so the solve lands at
+        // some non-trivial scale strictly between 1.0 and 1.6 — exactly
+        // the "wrong basin the write-back/propagation math must still
+        // handle correctly" scenario.
+        {
+            let state = slam.pose_graph_state.as_mut().expect("pose graph state");
+            let sim3_graph = state
+                .sim3_graph
+                .as_mut()
+                .expect("sim3 mirror populated under the Sim3 solver");
+            let edge = sim3_graph
+                .edges
+                .iter_mut()
+                .find(|edge| edge.from == 10 && edge.to == 20)
+                .expect("KF#10 -> KF#20 sequential edge should be present");
+            edge.measurement.scale = 1.6;
+            edge.weight = 100.0;
+        }
+
+        // KF#30 returns near the origin: shared-landmark loop gate fires,
+        // triggering the Sim3 solve (same fixture as the SE3 propagation
+        // test).
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(
+            stats.sim3_pose_graph_result.is_some(),
+            "the Sim3 solve must fire for this test to exercise propagation"
+        );
+
+        let siw_new = slam
+            .pose_graph_state
+            .as_ref()
+            .unwrap()
+            .sim3_graph
+            .as_ref()
+            .unwrap()
+            .poses[&20]
+            .clone();
+        assert!(
+            (siw_new.scale - 1.0).abs() > 0.05,
+            "expected a non-trivial solved scale at KF#20 (forced by the hand-edited edge), \
+             got {}",
+            siw_new.scale
+        );
+
+        let new_pose_20 = slam
+            .map
+            .keyframes
+            .get(&20)
+            .unwrap()
+            .frame
+            .pose
+            .clone()
+            .expect("KF#20 still has a pose after the Sim3 solve");
+        assert_ne!(
+            new_pose_20.world_to_camera.translation,
+            old_pose_20.world_to_camera.translation,
+            "KF#20 must actually move for this to be a meaningful test"
+        );
+
+        // Exact-displacement check, generalised to Sim(3): the landmark
+        // must move by exactly KF#20's world-frame similarity correction
+        // `Siw_new⁻¹ ∘ Siw_old`.
+        let siw_old = Sim3::new(
+            old_pose_20.world_to_camera.rotation,
+            old_pose_20.world_to_camera.translation,
+            1.0,
+        );
+        let expected_correction = siw_new.inverse().compose(&siw_old);
+        let expected_position = expected_correction.transform_point(&anchor_landmark_position);
+        let moved_position = slam.map.landmarks[&SYNTHETIC_ANCHOR_LANDMARK_ID].position;
+        assert!(
+            (moved_position - expected_position).norm() < 1.0e-9,
+            "landmark must move by exactly KF#20's Sim3 correction: expected \
+             {expected_position:?}, got {moved_position:?}"
+        );
+
+        // Projection invariance: reprojecting the CORRECTED landmark
+        // through the CORRECTED (rigid, `t/s`-written-back) keyframe pose
+        // must reproduce the ORIGINAL pixel. A wrong fixed point or a
+        // `t * s` (instead of `t / s`) write-back convention would move
+        // the reprojection and fail this check immediately.
+        let corrected_pixel = camera
+            .project(&new_pose_20.transform_world_point(&moved_position))
+            .expect("corrected point still projects in front of the camera");
+        assert!(
+            (corrected_pixel - original_pixel).norm() < 1.0e-6,
+            "corrected landmark must reproject to the original pixel under Sim3 propagation: \
+             expected {original_pixel:?}, got {corrected_pixel:?}"
+        );
+
+        assert!(stats.landmarks_moved >= 1);
+        assert!(stats.tracker_correction_applied);
     }
 }
 

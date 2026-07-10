@@ -218,6 +218,28 @@ where
         self.motion_model.apply_pose_correction(correction);
     }
 
+    /// [`Self::apply_pose_correction`]'s counterpart for a `Sim(3)`
+    /// world-frame correction — used after a `Sim(3)` pose-graph solve
+    /// (`visloc-slam`'s online loop-closure refinement `Sim3` solver)
+    /// instead of the rigid `SE(3)` solver, so scale-drift corrections
+    /// keep the tracker's continuation state consistent too.
+    ///
+    /// `last_successful_pose` is a rigid [`Pose`], so only `correction`'s
+    /// rotation+translation part is folded into it (mirroring the map's
+    /// keyframe write-back convention, which likewise keeps
+    /// `map.keyframes[*].frame.pose` rigid); `correction.scale` is left
+    /// to [`MotionModel::apply_similarity_correction`] for models that
+    /// cache a world-frame velocity, where it multiplies that vector
+    /// (see [`ImuPredictiveMotionModel`](crate::ImuPredictiveMotionModel)'s
+    /// override).
+    pub fn apply_similarity_pose_correction(&mut self, correction: &Sim3) {
+        let se3_part = SE3::new(correction.rotation, correction.translation);
+        if let Some(pose) = self.last_successful_pose.as_mut() {
+            pose.world_to_camera = pose.world_to_camera.compose(&se3_part.inverse());
+        }
+        self.motion_model.apply_similarity_correction(correction);
+    }
+
     pub fn pose_prior_for_frame(&self, frame: &Frame) -> Option<Pose> {
         self.motion_model.predict_pose(
             frame,
