@@ -3900,6 +3900,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relocalization_attempts_path = args.out_dir.join("relocalization_attempts.csv");
     let rebootstrap_log_path = args.out_dir.join("rebootstrap_log.csv");
     let loop_constraints_path = args.out_dir.join("loop_constraints.csv");
+    // Post-run views computed once the frame loop (and any pose-graph
+    // loop-closure back-propagation into `map.keyframes`) has finished:
+    // `slam_trajectory.csv`/`slam_errors.csv` are causal, per-frame *live*
+    // estimates and can never reflect a later loop-closure correction. These
+    // two give the "final optimized trajectory" view that published SLAM ATE
+    // numbers (ORB-SLAM3 etc.) are actually computed on.
+    let keyframe_trajectory_path = args.out_dir.join("keyframe_trajectory.csv");
+    let final_keyframe_errors_path = args.out_dir.join("final_keyframe_errors.csv");
 
     let mut traj_csv =
         String::from("timestamp_ns,frame_idx,px,py,pz,qw,qx,qy,qz,tracking_success\n");
@@ -5122,6 +5130,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (0.0, 0.0)
     };
+
+    // Final-trajectory view: `slam_trajectory.csv`/`slam_errors.csv` above are
+    // causal, per-frame *live* estimates logged as each frame was processed,
+    // so a loop-closure PGO correction applied to `map.keyframes` later in
+    // the run (`--pose-graph-refinement-propagate`) can never retroactively
+    // fix an already-logged row. `slam.map().keyframes` reflects every
+    // correction folded in by the time the frame loop finished, so re-running
+    // the same per-frame-error machinery over the final keyframe poses gives
+    // the "final optimized trajectory" ATE that published SLAM numbers
+    // (ORB-SLAM3 etc.) are computed on. Keyframe ids are assigned as
+    // `frame_idx as u64` when each `Frame` is built for `slam.process_frame`
+    // (see `frame_from_features` call sites above), so `dataset.cam0_images`
+    // is indexable directly by keyframe id to recover the frame timestamp —
+    // the same association `keyframe_decisions.csv` relies on implicitly via
+    // `frame_idx`.
+    let mut keyframe_ids: Vec<u64> = slam.map().keyframes.keys().copied().collect();
+    keyframe_ids.sort_unstable();
+
+    let mut keyframe_trajectory_csv =
+        String::from("keyframe_id,timestamp_ns,px,py,pz,qw,qx,qy,qz\n");
+    let mut final_keyframe_estimated_positions: Vec<Point3<f64>> = Vec::new();
+    let mut final_keyframe_reference_positions: Vec<Point3<f64>> = Vec::new();
+    let mut final_keyframe_timestamps: Vec<i128> = Vec::new();
+    let mut final_keyframe_ids: Vec<u64> = Vec::new();
+
+    for &keyframe_id in &keyframe_ids {
+        let keyframe = &slam.map().keyframes[&keyframe_id];
+        let Some(pose) = keyframe.frame.pose.as_ref() else {
+            continue;
+        };
+        let Some(image_entry) = dataset.cam0_images.get(keyframe_id as usize) else {
+            continue;
+        };
+        let timestamp_ns = image_entry.timestamp_nanoseconds;
+        let center = pose.camera_center_world();
+        let q = pose.world_to_camera.rotation.inverse();
+        keyframe_trajectory_csv.push_str(&format!(
+            "{keyframe_id},{timestamp_ns},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+            center.x, center.y, center.z, q.w, q.i, q.j, q.k,
+        ));
+
+        let gt = nearest_ground_truth(&dataset.ground_truth, timestamp_ns);
+        let gt_center = gt.position_world
+            + gt.orientation_world
+                .transform_vector(&body_to_camera.translation);
+
+        final_keyframe_estimated_positions.push(Point3::new(center.x, center.y, center.z));
+        final_keyframe_reference_positions.push(Point3::new(gt_center.x, gt_center.y, gt_center.z));
+        final_keyframe_timestamps.push(timestamp_ns);
+        final_keyframe_ids.push(keyframe_id);
+    }
+    fs::write(&keyframe_trajectory_path, keyframe_trajectory_csv)?;
+
+    let final_keyframe_count = final_keyframe_estimated_positions.len();
+    let final_keyframe_aligned_rigid = umeyama_similarity_transform(
+        &final_keyframe_estimated_positions,
+        &final_keyframe_reference_positions,
+        false,
+    )
+    .unwrap_or_else(TrajectorySimilarityTransform::identity);
+    let final_keyframe_aligned_similarity = umeyama_similarity_transform(
+        &final_keyframe_estimated_positions,
+        &final_keyframe_reference_positions,
+        true,
+    )
+    .unwrap_or_else(TrajectorySimilarityTransform::identity);
+
+    let mut final_keyframe_errors_csv =
+        String::from("keyframe_id,timestamp_ns,position_error_m\n");
+    let mut final_keyframe_rmse_sq_rigid = 0.0_f64;
+    let mut final_keyframe_rmse_sq_sim = 0.0_f64;
+    for (((id, ts), est), gt) in final_keyframe_ids
+        .iter()
+        .zip(final_keyframe_timestamps.iter())
+        .zip(final_keyframe_estimated_positions.iter())
+        .zip(final_keyframe_reference_positions.iter())
+    {
+        let rigid_err = (final_keyframe_aligned_rigid.apply(est) - gt).norm();
+        let sim_err = (final_keyframe_aligned_similarity.apply(est) - gt).norm();
+        final_keyframe_rmse_sq_rigid += rigid_err * rigid_err;
+        final_keyframe_rmse_sq_sim += sim_err * sim_err;
+        final_keyframe_errors_csv.push_str(&format!("{id},{ts},{rigid_err:.6}\n"));
+    }
+    fs::write(&final_keyframe_errors_path, final_keyframe_errors_csv)?;
+
+    let (final_keyframe_ate_rigid_rmse_m, final_keyframe_ate_similarity_rmse_m) =
+        if final_keyframe_count > 0 {
+            let n = final_keyframe_count as f64;
+            (
+                (final_keyframe_rmse_sq_rigid / n).sqrt(),
+                (final_keyframe_rmse_sq_sim / n).sqrt(),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+    let final_keyframe_ate_similarity_scale = final_keyframe_aligned_similarity.scale;
+
     let final_vi_status = slam.vi_initialization_status();
     let final_motion_vi_status = slam.motion_vi_initialization_status();
     let map_keyframes = slam.map().keyframes.len();
@@ -5402,7 +5507,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          ate_rigid_max_m={max_rigid:.4}\n\
          ate_similarity_rmse_m={ate_rmse_sim:.4}\n\
          ate_similarity_max_m={max_sim:.4}\n\
-         ate_similarity_scale={scale:.6}\n",
+         ate_similarity_scale={scale:.6}\n\
+         final_keyframe_ate_rigid_rmse_m={final_keyframe_ate_rigid_rmse_m:.4}\n\
+         final_keyframe_ate_similarity_rmse_m={final_keyframe_ate_similarity_rmse_m:.4}\n\
+         final_keyframe_ate_similarity_scale={final_keyframe_ate_similarity_scale:.6}\n\
+         final_keyframe_count={final_keyframe_count}\n",
         args.euroc_dir.display(),
         success_rate = if frames_recorded > 0 {
             tracking_successes as f64 / frames_recorded as f64
@@ -5786,7 +5895,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
     println!(
-        "wrote {}, {}, {}, {}, {}, {}, {}, {}, {} (+ summary.txt)",
+        "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} (+ summary.txt)",
         traj_path.display(),
         err_path.display(),
         frame_groundtruth_path.display(),
@@ -5796,6 +5905,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         keyframe_decision_log_path.display(),
         relocalization_appearance_candidates_path.display(),
         relocalization_attempts_path.display(),
+        keyframe_trajectory_path.display(),
+        final_keyframe_errors_path.display(),
     );
     if rebootstrap_enabled {
         println!("wrote {}", rebootstrap_log_path.display());
