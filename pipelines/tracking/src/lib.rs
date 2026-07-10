@@ -78,6 +78,54 @@ pub struct TrackingConfig {
     /// is enabled. Prevents an extended tracking outage from inflating the
     /// gate to an unbounded radius.
     pub pose_jump_gap_scaling_max_multiplier: usize,
+    /// ORB-SLAM3-style projection-guided tracking: when a pose prior is
+    /// available, restrict descriptor matching to a per-landmark projection
+    /// window instead of an appearance-global search, with a widen-retry
+    /// ladder and post-hoc local-map refinement. `None` (the default)
+    /// preserves today's appearance-global-then-warm-start behaviour
+    /// bit-for-bit; enabling the feature can only ADD tracking chances,
+    /// because the widen-retry ladder falls back to the existing
+    /// appearance-global path if every projection attempt fails.
+    pub projection_guided_tracking: Option<ProjectionGuidedTrackingConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectionGuidedTrackingConfig {
+    /// Initial per-landmark projection-window radius, in pixels.
+    pub search_radius_px: f64,
+    /// Multiplier applied to `search_radius_px` on each widen-retry attempt
+    /// after a stage-1 projection attempt fails the pose-estimation quality
+    /// gate.
+    pub widen_factor: f64,
+    /// Maximum number of widen-retry attempts after the initial one. Total
+    /// projection attempts per frame is `1 + max_widen_retries`; if all of
+    /// them fail, the tracker falls back to the appearance-global path.
+    pub max_widen_retries: u32,
+    /// When `true`, after ANY successful pose estimate (projection path or
+    /// appearance-global fallback), project the covisibility local map with
+    /// the estimated pose and re-optimize over the union of harvested and
+    /// existing inlier correspondences. Requires `covisibility_local_map`
+    /// to also be configured (the local-map landmark set the brief and
+    /// `build_covisibility_local_map_store` compute); otherwise this stage
+    /// is a no-op since there is no local-map landmark set to project.
+    pub local_map_refinement: bool,
+    /// Per-landmark projection-window radius, in pixels, used by the
+    /// local-map refinement stage. Independent of `search_radius_px` since
+    /// refinement starts from an already-estimated (not merely predicted)
+    /// pose and can afford a tighter window.
+    pub refinement_search_radius_px: f64,
+}
+
+impl Default for ProjectionGuidedTrackingConfig {
+    fn default() -> Self {
+        Self {
+            search_radius_px: 15.0,
+            widen_factor: 2.0,
+            max_widen_retries: 2,
+            local_map_refinement: true,
+            refinement_search_radius_px: 8.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,6 +165,7 @@ impl Default for TrackingConfig {
             pnp_pose_prior_warm_start: false,
             pose_jump_gap_scaling: false,
             pose_jump_gap_scaling_max_multiplier: 10,
+            projection_guided_tracking: None,
         }
     }
 }

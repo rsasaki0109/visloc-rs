@@ -1,17 +1,18 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
-use visloc_core::types::{Camera, Frame, Landmark, VisualMap};
+use visloc_core::types::{Camera, Frame, Landmark, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
-    correspondences_2d3d_for_loop_candidate, loop_closure_constraints_from_candidates,
-    online_slam_results_to_html_report, relative_world_to_camera, scan_pairwise_loop_closures,
-    verify_loop_closure_candidates, verify_loop_closure_candidates_hybrid,
-    verify_loop_closure_candidates_pnp, AppearanceLoopScannerSettings, CovisibilityLocalBaConfig,
-    CovisibilityLocalBaError, EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier,
-    HybridLoopClosureVerifierConfig, LinearSolver, LoopClosureConfig, LoopClosureConstraint,
-    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, OnlineSlamConfig,
-    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamImuConfig,
+    build_appearance_loop_candidates, correspondences_2d3d_for_loop_candidate,
+    loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
+    relative_world_to_camera, scan_pairwise_loop_closures, verify_loop_closure_candidates,
+    verify_loop_closure_candidates_hybrid, verify_loop_closure_candidates_pnp,
+    AppearanceLoopScannerSettings, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
+    EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig,
+    LinearSolver, LoopAppearanceCandidateConfig, LoopClosureConfig, LoopClosureConstraint,
+    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, LoopRefinementVerifier,
+    OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig, OnlineSlamImuConfig,
     OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
     OnlineSlamRelocalizationAppearanceConfig, OnlineSlamRelocalizationConfig,
     OnlineSlamRelocalizationCovisibilityConfig, PairwiseKeyframeView,
@@ -4073,6 +4074,7 @@ mod online_loop_closure_refinement {
                         max_mean_sampson_error: 5.0e-3,
                         default_translation_scale: 1.0,
                     },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
@@ -4081,6 +4083,51 @@ mod online_loop_closure_refinement {
                     marginalization_window: None,
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        )
+    }
+
+    /// Same wiring as [`pipeline_with_pose_graph`], but the refinement stage
+    /// runs [`LoopRefinementVerifier::Pnp`] instead of the default
+    /// essential-matrix backend, so accepted loop constraints carry a
+    /// metric translation recovered from the map's triangulated landmarks
+    /// rather than `verifier_config.default_translation_scale`.
+    fn pipeline_with_pnp_pose_graph(
+        map: VisualMap,
+        camera: Camera,
+        trigger_every_new_constraints: usize,
+        pnp_config: PnPLoopClosureVerifierConfig,
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 5,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera,
+                    verifier_config: LoopClosureVerifierConfig::default(),
+                    verifier: LoopRefinementVerifier::Pnp(pnp_config),
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
+                    pcm: None,
+                    covariance_gate: None,
+                    pcm_batch_rescreen: false,
+                    marginalization_window: None,
+                    marginalization_sparsify: false,
+                    trigger_every_new_constraints,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4113,6 +4160,7 @@ mod online_loop_closure_refinement {
                         max_mean_sampson_error: 5.0e-3,
                         default_translation_scale: 1.0,
                     },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
@@ -4121,6 +4169,8 @@ mod online_loop_closure_refinement {
                     marginalization_window: Some(window),
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4351,6 +4401,104 @@ mod online_loop_closure_refinement {
         );
     }
 
+    /// Same three-keyframe orbit as
+    /// `accepted_loop_constraint_triggers_pgo_and_writes_back_pose`
+    /// (KF#10 origin, KF#20 displaced 1.5m, KF#30 returns to
+    /// `(0.05, 0, 0.05)`, true |C30 - C10| = 0.05*sqrt(2) ≈ 0.0707m, NOT
+    /// 1.0m), but with `verifier: LoopRefinementVerifier::EssentialMatrix`
+    /// and `default_translation_scale: 1.0`. This is the measured bug this
+    /// change addresses: two-view essential-matrix geometry cannot observe
+    /// translation scale, so the accepted loop constraint's translation is
+    /// pinned to the configured default (`1.0`) regardless of the true
+    /// ~0.0707m baseline.
+    #[test]
+    fn essential_matrix_verifier_online_refinement_pins_default_translation_scale() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let true_translation_norm = (0.05_f64 * 0.05 + 0.05 * 0.05).sqrt();
+        let mut slam = pipeline_with_pose_graph(map.clone(), camera.clone(), 1);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(stats.accepted_count >= 1);
+
+        let state = slam.pose_graph_state.as_ref().unwrap();
+        let constraint = state
+            .verified_constraints
+            .iter()
+            .find(|c| c.from_keyframe_id == 10 && c.to_keyframe_id == 30)
+            .expect("(KF#10, KF#30) loop constraint admitted");
+        let translation_norm = constraint.relative_pose.translation.norm();
+        assert!(
+            (translation_norm - 1.0).abs() < 1.0e-6,
+            "essential-matrix verifier pins translation to default_translation_scale=1.0; got {translation_norm}"
+        );
+        assert!(
+            (translation_norm - true_translation_norm).abs() > 0.9,
+            "the pinned translation ({translation_norm}) must NOT match the true baseline \
+             ({true_translation_norm}) -- that mismatch is the bug this change fixes"
+        );
+    }
+
+    /// PnP counterpart of
+    /// `essential_matrix_verifier_online_refinement_pins_default_translation_scale`:
+    /// same three-keyframe orbit and the same true ~0.0707m baseline, but
+    /// `verifier: LoopRefinementVerifier::Pnp` verifies on 2D-3D
+    /// correspondences against the map's triangulated landmarks instead of
+    /// 2D-2D essential-matrix geometry. Because the keyframe pose already
+    /// carries the world scale, the accepted constraint's translation
+    /// should match the true baseline instead of an arbitrary constant.
+    #[test]
+    fn pnp_verifier_online_refinement_recovers_metric_translation() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let true_translation_norm = (0.05_f64 * 0.05 + 0.05 * 0.05).sqrt();
+        let mut slam = pipeline_with_pnp_pose_graph(
+            map.clone(),
+            camera.clone(),
+            1,
+            PnPLoopClosureVerifierConfig::default(),
+        );
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(
+            stats.accepted_count >= 1,
+            "PnP verifier accepts the (KF#10, KF#30) loop on the synthetic cloud"
+        );
+
+        let state = slam.pose_graph_state.as_ref().unwrap();
+        let constraint = state
+            .verified_constraints
+            .iter()
+            .find(|c| c.from_keyframe_id == 10 && c.to_keyframe_id == 30)
+            .expect("(KF#10, KF#30) loop constraint admitted");
+        let translation_norm = constraint.relative_pose.translation.norm();
+        assert!(
+            (translation_norm - true_translation_norm).abs() < 0.01,
+            "PnP verifier should recover the metric translation norm \
+             {true_translation_norm}, got {translation_norm}"
+        );
+    }
+
     /// Same three-keyframe orbit as the iterative test above, but with the
     /// back-end configured to run GNC (`OnlineSlamLoopClosureRefinementConfig::gnc`).
     /// Asserts the wiring: the GNC robust solver fires instead of the plain
@@ -4400,6 +4548,7 @@ mod online_loop_closure_refinement {
                         // magnitude to this constant).
                         default_translation_scale: 0.05 * std::f64::consts::SQRT_2,
                     },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     // TLS with a MAD auto-scaled inlier band (the band tracks
                     // the live graph's noise); no re-adapt — it is a BA-only
@@ -4417,6 +4566,8 @@ mod online_loop_closure_refinement {
                     marginalization_window: None,
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4509,6 +4660,7 @@ mod online_loop_closure_refinement {
                         max_mean_sampson_error: 5.0e-3,
                         default_translation_scale: 0.05 * std::f64::consts::SQRT_2,
                     },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: Some(PcmConfig::default()),
@@ -4517,6 +4669,8 @@ mod online_loop_closure_refinement {
                     marginalization_window: None,
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4589,6 +4743,7 @@ mod online_loop_closure_refinement {
                         max_mean_sampson_error: 5.0e-3,
                         default_translation_scale: 0.05 * std::f64::consts::SQRT_2,
                     },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
@@ -4597,6 +4752,8 @@ mod online_loop_closure_refinement {
                     marginalization_window: None,
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4649,6 +4806,7 @@ mod online_loop_closure_refinement {
                 pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
                     camera: camera.clone(),
                     verifier_config: LoopClosureVerifierConfig::default(),
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
                     gnc: None,
                     pcm: None,
@@ -4657,6 +4815,8 @@ mod online_loop_closure_refinement {
                     marginalization_window: None,
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
+                    appearance_candidates: None,
+                    propagate_corrections: false,
                 }),
                 ..OnlineSlamConfig::default()
             },
@@ -4675,6 +4835,459 @@ mod online_loop_closure_refinement {
             .unwrap()
             .keyframe_order
             .is_empty());
+    }
+
+    // --------------------------------------------------------------
+    // Appearance-based long-range loop candidate source
+    // (`LoopAppearanceCandidateConfig` / `build_appearance_loop_candidates`)
+    // --------------------------------------------------------------
+
+    /// Mirrors the internal `relocalization_mean_descriptor` computation
+    /// (mean, then L2-normalize) so the test can populate a
+    /// `descriptor_cache` entry the same way the pipeline would.
+    fn mean_descriptor_for_test(descriptors: &[Vec<f32>]) -> Vec<f32> {
+        let dim = descriptors[0].len();
+        let mut mean = vec![0.0_f32; dim];
+        for descriptor in descriptors {
+            for (acc, value) in mean.iter_mut().zip(descriptor) {
+                *acc += *value;
+            }
+        }
+        let inv_count = 1.0_f32 / descriptors.len() as f32;
+        let mut norm = 0.0_f32;
+        for value in &mut mean {
+            *value *= inv_count;
+            norm += *value * *value;
+        }
+        let norm = norm.sqrt();
+        for value in &mut mean {
+            *value /= norm;
+        }
+        mean
+    }
+
+    /// Builds a `VisualMap` with a single registered keyframe (id 10, at the
+    /// world origin, no rotation) observing 40 distinct 3D points under
+    /// landmark ids 1..=40, plus the matching appearance-descriptor-cache
+    /// entry `build_appearance_loop_candidates` expects. Returns
+    /// `(map, camera, descriptor_cache, points, descriptors)` so each test
+    /// can build its own "current frame" (a would-be keyframe that has NOT
+    /// re-triangulated these points into the map under new ids yet — the
+    /// scenario the appearance stream targets, since shared-landmark
+    /// candidates are structurally impossible here).
+    #[allow(clippy::type_complexity)]
+    fn appearance_candidate_fixture() -> (
+        VisualMap,
+        Camera,
+        std::collections::HashMap<u64, Vec<f32>>,
+        Vec<Point3<f64>>,
+        Vec<Vec<f32>>,
+    ) {
+        let camera = camera();
+        let points: Vec<Point3<f64>> = (0..40)
+            .map(|k| {
+                let k = k as f64;
+                Point3::new(
+                    -1.5 + 0.08 * k,
+                    0.8 * (k * 0.37).sin(),
+                    5.0 + 0.3 * (k * 0.19).cos(),
+                )
+            })
+            .collect();
+        let descriptors: Vec<Vec<f32>> = (0..points.len())
+            .map(|index| {
+                (0..16)
+                    .map(|d| ((index as f32) * 0.13 + (d as f32) * 0.07).sin())
+                    .collect()
+            })
+            .collect();
+
+        let mut map = VisualMap::new();
+        map.cameras.insert(camera.id, camera.clone());
+        for (index, point) in points.iter().enumerate() {
+            let landmark_id = (index + 1) as u64;
+            let mut landmark = Landmark::new(landmark_id, *point);
+            landmark.descriptor = Some(descriptors[index].clone());
+            map.landmarks.insert(landmark_id, landmark);
+        }
+
+        let pose_a = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+        let mut frame_a = Frame::new(10, camera.id);
+        let mut observations_a = Vec::new();
+        for (index, point) in points.iter().enumerate() {
+            let landmark_id = (index + 1) as u64;
+            let projected = camera.project(&pose_a.transform_world_point(point)).unwrap();
+            frame_a.keypoints.push(projected);
+            frame_a.descriptors.push(descriptors[index].clone());
+            observations_a.push(visloc_core::types::Observation {
+                frame_id: 10,
+                landmark_id,
+                keypoint_index: index,
+                xy: projected,
+            });
+        }
+        frame_a.pose = Some(pose_a);
+        map.keyframes.insert(
+            10,
+            visloc_core::types::Keyframe {
+                frame: frame_a.clone(),
+                observations: observations_a,
+            },
+        );
+
+        let mut descriptor_cache = std::collections::HashMap::new();
+        descriptor_cache.insert(10_u64, mean_descriptor_for_test(&frame_a.descriptors));
+
+        (map, camera, descriptor_cache, points, descriptors)
+    }
+
+    /// Builds the "current frame" (not yet a registered keyframe) that
+    /// revisits `points` from a translated camera center, reusing the exact
+    /// same descriptors (appearance match) under NO landmark ids at all —
+    /// correspondences can only come from descriptor matching against the
+    /// candidate keyframe's own landmarks, never from shared ids.
+    fn appearance_revisit_frame(
+        frame_id: u64,
+        camera_center: Vector3<f64>,
+        points: &[Point3<f64>],
+        descriptors: &[Vec<f32>],
+        camera: &Camera,
+    ) -> Frame {
+        let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), -camera_center);
+        let mut frame = Frame::new(frame_id, camera.id);
+        for (index, point) in points.iter().enumerate() {
+            let projected = camera.project(&pose.transform_world_point(point)).unwrap();
+            frame.keypoints.push(projected);
+            frame.descriptors.push(descriptors[index].clone());
+        }
+        frame
+    }
+
+    #[test]
+    fn appearance_loop_candidate_recovers_metric_translation_for_a_long_range_revisit() {
+        let (map, camera, descriptor_cache, points, descriptors) = appearance_candidate_fixture();
+
+        // Keyframe-id gap of 200 clears the default 150 minimum; the
+        // camera has translated by a known 2m baseline along x.
+        let true_translation = Vector3::new(2.0, 0.0, 0.0);
+        let frame_b = appearance_revisit_frame(210, true_translation, &points, &descriptors, &camera);
+
+        let config = LoopAppearanceCandidateConfig::default();
+        let candidates =
+            build_appearance_loop_candidates(&map, &frame_b, &descriptor_cache, &config, &camera);
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the single cached older keyframe must be ranked and verified"
+        );
+        let candidate = &candidates[0];
+        assert_eq!(candidate.matched_keyframe_id, 10);
+        let verification = candidate
+            .verification
+            .as_ref()
+            .expect("appearance candidates are always verifier-populated");
+        assert!(verification.verified, "noiseless correspondences must pass PnP verification");
+        assert!(
+            verification.inlier_count >= 30,
+            "expected >= 30 inliers out of 40 correspondences, got {}",
+            verification.inlier_count
+        );
+
+        let constraint = LoopClosureConstraint::from_verified_candidate(candidate)
+            .expect("a verified candidate must yield a constraint");
+        assert_eq!(constraint.from_keyframe_id, 10);
+        assert_eq!(constraint.to_keyframe_id, 210);
+        let recovered_translation_norm = constraint.relative_pose.translation.norm();
+        let true_translation_norm = true_translation.norm();
+        assert!(
+            (recovered_translation_norm - true_translation_norm).abs() < 1.0e-2,
+            "recovered translation norm {recovered_translation_norm} should match the true baseline {true_translation_norm}"
+        );
+    }
+
+    #[test]
+    fn appearance_loop_candidate_skips_keyframes_below_min_keyframe_id_gap() {
+        let (map, camera, descriptor_cache, points, descriptors) = appearance_candidate_fixture();
+
+        // Keyframe-id gap of only 40 is below the default 150 minimum, even
+        // though the appearance similarity and geometry would otherwise
+        // verify cleanly — the long-range gate must reject it outright.
+        let frame_b = appearance_revisit_frame(
+            50,
+            Vector3::new(2.0, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+
+        let config = LoopAppearanceCandidateConfig::default();
+        let candidates =
+            build_appearance_loop_candidates(&map, &frame_b, &descriptor_cache, &config, &camera);
+
+        assert!(
+            candidates.is_empty(),
+            "candidates below min_keyframe_id_gap must never be ranked, let alone verified"
+        );
+    }
+
+    // ============================================================
+    // `propagate_corrections` — PGO write-back correction propagation
+    // ============================================================
+
+    /// Same wiring as [`pipeline_with_pose_graph`], but with
+    /// `propagate_corrections: true` so a converged solve also moves
+    /// anchored landmarks and corrects the tracker's continuation state.
+    fn pipeline_with_propagating_pose_graph(
+        map: VisualMap,
+        camera: Camera,
+        trigger_every_new_constraints: usize,
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                apply_map_updates: true,
+                loop_closure: LoopClosureConfig {
+                    min_frame_id_gap: 5,
+                    min_shared_landmarks: 4,
+                    min_shared_landmark_ratio_percent: 30,
+                    ..LoopClosureConfig::default()
+                },
+                pose_graph_refinement: Some(OnlineSlamLoopClosureRefinementConfig {
+                    camera,
+                    verifier_config: LoopClosureVerifierConfig {
+                        min_inliers: 8,
+                        min_inlier_ratio: 0.5,
+                        max_mean_sampson_error: 5.0e-3,
+                        default_translation_scale: 1.0,
+                    },
+                    verifier: LoopRefinementVerifier::EssentialMatrix,
+                    pose_graph_config: PoseGraphSe3Config::default(),
+                    gnc: None,
+                    pcm: None,
+                    covariance_gate: None,
+                    pcm_batch_rescreen: false,
+                    marginalization_window: None,
+                    marginalization_sparsify: false,
+                    trigger_every_new_constraints,
+                    appearance_candidates: None,
+                    propagate_corrections: true,
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        )
+    }
+
+    const SYNTHETIC_ANCHOR_LANDMARK_ID: u64 = 9001;
+    const UNSOLVED_ANCHOR_LANDMARK_ID: u64 = 9002;
+    const UNSOLVED_ANCHOR_KEYFRAME_ID: u64 = 500;
+
+    /// (a) Exact-displacement check + (d) pose-convention sanity check in
+    /// one scenario (they share the same fixture, and (d) is exactly the
+    /// check that would fail immediately if the correction direction were
+    /// backwards).
+    #[test]
+    fn landmark_propagation_moves_anchored_landmark_by_keyframe_correction_and_preserves_reprojection(
+    ) {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_propagating_pose_graph(map.clone(), camera.clone(), 1);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+
+        // Seed a synthetic landmark anchored EXCLUSIVELY to KF#20: its
+        // only observation is on KF#20, so KF#20 (not KF#10, the graph's
+        // fixed anchor) is its anchor keyframe. Its pixel is the TRUE
+        // projection of its 3D position under KF#20's pre-solve pose.
+        let anchor_landmark_position = Point3::new(0.3, -0.2, 5.5);
+        let old_pose_20 = slam
+            .map
+            .keyframes
+            .get(&20)
+            .expect("KF#20 registered")
+            .frame
+            .pose
+            .clone()
+            .expect("KF#20 has a pose");
+        let original_pixel = camera
+            .project(&old_pose_20.transform_world_point(&anchor_landmark_position))
+            .expect("synthetic point projects in front of the camera");
+        {
+            let kf20 = slam.map.keyframes.get_mut(&20).unwrap();
+            let keypoint_index = kf20.frame.keypoints.len();
+            kf20.frame.keypoints.push(original_pixel);
+            kf20.frame.descriptors.push(vec![0.0; 2]);
+            kf20.observations.push(Observation {
+                frame_id: 20,
+                landmark_id: SYNTHETIC_ANCHOR_LANDMARK_ID,
+                keypoint_index,
+                xy: original_pixel,
+            });
+        }
+        let mut landmark = Landmark::new(SYNTHETIC_ANCHOR_LANDMARK_ID, anchor_landmark_position);
+        landmark.observations.push(Observation {
+            frame_id: 20,
+            landmark_id: SYNTHETIC_ANCHOR_LANDMARK_ID,
+            keypoint_index: slam.map.keyframes[&20].frame.keypoints.len() - 1,
+            xy: original_pixel,
+        });
+        slam.map.landmarks.insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
+
+        // Also seed a landmark anchored to a keyframe the running pose
+        // graph never registered (id 500 is inserted straight into
+        // `slam.map.keyframes`, bypassing `process_frame`, so it is never
+        // part of `state.graph.poses`). Exercises (b): its anchor is
+        // never in the solved `corrections` map, so it must stay put.
+        let unsolved_keyframe_pose =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(9.0, 9.0, 9.0));
+        let mut unsolved_frame = Frame::new(UNSOLVED_ANCHOR_KEYFRAME_ID, camera.id);
+        let unsolved_landmark_position = Point3::new(100.0, 100.0, 100.0);
+        unsolved_frame.keypoints.push(
+            camera
+                .project(&unsolved_keyframe_pose.transform_world_point(&unsolved_landmark_position))
+                .unwrap(),
+        );
+        unsolved_frame.descriptors.push(vec![0.0; 2]);
+        unsolved_frame.pose = Some(unsolved_keyframe_pose);
+        slam.map.keyframes.insert(
+            UNSOLVED_ANCHOR_KEYFRAME_ID,
+            visloc_core::types::Keyframe {
+                frame: unsolved_frame,
+                observations: vec![Observation {
+                    frame_id: UNSOLVED_ANCHOR_KEYFRAME_ID,
+                    landmark_id: UNSOLVED_ANCHOR_LANDMARK_ID,
+                    keypoint_index: 0,
+                    xy: nalgebra::Point2::new(0.0, 0.0),
+                }],
+            },
+        );
+        slam.map.landmarks.insert(
+            UNSOLVED_ANCHOR_LANDMARK_ID,
+            Landmark::new(UNSOLVED_ANCHOR_LANDMARK_ID, unsolved_landmark_position),
+        );
+
+        // KF#30 returns near the origin: shared-landmark loop gate fires
+        // and the essential-matrix verifier locks onto real parallax
+        // against KF#10, triggering PGO (same fixture as
+        // `accepted_loop_constraint_triggers_pgo_and_writes_back_pose`).
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(
+            stats.pose_graph_result.is_some(),
+            "PGO must fire for this test to exercise propagation"
+        );
+
+        let new_pose_20 = slam
+            .map
+            .keyframes
+            .get(&20)
+            .unwrap()
+            .frame
+            .pose
+            .clone()
+            .expect("KF#20 still has a pose after PGO");
+        assert_ne!(
+            new_pose_20.world_to_camera.translation,
+            old_pose_20.world_to_camera.translation,
+            "KF#20 must actually move for this to be a meaningful test"
+        );
+
+        // (a) Exact-displacement check: the landmark must move by EXACTLY
+        // KF#20's own world-frame correction
+        // `C = T_cw_new ∘ T_wc_old`.
+        let expected_correction = new_pose_20
+            .world_to_camera
+            .inverse()
+            .compose(&old_pose_20.world_to_camera);
+        let expected_position = expected_correction.transform_point(&anchor_landmark_position);
+        let moved_position = slam.map.landmarks[&SYNTHETIC_ANCHOR_LANDMARK_ID].position;
+        assert!(
+            (moved_position - expected_position).norm() < 1.0e-9,
+            "landmark must move by exactly KF#20's correction: expected {expected_position:?}, got {moved_position:?}"
+        );
+        assert_ne!(
+            moved_position, anchor_landmark_position,
+            "the landmark must actually have moved"
+        );
+
+        // (b) The landmark anchored to the never-registered keyframe 500
+        // must be untouched.
+        assert_eq!(
+            slam.map.landmarks[&UNSOLVED_ANCHOR_LANDMARK_ID].position,
+            unsolved_landmark_position,
+            "a landmark anchored to a keyframe outside the solved graph must not move"
+        );
+
+        // (d) Pose-convention sanity: reprojecting the CORRECTED landmark
+        // through the CORRECTED keyframe pose must reproduce the
+        // ORIGINAL pixel. A backwards correction would move the landmark
+        // in the wrong direction and fail this check immediately.
+        let corrected_pixel = camera
+            .project(&new_pose_20.transform_world_point(&moved_position))
+            .expect("corrected point still projects in front of the camera");
+        assert!(
+            (corrected_pixel - original_pixel).norm() < 1.0e-6,
+            "corrected landmark must reproject to the original pixel: expected {original_pixel:?}, got {corrected_pixel:?}"
+        );
+
+        assert!(
+            stats.landmarks_moved >= 1,
+            "stats must report at least the synthetic landmark as moved"
+        );
+        assert!(stats.max_landmark_displacement_meters.unwrap() > 0.0);
+        assert!(stats.mean_landmark_displacement_meters.unwrap() > 0.0);
+        assert!(
+            stats.tracker_correction_applied,
+            "tracker continuation state must be corrected when a solve moved a keyframe"
+        );
+    }
+
+    /// (c) `propagate_corrections: false` (the default) must leave every
+    /// landmark byte-identical even when PGO fires and moves keyframes —
+    /// today's behaviour, preserved exactly.
+    #[test]
+    fn propagate_corrections_false_leaves_landmarks_byte_identical() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let landmarks_before = map.landmarks.clone();
+        let mut slam = pipeline_with_pose_graph(map.clone(), camera.clone(), 1);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2
+            .pose_graph_refinement
+            .expect("stats reported on the loop-closing frame");
+        assert!(
+            stats.pose_graph_result.is_some(),
+            "PGO must fire for this to be a meaningful test"
+        );
+        assert_eq!(stats.landmarks_moved, 0);
+        assert!(stats.max_landmark_displacement_meters.is_none());
+        assert!(stats.mean_landmark_displacement_meters.is_none());
+        assert!(!stats.tracker_correction_applied);
+
+        for (id, landmark) in &landmarks_before {
+            assert_eq!(
+                slam.map.landmarks[id].position, landmark.position,
+                "landmark {id} must stay byte-identical when propagate_corrections is false"
+            );
+        }
     }
 }
 

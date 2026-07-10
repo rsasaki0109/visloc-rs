@@ -14,6 +14,22 @@ pub trait MotionModel {
     fn observe(&mut self, _result: &TrackingResult) {}
 
     fn reset(&mut self) {}
+
+    /// Apply a rigid world-frame correction to any cached world-frame
+    /// state the model carries (velocities, cached poses). `correction`
+    /// maps OLD world-frame points/poses to NEW world-frame points/poses:
+    /// `p_new = correction.transform_point(&p_old)`. Called by
+    /// [`crate::Tracker::apply_pose_correction`] after an external
+    /// pose-graph optimisation (e.g. `visloc-slam`'s online loop-closure
+    /// refinement) rewrites keyframe poses, so the model's own state
+    /// stays consistent with the corrected map instead of predicting the
+    /// next prior from stale, pre-correction poses/velocities.
+    ///
+    /// Default no-op — correct for stateless models (e.g.
+    /// [`ConstantPoseMotionModel`]) that read `last_successful_pose`
+    /// fresh from the [`Tracker`](crate::Tracker) on every call and so
+    /// need no cache of their own to correct.
+    fn apply_pose_correction(&mut self, _correction: &SE3) {}
 }
 
 pub trait VisualOdometryFrontend {
@@ -463,6 +479,16 @@ impl MotionModel for ImuPredictiveMotionModel {
         self.last_predict_consumed_samples = false;
         self.last_successful_pose = None;
     }
+
+    fn apply_pose_correction(&mut self, correction: &SE3) {
+        // `velocity_world` is a world-frame vector (a difference of
+        // positions), so only the rotation component of a rigid world
+        // correction applies — the translation term cancels.
+        self.velocity_world = correction.rotation.transform_vector(&self.velocity_world);
+        if let Some(pose) = self.last_successful_pose.as_mut() {
+            pose.world_to_camera = pose.world_to_camera.compose(&correction.inverse());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -513,6 +539,16 @@ impl MotionModel for ConstantVelocityMotionModel {
     fn reset(&mut self) {
         self.previous_successful_pose = None;
         self.latest_successful_pose = None;
+    }
+
+    fn apply_pose_correction(&mut self, correction: &SE3) {
+        let inverse = correction.inverse();
+        if let Some(pose) = self.previous_successful_pose.as_mut() {
+            pose.world_to_camera = pose.world_to_camera.compose(&inverse);
+        }
+        if let Some(pose) = self.latest_successful_pose.as_mut() {
+            pose.world_to_camera = pose.world_to_camera.compose(&inverse);
+        }
     }
 }
 
@@ -867,6 +903,22 @@ impl MotionModel for AdaptiveImuPoseMotionModel {
         self.dt_between_previous_two_observations = 0.0;
         self.dt_between_latest_two_observations = 0.0;
         self.velocity_refreshes_on_switch_to_imu = 0;
+    }
+
+    fn apply_pose_correction(&mut self, correction: &SE3) {
+        self.imu.apply_pose_correction(correction);
+        self.pose.apply_pose_correction(correction);
+        let inverse = correction.inverse();
+        for pose in [
+            self.oldest_successful_pose.as_mut(),
+            self.previous_successful_pose.as_mut(),
+            self.latest_successful_pose.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            pose.world_to_camera = pose.world_to_camera.compose(&inverse);
+        }
     }
 }
 

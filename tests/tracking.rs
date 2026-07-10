@@ -2,18 +2,19 @@
 
 use std::{convert::Infallible, fs};
 
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
 use visloc_rs::core::types::{
-    Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationFailureReason,
-    LocalizationResult, LocalizationSuccess, VisualMap,
+    Camera, Frame, Keyframe, Landmark, LandmarkDescriptorStore, LocalizationFailureReason,
+    LocalizationResult, LocalizationSuccess, Observation, VisualMap,
 };
 use visloc_rs::{
     tracking_results_to_csv, tracking_results_to_html_report, write_tracking_results_csv,
-    write_tracking_results_html_report, ConstantVelocityMotionModel, FeatureExtractor, FeatureSet,
-    FrameLocalizer, ImageTracker, InMemoryMapProvider, KittiOdometryBenchmarkConfig,
-    LocalizationPipeline, LocalizationPrior, MapProviderStats, MotionModel, PoseTrajectory,
-    PriorSubmapSelector, SelectableMapProvider, Tracker, TrackingConfig, TrackingEvaluationConfig,
+    write_tracking_results_html_report, ConstantVelocityMotionModel, CovisibilityLocalMapConfig,
+    FeatureExtractor, FeatureSet, FrameLocalizer, ImageTracker, InMemoryMapProvider,
+    KittiOdometryBenchmarkConfig, LocalizationPipeline, LocalizationPrior, MapProviderStats,
+    MotionModel, PoseTrajectory, PriorSubmapSelector, ProjectionGuidedTrackingConfig,
+    SelectableMapProvider, Tracker, TrackingConfig, TrackingEvaluationConfig,
     TrackingEvaluationFailure, TrackingEvent, TrackingFailureReason, TrackingResult, TrackingState,
     TrackingStats, TrajectoryAlignment, TrajectoryEvaluationConfig, TrajectoryEvaluationFailure,
     VisualOdometryEstimate, VisualOdometryFrontend, VisualOdometryPriorProvider,
@@ -53,6 +54,39 @@ impl FrameLocalizer for FixedFrameLocalizer {
         _descriptor_store: &LandmarkDescriptorStore,
     ) -> LocalizationResult {
         self.result.clone()
+    }
+}
+
+/// Test double for the projection-guided local-map refinement stage: the
+/// stage-1 (and any widen-retry rung, via the default trait fall-through)
+/// result is fixed to `initial`, and `refine_pose_with_local_map_and_descriptor_store`
+/// unconditionally returns `refined` so the accept/reject inlier-count
+/// comparison in `Tracker` can be exercised deterministically.
+#[derive(Debug, Clone)]
+struct RefinementControlledLocalizer {
+    initial: LocalizationResult,
+    refined: LocalizationResult,
+}
+
+impl FrameLocalizer for RefinementControlledLocalizer {
+    fn localize_frame_with_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _descriptor_store: &LandmarkDescriptorStore,
+    ) -> LocalizationResult {
+        self.initial.clone()
+    }
+
+    fn refine_pose_with_local_map_and_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _local_map_descriptor_store: &LandmarkDescriptorStore,
+        _estimated: &LocalizationResult,
+        _refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        Some(self.refined.clone())
     }
 }
 
@@ -1840,4 +1874,190 @@ fn tracker_accepts_custom_motion_model_for_pose_prior() {
     assert!(result.used_pose_prior);
     assert_eq!(result.localization.candidate_landmark_count, 6);
     assert_eq!(tracker.last_successful_frame_id(), None);
+}
+
+#[test]
+fn projection_guided_tracking_widen_retry_triggers_when_prior_is_slightly_off() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    // Camera centre offset by 5 cm: at the scene's 4-7 m depths this shifts
+    // every landmark's projected pixel by roughly 3.5-6.25 px (fx=500), well
+    // past a 2 px search window but comfortably inside a 10 px one.
+    let prior = pose_with_identity_rotation_at_center(Vector3::new(0.05, 0.0, 0.0));
+    let mut tracker = Tracker::with_motion_model(
+        LocalizationPipeline::default(),
+        FixedPoseMotionModel { pose: prior },
+        TrackingConfig {
+            last_pose_candidate_radius: Some(50.0),
+            projection_guided_tracking: Some(ProjectionGuidedTrackingConfig {
+                search_radius_px: 2.0,
+                widen_factor: 5.0,
+                max_widen_retries: 2,
+                local_map_refinement: false,
+                refinement_search_radius_px: 8.0,
+            }),
+            ..TrackingConfig::default()
+        },
+    );
+
+    let result = tracker.track_frame(&frame, &map);
+
+    assert!(result.localization.success);
+    assert_eq!(result.localization.inlier_count, 6);
+    assert!(tracker.stats().projection_guided_attempt_count >= 2);
+    assert!(tracker.stats().projection_guided_widen_retry_count >= 1);
+    assert_eq!(tracker.stats().projection_guided_success_count, 1);
+    assert_eq!(tracker.stats().projection_guided_fallback_success_count, 0);
+}
+
+#[test]
+fn projection_guided_tracking_falls_back_to_appearance_global_when_all_widen_attempts_fail() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    // A wildly wrong prior (10 m away) puts every landmark's projection far
+    // outside even the widened windows, so all projection attempts fail and
+    // the tracker must fall back to today's appearance-global path — which
+    // ignores the prior for matching and still finds the frame's landmarks.
+    let prior = pose_with_identity_rotation_at_center(Vector3::new(10.0, 0.0, 0.0));
+    let mut tracker = Tracker::with_motion_model(
+        LocalizationPipeline::default(),
+        FixedPoseMotionModel { pose: prior },
+        TrackingConfig {
+            projection_guided_tracking: Some(ProjectionGuidedTrackingConfig {
+                search_radius_px: 2.0,
+                widen_factor: 2.0,
+                max_widen_retries: 2,
+                local_map_refinement: false,
+                refinement_search_radius_px: 8.0,
+            }),
+            ..TrackingConfig::default()
+        },
+    );
+
+    let result = tracker.track_frame(&frame, &map);
+
+    assert!(result.localization.success);
+    assert_eq!(tracker.stats().projection_guided_attempt_count, 3);
+    assert_eq!(tracker.stats().projection_guided_widen_retry_count, 2);
+    assert_eq!(tracker.stats().projection_guided_success_count, 0);
+    assert_eq!(tracker.stats().projection_guided_fallback_success_count, 1);
+}
+
+#[test]
+fn projection_guided_local_map_refinement_accepts_only_when_inliers_do_not_decrease() {
+    let (mut map, frame_a) = build_map_and_frame(10, 1);
+    let landmark_ids: Vec<u64> = map.landmarks.keys().copied().collect();
+    map.keyframes.insert(
+        frame_a.id,
+        Keyframe {
+            frame: Frame::new(frame_a.id, frame_a.camera_id),
+            observations: landmark_ids
+                .iter()
+                .map(|&landmark_id| Observation {
+                    frame_id: frame_a.id,
+                    landmark_id,
+                    keypoint_index: 0,
+                    xy: Point2::origin(),
+                })
+                .collect(),
+        },
+    );
+    let mut frame_b = frame_a.clone();
+    frame_b.id = 11;
+
+    let config = TrackingConfig {
+        covisibility_local_map: Some(CovisibilityLocalMapConfig {
+            max_keyframes: Some(5),
+            min_shared_landmarks: 1,
+            min_local_map_landmarks: 1,
+        }),
+        projection_guided_tracking: Some(ProjectionGuidedTrackingConfig {
+            search_radius_px: 15.0,
+            widen_factor: 2.0,
+            max_widen_retries: 2,
+            local_map_refinement: true,
+            refinement_search_radius_px: 8.0,
+        }),
+        ..TrackingConfig::default()
+    };
+    let initial = successful_localization_result(4, 6, 0.0);
+
+    // Accept case: the refined estimate has MORE inliers than pre-refinement.
+    let better_refined = successful_localization_result(6, 8, 0.0);
+    let mut accepting_tracker = Tracker::new(
+        RefinementControlledLocalizer {
+            initial: initial.clone(),
+            refined: better_refined,
+        },
+        config.clone(),
+    );
+    accepting_tracker.track_frame(&frame_a, &map);
+    let accepted = accepting_tracker.track_frame(&frame_b, &map);
+
+    assert!(accepted.localization.success);
+    assert_eq!(accepted.localization.inlier_count, 6);
+    assert_eq!(
+        accepting_tracker
+            .stats()
+            .local_map_refinement_accepted_count,
+        1
+    );
+    assert_eq!(
+        accepting_tracker
+            .stats()
+            .local_map_refinement_rejected_count,
+        0
+    );
+
+    // Reject case: the refined estimate has FEWER inliers than
+    // pre-refinement, so the pre-refinement result must be kept unchanged.
+    let worse_refined = successful_localization_result(2, 6, 0.0);
+    let mut rejecting_tracker = Tracker::new(
+        RefinementControlledLocalizer {
+            initial: initial.clone(),
+            refined: worse_refined,
+        },
+        config,
+    );
+    rejecting_tracker.track_frame(&frame_a, &map);
+    let rejected = rejecting_tracker.track_frame(&frame_b, &map);
+
+    assert!(rejected.localization.success);
+    assert_eq!(rejected.localization.inlier_count, 4);
+    assert_eq!(
+        rejecting_tracker
+            .stats()
+            .local_map_refinement_accepted_count,
+        0
+    );
+    assert_eq!(
+        rejecting_tracker
+            .stats()
+            .local_map_refinement_rejected_count,
+        1
+    );
+}
+
+#[test]
+fn projection_guided_tracking_disabled_by_default_leaves_legacy_behavior_and_stats_unchanged() {
+    let (map, frame) = build_map_and_frame(10, 1);
+    let mut second_frame = frame.clone();
+    second_frame.id = 11;
+    let mut tracker = Tracker::new(LocalizationPipeline::default(), TrackingConfig::default());
+
+    let first = tracker.track_frame(&frame, &map);
+    let second = tracker.track_frame(&second_frame, &map);
+
+    assert!(first.localization.success);
+    assert!(second.localization.success);
+    assert_eq!(tracker.stats().projection_guided_attempt_count, 0);
+    assert_eq!(tracker.stats().projection_guided_widen_retry_count, 0);
+    assert_eq!(tracker.stats().projection_guided_success_count, 0);
+    assert_eq!(tracker.stats().projection_guided_fallback_success_count, 0);
+    assert_eq!(
+        tracker
+            .stats()
+            .local_map_refinement_correspondence_gain_total,
+        0
+    );
+    assert_eq!(tracker.stats().local_map_refinement_accepted_count, 0);
+    assert_eq!(tracker.stats().local_map_refinement_rejected_count, 0);
 }

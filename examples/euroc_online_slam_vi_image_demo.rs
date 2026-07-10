@@ -123,14 +123,17 @@ use visloc_rs::{
     CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel,
     ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
     KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalMappingResult,
-    LocalizationConfig, LocalizationPipeline, LoopClosureConfig, MapProviderStats, Matcher,
-    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
-    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
-    OnlineSlamLocalBaConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
-    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, SimpleKeyframePolicy,
-    StereoReplenishConfig, Tracker, TrackingConfig, TrackingEvent, TrackingResult, TrackingState,
-    TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent, Viba2Config,
-    VisualInertialInitializerConfig,
+    LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
+    LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig,
+    LoopRefinementVerifier, MapProviderStats, Matcher, MotionBasedViInitializerConfig,
+    MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher,
+    OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
+    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, PnPLoopClosureVerifierConfig,
+    PoseGraphSe3Config, ProjectionGuidedTrackingConfig, SimpleKeyframePolicy,
+    StereoReplenishConfig, Tracker,
+    TrackingConfig, TrackingEvent, TrackingResult, TrackingState, TrajectorySimilarityTransform,
+    ViInitFallback, ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
 };
 
 /// Runtime-dispatched motion model. Both inner models implement
@@ -837,6 +840,34 @@ struct CliArgs {
     /// search. Combine with `--max-pose-jump-meters` to gate
     /// post-hoc on the warm-start result. Off by default.
     pnp_pose_prior_warm_start: bool,
+    /// Enable ORB-SLAM3-style projection-guided tracking: when a pose
+    /// prior is available, restrict descriptor matching to a per-landmark
+    /// projection window instead of an appearance-global search, with a
+    /// widen-retry ladder that falls back to today's appearance-global
+    /// path if every projection attempt fails, plus a post-hoc local-map
+    /// refinement pass. Off by default; enabling it can only ADD tracking
+    /// chances since the widen-retry ladder's last rung IS today's
+    /// unmodified appearance-global path.
+    projection_guided_tracking: bool,
+    /// Initial per-landmark projection-window radius, in pixels. Only
+    /// meaningful when `--projection-guided-tracking` is set.
+    projection_search_radius_px: f64,
+    /// Multiplier applied to the projection-window radius on each
+    /// widen-retry attempt after a stage-1 projection attempt fails.
+    projection_widen_factor: f64,
+    /// Maximum number of widen-retry attempts after the initial
+    /// projection-window attempt. Total projection attempts per frame is
+    /// `1 + projection_max_widen_retries`.
+    projection_max_widen_retries: u32,
+    /// Disable stage-3 local-map refinement (on by default when
+    /// `--projection-guided-tracking` is set): re-projects the
+    /// covisibility local map with the estimated pose, harvests
+    /// additional correspondences, and re-optimizes the pose, accepting
+    /// the refined result only when its inlier count does not decrease.
+    projection_no_local_map_refinement: bool,
+    /// Per-landmark projection-window radius, in pixels, used by the
+    /// local-map refinement stage.
+    projection_refinement_search_radius_px: f64,
     /// Motion model fed to the tracker. `pose` (default) returns the
     /// last successful pose as the prior (`ConstantPoseMotionModel`);
     /// `velocity` extrapolates the last 2 successful poses to predict
@@ -1191,6 +1222,95 @@ struct CliArgs {
     rebootstrap_after_lost_frames: Option<usize>,
     /// Minimum frame gap between accepted re-bootstraps. Default `60`.
     rebootstrap_cooldown_frames: usize,
+    /// Opt into the online loop-closure + pose-graph refinement stage
+    /// (`OnlineSlamConfig::pose_graph_refinement`). When `true`, the
+    /// pipeline mirrors registered keyframe poses into a running pose
+    /// graph, verifies every `detect_loop_closure_candidates` output with
+    /// an essential-matrix verifier, and periodically re-solves the graph
+    /// and writes the optimised poses back into the map. Off by default so
+    /// baseline runs stay byte-identical.
+    pose_graph_refinement_enabled: bool,
+    /// Minimum newly-verified loop-closure constraints that must
+    /// accumulate before a fresh pose-graph solve fires. Mirrors
+    /// `OnlineSlamLoopClosureRefinementConfig::trigger_every_new_constraints`.
+    /// Defaults to `1`. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_trigger_every: usize,
+    /// Enable the Graduated Non-Convexity robust back-end solve
+    /// (`OnlineSlamLoopClosureRefinementConfig::gnc`, using
+    /// `gnc::GncConfig::default()`) instead of the plain iterative
+    /// M-estimator solve. Off by default. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_gnc: bool,
+    /// Enable the Pairwise Consistency Maximization front-end screen
+    /// (`OnlineSlamLoopClosureRefinementConfig::pcm`, using
+    /// `pcm::PcmConfig::default()`). Off by default. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_pcm: bool,
+    /// Optional covariance-based chi-squared gate on verified loop
+    /// closures. Mirrors
+    /// `OnlineSlamLoopClosureRefinementConfig::covariance_gate`. `None`
+    /// (default) applies no metric gate. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_covariance_gate: Option<f64>,
+    /// Which geometric verifier the refinement stage runs on loop-closure
+    /// candidates (`OnlineSlamLoopClosureRefinementConfig::verifier`).
+    /// `"essential"` (default) keeps the original scale-free two-view
+    /// verifier, whose accepted constraints all carry the same
+    /// `default_translation_scale` translation regardless of the true
+    /// baseline. `"pnp"` verifies on 2D-3D correspondences against the map's
+    /// triangulated landmarks instead, so accepted constraints carry the
+    /// metric relative translation. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_verifier: LoopRefinementVerifierKind,
+    /// Opt into the appearance-based long-range loop candidate source
+    /// (`OnlineSlamLoopClosureRefinementConfig::appearance_candidates`).
+    /// Diagnoses the short-range hypothesis for why PnP-verified loop
+    /// closures don't improve ATE: the default shared-landmark detector can
+    /// only propose candidates that still reference the SAME map landmark
+    /// ids the current frame's inliers carry, which drift re-triangulation
+    /// makes inherently short-range. This stream instead ranks past
+    /// keyframes by appearance (independent of shared ids) and PnP-verifies
+    /// them via descriptor-matched 2D-3D correspondences. Off by default so
+    /// baseline runs stay byte-identical. Only meaningful when
+    /// `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_appearance_loops: bool,
+    /// Minimum keyframe-id gap for an appearance candidate (mirrors
+    /// `LoopAppearanceCandidateConfig::min_keyframe_id_gap`). Defaults to
+    /// `150` — comfortably above the shared-landmark detector's span, so
+    /// this stream only ever proposes genuinely long-range loops. Only
+    /// meaningful when `pose_graph_refinement_appearance_loops` is set.
+    pose_graph_refinement_appearance_min_gap: u64,
+    /// Maximum number of appearance-ranked candidate keyframes verified per
+    /// frame (mirrors `LoopAppearanceCandidateConfig::max_candidates_per_frame`).
+    /// Defaults to `3`. Only meaningful when
+    /// `pose_graph_refinement_appearance_loops` is set.
+    pose_graph_refinement_appearance_max_candidates: usize,
+    /// Minimum PnP RANSAC inlier count an appearance candidate must produce
+    /// to be admitted (mirrors `LoopAppearanceCandidateConfig::pnp_verifier`'s
+    /// `min_inliers`). Defaults to `30` — higher than the shared-landmark
+    /// PnP path's default, since a false long-range loop closure is
+    /// catastrophic. Only meaningful when
+    /// `pose_graph_refinement_appearance_loops` is set.
+    pose_graph_refinement_appearance_min_inliers: usize,
+    /// Propagate each solved keyframe's pose correction to its anchored
+    /// landmarks and to the tracker's continuation state
+    /// (`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`).
+    /// Off by default so baseline pose-graph-refinement runs stay
+    /// byte-identical (only keyframe poses move on write-back). Only
+    /// meaningful when `pose_graph_refinement_enabled` is set.
+    pose_graph_refinement_propagate: bool,
+}
+
+/// CLI-selectable mirror of [`LoopRefinementVerifier`]'s variants. A
+/// separate enum (rather than dispatching straight to the library type) so
+/// this demo can carry its own `Display`/parsing without coupling to the
+/// library enum's exact shape.
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopRefinementVerifierKind {
+    Essential,
+    Pnp,
 }
 
 #[cfg(feature = "image-io")]
@@ -1272,6 +1392,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut tracking_min_inlier_ratio: f64 = 0.0;
     let mut tracking_max_reprojection_error: Option<f64> = None;
     let mut pnp_pose_prior_warm_start: bool = false;
+    let mut projection_guided_tracking: bool = false;
+    let mut projection_search_radius_px: f64 = 15.0;
+    let mut projection_widen_factor: f64 = 2.0;
+    let mut projection_max_widen_retries: u32 = 2;
+    let mut projection_no_local_map_refinement: bool = false;
+    let mut projection_refinement_search_radius_px: f64 = 8.0;
     let mut pnp_reprojection_threshold_px: Option<f64> = None;
     let mut motion_model: MotionModelKind = MotionModelKind::Pose;
     let mut imu_extrinsic_from_cam0: bool = false;
@@ -1327,6 +1453,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut relocalization_confirmation_max_translation_per_frame_meters: Option<f64> = None;
     let mut rebootstrap_after_lost_frames: Option<usize> = None;
     let mut rebootstrap_cooldown_frames: usize = 60;
+    let mut pose_graph_refinement_enabled: bool = false;
+    let mut pose_graph_refinement_trigger_every: usize = 1;
+    let mut pose_graph_refinement_gnc: bool = false;
+    let mut pose_graph_refinement_pcm: bool = false;
+    let mut pose_graph_refinement_covariance_gate: Option<f64> = None;
+    let mut pose_graph_refinement_verifier: LoopRefinementVerifierKind =
+        LoopRefinementVerifierKind::Essential;
+    let mut pose_graph_refinement_appearance_loops: bool = false;
+    let mut pose_graph_refinement_appearance_min_gap: u64 = 150;
+    let mut pose_graph_refinement_appearance_max_candidates: usize = 3;
+    let mut pose_graph_refinement_appearance_min_inliers: usize = 30;
+    let mut pose_graph_refinement_propagate: bool = false;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
     let i = 0;
@@ -1709,6 +1847,30 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pnp_pose_prior_warm_start = true;
                 args.remove(i);
             }
+            "--projection-guided-tracking" => {
+                projection_guided_tracking = true;
+                args.remove(i);
+            }
+            "--projection-search-radius-px" => {
+                projection_search_radius_px = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-widen-factor" => {
+                projection_widen_factor = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-max-widen-retries" => {
+                projection_max_widen_retries = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-no-local-map-refinement" => {
+                projection_no_local_map_refinement = true;
+                args.remove(i);
+            }
+            "--projection-refinement-search-radius-px" => {
+                projection_refinement_search_radius_px = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--pnp-reprojection-threshold-px" => {
                 pnp_reprojection_threshold_px = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -1980,6 +2142,60 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 rebootstrap_cooldown_frames = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pose-graph-refinement" => {
+                pose_graph_refinement_enabled = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-trigger-every" => {
+                pose_graph_refinement_trigger_every = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-gnc" => {
+                pose_graph_refinement_gnc = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-pcm" => {
+                pose_graph_refinement_pcm = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-covariance-gate" => {
+                pose_graph_refinement_covariance_gate = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--pose-graph-refinement-verifier" => {
+                let kind = args.remove(i + 1);
+                pose_graph_refinement_verifier = match kind.as_str() {
+                    "essential" => LoopRefinementVerifierKind::Essential,
+                    "pnp" => LoopRefinementVerifierKind::Pnp,
+                    other => {
+                        return Err(format!(
+                            "--pose-graph-refinement-verifier: expected 'essential' or 'pnp', got {other:?}"
+                        )
+                        .into());
+                    }
+                };
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-loops" => {
+                pose_graph_refinement_appearance_loops = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-min-gap" => {
+                pose_graph_refinement_appearance_min_gap = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-max-candidates" => {
+                pose_graph_refinement_appearance_max_candidates = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-min-inliers" => {
+                pose_graph_refinement_appearance_min_inliers = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-propagate" => {
+                pose_graph_refinement_propagate = true;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -2008,6 +2224,17 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         if !max_reprojection_error.is_finite() || max_reprojection_error <= 0.0 {
             return Err("--tracking-max-reprojection-error must be positive or 'none'".into());
         }
+    }
+    if !projection_search_radius_px.is_finite() || projection_search_radius_px <= 0.0 {
+        return Err("--projection-search-radius-px must be positive".into());
+    }
+    if !projection_widen_factor.is_finite() || projection_widen_factor <= 0.0 {
+        return Err("--projection-widen-factor must be positive".into());
+    }
+    if !projection_refinement_search_radius_px.is_finite()
+        || projection_refinement_search_radius_px <= 0.0
+    {
+        return Err("--projection-refinement-search-radius-px must be positive".into());
     }
     if relocalization_attempt_interval_frames == 0 {
         return Err("--relocalization-attempt-interval-frames must be >= 1".into());
@@ -2183,6 +2410,29 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
         }
     }
+    if pose_graph_refinement_enabled {
+        if pose_graph_refinement_trigger_every == 0 {
+            return Err("--pose-graph-refinement-trigger-every must be >= 1".into());
+        }
+        if let Some(gate) = pose_graph_refinement_covariance_gate {
+            if !gate.is_finite() || gate <= 0.0 {
+                return Err("--pose-graph-refinement-covariance-gate must be positive".into());
+            }
+        }
+        if pose_graph_refinement_appearance_loops {
+            if pose_graph_refinement_appearance_min_gap == 0 {
+                return Err("--pose-graph-refinement-appearance-min-gap must be >= 1".into());
+            }
+            if pose_graph_refinement_appearance_max_candidates == 0 {
+                return Err(
+                    "--pose-graph-refinement-appearance-max-candidates must be >= 1".into(),
+                );
+            }
+            if pose_graph_refinement_appearance_min_inliers == 0 {
+                return Err("--pose-graph-refinement-appearance-min-inliers must be >= 1".into());
+            }
+        }
+    }
     Ok(CliArgs {
         euroc_dir,
         out_dir,
@@ -2253,6 +2503,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         tracking_min_inlier_ratio,
         tracking_max_reprojection_error,
         pnp_pose_prior_warm_start,
+        projection_guided_tracking,
+        projection_search_radius_px,
+        projection_widen_factor,
+        projection_max_widen_retries,
+        projection_no_local_map_refinement,
+        projection_refinement_search_radius_px,
         pnp_reprojection_threshold_px,
         motion_model,
         imu_extrinsic_from_cam0,
@@ -2308,6 +2564,17 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         relocalization_confirmation_max_translation_per_frame_meters,
         rebootstrap_after_lost_frames,
         rebootstrap_cooldown_frames,
+        pose_graph_refinement_enabled,
+        pose_graph_refinement_trigger_every,
+        pose_graph_refinement_gnc,
+        pose_graph_refinement_pcm,
+        pose_graph_refinement_covariance_gate,
+        pose_graph_refinement_verifier,
+        pose_graph_refinement_appearance_loops,
+        pose_graph_refinement_appearance_min_gap,
+        pose_graph_refinement_appearance_max_candidates,
+        pose_graph_refinement_appearance_min_inliers,
+        pose_graph_refinement_propagate,
     })
 }
 
@@ -3372,6 +3639,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    // Sensible defaults for every field the CLI does not expose directly:
+    // `verifier_config`/`pose_graph_config` use their library `Default`s,
+    // `pcm_batch_rescreen`/`marginalization_window`/`marginalization_sparsify`
+    // keep the documented off-by-default behaviour (see
+    // `OnlineSlamLoopClosureRefinementConfig`'s field docs), and `camera`
+    // reuses cam0's intrinsics since both verifiers are single-monocular.
+    // `--pose-graph-refinement-verifier pnp` uses the library's default PnP
+    // RANSAC thresholds (`PnPLoopClosureVerifierConfig::default()`); only the
+    // essential-vs-PnP choice is CLI-selectable for now.
+    let pose_graph_refinement_config = if args.pose_graph_refinement_enabled {
+        Some(OnlineSlamLoopClosureRefinementConfig {
+            camera: camera.clone(),
+            verifier_config: LoopClosureVerifierConfig::default(),
+            verifier: match args.pose_graph_refinement_verifier {
+                LoopRefinementVerifierKind::Essential => LoopRefinementVerifier::EssentialMatrix,
+                LoopRefinementVerifierKind::Pnp => {
+                    LoopRefinementVerifier::Pnp(PnPLoopClosureVerifierConfig::default())
+                }
+            },
+            pose_graph_config: PoseGraphSe3Config::default(),
+            gnc: if args.pose_graph_refinement_gnc {
+                Some(visloc_rs::slam::gnc::GncConfig::default())
+            } else {
+                None
+            },
+            pcm: if args.pose_graph_refinement_pcm {
+                Some(visloc_rs::slam::pcm::PcmConfig::default())
+            } else {
+                None
+            },
+            covariance_gate: args.pose_graph_refinement_covariance_gate,
+            pcm_batch_rescreen: false,
+            marginalization_window: None,
+            marginalization_sparsify: false,
+            trigger_every_new_constraints: args.pose_graph_refinement_trigger_every,
+            appearance_candidates: if args.pose_graph_refinement_appearance_loops {
+                Some(LoopAppearanceCandidateConfig {
+                    min_keyframe_id_gap: args.pose_graph_refinement_appearance_min_gap,
+                    max_candidates_per_frame: args
+                        .pose_graph_refinement_appearance_max_candidates,
+                    pnp_verifier: PnPLoopClosureVerifierConfig {
+                        min_inliers: args.pose_graph_refinement_appearance_min_inliers,
+                        ..PnPLoopClosureVerifierConfig::default()
+                    },
+                    ..LoopAppearanceCandidateConfig::default()
+                })
+            } else {
+                None
+            },
+            propagate_corrections: args.pose_graph_refinement_propagate,
+        })
+    } else {
+        None
+    };
     let covisibility_config = args
         .covisibility_local_map_max_keyframes
         .map(|max_keyframes| CovisibilityLocalMapConfig {
@@ -3412,6 +3733,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .relocalization_appearance_compare_broader_store,
                 },
             );
+    let projection_guided_tracking_config = if args.projection_guided_tracking {
+        Some(ProjectionGuidedTrackingConfig {
+            search_radius_px: args.projection_search_radius_px,
+            widen_factor: args.projection_widen_factor,
+            max_widen_retries: args.projection_max_widen_retries,
+            local_map_refinement: !args.projection_no_local_map_refinement,
+            refinement_search_radius_px: args.projection_refinement_search_radius_px,
+        })
+    } else {
+        None
+    };
     let tracking_config = TrackingConfig {
         covisibility_local_map: covisibility_config,
         max_pose_prior_translation_error: args.max_pose_jump_meters,
@@ -3421,6 +3753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pnp_pose_prior_warm_start: args.pnp_pose_prior_warm_start,
         pose_jump_gap_scaling: args.pose_jump_gap_scaling,
         pose_jump_gap_scaling_max_multiplier: args.pose_jump_gap_scaling_max_multiplier,
+        projection_guided_tracking: projection_guided_tracking_config,
         ..TrackingConfig::default()
     };
     let build_imu_config = || {
@@ -3519,7 +3852,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vi_init: Some(vi_init_config),
             vi_motion_init: vi_motion_init_config,
             keep_pre_promotion_imu_factors: args.keep_pre_promotion_imu_factors,
-            pose_graph_refinement: None,
+            pose_graph_refinement: pose_graph_refinement_config,
             relocalization: if args.relocalization_enabled {
                 Some(visloc_rs::OnlineSlamRelocalizationConfig {
                     min_inliers: args.relocalization_min_inliers,
@@ -3566,6 +3899,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("relocalization_appearance_candidates.csv");
     let relocalization_attempts_path = args.out_dir.join("relocalization_attempts.csv");
     let rebootstrap_log_path = args.out_dir.join("rebootstrap_log.csv");
+    let loop_constraints_path = args.out_dir.join("loop_constraints.csv");
 
     let mut traj_csv =
         String::from("timestamp_ns,frame_idx,px,py,pz,qw,qx,qy,qz,tracking_success\n");
@@ -3593,6 +3927,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rebootstrap_log_csv = String::from(
         "event_idx,segment_id,frame_idx,timestamp_ns,seed_source,stereo_matches,landmarks_added,keyframe_selected,consecutive_lost_frames\n",
     );
+    // Diagnostic for the short-range loop-closure hypothesis: every folded
+    // loop constraint (both the shared-landmark and, when
+    // `--pose-graph-refinement-appearance-loops` is set, the appearance
+    // stream), with the keyframe-id gap so an offline pass can bucket
+    // constraints by range and check whether appearance-sourced constraints
+    // (necessarily long-range) are the ones actually moving ATE.
+    let mut loop_constraints_csv = String::from(
+        "frame_idx,from_keyframe_id,to_keyframe_id,keyframe_id_gap,translation_norm_m,inlier_count,source\n",
+    );
+    let mut pose_graph_refinement_constraints_shared: usize = 0;
+    let mut pose_graph_refinement_constraints_appearance: usize = 0;
 
     let frame_cap = if args.max_frames == 0 {
         usize::MAX
@@ -3720,6 +4065,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_behind_camera_gate_failures: usize = 0;
     let mut covisibility_local_ba_fixed_ratio_gate_failures: usize = 0;
     let mut covisibility_local_ba_other_failures: usize = 0;
+    // Online loop-closure + pose-graph refinement stage bookkeeping (opt-in
+    // via `--pose-graph-refinement`).
+    let mut pose_graph_refinement_candidates_seen: usize = 0;
+    let mut pose_graph_refinement_verified_constraints: usize = 0;
+    let mut pose_graph_refinement_pgo_solves: usize = 0;
+    let mut pose_graph_refinement_pcm_rejected: usize = 0;
+    let mut pose_graph_refinement_covariance_rejected: usize = 0;
+    let mut pose_graph_refinement_landmarks_moved: usize = 0;
+    let mut pose_graph_refinement_max_landmark_displacement_meters: f64 = 0.0;
+    let mut pose_graph_refinement_tracker_corrections_applied: usize = 0;
     // Stereo landmark replenishment (opt-in via `--stereo-landmark-replenish`).
     // Candidates built from frame N's stereo match are queued here and
     // submitted on frame N+1's `process_frame` call, once frame N's
@@ -4519,6 +4874,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.removed_observation_count,
             ));
         }
+        if let Some(stats) = result.pose_graph_refinement.as_ref() {
+            pose_graph_refinement_candidates_seen += stats.verified_candidate_count;
+            pose_graph_refinement_verified_constraints += stats.accepted_count;
+            if stats.pose_graph_result.is_some() || stats.gnc_result.is_some() {
+                pose_graph_refinement_pgo_solves += 1;
+            }
+            pose_graph_refinement_pcm_rejected += stats.loop_closures_pcm_rejected;
+            pose_graph_refinement_covariance_rejected += stats.loop_closures_covariance_rejected;
+            pose_graph_refinement_landmarks_moved += stats.landmarks_moved;
+            if let Some(max_displacement) = stats.max_landmark_displacement_meters {
+                if max_displacement > pose_graph_refinement_max_landmark_displacement_meters {
+                    pose_graph_refinement_max_landmark_displacement_meters = max_displacement;
+                }
+            }
+            if stats.tracker_correction_applied {
+                pose_graph_refinement_tracker_corrections_applied += 1;
+            }
+            for admitted in &stats.admitted_constraints {
+                let source = match admitted.source {
+                    LoopClosureCandidateSource::SharedLandmark => {
+                        pose_graph_refinement_constraints_shared += 1;
+                        "shared_landmark"
+                    }
+                    LoopClosureCandidateSource::Appearance => {
+                        pose_graph_refinement_constraints_appearance += 1;
+                        "appearance"
+                    }
+                };
+                let keyframe_id_gap = admitted
+                    .to_keyframe_id
+                    .saturating_sub(admitted.from_keyframe_id);
+                loop_constraints_csv.push_str(&format!(
+                    "{frame_idx},{},{},{},{:.6},{},{}\n",
+                    admitted.from_keyframe_id,
+                    admitted.to_keyframe_id,
+                    keyframe_id_gap,
+                    admitted.translation_norm_m,
+                    admitted.inlier_count,
+                    source,
+                ));
+            }
+        }
         if let Some(size) = result.tracking.covisibility_local_map_size {
             covisibility_local_map_frames += 1;
             covisibility_local_map_size_sum += size;
@@ -4666,6 +5063,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&relocalization_attempts_path, &relocalization_attempts_csv)?;
     if rebootstrap_enabled {
         fs::write(&rebootstrap_log_path, &rebootstrap_log_csv)?;
+    }
+    if args.pose_graph_refinement_enabled {
+        fs::write(&loop_constraints_path, &loop_constraints_csv)?;
     }
 
     // Dump the metric landmark cloud (world frame) so downstream tools can seed
@@ -4841,6 +5241,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_elapsed_ms_mean={covis_ba_elapsed_ms_mean:?}\n\
          covisibility_local_ba_elapsed_ms_max={covis_ba_elapsed_ms_max:.6}\n\
          covisibility_local_ba_last_error={covis_ba_last_error:?}\n\
+         pose_graph_refinement={pgr_enabled}\n\
+         pose_graph_refinement_trigger_every={pgr_trigger_every}\n\
+         pose_graph_refinement_gnc={pgr_gnc}\n\
+         pose_graph_refinement_pcm={pgr_pcm}\n\
+         pose_graph_refinement_covariance_gate={pgr_covariance_gate:?}\n\
+         pose_graph_refinement_verifier={pgr_verifier}\n\
+         pose_graph_refinement_candidates_seen={pgr_candidates_seen}\n\
+         pose_graph_refinement_verified_constraints={pgr_verified_constraints}\n\
+         pose_graph_refinement_pgo_solves={pgr_pgo_solves}\n\
+         pose_graph_refinement_pcm_rejected={pgr_pcm_rejected}\n\
+         pose_graph_refinement_covariance_rejected={pgr_covariance_rejected}\n\
+         pose_graph_refinement_appearance_loops={pgr_appearance_enabled}\n\
+         pose_graph_refinement_appearance_min_gap={pgr_appearance_min_gap}\n\
+         pose_graph_refinement_appearance_max_candidates={pgr_appearance_max_candidates}\n\
+         pose_graph_refinement_appearance_min_inliers={pgr_appearance_min_inliers}\n\
+         pose_graph_refinement_constraints_shared={pgr_constraints_shared}\n\
+         pose_graph_refinement_constraints_appearance={pgr_constraints_appearance}\n\
+         pose_graph_refinement_propagate={pgr_propagate}\n\
+         pose_graph_refinement_landmarks_moved={pgr_landmarks_moved}\n\
+         pose_graph_refinement_max_landmark_displacement_meters={pgr_max_landmark_displacement_meters:.6}\n\
+         pose_graph_refinement_tracker_corrections_applied={pgr_tracker_corrections_applied}\n\
          max_pose_jump_meters={max_pose_jump:?}\n\
          pose_jump_gap_scaling={pose_jump_gap_scaling}\n\
          pose_jump_gap_scaling_max_multiplier={pose_jump_gap_scaling_max_multiplier}\n\
@@ -4848,6 +5269,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          tracking_min_inlier_ratio={tracking_min_inlier_ratio:.6}\n\
          tracking_max_reprojection_error={tracking_max_reprojection_error:?}\n\
          pnp_pose_prior_warm_start={pnp_warm_start}\n\
+         projection_guided_tracking={projection_guided_tracking}\n\
+         projection_search_radius_px={projection_search_radius_px:.3}\n\
+         projection_widen_factor={projection_widen_factor:.3}\n\
+         projection_max_widen_retries={projection_max_widen_retries}\n\
+         projection_local_map_refinement={projection_local_map_refinement}\n\
+         projection_refinement_search_radius_px={projection_refinement_search_radius_px:.3}\n\
+         projection_guided_attempt_count={projection_guided_attempt_count}\n\
+         projection_guided_widen_retry_count={projection_guided_widen_retry_count}\n\
+         projection_guided_success_count={projection_guided_success_count}\n\
+         projection_guided_fallback_success_count={projection_guided_fallback_success_count}\n\
+         local_map_refinement_correspondence_gain_total={local_map_refinement_correspondence_gain_total}\n\
+         local_map_refinement_accepted_count={local_map_refinement_accepted_count}\n\
+         local_map_refinement_rejected_count={local_map_refinement_rejected_count}\n\
          pnp_reprojection_threshold_px={pnp_reproj_thresh:?}\n\
          motion_model={motion_model_kind}\n\
          imu_extrinsic_from_cam0={imu_tbs}\n\
@@ -5065,6 +5499,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_elapsed_ms_mean = covisibility_local_ba_elapsed_ms_mean,
         covis_ba_elapsed_ms_max = covisibility_local_ba_elapsed_ms_max,
         covis_ba_last_error = covisibility_local_ba_last_error,
+        pgr_enabled = args.pose_graph_refinement_enabled,
+        pgr_trigger_every = args.pose_graph_refinement_trigger_every,
+        pgr_gnc = args.pose_graph_refinement_gnc,
+        pgr_pcm = args.pose_graph_refinement_pcm,
+        pgr_covariance_gate = args.pose_graph_refinement_covariance_gate,
+        pgr_verifier = match args.pose_graph_refinement_verifier {
+            LoopRefinementVerifierKind::Essential => "essential",
+            LoopRefinementVerifierKind::Pnp => "pnp",
+        },
+        pgr_candidates_seen = pose_graph_refinement_candidates_seen,
+        pgr_verified_constraints = pose_graph_refinement_verified_constraints,
+        pgr_pgo_solves = pose_graph_refinement_pgo_solves,
+        pgr_pcm_rejected = pose_graph_refinement_pcm_rejected,
+        pgr_covariance_rejected = pose_graph_refinement_covariance_rejected,
+        pgr_appearance_enabled = args.pose_graph_refinement_appearance_loops,
+        pgr_appearance_min_gap = args.pose_graph_refinement_appearance_min_gap,
+        pgr_appearance_max_candidates = args.pose_graph_refinement_appearance_max_candidates,
+        pgr_appearance_min_inliers = args.pose_graph_refinement_appearance_min_inliers,
+        pgr_constraints_shared = pose_graph_refinement_constraints_shared,
+        pgr_constraints_appearance = pose_graph_refinement_constraints_appearance,
+        pgr_propagate = args.pose_graph_refinement_propagate,
+        pgr_landmarks_moved = pose_graph_refinement_landmarks_moved,
+        pgr_max_landmark_displacement_meters = pose_graph_refinement_max_landmark_displacement_meters,
+        pgr_tracker_corrections_applied = pose_graph_refinement_tracker_corrections_applied,
         max_pose_jump = args.max_pose_jump_meters,
         pose_jump_gap_scaling = args.pose_jump_gap_scaling,
         pose_jump_gap_scaling_max_multiplier = args.pose_jump_gap_scaling_max_multiplier,
@@ -5072,6 +5530,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracking_min_inlier_ratio = args.tracking_min_inlier_ratio,
         tracking_max_reprojection_error = args.tracking_max_reprojection_error,
         pnp_warm_start = args.pnp_pose_prior_warm_start,
+        projection_guided_tracking = args.projection_guided_tracking,
+        projection_search_radius_px = args.projection_search_radius_px,
+        projection_widen_factor = args.projection_widen_factor,
+        projection_max_widen_retries = args.projection_max_widen_retries,
+        projection_local_map_refinement = !args.projection_no_local_map_refinement,
+        projection_refinement_search_radius_px = args.projection_refinement_search_radius_px,
+        projection_guided_attempt_count = slam.tracker.stats().projection_guided_attempt_count,
+        projection_guided_widen_retry_count =
+            slam.tracker.stats().projection_guided_widen_retry_count,
+        projection_guided_success_count = slam.tracker.stats().projection_guided_success_count,
+        projection_guided_fallback_success_count =
+            slam.tracker.stats().projection_guided_fallback_success_count,
+        local_map_refinement_correspondence_gain_total = slam
+            .tracker
+            .stats()
+            .local_map_refinement_correspondence_gain_total,
+        local_map_refinement_accepted_count =
+            slam.tracker.stats().local_map_refinement_accepted_count,
+        local_map_refinement_rejected_count =
+            slam.tracker.stats().local_map_refinement_rejected_count,
         pnp_reproj_thresh = args.pnp_reprojection_threshold_px,
         motion_model_kind = match args.motion_model {
             MotionModelKind::Pose => "pose",

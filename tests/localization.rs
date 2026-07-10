@@ -17,8 +17,8 @@ use visloc_rs::{
     localize, localize_frame, localize_frames, localize_with_descriptor_store,
     CorrespondenceBuildError, CorrespondenceBuilder, CrossCheckMatcher, FixedLandmarkSelector,
     ImageLocalizer, InMemoryMapProvider, IntersectCandidateSelector, LocalizationConfig,
-    LocalizationPipeline, LocalizationPrior, PriorSubmapSelector, RadiusLandmarkSelector,
-    RadiusSubmapSelector, RobustPoseEstimator, SelectableMapProvider,
+    LocalizationPipeline, LocalizationPrior, PriorSubmapSelector, ProjectionCorrespondenceBuilder,
+    RadiusLandmarkSelector, RadiusSubmapSelector, RobustPoseEstimator, SelectableMapProvider,
 };
 
 #[derive(Debug, Clone)]
@@ -1387,4 +1387,151 @@ fn reports_pose_estimation_failure_with_too_few_correspondences() {
     assert_eq!(diagnostics.minimum_correspondence_count, Some(6));
     assert_eq!(diagnostics.ransac_iterations, Some(128));
     assert_eq!(diagnostics.ransac_reprojection_threshold, Some(4.0));
+}
+
+#[test]
+fn projection_window_matching_finds_the_same_pose_as_appearance_matching_on_a_clean_frame() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+    let points = vec![
+        Point3::new(-1.0, -1.0, 4.0),
+        Point3::new(1.0, -1.0, 4.5),
+        Point3::new(-1.0, 1.0, 5.0),
+        Point3::new(1.0, 1.0, 5.5),
+        Point3::new(0.0, 0.0, 6.0),
+        Point3::new(0.5, -0.25, 7.0),
+    ];
+
+    let mut map = VisualMap::new();
+    map.cameras.insert(camera.id, camera.clone());
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    let mut frame = Frame::new(10, camera.id);
+
+    for (index, point) in points.iter().enumerate() {
+        let landmark_id = index as u64 + 1;
+        let descriptor = vec![index as f32, 3.0];
+        map.landmarks
+            .insert(landmark_id, Landmark::new(landmark_id, *point));
+        descriptor_store.insert(landmark_id, descriptor.clone());
+        frame
+            .keypoints
+            .push(camera.project(&pose.transform_world_point(point)).unwrap());
+        frame.descriptors.push(descriptor);
+    }
+    let query = QueryImage::from_frame(&frame, camera.clone());
+
+    let appearance_set = CorrespondenceBuilder::new(BruteForceMatcher { ratio: Some(0.8) })
+        .build(&query, &map, &descriptor_store)
+        .unwrap();
+    let projection_set =
+        ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: Some(0.8) })
+            .build_with_pose_prior(&query, &map, &descriptor_store, &pose, 15.0)
+            .unwrap();
+
+    // Same query-keypoint <-> landmark pairing, independent of the two
+    // builders' different iteration order (appearance iterates by query
+    // index, projection iterates by landmark index).
+    let mut appearance_pairs: Vec<(usize, u64)> = appearance_set
+        .query_indices
+        .iter()
+        .copied()
+        .zip(appearance_set.landmark_ids.iter().copied())
+        .collect();
+    let mut projection_pairs: Vec<(usize, u64)> = projection_set
+        .query_indices
+        .iter()
+        .copied()
+        .zip(projection_set.landmark_ids.iter().copied())
+        .collect();
+    appearance_pairs.sort_unstable();
+    projection_pairs.sort_unstable();
+    assert_eq!(appearance_pairs, projection_pairs);
+    assert_eq!(appearance_set.correspondences.len(), points.len());
+    assert_eq!(projection_set.correspondences.len(), points.len());
+
+    let pipeline = LocalizationPipeline::default();
+    let appearance_result =
+        pipeline.localize_frame_with_descriptor_store(&frame, &map, &descriptor_store);
+    let projection_result = pipeline.localize_frame_with_projection_window_and_descriptor_store(
+        &frame,
+        &map,
+        &descriptor_store,
+        &pose,
+        None,
+        15.0,
+    );
+
+    assert!(appearance_result.success);
+    assert!(projection_result.success);
+    assert_eq!(
+        appearance_result.inlier_count,
+        projection_result.inlier_count
+    );
+    let appearance_center = appearance_result.pose.unwrap().camera_center_world();
+    let projection_center = projection_result.pose.unwrap().camera_center_world();
+    assert!((appearance_center - projection_center).norm() < 1.0e-9);
+}
+
+#[test]
+fn projection_window_matching_disambiguates_identical_descriptors_at_different_locations() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+    // Two landmarks, well separated in the image, sharing the exact same
+    // descriptor: appearance-only matching cannot tell them apart.
+    let landmark_1_point = Point3::new(-2.0, 0.0, 5.0);
+    let landmark_2_point = Point3::new(2.0, 0.0, 5.0);
+    let shared_descriptor = vec![1.0, 0.0];
+
+    let mut map = VisualMap::new();
+    map.cameras.insert(camera.id, camera.clone());
+    let mut landmark_1 = Landmark::new(1, landmark_1_point);
+    landmark_1.descriptor = Some(shared_descriptor.clone());
+    let mut landmark_2 = Landmark::new(2, landmark_2_point);
+    landmark_2.descriptor = Some(shared_descriptor.clone());
+    map.landmarks.insert(1, landmark_1);
+    map.landmarks.insert(2, landmark_2);
+
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    descriptor_store.insert(1, shared_descriptor.clone());
+    descriptor_store.insert(2, shared_descriptor.clone());
+
+    // Query keypoint 0 sits where landmark 2 projects; keypoint 1 sits
+    // where landmark 1 projects (deliberately "swapped" relative to
+    // landmark id order, so a naive first-wins tie-break would pair them
+    // wrong).
+    let keypoint_near_landmark_2 = camera
+        .project(&pose.transform_world_point(&landmark_2_point))
+        .unwrap();
+    let keypoint_near_landmark_1 = camera
+        .project(&pose.transform_world_point(&landmark_1_point))
+        .unwrap();
+    let query = QueryImage {
+        camera: camera.clone(),
+        keypoints: vec![keypoint_near_landmark_2, keypoint_near_landmark_1],
+        descriptors: vec![shared_descriptor.clone(), shared_descriptor.clone()],
+    };
+
+    // Appearance-only matching (no ratio test, so identical-distance ties
+    // don't get filtered out): both query keypoints tie-break to the same
+    // (first) landmark, producing an inconsistent pairing.
+    let appearance_set = CorrespondenceBuilder::new(BruteForceMatcher { ratio: None })
+        .build(&query, &map, &descriptor_store)
+        .unwrap();
+    assert_eq!(appearance_set.landmark_ids, vec![1, 1]);
+
+    // Projection-guided matching uses the (correct) pose prior to restrict
+    // each landmark's descriptor search to its own projection window,
+    // correctly disambiguating despite the identical descriptors.
+    let projection_set = ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: None })
+        .build_with_pose_prior(&query, &map, &descriptor_store, &pose, 5.0)
+        .unwrap();
+
+    let pairs: std::collections::HashMap<u64, usize> = projection_set
+        .landmark_ids
+        .iter()
+        .copied()
+        .zip(projection_set.query_indices.iter().copied())
+        .collect();
+    assert_eq!(pairs.get(&1), Some(&1));
+    assert_eq!(pairs.get(&2), Some(&0));
 }

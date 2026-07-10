@@ -189,6 +189,35 @@ where
         self.motion_model.observe(&result);
     }
 
+    /// Apply a rigid world-frame correction to the tracker's continuation
+    /// state: `last_successful_pose` and the motion model's own cached
+    /// world-frame state (e.g. [`ImuPredictiveMotionModel`]'s
+    /// `velocity_world` and cached poses, or [`ConstantVelocityMotionModel`]'s
+    /// cached poses), via [`MotionModel::apply_pose_correction`].
+    ///
+    /// `correction` follows the same convention used to move map
+    /// landmarks after an external pose-graph optimisation: it maps OLD
+    /// world-frame points/poses to NEW world-frame points/poses, i.e.
+    /// `p_new = correction.transform_point(&p_old)`. A cached
+    /// `world_to_camera` pose `T_wc_old` is corrected to
+    /// `T_wc_old.compose(&correction.inverse())` — the pose whose
+    /// projection of the corrected point matches the original
+    /// projection of the old point (see the call site in
+    /// `visloc-slam`'s online loop-closure refinement for the derivation).
+    ///
+    /// This is the tracker-side half of loop-closure correction
+    /// propagation: without it, the very next `track_frame` call would
+    /// predict a prior pose (and, for `pnp_pose_prior_warm_start` /
+    /// covisibility-radius gating, a candidate radius) anchored to the
+    /// pre-correction map even though the landmarks it is about to match
+    /// against just moved.
+    pub fn apply_pose_correction(&mut self, correction: &SE3) {
+        if let Some(pose) = self.last_successful_pose.as_mut() {
+            pose.world_to_camera = pose.world_to_camera.compose(&correction.inverse());
+        }
+        self.motion_model.apply_pose_correction(correction);
+    }
+
     pub fn pose_prior_for_frame(&self, frame: &Frame) -> Option<Pose> {
         self.motion_model.predict_pose(
             frame,
@@ -392,25 +421,35 @@ where
             .as_ref()
             .unwrap_or(descriptor_store);
 
-        let mut localization = if self.config.pnp_pose_prior_warm_start {
-            self.localization_pipeline
-                .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
-                    frame,
-                    map,
-                    active_descriptor_store,
-                    pose_prior.as_ref(),
-                    self.config.last_pose_candidate_radius,
-                )
-        } else {
-            self.localization_pipeline
-                .localize_frame_with_pose_prior_and_descriptor_store(
-                    frame,
-                    map,
-                    active_descriptor_store,
-                    pose_prior.as_ref(),
-                    self.config.last_pose_candidate_radius,
-                )
+        // Copied out (the config is `Copy`) rather than borrowed, so the
+        // widen-retry ladder below can take `&mut self` for its stats
+        // bookkeeping without fighting the borrow checker over `self.config`.
+        let projection_guided_config = self.config.projection_guided_tracking;
+        let mut localization = match (projection_guided_config, pose_prior.as_ref()) {
+            (Some(projection_config), Some(prior)) => self.run_projection_guided_tracking(
+                frame,
+                map,
+                active_descriptor_store,
+                prior,
+                &projection_config,
+            ),
+            _ => self.localize_appearance_global(
+                frame,
+                map,
+                active_descriptor_store,
+                pose_prior.as_ref(),
+            ),
         };
+
+        if localization.success {
+            self.apply_local_map_refinement(
+                frame,
+                map,
+                covisibility_local_store.as_ref(),
+                &mut localization,
+            );
+        }
+
         let tracking_failure_reason =
             self.apply_tracking_quality_gate(frame.id, pose_prior.as_ref(), &mut localization);
 
@@ -456,6 +495,148 @@ where
         self.update_history(&result);
         self.motion_model.observe(&result);
         result
+    }
+
+    /// Today's appearance-global localization path (descriptor search over
+    /// the full radius-filtered candidate set, with the optional PnP
+    /// warm-start). Factored out so it is shared, byte-for-byte, between the
+    /// `projection_guided_tracking == None` default and the widen-retry
+    /// ladder's fallback rung — enabling projection-guided tracking can
+    /// therefore only ADD tracking chances, never remove this one.
+    fn localize_appearance_global(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: Option<&Pose>,
+    ) -> LocalizationResult {
+        if self.config.pnp_pose_prior_warm_start {
+            self.localization_pipeline
+                .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
+                    frame,
+                    map,
+                    descriptor_store,
+                    pose_prior,
+                    self.config.last_pose_candidate_radius,
+                )
+        } else {
+            self.localization_pipeline
+                .localize_frame_with_pose_prior_and_descriptor_store(
+                    frame,
+                    map,
+                    descriptor_store,
+                    pose_prior,
+                    self.config.last_pose_candidate_radius,
+                )
+        }
+    }
+
+    /// Stage 1 + widen-retry ladder: try projection-window matching at
+    /// `config.search_radius_px`, multiplying the radius by
+    /// `config.widen_factor` and retrying up to `config.max_widen_retries`
+    /// times when the current radius's result fails the pose-estimation
+    /// quality gate. Falls back to today's appearance-global path
+    /// (`localize_appearance_global`) if every projection attempt fails, so
+    /// enabling this feature can only add tracking chances versus today.
+    fn run_projection_guided_tracking(
+        &mut self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        config: &ProjectionGuidedTrackingConfig,
+    ) -> LocalizationResult {
+        let mut radius = config.search_radius_px;
+        let mut projection_result =
+            LocalizationResult::failure(LocalizationFailureReason::NoDescriptorMatches, 0, 0, 0);
+        for attempt in 0..=config.max_widen_retries {
+            self.stats.projection_guided_attempt_count += 1;
+            projection_result = self
+                .localization_pipeline
+                .localize_frame_with_projection_window_and_descriptor_store(
+                    frame,
+                    map,
+                    descriptor_store,
+                    pose_prior,
+                    self.config.last_pose_candidate_radius,
+                    radius,
+                );
+            if projection_result.success {
+                break;
+            }
+            if attempt < config.max_widen_retries {
+                self.stats.projection_guided_widen_retry_count += 1;
+                radius *= config.widen_factor;
+            }
+        }
+
+        if projection_result.success {
+            self.stats.projection_guided_success_count += 1;
+            return projection_result;
+        }
+
+        let fallback =
+            self.localize_appearance_global(frame, map, descriptor_store, Some(pose_prior));
+        if fallback.success {
+            self.stats.projection_guided_fallback_success_count += 1;
+        }
+        fallback
+    }
+
+    /// Stage 3: after ANY successful pose estimate (projection path or
+    /// appearance-global fallback), project the covisibility local map (if
+    /// one was built for this frame) with the ESTIMATED pose and re-optimize
+    /// over the union of harvested and existing inlier correspondences.
+    /// Accepts the refined pose only when its inlier count does not
+    /// decrease relative to the pre-refinement result; otherwise
+    /// `localization` is left unchanged. No-op unless
+    /// `projection_guided_tracking` is configured with
+    /// `local_map_refinement = true` AND a covisibility local map exists for
+    /// this frame (there is otherwise no defined local-map landmark set to
+    /// project).
+    fn apply_local_map_refinement(
+        &mut self,
+        frame: &Frame,
+        map: &VisualMap,
+        covisibility_local_store: Option<&LandmarkDescriptorStore>,
+        localization: &mut LocalizationResult,
+    ) {
+        let Some(projection_config) = self.config.projection_guided_tracking else {
+            return;
+        };
+        if !projection_config.local_map_refinement {
+            return;
+        }
+        let Some(local_store) = covisibility_local_store else {
+            return;
+        };
+
+        let pre_refinement_inlier_count = localization.inlier_count;
+        let pre_refinement_correspondence_count = localization.correspondence_count;
+        let Some(refined) = self
+            .localization_pipeline
+            .refine_pose_with_local_map_and_descriptor_store(
+                frame,
+                map,
+                local_store,
+                localization,
+                projection_config.refinement_search_radius_px,
+            )
+        else {
+            return;
+        };
+
+        let gain = refined
+            .correspondence_count
+            .saturating_sub(pre_refinement_correspondence_count);
+        self.stats.local_map_refinement_correspondence_gain_total += gain;
+
+        if refined.success && refined.inlier_count >= pre_refinement_inlier_count {
+            *localization = refined;
+            self.stats.local_map_refinement_accepted_count += 1;
+        } else {
+            self.stats.local_map_refinement_rejected_count += 1;
+        }
     }
 
     /// Build a covisibility-graph-derived descriptor store, if the feature is
@@ -930,6 +1111,53 @@ pub trait FrameLocalizer {
             candidate_radius,
         )
     }
+
+    /// ORB-SLAM3-style projection-guided variant: for each candidate
+    /// landmark, project it into the frame with `pose_prior` and match its
+    /// descriptor only against query keypoints within `search_radius_px` of
+    /// the projection (rather than an appearance-global search over the
+    /// whole candidate set). Default implementation ignores the projection
+    /// window and falls back to the appearance-global
+    /// `_pose_prior_and_descriptor_store` variant, so a `FrameLocalizer`
+    /// implementor that hasn't opted in still produces a (non-projection)
+    /// result the tracker's widen-retry ladder can fall through to.
+    fn localize_frame_with_projection_window_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        _search_radius_px: f64,
+    ) -> LocalizationResult {
+        self.localize_frame_with_pose_prior_and_descriptor_store(
+            frame,
+            map,
+            descriptor_store,
+            Some(pose_prior),
+            candidate_radius,
+        )
+    }
+
+    /// Stage-3 local-map refinement: given an already-successful `estimated`
+    /// localization, project `local_map_descriptor_store`'s landmarks with
+    /// the ESTIMATED pose and harvest additional correspondences within
+    /// `refinement_search_radius_px`, then re-run pose estimation over the
+    /// union with `estimated`'s inliers. Returns `None` when the implementor
+    /// doesn't support refinement (default) or no usable correspondences
+    /// could be harvested; callers (see `Tracker`) independently gate
+    /// acceptance on inlier count, since this method does not compare
+    /// against `estimated` itself.
+    fn refine_pose_with_local_map_and_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _local_map_descriptor_store: &LandmarkDescriptorStore,
+        _estimated: &LocalizationResult,
+        _refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        None
+    }
 }
 
 impl<M, S, E> FrameLocalizer for LocalizationPipeline<M, S, E>
@@ -1025,6 +1253,44 @@ where
             )
         }
     }
+
+    fn localize_frame_with_projection_window_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        search_radius_px: f64,
+    ) -> LocalizationResult {
+        LocalizationPipeline::localize_frame_with_projection_window_and_descriptor_store(
+            self,
+            frame,
+            map,
+            descriptor_store,
+            pose_prior,
+            candidate_radius,
+            search_radius_px,
+        )
+    }
+
+    fn refine_pose_with_local_map_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        local_map_descriptor_store: &LandmarkDescriptorStore,
+        estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        LocalizationPipeline::refine_frame_pose_with_local_map_and_descriptor_store(
+            self,
+            frame,
+            map,
+            local_map_descriptor_store,
+            estimated,
+            refinement_search_radius_px,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1042,6 +1308,36 @@ pub struct TrackingStats {
     pub total_inlier_count: usize,
     pub total_correspondence_count: usize,
     pub covisibility_local_map_used_count: usize,
+    /// Number of stage-1 projection-guided pose-estimation attempts made
+    /// across all frames (one per widen-retry rung tried, including the
+    /// first). Zero when `projection_guided_tracking` is disabled or no pose
+    /// prior was available for a frame. Populated live by `Tracker`; unlike
+    /// most other counters here, NOT reconstructed by
+    /// [`TrackingStats::from_results`] (the per-attempt detail is not carried
+    /// on `TrackingResult`).
+    pub projection_guided_attempt_count: usize,
+    /// Number of widen-retry rungs actually taken (i.e. attempts beyond the
+    /// first that used a widened radius after the previous rung failed the
+    /// quality gate).
+    pub projection_guided_widen_retry_count: usize,
+    /// Number of frames where a projection-guided attempt (at any widen
+    /// rung) produced the accepted pose estimate.
+    pub projection_guided_success_count: usize,
+    /// Number of frames where every projection-guided attempt failed and
+    /// the appearance-global fallback path produced the accepted pose
+    /// estimate.
+    pub projection_guided_fallback_success_count: usize,
+    /// Sum, across frames where local-map refinement ran, of additional
+    /// correspondences harvested beyond the pre-refinement correspondence
+    /// count (0 when refinement harvested nothing new).
+    pub local_map_refinement_correspondence_gain_total: usize,
+    /// Number of frames where local-map refinement ran and its result was
+    /// accepted (inlier count did not decrease).
+    pub local_map_refinement_accepted_count: usize,
+    /// Number of frames where local-map refinement ran but was rejected
+    /// (inlier count decreased, or the refined estimate failed its own
+    /// quality gate).
+    pub local_map_refinement_rejected_count: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1160,7 +1456,14 @@ impl TrackingStats {
                 "  \"pose_prior_usage_rate\": {},\n",
                 "  \"external_localization_prior_usage_rate\": {},\n",
                 "  \"overall_inlier_ratio\": {},\n",
-                "  \"mean_inliers_per_successful_frame\": {}\n",
+                "  \"mean_inliers_per_successful_frame\": {},\n",
+                "  \"projection_guided_attempt_count\": {},\n",
+                "  \"projection_guided_widen_retry_count\": {},\n",
+                "  \"projection_guided_success_count\": {},\n",
+                "  \"projection_guided_fallback_success_count\": {},\n",
+                "  \"local_map_refinement_correspondence_gain_total\": {},\n",
+                "  \"local_map_refinement_accepted_count\": {},\n",
+                "  \"local_map_refinement_rejected_count\": {}\n",
                 "}}\n"
             ),
             optional_frame_id_json(self.first_frame_id),
@@ -1181,6 +1484,13 @@ impl TrackingStats {
             self.external_localization_prior_usage_rate(),
             self.overall_inlier_ratio(),
             self.mean_inliers_per_successful_frame(),
+            self.projection_guided_attempt_count,
+            self.projection_guided_widen_retry_count,
+            self.projection_guided_success_count,
+            self.projection_guided_fallback_success_count,
+            self.local_map_refinement_correspondence_gain_total,
+            self.local_map_refinement_accepted_count,
+            self.local_map_refinement_rejected_count,
         )
     }
 
@@ -1205,7 +1515,14 @@ impl TrackingStats {
                 "\"pose_prior_usage_rate\": {}, ",
                 "\"external_localization_prior_usage_rate\": {}, ",
                 "\"overall_inlier_ratio\": {}, ",
-                "\"mean_inliers_per_successful_frame\": {}",
+                "\"mean_inliers_per_successful_frame\": {}, ",
+                "\"projection_guided_attempt_count\": {}, ",
+                "\"projection_guided_widen_retry_count\": {}, ",
+                "\"projection_guided_success_count\": {}, ",
+                "\"projection_guided_fallback_success_count\": {}, ",
+                "\"local_map_refinement_correspondence_gain_total\": {}, ",
+                "\"local_map_refinement_accepted_count\": {}, ",
+                "\"local_map_refinement_rejected_count\": {}",
                 "}}"
             ),
             optional_frame_id_json(self.first_frame_id),
@@ -1226,6 +1543,13 @@ impl TrackingStats {
             self.external_localization_prior_usage_rate(),
             self.overall_inlier_ratio(),
             self.mean_inliers_per_successful_frame(),
+            self.projection_guided_attempt_count,
+            self.projection_guided_widen_retry_count,
+            self.projection_guided_success_count,
+            self.projection_guided_fallback_success_count,
+            self.local_map_refinement_correspondence_gain_total,
+            self.local_map_refinement_accepted_count,
+            self.local_map_refinement_rejected_count,
         )
     }
 

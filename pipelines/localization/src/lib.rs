@@ -18,11 +18,13 @@ use visloc_core::types::{
 };
 use visloc_vision::features::{FeatureExtractor, FeatureSet};
 use visloc_vision::matching::{BruteForceMatcher, Matcher};
+use visloc_vision::pnp::Correspondence2D3D;
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 
 pub use correspondence::{
     AllLandmarksSelector, CandidateSelector, CorrespondenceBuildError, CorrespondenceBuilder,
-    CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector, RadiusLandmarkSelector,
+    CorrespondenceSet, FixedLandmarkSelector, IntersectCandidateSelector,
+    ProjectionCorrespondenceBuilder, RadiusLandmarkSelector,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -842,6 +844,202 @@ where
         )
     }
 
+    /// ORB-SLAM3-style projection-guided variant of
+    /// [`Self::localize_frame_with_pose_prior_and_descriptor_store`]: instead
+    /// of an appearance-global descriptor search restricted to a radius
+    /// candidate set, each candidate landmark is projected into the frame
+    /// with `pose_prior` and matched only against query keypoints within
+    /// `search_radius_px` pixels of the projection (see
+    /// [`ProjectionCorrespondenceBuilder`]). Falls through to the existing
+    /// pose-estimation-and-quality-gate path unchanged.
+    pub fn localize_frame_with_projection_window_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        search_radius_px: f64,
+    ) -> LocalizationResult {
+        let Some(camera) = map.cameras.get(&frame.camera_id).cloned() else {
+            return LocalizationResult::failure(
+                LocalizationFailureReason::MissingCamera {
+                    camera_id: frame.camera_id,
+                },
+                0,
+                0,
+                0,
+            );
+        };
+        let query = QueryImage::from_frame(frame, camera);
+
+        if let Some(radius) = candidate_radius {
+            let radius_selector =
+                RadiusLandmarkSelector::new(pose_prior.camera_center_world(), radius);
+            let candidate_selector =
+                IntersectCandidateSelector::new(self.candidate_selector.clone(), radius_selector);
+            self.localize_with_projection_window_and_descriptor_store(
+                &query,
+                map,
+                descriptor_store,
+                candidate_selector,
+                pose_prior,
+                search_radius_px,
+            )
+        } else {
+            self.localize_with_projection_window_and_descriptor_store(
+                &query,
+                map,
+                descriptor_store,
+                self.candidate_selector.clone(),
+                pose_prior,
+                search_radius_px,
+            )
+        }
+    }
+
+    pub fn localize_with_projection_window_and_descriptor_store<S2>(
+        &self,
+        query: &QueryImage,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        candidate_selector: S2,
+        pose_prior: &Pose,
+        search_radius_px: f64,
+    ) -> LocalizationResult
+    where
+        S2: CandidateSelector + Clone,
+    {
+        let correspondence_set = match ProjectionCorrespondenceBuilder::with_candidate_selector(
+            self.matcher.clone(),
+            candidate_selector,
+        )
+        .build_with_pose_prior(query, map, descriptor_store, pose_prior, search_radius_px)
+        {
+            Ok(correspondence_set) => correspondence_set,
+            Err(error) => return result_from_correspondence_error(error),
+        };
+        self.estimate_and_gate(query, correspondence_set, Some(pose_prior))
+    }
+
+    /// Stage-3 local-map refinement: given an already-successful `estimated`
+    /// localization for `frame`, project `local_map_descriptor_store`'s
+    /// landmarks with the ESTIMATED pose, harvest additional correspondences
+    /// within `refinement_search_radius_px`, and re-run pose estimation over
+    /// the union with `estimated`'s own inlier correspondences (duplicates
+    /// by landmark id are dropped, preferring the already-known-good inlier
+    /// entry). Returns `None` when `estimated` carries no pose or the
+    /// combined correspondence set is too small for the estimator to run;
+    /// callers are responsible for accept/reject decisions (this method does
+    /// not compare inlier counts against `estimated`).
+    pub fn refine_frame_pose_with_local_map_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        local_map_descriptor_store: &LandmarkDescriptorStore,
+        estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        let estimated_pose = estimated.pose.as_ref()?;
+        let camera = map.cameras.get(&frame.camera_id)?.clone();
+        let query = QueryImage::from_frame(frame, camera.clone());
+
+        let harvested = ProjectionCorrespondenceBuilder::new(self.matcher.clone())
+            .build_with_pose_prior(
+                &query,
+                map,
+                local_map_descriptor_store,
+                estimated_pose,
+                refinement_search_radius_px,
+            )
+            .ok();
+
+        let mut seen_landmarks: HashSet<LandmarkId> = HashSet::new();
+        let mut correspondences = Vec::new();
+        let mut query_indices = Vec::new();
+        let mut landmark_ids = Vec::new();
+
+        for (&query_index, &landmark_id) in estimated
+            .inlier_query_indices
+            .iter()
+            .zip(estimated.inlier_landmark_ids.iter())
+        {
+            let Some(point2d) = frame.keypoints.get(query_index).copied() else {
+                continue;
+            };
+            let Some(landmark) = map.landmarks.get(&landmark_id) else {
+                continue;
+            };
+            if !seen_landmarks.insert(landmark_id) {
+                continue;
+            }
+            correspondences.push(Correspondence2D3D {
+                point2d,
+                point3d: landmark.position,
+                confidence: None,
+            });
+            query_indices.push(query_index);
+            landmark_ids.push(landmark_id);
+        }
+
+        if let Some(harvested) = &harvested {
+            for ((correspondence, &query_index), &landmark_id) in harvested
+                .correspondences
+                .iter()
+                .zip(harvested.query_indices.iter())
+                .zip(harvested.landmark_ids.iter())
+            {
+                if !seen_landmarks.insert(landmark_id) {
+                    continue;
+                }
+                correspondences.push(correspondence.clone());
+                query_indices.push(query_index);
+                landmark_ids.push(landmark_id);
+            }
+        }
+
+        let correspondence_count = correspondences.len();
+        let confidence_weights = correspondence_confidence_weights(&correspondences);
+        let report = self.pose_estimator.estimate_with_pose_prior_and_weights(
+            &correspondences,
+            &camera,
+            Some(estimated_pose),
+            confidence_weights.as_deref(),
+        )?;
+
+        let inlier_query_indices = report
+            .inliers
+            .iter()
+            .filter_map(|inlier| query_indices.get(*inlier).copied())
+            .collect::<Vec<_>>();
+        let inlier_landmark_ids = report
+            .inliers
+            .iter()
+            .filter_map(|inlier| landmark_ids.get(*inlier).copied())
+            .collect::<Vec<_>>();
+
+        let result = LocalizationResult::success(LocalizationSuccess {
+            pose: report.pose,
+            candidate_landmark_count: correspondence_count,
+            match_count: correspondence_count,
+            correspondence_count,
+            inliers: report.inliers,
+            inlier_query_indices,
+            inlier_landmark_ids,
+            inlier_reprojection_errors: report.inlier_reprojection_errors,
+            mean_reprojection_error: report.mean_reprojection_error,
+            median_reprojection_error: report.median_reprojection_error,
+            max_reprojection_error: report.max_reprojection_error,
+        })
+        .with_estimator_diagnostics(report.diagnostics);
+
+        Some(if passes_quality_gate(&result, &self.config) {
+            result
+        } else {
+            result.rejected_by_quality_gate()
+        })
+    }
+
     fn run_localization<S2>(
         &self,
         query: &QueryImage,
@@ -864,6 +1062,21 @@ where
                 return result_from_correspondence_error(error);
             }
         };
+        self.estimate_and_gate(query, correspondence_set, pose_prior)
+    }
+
+    /// Shared tail of both `run_localization` (appearance-global) and
+    /// `localize_with_projection_window_and_descriptor_store`
+    /// (projection-guided): run the configured `RobustPoseEstimator` over an
+    /// already-built `CorrespondenceSet` and apply the quality gate. Kept as
+    /// one function so PnP/gate behaviour cannot drift between the two
+    /// correspondence-building strategies.
+    fn estimate_and_gate(
+        &self,
+        query: &QueryImage,
+        correspondence_set: CorrespondenceSet,
+        pose_prior: Option<&Pose>,
+    ) -> LocalizationResult {
         let match_count = correspondence_set.match_count;
         let candidate_landmark_count = correspondence_set.candidate_landmark_count;
         let correspondence_count = correspondence_set.correspondences.len();

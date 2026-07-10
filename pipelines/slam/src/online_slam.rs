@@ -911,6 +911,171 @@ fn relocalization_appearance_descriptor_store(
     })
 }
 
+/// Build a [`visloc_core::types::LandmarkDescriptorStore`] scoped to a
+/// single keyframe's own observed landmarks (no covisible-neighbor
+/// expansion). Used by [`build_appearance_loop_candidates`] to restrict
+/// descriptor-based correspondence building to exactly the candidate
+/// keyframe's landmarks, since appearance candidates by construction share
+/// no landmark ids with the current frame. Returns `None` when the
+/// keyframe has no observations at all.
+pub fn appearance_loop_candidate_descriptor_store(
+    map: &VisualMap,
+    keyframe: &Keyframe,
+) -> Option<visloc_core::types::LandmarkDescriptorStore> {
+    let mut landmark_ids: Vec<u64> = keyframe
+        .observations
+        .iter()
+        .map(|observation| observation.landmark_id)
+        .collect();
+    landmark_ids.sort_unstable();
+    landmark_ids.dedup();
+    if landmark_ids.is_empty() {
+        return None;
+    }
+    let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+    for landmark_id in landmark_ids {
+        if let Some(descriptor) = map
+            .landmarks
+            .get(&landmark_id)
+            .and_then(|landmark| landmark.descriptor.as_ref())
+        {
+            store.insert(landmark_id, descriptor.clone());
+        }
+    }
+    Some(store)
+}
+
+/// Rank the cached per-keyframe mean descriptors in `descriptor_cache` by
+/// cosine similarity against `query_descriptor`, keeping only entries
+/// strictly older than `frame_id` and at least `min_keyframe_id_gap`
+/// keyframe-ids older. Ties broken by ascending keyframe id for
+/// determinism. Shared between [`build_appearance_loop_candidates`] and its
+/// unit tests.
+fn rank_appearance_loop_candidate_keyframes(
+    descriptor_cache: &HashMap<u64, Vec<f32>>,
+    frame_id: u64,
+    query_descriptor: &[f32],
+    min_similarity: f32,
+    min_keyframe_id_gap: u64,
+) -> Vec<(u64, f32)> {
+    let mut ranked: Vec<(u64, f32)> = descriptor_cache
+        .iter()
+        .filter(|(&keyframe_id, _)| {
+            keyframe_id < frame_id && frame_id.saturating_sub(keyframe_id) >= min_keyframe_id_gap
+        })
+        .map(|(&keyframe_id, descriptor)| {
+            (
+                keyframe_id,
+                relocalization_descriptor_cosine(query_descriptor, descriptor),
+            )
+        })
+        .filter(|(_, similarity)| *similarity >= min_similarity)
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked
+}
+
+/// Build and PnP-verify appearance-based long-range loop-closure candidates
+/// for `frame` against the per-keyframe mean descriptors cached in
+/// `descriptor_cache` (see
+/// [`OnlineSlamLoopClosureRefinementState::appearance_descriptor_cache`]).
+///
+/// Ranks past keyframes at least `config.min_keyframe_id_gap` keyframe-ids
+/// older than `frame.id` by cosine similarity of their cached mean
+/// descriptor against `frame`'s mean descriptor (reusing the same
+/// `relocalization_mean_descriptor` / `relocalization_descriptor_cosine`
+/// machinery [`OnlineSlamRelocalizationAppearanceConfig`]'s retrieval store
+/// uses), keeps the top `config.max_candidates_per_frame`, and for each one:
+///
+/// 1. builds a [`visloc_core::types::LandmarkDescriptorStore`] scoped to
+///    that keyframe's own observed landmarks
+///    ([`appearance_loop_candidate_descriptor_store`]);
+/// 2. builds 2D-3D correspondences by matching `frame`'s descriptors
+///    against that store via
+///    [`visloc_localization::CorrespondenceBuilder`] — descriptor
+///    appearance alone, since appearance candidates share no landmark ids
+///    with `frame` by construction;
+/// 3. runs [`PnPLoopClosureVerifier`] (configured by `config.pnp_verifier`)
+///    on the resulting correspondences against the candidate keyframe's
+///    stored pose.
+///
+/// Returns one [`LoopClosureCandidate`] per candidate keyframe that passed
+/// the PnP verifier's acceptance gates, with `verification` populated —
+/// ready for [`LoopClosureConstraint::from_verified_candidate`], the same
+/// as the shared-landmark detector's output. Candidates without a stored
+/// pose, without a viable descriptor store (fewer than
+/// `config.min_candidate_landmark_count` descriptors), or without a
+/// correspondence match are silently skipped.
+pub fn build_appearance_loop_candidates(
+    map: &VisualMap,
+    frame: &Frame,
+    descriptor_cache: &HashMap<u64, Vec<f32>>,
+    config: &LoopAppearanceCandidateConfig,
+    camera: &Camera,
+) -> Vec<LoopClosureCandidate> {
+    let Some(query_descriptor) = relocalization_mean_descriptor(&frame.descriptors) else {
+        return Vec::new();
+    };
+    let mut ranked = rank_appearance_loop_candidate_keyframes(
+        descriptor_cache,
+        frame.id,
+        &query_descriptor,
+        config.min_similarity,
+        config.min_keyframe_id_gap,
+    );
+    ranked.truncate(config.max_candidates_per_frame.max(1));
+
+    let query = visloc_core::types::QueryImage::from_frame(frame, camera.clone());
+    let matcher = visloc_vision::matching::BruteForceMatcher::default();
+    let correspondence_builder = visloc_localization::CorrespondenceBuilder::new(matcher);
+    let verifier = PnPLoopClosureVerifier {
+        ransac: PnPRansac::default(),
+        config: config.pnp_verifier,
+    };
+
+    let mut candidates = Vec::new();
+    for (keyframe_id, similarity) in ranked {
+        let Some(keyframe) = map.keyframes.get(&keyframe_id) else {
+            continue;
+        };
+        let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
+            continue;
+        };
+        let Some(store) = appearance_loop_candidate_descriptor_store(map, keyframe) else {
+            continue;
+        };
+        if store.len() < config.min_candidate_landmark_count {
+            continue;
+        }
+        let Ok(correspondence_set) = correspondence_builder.build(&query, map, &store) else {
+            continue;
+        };
+        let verification =
+            verifier.verify(&correspondence_set.correspondences, keyframe_pose, camera);
+        if !verification.verified {
+            continue;
+        }
+        candidates.push(LoopClosureCandidate {
+            query_frame_id: frame.id,
+            matched_keyframe_id: keyframe_id,
+            shared_landmark_count: verification.inlier_count,
+            query_inlier_count: verification.inlier_count,
+            keyframe_observation_count: correspondence_set.candidate_landmark_count,
+            shared_landmark_ratio: verification.inlier_ratio,
+            score: f64::from(similarity) * verification.score,
+            geometrically_verified: true,
+            verification: Some(verification),
+        });
+    }
+    candidates
+}
+
 fn relocalization_recent_keyframe_descriptor_store(
     map: &VisualMap,
     recent_keyframe_window: Option<usize>,
@@ -960,11 +1125,137 @@ fn relocalization_result_has_better_score(
             })
 }
 
+/// Which geometric verifier [`OnlineSlamLoopClosureRefinementConfig`] runs
+/// on loop-closure candidates every frame.
+///
+/// - `EssentialMatrix` (the default) mirrors the original online-refinement
+///   behaviour byte-for-byte: candidates are verified on 2D-2D
+///   correspondences via [`EssentialMatrixLoopClosureVerifier`] using
+///   `verifier_config`. Two-view essential-matrix geometry leaves
+///   translation scale unobservable, so every accepted constraint's
+///   translation is pinned to
+///   `verifier_config.default_translation_scale` regardless of the true
+///   relative translation norm — acceptable for topology-only pose-graph
+///   corrections, but it actively corrupts the trajectory's metric scale
+///   when the true baseline differs.
+/// - `Pnp` verifies each candidate on 2D-3D correspondences instead: the
+///   current frame's inlier observations of landmarks the older keyframe
+///   already observed (built by
+///   [`correspondences_2d3d_for_loop_candidate`], landmark positions read
+///   from the live map) are handed to [`PnPLoopClosureVerifier`]. Because
+///   the keyframe pose already carries the world scale, the recovered
+///   relative translation is metric — no `default_translation_scale` is
+///   involved. Candidates with too few 2D-3D correspondences (below the
+///   configured `min_inliers`) are rejected outright; there is no fallback
+///   to the essential-matrix path.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum LoopRefinementVerifier {
+    #[default]
+    EssentialMatrix,
+    Pnp(PnPLoopClosureVerifierConfig),
+}
+
+/// Opt-in appearance-based long-range loop-candidate source for
+/// [`OnlineSlamLoopClosureRefinementConfig`]. The shared-landmark detector
+/// (`detect_loop_closure_candidates`) can only ever propose candidates that
+/// still reference the SAME map landmark ids the current frame's inliers
+/// carry; once the tracker drifts around a loop and revisits a place, the
+/// mapper has typically re-triangulated fresh landmark ids for the very same
+/// walls, so shared-id candidates are inherently short-range (near-in-time
+/// keyframes only). This stream instead ranks *past* keyframes by cosine
+/// similarity of their cached mean local descriptor against the current
+/// frame's, restricted to candidates at least `min_keyframe_id_gap`
+/// keyframe-ids older — i.e. genuinely long-range, appearance-only place
+/// recognition, mirroring
+/// [`OnlineSlamRelocalizationAppearanceConfig`]'s retrieval machinery
+/// (`relocalization_mean_descriptor` / cosine ranking) but tuned for
+/// long-range loop detection rather than short-range recovery-after-loss.
+///
+/// Each ranked candidate keyframe is verified by building 2D-3D
+/// correspondences via descriptor matching (current frame descriptors
+/// against the candidate keyframe's own observed landmarks' descriptors —
+/// there is no shared-id assembly to fall back to, by construction) and
+/// running them through [`PnPLoopClosureVerifier`] configured by
+/// `pnp_verifier`. Accepted candidates flow through the exact same
+/// downstream fold as shared-landmark candidates (PCM / covariance gate /
+/// PGO / GNC / write-back).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopAppearanceCandidateConfig {
+    /// Minimum keyframe-id gap between the newly-registered keyframe and a
+    /// candidate older keyframe. This is what makes the stream long-range:
+    /// set it comfortably above the span the shared-landmark detector and
+    /// local mapping window already cover.
+    pub min_keyframe_id_gap: u64,
+    /// Maximum number of appearance-ranked candidate keyframes verified per
+    /// frame. Bounds the per-frame PnP-verification cost.
+    pub max_candidates_per_frame: usize,
+    /// Minimum cosine similarity between the current frame's mean local
+    /// descriptor and a candidate keyframe's cached mean local descriptor.
+    pub min_similarity: f32,
+    /// Minimum number of descriptor-bearing landmarks a candidate keyframe
+    /// must observe before appearance verification runs against it. A
+    /// keyframe with fewer descriptors than `pnp_verifier.min_inliers` can
+    /// never pass the PnP gate anyway, so this is a cheap early reject.
+    pub min_candidate_landmark_count: usize,
+    /// PnP RANSAC verifier thresholds. `min_inliers` defaults higher than
+    /// the shared-landmark PnP path's default because a false long-range
+    /// loop closure is catastrophic (it can fold the whole trajectory into
+    /// a wrong basin), so this stream demands stronger evidence before
+    /// admitting a candidate.
+    pub pnp_verifier: PnPLoopClosureVerifierConfig,
+}
+
+impl Default for LoopAppearanceCandidateConfig {
+    fn default() -> Self {
+        Self {
+            min_keyframe_id_gap: 150,
+            max_candidates_per_frame: 3,
+            min_similarity: 0.2,
+            min_candidate_landmark_count: 30,
+            pnp_verifier: PnPLoopClosureVerifierConfig {
+                min_inliers: 30,
+                min_inlier_ratio: 0.5,
+                max_mean_reprojection_error_px: 4.0,
+            },
+        }
+    }
+}
+
+/// Which stream a folded [`LoopClosureConstraint`] (reported on
+/// [`OnlineSlamLoopClosureRefinementStats::admitted_constraints`]) came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopClosureCandidateSource {
+    /// From the default shared-landmark detector
+    /// (`detect_loop_closure_candidates`), verified by
+    /// [`OnlineSlamLoopClosureRefinementConfig::verifier`].
+    SharedLandmark,
+    /// From the opt-in appearance-based long-range candidate source
+    /// (`OnlineSlamLoopClosureRefinementConfig::appearance_candidates`).
+    Appearance,
+}
+
+/// One loop-closure constraint admitted into the running pose graph this
+/// frame, with enough detail for external diagnostics (e.g. a per-frame CSV
+/// log distinguishing shared-landmark from appearance-sourced closures).
+/// Reported on
+/// [`OnlineSlamLoopClosureRefinementStats::admitted_constraints`]; does NOT
+/// include constraints admitted via the `pcm_batch_rescreen` promotion path
+/// (those remain counted only in
+/// [`OnlineSlamLoopClosureRefinementStats::loop_closures_pcm_promoted`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamAdmittedLoopConstraint {
+    pub from_keyframe_id: u64,
+    pub to_keyframe_id: u64,
+    pub inlier_count: usize,
+    pub translation_norm_m: f64,
+    pub source: LoopClosureCandidateSource,
+}
+
 /// Per-session configuration for the online loop-closure + pose-graph
 /// refinement stage owned by [`OnlineSlamPipeline`]. When attached via
 /// [`OnlineSlamConfig::pose_graph_refinement`], the pipeline maintains a
-/// running [`PoseGraph`] mirror of `map.keyframes`, runs an
-/// [`EssentialMatrixLoopClosureVerifier`] on every candidate emitted by
+/// running [`PoseGraph`] mirror of `map.keyframes`, runs the configured
+/// [`LoopRefinementVerifier`] on every candidate emitted by
 /// `detect_loop_closure_candidates`, and folds verified
 /// [`LoopClosureConstraint`]s into the graph. When
 /// `trigger_every_new_constraints` new verified edges have accumulated
@@ -973,15 +1264,21 @@ fn relocalization_result_has_better_score(
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamLoopClosureRefinementConfig {
     /// Camera intrinsics passed to the loop-closure verifier when it
-    /// builds essential-matrix correspondences. Must match the camera
-    /// that produced the keyframes' keypoints. Single-monocular for
-    /// now — per-frame intrinsics are out of scope for the first
-    /// version of this stage.
+    /// builds correspondences. Must match the camera that produced the
+    /// keyframes' keypoints. Single-monocular for now — per-frame
+    /// intrinsics are out of scope for the first version of this stage.
     pub camera: Camera,
     /// Thresholds (`min_inliers`, `min_inlier_ratio`,
     /// `max_mean_sampson_error`, `default_translation_scale`) handed to
-    /// the [`EssentialMatrixLoopClosureVerifier`] every frame.
+    /// the [`EssentialMatrixLoopClosureVerifier`] every frame. Only
+    /// consulted when `verifier` is [`LoopRefinementVerifier::EssentialMatrix`]
+    /// (the default).
     pub verifier_config: LoopClosureVerifierConfig,
+    /// Which verifier backend runs on candidates this frame. Defaults to
+    /// [`LoopRefinementVerifier::EssentialMatrix`] so existing callers keep
+    /// today's scale-free behaviour byte-identical; opt into
+    /// [`LoopRefinementVerifier::Pnp`] for metric loop-closure translations.
+    pub verifier: LoopRefinementVerifier,
     /// SE(3) Gauss-Newton settings consumed by
     /// [`PoseGraph::optimize_se3_iterative`] (or, when `gnc` is `Some`, the
     /// shared SE(3) settings consumed by [`PoseGraph::optimize_se3_gnc`])
@@ -1070,6 +1367,42 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// at least `1`; `1` runs PGO on every accepted loop edge, higher
     /// values batch.
     pub trigger_every_new_constraints: usize,
+    /// Optional appearance-based long-range loop-candidate source. `None`
+    /// (the default) keeps the stage's only candidate source as
+    /// `detect_loop_closure_candidates`'s shared-landmark detector — byte-
+    /// identical to the stage's original behaviour. `Some(config)` also
+    /// ranks past keyframes by appearance (independent of shared landmark
+    /// ids) and PnP-verifies the top candidates every frame; see
+    /// [`LoopAppearanceCandidateConfig`] for the retrieval + verification
+    /// details. When set, the stage maintains a per-keyframe mean-
+    /// descriptor cache (`OnlineSlamLoopClosureRefinementState::appearance_descriptor_cache`)
+    /// as keyframes register, independent of whether
+    /// [`OnlineSlamConfig::relocalization`] is configured.
+    pub appearance_candidates: Option<LoopAppearanceCandidateConfig>,
+    /// When `true`, propagate each solved keyframe's rigid pose
+    /// correction `C_k = T_cw_new ∘ T_wc_old` (world-frame, computed from
+    /// the keyframe's pose immediately before this solve versus the
+    /// solved [`PoseGraph`] pose) to (a) every landmark whose *anchor*
+    /// keyframe — the first (lowest-id) keyframe that observed it — is
+    /// among the keyframes this solve updated, moving the landmark
+    /// rigidly with its anchor so the map stays internally consistent
+    /// after PGO write-back, and (b) the tracker's continuation state
+    /// (`last_successful_pose` plus motion-model state such as
+    /// [`visloc_tracking::ImuPredictiveMotionModel`]'s `velocity_world`)
+    /// via [`Tracker::apply_pose_correction`], using the correction of
+    /// the highest-id (most-recently registered) solved keyframe so the
+    /// very next `track_frame`'s PnP prior is consistent with the
+    /// corrected map instead of re-anchoring to the pre-solve drift.
+    /// `false` (default) keeps today's behaviour byte-identical: only
+    /// `map.keyframes[*].frame.pose` moves; landmarks and the tracker's
+    /// state are untouched, which is the write-back gap that leaves the
+    /// tracker immediately re-localizing against the stale landmark
+    /// field. Per-solve propagation diagnostics land on
+    /// [`OnlineSlamLoopClosureRefinementStats::landmarks_moved`],
+    /// `max_landmark_displacement_meters`,
+    /// `mean_landmark_displacement_meters`, and
+    /// `tracker_correction_applied`.
+    pub propagate_corrections: bool,
 }
 
 /// Running state for the online loop-closure + pose-graph refinement
@@ -1106,6 +1439,14 @@ pub struct OnlineSlamLoopClosureRefinementState {
     /// not-converged solves; mismatches between the two go to
     /// `OnlineSlamLoopClosureRefinementStats::pose_graph_result`).
     pub trigger_count: u64,
+    /// Cached per-keyframe mean local descriptor for the appearance-based
+    /// long-range loop candidate source (see
+    /// [`OnlineSlamLoopClosureRefinementConfig::appearance_candidates`]).
+    /// Populated as each keyframe registers with the running graph whenever
+    /// `config.appearance_candidates` is `Some`; maintained independently of
+    /// [`OnlineSlamConfig::relocalization`]. Empty (and never consulted)
+    /// when `appearance_candidates` is `None`.
+    pub appearance_descriptor_cache: HashMap<u64, Vec<f32>>,
 }
 
 impl OnlineSlamLoopClosureRefinementState {
@@ -1118,10 +1459,12 @@ impl OnlineSlamLoopClosureRefinementState {
             pcm_deferred: Vec::new(),
             pending_since_last_trigger: 0,
             trigger_count: 0,
+            appearance_descriptor_cache: HashMap::new(),
         }
     }
 
     fn reset(&mut self) {
+        self.appearance_descriptor_cache.clear();
         self.graph = PoseGraph::new();
         self.keyframe_order.clear();
         self.verified_constraints.clear();
@@ -1189,6 +1532,40 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// graph this frame (oldest first), folded into a dense Gaussian prior.
     /// Empty unless `marginalization_window` is set and the graph exceeded it.
     pub poses_marginalized: Vec<u64>,
+    /// Number of appearance-ranked candidate keyframes evaluated this frame
+    /// (post ranking / gap filter, pre PnP verification). Always `0` when
+    /// [`OnlineSlamLoopClosureRefinementConfig::appearance_candidates`] is
+    /// unset.
+    pub appearance_candidate_count: usize,
+    /// Number of appearance candidates admitted into the graph this frame
+    /// (subset of `accepted_count`). Always `0` when
+    /// `appearance_candidates` is unset.
+    pub appearance_accepted_count: usize,
+    /// Loop-closure constraints admitted into the graph this frame — both
+    /// the shared-landmark and (when configured) appearance streams — with
+    /// enough detail for external diagnostics (e.g.
+    /// `examples/euroc_online_slam_vi_image_demo.rs`'s `loop_constraints.csv`).
+    /// Does NOT include constraints admitted via the `pcm_batch_rescreen`
+    /// promotion path.
+    pub admitted_constraints: Vec<OnlineSlamAdmittedLoopConstraint>,
+    /// Number of landmarks moved by
+    /// [`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`]'s
+    /// landmark-propagation pass this frame. Always `0` when
+    /// `propagate_corrections` is `false`, no solve fired this frame, or
+    /// the solve updated no keyframe with a previously-known pose.
+    pub landmarks_moved: usize,
+    /// Maximum per-landmark displacement (metres) applied by the
+    /// propagation pass this frame. `None` when `landmarks_moved == 0`.
+    pub max_landmark_displacement_meters: Option<f64>,
+    /// Mean per-landmark displacement (metres) applied by the
+    /// propagation pass this frame. `None` when `landmarks_moved == 0`.
+    pub mean_landmark_displacement_meters: Option<f64>,
+    /// `true` when the tracker's continuation state
+    /// (`last_successful_pose` plus motion-model state) was corrected
+    /// this frame via [`Tracker::apply_pose_correction`] with the
+    /// most-recently solved keyframe's correction. Always `false` when
+    /// `propagate_corrections` is `false` or no solve fired this frame.
+    pub tracker_correction_applied: bool,
 }
 
 /// Per-session IMU integration parameters consumed by
@@ -2159,24 +2536,82 @@ where
         }
         state.keyframe_order.push(new_keyframe_id);
 
-        // Verify candidates (only essential-matrix verifier for now —
-        // the pipeline currently exposes only the monocular two-view
-        // backend; PnP/Hybrid wiring is a follow-up).
+        // Cache this keyframe's mean local descriptor for the appearance-
+        // based long-range candidate source. Independent of whether
+        // relocalization is configured — this cache lives on the pose-
+        // graph refinement state, keyed only on `appearance_candidates`.
+        if state.config.appearance_candidates.is_some() {
+            if let Some(mean_descriptor) = relocalization_mean_descriptor(&frame.descriptors) {
+                state
+                    .appearance_descriptor_cache
+                    .insert(new_keyframe_id, mean_descriptor);
+            }
+        }
+
+        // Verify candidates with the configured backend (see
+        // `LoopRefinementVerifier`): essential-matrix (default, scale-free —
+        // every accepted constraint's translation is pinned to
+        // `verifier_config.default_translation_scale`) or PnP (2D-3D,
+        // metric translation recovered from the map's triangulated
+        // landmarks; candidates with too few 2D-3D correspondences are
+        // rejected outright, never falling back to essential-matrix).
         let mut stats = OnlineSlamLoopClosureRefinementStats::default();
         if !loop_closure_candidates.is_empty() {
-            let verifier = EssentialMatrixLoopClosureVerifier {
-                config: state.config.verifier_config,
-                ..Default::default()
-            };
             stats.verified_candidate_count = loop_closure_candidates.len();
-            verify_loop_closure_candidates(
-                loop_closure_candidates,
-                frame,
-                tracking,
-                &self.map,
-                &state.config.camera,
-                &verifier,
-            );
+            match &state.config.verifier {
+                LoopRefinementVerifier::EssentialMatrix => {
+                    let verifier = EssentialMatrixLoopClosureVerifier {
+                        config: state.config.verifier_config,
+                        ..Default::default()
+                    };
+                    verify_loop_closure_candidates(
+                        loop_closure_candidates,
+                        frame,
+                        tracking,
+                        &self.map,
+                        &state.config.camera,
+                        &verifier,
+                    );
+                }
+                LoopRefinementVerifier::Pnp(pnp_config) => {
+                    let verifier = PnPLoopClosureVerifier {
+                        ransac: PnPRansac::default(),
+                        config: *pnp_config,
+                    };
+                    verify_loop_closure_candidates_pnp(
+                        loop_closure_candidates,
+                        frame,
+                        tracking,
+                        &self.map,
+                        &state.config.camera,
+                        &verifier,
+                    );
+                }
+            }
+        }
+
+        // Appearance-based long-range candidate stream (opt-in, see
+        // `LoopAppearanceCandidateConfig`). Independent of the shared-
+        // landmark stream above: built and PnP-verified regardless of
+        // whether `detect_loop_closure_candidates` found anything this
+        // frame, since the whole point is to catch loops the shared-id
+        // detector structurally cannot see.
+        let appearance_candidates: Vec<LoopClosureCandidate> =
+            if let Some(appearance_config) = state.config.appearance_candidates.clone() {
+                let built = build_appearance_loop_candidates(
+                    &self.map,
+                    frame,
+                    &state.appearance_descriptor_cache,
+                    &appearance_config,
+                    &state.config.camera,
+                );
+                stats.appearance_candidate_count = built.len();
+                built
+            } else {
+                Vec::new()
+            };
+
+        if !loop_closure_candidates.is_empty() || !appearance_candidates.is_empty() {
             // PCM front-end screen (optional): snapshot the current odometry
             // (graph poses) and the already-admitted closures once, then admit
             // a new closure only if it is geometrically consistent with the
@@ -2202,7 +2637,19 @@ where
                 Vec::new()
             };
 
-            for candidate in loop_closure_candidates.iter() {
+            // Both streams flow through the identical accept path (PCM /
+            // covariance gate / graph add / write-back) so folding is
+            // untouched regardless of which stream a candidate came from.
+            let tagged_candidates = loop_closure_candidates
+                .iter()
+                .map(|candidate| (candidate, LoopClosureCandidateSource::SharedLandmark))
+                .chain(
+                    appearance_candidates
+                        .iter()
+                        .map(|candidate| (candidate, LoopClosureCandidateSource::Appearance)),
+                );
+
+            for (candidate, source) in tagged_candidates {
                 let Some(constraint) = LoopClosureConstraint::from_verified_candidate(candidate)
                 else {
                     continue;
@@ -2238,6 +2685,16 @@ where
                     admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
+                stats.admitted_constraints.push(OnlineSlamAdmittedLoopConstraint {
+                    from_keyframe_id: constraint.from_keyframe_id,
+                    to_keyframe_id: constraint.to_keyframe_id,
+                    inlier_count: constraint.inlier_count,
+                    translation_norm_m: constraint.relative_pose.translation.norm(),
+                    source,
+                });
+                if source == LoopClosureCandidateSource::Appearance {
+                    stats.appearance_accepted_count += 1;
+                }
                 state.verified_constraints.push(constraint);
                 state.pending_since_last_trigger += 1;
                 stats.accepted_count += 1;
@@ -2311,14 +2768,59 @@ where
             if solved {
                 // Write optimised poses back into the map so subsequent
                 // tracking / local-VI-BA passes see the refined frame.
+                // When `propagate_corrections` is set, snapshot each
+                // updated keyframe's PRE-solve `world_to_camera` before
+                // overwriting it so the rigid world-frame correction
+                // `C_k = T_cw_new ∘ T_wc_old` can be computed (see
+                // `propagate_pose_graph_corrections` for the derivation
+                // and why this is the correction that keeps a landmark's
+                // reprojection into keyframe k invariant).
                 let mut updated = 0usize;
+                let mut corrections: HashMap<u64, SE3> = HashMap::new();
                 for (id, pose) in state.graph.poses.iter() {
                     if let Some(keyframe) = self.map.keyframes.get_mut(id) {
+                        if state.config.propagate_corrections {
+                            if let Some(old_pose) = keyframe.frame.pose.as_ref() {
+                                let correction = pose
+                                    .world_to_camera
+                                    .inverse()
+                                    .compose(&old_pose.world_to_camera);
+                                corrections.insert(*id, correction);
+                            }
+                        }
                         keyframe.frame.pose = Some(pose.clone());
                         updated += 1;
                     }
                 }
                 stats.keyframes_updated = updated;
+
+                if state.config.propagate_corrections && !corrections.is_empty() {
+                    // Landmark propagation: each landmark moves rigidly
+                    // with its ANCHOR keyframe (the first, lowest-id,
+                    // keyframe that observed it). Landmarks anchored to a
+                    // keyframe this solve did not update keep their
+                    // position untouched.
+                    let (moved, max_displacement, mean_displacement) =
+                        propagate_pose_graph_corrections(&mut self.map, &corrections);
+                    stats.landmarks_moved = moved;
+                    stats.max_landmark_displacement_meters = max_displacement;
+                    stats.mean_landmark_displacement_meters = mean_displacement;
+
+                    // Tracker/current-pose propagation: map the
+                    // tracker's continuation state (last successful pose
+                    // + motion-model state) into the corrected frame
+                    // using the most-recently solved keyframe's
+                    // correction, so the very next `track_frame`'s PnP
+                    // prior starts consistent with the just-corrected
+                    // map instead of re-anchoring the trajectory to the
+                    // pre-solve drift.
+                    if let Some((_, last_correction)) =
+                        corrections.iter().max_by_key(|(id, _)| **id)
+                    {
+                        self.tracker.apply_pose_correction(last_correction);
+                        stats.tracker_correction_applied = true;
+                    }
+                }
 
                 // Fixed-lag bound: marginalize the oldest poses past the window
                 // into a dense prior, keeping the graph (and next solve) bounded.
@@ -3070,6 +3572,80 @@ impl OnlineSlamResult {
 
     pub fn has_loop_closure_candidate(&self) -> bool {
         !self.loop_closure_candidates.is_empty()
+    }
+}
+
+/// [`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`]'s
+/// landmark-propagation pass. For every landmark in `map.landmarks`,
+/// derives its ANCHOR keyframe — the first (lowest-id) keyframe in
+/// `map.keyframes` whose `observations` reference that landmark id — and,
+/// when that anchor's id is a key in `corrections`, moves the landmark
+/// rigidly by the anchor's correction:
+/// `landmark.position = correction.transform_point(&landmark.position)`.
+///
+/// `corrections` maps a solved keyframe id to its world-frame rigid
+/// correction `C_k = T_cw_new ∘ T_wc_old` (new camera-to-world composed
+/// with old world-to-camera), i.e. the transform such that for any point
+/// `p` observed by keyframe `k`,
+/// `T_wc_old.transform_point(&p) == T_wc_new.transform_point(&correction.transform_point(&p))`
+/// — the point's projection into keyframe `k` is invariant across the
+/// correction. This is exactly the rigid motion a landmark anchored to
+/// `k` must undergo to stay consistent with `k`'s corrected pose.
+///
+/// Landmarks whose anchor keyframe is NOT a key in `corrections` (i.e.
+/// the anchor either was not part of this solve or had no previously-
+/// known pose to diff against) are left untouched, matching ORB-SLAM3's
+/// "only points anchored to a corrected keyframe move" propagation rule.
+///
+/// The anchor index is rebuilt from scratch every call by scanning every
+/// keyframe's `observations` in ascending keyframe-id order — this is
+/// `O(total observations across the map)`, which for the maps this stage
+/// targets (on the order of 1-3k keyframes / 50-200k landmarks) is cheap
+/// relative to the pose-graph solve that triggered the call. Returns
+/// `(landmarks_moved, max_displacement_meters, mean_displacement_meters)`;
+/// the latter two are `None` when no landmark moved.
+fn propagate_pose_graph_corrections(
+    map: &mut VisualMap,
+    corrections: &HashMap<u64, SE3>,
+) -> (usize, Option<f64>, Option<f64>) {
+    let mut anchor_keyframe_of_landmark: HashMap<u64, u64> = HashMap::new();
+    let mut keyframe_ids: Vec<u64> = map.keyframes.keys().copied().collect();
+    keyframe_ids.sort_unstable();
+    for keyframe_id in keyframe_ids {
+        let Some(keyframe) = map.keyframes.get(&keyframe_id) else {
+            continue;
+        };
+        for observation in &keyframe.observations {
+            anchor_keyframe_of_landmark
+                .entry(observation.landmark_id)
+                .or_insert(keyframe_id);
+        }
+    }
+
+    let mut moved = 0usize;
+    let mut max_displacement = 0.0_f64;
+    let mut sum_displacement = 0.0_f64;
+    for (landmark_id, anchor_keyframe_id) in &anchor_keyframe_of_landmark {
+        let Some(correction) = corrections.get(anchor_keyframe_id) else {
+            continue;
+        };
+        let Some(landmark) = map.landmarks.get_mut(landmark_id) else {
+            continue;
+        };
+        let old_position = landmark.position;
+        landmark.position = correction.transform_point(&old_position);
+        let displacement = (landmark.position - old_position).norm();
+        moved += 1;
+        sum_displacement += displacement;
+        if displacement > max_displacement {
+            max_displacement = displacement;
+        }
+    }
+
+    if moved == 0 {
+        (0, None, None)
+    } else {
+        (moved, Some(max_displacement), Some(sum_displacement / moved as f64))
     }
 }
 
