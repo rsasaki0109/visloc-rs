@@ -3900,7 +3900,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_mapping,
         OnlineSlamConfig {
             apply_map_updates: true,
-            loop_closure: LoopClosureConfig::default(),
+            loop_closure: LoopClosureConfig {
+                // Shared-landmark overlap at a 5-frame gap is ordinary local
+                // covisibility, not evidence of a completed loop. Keep the
+                // geometric and appearance candidate streams on the same
+                // long-range revisit horizon when online PGO is enabled.
+                min_frame_id_gap: if args.pose_graph_refinement_enabled {
+                    args.pose_graph_refinement_appearance_min_gap
+                } else {
+                    LoopClosureConfig::default().min_frame_id_gap
+                },
+                ..LoopClosureConfig::default()
+            },
             imu: Some(imu_config),
             local_vi_ba: local_vi_ba_config,
             covisibility_local_ba: covisibility_local_ba_config,
