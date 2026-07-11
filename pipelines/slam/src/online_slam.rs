@@ -2766,6 +2766,31 @@ where
                 if !state.graph.poses.contains_key(&constraint.from_keyframe_id) {
                     continue;
                 }
+                let measured_sim3_scale = if matches!(
+                    state.config.solver,
+                    LoopRefinementSolver::Sim3(_)
+                ) && source == LoopClosureCandidateSource::Appearance
+                {
+                    let Some(scale) = estimate_loop_sim3_scale_3d3d(
+                        &self.map,
+                        constraint.from_keyframe_id,
+                        constraint.to_keyframe_id,
+                    ) else {
+                        // A PnP pose alone contains no scale observation.
+                        // Do not let an arbitrary scale-1 edge perturb an
+                        // already accurate map on the Sim3-only path.
+                        continue;
+                    };
+                    if (scale - 1.0).abs() < 0.05 {
+                        // This solver option is specifically the scale-drift
+                        // correction arm. Leave near-unit rigid corrections
+                        // to the established SE3 path.
+                        continue;
+                    }
+                    Some(scale)
+                } else {
+                    None
+                };
                 // Front-end screens (both before the closure enters the graph):
                 // PCM combinatorial consistency, then the covariance metric gate.
                 let pcm_measurement = pcm_cfg.as_ref().map(|cfg| {
@@ -2791,12 +2816,6 @@ where
                     admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
-                let measured_sim3_scale = estimate_loop_sim3_scale_3d3d(
-                    &self.map,
-                    constraint.from_keyframe_id,
-                    constraint.to_keyframe_id,
-                )
-                .unwrap_or(1.0);
                 if let Some(sim3_graph) = state.sim3_graph.as_mut() {
                     let weight = (constraint.inlier_count as f64).max(1.0);
                     sim3_graph.add_edge(
@@ -2805,7 +2824,7 @@ where
                         Sim3::new(
                             constraint.relative_pose.rotation,
                             constraint.relative_pose.translation,
-                            measured_sim3_scale,
+                            measured_sim3_scale.unwrap_or(1.0),
                         ),
                         weight,
                     );

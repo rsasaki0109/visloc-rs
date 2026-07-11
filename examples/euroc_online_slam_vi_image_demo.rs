@@ -3901,6 +3901,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OnlineSlamConfig {
             apply_map_updates: true,
             loop_closure: LoopClosureConfig {
+                enabled: !(args.pose_graph_refinement_enabled
+                    && args.pose_graph_refinement_appearance_loops),
                 // Shared-landmark overlap at a 5-frame gap is ordinary local
                 // covisibility, not evidence of a completed loop. Keep the
                 // geometric and appearance candidate streams on the same
