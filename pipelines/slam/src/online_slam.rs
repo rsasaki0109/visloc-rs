@@ -3934,26 +3934,77 @@ fn estimate_loop_sim3_scale_3d3d(
             matched.push((from_points[m.query_index].2, to_points[m.train_index].2));
         }
     }
-    if matched.len() < 4 {
+    if matched.len() < 6 {
         return None;
     }
 
-    let mut ratios = Vec::new();
+    // ORB-SLAM's Sim3Solver uses minimal-set RANSAC and accepts a hypothesis
+    // only when many MapPoint correspondences agree geometrically. Mirror
+    // that safety property here with deterministic triplet enumeration.
+    let mut scene_distances = Vec::new();
     for i in 0..matched.len() {
         for j in (i + 1)..matched.len() {
-            let from_distance = (matched[i].0 - matched[j].0).norm();
-            let to_distance = (matched[i].1 - matched[j].1).norm();
-            if from_distance > 1.0e-3 && to_distance > 1.0e-3 {
-                ratios.push(to_distance / from_distance);
+            scene_distances.push((matched[i].1 - matched[j].1).norm());
+        }
+    }
+    scene_distances.sort_by(f64::total_cmp);
+    let scene_scale = scene_distances[scene_distances.len() / 2];
+    let inlier_threshold = (scene_scale * 0.03).clamp(0.02, 0.20);
+
+    let mut best_inliers = Vec::new();
+    let mut best_rmse = f64::INFINITY;
+    let mut hypotheses = 0usize;
+    'triplets: for i in 0..matched.len() - 2 {
+        for j in (i + 1)..matched.len() - 1 {
+            for k in (j + 1)..matched.len() {
+                if hypotheses >= 256 {
+                    break 'triplets;
+                }
+                hypotheses += 1;
+                let source = [matched[i].0, matched[j].0, matched[k].0];
+                let target = [matched[i].1, matched[j].1, matched[k].1];
+                let Some(model) = visloc_tracking::umeyama_similarity_transform(
+                    &source,
+                    &target,
+                    true,
+                ) else {
+                    continue;
+                };
+                if !model.scale.is_finite() || !(0.5..=2.0).contains(&model.scale) {
+                    continue;
+                }
+                let mut inliers = Vec::new();
+                let mut squared_error = 0.0;
+                for (index, (from_point, to_point)) in matched.iter().enumerate() {
+                    let error = (model.apply(from_point) - to_point).norm();
+                    if error <= inlier_threshold {
+                        inliers.push(index);
+                        squared_error += error * error;
+                    }
+                }
+                let rmse = if inliers.is_empty() {
+                    f64::INFINITY
+                } else {
+                    (squared_error / inliers.len() as f64).sqrt()
+                };
+                if inliers.len() > best_inliers.len()
+                    || (inliers.len() == best_inliers.len() && rmse < best_rmse)
+                {
+                    best_inliers = inliers;
+                    best_rmse = rmse;
+                }
             }
         }
     }
-    if ratios.len() < 6 {
+    let min_inliers = 6usize.max(matched.len().div_ceil(2));
+    if best_inliers.len() < min_inliers || best_rmse > inlier_threshold * 0.5 {
         return None;
     }
-    ratios.sort_by(f64::total_cmp);
-    let scale = ratios[ratios.len() / 2];
-    (scale.is_finite() && (0.25..=4.0).contains(&scale)).then_some(scale)
+    let source: Vec<Point3<f64>> = best_inliers.iter().map(|&i| matched[i].0).collect();
+    let target: Vec<Point3<f64>> = best_inliers.iter().map(|&i| matched[i].1).collect();
+    let refined = visloc_tracking::umeyama_similarity_transform(&source, &target, true)?;
+    (refined.scale.is_finite() && (0.5..=2.0).contains(&refined.scale))
+        .then_some(refined.scale)
 }
 
 /// `(min, max)` per-node scale across a solved [`Sim3PoseGraph`]'s nodes.
@@ -4052,6 +4103,10 @@ mod sim3_scale_estimation_tests {
             Point3::new(1.0, 0.0, 4.2),
             Point3::new(0.0, 1.0, 4.4),
             Point3::new(1.0, 1.0, 4.8),
+            Point3::new(-0.5, 0.3, 5.0),
+            Point3::new(0.4, -0.7, 5.3),
+            Point3::new(1.2, 0.6, 5.6),
+            Point3::new(-0.8, -0.4, 4.6),
         ];
         for (index, point) in points.into_iter().enumerate() {
             let descriptor = vec![index as f32, 1.0, -(index as f32)];
@@ -4059,10 +4114,12 @@ mod sim3_scale_estimation_tests {
             let to_id = index as u64 + 101;
             let mut from_landmark = Landmark::new(from_id, point);
             from_landmark.descriptor = Some(descriptor.clone());
-            let mut to_landmark = Landmark::new(
-                to_id,
-                Point3::from(point.coords * 1.7 + Vector3::new(2.0, -1.0, 0.5)),
-            );
+            let transformed = if index < 6 {
+                point.coords * 1.7 + Vector3::new(2.0, -1.0, 0.5)
+            } else {
+                Vector3::new(20.0 + index as f64, -15.0, 2.0)
+            };
+            let mut to_landmark = Landmark::new(to_id, Point3::from(transformed));
             to_landmark.descriptor = Some(descriptor);
             map.landmarks.insert(from_id, from_landmark);
             map.landmarks.insert(to_id, to_landmark);
