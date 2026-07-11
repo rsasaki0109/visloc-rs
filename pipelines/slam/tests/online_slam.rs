@@ -5570,7 +5570,7 @@ mod online_loop_closure_refinement {
         // some non-trivial scale strictly between 1.0 and 1.6 — exactly
         // the "wrong basin the write-back/propagation math must still
         // handle correctly" scenario.
-        {
+        let siw_before_solve = {
             let state = slam.pose_graph_state.as_mut().expect("pose graph state");
             let sim3_graph = state
                 .sim3_graph
@@ -5583,7 +5583,8 @@ mod online_loop_closure_refinement {
                 .expect("KF#10 -> KF#20 sequential edge should be present");
             edge.measurement.scale = 1.6;
             edge.weight = 100.0;
-        }
+            sim3_graph.poses[&20].clone()
+        };
 
         // KF#30 returns near the origin: shared-landmark loop gate fires,
         // triggering the Sim3 solve (same fixture as the SE3 propagation
@@ -5633,12 +5634,7 @@ mod online_loop_closure_refinement {
         // Exact-displacement check, generalised to Sim(3): the landmark
         // must move by exactly KF#20's world-frame similarity correction
         // `Siw_new⁻¹ ∘ Siw_old`.
-        let siw_old = Sim3::new(
-            old_pose_20.world_to_camera.rotation,
-            old_pose_20.world_to_camera.translation,
-            1.0,
-        );
-        let expected_correction = siw_new.inverse().compose(&siw_old);
+        let expected_correction = siw_new.inverse().compose(&siw_before_solve);
         let expected_position = expected_correction.transform_point(&anchor_landmark_position);
         let moved_position = slam.map.landmarks[&SYNTHETIC_ANCHOR_LANDMARK_ID].position;
         assert!(

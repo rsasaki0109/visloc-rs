@@ -2854,6 +2854,15 @@ where
                 LoopRefinementSolver::Sim3(cfg) => Some(cfg.clone()),
                 LoopRefinementSolver::Se3 => None,
             };
+            // Preserve the actual pre-solve Sim3 nodes, including their
+            // accumulated scales. Re-embedding the rigid write-back poses at
+            // unit scale here would make an unchanged non-unit solution look
+            // like a fresh correction on every solve, repeatedly moving
+            // landmarks and the tracker.
+            let pre_solve_sim3_nodes = state
+                .sim3_graph
+                .as_ref()
+                .map(|graph| graph.poses.clone());
             state.pending_since_last_trigger = 0;
             state.trigger_count += 1;
             // `Sim3` solves the parallel Sim3 mirror instead of the rigid
@@ -2937,9 +2946,11 @@ where
                         ),
                     };
                     if state.config.propagate_corrections {
-                        if let Some(old_pose) = keyframe.frame.pose.as_ref() {
-                            let siw_old = sim3_at_unit_scale(&old_pose.world_to_camera);
-                            corrections.insert(*id, siw_new.inverse().compose(&siw_old));
+                        if let Some(siw_old) = pre_solve_sim3_nodes
+                            .as_ref()
+                            .and_then(|nodes| nodes.get(id))
+                        {
+                            corrections.insert(*id, siw_new.inverse().compose(siw_old));
                         }
                     }
                     keyframe.frame.pose = Some(new_pose.clone());
