@@ -4145,6 +4145,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // via `--pose-graph-refinement`).
     let mut pose_graph_refinement_candidates_seen: usize = 0;
     let mut pose_graph_refinement_verified_constraints: usize = 0;
+    let mut pose_graph_refinement_appearance_ranked: usize = 0;
+    let mut pose_graph_refinement_appearance_pnp_verified: usize = 0;
+    let mut pose_graph_refinement_appearance_scale_failed: usize = 0;
+    let mut pose_graph_refinement_appearance_near_unit: usize = 0;
     let mut pose_graph_refinement_pgo_solves: usize = 0;
     let mut pose_graph_refinement_pcm_rejected: usize = 0;
     let mut pose_graph_refinement_covariance_rejected: usize = 0;
@@ -4958,6 +4962,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(stats) = result.pose_graph_refinement.as_ref() {
             pose_graph_refinement_candidates_seen += stats.verified_candidate_count;
             pose_graph_refinement_verified_constraints += stats.accepted_count;
+            pose_graph_refinement_appearance_ranked += stats.appearance_ranked_candidate_count;
+            pose_graph_refinement_appearance_pnp_verified += stats.appearance_candidate_count;
+            pose_graph_refinement_appearance_scale_failed +=
+                stats.appearance_scale_estimation_failed_count;
+            pose_graph_refinement_appearance_near_unit +=
+                stats.appearance_near_unit_scale_count;
             if stats.pose_graph_result.is_some()
                 || stats.gnc_result.is_some()
                 || stats.sim3_pose_graph_result.is_some()
@@ -5442,6 +5452,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_appearance_min_gap={pgr_appearance_min_gap}\n\
          pose_graph_refinement_appearance_max_candidates={pgr_appearance_max_candidates}\n\
          pose_graph_refinement_appearance_min_inliers={pgr_appearance_min_inliers}\n\
+         pose_graph_refinement_appearance_ranked={pgr_appearance_ranked}\n\
+         pose_graph_refinement_appearance_pnp_verified={pgr_appearance_pnp_verified}\n\
+         pose_graph_refinement_appearance_scale_failed={pgr_appearance_scale_failed}\n\
+         pose_graph_refinement_appearance_near_unit={pgr_appearance_near_unit}\n\
          pose_graph_refinement_constraints_shared={pgr_constraints_shared}\n\
          pose_graph_refinement_constraints_appearance={pgr_constraints_appearance}\n\
          pose_graph_refinement_propagate={pgr_propagate}\n\
@@ -5712,6 +5726,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_appearance_min_gap = args.pose_graph_refinement_appearance_min_gap,
         pgr_appearance_max_candidates = args.pose_graph_refinement_appearance_max_candidates,
         pgr_appearance_min_inliers = args.pose_graph_refinement_appearance_min_inliers,
+        pgr_appearance_ranked = pose_graph_refinement_appearance_ranked,
+        pgr_appearance_pnp_verified = pose_graph_refinement_appearance_pnp_verified,
+        pgr_appearance_scale_failed = pose_graph_refinement_appearance_scale_failed,
+        pgr_appearance_near_unit = pose_graph_refinement_appearance_near_unit,
         pgr_constraints_shared = pose_graph_refinement_constraints_shared,
         pgr_constraints_appearance = pose_graph_refinement_constraints_appearance,
         pgr_propagate = args.pose_graph_refinement_propagate,

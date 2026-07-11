@@ -1627,6 +1627,15 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// [`OnlineSlamLoopClosureRefinementConfig::appearance_candidates`] is
     /// unset.
     pub appearance_candidate_count: usize,
+    /// Number of keyframes surviving appearance ranking and the frame-gap
+    /// filter before descriptor matching / PnP verification.
+    pub appearance_ranked_candidate_count: usize,
+    /// Appearance candidates whose PnP verification succeeded but whose
+    /// matched 3D regions could not produce a robust Sim3 scale observation.
+    pub appearance_scale_estimation_failed_count: usize,
+    /// Robust scale observations rejected because they were within the
+    /// Sim3 arm's five-percent no-op band around unit scale.
+    pub appearance_near_unit_scale_count: usize,
     /// Number of appearance candidates admitted into the graph this frame
     /// (subset of `accepted_count`). Always `0` when
     /// `appearance_candidates` is unset.
@@ -2702,8 +2711,22 @@ where
         // whether `detect_loop_closure_candidates` found anything this
         // frame, since the whole point is to catch loops the shared-id
         // detector structurally cannot see.
-        let appearance_candidates: Vec<LoopClosureCandidate> =
+            let appearance_candidates: Vec<LoopClosureCandidate> =
             if let Some(appearance_config) = state.config.appearance_candidates.clone() {
+                stats.appearance_ranked_candidate_count =
+                    relocalization_mean_descriptor(&frame.descriptors)
+                        .map(|descriptor| {
+                            rank_appearance_loop_candidate_keyframes(
+                                &state.appearance_descriptor_cache,
+                                frame.id,
+                                &descriptor,
+                                appearance_config.min_similarity,
+                                appearance_config.min_keyframe_id_gap,
+                            )
+                            .len()
+                            .min(appearance_config.max_candidates_per_frame.max(1))
+                        })
+                        .unwrap_or(0);
                 let built = build_appearance_loop_candidates(
                     &self.map,
                     frame,
@@ -2776,12 +2799,14 @@ where
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
                     ) else {
+                        stats.appearance_scale_estimation_failed_count += 1;
                         // A PnP pose alone contains no scale observation.
                         // Do not let an arbitrary scale-1 edge perturb an
                         // already accurate map on the Sim3-only path.
                         continue;
                     };
                     if (scale - 1.0).abs() < 0.05 {
+                        stats.appearance_near_unit_scale_count += 1;
                         // This solver option is specifically the scale-drift
                         // correction arm. Leave near-unit rigid corrections
                         // to the established SE3 path.
