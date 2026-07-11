@@ -2791,18 +2791,22 @@ where
                     admitted.push(m);
                 }
                 state.graph.add_loop_closure_constraint(&constraint);
+                let measured_sim3_scale = estimate_loop_sim3_scale_3d3d(
+                    &self.map,
+                    constraint.from_keyframe_id,
+                    constraint.to_keyframe_id,
+                )
+                .unwrap_or(1.0);
                 if let Some(sim3_graph) = state.sim3_graph.as_mut() {
-                    // Scale-1 measurement: the PnP verifier that produced
-                    // this constraint recovers a metric relative pose from
-                    // the map's triangulated landmarks (see
-                    // `LoopRefinementVerifier::Pnp`'s doc comment), so
-                    // there is no independent scale to encode beyond the
-                    // odometry chain's own unit-scale convention.
                     let weight = (constraint.inlier_count as f64).max(1.0);
                     sim3_graph.add_edge(
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
-                        sim3_at_unit_scale(&constraint.relative_pose),
+                        Sim3::new(
+                            constraint.relative_pose.rotation,
+                            constraint.relative_pose.translation,
+                            measured_sim3_scale,
+                        ),
                         weight,
                     );
                 }
@@ -3880,6 +3884,78 @@ fn sim3_at_unit_scale(se3: &SE3) -> Sim3 {
     Sim3::new(se3.rotation, se3.translation, 1.0)
 }
 
+/// Estimate the relative scale of two independently triangulated keyframe
+/// regions from descriptor-matched 3D landmarks. Pairwise-distance ratios are
+/// invariant to the loop rotation and translation, so their median supplies
+/// the scale of the `from-camera -> to-camera` Sim3 measurement without
+/// coupling it to the PnP translation already used by the rigid graph.
+fn estimate_loop_sim3_scale_3d3d(
+    map: &VisualMap,
+    from_keyframe_id: u64,
+    to_keyframe_id: u64,
+) -> Option<f64> {
+    let from = map.keyframes.get(&from_keyframe_id)?;
+    let to = map.keyframes.get(&to_keyframe_id)?;
+    let from_pose = from.frame.pose.as_ref()?;
+    let to_pose = to.frame.pose.as_ref()?;
+
+    let collect = |keyframe: &Keyframe, pose: &Pose| {
+        keyframe
+            .observations
+            .iter()
+            .filter_map(|observation| {
+                let landmark = map.landmarks.get(&observation.landmark_id)?;
+                let descriptor = landmark.descriptor.clone()?;
+                Some((
+                    observation.landmark_id,
+                    descriptor,
+                    pose.transform_world_point(&landmark.position),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    let from_points = collect(from, from_pose);
+    let to_points = collect(to, to_pose);
+    if from_points.len() < 4 || to_points.len() < 4 {
+        return None;
+    }
+    let from_descriptors: Vec<Vec<f32>> =
+        from_points.iter().map(|(_, d, _)| d.clone()).collect();
+    let to_descriptors: Vec<Vec<f32>> = to_points.iter().map(|(_, d, _)| d.clone()).collect();
+    let matcher = visloc_vision::matching::BruteForceMatcher::default();
+    let forward = matcher.match_descriptors(&from_descriptors, &to_descriptors);
+    let reverse = matcher.match_descriptors(&to_descriptors, &from_descriptors);
+    let mut matched = Vec::new();
+    for m in forward {
+        let reciprocal = reverse
+            .iter()
+            .any(|r| r.query_index == m.train_index && r.train_index == m.query_index);
+        if reciprocal && from_points[m.query_index].0 != to_points[m.train_index].0 {
+            matched.push((from_points[m.query_index].2, to_points[m.train_index].2));
+        }
+    }
+    if matched.len() < 4 {
+        return None;
+    }
+
+    let mut ratios = Vec::new();
+    for i in 0..matched.len() {
+        for j in (i + 1)..matched.len() {
+            let from_distance = (matched[i].0 - matched[j].0).norm();
+            let to_distance = (matched[i].1 - matched[j].1).norm();
+            if from_distance > 1.0e-3 && to_distance > 1.0e-3 {
+                ratios.push(to_distance / from_distance);
+            }
+        }
+    }
+    if ratios.len() < 6 {
+        return None;
+    }
+    ratios.sort_by(f64::total_cmp);
+    let scale = ratios[ratios.len() / 2];
+    (scale.is_finite() && (0.25..=4.0).contains(&scale)).then_some(scale)
+}
+
 /// `(min, max)` per-node scale across a solved [`Sim3PoseGraph`]'s nodes.
 /// `None` when the graph has no nodes (never observed in practice — the
 /// graph always has at least the anchor before a solve can fire).
@@ -3952,6 +4028,74 @@ fn propagate_pose_graph_corrections_sim3(
         (0, None, None)
     } else {
         (moved, Some(max_displacement), Some(sum_displacement / moved as f64))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod sim3_scale_estimation_tests {
+    use super::*;
+    use nalgebra::{Point2, Point3};
+    use visloc_core::types::Landmark;
+
+    #[test]
+    fn recovers_scale_from_duplicate_landmark_regions() {
+        let mut map = VisualMap::new();
+        let mut from_frame = Frame::new(10, 1);
+        let mut to_frame = Frame::new(20, 1);
+        from_frame.pose = Some(Pose::identity());
+        to_frame.pose = Some(Pose::identity());
+        let mut from_observations = Vec::new();
+        let mut to_observations = Vec::new();
+        let points = [
+            Point3::new(0.0, 0.0, 4.0),
+            Point3::new(1.0, 0.0, 4.2),
+            Point3::new(0.0, 1.0, 4.4),
+            Point3::new(1.0, 1.0, 4.8),
+        ];
+        for (index, point) in points.into_iter().enumerate() {
+            let descriptor = vec![index as f32, 1.0, -(index as f32)];
+            let from_id = index as u64 + 1;
+            let to_id = index as u64 + 101;
+            let mut from_landmark = Landmark::new(from_id, point);
+            from_landmark.descriptor = Some(descriptor.clone());
+            let mut to_landmark = Landmark::new(
+                to_id,
+                Point3::from(point.coords * 1.7 + Vector3::new(2.0, -1.0, 0.5)),
+            );
+            to_landmark.descriptor = Some(descriptor);
+            map.landmarks.insert(from_id, from_landmark);
+            map.landmarks.insert(to_id, to_landmark);
+            from_observations.push(Observation {
+                frame_id: 10,
+                landmark_id: from_id,
+                keypoint_index: index,
+                xy: Point2::origin(),
+            });
+            to_observations.push(Observation {
+                frame_id: 20,
+                landmark_id: to_id,
+                keypoint_index: index,
+                xy: Point2::origin(),
+            });
+        }
+        map.keyframes.insert(
+            10,
+            Keyframe {
+                frame: from_frame,
+                observations: from_observations,
+            },
+        );
+        map.keyframes.insert(
+            20,
+            Keyframe {
+                frame: to_frame,
+                observations: to_observations,
+            },
+        );
+
+        let scale = estimate_loop_sim3_scale_3d3d(&map, 10, 20).unwrap();
+        assert!((scale - 1.7).abs() < 1.0e-9, "scale={scale}");
     }
 }
 
