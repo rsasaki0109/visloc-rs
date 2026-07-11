@@ -1633,6 +1633,9 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// Appearance candidates whose PnP verification succeeded but whose
     /// matched 3D regions could not produce a robust Sim3 scale observation.
     pub appearance_scale_estimation_failed_count: usize,
+    pub appearance_scale_insufficient_points_count: usize,
+    pub appearance_scale_insufficient_matches_count: usize,
+    pub appearance_scale_no_consensus_count: usize,
     /// Robust scale observations rejected because they were within the
     /// Sim3 arm's five-percent no-op band around unit scale.
     pub appearance_near_unit_scale_count: usize,
@@ -2794,16 +2797,30 @@ where
                     LoopRefinementSolver::Sim3(_)
                 ) && source == LoopClosureCandidateSource::Appearance
                 {
-                    let Some(scale) = estimate_loop_sim3_scale_3d3d(
+                    let scale = match estimate_loop_sim3_scale_3d3d(
                         &self.map,
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
-                    ) else {
-                        stats.appearance_scale_estimation_failed_count += 1;
+                    ) {
+                        Ok(scale) => scale,
+                        Err(reason) => {
+                            stats.appearance_scale_estimation_failed_count += 1;
+                            match reason {
+                                Sim3ScaleEstimationFailure::InsufficientPoints => {
+                                    stats.appearance_scale_insufficient_points_count += 1;
+                                }
+                                Sim3ScaleEstimationFailure::InsufficientMatches => {
+                                    stats.appearance_scale_insufficient_matches_count += 1;
+                                }
+                                Sim3ScaleEstimationFailure::NoConsensus => {
+                                    stats.appearance_scale_no_consensus_count += 1;
+                                }
+                            }
                         // A PnP pose alone contains no scale observation.
                         // Do not let an arbitrary scale-1 edge perturb an
                         // already accurate map on the Sim3-only path.
-                        continue;
+                            continue;
+                        }
                     };
                     if (scale - 1.0).abs() < 0.05 {
                         stats.appearance_near_unit_scale_count += 1;
@@ -3933,15 +3950,36 @@ fn sim3_at_unit_scale(se3: &SE3) -> Sim3 {
 /// invariant to the loop rotation and translation, so their median supplies
 /// the scale of the `from-camera -> to-camera` Sim3 measurement without
 /// coupling it to the PnP translation already used by the rigid graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sim3ScaleEstimationFailure {
+    InsufficientPoints,
+    InsufficientMatches,
+    NoConsensus,
+}
+
 fn estimate_loop_sim3_scale_3d3d(
     map: &VisualMap,
     from_keyframe_id: u64,
     to_keyframe_id: u64,
-) -> Option<f64> {
-    let from = map.keyframes.get(&from_keyframe_id)?;
-    let to = map.keyframes.get(&to_keyframe_id)?;
-    let from_pose = from.frame.pose.as_ref()?;
-    let to_pose = to.frame.pose.as_ref()?;
+) -> Result<f64, Sim3ScaleEstimationFailure> {
+    let from = map
+        .keyframes
+        .get(&from_keyframe_id)
+        .ok_or(Sim3ScaleEstimationFailure::InsufficientPoints)?;
+    let to = map
+        .keyframes
+        .get(&to_keyframe_id)
+        .ok_or(Sim3ScaleEstimationFailure::InsufficientPoints)?;
+    let from_pose = from
+        .frame
+        .pose
+        .as_ref()
+        .ok_or(Sim3ScaleEstimationFailure::InsufficientPoints)?;
+    let to_pose = to
+        .frame
+        .pose
+        .as_ref()
+        .ok_or(Sim3ScaleEstimationFailure::InsufficientPoints)?;
 
     let collect = |keyframe: &Keyframe, pose: &Pose| {
         keyframe
@@ -3961,7 +3999,7 @@ fn estimate_loop_sim3_scale_3d3d(
     let from_points = collect(from, from_pose);
     let to_points = collect(to, to_pose);
     if from_points.len() < 4 || to_points.len() < 4 {
-        return None;
+        return Err(Sim3ScaleEstimationFailure::InsufficientPoints);
     }
     let from_descriptors: Vec<Vec<f32>> =
         from_points.iter().map(|(_, d, _)| d.clone()).collect();
@@ -3979,7 +4017,7 @@ fn estimate_loop_sim3_scale_3d3d(
         }
     }
     if matched.len() < 6 {
-        return None;
+        return Err(Sim3ScaleEstimationFailure::InsufficientMatches);
     }
 
     // ORB-SLAM's Sim3Solver uses minimal-set RANSAC and accepts a hypothesis
@@ -4042,13 +4080,15 @@ fn estimate_loop_sim3_scale_3d3d(
     }
     let min_inliers = 6usize.max(matched.len().div_ceil(2));
     if best_inliers.len() < min_inliers || best_rmse > inlier_threshold * 0.5 {
-        return None;
+        return Err(Sim3ScaleEstimationFailure::NoConsensus);
     }
     let source: Vec<Point3<f64>> = best_inliers.iter().map(|&i| matched[i].0).collect();
     let target: Vec<Point3<f64>> = best_inliers.iter().map(|&i| matched[i].1).collect();
-    let refined = visloc_tracking::umeyama_similarity_transform(&source, &target, true)?;
+    let refined = visloc_tracking::umeyama_similarity_transform(&source, &target, true)
+        .ok_or(Sim3ScaleEstimationFailure::NoConsensus)?;
     (refined.scale.is_finite() && (0.5..=2.0).contains(&refined.scale))
         .then_some(refined.scale)
+        .ok_or(Sim3ScaleEstimationFailure::NoConsensus)
 }
 
 /// `(min, max)` per-node scale across a solved [`Sim3PoseGraph`]'s nodes.

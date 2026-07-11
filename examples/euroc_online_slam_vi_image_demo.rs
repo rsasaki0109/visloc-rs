@@ -4148,6 +4148,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_appearance_ranked: usize = 0;
     let mut pose_graph_refinement_appearance_pnp_verified: usize = 0;
     let mut pose_graph_refinement_appearance_scale_failed: usize = 0;
+    let mut pose_graph_refinement_appearance_scale_insufficient_points: usize = 0;
+    let mut pose_graph_refinement_appearance_scale_insufficient_matches: usize = 0;
+    let mut pose_graph_refinement_appearance_scale_no_consensus: usize = 0;
     let mut pose_graph_refinement_appearance_near_unit: usize = 0;
     let mut pose_graph_refinement_pgo_solves: usize = 0;
     let mut pose_graph_refinement_pcm_rejected: usize = 0;
@@ -4966,6 +4969,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pose_graph_refinement_appearance_pnp_verified += stats.appearance_candidate_count;
             pose_graph_refinement_appearance_scale_failed +=
                 stats.appearance_scale_estimation_failed_count;
+            pose_graph_refinement_appearance_scale_insufficient_points +=
+                stats.appearance_scale_insufficient_points_count;
+            pose_graph_refinement_appearance_scale_insufficient_matches +=
+                stats.appearance_scale_insufficient_matches_count;
+            pose_graph_refinement_appearance_scale_no_consensus +=
+                stats.appearance_scale_no_consensus_count;
             pose_graph_refinement_appearance_near_unit +=
                 stats.appearance_near_unit_scale_count;
             if stats.pose_graph_result.is_some()
@@ -5455,6 +5464,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_appearance_ranked={pgr_appearance_ranked}\n\
          pose_graph_refinement_appearance_pnp_verified={pgr_appearance_pnp_verified}\n\
          pose_graph_refinement_appearance_scale_failed={pgr_appearance_scale_failed}\n\
+         pose_graph_refinement_appearance_scale_insufficient_points={pgr_appearance_scale_insufficient_points}\n\
+         pose_graph_refinement_appearance_scale_insufficient_matches={pgr_appearance_scale_insufficient_matches}\n\
+         pose_graph_refinement_appearance_scale_no_consensus={pgr_appearance_scale_no_consensus}\n\
          pose_graph_refinement_appearance_near_unit={pgr_appearance_near_unit}\n\
          pose_graph_refinement_constraints_shared={pgr_constraints_shared}\n\
          pose_graph_refinement_constraints_appearance={pgr_constraints_appearance}\n\
@@ -5729,6 +5741,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_appearance_ranked = pose_graph_refinement_appearance_ranked,
         pgr_appearance_pnp_verified = pose_graph_refinement_appearance_pnp_verified,
         pgr_appearance_scale_failed = pose_graph_refinement_appearance_scale_failed,
+        pgr_appearance_scale_insufficient_points =
+            pose_graph_refinement_appearance_scale_insufficient_points,
+        pgr_appearance_scale_insufficient_matches =
+            pose_graph_refinement_appearance_scale_insufficient_matches,
+        pgr_appearance_scale_no_consensus =
+            pose_graph_refinement_appearance_scale_no_consensus,
         pgr_appearance_near_unit = pose_graph_refinement_appearance_near_unit,
         pgr_constraints_shared = pose_graph_refinement_constraints_shared,
         pgr_constraints_appearance = pose_graph_refinement_constraints_appearance,
