@@ -42,6 +42,9 @@ pub struct LoopClosureCandidate {
     /// the candidate; `None` when only the shared-landmark heuristic has
     /// produced the candidate.
     pub verification: Option<LoopClosureVerification>,
+    /// Query keypoint index paired with an older-map landmark id by the
+    /// appearance PnP correspondence builder. Empty for other sources.
+    pub pnp_query_landmark_pairs: Vec<(usize, u64)>,
 }
 
 /// Configuration thresholds for [`EssentialMatrixLoopClosureVerifier`].
@@ -921,6 +924,7 @@ where
                 score: verification.score,
                 geometrically_verified: true,
                 verification: Some(verification),
+                pnp_query_landmark_pairs: Vec::new(),
             });
         }
     }
@@ -1080,6 +1084,7 @@ pub(crate) fn detect_loop_closure_candidates(
                 score,
                 geometrically_verified: true,
                 verification: None,
+                pnp_query_landmark_pairs: Vec::new(),
             })
         })
         .collect::<Vec<_>>();

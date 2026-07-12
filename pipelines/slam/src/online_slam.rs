@@ -1071,6 +1071,12 @@ pub fn build_appearance_loop_candidates(
             score: f64::from(similarity) * verification.score,
             geometrically_verified: true,
             verification: Some(verification),
+            pnp_query_landmark_pairs: correspondence_set
+                .query_indices
+                .iter()
+                .copied()
+                .zip(correspondence_set.landmark_ids.iter().copied())
+                .collect(),
         });
     }
     candidates
@@ -2801,6 +2807,7 @@ where
                         &self.map,
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
+                        &candidate.pnp_query_landmark_pairs,
                     ) {
                         Ok(scale) => scale,
                         Err(reason) => {
@@ -3961,6 +3968,7 @@ fn estimate_loop_sim3_scale_3d3d(
     map: &VisualMap,
     from_keyframe_id: u64,
     to_keyframe_id: u64,
+    pnp_query_landmark_pairs: &[(usize, u64)],
 ) -> Result<f64, Sim3ScaleEstimationFailure> {
     let from = map
         .keyframes
@@ -4020,19 +4028,46 @@ fn estimate_loop_sim3_scale_3d3d(
     if from_points.len() < 4 || to_points.len() < 4 {
         return Err(Sim3ScaleEstimationFailure::InsufficientPoints);
     }
-    let from_descriptors: Vec<Vec<f32>> =
-        from_points.iter().map(|(_, d, _)| d.clone()).collect();
-    let to_descriptors: Vec<Vec<f32>> = to_points.iter().map(|(_, d, _)| d.clone()).collect();
-    let matcher = visloc_vision::matching::BruteForceMatcher::default();
-    let forward = matcher.match_descriptors(&from_descriptors, &to_descriptors);
-    let reverse = matcher.match_descriptors(&to_descriptors, &from_descriptors);
     let mut matched = Vec::new();
-    for m in forward {
-        let reciprocal = reverse
+    if pnp_query_landmark_pairs.is_empty() {
+        let from_descriptors: Vec<Vec<f32>> =
+            from_points.iter().map(|(_, d, _)| d.clone()).collect();
+        let to_descriptors: Vec<Vec<f32>> =
+            to_points.iter().map(|(_, d, _)| d.clone()).collect();
+        let matcher = visloc_vision::matching::BruteForceMatcher::default();
+        let forward = matcher.match_descriptors(&from_descriptors, &to_descriptors);
+        let reverse = matcher.match_descriptors(&to_descriptors, &from_descriptors);
+        for m in forward {
+            let reciprocal = reverse
+                .iter()
+                .any(|r| r.query_index == m.train_index && r.train_index == m.query_index);
+            if reciprocal && from_points[m.query_index].0 != to_points[m.train_index].0 {
+                matched.push((from_points[m.query_index].2, to_points[m.train_index].2));
+            }
+        }
+    } else {
+        let current_landmark_by_keypoint: HashMap<usize, u64> = to
+            .observations
             .iter()
-            .any(|r| r.query_index == m.train_index && r.train_index == m.query_index);
-        if reciprocal && from_points[m.query_index].0 != to_points[m.train_index].0 {
-            matched.push((from_points[m.query_index].2, to_points[m.train_index].2));
+            .map(|observation| (observation.keypoint_index, observation.landmark_id))
+            .collect();
+        for &(query_index, old_landmark_id) in pnp_query_landmark_pairs {
+            let Some(&current_landmark_id) = current_landmark_by_keypoint.get(&query_index) else {
+                continue;
+            };
+            if current_landmark_id == old_landmark_id {
+                continue;
+            }
+            let Some(old_landmark) = map.landmarks.get(&old_landmark_id) else {
+                continue;
+            };
+            let Some(current_landmark) = map.landmarks.get(&current_landmark_id) else {
+                continue;
+            };
+            matched.push((
+                from_pose.transform_world_point(&old_landmark.position),
+                to_pose.transform_world_point(&current_landmark.position),
+            ));
         }
     }
     if matched.len() < 6 {
@@ -4260,7 +4295,10 @@ mod sim3_scale_estimation_tests {
             },
         );
 
-        let scale = estimate_loop_sim3_scale_3d3d(&map, 10, 20).unwrap();
+        let pnp_pairs: Vec<(usize, u64)> = (0..points.len())
+            .map(|index| (index, index as u64 + 1))
+            .collect();
+        let scale = estimate_loop_sim3_scale_3d3d(&map, 10, 20, &pnp_pairs).unwrap();
         assert!((scale - 1.7).abs() < 1.0e-9, "scale={scale}");
     }
 }
