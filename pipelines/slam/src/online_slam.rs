@@ -3987,7 +3987,18 @@ fn estimate_loop_sim3_scale_3d3d(
             .iter()
             .filter_map(|observation| {
                 let landmark = map.landmarks.get(&observation.landmark_id)?;
-                let descriptor = landmark.descriptor.clone()?;
+                // Fresh stereo/replenished landmarks do not always have a
+                // descriptor promoted into the map slot yet, while their
+                // observing keyframe still owns the exact feature descriptor
+                // that PnP used. Reuse it instead of discarding an otherwise
+                // valid 3D point from the Sim3 correspondence pool.
+                let descriptor = landmark.descriptor.clone().or_else(|| {
+                    keyframe
+                        .frame
+                        .descriptors
+                        .get(observation.keypoint_index)
+                        .cloned()
+                })?;
                 Some((
                     observation.landmark_id,
                     descriptor,
@@ -4194,17 +4205,23 @@ mod sim3_scale_estimation_tests {
         ];
         for (index, point) in points.into_iter().enumerate() {
             let descriptor = vec![index as f32, 1.0, -(index as f32)];
+            from_frame.descriptors.push(descriptor.clone());
+            to_frame.descriptors.push(descriptor.clone());
             let from_id = index as u64 + 1;
             let to_id = index as u64 + 101;
             let mut from_landmark = Landmark::new(from_id, point);
-            from_landmark.descriptor = Some(descriptor.clone());
+            if index % 2 == 0 {
+                from_landmark.descriptor = Some(descriptor.clone());
+            }
             let transformed = if index < 6 {
                 point.coords * 1.7 + Vector3::new(2.0, -1.0, 0.5)
             } else {
                 Vector3::new(20.0 + index as f64, -15.0, 2.0)
             };
             let mut to_landmark = Landmark::new(to_id, Point3::from(transformed));
-            to_landmark.descriptor = Some(descriptor);
+            if index % 2 == 0 {
+                to_landmark.descriptor = Some(descriptor);
+            }
             map.landmarks.insert(from_id, from_landmark);
             map.landmarks.insert(to_id, to_landmark);
             from_observations.push(Observation {
