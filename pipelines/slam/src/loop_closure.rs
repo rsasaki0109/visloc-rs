@@ -334,7 +334,7 @@ where
         keyframe_pose: &Pose,
         camera: &Camera,
     ) -> LoopClosureVerification {
-        self.verify_impl(correspondences, keyframe_pose, camera, None)
+        self.verify_impl(correspondences, keyframe_pose, camera, None).0
     }
 
     /// Run PnP RANSAC with optional confidence-weighted sampling. This keeps the
@@ -347,7 +347,19 @@ where
         camera: &Camera,
         weights: Option<&[f32]>,
     ) -> LoopClosureVerification {
-        self.verify_impl(correspondences, keyframe_pose, camera, weights)
+        self.verify_impl(correspondences, keyframe_pose, camera, weights).0
+    }
+
+    /// PnP verification plus indices into `correspondences` selected as
+    /// RANSAC inliers. Used by Sim3 loop estimation to avoid reintroducing
+    /// descriptor outliers already rejected by PnP.
+    pub fn verify_with_inlier_indices(
+        &self,
+        correspondences: &[Correspondence2D3D],
+        keyframe_pose: &Pose,
+        camera: &Camera,
+    ) -> (LoopClosureVerification, Vec<usize>) {
+        self.verify_impl(correspondences, keyframe_pose, camera, None)
     }
 
     fn verify_impl(
@@ -356,10 +368,10 @@ where
         keyframe_pose: &Pose,
         camera: &Camera,
         weights: Option<&[f32]>,
-    ) -> LoopClosureVerification {
+    ) -> (LoopClosureVerification, Vec<usize>) {
         let correspondence_count = correspondences.len();
         if correspondence_count < self.config.min_inliers {
-            return LoopClosureVerification {
+            return (LoopClosureVerification {
                 verified: false,
                 correspondence_count,
                 inlier_count: 0,
@@ -371,7 +383,7 @@ where
                 ),
                 relative_pose: None,
                 mean_reprojection_error_px: None,
-            };
+            }, Vec::new());
         }
 
         let report = match weights {
@@ -387,7 +399,7 @@ where
             _ => self.ransac.estimate(correspondences, camera),
         };
         let Some(report) = report else {
-            return LoopClosureVerification {
+            return (LoopClosureVerification {
                 verified: false,
                 correspondence_count,
                 inlier_count: 0,
@@ -399,7 +411,7 @@ where
                 ),
                 relative_pose: None,
                 mean_reprojection_error_px: None,
-            };
+            }, Vec::new());
         };
 
         let inlier_count = report.inliers.len();
@@ -426,7 +438,8 @@ where
             .pose
             .world_to_camera
             .compose(&keyframe_pose.world_to_camera.inverse());
-        LoopClosureVerification {
+        let inlier_indices = report.inliers.clone();
+        (LoopClosureVerification {
             verified,
             correspondence_count,
             inlier_count,
@@ -436,7 +449,7 @@ where
             failure_reason,
             relative_pose: Some(relative_pose),
             mean_reprojection_error_px: Some(mean_reprojection_error_px),
-        }
+        }, inlier_indices)
     }
 }
 

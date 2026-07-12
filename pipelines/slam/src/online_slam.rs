@@ -1056,8 +1056,11 @@ pub fn build_appearance_loop_candidates(
         let Ok(correspondence_set) = correspondence_builder.build(&query, map, &store) else {
             continue;
         };
-        let verification =
-            verifier.verify(&correspondence_set.correspondences, keyframe_pose, camera);
+        let (verification, pnp_inlier_indices) = verifier.verify_with_inlier_indices(
+            &correspondence_set.correspondences,
+            keyframe_pose,
+            camera,
+        );
         if !verification.verified {
             continue;
         }
@@ -1071,11 +1074,14 @@ pub fn build_appearance_loop_candidates(
             score: f64::from(similarity) * verification.score,
             geometrically_verified: true,
             verification: Some(verification),
-            pnp_query_landmark_pairs: correspondence_set
-                .query_indices
-                .iter()
-                .copied()
-                .zip(correspondence_set.landmark_ids.iter().copied())
+            pnp_query_landmark_pairs: pnp_inlier_indices
+                .into_iter()
+                .filter_map(|index| {
+                    Some((
+                        *correspondence_set.query_indices.get(index)?,
+                        *correspondence_set.landmark_ids.get(index)?,
+                    ))
+                })
                 .collect(),
         });
     }
