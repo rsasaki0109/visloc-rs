@@ -3981,7 +3981,7 @@ fn estimate_loop_sim3_scale_3d3d(
         .as_ref()
         .ok_or(Sim3ScaleEstimationFailure::InsufficientPoints)?;
 
-    let collect = |keyframe: &Keyframe, pose: &Pose| {
+    let collect = |keyframe: &Keyframe, pose: &Pose, prefer_frame_descriptor: bool| {
         keyframe
             .observations
             .iter()
@@ -3992,13 +3992,18 @@ fn estimate_loop_sim3_scale_3d3d(
                 // observing keyframe still owns the exact feature descriptor
                 // that PnP used. Reuse it instead of discarding an otherwise
                 // valid 3D point from the Sim3 correspondence pool.
-                let descriptor = landmark.descriptor.clone().or_else(|| {
+                let frame_descriptor = || {
                     keyframe
                         .frame
                         .descriptors
                         .get(observation.keypoint_index)
                         .cloned()
-                })?;
+                };
+                let descriptor = if prefer_frame_descriptor {
+                    frame_descriptor().or_else(|| landmark.descriptor.clone())
+                } else {
+                    landmark.descriptor.clone().or_else(frame_descriptor)
+                }?;
                 Some((
                     observation.landmark_id,
                     descriptor,
@@ -4007,8 +4012,11 @@ fn estimate_loop_sim3_scale_3d3d(
             })
             .collect::<Vec<_>>()
     };
-    let from_points = collect(from, from_pose);
-    let to_points = collect(to, to_pose);
+    // Match in the same direction as appearance PnP: current/query frame
+    // features against the older keyframe's map-landmark descriptors. The
+    // current observation's 3D landmark then supplies the second endpoint.
+    let from_points = collect(from, from_pose, false);
+    let to_points = collect(to, to_pose, true);
     if from_points.len() < 4 || to_points.len() < 4 {
         return Err(Sim3ScaleEstimationFailure::InsufficientPoints);
     }
@@ -4219,9 +4227,9 @@ mod sim3_scale_estimation_tests {
                 Vector3::new(20.0 + index as f64, -15.0, 2.0)
             };
             let mut to_landmark = Landmark::new(to_id, Point3::from(transformed));
-            if index % 2 == 0 {
-                to_landmark.descriptor = Some(descriptor);
-            }
+            // The query-side map descriptor may be stale/aggregated; the
+            // observing frame descriptor above must take precedence.
+            to_landmark.descriptor = Some(vec![100.0 + index as f32, -50.0, 25.0]);
             map.landmarks.insert(from_id, from_landmark);
             map.landmarks.insert(to_id, to_landmark);
             from_observations.push(Observation {
