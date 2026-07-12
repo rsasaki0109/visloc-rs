@@ -66,6 +66,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dpi", type=int, default=92)
     p.add_argument("--fig-width", type=float, default=8.27)
     p.add_argument("--fig-height", type=float, default=3.52)
+    p.add_argument(
+        "--longest-continuous-run",
+        action="store_true",
+        help=(
+            "render only the longest consecutive, error-gated tracking run; "
+            "useful for a hero clip whose estimate remains live throughout"
+        ),
+    )
     return p.parse_args()
 
 
@@ -186,6 +194,31 @@ def main() -> int:
     n_bad = int((~good).sum())
     if n_bad:
         print(f"excluding {n_bad} frame(s) with aligned error > {args.max_position_error} m from estimate polyline")
+
+    if args.longest_continuous_run:
+        best_start = best_end = run_start = 0
+        for i in range(len(fidx)):
+            continues = good[i] and (
+                i == run_start or (good[i - 1] and fidx[i] == fidx[i - 1] + 1)
+            )
+            if not continues:
+                run_start = i if good[i] else i + 1
+            if good[i] and i + 1 - run_start > best_end - best_start:
+                best_start, best_end = run_start, i + 1
+        if best_end - best_start < 10:
+            print("no continuous error-gated tracking run with at least 10 frames", file=sys.stderr)
+            return 1
+        print(
+            f"selected continuous tracking run frames {fidx[best_start]}.."
+            f"{fidx[best_end - 1]} ({best_end - best_start} frames)"
+        )
+        rows = rows[best_start:best_end]
+        ts = ts[best_start:best_end]
+        fidx = fidx[best_start:best_end]
+        gt = gt[best_start:best_end]
+        est = est[best_start:best_end]
+        aligned_err = aligned_err[best_start:best_end]
+        good = good[best_start:best_end]
 
     rmse = float(np.sqrt((aligned_err[good] ** 2).mean()))
 
