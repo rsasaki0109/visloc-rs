@@ -4124,7 +4124,12 @@ fn estimate_loop_sim3_scale_3d3d(
     }
     scene_distances.sort_by(f64::total_cmp);
     let scene_scale = scene_distances[scene_distances.len() / 2];
-    let inlier_threshold = (scene_scale * 0.03).clamp(0.02, 0.20);
+    // Rectified stereo depth uncertainty grows quadratically with range;
+    // ORB-SLAM therefore gates Sim3 correspondences in image reprojection
+    // space rather than demanding centimetre-level 3D agreement. This
+    // dependency-free approximation scales the metric tolerance with scene
+    // extent while retaining a finite cap against arbitrary matches.
+    let inlier_threshold = (scene_scale * 0.10).clamp(0.05, 1.0);
 
     let mut best_inliers = Vec::new();
     let mut best_rmse = f64::INFINITY;
@@ -4172,7 +4177,7 @@ fn estimate_loop_sim3_scale_3d3d(
         }
     }
     let min_inliers = 6usize.max(matched.len().div_ceil(2));
-    if best_inliers.len() < min_inliers || best_rmse > inlier_threshold * 0.5 {
+    if best_inliers.len() < min_inliers || best_rmse > inlier_threshold * 0.75 {
         return Err(Sim3ScaleEstimationFailure::NoConsensus);
     }
     let source: Vec<Point3<f64>> = best_inliers.iter().map(|&i| matched[i].0).collect();
