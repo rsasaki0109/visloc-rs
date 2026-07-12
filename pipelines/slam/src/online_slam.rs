@@ -2000,6 +2000,22 @@ where
     where
         I: IntoIterator<Item = LandmarkCandidate>,
     {
+        self.process_frame_with_metric_points(frame, candidates, &HashMap::new())
+    }
+
+    /// Process a frame while exposing independently triangulated metric 3D
+    /// points in the current camera frame, keyed by query keypoint index.
+    /// The lookup is consumed only by appearance-loop Sim3 verification;
+    /// tracking and mapping retain the existing `process_frame` behaviour.
+    pub fn process_frame_with_metric_points<I>(
+        &mut self,
+        frame: &Frame,
+        candidates: I,
+        metric_points_camera: &HashMap<usize, Point3<f64>>,
+    ) -> OnlineSlamResult
+    where
+        I: IntoIterator<Item = LandmarkCandidate>,
+    {
         let mut tracking = self.tracker.track_frame(frame, &self.map);
         // Relocalization-on-tracker-death: if the primary attempt
         // failed and the stage is enabled, run a fresh PnP against the
@@ -2084,6 +2100,7 @@ where
             &tracking,
             applied_update.as_ref(),
             &mut loop_closure_candidates,
+            metric_points_camera,
         );
 
         OnlineSlamResult {
@@ -2615,6 +2632,7 @@ where
         tracking: &TrackingResult,
         applied_update: Option<&AppliedMapUpdate>,
         loop_closure_candidates: &mut [LoopClosureCandidate],
+        metric_points_camera: &HashMap<usize, Point3<f64>>,
     ) -> Option<OnlineSlamLoopClosureRefinementStats> {
         let state = self.pose_graph_state.as_mut()?;
         // The pipeline mirrors keyframes into the running graph on
@@ -2814,6 +2832,7 @@ where
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
                         &candidate.pnp_query_landmark_pairs,
+                        metric_points_camera,
                     ) {
                         Ok(scale) => scale,
                         Err(reason) => {
@@ -3975,6 +3994,7 @@ fn estimate_loop_sim3_scale_3d3d(
     from_keyframe_id: u64,
     to_keyframe_id: u64,
     pnp_query_landmark_pairs: &[(usize, u64)],
+    metric_points_camera: &HashMap<usize, Point3<f64>>,
 ) -> Result<f64, Sim3ScaleEstimationFailure> {
     let from = map
         .keyframes
@@ -4050,6 +4070,19 @@ fn estimate_loop_sim3_scale_3d3d(
             if reciprocal && from_points[m.query_index].0 != to_points[m.train_index].0 {
                 matched.push((from_points[m.query_index].2, to_points[m.train_index].2));
             }
+        }
+    } else if !metric_points_camera.is_empty() {
+        for &(query_index, old_landmark_id) in pnp_query_landmark_pairs {
+            let Some(current_point) = metric_points_camera.get(&query_index) else {
+                continue;
+            };
+            let Some(old_landmark) = map.landmarks.get(&old_landmark_id) else {
+                continue;
+            };
+            matched.push((
+                from_pose.transform_world_point(&old_landmark.position),
+                *current_point,
+            ));
         }
     } else {
         let current_landmark_by_keypoint: HashMap<usize, u64> = to
@@ -4304,7 +4337,14 @@ mod sim3_scale_estimation_tests {
         let pnp_pairs: Vec<(usize, u64)> = (0..points.len())
             .map(|index| (index, index as u64 + 1))
             .collect();
-        let scale = estimate_loop_sim3_scale_3d3d(&map, 10, 20, &pnp_pairs).unwrap();
+        let scale = estimate_loop_sim3_scale_3d3d(
+            &map,
+            10,
+            20,
+            &pnp_pairs,
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!((scale - 1.7).abs() < 1.0e-9, "scale={scale}");
     }
 }

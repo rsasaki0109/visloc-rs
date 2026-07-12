@@ -112,7 +112,8 @@ pub use visloc_localization::{
     RadiusLandmarkSelector, RadiusSubmapSelector, SelectableMapProvider, SubmapSelector,
 };
 pub use visloc_mapping::{
-    build_stereo_replenish_candidates, AppliedMapUpdate, KeyframeDecision, KeyframeDecisionReason,
+    build_stereo_metric_points, build_stereo_replenish_candidates, AppliedMapUpdate,
+    KeyframeDecision, KeyframeDecisionReason,
     KeyframePolicy, KeyframePolicyConfig, LandmarkCandidate, LandmarkCandidateId,
     LandmarkCandidateMappingFailure, LandmarkCandidateMappingFailureReason,
     LandmarkCandidateObservation, LandmarkCandidateValidationConfig,
@@ -238,7 +239,7 @@ pub use two_view_vo::{
 /// that prefer explicit imports.
 pub mod prelude {
     pub use crate::{
-        build_stereo_replenish_candidates, localize, localize_frame,
+        build_stereo_metric_points, build_stereo_replenish_candidates, localize, localize_frame,
         localize_frame_with_descriptor_store, localize_frames,
         localize_frames_with_descriptor_store, localize_with_descriptor_store, map_provider_stats,
         online_slam_results_to_html_report, parse_external_deep_features_txt,

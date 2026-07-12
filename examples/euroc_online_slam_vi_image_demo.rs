@@ -116,7 +116,8 @@ use visloc_rs::vision::stereo_bootstrap::{
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::{
-    build_stereo_replenish_candidates, read_external_deep_features_txt,
+    build_stereo_metric_points, build_stereo_replenish_candidates,
+    read_external_deep_features_txt,
     umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
     AdaptiveMotionMode, AdaptiveVelocityGateConfig, BruteForceMatcher, ConstantPoseMotionModel,
     ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
@@ -4276,6 +4277,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let frame = frame_from_features(frame_idx as u64, camera_id, &features);
 
+        // Metric stereo points must exist before `process_frame`: appearance
+        // PnP runs inside that call, and its inlier query indices are the join
+        // key between old-map 3D points and these independent current-frame
+        // stereo depths for Sim3 scale estimation.
+        let stereo_metric_points = if args.stereo_landmark_replenish {
+            if let Some(cam1_setup) = cam1_stereo_setup.as_ref() {
+                if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
+                    entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
+                }) {
+                    let cam1_image_path = dataset
+                        .cam1_image_dir
+                        .join(&dataset.cam1_images[cam1_idx].filename);
+                    if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
+                        extractor.set_camera(SuperPointCamera::Cam1);
+                        extractor.set_frame_idx(cam1_idx);
+                        let extracted = extractor.extract(&cam1_image);
+                        extractor.set_camera(SuperPointCamera::Cam0);
+                        if let Ok(raw) = extracted {
+                            let cam1_features = undistort_feature_keypoints(
+                                &cam1_setup.distortion,
+                                &cam1_setup.camera,
+                                &raw,
+                            );
+                            build_stereo_metric_points(
+                                &camera,
+                                &cam1_setup.camera,
+                                &cam1_setup.cam0_to_cam1,
+                                &features,
+                                &cam1_features,
+                                &stereo_replenish_config,
+                            )
+                        } else {
+                            std::collections::HashMap::new()
+                        }
+                    } else {
+                        std::collections::HashMap::new()
+                    }
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
         // The most recently applied keyframe, captured *before* this
         // frame's own `process_frame` call, anchors any replenishment
         // candidates built below: `process_keyframe`'s triangulator only
@@ -4300,7 +4348,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
-        let mut result = slam.process_frame(&frame, candidates_to_submit);
+        let mut result = slam.process_frame_with_metric_points(
+            &frame,
+            candidates_to_submit,
+            &stereo_metric_points,
+        );
         let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
             && result

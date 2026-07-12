@@ -13,7 +13,9 @@ use visloc_core::types::{
 use visloc_tracking::{TrackingEvent, TrackingResult};
 
 mod stereo_replenish;
-pub use stereo_replenish::{build_stereo_replenish_candidates, StereoReplenishConfig};
+pub use stereo_replenish::{
+    build_stereo_metric_points, build_stereo_replenish_candidates, StereoReplenishConfig,
+};
 
 pub trait KeyframePolicy {
     fn evaluate(&mut self, result: &TrackingResult) -> KeyframeDecision;

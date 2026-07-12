@@ -22,7 +22,7 @@
 //! permissive defaults so the common case still admits plenty of fresh
 //! landmarks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::Point2;
 use visloc_core::geometry::{Pose, SE3};
@@ -117,6 +117,37 @@ impl Default for StereoReplenishConfig {
             max_depth_meters: 50.0,
         }
     }
+}
+
+/// Triangulate same-instant stereo features into metric cam0-frame points,
+/// keyed by cam0 keypoint index. Unlike replenishment candidate construction,
+/// this requires neither a tracked pose nor an anchor keyframe and can run
+/// before online tracking/loop closure.
+pub fn build_stereo_metric_points(
+    cam0_camera: &Camera,
+    cam1_camera: &Camera,
+    cam0_to_cam1: &SE3,
+    cam0_features: &FeatureSet,
+    cam1_features: &FeatureSet,
+    config: &StereoReplenishConfig,
+) -> HashMap<usize, nalgebra::Point3<f64>> {
+    bootstrap_stereo_landmarks(
+        cam0_camera,
+        cam1_camera,
+        cam0_to_cam1,
+        cam0_features,
+        cam1_features,
+        &config.bootstrap_config,
+    )
+    .into_iter()
+    .filter(|survivor| {
+        let depth = survivor.point_left_camera_frame.z;
+        depth.is_finite()
+            && depth >= config.min_depth_meters
+            && depth <= config.max_depth_meters
+    })
+    .map(|survivor| (survivor.left_keypoint_index, survivor.point_left_camera_frame))
+    .collect()
 }
 
 /// Build stereo-replenishment [`LandmarkCandidate`]s for the current frame.
