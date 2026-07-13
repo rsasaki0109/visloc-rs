@@ -29,6 +29,17 @@ the corresponding ablation is reproduced here.
 | [ORB-SLAM2 (2017)](https://arxiv.org/abs/1610.06475) | Monocular, stereo, and RGB-D SLAM with monocular/stereo BA residuals and metric scale | Stereo loops must fix scale to one; optimize stereo reprojection residuals instead of recovering scale from two noisy 3-D clouds |
 | [ORB-SLAM3 (2021)](https://arxiv.org/abs/2007.11898) | MAP visual-inertial estimation, Atlas multi-map recovery, and improved-recall place recognition | Verify a geometrically matched place through its local covisible keyframes, then fuse map points and optimize the affected map |
 
+## Correspondence, triangulation, and sparse optimization foundations
+
+| Work | Central contribution | visloc-rs hypothesis |
+| --- | --- | --- |
+| [Lucas--Kanade (1981)](https://idl.uw.edu/living-papers-paper/lucas-kanade/index.pdf) | Iterative gradient-based image registration obtains subpixel displacement without an exhaustive correspondence search | Compare descriptor-only projection rematching with bidirectional patch refinement; gate the refined track on photometric residual, convergence, and forward/backward consistency |
+| [Shi--Tomasi, Good Features to Track (CVPR 1994)](https://publications.ri.cmu.edu/good-features-to-track) | Selects patches from the smaller structure-tensor eigenvalue and monitors affine tracking failure, occlusion, and disocclusion | Replenish tracks by predicted trackability and spatial coverage rather than detector score alone, and retire tracks when their local appearance ceases to support one physical point |
+| [Hartley--Sturm triangulation (CVIU 1997)](https://perception.inrialpes.fr/Publications/1997/HS97/HartleySturm-cviu97.pdf) | Finds the global minimum of a Gaussian image-coordinate correction instead of intersecting noisy rays or accepting a local minimum | Replace midpoint-style stereo depth confidence with reprojection-domain triangulation, cheirality, parallax, and propagated pixel covariance; never use raw 3-D distance as though depth noise were isotropic |
+| [Bundle Adjustment -- A Modern Synthesis (2000)](https://hal.inria.fr/inria-00548290) | Defines joint robust structure/camera refinement, gauge freedom, quality control, and sparse second-order methods | Every BA fixture must verify a fixed gauge, robust reprojection weighting, Schur landmark elimination, rejected-step rollback, and a decrease in the exact cost reported to the caller |
+| [g2o paper (ICRA 2011)](https://ais.informatik.uni-freiburg.de/publications/papers/kuemmerle11icra.pdf) and [official implementation](https://github.com/RainerKuemmerle/g2o) | Expresses pose SLAM and BA as extensible sparse nonlinear graph optimization and exploits each graph's block structure | Cross-check SE(3) residual direction, analytic/numeric Jacobians, gauge fixing, and LM/GN convergence on exported visloc-rs graphs before attributing a trajectory change to loop selection |
+| [iSAM2 (IJRR 2012)](https://www.cs.cmu.edu/~kaess/pub/Kaess12ijrr.html) and [GTSAM ISAM2](https://gtsam.org/doxygen/a04947.html) | Bayes-tree updates provide incremental variable reordering and selective relinearization without periodic full batch solves | Benchmark an incremental factor-history back end against batch PGO/BA, including loop-factor removal and delayed relinearization after GNC/PCM changes the accepted set; equal final cost is required before runtime can decide |
+
 ## Direct and hybrid systems
 
 | Work | Central contribution | visloc-rs hypothesis |
@@ -268,9 +279,12 @@ evidence violates at least one safety or improvement gate.
    variables on injected and naturally occurring false closures.
 5. Fuse duplicate map points and run loop-side covisibility BA after SE(3) PGO.
 6. Propagate stereo disparity uncertainty into triangulation, PnP, and BA.
-7. Build a genuinely tightly coupled stereo-inertial window with consistent
+7. Export deterministic graph fixtures, cross-check gauge/Jacobian/final cost
+   against g2o or GTSAM, then compare batch solves with an incremental Bayes-tree
+   factor history that can remove rejected loop factors.
+8. Build a genuinely tightly coupled stereo-inertial window with consistent
    relinearization and delayed prior reconstruction.
-8. Only then benchmark learned recurrent patch/pointmap front ends and dense map
+9. Only then benchmark learned recurrent patch/pointmap front ends and dense map
    representations.
 
 ## Recorded diagnostic result
