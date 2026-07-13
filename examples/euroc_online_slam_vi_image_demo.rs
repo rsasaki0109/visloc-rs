@@ -116,8 +116,7 @@ use visloc_rs::vision::stereo_bootstrap::{
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::{
-    build_stereo_metric_points, build_stereo_replenish_candidates,
-    read_external_deep_features_txt,
+    build_stereo_replenish_candidates, read_external_deep_features_txt,
     umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
     AdaptiveMotionMode, AdaptiveVelocityGateConfig, BruteForceMatcher, ConstantPoseMotionModel,
     ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
@@ -2481,6 +2480,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                  that path (see LoopRefinementSolver::Sim3's doc comment)."
             );
         }
+        if pose_graph_refinement_solver == LoopRefinementSolverKind::Sim3
+            && (stereo_bootstrap || stereo_landmark_replenish)
+        {
+            return Err(
+                "--pose-graph-refinement-solver sim3 is not valid for metric stereo maps; \
+                 ORB-SLAM2/3 fix loop scale to 1 for stereo/RGB-D, so use the default \
+                 --pose-graph-refinement-solver se3"
+                    .into(),
+            );
+        }
     }
     Ok(CliArgs {
         euroc_dir,
@@ -4277,11 +4286,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let frame = frame_from_features(frame_idx as u64, camera_id, &features);
 
-        // Metric stereo points must exist before `process_frame`: appearance
-        // PnP runs inside that call, and its inlier query indices are the join
-        // key between old-map 3D points and these independent current-frame
-        // stereo depths for Sim3 scale estimation.
-        let stereo_metric_points = if args.stereo_landmark_replenish {
+        // Extract cam1 once per frame and share the undistorted features
+        // between re-bootstrap and landmark replenishment below. Metric
+        // stereo loop closure fixes scale to one (ORB-SLAM2/3 convention),
+        // so this demo deliberately does not build a second 3D point set for
+        // per-loop Sim3 scale estimation.
+        let cam1_features_for_frame = if args.stereo_landmark_replenish {
             if let Some(cam1_setup) = cam1_stereo_setup.as_ref() {
                 if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
                     entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
@@ -4300,28 +4310,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &cam1_setup.camera,
                                 &raw,
                             );
-                            build_stereo_metric_points(
-                                &camera,
-                                &cam1_setup.camera,
-                                &cam1_setup.cam0_to_cam1,
-                                &features,
-                                &cam1_features,
-                                &stereo_replenish_config,
-                            )
+                            Some(cam1_features)
                         } else {
-                            std::collections::HashMap::new()
+                            None
                         }
                     } else {
-                        std::collections::HashMap::new()
+                        None
                     }
                 } else {
-                    std::collections::HashMap::new()
+                    None
                 }
             } else {
-                std::collections::HashMap::new()
+                None
             }
         } else {
-            std::collections::HashMap::new()
+            None
         };
 
         // The most recently applied keyframe, captured *before* this
@@ -4348,11 +4351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
-        let mut result = slam.process_frame_with_metric_points(
-            &frame,
-            candidates_to_submit,
-            &stereo_metric_points,
-        );
+        let mut result = slam.process_frame(&frame, candidates_to_submit);
         let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
             && result
@@ -4390,89 +4389,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         >= args.rebootstrap_after_lost_frames.unwrap_or(usize::MAX)
                 {
                     let min_stereo_matches = args.keyframe_min_inliers.unwrap_or(15).max(1);
-                    if let (Some(cam1_setup), Some(cam1_idx)) = (
-                        cam1_stereo_setup.as_ref(),
-                        dataset.cam1_images.iter().position(|entry| {
-                            entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
-                        }),
-                    ) {
-                        let cam1_image_path = dataset
-                            .cam1_image_dir
-                            .join(&dataset.cam1_images[cam1_idx].filename);
-                        if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
-                            extractor.set_camera(SuperPointCamera::Cam1);
-                            extractor.set_frame_idx(cam1_idx);
-                            let cam1_features_result = extractor.extract(&cam1_image);
-                            extractor.set_camera(SuperPointCamera::Cam0);
-                            if let Ok(cam1_features_raw) = cam1_features_result {
-                                let cam1_features = undistort_feature_keypoints(
-                                    &cam1_setup.distortion,
-                                    &cam1_setup.camera,
-                                    &cam1_features_raw,
-                                );
-                                let stereo_matches = bootstrap_stereo_landmarks(
-                                    &camera,
-                                    &cam1_setup.camera,
-                                    &cam1_setup.cam0_to_cam1,
-                                    &features,
-                                    &cam1_features,
-                                    &StereoBootstrapConfig::default(),
-                                );
-                                if stereo_matches.len() >= min_stereo_matches {
-                                    let gt = nearest_ground_truth(
-                                        &dataset.ground_truth,
-                                        image_entry.timestamp_nanoseconds,
-                                    );
-                                    let seed_pose = world_to_camera_pose(
-                                        &gt.orientation_world,
-                                        &gt.position_world,
-                                        &body_to_camera,
-                                    );
-                                    let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
-                                        slam.map_mut(),
-                                        &seed_pose,
-                                        &features,
-                                        &stereo_matches,
-                                        &mut next_rebootstrap_landmark_id,
-                                    );
-                                    let map_stats = map_provider_stats_from_map(slam.map());
-                                    let restart_tracking =
-                                        build_gt_seeded_rebootstrap_tracking_result(
-                                            frame_idx as u64,
-                                            seed_pose,
-                                            &stereo_matches,
-                                            &landmark_ids,
-                                            map_stats,
-                                        );
-                                    slam.tracker
-                                        .accept_segment_restart_result(restart_tracking.clone());
-                                    if let Some(state) = slam.relocalization_state.as_mut() {
-                                        state.consecutive_failed_attempts = 0;
-                                        state.pending_confirmation = None;
-                                    }
-                                    pending_replenish_candidates.clear();
-                                    let keyframe =
-                                        keyframe_from_tracking_result(&frame, &restart_tracking);
-                                    let map_snapshot = slam.map().clone();
-                                    let mapping_result = slam.mapper.process_keyframe(
-                                        &map_snapshot,
-                                        &restart_tracking,
-                                        keyframe,
-                                        Vec::<LandmarkCandidate>::new(),
-                                    );
-                                    if slam.config.apply_map_updates
-                                        && mapping_result.staged_update_validation.is_valid()
-                                    {
-                                        let _ = mapping_result
-                                            .staged_update
-                                            .clone()
-                                            .apply_to(slam.map_mut());
-                                    }
-                                    rebootstrap_mapping_override = Some(mapping_result);
-                                    segment_id += 1;
-                                    rebootstrap_events += 1;
-                                    rebootstrap_event_idx += 1;
-                                    rebootstrap_log_csv.push_str(&format!(
+                    if let (Some(cam1_setup), Some(cam1_features)) =
+                        (cam1_stereo_setup.as_ref(), cam1_features_for_frame.as_ref())
+                    {
+                        let stereo_matches = bootstrap_stereo_landmarks(
+                            &camera,
+                            &cam1_setup.camera,
+                            &cam1_setup.cam0_to_cam1,
+                            &features,
+                            cam1_features,
+                            &StereoBootstrapConfig::default(),
+                        );
+                        if stereo_matches.len() >= min_stereo_matches {
+                            let gt = nearest_ground_truth(
+                                &dataset.ground_truth,
+                                image_entry.timestamp_nanoseconds,
+                            );
+                            let seed_pose = world_to_camera_pose(
+                                &gt.orientation_world,
+                                &gt.position_world,
+                                &body_to_camera,
+                            );
+                            let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
+                                slam.map_mut(),
+                                &seed_pose,
+                                &features,
+                                &stereo_matches,
+                                &mut next_rebootstrap_landmark_id,
+                            );
+                            let map_stats = map_provider_stats_from_map(slam.map());
+                            let restart_tracking = build_gt_seeded_rebootstrap_tracking_result(
+                                frame_idx as u64,
+                                seed_pose,
+                                &stereo_matches,
+                                &landmark_ids,
+                                map_stats,
+                            );
+                            slam.tracker
+                                .accept_segment_restart_result(restart_tracking.clone());
+                            if let Some(state) = slam.relocalization_state.as_mut() {
+                                state.consecutive_failed_attempts = 0;
+                                state.pending_confirmation = None;
+                            }
+                            pending_replenish_candidates.clear();
+                            let keyframe = keyframe_from_tracking_result(&frame, &restart_tracking);
+                            let map_snapshot = slam.map().clone();
+                            let mapping_result = slam.mapper.process_keyframe(
+                                &map_snapshot,
+                                &restart_tracking,
+                                keyframe,
+                                Vec::<LandmarkCandidate>::new(),
+                            );
+                            if slam.config.apply_map_updates
+                                && mapping_result.staged_update_validation.is_valid()
+                            {
+                                let _ = mapping_result
+                                    .staged_update
+                                    .clone()
+                                    .apply_to(slam.map_mut());
+                            }
+                            rebootstrap_mapping_override = Some(mapping_result);
+                            segment_id += 1;
+                            rebootstrap_events += 1;
+                            rebootstrap_event_idx += 1;
+                            rebootstrap_log_csv.push_str(&format!(
                                         "{rebootstrap_event_idx},{segment_id},{frame_idx},{},gt_pose,{},{},{},{}\n",
                                         image_entry.timestamp_nanoseconds,
                                         stereo_matches.len(),
@@ -4485,12 +4465,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(0),
                                         consecutive_lost_frames,
                                     ));
-                                    last_rebootstrap_frame_idx = Some(frame_idx);
-                                    consecutive_lost_frames = 0;
-                                    result.tracking = restart_tracking;
-                                    success = true;
-                                    tracked = result.tracking.localization.pose.clone();
-                                    println!(
+                            last_rebootstrap_frame_idx = Some(frame_idx);
+                            consecutive_lost_frames = 0;
+                            result.tracking = restart_tracking;
+                            success = true;
+                            tracked = result.tracking.localization.pose.clone();
+                            println!(
                                         "rebootstrap segment_id={segment_id} frame_idx={frame_idx} stereo_matches={} landmarks_added={} keyframe_selected={}",
                                         stereo_matches.len(),
                                         landmark_ids.len(),
@@ -4499,8 +4479,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .map(|mapping| mapping.keyframe_decision.selected)
                                             .unwrap_or(false),
                                     );
-                                }
-                            }
                         }
                     }
                 }
@@ -4510,8 +4488,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracking_successes += 1;
         }
         // Stereo landmark replenishment: for cam0 keypoints tracking did NOT
-        // match to an existing landmark this frame, stereo-match against a
-        // freshly loaded/undistorted cam1 image and stage two-observation
+        // match to an existing landmark this frame, reuse the cam1 features
+        // extracted above and stage two-observation
         // `LandmarkCandidate`s (this frame's real pixel + a synthesised
         // observation reprojected into the most-recent keyframe) for
         // submission on the *next* frame's `process_frame` call. All the
@@ -4521,54 +4499,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // just-solved pose, and the PnP-inlier index set — and queue the
         // result.
         if args.stereo_landmark_replenish && success {
-            if let (Some(anchor_frame_id), Some(cam1_setup), Some(current_pose)) = (
+            if let (
+                Some(anchor_frame_id),
+                Some(cam1_setup),
+                Some(current_pose),
+                Some(cam1_features),
+            ) = (
                 replenish_anchor_frame_id,
                 cam1_stereo_setup.as_ref(),
                 tracked.as_ref(),
+                cam1_features_for_frame.as_ref(),
             ) {
-                if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
-                    entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
-                }) {
-                    let cam1_image_path = dataset
-                        .cam1_image_dir
-                        .join(&dataset.cam1_images[cam1_idx].filename);
-                    if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
-                        extractor.set_camera(SuperPointCamera::Cam1);
-                        extractor.set_frame_idx(cam1_idx);
-                        let cam1_features_result = extractor.extract(&cam1_image);
-                        extractor.set_camera(SuperPointCamera::Cam0);
-                        if let Ok(cam1_features_raw) = cam1_features_result {
-                            let cam1_features = undistort_feature_keypoints(
-                                &cam1_setup.distortion,
-                                &cam1_setup.camera,
-                                &cam1_features_raw,
-                            );
-                            let matched_cam0_indices: std::collections::HashSet<usize> = result
-                                .tracking
-                                .localization
-                                .inlier_query_indices
-                                .iter()
-                                .copied()
-                                .collect();
-                            let new_candidates = build_stereo_replenish_candidates(
-                                slam.map(),
-                                anchor_frame_id,
-                                frame_idx as u64,
-                                &cam1_setup.camera,
-                                &cam1_setup.cam0_to_cam1,
-                                &features,
-                                &cam1_features,
-                                &matched_cam0_indices,
-                                current_pose,
-                                next_replenish_candidate_id,
-                                &stereo_replenish_config,
-                            );
-                            next_replenish_candidate_id += new_candidates.len() as u64;
-                            stereo_landmark_replenish_candidates_total += new_candidates.len();
-                            pending_replenish_candidates.extend(new_candidates);
-                        }
-                    }
-                }
+                let matched_cam0_indices: std::collections::HashSet<usize> = result
+                    .tracking
+                    .localization
+                    .inlier_query_indices
+                    .iter()
+                    .copied()
+                    .collect();
+                let new_candidates = build_stereo_replenish_candidates(
+                    slam.map(),
+                    anchor_frame_id,
+                    frame_idx as u64,
+                    &cam1_setup.camera,
+                    &cam1_setup.cam0_to_cam1,
+                    &features,
+                    cam1_features,
+                    &matched_cam0_indices,
+                    current_pose,
+                    next_replenish_candidate_id,
+                    &stereo_replenish_config,
+                );
+                next_replenish_candidate_id += new_candidates.len() as u64;
+                stereo_landmark_replenish_candidates_total += new_candidates.len();
+                pending_replenish_candidates.extend(new_candidates);
             }
         }
         if let Some(reloc) = result.relocalization.as_ref() {

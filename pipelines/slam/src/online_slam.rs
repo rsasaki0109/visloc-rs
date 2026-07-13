@@ -1188,6 +1188,14 @@ pub enum LoopRefinementVerifier {
 /// `sim3_solver_recovers_scale_drift_se3_cannot` for a measured A/B on a
 /// synthetic drifted chain).
 ///
+/// This variant is only appropriate when scale is genuinely unobservable,
+/// such as a monocular map or a merge between independently scaled maps.
+/// Metric stereo and RGB-D maps must use [`Self::Se3`]: following
+/// ORB-SLAM2/3, their loop scale is fixed to `1` rather than re-estimated
+/// from noisy per-frame depths. Allowing every pose-graph node to change
+/// scale in a metric map discards the sensor's scale observation and can
+/// turn depth noise into global scale drift.
+///
 /// Write-back and correction-propagation conventions for this path
 /// (`maybe_run_loop_closure_refinement`'s `Sim3` branch): each solved
 /// node's rigid pose for `map.keyframes[*].frame.pose` is
