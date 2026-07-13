@@ -569,7 +569,8 @@ pub fn refine_stereo_vo_with_ba(
                     ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
                         keyframe_id_from: i as u64,
                         keyframe_id_to: (i + 1) as u64,
-                        weight: rw_weight,
+                        weight_gyro: rw_weight,
+                        weight_accel: rw_weight,
                     });
                 }
             }

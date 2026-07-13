@@ -278,8 +278,8 @@ pub struct PairwisePoseFactor {
 }
 
 /// Bias random-walk factor between two keyframes' 6-vector IMU
-/// biases. Adds the residual `r = b_j − b_i` weighted by the scalar
-/// `weight` (per-axis isotropic). Use this to keep neighbouring
+/// biases. Adds the residual `r = b_j − b_i` with independent gyro and
+/// accelerometer weights. Use this to keep neighbouring
 /// keyframes' biases close to each other when the IMU factor's data-
 /// driven Jacobian leaves some bias DoFs unobservable in isolation
 /// (e.g., gyro biases on a straight-line trajectory).
@@ -296,13 +296,12 @@ pub struct BiasRandomWalkFactor {
     pub keyframe_id_from: u64,
     /// "To" keyframe id (the bias on the `+I` side).
     pub keyframe_id_to: u64,
-    /// Scalar weight (sqrt-information squared). The cost added is
-    /// `weight · ‖b_j − b_i‖²` so `weight = 1 / σ²` for an isotropic
-    /// per-axis bias random-walk noise `σ`. A typical value is
-    /// `1 / (σ_bw² · Δt_{ij})` where `σ_bw` is the gyro/accel bias
-    /// random-walk noise density and `Δt_{ij}` is the inter-keyframe
-    /// time — but the caller chooses the units.
-    pub weight: f64,
+    /// Gyroscope-bias sqrt-information squared. A typical value is
+    /// `1 / (σ_bg² · Δt_ij)` for continuous random-walk density `σ_bg`.
+    pub weight_gyro: f64,
+    /// Accelerometer-bias sqrt-information squared. A typical value is
+    /// `1 / (σ_ba² · Δt_ij)` for continuous random-walk density `σ_ba`.
+    pub weight_accel: f64,
 }
 
 /// A bundle of per-keyframe absolute position constraints.
@@ -402,6 +401,11 @@ pub struct BundleAdjustment {
     /// linearises the rotation residual via the SO(3) right-Jacobian
     /// inverse.
     pub imu_factors: Vec<ImuPreintegrationFactor>,
+    /// Rigid transform from the tracked camera/sensor frame into the IMU
+    /// body frame (`T_b<-c`, EuRoC `T_BS`). Visual residuals continue to use
+    /// the stored camera poses; IMU residuals compose this extrinsic to obtain
+    /// body poses. Identity preserves the historical co-located rig behavior.
+    pub imu_body_to_camera: SE3,
     /// Per-keyframe IMU bias state, packing `(bias_gyro, bias_acc)` as a
     /// 6-vector. Populated for the keyframes whose
     /// [`ImuPreintegrationFactor`] should be bias-corrected (the
@@ -439,6 +443,7 @@ impl BundleAdjustment {
             velocities: BTreeMap::new(),
             fixed_velocities: BTreeSet::new(),
             imu_factors: Vec::new(),
+            imu_body_to_camera: SE3::identity(),
             biases: BTreeMap::new(),
             fixed_biases: BTreeSet::new(),
             bias_random_walk_factors: Vec::new(),
@@ -473,6 +478,12 @@ impl BundleAdjustment {
     /// (the rest of the BA still runs).
     pub fn add_imu_factor(&mut self, factor: ImuPreintegrationFactor) {
         self.imu_factors.push(factor);
+    }
+
+    /// Set the calibrated camera/sensor-to-body transform used only by IMU
+    /// residuals. Reprojection residuals always retain the camera pose state.
+    pub fn set_imu_body_to_camera(&mut self, body_to_camera: SE3) {
+        self.imu_body_to_camera = body_to_camera;
     }
 
     /// Register an initial IMU bias state for the given keyframe,
@@ -713,12 +724,13 @@ impl BundleAdjustment {
                 continue;
             };
             let r: Vector6<f64> = b_j - b_i;
-            total += factor.weight * r.norm_squared();
+            total += factor.weight_gyro.max(0.0) * r.fixed_rows::<3>(0).norm_squared()
+                + factor.weight_accel.max(0.0) * r.fixed_rows::<3>(3).norm_squared();
         }
         // IMU pre-integration factors: 9-vector residual [r_R; r_v; r_p]
         // weighted axis-wise. The factor's `residual` helper takes the
-        // body-to-world rotation (= world_to_camera.inverse()) and the
-        // world-frame camera centre, both pulled from the BA pose state.
+        // body-to-world rotation and world-frame body centre obtained by
+        // composing the camera pose with the calibrated T_b<-c extrinsic.
         // When `self.biases` carries a bias for the factor's "from"
         // keyframe, the bias-corrected residual is used (Forster eq. 44).
         for factor in &self.imu_factors {
@@ -734,10 +746,12 @@ impl BundleAdjustment {
             ) else {
                 continue;
             };
-            let r_i = SO3::from_quaternion(pose_i.world_to_camera.rotation.inverse());
-            let r_j = SO3::from_quaternion(pose_j.world_to_camera.rotation.inverse());
-            let p_i: Vector3<f64> = pose_i.camera_center_world().coords;
-            let p_j: Vector3<f64> = pose_j.camera_center_world().coords;
+            let body_i = self.imu_body_to_camera.compose(&pose_i.world_to_camera);
+            let body_j = self.imu_body_to_camera.compose(&pose_j.world_to_camera);
+            let r_i = SO3::from_quaternion(body_i.rotation.inverse());
+            let r_j = SO3::from_quaternion(body_j.rotation.inverse());
+            let p_i: Vector3<f64> = body_i.inverse().translation;
+            let p_j: Vector3<f64> = body_j.inverse().translation;
             let [r_rot, r_vel, r_pos] =
                 if let Some(bias) = self.biases.get(&factor.keyframe_id_from) {
                     let bg: Vector3<f64> = bias.fixed_rows::<3>(0).into_owned();
@@ -2359,23 +2373,25 @@ fn build_normal_equations(
     // and Jacobians follow Forster eq. 45-47 with the BA right-perturbation
     // convention (T_new = T_old · exp([ρ; ω])):
     //
-    //   r_R = log(ΔR.T · R_iᵀ · R_j)            (Forster's R_i = R_wcᵢ.T)
-    //   r_v = R_wcᵢ · (v_j − v_i − g·Δt) − Δv
-    //   r_p = R_wcᵢ · (C_j − C_i − v_i·Δt − ½ g Δt²) − Δp
+    //   r_R = log(ΔR.T · R_iᵀ · R_j)            (Forster's R_i = R_wbᵢ)
+    //   r_v = R_bwᵢ · (v_j − v_i − g·Δt) − Δv
+    //   r_p = R_bwᵢ · (B_j − B_i − v_i·Δt − ½ g Δt²) − Δp
     //
     // Right-perturbation Jacobians (ρ = translation perturbation, ω =
-    // rotation perturbation, both 3-vec; world camera centre
-    // C = −Rᵀt so ∂C/∂ρ = −I, ∂C/∂ω = [C]×):
+    // rotation perturbation, both 3-vec; world body centre
+    // B = −Rᵀt so ∂B/∂ρ = −I, ∂B/∂ω = [B]×). Since
+    // T_bw = T_bc T_cw, a right perturbation of T_cw is the same right
+    // perturbation of T_bw, so no additional adjoint is required:
     //
-    //   ∂r_R/∂ω_i =  Jr_inv(r_R) · R_wcⱼ
-    //   ∂r_R/∂ω_j = −Jr_inv(r_R) · R_wcⱼ
-    //   ∂r_v/∂ω_i = −R_wcᵢ · [v_j − v_i − g·Δt]×
-    //   ∂r_v/∂v_i = −R_wcᵢ
-    //   ∂r_v/∂v_j =  R_wcᵢ
-    //   ∂r_p/∂ρ_i =  R_wcᵢ            ∂r_p/∂ρ_j = −R_wcᵢ
-    //   ∂r_p/∂ω_i = −R_wcᵢ · [C_j − v_i·Δt − ½ g Δt²]×
-    //   ∂r_p/∂ω_j =  R_wcᵢ · [C_j]×
-    //   ∂r_p/∂v_i = −Δt · R_wcᵢ
+    //   ∂r_R/∂ω_i =  Jr_inv(r_R) · R_bwⱼ
+    //   ∂r_R/∂ω_j = −Jr_inv(r_R) · R_bwⱼ
+    //   ∂r_v/∂ω_i = −R_bwᵢ · [v_j − v_i − g·Δt]×
+    //   ∂r_v/∂v_i = −R_bwᵢ
+    //   ∂r_v/∂v_j =  R_bwᵢ
+    //   ∂r_p/∂ρ_i =  R_bwᵢ            ∂r_p/∂ρ_j = −R_bwᵢ
+    //   ∂r_p/∂ω_i = −R_bwᵢ · [B_j − v_i·Δt − ½ g Δt²]×
+    //   ∂r_p/∂ω_j =  R_bwᵢ · [B_j]×
+    //   ∂r_p/∂v_i = −Δt · R_bwᵢ
     //
     // The 9-vector residual is stacked [r_R; r_v; r_p] with axis-wise
     // weights `sqrt(weight_rotation, weight_velocity, weight_position)`
@@ -2394,18 +2410,12 @@ fn build_normal_equations(
         ) else {
             continue;
         };
-        let r_wc_i = pose_i
-            .world_to_camera
-            .rotation
-            .to_rotation_matrix()
-            .into_inner();
-        let r_wc_j = pose_j
-            .world_to_camera
-            .rotation
-            .to_rotation_matrix()
-            .into_inner();
-        let c_i: Vector3<f64> = pose_i.camera_center_world().coords;
-        let c_j: Vector3<f64> = pose_j.camera_center_world().coords;
+        let body_i = ba.imu_body_to_camera.compose(&pose_i.world_to_camera);
+        let body_j = ba.imu_body_to_camera.compose(&pose_j.world_to_camera);
+        let r_wc_i = body_i.rotation.to_rotation_matrix().into_inner();
+        let r_wc_j = body_j.rotation.to_rotation_matrix().into_inner();
+        let c_i: Vector3<f64> = body_i.inverse().translation;
+        let c_j: Vector3<f64> = body_j.inverse().translation;
         let dt = factor.delta.delta_time;
         let g = factor.gravity_world;
 
@@ -2415,8 +2425,8 @@ fn build_normal_equations(
         // apply the first-order bias correction; otherwise fall back
         // to the un-corrected residual (the linearisation bias is
         // implicit in the integrated delta).
-        let r_i_so3 = SO3::from_quaternion(pose_i.world_to_camera.rotation.inverse());
-        let r_j_so3 = SO3::from_quaternion(pose_j.world_to_camera.rotation.inverse());
+        let r_i_so3 = SO3::from_quaternion(body_i.rotation.inverse());
+        let r_j_so3 = SO3::from_quaternion(body_j.rotation.inverse());
         let bias_for_factor = ba.biases.get(&factor.keyframe_id_from);
         let [r_rot, r_vel, r_pos] = if let Some(bias) = bias_for_factor {
             let bg: Vector3<f64> = bias.fixed_rows::<3>(0).into_owned();
@@ -2701,7 +2711,7 @@ fn build_normal_equations(
     }
 
     // Bias random-walk factors: residual `r = b_j − b_i`, Jacobian
-    // `J_i = −I, J_j = I`, weight scaling `w = factor.weight`. The
+    // `J_i = −I, J_j = I`, with separate gyro/accel weights. The
     // factor only touches the bias slots (no pose / velocity coupling),
     // so `Jᵀ J` lands as `+w · I` on each diagonal bias block, `−w · I`
     // on the off-diagonal cross block, and `Jᵀ r` distributes
@@ -2714,26 +2724,36 @@ fn build_normal_equations(
             continue;
         };
         let r: Vector6<f64> = b_j - b_i;
-        let w = factor.weight.max(0.0);
-        if w <= 0.0 {
+        let weights = [
+            factor.weight_gyro.max(0.0),
+            factor.weight_gyro.max(0.0),
+            factor.weight_gyro.max(0.0),
+            factor.weight_accel.max(0.0),
+            factor.weight_accel.max(0.0),
+            factor.weight_accel.max(0.0),
+        ];
+        if weights.iter().all(|weight| *weight <= 0.0) {
             continue;
         }
         let i_slot = bias_index.get(&factor.keyframe_id_from).copied();
         let j_slot = bias_index.get(&factor.keyframe_id_to).copied();
         if let Some(i) = i_slot {
             for k in 0..6 {
+                let w = weights[k];
                 h_pp[(bias_offset + i * 6 + k, bias_offset + i * 6 + k)] += w;
                 b_p[bias_offset + i * 6 + k] += -w * r[k];
             }
         }
         if let Some(j) = j_slot {
             for k in 0..6 {
+                let w = weights[k];
                 h_pp[(bias_offset + j * 6 + k, bias_offset + j * 6 + k)] += w;
                 b_p[bias_offset + j * 6 + k] += w * r[k];
             }
         }
         if let (Some(i), Some(j)) = (i_slot, j_slot) {
             for k in 0..6 {
+                let w = weights[k];
                 h_pp[(bias_offset + i * 6 + k, bias_offset + j * 6 + k)] += -w;
                 h_pp[(bias_offset + j * 6 + k, bias_offset + i * 6 + k)] += -w;
             }

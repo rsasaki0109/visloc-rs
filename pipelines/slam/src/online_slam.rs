@@ -46,11 +46,13 @@ pub struct OnlineSlamConfig {
     /// pipeline's bias / rotation seeds at whatever the caller passed on
     /// [`OnlineSlamImuConfig`].
     pub vi_init: Option<OnlineSlamViInitConfig>,
-    /// Optional motion-based VI init stage that fires AFTER `vi_init`
-    /// has succeeded and the body has moved enough to give the IMU
-    /// translational excitation. Refines per-keyframe
-    /// `(R_w←b, v_w, b_g, b_a)` against IMU pre-integration factors only
-    /// (VIBA1, stereo / known-scale path; see
+    /// Optional motion-based VI init stage that normally fires after `vi_init`
+    /// succeeds and the body has moved enough to give the IMU translational
+    /// excitation. An explicit fallback may instead start from configured IMU
+    /// biases after static initialization gives up. Holds the known-scale
+    /// visual body-pose trajectory fixed while refining per-keyframe velocity
+    /// and a shared `(b_g, b_a)` against IMU pre-integration factors (the
+    /// inertial-only initialization stage; see
     /// [`crate::vi_motion_initializer`] for the contract). Requires both
     /// `imu = Some(_)` and `vi_init = Some(_)`; otherwise the config is
     /// rejected on [`OnlineSlamPipeline::new`]. `None` (default) keeps
@@ -123,6 +125,13 @@ impl OnlineSlamConfig {
             if self.vi_init.is_none() {
                 return Err(OnlineSlamConfigError::MotionViInitRequiresStaticViInit);
             }
+            if motion.allow_after_static_give_up
+                && self.vi_init.as_ref().is_some_and(|static_config| {
+                    static_config.on_persistent_rejection != ViInitFallback::KeepExistingSeed
+                })
+            {
+                return Err(OnlineSlamConfigError::MotionViInitAfterGiveUpRequiresKeepExistingSeed);
+            }
             if let Some(imu) = &self.imu {
                 if (motion.initializer.gravity_world - imu.gravity_world).norm() > 1.0e-12 {
                     return Err(OnlineSlamConfigError::MotionGravityMismatch {
@@ -131,6 +140,25 @@ impl OnlineSlamConfig {
                     });
                 }
             }
+            if self.vi_init.as_ref().is_some_and(|static_config| {
+                motion.initializer.body_to_camera != static_config.body_to_camera
+            }) {
+                return Err(OnlineSlamConfigError::MotionExtrinsicMismatch);
+            }
+        }
+        if self.local_vi_ba.as_ref().is_some_and(|local| {
+            self.vi_init
+                .as_ref()
+                .is_some_and(|static_config| local.body_to_camera != static_config.body_to_camera)
+        }) {
+            return Err(OnlineSlamConfigError::LocalViBaExtrinsicMismatch);
+        }
+        if self.local_vi_ba.as_ref().is_some_and(|local| {
+            local.bias_random_walk_weights.is_some_and(|(gyro, accel)| {
+                !gyro.is_finite() || gyro <= 0.0 || !accel.is_finite() || accel <= 0.0
+            })
+        }) {
+            return Err(OnlineSlamConfigError::InvalidLocalViBaBiasRandomWalkWeights);
         }
         Ok(())
     }
@@ -945,6 +973,69 @@ pub fn appearance_loop_candidate_descriptor_store(
     Some(store)
 }
 
+fn keyframes_ranked_by_covisibility(
+    map: &VisualMap,
+    seed_keyframe_id: u64,
+    min_shared_landmarks: usize,
+    max_keyframes: usize,
+) -> Vec<u64> {
+    let Some(seed) = map.keyframes.get(&seed_keyframe_id) else {
+        return Vec::new();
+    };
+    let seed_landmarks: std::collections::HashSet<_> = seed
+        .observations
+        .iter()
+        .map(|observation| observation.landmark_id)
+        .collect();
+    let mut ranked: Vec<(u64, usize)> = map
+        .keyframes
+        .iter()
+        .filter(|(keyframe_id, _)| **keyframe_id != seed_keyframe_id)
+        .filter_map(|(keyframe_id, keyframe)| {
+            let shared = keyframe
+                .observations
+                .iter()
+                .filter(|observation| seed_landmarks.contains(&observation.landmark_id))
+                .count();
+            (shared >= min_shared_landmarks.max(1)).then_some((*keyframe_id, shared))
+        })
+        .collect();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked.truncate(max_keyframes);
+    ranked
+        .into_iter()
+        .map(|(keyframe_id, _)| keyframe_id)
+        .collect()
+}
+
+fn appearance_loop_region_descriptor_store(
+    map: &VisualMap,
+    keyframe_ids: &[u64],
+) -> visloc_core::types::LandmarkDescriptorStore {
+    let mut landmark_ids = std::collections::BTreeSet::new();
+    for keyframe_id in keyframe_ids {
+        if let Some(keyframe) = map.keyframes.get(keyframe_id) {
+            landmark_ids.extend(
+                keyframe
+                    .observations
+                    .iter()
+                    .map(|observation| observation.landmark_id),
+            );
+        }
+    }
+    let mut store = visloc_core::types::LandmarkDescriptorStore::new();
+    for landmark_id in landmark_ids {
+        if let Some(descriptor) = map
+            .landmarks
+            .get(&landmark_id)
+            .and_then(|landmark| landmark.descriptor.as_ref())
+        {
+            store.insert(landmark_id, descriptor.clone());
+        }
+    }
+    store
+}
+
 /// Rank the cached per-keyframe mean descriptors in `descriptor_cache` by
 /// cosine similarity against `query_descriptor`, keeping only entries
 /// strictly older than `frame_id` and at least `min_keyframe_id_gap`
@@ -1012,6 +1103,40 @@ fn rank_appearance_loop_candidate_keyframes(
 /// pose, without a viable descriptor store (fewer than
 /// `config.min_candidate_landmark_count` descriptors), or without a
 /// correspondence match are silently skipped.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AppearanceLoopCandidateBuildResult {
+    pub candidates: Vec<LoopClosureCandidate>,
+    pub connected_region_rejected_count: usize,
+    pub pnp_verified_count: usize,
+    pub projection_rejected_count: usize,
+    pub covisibility_rejected_count: usize,
+    pub diagnostics: Vec<AppearanceLoopCandidateDiagnostic>,
+}
+
+/// Per-candidate evidence retained after primary PnP succeeds, so threshold
+/// changes can be based on measured covisibility support rather than only an
+/// aggregate accept/reject count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppearanceLoopCandidateDiagnostic {
+    pub query_frame_id: u64,
+    pub matched_keyframe_id: u64,
+    pub appearance_similarity: f32,
+    pub matched_region_keyframe_count: usize,
+    pub matched_region_landmark_count: usize,
+    pub primary_correspondence_count: usize,
+    pub primary_inlier_count: usize,
+    pub projection_attempted: bool,
+    pub projection_correspondence_count: usize,
+    pub projection_inlier_count: usize,
+    pub projection_accepted: bool,
+    pub current_covisible_keyframe_count: usize,
+    pub neighbor_pnp_verified_count: usize,
+    pub consistent_keyframe_count: usize,
+    pub minimum_translation_disagreement_meters: Option<f64>,
+    pub minimum_rotation_disagreement_radians: Option<f64>,
+    pub accepted: bool,
+}
+
 pub fn build_appearance_loop_candidates(
     map: &VisualMap,
     frame: &Frame,
@@ -1019,8 +1144,19 @@ pub fn build_appearance_loop_candidates(
     config: &LoopAppearanceCandidateConfig,
     camera: &Camera,
 ) -> Vec<LoopClosureCandidate> {
+    build_appearance_loop_candidates_with_diagnostics(map, frame, descriptor_cache, config, camera)
+        .candidates
+}
+
+pub fn build_appearance_loop_candidates_with_diagnostics(
+    map: &VisualMap,
+    frame: &Frame,
+    descriptor_cache: &HashMap<u64, Vec<f32>>,
+    config: &LoopAppearanceCandidateConfig,
+    camera: &Camera,
+) -> AppearanceLoopCandidateBuildResult {
     let Some(query_descriptor) = relocalization_mean_descriptor(&frame.descriptors) else {
-        return Vec::new();
+        return AppearanceLoopCandidateBuildResult::default();
     };
     let mut ranked = rank_appearance_loop_candidate_keyframes(
         descriptor_cache,
@@ -1039,7 +1175,17 @@ pub fn build_appearance_loop_candidates(
         config: config.pnp_verifier,
     };
 
-    let mut candidates = Vec::new();
+    let mut result = AppearanceLoopCandidateBuildResult::default();
+    let current_connected_keyframes: std::collections::HashSet<u64> =
+        keyframes_ranked_by_covisibility(
+            map,
+            frame.id,
+            config.covisibility_min_shared_landmarks,
+            usize::MAX,
+        )
+        .into_iter()
+        .chain(std::iter::once(frame.id))
+        .collect();
     for (keyframe_id, similarity) in ranked {
         let Some(keyframe) = map.keyframes.get(&keyframe_id) else {
             continue;
@@ -1047,16 +1193,28 @@ pub fn build_appearance_loop_candidates(
         let Some(keyframe_pose) = keyframe.frame.pose.as_ref() else {
             continue;
         };
-        let Some(store) = appearance_loop_candidate_descriptor_store(map, keyframe) else {
+        let mut matched_region_keyframe_ids = vec![keyframe_id];
+        matched_region_keyframe_ids.extend(keyframes_ranked_by_covisibility(
+            map,
+            keyframe_id,
+            config.covisibility_min_shared_landmarks,
+            config.covisibility_max_keyframes,
+        ));
+        if matched_region_keyframe_ids
+            .iter()
+            .any(|keyframe_id| current_connected_keyframes.contains(keyframe_id))
+        {
+            result.connected_region_rejected_count += 1;
             continue;
-        };
+        }
+        let store = appearance_loop_region_descriptor_store(map, &matched_region_keyframe_ids);
         if store.len() < config.min_candidate_landmark_count {
             continue;
         }
-        let Ok(correspondence_set) = correspondence_builder.build(&query, map, &store) else {
+        let Ok(mut correspondence_set) = correspondence_builder.build(&query, map, &store) else {
             continue;
         };
-        let (verification, pnp_inlier_indices) = verifier.verify_with_inlier_indices(
+        let (mut verification, mut pnp_inlier_indices) = verifier.verify_with_inlier_indices(
             &correspondence_set.correspondences,
             keyframe_pose,
             camera,
@@ -1064,7 +1222,166 @@ pub fn build_appearance_loop_candidates(
         if !verification.verified {
             continue;
         }
-        candidates.push(LoopClosureCandidate {
+        result.pnp_verified_count += 1;
+        let primary_correspondence_count = verification.correspondence_count;
+        let primary_inlier_count = verification.inlier_count;
+        let mut projection_attempted = false;
+        let mut projection_correspondence_count = 0usize;
+        let mut projection_inlier_count = 0usize;
+        let mut projection_accepted = false;
+        if let Some(search_radius_px) = config.projection_search_radius_px {
+            projection_attempted = true;
+            if let Some(primary_relative_pose) = verification.relative_pose.as_ref() {
+                let recovered_current_pose = Pose {
+                    world_to_camera: primary_relative_pose.compose(&keyframe_pose.world_to_camera),
+                };
+                let projection_builder = visloc_localization::ProjectionCorrespondenceBuilder::new(
+                    visloc_vision::matching::BruteForceMatcher::default(),
+                );
+                if let Ok(projected_set) = projection_builder.build_with_pose_prior(
+                    &query,
+                    map,
+                    &store,
+                    &recovered_current_pose,
+                    search_radius_px,
+                ) {
+                    projection_correspondence_count = projected_set.correspondences.len();
+                    if projection_correspondence_count >= config.min_projection_correspondence_count
+                    {
+                        let (projected_verification, projected_inlier_indices) = verifier
+                            .verify_with_inlier_indices(
+                                &projected_set.correspondences,
+                                keyframe_pose,
+                                camera,
+                            );
+                        projection_inlier_count = projected_verification.inlier_count;
+                        if projected_verification.verified {
+                            projection_accepted = true;
+                            correspondence_set = projected_set;
+                            verification = projected_verification;
+                            pnp_inlier_indices = projected_inlier_indices;
+                        }
+                    }
+                }
+            }
+        }
+        let required_verifications = config.min_covisible_keyframe_verifications.max(1);
+        let mut region_verifications = 1usize;
+        let current_covisible_keyframe_ids = keyframes_ranked_by_covisibility(
+            map,
+            frame.id,
+            config.covisibility_min_shared_landmarks,
+            config.covisibility_max_keyframes,
+        );
+        let mut diagnostic = AppearanceLoopCandidateDiagnostic {
+            query_frame_id: frame.id,
+            matched_keyframe_id: keyframe_id,
+            appearance_similarity: similarity,
+            matched_region_keyframe_count: matched_region_keyframe_ids.len(),
+            matched_region_landmark_count: store.len(),
+            primary_correspondence_count,
+            primary_inlier_count,
+            projection_attempted,
+            projection_correspondence_count,
+            projection_inlier_count,
+            projection_accepted,
+            current_covisible_keyframe_count: current_covisible_keyframe_ids.len(),
+            neighbor_pnp_verified_count: 0,
+            consistent_keyframe_count: 1,
+            minimum_translation_disagreement_meters: None,
+            minimum_rotation_disagreement_radians: None,
+            accepted: false,
+        };
+        if projection_attempted && !projection_accepted {
+            result.projection_rejected_count += 1;
+            result.diagnostics.push(diagnostic);
+            continue;
+        }
+        if required_verifications > 1 {
+            let Some(primary_relative_pose) = verification.relative_pose.as_ref() else {
+                result.covisibility_rejected_count += 1;
+                result.diagnostics.push(diagnostic);
+                continue;
+            };
+            let Some(current_pose) = map
+                .keyframes
+                .get(&frame.id)
+                .and_then(|keyframe| keyframe.frame.pose.as_ref())
+            else {
+                result.covisibility_rejected_count += 1;
+                result.diagnostics.push(diagnostic);
+                continue;
+            };
+            for current_neighbor_id in current_covisible_keyframe_ids {
+                let Some(current_neighbor) = map.keyframes.get(&current_neighbor_id) else {
+                    continue;
+                };
+                let neighbor_query = visloc_core::types::QueryImage::from_frame(
+                    &current_neighbor.frame,
+                    camera.clone(),
+                );
+                let Ok(neighbor_correspondences) =
+                    correspondence_builder.build(&neighbor_query, map, &store)
+                else {
+                    continue;
+                };
+                let neighbor_verification = verifier.verify(
+                    &neighbor_correspondences.correspondences,
+                    keyframe_pose,
+                    camera,
+                );
+                if neighbor_verification.verified {
+                    diagnostic.neighbor_pnp_verified_count += 1;
+                    let Some(neighbor_relative_pose) = neighbor_verification.relative_pose.as_ref()
+                    else {
+                        continue;
+                    };
+                    let Some(neighbor_pose) = current_neighbor.frame.pose.as_ref() else {
+                        continue;
+                    };
+                    let current_to_neighbor = relative_world_to_camera(current_pose, neighbor_pose);
+                    let expected_neighbor_relative =
+                        current_to_neighbor.compose(primary_relative_pose);
+                    let disagreement =
+                        neighbor_relative_pose.compose(&expected_neighbor_relative.inverse());
+                    let translation_disagreement = disagreement.translation.norm();
+                    let rotation_disagreement = disagreement.rotation.angle();
+                    diagnostic.minimum_translation_disagreement_meters = Some(
+                        diagnostic
+                            .minimum_translation_disagreement_meters
+                            .map_or(translation_disagreement, |value| {
+                                value.min(translation_disagreement)
+                            }),
+                    );
+                    diagnostic.minimum_rotation_disagreement_radians = Some(
+                        diagnostic
+                            .minimum_rotation_disagreement_radians
+                            .map_or(rotation_disagreement, |value| {
+                                value.min(rotation_disagreement)
+                            }),
+                    );
+                    if translation_disagreement
+                        <= config.max_covisibility_translation_disagreement_meters
+                        && rotation_disagreement
+                            <= config.max_covisibility_rotation_disagreement_radians
+                    {
+                        region_verifications += 1;
+                        diagnostic.consistent_keyframe_count = region_verifications;
+                    }
+                    if region_verifications >= required_verifications {
+                        break;
+                    }
+                }
+            }
+        }
+        if region_verifications < required_verifications {
+            result.covisibility_rejected_count += 1;
+            result.diagnostics.push(diagnostic);
+            continue;
+        }
+        diagnostic.accepted = true;
+        result.diagnostics.push(diagnostic);
+        result.candidates.push(LoopClosureCandidate {
             query_frame_id: frame.id,
             matched_keyframe_id: keyframe_id,
             shared_landmark_count: verification.inlier_count,
@@ -1085,7 +1402,154 @@ pub fn build_appearance_loop_candidates(
                 .collect(),
         });
     }
-    candidates
+    result
+}
+
+fn appearance_regions_overlap(
+    map: &VisualMap,
+    left_keyframe_id: u64,
+    right_keyframe_id: u64,
+    config: &LoopAppearanceCandidateConfig,
+) -> bool {
+    if left_keyframe_id == right_keyframe_id {
+        return true;
+    }
+    let mut left_region = keyframes_ranked_by_covisibility(
+        map,
+        left_keyframe_id,
+        config.covisibility_min_shared_landmarks,
+        config.covisibility_max_keyframes,
+    );
+    left_region.push(left_keyframe_id);
+    let right_region: std::collections::HashSet<u64> = keyframes_ranked_by_covisibility(
+        map,
+        right_keyframe_id,
+        config.covisibility_min_shared_landmarks,
+        config.covisibility_max_keyframes,
+    )
+    .into_iter()
+    .chain(std::iter::once(right_keyframe_id))
+    .collect();
+    left_region
+        .iter()
+        .any(|keyframe_id| right_region.contains(keyframe_id))
+}
+
+fn confirm_appearance_region_across_keyframes(
+    map: &VisualMap,
+    current_keyframe_id: u64,
+    candidates: Vec<LoopClosureCandidate>,
+    config: &LoopAppearanceCandidateConfig,
+    pending: &mut Option<AppearancePendingRegion>,
+) -> (Vec<LoopClosureCandidate>, bool, bool) {
+    let required = config.region_confirmation_required_keyframes.max(1);
+    if required == 1 {
+        *pending = None;
+        return (candidates, false, false);
+    }
+
+    let Some(current_pose) = map
+        .keyframes
+        .get(&current_keyframe_id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref())
+    else {
+        *pending = None;
+        return (Vec::new(), false, false);
+    };
+
+    if pending.is_none() {
+        let Some(candidate) = candidates
+            .into_iter()
+            .max_by(|left, right| left.score.total_cmp(&right.score))
+        else {
+            return (Vec::new(), false, false);
+        };
+        let Some(relative_pose) = candidate
+            .verification
+            .as_ref()
+            .and_then(|verification| verification.relative_pose.clone())
+        else {
+            return (Vec::new(), false, false);
+        };
+        *pending = Some(AppearancePendingRegion {
+            root_keyframe_id: candidate.matched_keyframe_id,
+            last_current_keyframe_id: current_keyframe_id,
+            root_to_last_current: relative_pose,
+            confirmation_count: 1,
+            miss_count: 0,
+        });
+        return (Vec::new(), true, false);
+    }
+
+    let state = pending.as_mut().expect("pending region checked above");
+    let matching_candidate = candidates.into_iter().find(|candidate| {
+        appearance_regions_overlap(
+            map,
+            state.root_keyframe_id,
+            candidate.matched_keyframe_id,
+            config,
+        )
+    });
+    let Some(candidate) = matching_candidate else {
+        state.miss_count += 1;
+        if state.miss_count >= config.region_confirmation_max_misses.max(1) {
+            *pending = None;
+        }
+        return (Vec::new(), true, false);
+    };
+
+    let recovered_candidate_to_current = candidate
+        .verification
+        .as_ref()
+        .and_then(|verification| verification.relative_pose.as_ref());
+    let root_pose = map
+        .keyframes
+        .get(&state.root_keyframe_id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref());
+    let candidate_pose = map
+        .keyframes
+        .get(&candidate.matched_keyframe_id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref());
+    let last_current_pose = map
+        .keyframes
+        .get(&state.last_current_keyframe_id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref());
+    let Some((recovered_candidate_to_current, root_pose, candidate_pose, last_current_pose)) =
+        recovered_candidate_to_current
+            .zip(root_pose)
+            .zip(candidate_pose)
+            .zip(last_current_pose)
+            .map(|(((a, b), c), d)| (a, b, c, d))
+    else {
+        *pending = None;
+        return (Vec::new(), false, false);
+    };
+
+    let root_to_candidate = relative_world_to_camera(root_pose, candidate_pose);
+    let recovered_root_to_current = recovered_candidate_to_current.compose(&root_to_candidate);
+    let last_to_current = relative_world_to_camera(last_current_pose, current_pose);
+    let predicted_root_to_current = last_to_current.compose(&state.root_to_last_current);
+    let disagreement = recovered_root_to_current.compose(&predicted_root_to_current.inverse());
+    let consistent = disagreement.translation.norm()
+        <= config.max_covisibility_translation_disagreement_meters
+        && disagreement.rotation.angle() <= config.max_covisibility_rotation_disagreement_radians;
+    if !consistent {
+        state.miss_count += 1;
+        if state.miss_count >= config.region_confirmation_max_misses.max(1) {
+            *pending = None;
+        }
+        return (Vec::new(), true, false);
+    }
+
+    state.confirmation_count += 1;
+    state.miss_count = 0;
+    state.last_current_keyframe_id = current_keyframe_id;
+    state.root_to_last_current = recovered_root_to_current;
+    if state.confirmation_count < required {
+        return (Vec::new(), true, false);
+    }
+    *pending = None;
+    (vec![candidate], false, true)
 }
 
 fn relocalization_recent_keyframe_descriptor_store(
@@ -1270,6 +1734,34 @@ pub struct LoopAppearanceCandidateConfig {
     /// keyframe with fewer descriptors than `pnp_verifier.min_inliers` can
     /// never pass the PnP gate anyway, so this is a cheap early reject.
     pub min_candidate_landmark_count: usize,
+    /// Number of strongest covisible neighbors gathered on each side of a
+    /// candidate, matching ORB-SLAM3's ten-keyframe local-region search.
+    pub covisibility_max_keyframes: usize,
+    /// Shared landmark floor used to define a covisibility edge.
+    pub covisibility_min_shared_landmarks: usize,
+    /// Number of current-region keyframes that must independently PnP-verify
+    /// against the matched candidate region. Includes the current keyframe.
+    pub min_covisible_keyframe_verifications: usize,
+    /// Maximum translation disagreement between a neighbor's independent PnP
+    /// loop pose and the primary loop pose propagated through local odometry.
+    pub max_covisibility_translation_disagreement_meters: f64,
+    /// Rotation counterpart of `max_covisibility_translation_disagreement_meters`.
+    pub max_covisibility_rotation_disagreement_radians: f64,
+    /// Number of separate current keyframes that must verify the same
+    /// covisible candidate region before it may enter the graph.
+    pub region_confirmation_required_keyframes: usize,
+    /// Consecutive keyframes allowed to miss a pending region before reset.
+    pub region_confirmation_max_misses: usize,
+    /// Optional ORB-SLAM3-style post-PnP projection search radius. When set,
+    /// the primary appearance PnP pose projects the candidate region into the
+    /// current image, rematches only inside each landmark's pixel window, and
+    /// requires a second PnP verification before covisibility confirmation.
+    pub projection_search_radius_px: Option<f64>,
+    /// Minimum one-to-one projection-guided correspondences required before
+    /// the refined PnP solve. ORB-SLAM3 uses a 50-match pre-optimization gate;
+    /// this remains configurable because visloc-rs uses SuperPoint rather than
+    /// ORB descriptors and must measure its own correspondence distribution.
+    pub min_projection_correspondence_count: usize,
     /// PnP RANSAC verifier thresholds. `min_inliers` defaults higher than
     /// the shared-landmark PnP path's default because a false long-range
     /// loop closure is catastrophic (it can fold the whole trajectory into
@@ -1285,6 +1777,15 @@ impl Default for LoopAppearanceCandidateConfig {
             max_candidates_per_frame: 3,
             min_similarity: 0.2,
             min_candidate_landmark_count: 30,
+            covisibility_max_keyframes: 10,
+            covisibility_min_shared_landmarks: 10,
+            min_covisible_keyframe_verifications: 3,
+            max_covisibility_translation_disagreement_meters: 0.5,
+            max_covisibility_rotation_disagreement_radians: 0.2,
+            region_confirmation_required_keyframes: 3,
+            region_confirmation_max_misses: 2,
+            projection_search_radius_px: None,
+            min_projection_correspondence_count: 50,
             pnp_verifier: PnPLoopClosureVerifierConfig {
                 min_inliers: 30,
                 min_inlier_ratio: 0.5,
@@ -1321,7 +1822,30 @@ pub struct OnlineSlamAdmittedLoopConstraint {
     pub to_keyframe_id: u64,
     pub inlier_count: usize,
     pub translation_norm_m: f64,
+    pub relative_pose: SE3,
     pub source: LoopClosureCandidateSource,
+}
+
+/// Front-end gate that rejected an otherwise geometrically verified loop
+/// constraint before it entered the pose graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineSlamLoopConstraintRejectionReason {
+    Pcm,
+    Covariance,
+}
+
+/// A verified loop measurement rejected before graph insertion. Keeping the
+/// measurement is essential for deciding offline whether a robust gate caught
+/// a false closure or over-rejected a ground-truth-consistent one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnlineSlamRejectedLoopConstraint {
+    pub from_keyframe_id: u64,
+    pub to_keyframe_id: u64,
+    pub inlier_count: usize,
+    pub translation_norm_m: f64,
+    pub relative_pose: SE3,
+    pub source: LoopClosureCandidateSource,
+    pub reason: OnlineSlamLoopConstraintRejectionReason,
 }
 
 /// Per-session configuration for the online loop-closure + pose-graph
@@ -1540,11 +2064,22 @@ pub struct OnlineSlamLoopClosureRefinementState {
     /// [`OnlineSlamConfig::relocalization`]. Empty (and never consulted)
     /// when `appearance_candidates` is `None`.
     pub appearance_descriptor_cache: HashMap<u64, Vec<f32>>,
+    appearance_pending_region: Option<AppearancePendingRegion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AppearancePendingRegion {
+    root_keyframe_id: u64,
+    last_current_keyframe_id: u64,
+    root_to_last_current: SE3,
+    confirmation_count: usize,
+    miss_count: usize,
 }
 
 impl OnlineSlamLoopClosureRefinementState {
     fn new(config: OnlineSlamLoopClosureRefinementConfig) -> Self {
-        let sim3_graph = matches!(config.solver, LoopRefinementSolver::Sim3(_)).then(Sim3PoseGraph::new);
+        let sim3_graph =
+            matches!(config.solver, LoopRefinementSolver::Sim3(_)).then(Sim3PoseGraph::new);
         Self {
             config,
             graph: PoseGraph::new(),
@@ -1555,14 +2090,16 @@ impl OnlineSlamLoopClosureRefinementState {
             pending_since_last_trigger: 0,
             trigger_count: 0,
             appearance_descriptor_cache: HashMap::new(),
+            appearance_pending_region: None,
         }
     }
 
     fn reset(&mut self) {
         self.appearance_descriptor_cache.clear();
+        self.appearance_pending_region = None;
         self.graph = PoseGraph::new();
-        self.sim3_graph = matches!(self.config.solver, LoopRefinementSolver::Sim3(_))
-            .then(Sim3PoseGraph::new);
+        self.sim3_graph =
+            matches!(self.config.solver, LoopRefinementSolver::Sim3(_)).then(Sim3PoseGraph::new);
         self.keyframe_order.clear();
         self.verified_constraints.clear();
         self.pcm_deferred.clear();
@@ -1650,6 +2187,22 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// Number of keyframes surviving appearance ranking and the frame-gap
     /// filter before descriptor matching / PnP verification.
     pub appearance_ranked_candidate_count: usize,
+    /// Appearance regions rejected because they intersect the current
+    /// keyframe's connected/covisible local region and are not a loop.
+    pub appearance_connected_region_rejected_count: usize,
+    /// Candidates passing the primary current-vs-candidate-region PnP test.
+    pub appearance_pnp_verified_count: usize,
+    /// Primary-PnP successes rejected by the optional projection-rematch and
+    /// refined-PnP gate.
+    pub appearance_projection_rejected_count: usize,
+    /// Primary-PnP successes rejected by current-side covisibility checking.
+    pub appearance_covisibility_rejected_count: usize,
+    /// Per-primary-PnP candidate evidence for reproducible gate analysis.
+    pub appearance_candidate_diagnostics: Vec<AppearanceLoopCandidateDiagnostic>,
+    /// A geometrically verified region is being carried into later keyframes.
+    pub appearance_region_confirmation_waiting: bool,
+    /// A pending region reached its configured cross-keyframe confirmation count.
+    pub appearance_region_confirmed_count: usize,
     /// Appearance candidates whose PnP verification succeeded but whose
     /// matched 3D regions could not produce a robust Sim3 scale observation.
     pub appearance_scale_estimation_failed_count: usize,
@@ -1670,6 +2223,10 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// Does NOT include constraints admitted via the `pcm_batch_rescreen`
     /// promotion path.
     pub admitted_constraints: Vec<OnlineSlamAdmittedLoopConstraint>,
+    /// Verified loop measurements rejected by PCM or the covariance gate this
+    /// frame. Unlike the aggregate counters, this retains the pose needed for
+    /// post-hoc ground-truth correctness and over-rejection analysis.
+    pub rejected_constraints: Vec<OnlineSlamRejectedLoopConstraint>,
     /// Number of landmarks moved by
     /// [`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`]'s
     /// landmark-propagation pass this frame. Always `0` when
@@ -1775,8 +2332,9 @@ pub struct OnlineSlamPipeline<T, M> {
     /// Running motion-based VI init state. `Some` exactly when
     /// `config.vi_motion_init.is_some() && config.vi_init.is_some() &&
     /// config.imu.is_some()`. Private because the motion-based fire is
-    /// gated on the static stage having completed first; the pipeline
-    /// owns the ordering. Inspected via
+    /// normally gated on the static stage having completed first; an explicit
+    /// motion-start fallback may instead begin after that stage gives up. The
+    /// pipeline owns the ordering. Inspected via
     /// [`Self::motion_vi_initialization_status`].
     vi_motion_init_state: Option<OnlineSlamMotionViInitState>,
     /// Running loop-closure + pose-graph refinement state. `Some`
@@ -1891,6 +2449,30 @@ impl<T, M> OnlineSlamPipeline<T, M> {
         // sample into its initialiser buffer. Once `completed` /
         // `gave_up` is `Some`, stop forwarding so the standalone module
         // is not asked to keep growing memory after it has fired.
+        if let Some(state) = self.vi_init_state.as_mut() {
+            if state.is_active() {
+                state.initializer.push_sample(gyro, accel, dt);
+                state.samples_buffered += 1;
+                state.buffered_duration_seconds += dt;
+            }
+        }
+    }
+
+    /// Feed a sample only to the stationary visual-inertial initializer,
+    /// without integrating it into the first inter-keyframe IMU factor.
+    /// Dataset runners use this for IMU measurements that precede the visual
+    /// seed keyframe: those samples contain the best stationary bias/gravity
+    /// window, but including them in the running preintegrator would attach
+    /// motion from before the first graph state to its first factor.
+    pub fn push_vi_initialization_measurement(
+        &mut self,
+        gyro: Vector3<f64>,
+        accel: Vector3<f64>,
+        dt: f64,
+    ) {
+        if dt <= 0.0 || !dt.is_finite() {
+            return;
+        }
         if let Some(state) = self.vi_init_state.as_mut() {
             if state.is_active() {
                 state.initializer.push_sample(gyro, accel, dt);
@@ -2085,8 +2667,8 @@ where
                 local_vi_ba = crate::online_slam_vi_ba::run_local_vi_ba(&mut self.map, state);
             }
         }
-        // The motion-based stage gates on the static stage having
-        // completed; runs AFTER local-VI-BA so the refined pose +
+        // The motion-based stage normally gates on static completion (or the
+        // explicit post-give-up fallback); it runs AFTER local-VI-BA so the refined pose +
         // velocity slot are already in `map.keyframes` /
         // `local_vi_ba_state.keyframe_state` when the trigger fires.
         let vi_motion_init =
@@ -2664,7 +3246,10 @@ where
         let prev_keyframe_id = state.keyframe_order.last().copied();
         state.graph.add_pose(new_keyframe_id, new_pose.clone());
         if let Some(sim3_graph) = state.sim3_graph.as_mut() {
-            sim3_graph.add_pose(new_keyframe_id, sim3_at_unit_scale(&new_pose.world_to_camera));
+            sim3_graph.add_pose(
+                new_keyframe_id,
+                sim3_at_unit_scale(&new_pose.world_to_camera),
+            );
         }
         if state.keyframe_order.is_empty() {
             state.graph.anchor(new_keyframe_id);
@@ -2687,7 +3272,9 @@ where
                         1.0,
                     );
                 }
-                state.graph.add_sequential_edge(prev_id, new_keyframe_id, relative);
+                state
+                    .graph
+                    .add_sequential_edge(prev_id, new_keyframe_id, relative);
             }
         }
         state.keyframe_order.push(new_keyframe_id);
@@ -2752,34 +3339,55 @@ where
         // whether `detect_loop_closure_candidates` found anything this
         // frame, since the whole point is to catch loops the shared-id
         // detector structurally cannot see.
-            let appearance_candidates: Vec<LoopClosureCandidate> =
-            if let Some(appearance_config) = state.config.appearance_candidates.clone() {
-                stats.appearance_ranked_candidate_count =
-                    relocalization_mean_descriptor(&frame.descriptors)
-                        .map(|descriptor| {
-                            rank_appearance_loop_candidate_keyframes(
-                                &state.appearance_descriptor_cache,
-                                frame.id,
-                                &descriptor,
-                                appearance_config.min_similarity,
-                                appearance_config.min_keyframe_id_gap,
-                            )
-                            .len()
-                            .min(appearance_config.max_candidates_per_frame.max(1))
-                        })
-                        .unwrap_or(0);
-                let built = build_appearance_loop_candidates(
-                    &self.map,
-                    frame,
-                    &state.appearance_descriptor_cache,
-                    &appearance_config,
-                    &state.config.camera,
-                );
-                stats.appearance_candidate_count = built.len();
-                built
-            } else {
-                Vec::new()
-            };
+        let appearance_candidates: Vec<LoopClosureCandidate> = if let Some(appearance_config) =
+            state.config.appearance_candidates.clone()
+        {
+            stats.appearance_ranked_candidate_count =
+                relocalization_mean_descriptor(&frame.descriptors)
+                    .map(|descriptor| {
+                        rank_appearance_loop_candidate_keyframes(
+                            &state.appearance_descriptor_cache,
+                            frame.id,
+                            &descriptor,
+                            appearance_config.min_similarity,
+                            appearance_config.min_keyframe_id_gap,
+                        )
+                        .len()
+                        .min(appearance_config.max_candidates_per_frame.max(1))
+                    })
+                    .unwrap_or(0);
+            let mut builder_config = appearance_config.clone();
+            // ORB-SLAM3 first obtains one strong current-vs-region pose,
+            // then carries that region into later keyframes. Do not make
+            // the one-frame builder consume the cross-keyframe count.
+            builder_config.min_covisible_keyframe_verifications = 1;
+            let built = build_appearance_loop_candidates_with_diagnostics(
+                &self.map,
+                frame,
+                &state.appearance_descriptor_cache,
+                &builder_config,
+                &state.config.camera,
+            );
+            stats.appearance_connected_region_rejected_count =
+                built.connected_region_rejected_count;
+            stats.appearance_pnp_verified_count = built.pnp_verified_count;
+            stats.appearance_projection_rejected_count = built.projection_rejected_count;
+            stats.appearance_covisibility_rejected_count = built.covisibility_rejected_count;
+            stats.appearance_candidate_count = built.candidates.len();
+            stats.appearance_candidate_diagnostics = built.diagnostics;
+            let (confirmed, waiting, just_confirmed) = confirm_appearance_region_across_keyframes(
+                &self.map,
+                frame.id,
+                built.candidates,
+                &appearance_config,
+                &mut state.appearance_pending_region,
+            );
+            stats.appearance_region_confirmation_waiting = waiting;
+            stats.appearance_region_confirmed_count = usize::from(just_confirmed);
+            confirmed
+        } else {
+            Vec::new()
+        };
 
         if !loop_closure_candidates.is_empty() || !appearance_candidates.is_empty() {
             // PCM front-end screen (optional): snapshot the current odometry
@@ -2830,49 +3438,48 @@ where
                 if !state.graph.poses.contains_key(&constraint.from_keyframe_id) {
                     continue;
                 }
-                let measured_sim3_scale = if matches!(
-                    state.config.solver,
-                    LoopRefinementSolver::Sim3(_)
-                ) && source == LoopClosureCandidateSource::Appearance
-                {
-                    let scale = match estimate_loop_sim3_scale_3d3d(
-                        &self.map,
-                        constraint.from_keyframe_id,
-                        constraint.to_keyframe_id,
-                        &candidate.pnp_query_landmark_pairs,
-                        metric_points_camera,
-                    ) {
-                        Ok(scale) => scale,
-                        Err(reason) => {
-                            stats.appearance_scale_estimation_failed_count += 1;
-                            match reason {
-                                Sim3ScaleEstimationFailure::InsufficientPoints => {
-                                    stats.appearance_scale_insufficient_points_count += 1;
+                let measured_sim3_scale =
+                    if matches!(state.config.solver, LoopRefinementSolver::Sim3(_))
+                        && source == LoopClosureCandidateSource::Appearance
+                    {
+                        let scale = match estimate_loop_sim3_scale_3d3d(
+                            &self.map,
+                            constraint.from_keyframe_id,
+                            constraint.to_keyframe_id,
+                            &candidate.pnp_query_landmark_pairs,
+                            metric_points_camera,
+                        ) {
+                            Ok(scale) => scale,
+                            Err(reason) => {
+                                stats.appearance_scale_estimation_failed_count += 1;
+                                match reason {
+                                    Sim3ScaleEstimationFailure::InsufficientPoints => {
+                                        stats.appearance_scale_insufficient_points_count += 1;
+                                    }
+                                    Sim3ScaleEstimationFailure::InsufficientMatches => {
+                                        stats.appearance_scale_insufficient_matches_count += 1;
+                                    }
+                                    Sim3ScaleEstimationFailure::NoConsensus => {
+                                        stats.appearance_scale_no_consensus_count += 1;
+                                    }
                                 }
-                                Sim3ScaleEstimationFailure::InsufficientMatches => {
-                                    stats.appearance_scale_insufficient_matches_count += 1;
-                                }
-                                Sim3ScaleEstimationFailure::NoConsensus => {
-                                    stats.appearance_scale_no_consensus_count += 1;
-                                }
+                                // A PnP pose alone contains no scale observation.
+                                // Do not let an arbitrary scale-1 edge perturb an
+                                // already accurate map on the Sim3-only path.
+                                continue;
                             }
-                        // A PnP pose alone contains no scale observation.
-                        // Do not let an arbitrary scale-1 edge perturb an
-                        // already accurate map on the Sim3-only path.
+                        };
+                        if (scale - 1.0).abs() < 0.05 {
+                            stats.appearance_near_unit_scale_count += 1;
+                            // This solver option is specifically the scale-drift
+                            // correction arm. Leave near-unit rigid corrections
+                            // to the established SE3 path.
                             continue;
                         }
+                        Some(scale)
+                    } else {
+                        None
                     };
-                    if (scale - 1.0).abs() < 0.05 {
-                        stats.appearance_near_unit_scale_count += 1;
-                        // This solver option is specifically the scale-drift
-                        // correction arm. Leave near-unit rigid corrections
-                        // to the established SE3 path.
-                        continue;
-                    }
-                    Some(scale)
-                } else {
-                    None
-                };
                 // Front-end screens (both before the closure enters the graph):
                 // PCM combinatorial consistency, then the covariance metric gate.
                 let pcm_measurement = pcm_cfg.as_ref().map(|cfg| {
@@ -2881,6 +3488,17 @@ where
                 });
                 if let Some((false, _)) = pcm_measurement {
                     stats.loop_closures_pcm_rejected += 1;
+                    stats
+                        .rejected_constraints
+                        .push(OnlineSlamRejectedLoopConstraint {
+                            from_keyframe_id: constraint.from_keyframe_id,
+                            to_keyframe_id: constraint.to_keyframe_id,
+                            inlier_count: constraint.inlier_count,
+                            translation_norm_m: constraint.relative_pose.translation.norm(),
+                            relative_pose: constraint.relative_pose.clone(),
+                            source,
+                            reason: OnlineSlamLoopConstraintRejectionReason::Pcm,
+                        });
                     // Hold a deferred-but-verified closure for the batch
                     // re-screen, which may promote it once a consensus forms.
                     if state.config.pcm_batch_rescreen {
@@ -2891,6 +3509,17 @@ where
                 if let Some(threshold) = state.config.covariance_gate {
                     if !covariance_gate_admits(&state.graph, &constraint, threshold) {
                         stats.loop_closures_covariance_rejected += 1;
+                        stats
+                            .rejected_constraints
+                            .push(OnlineSlamRejectedLoopConstraint {
+                                from_keyframe_id: constraint.from_keyframe_id,
+                                to_keyframe_id: constraint.to_keyframe_id,
+                                inlier_count: constraint.inlier_count,
+                                translation_norm_m: constraint.relative_pose.translation.norm(),
+                                relative_pose: constraint.relative_pose.clone(),
+                                source,
+                                reason: OnlineSlamLoopConstraintRejectionReason::Covariance,
+                            });
                         continue;
                     }
                 }
@@ -2911,13 +3540,16 @@ where
                         weight,
                     );
                 }
-                stats.admitted_constraints.push(OnlineSlamAdmittedLoopConstraint {
-                    from_keyframe_id: constraint.from_keyframe_id,
-                    to_keyframe_id: constraint.to_keyframe_id,
-                    inlier_count: constraint.inlier_count,
-                    translation_norm_m: constraint.relative_pose.translation.norm(),
-                    source,
-                });
+                stats
+                    .admitted_constraints
+                    .push(OnlineSlamAdmittedLoopConstraint {
+                        from_keyframe_id: constraint.from_keyframe_id,
+                        to_keyframe_id: constraint.to_keyframe_id,
+                        inlier_count: constraint.inlier_count,
+                        translation_norm_m: constraint.relative_pose.translation.norm(),
+                        relative_pose: constraint.relative_pose.clone(),
+                        source,
+                    });
                 if source == LoopClosureCandidateSource::Appearance {
                     stats.appearance_accepted_count += 1;
                 }
@@ -2964,10 +3596,7 @@ where
             // unit scale here would make an unchanged non-unit solution look
             // like a fresh correction on every solve, repeatedly moving
             // landmarks and the tracker.
-            let pre_solve_sim3_nodes = state
-                .sim3_graph
-                .as_ref()
-                .map(|graph| graph.poses.clone());
+            let pre_solve_sim3_nodes = state.sim3_graph.as_ref().map(|graph| graph.poses.clone());
             state.pending_since_last_trigger = 0;
             state.trigger_count += 1;
             // `Sim3` solves the parallel Sim3 mirror instead of the rigid
@@ -3085,7 +3714,8 @@ where
                     if let Some((_, last_correction)) =
                         corrections.iter().max_by_key(|(id, _)| **id)
                     {
-                        self.tracker.apply_similarity_pose_correction(last_correction);
+                        self.tracker
+                            .apply_similarity_pose_correction(last_correction);
                         stats.tracker_correction_applied = true;
                     }
                 }
@@ -3662,8 +4292,8 @@ where
     /// [`OnlineSlamResult::vi_motion_init`]. `None` when:
     /// * no new keyframe was registered this frame,
     /// * the motion-based stage is disabled,
-    /// * the static VI init stage has not yet succeeded (the motion-
-    ///   based stage's prerequisite),
+    /// * the static VI init stage has neither succeeded nor reached the
+    ///   explicitly-enabled post-give-up fallback,
     /// * or the stage has already reached the terminal `Initialised`
     ///   state.
     fn run_motion_vi_init_step(
@@ -3678,12 +4308,6 @@ where
         if !added_new_keyframe {
             return None;
         }
-        // Gate on the static stage having completed successfully. The
-        // motion-based stage's `static_seed` is the result we mirror.
-        let static_seed = self
-            .vi_init_state
-            .as_ref()
-            .and_then(|s| s.completed.clone())?;
         if self
             .vi_motion_init_state
             .as_ref()
@@ -3692,6 +4316,33 @@ where
         {
             return None;
         }
+        // Prefer stationary-window bias estimates. For a sequence that starts
+        // in motion, an explicit opt-in may continue only after the static
+        // stage has terminally given up; use the still-live IMU configuration's
+        // calibrated/existing biases rather than fabricating a stationary
+        // result from a low-variance moving window.
+        let static_bias_seed = self
+            .vi_init_state
+            .as_ref()
+            .and_then(|state| state.completed.as_ref())
+            .map(|seed| (seed.bias_gyro, seed.bias_acc));
+        let allow_after_give_up = self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|state| state.config.allow_after_static_give_up)
+            .unwrap_or(false);
+        let static_gave_up = self
+            .vi_init_state
+            .as_ref()
+            .is_some_and(|state| state.gave_up.is_some());
+        let (bias_gyro_seed, bias_acc_seed) = if let Some(seed) = static_bias_seed {
+            seed
+        } else if allow_after_give_up && static_gave_up {
+            let imu = self.imu_state.as_ref()?;
+            (imu.config.bias_gyro, imu.config.bias_acc)
+        } else {
+            return None;
+        };
 
         // Bank the new factor + register the keyframe centre.
         let camera_center = self
@@ -3719,10 +4370,12 @@ where
             .unwrap_or_default();
         let outcome = {
             let state = self.vi_motion_init_state.as_mut().unwrap();
-            match state
-                .initializer
-                .try_initialize(&mut self.map, &factors_snapshot, &static_seed)
-            {
+            match state.initializer.try_initialize_with_bias_seed(
+                &mut self.map,
+                &factors_snapshot,
+                bias_gyro_seed,
+                bias_acc_seed,
+            ) {
                 Ok(r) => Ok(r.clone()),
                 Err(reason) => {
                     state.last_rejection = Some(reason.clone());
@@ -3972,7 +4625,11 @@ fn propagate_pose_graph_corrections(
     if moved == 0 {
         (0, None, None)
     } else {
-        (moved, Some(max_displacement), Some(sum_displacement / moved as f64))
+        (
+            moved,
+            Some(max_displacement),
+            Some(sum_displacement / moved as f64),
+        )
     }
 }
 
@@ -4066,8 +4723,7 @@ fn estimate_loop_sim3_scale_3d3d(
     if pnp_query_landmark_pairs.is_empty() {
         let from_descriptors: Vec<Vec<f32>> =
             from_points.iter().map(|(_, d, _)| d.clone()).collect();
-        let to_descriptors: Vec<Vec<f32>> =
-            to_points.iter().map(|(_, d, _)| d.clone()).collect();
+        let to_descriptors: Vec<Vec<f32>> = to_points.iter().map(|(_, d, _)| d.clone()).collect();
         let matcher = visloc_vision::matching::BruteForceMatcher::default();
         let forward = matcher.match_descriptors(&from_descriptors, &to_descriptors);
         let reverse = matcher.match_descriptors(&to_descriptors, &from_descriptors);
@@ -4151,11 +4807,9 @@ fn estimate_loop_sim3_scale_3d3d(
                 hypotheses += 1;
                 let source = [matched[i].0, matched[j].0, matched[k].0];
                 let target = [matched[i].1, matched[j].1, matched[k].1];
-                let Some(model) = visloc_tracking::umeyama_similarity_transform(
-                    &source,
-                    &target,
-                    true,
-                ) else {
+                let Some(model) =
+                    visloc_tracking::umeyama_similarity_transform(&source, &target, true)
+                else {
                     continue;
                 };
                 if !model.scale.is_finite() || !(0.5..=2.0).contains(&model.scale) {
@@ -4268,7 +4922,11 @@ fn propagate_pose_graph_corrections_sim3(
     if moved == 0 {
         (0, None, None)
     } else {
-        (moved, Some(max_displacement), Some(sum_displacement / moved as f64))
+        (
+            moved,
+            Some(max_displacement),
+            Some(sum_displacement / moved as f64),
+        )
     }
 }
 
@@ -4278,6 +4936,161 @@ mod sim3_scale_estimation_tests {
     use super::*;
     use nalgebra::{Point2, Point3};
     use visloc_core::types::Landmark;
+
+    fn verified_appearance_candidate(query_frame_id: u64) -> LoopClosureCandidate {
+        verified_appearance_candidate_with_pose(query_frame_id, 10, SE3::identity())
+    }
+
+    fn verified_appearance_candidate_with_pose(
+        query_frame_id: u64,
+        matched_keyframe_id: u64,
+        relative_pose: SE3,
+    ) -> LoopClosureCandidate {
+        LoopClosureCandidate {
+            query_frame_id,
+            matched_keyframe_id,
+            shared_landmark_count: 40,
+            query_inlier_count: 40,
+            keyframe_observation_count: 40,
+            shared_landmark_ratio: 1.0,
+            score: 10.0,
+            geometrically_verified: true,
+            verification: Some(LoopClosureVerification {
+                verified: true,
+                correspondence_count: 40,
+                inlier_count: 40,
+                inlier_ratio: 1.0,
+                mean_sampson_error: 0.0,
+                score: 10.0,
+                failure_reason: None,
+                relative_pose: Some(relative_pose),
+                mean_reprojection_error_px: Some(0.0),
+            }),
+            pnp_query_landmark_pairs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn confirms_the_same_appearance_region_across_three_keyframes() {
+        let mut map = VisualMap::new();
+        for frame_id in [10, 100, 110, 120] {
+            let mut frame = Frame::new(frame_id, 1);
+            frame.pose = Some(Pose::identity());
+            map.keyframes.insert(
+                frame_id,
+                Keyframe {
+                    frame,
+                    observations: Vec::new(),
+                },
+            );
+        }
+        let config = LoopAppearanceCandidateConfig {
+            region_confirmation_required_keyframes: 3,
+            ..LoopAppearanceCandidateConfig::default()
+        };
+        let mut pending = None;
+
+        let (first, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            100,
+            vec![verified_appearance_candidate(100)],
+            &config,
+            &mut pending,
+        );
+        assert!(first.is_empty() && waiting && !confirmed);
+        let (second, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            110,
+            vec![verified_appearance_candidate(110)],
+            &config,
+            &mut pending,
+        );
+        assert!(second.is_empty() && waiting && !confirmed);
+        let (third, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            120,
+            vec![verified_appearance_candidate(120)],
+            &config,
+            &mut pending,
+        );
+        assert_eq!(third.len(), 1);
+        assert!(!waiting && confirmed);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn confirms_overlapping_region_with_nontrivial_pose_composition() {
+        use nalgebra::{UnitQuaternion, Vector3};
+        use visloc_core::types::Observation;
+
+        let pose = |x: f64| {
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(x, 0.0, 0.0))
+        };
+        let observation = |frame_id| Observation {
+            frame_id,
+            landmark_id: 7,
+            keypoint_index: 0,
+            xy: Point2::origin(),
+        };
+        let mut map = VisualMap::new();
+        for (frame_id, x) in [(10, 0.0), (20, 1.0), (100, 10.0), (110, 11.0), (120, 12.0)] {
+            let mut frame = Frame::new(frame_id, 1);
+            frame.pose = Some(pose(x));
+            let observations = if matches!(frame_id, 10 | 20) {
+                vec![observation(frame_id)]
+            } else {
+                Vec::new()
+            };
+            map.keyframes.insert(
+                frame_id,
+                Keyframe {
+                    frame,
+                    observations,
+                },
+            );
+        }
+        let config = LoopAppearanceCandidateConfig {
+            covisibility_min_shared_landmarks: 1,
+            region_confirmation_required_keyframes: 3,
+            ..LoopAppearanceCandidateConfig::default()
+        };
+        let mut pending = None;
+
+        let first_edge = SE3::new(UnitQuaternion::identity(), Vector3::new(10.0, 0.0, 0.0));
+        let second_edge = SE3::new(UnitQuaternion::identity(), Vector3::new(10.0, 0.0, 0.0));
+        let third_edge = SE3::new(UnitQuaternion::identity(), Vector3::new(12.0, 0.0, 0.0));
+        let (first, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            100,
+            vec![verified_appearance_candidate_with_pose(100, 10, first_edge)],
+            &config,
+            &mut pending,
+        );
+        assert!(first.is_empty() && waiting && !confirmed);
+        let (second, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            110,
+            vec![verified_appearance_candidate_with_pose(
+                110,
+                20,
+                second_edge,
+            )],
+            &config,
+            &mut pending,
+        );
+        assert!(second.is_empty() && waiting && !confirmed);
+        let (third, waiting, confirmed) = confirm_appearance_region_across_keyframes(
+            &map,
+            120,
+            vec![verified_appearance_candidate_with_pose(120, 10, third_edge)],
+            &config,
+            &mut pending,
+        );
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].matched_keyframe_id, 10);
+        assert!(!waiting && confirmed);
+        assert!(pending.is_none());
+    }
 
     #[test]
     fn recovers_scale_from_duplicate_landmark_regions() {
@@ -4350,14 +5163,8 @@ mod sim3_scale_estimation_tests {
         let pnp_pairs: Vec<(usize, u64)> = (0..points.len())
             .map(|index| (index, index as u64 + 1))
             .collect();
-        let scale = estimate_loop_sim3_scale_3d3d(
-            &map,
-            10,
-            20,
-            &pnp_pairs,
-            &HashMap::new(),
-        )
-        .unwrap();
+        let scale =
+            estimate_loop_sim3_scale_3d3d(&map, 10, 20, &pnp_pairs, &HashMap::new()).unwrap();
         assert!((scale - 1.7).abs() < 1.0e-9, "scale={scale}");
     }
 }

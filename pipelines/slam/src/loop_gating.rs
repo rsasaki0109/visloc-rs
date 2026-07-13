@@ -27,7 +27,11 @@ pub(crate) fn pcm_admits_loop(
     cfg: &pcm::PcmConfig,
 ) -> bool {
     if cfg.require_individual {
-        match pcm::individual_residual(new, odometry) {
+        let residual = match &cfg.noise {
+            Some(noise) => pcm::individual_mahalanobis(new, odometry, noise),
+            None => pcm::individual_residual(new, odometry),
+        };
+        match residual {
             Some(r) if r <= cfg.threshold => {}
             _ => return false,
         }
@@ -38,9 +42,11 @@ pub(crate) fn pcm_admits_loop(
     let consistent = admitted
         .iter()
         .filter(|a| {
-            pcm::pairwise_residual(new, a, odometry)
-                .map(|r| r <= cfg.threshold)
-                .unwrap_or(false)
+            let residual = match &cfg.noise {
+                Some(noise) => pcm::pairwise_mahalanobis(new, a, odometry, noise),
+                None => pcm::pairwise_residual(new, a, odometry),
+            };
+            residual.map(|r| r <= cfg.threshold).unwrap_or(false)
         })
         .count();
     // Strict majority of the established set agrees with the new closure.
@@ -158,6 +164,44 @@ mod pcm_batch_reconcile_tests {
             .edges
             .iter()
             .any(|e| e.kind == PoseGraphEdgeKind::LoopClosure && e.from == from && e.to == to)
+    }
+
+    #[test]
+    fn incremental_admission_uses_configured_mahalanobis_metric() {
+        let odometry = BTreeMap::from([
+            (0, SE3::identity()),
+            (
+                1,
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    nalgebra::Vector3::new(2.0, 0.0, 0.0),
+                ),
+            ),
+        ]);
+        let measurement = pcm::LoopMeasurement {
+            from: 0,
+            to: 1,
+            relative: SE3::identity(),
+        };
+        let raw = pcm::PcmConfig {
+            threshold: 1.0,
+            require_individual: true,
+            noise: None,
+        };
+        assert!(
+            !pcm_admits_loop(&measurement, &[], &odometry, &raw),
+            "the raw SE(3) residual is 2 and must fail a threshold of 1"
+        );
+
+        let mahalanobis = pcm::PcmConfig {
+            threshold: 1.0,
+            require_individual: true,
+            noise: Some(pcm::PcmNoiseModel::isotropic(100.0, 100.0, 100.0, 100.0)),
+        };
+        assert!(
+            pcm_admits_loop(&measurement, &[], &odometry, &mahalanobis),
+            "the online gate must honor the configured covariance-normalized metric"
+        );
     }
 
     /// The poisoning scenario: a wrong closure was admitted first (against the

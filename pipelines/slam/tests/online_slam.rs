@@ -1,19 +1,20 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
-use visloc_core::geometry::{Pose, Sim3};
+use visloc_core::geometry::{Pose, Sim3, SE3};
 use visloc_core::types::{Camera, Frame, Landmark, Observation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
-    build_appearance_loop_candidates, correspondences_2d3d_for_loop_candidate,
-    loop_closure_constraints_from_candidates, online_slam_results_to_html_report,
-    relative_world_to_camera, scan_pairwise_loop_closures, verify_loop_closure_candidates,
-    verify_loop_closure_candidates_hybrid, verify_loop_closure_candidates_pnp,
-    AppearanceLoopScannerSettings, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
-    EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier, HybridLoopClosureVerifierConfig,
-    LinearSolver, LoopAppearanceCandidateConfig, LoopClosureConfig, LoopClosureConstraint,
-    LoopClosureVerificationFailureReason, LoopClosureVerifierConfig, LoopRefinementSolver,
-    LoopRefinementVerifier, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
-    OnlineSlamImuConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
+    build_appearance_loop_candidates, build_appearance_loop_candidates_with_diagnostics,
+    correspondences_2d3d_for_loop_candidate, loop_closure_constraints_from_candidates,
+    online_slam_results_to_html_report, relative_world_to_camera, scan_pairwise_loop_closures,
+    verify_loop_closure_candidates, verify_loop_closure_candidates_hybrid,
+    verify_loop_closure_candidates_pnp, AppearanceLoopScannerSettings, CovisibilityLocalBaConfig,
+    CovisibilityLocalBaError, EssentialMatrixLoopClosureVerifier, HybridLoopClosureVerifier,
+    HybridLoopClosureVerifierConfig, LinearSolver, LoopAppearanceCandidateConfig,
+    LoopClosureConfig, LoopClosureConstraint, LoopClosureVerificationFailureReason,
+    LoopClosureVerifierConfig, LoopRefinementSolver, LoopRefinementVerifier, OnlineSlamConfig,
+    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamImuConfig, OnlineSlamLocalBaConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamPipeline,
     OnlineSlamRelocalizationAppearanceConfig, OnlineSlamRelocalizationConfig,
     OnlineSlamRelocalizationCovisibilityConfig, PairwiseKeyframeView,
     PairwiseLoopClosureScannerConfig, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
@@ -3569,6 +3570,38 @@ mod vi_init_integration {
         );
     }
 
+    #[test]
+    fn preseed_vi_samples_fill_initializer_without_polluting_first_imu_factor() {
+        let (map, _) = map_and_frame(10, 1);
+        let mut slam = pipeline_with_vi_init(map, vi_init_config_default(), None);
+        for _ in 0..100 {
+            slam.push_vi_initialization_measurement(
+                Vector3::zeros(),
+                Vector3::new(0.0, 0.0, 9.81),
+                0.005,
+            );
+        }
+        match slam.vi_initialization_status() {
+            ViInitializationStatus::Buffering {
+                samples_buffered,
+                buffered_duration_seconds,
+                ..
+            } => {
+                assert_eq!(samples_buffered, 100);
+                assert!((buffered_duration_seconds - 0.5).abs() < 1.0e-12);
+            }
+            other => panic!("expected pre-seed samples to remain buffered, got {other:?}"),
+        }
+        let delta_time = slam
+            .imu_state
+            .as_ref()
+            .unwrap()
+            .preintegrator
+            .delta()
+            .delta_time;
+        assert!(delta_time.abs() < 1.0e-12);
+    }
+
     // Test #14: reset_sequence_state re-arms VI init.
     #[test]
     fn reset_sequence_state_rearms_vi_init() {
@@ -3657,6 +3690,30 @@ mod vi_motion_init_integration {
     }
 
     #[test]
+    fn validate_rejects_post_give_up_motion_fallback_when_imu_is_disabled() {
+        let config = OnlineSlamConfig {
+            imu: Some(OnlineSlamImuConfig::default()),
+            vi_init: Some(OnlineSlamViInitConfig {
+                initializer: VisualInertialInitializerConfig {
+                    gravity_world: Vector3::new(0.0, 9.81, 0.0),
+                    ..VisualInertialInitializerConfig::default()
+                },
+                on_persistent_rejection: ViInitFallback::DisableImuStage,
+                ..OnlineSlamViInitConfig::default()
+            }),
+            vi_motion_init: Some(OnlineSlamMotionViInitConfig {
+                allow_after_static_give_up: true,
+                ..motion_config_default()
+            }),
+            ..OnlineSlamConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(OnlineSlamConfigError::MotionViInitAfterGiveUpRequiresKeepExistingSeed)
+        );
+    }
+
+    #[test]
     fn validate_rejects_motion_init_gravity_mismatch() {
         let config = OnlineSlamConfig {
             imu: Some(OnlineSlamImuConfig {
@@ -3683,6 +3740,71 @@ mod vi_motion_init_integration {
             Err(OnlineSlamConfigError::MotionGravityMismatch { .. }) => {}
             other => panic!("expected MotionGravityMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_rejects_motion_init_extrinsic_mismatch() {
+        let body_to_camera = SE3::new(
+            UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3),
+            Vector3::new(0.01, -0.02, 0.03),
+        );
+        let config = OnlineSlamConfig {
+            imu: Some(OnlineSlamImuConfig::default()),
+            vi_init: Some(OnlineSlamViInitConfig {
+                initializer: VisualInertialInitializerConfig {
+                    gravity_world: Vector3::new(0.0, 9.81, 0.0),
+                    ..VisualInertialInitializerConfig::default()
+                },
+                body_to_camera,
+                ..OnlineSlamViInitConfig::default()
+            }),
+            vi_motion_init: Some(motion_config_default()),
+            ..OnlineSlamConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(OnlineSlamConfigError::MotionExtrinsicMismatch)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_local_vi_ba_extrinsic_mismatch() {
+        let body_to_camera = SE3::new(
+            UnitQuaternion::from_euler_angles(-0.2, 0.1, 0.3),
+            Vector3::new(0.02, 0.03, -0.01),
+        );
+        let config = OnlineSlamConfig {
+            imu: Some(OnlineSlamImuConfig::default()),
+            vi_init: Some(OnlineSlamViInitConfig {
+                initializer: VisualInertialInitializerConfig {
+                    gravity_world: Vector3::new(0.0, 9.81, 0.0),
+                    ..VisualInertialInitializerConfig::default()
+                },
+                body_to_camera,
+                ..OnlineSlamViInitConfig::default()
+            }),
+            local_vi_ba: Some(OnlineSlamLocalBaConfig::default()),
+            ..OnlineSlamConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(OnlineSlamConfigError::LocalViBaExtrinsicMismatch)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_local_vi_ba_bias_random_walk_weights() {
+        let config = OnlineSlamConfig {
+            local_vi_ba: Some(OnlineSlamLocalBaConfig {
+                bias_random_walk_weights: Some((f64::NAN, 1.0)),
+                ..OnlineSlamLocalBaConfig::default()
+            }),
+            ..OnlineSlamConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(OnlineSlamConfigError::InvalidLocalViBaBiasRandomWalkWeights)
+        );
     }
 
     #[test]
@@ -3881,6 +4003,91 @@ mod vi_motion_init_integration {
             slam.vi_initialization_status(),
             visloc_slam::ViInitializationStatus::Initialised { .. }
         ));
+    }
+
+    #[test]
+    fn motion_vi_init_can_collect_factors_after_opted_in_static_give_up() {
+        use visloc_core::geometry::SE3;
+        let gravity = Vector3::new(0.0, 0.0, -9.81);
+        let (map, frame_a) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+        let (_, frame_b) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+        let mut slam = OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                imu: Some(OnlineSlamImuConfig {
+                    gravity_world: gravity,
+                    ..OnlineSlamImuConfig::default()
+                }),
+                vi_init: Some(OnlineSlamViInitConfig {
+                    initializer: VisualInertialInitializerConfig {
+                        gravity_world: gravity,
+                        max_gyro_std: 1.0e-6,
+                        max_accel_std: 1.0e-6,
+                        ..VisualInertialInitializerConfig::default()
+                    },
+                    body_to_camera: SE3::identity(),
+                    seed_first_keyframe_rotation: false,
+                    on_persistent_rejection: ViInitFallback::KeepExistingSeed,
+                    max_wait_duration_seconds: 0.1,
+                    max_buffered_samples: 50,
+                    try_initialize_on_every_frame: false,
+                }),
+                vi_motion_init: Some(OnlineSlamMotionViInitConfig {
+                    initializer: MotionBasedViInitializerConfig {
+                        // Keep the solver from firing: this test pins that the
+                        // fallback starts collecting keyframes/factors, not a
+                        // particular nonlinear optimum.
+                        min_keyframes: 10,
+                        min_translation_meters: 0.1,
+                        gravity_world: gravity,
+                        ..MotionBasedViInitializerConfig::default()
+                    },
+                    allow_after_static_give_up: true,
+                    ..OnlineSlamMotionViInitConfig::default()
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        );
+
+        for i in 0..200 {
+            let jitter = (i as f64 * 0.1).sin();
+            slam.push_imu_measurement(
+                Vector3::new(jitter, 0.0, 0.0),
+                Vector3::new(jitter * 0.5, 0.0, 9.81),
+                0.005,
+            );
+        }
+        let first = slam.process_frame(&frame_a, []);
+        assert!(matches!(
+            first.vi_init,
+            Some(ViInitializationEvent::GaveUp { .. })
+        ));
+        assert!(matches!(
+            first.vi_motion_init,
+            Some(MotionViInitializationEvent::StillWaiting { .. })
+        ));
+
+        for _ in 0..10 {
+            slam.push_imu_measurement(Vector3::zeros(), Vector3::new(0.0, 0.0, 9.81), 0.01);
+        }
+        let second = slam.process_frame(&frame_b, []);
+        assert!(matches!(
+            second.vi_motion_init,
+            Some(MotionViInitializationEvent::StillWaiting { .. })
+        ));
+        match slam.motion_vi_initialization_status() {
+            MotionViInitializationStatus::Waiting {
+                keyframes_observed,
+                buffered_factor_count,
+                ..
+            } => {
+                assert_eq!(keyframes_observed, 2);
+                assert_eq!(buffered_factor_count, 1);
+            }
+            other => panic!("expected fallback motion init to be collecting, got {other:?}"),
+        }
     }
 
     /// Regression: pins that the
@@ -4924,7 +5131,9 @@ mod online_loop_closure_refinement {
         let mut observations_a = Vec::new();
         for (index, point) in points.iter().enumerate() {
             let landmark_id = (index + 1) as u64;
-            let projected = camera.project(&pose_a.transform_world_point(point)).unwrap();
+            let projected = camera
+                .project(&pose_a.transform_world_point(point))
+                .unwrap();
             frame_a.keypoints.push(projected);
             frame_a.descriptors.push(descriptors[index].clone());
             observations_a.push(visloc_core::types::Observation {
@@ -4968,7 +5177,81 @@ mod online_loop_closure_refinement {
             frame.keypoints.push(projected);
             frame.descriptors.push(descriptors[index].clone());
         }
+        frame.pose = Some(pose);
         frame
+    }
+
+    fn insert_revisit_keyframe(map: &mut VisualMap, frame: Frame) {
+        let observations = frame
+            .keypoints
+            .iter()
+            .enumerate()
+            .map(|(keypoint_index, xy)| visloc_core::types::Observation {
+                frame_id: frame.id,
+                landmark_id: 10_000 + keypoint_index as u64,
+                keypoint_index,
+                xy: *xy,
+            })
+            .collect();
+        map.keyframes.insert(
+            frame.id,
+            visloc_core::types::Keyframe {
+                frame,
+                observations,
+            },
+        );
+    }
+
+    #[test]
+    fn appearance_loop_candidate_requires_three_current_covisible_keyframes() {
+        let (mut map, camera, descriptor_cache, points, descriptors) =
+            appearance_candidate_fixture();
+        let frame_200 = appearance_revisit_frame(
+            200,
+            Vector3::new(1.8, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+        let frame_205 = appearance_revisit_frame(
+            205,
+            Vector3::new(1.9, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+        let frame_210 = appearance_revisit_frame(
+            210,
+            Vector3::new(2.0, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+        insert_revisit_keyframe(&mut map, frame_200);
+        insert_revisit_keyframe(&mut map, frame_205);
+        insert_revisit_keyframe(&mut map, frame_210.clone());
+
+        let candidates = build_appearance_loop_candidates(
+            &map,
+            &frame_210,
+            &descriptor_cache,
+            &LoopAppearanceCandidateConfig::default(),
+            &camera,
+        );
+        assert_eq!(candidates.len(), 1);
+
+        map.keyframes.remove(&205);
+        let rejected = build_appearance_loop_candidates(
+            &map,
+            &frame_210,
+            &descriptor_cache,
+            &LoopAppearanceCandidateConfig::default(),
+            &camera,
+        );
+        assert!(
+            rejected.is_empty(),
+            "two agreeing keyframes must not satisfy the three-keyframe gate"
+        );
     }
 
     #[test]
@@ -4978,9 +5261,13 @@ mod online_loop_closure_refinement {
         // Keyframe-id gap of 200 clears the default 150 minimum; the
         // camera has translated by a known 2m baseline along x.
         let true_translation = Vector3::new(2.0, 0.0, 0.0);
-        let frame_b = appearance_revisit_frame(210, true_translation, &points, &descriptors, &camera);
+        let frame_b =
+            appearance_revisit_frame(210, true_translation, &points, &descriptors, &camera);
 
-        let config = LoopAppearanceCandidateConfig::default();
+        let config = LoopAppearanceCandidateConfig {
+            min_covisible_keyframe_verifications: 1,
+            ..LoopAppearanceCandidateConfig::default()
+        };
         let candidates =
             build_appearance_loop_candidates(&map, &frame_b, &descriptor_cache, &config, &camera);
 
@@ -4995,7 +5282,10 @@ mod online_loop_closure_refinement {
             .verification
             .as_ref()
             .expect("appearance candidates are always verifier-populated");
-        assert!(verification.verified, "noiseless correspondences must pass PnP verification");
+        assert!(
+            verification.verified,
+            "noiseless correspondences must pass PnP verification"
+        );
         assert!(
             verification.inlier_count >= 30,
             "expected >= 30 inliers out of 40 correspondences, got {}",
@@ -5012,6 +5302,102 @@ mod online_loop_closure_refinement {
             (recovered_translation_norm - true_translation_norm).abs() < 1.0e-2,
             "recovered translation norm {recovered_translation_norm} should match the true baseline {true_translation_norm}"
         );
+    }
+
+    #[test]
+    fn appearance_loop_candidate_refines_with_projection_and_reports_its_gate() {
+        let (map, camera, descriptor_cache, points, descriptors) = appearance_candidate_fixture();
+        let frame = appearance_revisit_frame(
+            210,
+            Vector3::new(2.0, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+        let accepting_config = LoopAppearanceCandidateConfig {
+            min_covisible_keyframe_verifications: 1,
+            projection_search_radius_px: Some(15.0),
+            min_projection_correspondence_count: 1,
+            ..LoopAppearanceCandidateConfig::default()
+        };
+        let accepted = build_appearance_loop_candidates_with_diagnostics(
+            &map,
+            &frame,
+            &descriptor_cache,
+            &accepting_config,
+            &camera,
+        );
+        assert_eq!(accepted.candidates.len(), 1);
+        assert_eq!(accepted.projection_rejected_count, 0);
+        let evidence = &accepted.diagnostics[0];
+        assert!(evidence.projection_attempted);
+        assert!(evidence.projection_correspondence_count > 0);
+        assert!(evidence.projection_inlier_count > 0);
+        assert!(evidence.projection_accepted);
+
+        let rejecting_config = LoopAppearanceCandidateConfig {
+            min_projection_correspondence_count: usize::MAX,
+            ..accepting_config
+        };
+        let rejected = build_appearance_loop_candidates_with_diagnostics(
+            &map,
+            &frame,
+            &descriptor_cache,
+            &rejecting_config,
+            &camera,
+        );
+        assert!(rejected.candidates.is_empty());
+        assert_eq!(rejected.projection_rejected_count, 1);
+        let evidence = &rejected.diagnostics[0];
+        assert!(evidence.projection_attempted);
+        assert!(evidence.projection_correspondence_count > 0);
+        assert!(!evidence.projection_accepted);
+    }
+
+    #[test]
+    fn appearance_loop_candidate_rejects_a_region_connected_to_current() {
+        let (mut map, camera, descriptor_cache, points, descriptors) =
+            appearance_candidate_fixture();
+        let frame_b = appearance_revisit_frame(
+            210,
+            Vector3::new(2.0, 0.0, 0.0),
+            &points,
+            &descriptors,
+            &camera,
+        );
+        let observations = frame_b
+            .keypoints
+            .iter()
+            .take(12)
+            .enumerate()
+            .map(|(keypoint_index, xy)| Observation {
+                frame_id: frame_b.id,
+                landmark_id: keypoint_index as u64 + 1,
+                keypoint_index,
+                xy: *xy,
+            })
+            .collect();
+        map.keyframes.insert(
+            frame_b.id,
+            visloc_core::types::Keyframe {
+                frame: frame_b.clone(),
+                observations,
+            },
+        );
+
+        let result = build_appearance_loop_candidates_with_diagnostics(
+            &map,
+            &frame_b,
+            &descriptor_cache,
+            &LoopAppearanceCandidateConfig {
+                min_covisible_keyframe_verifications: 1,
+                ..LoopAppearanceCandidateConfig::default()
+            },
+            &camera,
+        );
+        assert!(result.candidates.is_empty());
+        assert_eq!(result.connected_region_rejected_count, 1);
+        assert_eq!(result.pnp_verified_count, 0);
     }
 
     #[test]
@@ -5146,7 +5532,9 @@ mod online_loop_closure_refinement {
             keypoint_index: slam.map.keyframes[&20].frame.keypoints.len() - 1,
             xy: original_pixel,
         });
-        slam.map.landmarks.insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
+        slam.map
+            .landmarks
+            .insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
 
         // Also seed a landmark anchored to a keyframe the running pose
         // graph never registered (id 500 is inserted straight into
@@ -5206,8 +5594,7 @@ mod online_loop_closure_refinement {
             .clone()
             .expect("KF#20 still has a pose after PGO");
         assert_ne!(
-            new_pose_20.world_to_camera.translation,
-            old_pose_20.world_to_camera.translation,
+            new_pose_20.world_to_camera.translation, old_pose_20.world_to_camera.translation,
             "KF#20 must actually move for this to be a meaningful test"
         );
 
@@ -5232,8 +5619,7 @@ mod online_loop_closure_refinement {
         // (b) The landmark anchored to the never-registered keyframe 500
         // must be untouched.
         assert_eq!(
-            slam.map.landmarks[&UNSOLVED_ANCHOR_LANDMARK_ID].position,
-            unsolved_landmark_position,
+            slam.map.landmarks[&UNSOLVED_ANCHOR_LANDMARK_ID].position, unsolved_landmark_position,
             "a landmark anchored to a keyframe outside the solved graph must not move"
         );
 
@@ -5339,7 +5725,8 @@ mod online_loop_closure_refinement {
             .map(|i| {
                 let angle = i as f64 / NODE_COUNT as f64 * TAU;
                 let rotation = UnitQuaternion::from_euler_angles(0.0, 0.0, angle);
-                let translation = Vector3::new(5.0 * angle.cos(), 5.0 * angle.sin(), 0.3 * i as f64);
+                let translation =
+                    Vector3::new(5.0 * angle.cos(), 5.0 * angle.sin(), 0.3 * i as f64);
                 (i, rotation, translation)
             })
             .collect();
@@ -5370,14 +5757,11 @@ mod online_loop_closure_refinement {
         let mut se3_graph = PoseGraph::new();
         let mut sim3_graph = Sim3PoseGraph::new();
         for (i, pose) in estimate.iter().enumerate() {
-            se3_graph.add_pose(i as u64, Pose::from_world_to_camera(
-                pose.rotation,
-                pose.translation,
-            ));
-            sim3_graph.add_pose(
+            se3_graph.add_pose(
                 i as u64,
-                Sim3::new(pose.rotation, pose.translation, 1.0),
+                Pose::from_world_to_camera(pose.rotation, pose.translation),
             );
+            sim3_graph.add_pose(i as u64, Sim3::new(pose.rotation, pose.translation, 1.0));
         }
         se3_graph.anchor(0);
         sim3_graph.anchor(0);
@@ -5560,7 +5944,9 @@ mod online_loop_closure_refinement {
             keypoint_index: slam.map.keyframes[&20].frame.keypoints.len() - 1,
             xy: original_pixel,
         });
-        slam.map.landmarks.insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
+        slam.map
+            .landmarks
+            .insert(SYNTHETIC_ANCHOR_LANDMARK_ID, landmark);
 
         // Force a genuinely non-1 solved scale at KF#20: hand-edit the
         // Sim3 mirror's only edge so far (KF#10 -> KF#20, auto-seeded at
@@ -5626,8 +6012,7 @@ mod online_loop_closure_refinement {
             .clone()
             .expect("KF#20 still has a pose after the Sim3 solve");
         assert_ne!(
-            new_pose_20.world_to_camera.translation,
-            old_pose_20.world_to_camera.translation,
+            new_pose_20.world_to_camera.translation, old_pose_20.world_to_camera.translation,
             "KF#20 must actually move for this to be a meaningful test"
         );
 

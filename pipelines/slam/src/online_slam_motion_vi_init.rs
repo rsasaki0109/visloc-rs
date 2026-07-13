@@ -2,16 +2,18 @@
 //!
 //! Companion to [`crate::online_slam_vi_init`]: where the static stage
 //! recovers `(R_w←b, b_g, b_a)` from a stationary IMU window, this stage
-//! refines per-keyframe `(R_w←b, v_w, b_g, b_a)` (and optionally a single
-//! shared `s`) once the body has moved enough to give the IMU
+//! holds the known-scale visual body-pose trajectory fixed while refining
+//! per-keyframe velocity and a shared `(b_g, b_a)` once the body has moved
+//! enough to give the IMU
 //! translational excitation. It is the analogue of ORB-SLAM3's VIBA1 /
 //! VIBA2 inside [`crate::OnlineSlamPipeline`].
 //!
 //! Lifecycle:
 //!
-//! 1. The pipeline only feeds this stage AFTER the static VI init stage
-//!    has fired (`vi_init_state.completed = Some(...)`). The motion-based
-//!    stage consumes that static seed as its starting linearisation point.
+//! 1. The pipeline normally feeds this stage AFTER static VI init succeeds and
+//!    consumes that bias seed as its starting linearisation point. With
+//!    `allow_after_static_give_up`, a motion-start sequence may instead begin
+//!    after static initialization terminally fails, using configured IMU biases.
 //! 2. On every new keyframe, the pipeline calls
 //!    `OnlineSlamMotionViInitState::register_keyframe` with the
 //!    keyframe id + world-frame camera centre, and banks the freshly-
@@ -39,9 +41,9 @@ use crate::vi_motion_initializer::{
 /// Pipeline-level configuration for the motion-based VI init stage.
 ///
 /// Requires [`crate::OnlineSlamConfig::vi_init`] and
-/// [`crate::OnlineSlamConfig::imu`] to both be `Some(_)`: the static seed
-/// is the linearisation point this stage refines, and the IMU stream is
-/// the source of the pre-integration factors that drive the solve.
+/// [`crate::OnlineSlamConfig::imu`] to both be `Some(_)`: the static stage
+/// controls whether a recovered or explicit post-give-up bias seed is used,
+/// and the IMU stream supplies the pre-integration factors that drive the solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamMotionViInitConfig {
     /// Inner motion-based initialiser config (trigger thresholds + inner
@@ -56,6 +58,12 @@ pub struct OnlineSlamMotionViInitConfig {
     /// reset the running pre-integrator. Defaults to `true`; the same
     /// hand-off the static stage performs.
     pub mirror_into_imu_state: bool,
+    /// Permit the motion-based solver to start from the configured running IMU
+    /// biases after the stationary initializer reaches `GaveUp` while keeping
+    /// its existing seed. Off by default: callers must explicitly acknowledge
+    /// that their sequence may begin in motion and that no stationary bias
+    /// estimate is available.
+    pub allow_after_static_give_up: bool,
     /// Cap on the number of IMU factors banked in
     /// `OnlineSlamMotionViInitState::factor_history`. Bounds memory on
     /// long sequences where the trigger never fires. `0` disables the
@@ -69,6 +77,7 @@ impl Default for OnlineSlamMotionViInitConfig {
             initializer: MotionBasedViInitializerConfig::default(),
             mirror_into_local_vi_ba: true,
             mirror_into_imu_state: true,
+            allow_after_static_give_up: false,
             max_buffered_factors: 64,
         }
     }
@@ -78,9 +87,7 @@ impl Default for OnlineSlamMotionViInitConfig {
 /// [`crate::OnlineSlamPipeline::motion_vi_initialization_status`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum MotionViInitializationStatus {
-    /// Either the parent pipeline has no `vi_motion_init` config, or the
-    /// static VI init stage has not yet succeeded (motion-based stage
-    /// gates on the static seed being available).
+    /// The parent pipeline has no `vi_motion_init` config.
     Disabled,
     /// Static seed in hand; accumulating keyframes / translation until
     /// the trigger fires.

@@ -26,6 +26,11 @@ pub trait KeyframePolicy {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframePolicyConfig {
     pub min_frame_id_gap: u64,
+    /// Force a new keyframe once this many frame ids have elapsed, even when
+    /// estimated translation remains below `min_translation`. The optional
+    /// tracking-quality floors still apply, preventing a weak localization
+    /// from being promoted merely because it is old.
+    pub max_frame_id_gap: Option<u64>,
     pub min_translation: f64,
     pub select_relocalized_frames: bool,
     pub tracked_landmark_keyframe_ratio: Option<f64>,
@@ -51,6 +56,7 @@ impl Default for KeyframePolicyConfig {
     fn default() -> Self {
         Self {
             min_frame_id_gap: 5,
+            max_frame_id_gap: None,
             min_translation: 1.0,
             select_relocalized_frames: true,
             tracked_landmark_keyframe_ratio: None,
@@ -89,6 +95,10 @@ pub enum KeyframeDecisionReason {
     FrameIdGapTooSmall {
         frame_id_gap: u64,
         min_frame_id_gap: u64,
+    },
+    MaximumFrameIdGap {
+        frame_id_gap: u64,
+        max_frame_id_gap: u64,
     },
     TranslationTooSmall {
         translation: f64,
@@ -275,6 +285,24 @@ impl KeyframePolicy for SimpleKeyframePolicy {
 
         if let Some(reason) = self.tracked_landmark_drop_reason(result, frame_id_gap) {
             return self.selected(result, pose, reason);
+        }
+
+        if self
+            .config
+            .max_frame_id_gap
+            .is_some_and(|maximum| frame_id_gap >= maximum)
+        {
+            if let Some(reason) = self.insufficient_tracking_quality_reason(result) {
+                return self.rejected(result, reason);
+            }
+            return self.selected(
+                result,
+                pose,
+                KeyframeDecisionReason::MaximumFrameIdGap {
+                    frame_id_gap,
+                    max_frame_id_gap: self.config.max_frame_id_gap.unwrap_or(frame_id_gap),
+                },
+            );
         }
 
         let translation = self

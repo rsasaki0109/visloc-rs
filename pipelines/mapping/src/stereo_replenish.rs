@@ -142,11 +142,14 @@ pub fn build_stereo_metric_points(
     .into_iter()
     .filter(|survivor| {
         let depth = survivor.point_left_camera_frame.z;
-        depth.is_finite()
-            && depth >= config.min_depth_meters
-            && depth <= config.max_depth_meters
+        depth.is_finite() && depth >= config.min_depth_meters && depth <= config.max_depth_meters
     })
-    .map(|survivor| (survivor.left_keypoint_index, survivor.point_left_camera_frame))
+    .map(|survivor| {
+        (
+            survivor.left_keypoint_index,
+            survivor.point_left_camera_frame,
+        )
+    })
     .collect()
 }
 

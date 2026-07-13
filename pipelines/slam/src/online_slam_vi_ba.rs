@@ -35,9 +35,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{Vector3, Vector6};
+use visloc_core::geometry::SE3;
 use visloc_core::types::{Camera, VisualMap};
 
-use crate::bundle::{BaConfig, BaObservation, BaResult, BundleAdjustment};
+use crate::bundle::{BaConfig, BaObservation, BaResult, BiasRandomWalkFactor, BundleAdjustment};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::LinearSolver;
 
@@ -110,10 +111,20 @@ pub struct OnlineSlamLocalBaConfig {
     /// so the stage is self-contained and unit tests can drive it without
     /// constructing the full pipeline.
     pub gravity_world: Vector3<f64>,
+    /// Rigid transform from the tracked camera/sensor frame into the IMU body
+    /// frame (`T_b<-c`, EuRoC `T_BS`). Identity is valid only for co-located,
+    /// axis-aligned camera and IMU frames.
+    pub body_to_camera: SE3,
     /// Initial bias-gyro linearisation point for newly-promoted keyframes.
     pub bias_gyro_init: Vector3<f64>,
     /// Initial bias-acc linearisation point for newly-promoted keyframes.
     pub bias_acc_init: Vector3<f64>,
+    /// Optional `(gyro, accel)` information weights for adjacent bias
+    /// random-walk factors. Use `1 / (sigma_random_walk² * dt)` only when
+    /// the other IMU residual blocks use compatible covariance weighting.
+    /// `None` preserves the diagnostic legacy behavior; promoted tight VI
+    /// fusion must provide a physically calibrated prior.
+    pub bias_random_walk_weights: Option<(f64, f64)>,
     /// Conditioning fallback: when the first BA pass has
     /// `final_cost / initial_cost > threshold`, the cost surface is too
     /// far from quadratic for the joint pose + velocity + bias solve to
@@ -214,8 +225,10 @@ impl Default for OnlineSlamLocalBaConfig {
                 ..BaConfig::default()
             },
             gravity_world: Vector3::new(0.0, 9.81, 0.0),
+            body_to_camera: SE3::identity(),
             bias_gyro_init: Vector3::zeros(),
             bias_acc_init: Vector3::zeros(),
+            bias_random_walk_weights: None,
             freeze_biases_when_cost_ratio_above: None,
             reject_writeback_when_cost_ratio_above: None,
             reject_writeback_when_velocity_norm_above_mps: None,
@@ -377,6 +390,7 @@ fn robust_quantile(values: &mut Vec<f64>, quantile: f64) -> Option<f64> {
 fn pose_delta_velocity_norms_for_window(
     map: &VisualMap,
     factors: &[ImuPreintegrationFactor],
+    body_to_camera: &SE3,
 ) -> Vec<f64> {
     let mut norms = Vec::new();
     for factor in factors {
@@ -388,7 +402,12 @@ fn pose_delta_velocity_norms_for_window(
             .keyframes
             .get(&factor.keyframe_id_from)
             .and_then(|kf| kf.frame.pose.as_ref())
-            .map(|pose| pose.camera_center_world())
+            .map(|pose| {
+                body_to_camera
+                    .compose(&pose.world_to_camera)
+                    .inverse()
+                    .translation
+            })
         else {
             continue;
         };
@@ -396,7 +415,12 @@ fn pose_delta_velocity_norms_for_window(
             .keyframes
             .get(&factor.keyframe_id_to)
             .and_then(|kf| kf.frame.pose.as_ref())
-            .map(|pose| pose.camera_center_world())
+            .map(|pose| {
+                body_to_camera
+                    .compose(&pose.world_to_camera)
+                    .inverse()
+                    .translation
+            })
         else {
             continue;
         };
@@ -426,7 +450,14 @@ fn imu_predicted_velocity_norms_for_window(
             .keyframes
             .get(&factor.keyframe_id_from)
             .and_then(|kf| kf.frame.pose.as_ref())
-            .map(|pose| pose.world_to_camera.rotation.inverse())
+            .map(|pose| {
+                state
+                    .config
+                    .body_to_camera
+                    .compose(&pose.world_to_camera)
+                    .rotation
+                    .inverse()
+            })
         else {
             continue;
         };
@@ -454,7 +485,11 @@ fn compute_adaptive_velocity_gate_threshold_mps(
         .map(|slot| slot.velocity_world.norm())
         .filter(|value| value.is_finite() && *value >= 0.0)
         .collect();
-    reference_norms.extend(pose_delta_velocity_norms_for_window(map, factors));
+    reference_norms.extend(pose_delta_velocity_norms_for_window(
+        map,
+        factors,
+        &state.config.body_to_camera,
+    ));
     reference_norms.extend(imu_predicted_velocity_norms_for_window(map, state, factors));
     if reference_norms.len() < config.min_reference_count.max(1) {
         return None;
@@ -534,8 +569,14 @@ pub fn run_local_vi_ba(
         if state.keyframe_state.contains_key(&kf_id) {
             continue;
         }
-        let seed_velocity = seed_velocity_for(map, &window_ids, window_idx, &in_window_factors)
-            .unwrap_or_else(Vector3::zeros);
+        let seed_velocity = seed_velocity_for(
+            map,
+            &window_ids,
+            window_idx,
+            &in_window_factors,
+            &state.config.body_to_camera,
+        )
+        .unwrap_or_else(Vector3::zeros);
         state.keyframe_state.insert(
             kf_id,
             KeyframeImuState {
@@ -602,6 +643,7 @@ pub fn run_local_vi_ba(
 
     let build_ba = |freeze_all_biases: bool| -> Option<(BundleAdjustment, usize)> {
         let mut ba = BundleAdjustment::new(camera.clone());
+        ba.set_imu_body_to_camera(state.config.body_to_camera.clone());
         for kf_id in &window_ids {
             let kf = map.keyframes.get(kf_id)?;
             let pose = kf.frame.pose.clone()?;
@@ -628,6 +670,16 @@ pub fn run_local_vi_ba(
                 } else if freeze_all_biases {
                     ba.fix_bias(*kf_id);
                 }
+            }
+        }
+        if let Some((weight_gyro, weight_accel)) = state.config.bias_random_walk_weights {
+            for factor in &in_window_factors {
+                ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
+                    keyframe_id_from: factor.keyframe_id_from,
+                    keyframe_id_to: factor.keyframe_id_to,
+                    weight_gyro,
+                    weight_accel,
+                });
             }
         }
         let mut observation_count = 0usize;
@@ -806,16 +858,20 @@ pub struct InertialOnlyViBaStats {
 /// Run an inertial-only sliding-window MAP solve over `keyframe_ids`'s
 /// preintegration factors. Mirrors the VIBA1 stage in ORB-SLAM3:
 /// **landmarks are not touched** (no visual residuals contribute), and
-/// only the per-keyframe `(R_w←b, v_w, b_g, b_a)` states are optimised.
+/// only inertial states are optimised. The vision-only keyframe trajectory is
+/// held fixed, as required by Campos–Montiel–Tardós' disjoint inertial-only
+/// MAP formulation; allowing poses to move would remove the visual reference
+/// that makes gyro bias observable.
 /// Scale is fixed at `1.0` for this entry-point — the monocular scale
 /// recovery sits in the future VIBA2 stage. Used by
 /// [`crate::MotionBasedViInitializer`] to refine biases + poses once
 /// the body has moved enough to give the IMU translational excitation.
 ///
-/// The first keyframe in `keyframe_ids` (sorted ascending) is gauge-
-/// fixed: pose, velocity, and bias slots are all pinned so the solve
-/// only refines downstream keyframes. This matches the existing
-/// [`run_local_vi_ba`] convention.
+/// Bias is assumed constant over the short initialization window. The generic
+/// BA core represents one bias slot per keyframe, so adjacent slots are tied
+/// with a high-information equality factor. Unlike local VI-BA, no bias or
+/// velocity slot is pinned: fixed visual poses remove the trajectory gauge and
+/// the initializer must be able to estimate the common bias itself.
 ///
 /// Returns `None` when:
 /// * `keyframe_ids` has fewer than 2 entries,
@@ -855,15 +911,12 @@ pub fn run_inertial_only_vi_ba(
     let camera: Camera = map.cameras.get(&first_kf.frame.camera_id)?.clone();
 
     let mut ba = BundleAdjustment::new(camera);
-    let anchor_id = sorted_ids[0];
 
     for kf_id in &sorted_ids {
         let kf = map.keyframes.get(kf_id)?;
         let pose = kf.frame.pose.clone()?;
         ba.add_pose(*kf_id, pose);
-        if *kf_id == anchor_id {
-            ba.fix_pose(*kf_id);
-        }
+        ba.fix_pose(*kf_id);
     }
     // Velocity + bias slots per keyframe. Seed from `initial_states` when
     // available; otherwise zero velocity and zero bias.
@@ -875,10 +928,20 @@ pub fn run_inertial_only_vi_ba(
         ba.add_velocity(*kf_id, velocity);
         let bias = Vector6::new(bias_g.x, bias_g.y, bias_g.z, bias_a.x, bias_a.y, bias_a.z);
         ba.add_bias(*kf_id, bias);
-        if *kf_id == anchor_id {
-            ba.fix_velocity(*kf_id);
-            ba.fix_bias(*kf_id);
-        }
+    }
+    // The inertial-only initialization paper estimates a single gyro and
+    // accelerometer bias over its short window. Approximate that exact shared
+    // variable in the generic per-keyframe BA representation with a hard
+    // equality constraint. This is intentionally far stronger than a normal
+    // running bias random walk.
+    const SHARED_BIAS_EQUALITY_WEIGHT: f64 = 1.0e8;
+    for pair in sorted_ids.windows(2) {
+        ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
+            keyframe_id_from: pair[0],
+            keyframe_id_to: pair[1],
+            weight_gyro: SHARED_BIAS_EQUALITY_WEIGHT,
+            weight_accel: SHARED_BIAS_EQUALITY_WEIGHT,
+        });
     }
 
     let imu_factor_count = in_window_factors.len();
@@ -887,16 +950,6 @@ pub fn run_inertial_only_vi_ba(
     }
 
     let ba_result = ba.optimize(ba_config).ok()?;
-
-    // Write refined poses back to the map (rotation + position). The
-    // first (anchor) keyframe is fixed so its pose did not change.
-    for kf_id in &sorted_ids {
-        if let Some(refined_pose) = ba.poses.get(kf_id) {
-            if let Some(kf) = map.keyframes.get_mut(kf_id) {
-                kf.frame.pose = Some(refined_pose.clone());
-            }
-        }
-    }
 
     // Collect refined per-keyframe states for the caller.
     let mut keyframe_states: BTreeMap<u64, KeyframeImuState> = BTreeMap::new();
@@ -1186,10 +1239,11 @@ fn seed_velocity_for(
     window_ids: &[u64],
     window_idx: usize,
     factors: &[ImuPreintegrationFactor],
+    body_to_camera: &SE3,
 ) -> Option<Vector3<f64>> {
     // For the first window keyframe we have no prior estimate; the caller
-    // falls back to zero. For everyone else, seed from the camera-centre
-    // displacement over the connecting IMU factor's `delta_time`.
+    // falls back to zero. For everyone else, seed from the calibrated body-
+    // centre displacement over the connecting IMU factor's `delta_time`.
     if window_idx == 0 {
         return None;
     }
@@ -1201,20 +1255,16 @@ fn seed_velocity_for(
     if factor.delta.delta_time <= 0.0 {
         return None;
     }
-    let prev_center = map
-        .keyframes
-        .get(&prev_id)?
-        .frame
-        .pose
-        .as_ref()?
-        .camera_center_world();
-    let curr_center = map
-        .keyframes
-        .get(&kf_id)?
-        .frame
-        .pose
-        .as_ref()?
-        .camera_center_world();
+    let prev_camera_pose = map.keyframes.get(&prev_id)?.frame.pose.as_ref()?;
+    let curr_camera_pose = map.keyframes.get(&kf_id)?.frame.pose.as_ref()?;
+    let prev_center = body_to_camera
+        .compose(&prev_camera_pose.world_to_camera)
+        .inverse()
+        .translation;
+    let curr_center = body_to_camera
+        .compose(&curr_camera_pose.world_to_camera)
+        .inverse()
+        .translation;
     Some((curr_center - prev_center) / factor.delta.delta_time)
 }
 

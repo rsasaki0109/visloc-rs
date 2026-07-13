@@ -323,10 +323,7 @@ where
         }
 
         let radius_squared = search_radius_px * search_radius_px;
-        let mut correspondences = Vec::new();
-        let mut query_indices = Vec::new();
-        let mut landmark_ids = Vec::new();
-        let mut descriptor_matches = Vec::new();
+        let mut proposals = Vec::new();
 
         for (landmark_index, (landmark, descriptor)) in paired.iter().enumerate() {
             let point_camera = pose_prior.transform_world_point(&landmark.position);
@@ -355,34 +352,72 @@ where
                 continue;
             }
 
-            let train = [descriptor.to_vec()];
-            let window_matches = self.matcher.match_descriptors(&window_descriptors, &train);
+            // Match in landmark -> window direction. With one landmark
+            // descriptor as the query, the matcher's best/second-best (and
+            // ratio test) select exactly one image keypoint from this
+            // projection window. The opposite direction would allow every
+            // keypoint in the window to select the same landmark and makes a
+            // one-element train set bypass the ratio test.
+            let landmark_query = [descriptor.to_vec()];
+            let window_matches = self
+                .matcher
+                .match_descriptors(&landmark_query, &window_descriptors);
             for window_match in window_matches {
-                let Some(&global_query_index) = window_indices.get(window_match.query_index) else {
+                let Some(&global_query_index) = window_indices.get(window_match.train_index) else {
                     continue;
                 };
-                let Some(point2d) = query.keypoints.get(global_query_index).copied() else {
-                    continue;
-                };
-                correspondences.push(Correspondence2D3D {
-                    point2d,
-                    point3d: landmark.position,
-                    confidence: window_match.confidence,
-                });
-                query_indices.push(global_query_index);
-                landmark_ids.push(landmark.id);
-                descriptor_matches.push(DescriptorMatch {
-                    query_index: global_query_index,
-                    train_index: landmark_index,
-                    ..window_match
-                });
+                proposals.push((
+                    landmark_index,
+                    landmark.id,
+                    landmark.position,
+                    global_query_index,
+                    DescriptorMatch {
+                        query_index: global_query_index,
+                        train_index: landmark_index,
+                        ..window_match
+                    },
+                ));
             }
         }
 
-        if correspondences.is_empty() {
+        if proposals.is_empty() {
             return Err(CorrespondenceBuildError::NoDescriptorMatches {
                 candidate_landmark_count,
             });
+        }
+
+        // Different projected landmarks can still compete for the same image
+        // keypoint when windows overlap. Keep the globally lowest descriptor
+        // distance first, with deterministic landmark/query tie breaks, so
+        // the final 2D-3D set is one-to-one in both directions.
+        proposals.sort_by(|left, right| {
+            left.4
+                .distance
+                .total_cmp(&right.4.distance)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.3.cmp(&right.3))
+        });
+        let mut used_query_indices = HashSet::new();
+        let mut used_landmark_ids = HashSet::new();
+        let mut correspondences = Vec::new();
+        let mut query_indices = Vec::new();
+        let mut landmark_ids = Vec::new();
+        let mut descriptor_matches = Vec::new();
+        for (_, landmark_id, point3d, query_index, descriptor_match) in proposals {
+            if !used_query_indices.insert(query_index) || !used_landmark_ids.insert(landmark_id) {
+                continue;
+            }
+            let Some(point2d) = query.keypoints.get(query_index).copied() else {
+                continue;
+            };
+            correspondences.push(Correspondence2D3D {
+                point2d,
+                point3d,
+                confidence: descriptor_match.confidence,
+            });
+            query_indices.push(query_index);
+            landmark_ids.push(landmark_id);
+            descriptor_matches.push(descriptor_match);
         }
 
         Ok(CorrespondenceSet {

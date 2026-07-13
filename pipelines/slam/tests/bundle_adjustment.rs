@@ -1,5 +1,5 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3, Vector6};
-use visloc_core::geometry::Pose;
+use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Landmark, Observation, VisualMap};
 use visloc_mapping::{LocalMapWindow, LocalRefinementReason, LocalRefiner, StagedMapUpdate};
 use visloc_slam::{
@@ -1849,6 +1849,107 @@ fn imu_factor_zero_cost_at_consistent_state() {
 }
 
 #[test]
+fn imu_factor_uses_camera_to_body_extrinsic() {
+    let camera = pinhole();
+    let body_to_camera = SE3::new(
+        UnitQuaternion::from_euler_angles(0.2, -0.3, 0.4),
+        Vector3::new(0.11, -0.07, 0.05),
+    );
+    let body_pose_0 = SE3::new(UnitQuaternion::identity(), Vector3::zeros());
+    let body_pose_1 = SE3::new(UnitQuaternion::identity(), Vector3::new(-1.0, 0.0, 0.0));
+    let camera_pose_0 = body_to_camera.inverse().compose(&body_pose_0);
+    let camera_pose_1 = body_to_camera.inverse().compose(&body_pose_1);
+    let pose_0 = Pose::from_world_to_camera(camera_pose_0.rotation, camera_pose_0.translation);
+    let pose_1 = Pose::from_world_to_camera(camera_pose_1.rotation, camera_pose_1.translation);
+    let factor = ImuPreintegrationFactor {
+        keyframe_id_from: 10,
+        keyframe_id_to: 20,
+        delta: imu_constant_accel_delta(Vector3::new(2.0, 0.0, 0.0), 1.0, 0.001),
+        gravity_world: Vector3::zeros(),
+        weight_position: 1.0,
+        weight_velocity: 1.0,
+        weight_rotation: 1.0,
+    };
+
+    let build = |with_extrinsic: bool| {
+        let mut ba = BundleAdjustment::new(camera.clone());
+        ba.add_pose(10, pose_0.clone());
+        ba.add_pose(20, pose_1.clone());
+        ba.add_velocity(10, Vector3::zeros());
+        ba.add_velocity(20, Vector3::new(2.0, 0.0, 0.0));
+        ba.add_imu_factor(factor.clone());
+        if with_extrinsic {
+            ba.set_imu_body_to_camera(body_to_camera.clone());
+        }
+        ba
+    };
+
+    let calibrated_cost = build(true).cost();
+    let identity_rig_cost = build(false).cost();
+    assert!(
+        calibrated_cost < 1.0e-6,
+        "calibrated IMU residual must vanish, cost={calibrated_cost}"
+    );
+    assert!(
+        identity_rig_cost > 1.0e-2,
+        "non-identity rig must expose the old frame error, cost={identity_rig_cost}"
+    );
+}
+
+#[test]
+fn imu_pose_jacobian_respects_camera_to_body_extrinsic() {
+    let body_to_camera = SE3::new(
+        UnitQuaternion::from_euler_angles(0.2, -0.3, 0.4),
+        Vector3::new(0.11, -0.07, 0.05),
+    );
+    let body_pose_0 = SE3::identity();
+    let body_pose_1 = SE3::new(UnitQuaternion::identity(), Vector3::new(-1.0, 0.0, 0.0));
+    let camera_pose_0 = body_to_camera.inverse().compose(&body_pose_0);
+    let camera_pose_1 = body_to_camera.inverse().compose(&body_pose_1);
+    let mut drifted_camera_pose_1 = camera_pose_1.clone();
+    drifted_camera_pose_1.translation += Vector3::new(0.25, -0.12, 0.08);
+
+    let mut ba = BundleAdjustment::new(pinhole());
+    ba.set_imu_body_to_camera(body_to_camera.clone());
+    ba.add_pose(
+        10,
+        Pose::from_world_to_camera(camera_pose_0.rotation, camera_pose_0.translation),
+    );
+    ba.add_pose(
+        20,
+        Pose::from_world_to_camera(
+            drifted_camera_pose_1.rotation,
+            drifted_camera_pose_1.translation,
+        ),
+    );
+    ba.fix_pose(10);
+    ba.add_velocity(10, Vector3::zeros());
+    ba.add_velocity(20, Vector3::new(2.0, 0.0, 0.0));
+    ba.fix_velocity(10);
+    ba.fix_velocity(20);
+    ba.add_imu_factor(ImuPreintegrationFactor {
+        keyframe_id_from: 10,
+        keyframe_id_to: 20,
+        delta: imu_constant_accel_delta(Vector3::new(2.0, 0.0, 0.0), 1.0, 0.001),
+        gravity_world: Vector3::zeros(),
+        weight_position: 100.0,
+        weight_velocity: 1.0,
+        weight_rotation: 100.0,
+    });
+
+    let initial_cost = ba.cost();
+    let result = ba.optimize(&BaConfig::default()).expect("IMU BA");
+    let refined_camera = &ba.poses.get(&20).expect("refined pose").world_to_camera;
+    let refined_body = body_to_camera.compose(refined_camera);
+    let refined_body_center = refined_body.inverse().translation;
+    assert!(result.final_cost < initial_cost * 1.0e-4);
+    assert!(
+        (refined_body_center - Vector3::new(1.0, 0.0, 0.0)).norm() < 1.0e-4,
+        "refined body center={refined_body_center:?}"
+    );
+}
+
+#[test]
 fn imu_factor_pulls_drifted_velocity_back_to_truth() {
     // Truth scenario: constant +x acceleration of 2 m/s² for 1 s, two
     // keyframes 1 m apart. Fix both poses and v_1; only v_0 is free,
@@ -2234,11 +2335,29 @@ fn bias_random_walk_zero_cost_at_truth() {
     ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
         keyframe_id_from: 10,
         keyframe_id_to: 20,
-        weight: 100.0,
+        weight_gyro: 100.0,
+        weight_accel: 100.0,
     });
 
     let cost = ba.cost();
     assert!(cost < 1e-6, "cost at truth should be ≈0, got {cost}");
+}
+
+#[test]
+fn bias_random_walk_weights_gyro_and_accel_independently() {
+    let mut ba = BundleAdjustment::new(pinhole());
+    let mut bias_j = Vector6::zeros();
+    bias_j[0] = 1.0;
+    bias_j[3] = 2.0;
+    ba.add_bias(10, Vector6::zeros());
+    ba.add_bias(20, bias_j);
+    ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
+        keyframe_id_from: 10,
+        keyframe_id_to: 20,
+        weight_gyro: 3.0,
+        weight_accel: 5.0,
+    });
+    assert!((ba.cost() - 23.0).abs() < 1.0e-12);
 }
 
 #[test]
@@ -2277,7 +2396,8 @@ fn bias_random_walk_pulls_drifted_bias_toward_neighbor() {
     ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
         keyframe_id_from: 10,
         keyframe_id_to: 20,
-        weight: 1e4,
+        weight_gyro: 1e4,
+        weight_accel: 1e4,
     });
 
     let config = BaConfig {
@@ -2362,7 +2482,8 @@ fn bias_random_walk_propagates_observable_bias_to_neighbor() {
     ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
         keyframe_id_from: 10,
         keyframe_id_to: 20,
-        weight: 1e4,
+        weight_gyro: 1e4,
+        weight_accel: 1e4,
     });
 
     let config = BaConfig {
