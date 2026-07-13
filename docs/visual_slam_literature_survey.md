@@ -172,7 +172,11 @@ run do not regress materially, and the runtime cost is explicitly reported.
 Zero accepted loops proves safety but not improvement.
 
 Run the binary-identical repeated experiment matrix sequentially so concurrent
-inference does not contaminate runtime measurements. The runner records the
+inference does not contaminate runtime measurements. Keep the host free of
+unrelated compute-heavy jobs for the entire matrix: the memory gate below
+prevents allocation-starved runs from being accepted, but it cannot by itself
+prove CPU exclusivity. Any overlap with an unrelated compute job invalidates
+the affected runtime samples and requires a clean rerun. The runner records the
 Git revision, executable and model hashes, exact argument vector, timestamps,
 elapsed time, and exit status for every run:
 
@@ -190,16 +194,28 @@ the demo's 400-frame smoke-test default rather than a full sequence.
 It fails before launching when the dynamic ONNX runtime DLL is unavailable and
 records the Git revision, dirty status and diff fingerprint, executable/model/
 runtime DLL hashes, exact arguments, Rust toolchain, OS, CPU, logical processor
-count, installed memory, and 250-ms-sampled peak process working set. A dirty-tree run is therefore identifiable, while
+count, installed memory, and 250-ms-sampled peak process working set. It also
+requires at least 4 GiB of available physical memory and 4 GiB of Windows
+commit headroom before each run, samples both every five seconds, and records
+the preflight and minimum values in each run manifest. If either reserve is
+crossed during a run, the runner stops only its benchmark child and records an
+environmental validation error separately from the child's real exit code.
+Such a run is not an accuracy or runtime sample. The thresholds and sampling
+period can be changed explicitly with `-MinAvailableMemoryGiB`,
+`-MinCommitHeadroomGiB`, and `-ResourceSampleIntervalSeconds` when the host has
+a documented resource policy.
+
+A dirty-tree run is therefore identifiable, while
 the executable hash remains the authoritative identity of what actually ran.
 For a long interrupted matrix, repeat the same command with `-Resume`.
 Only runs whose per-run manifest has exit code zero and whose `summary.txt`
 exists are skipped; an incomplete or failed directory is never overwritten
 implicitly. Resume is also refused when executable, SuperPoint model, or ORT
 DLL hashes, dataset root, sequence list, repetition count, or frame cap differ
-from the existing experiment. The schema-v2 manifest also fingerprints the
-common and per-variant argument protocol, preventing a changed treatment from
-being resumed into an older matrix. Each successful run is rejected by the
+from the existing experiment. The schema-v3 manifest also fingerprints the
+common and per-variant argument protocol and the resource gate, preventing a
+changed treatment or environmental validity rule from being resumed into an
+older matrix. Each successful run is rejected by the
 runner if `summary.txt` does not report the expected
 `pose_graph_refinement=false` for `no_loop` or `true` for `appearance_loop`.
 

@@ -18,6 +18,12 @@ param(
     # The demo interprets zero as all available frames (its omitted default is 400).
     [int]$MaxFrames = 0,
 
+    [double]$MinAvailableMemoryGiB = 4.0,
+
+    [double]$MinCommitHeadroomGiB = 4.0,
+
+    [int]$ResourceSampleIntervalSeconds = 5,
+
     [switch]$Resume,
 
     [switch]$ContinueOnError
@@ -41,6 +47,50 @@ if ($Repetitions -lt 1) {
 }
 if ($MaxFrames -lt 0) {
     throw 'MaxFrames must be zero (full sequence) or positive.'
+}
+if ($MinAvailableMemoryGiB -lt 0.0) {
+    throw 'MinAvailableMemoryGiB must be non-negative.'
+}
+if ($MinCommitHeadroomGiB -lt 0.0) {
+    throw 'MinCommitHeadroomGiB must be non-negative.'
+}
+if ($ResourceSampleIntervalSeconds -lt 1) {
+    throw 'ResourceSampleIntervalSeconds must be at least 1.'
+}
+
+$minAvailableMemoryBytes = [int64]($MinAvailableMemoryGiB * 1GB)
+$minCommitHeadroomBytes = [int64]($MinCommitHeadroomGiB * 1GB)
+
+function Get-SystemMemorySnapshot {
+    $memoryOperatingSystem = Get-CimInstance Win32_OperatingSystem
+    [pscustomobject]@{
+        available_physical_bytes = [int64]$memoryOperatingSystem.FreePhysicalMemory * 1KB
+        commit_limit_bytes = [int64]$memoryOperatingSystem.TotalVirtualMemorySize * 1KB
+        commit_headroom_bytes = [int64]$memoryOperatingSystem.FreeVirtualMemory * 1KB
+    }
+}
+
+function Get-MemoryGateViolation {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Snapshot
+    )
+
+    $violations = [Collections.Generic.List[string]]::new()
+    if ($Snapshot.available_physical_bytes -lt $minAvailableMemoryBytes) {
+        $violations.Add(
+            "available physical memory $($Snapshot.available_physical_bytes) bytes is below required $minAvailableMemoryBytes bytes"
+        )
+    }
+    if ($Snapshot.commit_headroom_bytes -lt $minCommitHeadroomBytes) {
+        $violations.Add(
+            "commit headroom $($Snapshot.commit_headroom_bytes) bytes is below required $minCommitHeadroomBytes bytes"
+        )
+    }
+    if ($violations.Count -eq 0) {
+        return $null
+    }
+    return $violations -join '; '
 }
 
 $DatasetRoot = [IO.Path]::GetFullPath($DatasetRoot)
@@ -125,8 +175,10 @@ $variantArguments = [ordered]@{
     )
 }
 
+$initialMemorySnapshot = Get-SystemMemorySnapshot
+
 $experiment = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     created_at = (Get-Date).ToString('o')
     git_sha = $gitSha
     git_dirty = ($gitStatus.Count -gt 0)
@@ -143,6 +195,11 @@ $experiment = [ordered]@{
     protocol = [ordered]@{
         common_arguments = $commonArgs
         variant_arguments = $variantArguments
+        resource_gate = [ordered]@{
+            minimum_available_physical_bytes = $minAvailableMemoryBytes
+            minimum_commit_headroom_bytes = $minCommitHeadroomBytes
+            sample_interval_seconds = $ResourceSampleIntervalSeconds
+        }
     }
     ort_dylib_path = $env:ORT_DYLIB_PATH
     ort_dylib_sha256 = $ortDylibSha256
@@ -153,6 +210,9 @@ $experiment = [ordered]@{
         processor = $processor.Name
         logical_processors = $processor.NumberOfLogicalProcessors
         total_memory_bytes = [int64]$operatingSystem.TotalVisibleMemorySize * 1KB
+        initial_available_physical_bytes = $initialMemorySnapshot.available_physical_bytes
+        initial_commit_limit_bytes = $initialMemorySnapshot.commit_limit_bytes
+        initial_commit_headroom_bytes = $initialMemorySnapshot.commit_headroom_bytes
         powershell_version = $PSVersionTable.PSVersion.ToString()
         rustc_version = $rustcVersion
         cargo_version = $cargoVersion
@@ -232,6 +292,12 @@ foreach ($sequence in $Sequences) {
                 }
                 throw "Refusing to overwrite incomplete or failed run directory: $runDir"
             }
+
+            $preflightMemorySnapshot = Get-SystemMemorySnapshot
+            $preflightMemoryViolation = Get-MemoryGateViolation -Snapshot $preflightMemorySnapshot
+            if ($null -ne $preflightMemoryViolation) {
+                throw "Resource preflight failed before ${runName}: $preflightMemoryViolation"
+            }
             New-Item -ItemType Directory -Path $runDir | Out-Null
 
             $arguments = @('--euroc-dir', $datasetDir, '--out-dir', $runDir) +
@@ -252,6 +318,11 @@ foreach ($sequence in $Sequences) {
                 exit_code = $null
                 validation_error = $null
                 sampled_peak_working_set_bytes = $null
+                preflight_available_physical_bytes = $preflightMemorySnapshot.available_physical_bytes
+                preflight_commit_limit_bytes = $preflightMemorySnapshot.commit_limit_bytes
+                preflight_commit_headroom_bytes = $preflightMemorySnapshot.commit_headroom_bytes
+                minimum_available_physical_bytes = $preflightMemorySnapshot.available_physical_bytes
+                minimum_commit_headroom_bytes = $preflightMemorySnapshot.commit_headroom_bytes
             }
             $runRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDir 'run_manifest.json') -Encoding utf8
 
@@ -276,12 +347,35 @@ foreach ($sequence in $Sequences) {
                 $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
                 $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
                 $peakWorkingSetBytes = 0L
+                $minimumAvailablePhysicalBytes = $preflightMemorySnapshot.available_physical_bytes
+                $minimumCommitHeadroomBytes = $preflightMemorySnapshot.commit_headroom_bytes
+                $resourceValidationError = $null
+                $nextResourceSampleAt = (Get-Date).AddSeconds($ResourceSampleIntervalSeconds)
                 while (-not $process.WaitForExit(250)) {
                     $process.Refresh()
                     $peakWorkingSetBytes = [math]::Max(
                         $peakWorkingSetBytes,
                         $process.WorkingSet64
                     )
+                    if ((Get-Date) -ge $nextResourceSampleAt) {
+                        $memorySnapshot = Get-SystemMemorySnapshot
+                        $minimumAvailablePhysicalBytes = [math]::Min(
+                            $minimumAvailablePhysicalBytes,
+                            $memorySnapshot.available_physical_bytes
+                        )
+                        $minimumCommitHeadroomBytes = [math]::Min(
+                            $minimumCommitHeadroomBytes,
+                            $memorySnapshot.commit_headroom_bytes
+                        )
+                        $memoryViolation = Get-MemoryGateViolation -Snapshot $memorySnapshot
+                        if ($null -ne $memoryViolation) {
+                            $resourceValidationError = "resource gate failed during ${runName}: $memoryViolation"
+                            $process.Kill()
+                            [void]$process.WaitForExit()
+                            break
+                        }
+                        $nextResourceSampleAt = (Get-Date).AddSeconds($ResourceSampleIntervalSeconds)
+                    }
                 }
                 [void]$stdoutCopy.GetAwaiter().GetResult()
                 [void]$stderrCopy.GetAwaiter().GetResult()
@@ -294,8 +388,8 @@ foreach ($sequence in $Sequences) {
             $finishedAt = Get-Date
 
             $processExitCode = $exitCode
-            $validationError = $null
-            if ($processExitCode -eq 0) {
+            $validationError = $resourceValidationError
+            if ($null -eq $validationError -and $processExitCode -eq 0) {
                 $summaryPath = Join-Path $runDir 'summary.txt'
                 if (-not (Test-Path -LiteralPath $summaryPath)) {
                     $validationError = 'successful process did not produce summary.txt'
@@ -350,6 +444,8 @@ foreach ($sequence in $Sequences) {
             $runRecord.exit_code = $exitCode
             $runRecord.validation_error = $validationError
             $runRecord.sampled_peak_working_set_bytes = $peakWorkingSetBytes
+            $runRecord.minimum_available_physical_bytes = $minimumAvailablePhysicalBytes
+            $runRecord.minimum_commit_headroom_bytes = $minimumCommitHeadroomBytes
             $runRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDir 'run_manifest.json') -Encoding utf8
             $experiment.runs += $runRecord
             $experiment | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $experimentPath -Encoding utf8

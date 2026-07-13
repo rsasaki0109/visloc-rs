@@ -242,15 +242,15 @@ def mean_std(values: list[float | int | None]) -> tuple[float | None, float | No
     return statistics.mean(present), statistics.stdev(present) if len(present) > 1 else 0.0
 
 
-def validate_matrix_protocol(root: Path) -> None:
+def validate_matrix_protocol(root: Path) -> tuple[int, int]:
     experiment_path = root / "experiment_manifest.json"
     if not experiment_path.exists():
         raise ValueError(f"matrix is missing {experiment_path}")
     experiment = json.loads(experiment_path.read_text(encoding="utf-8-sig"))
-    if experiment.get("schema_version") != 2:
+    if experiment.get("schema_version") != 3:
         raise ValueError(
-            "matrix must use schema_version=2; older runner protocols did not "
-            "prove that the no_loop arm was genuinely loop-free"
+            "matrix must use schema_version=3; older runner protocols did not "
+            "prove both a genuinely loop-free control and resource-valid runs"
         )
     protocol = experiment.get("protocol")
     if not isinstance(protocol, dict):
@@ -278,10 +278,23 @@ def validate_matrix_protocol(root: Path) -> None:
             "appearance_loop protocol is missing required switches: "
             + ", ".join(sorted(missing))
         )
+    resource_gate = protocol.get("resource_gate")
+    if not isinstance(resource_gate, dict):
+        raise ValueError("matrix protocol is missing its resource gate")
+    minimum_available = resource_gate.get("minimum_available_physical_bytes")
+    minimum_commit = resource_gate.get("minimum_commit_headroom_bytes")
+    sample_interval = resource_gate.get("sample_interval_seconds")
+    if not isinstance(minimum_available, int) or minimum_available <= 0:
+        raise ValueError("matrix resource gate has no positive physical-memory reserve")
+    if not isinstance(minimum_commit, int) or minimum_commit <= 0:
+        raise ValueError("matrix resource gate has no positive commit-headroom reserve")
+    if not isinstance(sample_interval, int) or sample_interval < 1:
+        raise ValueError("matrix resource gate has an invalid sample interval")
+    return minimum_available, minimum_commit
 
 
 def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
-    validate_matrix_protocol(root)
+    required_available, required_commit = validate_matrix_protocol(root)
     runs: list[RunSummary] = []
     groups: dict[str, RunIdentity] = {}
     identities: set[RunIdentity] = set()
@@ -289,6 +302,23 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         if manifest.get("exit_code") != 0:
             continue
+        if manifest.get("validation_error") not in {None, ""}:
+            raise ValueError(
+                f"{manifest_path.parent}: successful run records validation_error="
+                f"{manifest.get('validation_error')!r}"
+            )
+        minimum_available = manifest.get("minimum_available_physical_bytes")
+        minimum_commit = manifest.get("minimum_commit_headroom_bytes")
+        if not isinstance(minimum_available, int) or minimum_available < required_available:
+            raise ValueError(
+                f"{manifest_path.parent}: physical-memory minimum does not satisfy "
+                "the experiment resource gate"
+            )
+        if not isinstance(minimum_commit, int) or minimum_commit < required_commit:
+            raise ValueError(
+                f"{manifest_path.parent}: commit-headroom minimum does not satisfy "
+                "the experiment resource gate"
+            )
         run_dir = manifest_path.parent
         if not (run_dir / "summary.txt").exists():
             continue
