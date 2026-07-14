@@ -86,6 +86,8 @@ use std::env;
 use std::fs;
 #[cfg(feature = "image-io")]
 use std::path::PathBuf;
+#[cfg(feature = "image-io")]
+use std::time::Instant;
 
 #[cfg(feature = "image-io")]
 use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
@@ -116,8 +118,7 @@ use visloc_rs::vision::stereo_bootstrap::{
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::{
-    build_stereo_metric_points, build_stereo_replenish_candidates,
-    read_external_deep_features_txt,
+    build_stereo_replenish_candidates, read_external_deep_features_txt,
     umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
     AdaptiveMotionMode, AdaptiveVelocityGateConfig, BruteForceMatcher, ConstantPoseMotionModel,
     ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
@@ -125,14 +126,14 @@ use visloc_rs::{
     ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
     KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalMappingResult,
     LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
-    LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig,
-    LoopRefinementSolver, LoopRefinementVerifier, MapProviderStats, Matcher,
-    MotionBasedViInitializerConfig, MotionModel, MotionViInitializationEvent, MutualSoftmaxConfig,
-    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
-    OnlineSlamLocalBaConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig,
-    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
-    PnPLoopClosureVerifierConfig, PoseGraphSe3Config, ProjectionGuidedTrackingConfig,
-    SimpleKeyframePolicy, Sim3PoseGraphConfig, StereoReplenishConfig, Tracker, TrackingConfig,
+    LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig, LoopRefinementSolver,
+    LoopRefinementVerifier, MapProviderStats, Matcher, MotionBasedViInitializerConfig, MotionModel,
+    MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher, OnlineSlamConfig,
+    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
+    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, PnPLoopClosureVerifierConfig,
+    PoseGraphSe3Config, PoseTrajectory, ProjectionGuidedTrackingConfig, RelativePoseErrorConfig,
+    Sim3PoseGraphConfig, SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig,
     TrackingEvent, TrackingResult, TrackingState, TrajectorySimilarityTransform, ViInitFallback,
     ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
 };
@@ -622,11 +623,14 @@ struct CliArgs {
     stereo_bootstrap: bool,
     /// Enable the motion-based VI init stage (VIBA1 / optional VIBA2).
     /// Off by default so the demo stays backwards compatible with the
-    /// existing baseline. The stage is gated on the static VI init
-    /// completing first.
+    /// existing baseline. The stage normally gates on static VI init.
     motion_vi_init_enabled: bool,
-    /// Minimum keyframes (post-static-seed) before the motion-VI trigger
-    /// is allowed to fire. Mirrors
+    /// After static VI init gives up, permit motion-VI to start from the
+    /// configured running IMU biases. Intended for sequences that start in
+    /// motion and therefore have no valid stationary window.
+    motion_vi_init_after_static_give_up: bool,
+    /// Minimum keyframes after static success or the opted-in give-up fallback
+    /// before the motion-VI trigger is allowed to fire. Mirrors
     /// `MotionBasedViInitializerConfig::min_keyframes`.
     motion_vi_init_min_keyframes: usize,
     /// Minimum cumulative camera-centre translation (m) before the
@@ -686,6 +690,10 @@ struct CliArgs {
     /// (the default) preserves legacy behaviour. EuRoC V1-class indoor
     /// sequences run safely at `Some(10.0)`.
     motion_vi_init_max_velocity_mps: Option<f64>,
+    /// Optional post-solve magnitude bound for every recovered gyro bias.
+    motion_vi_init_max_gyro_bias_rad_s: Option<f64>,
+    /// Optional post-solve magnitude bound for every recovered accel bias.
+    motion_vi_init_max_accel_bias_mps2: Option<f64>,
     /// When `Some(n)`, restricts descriptor matching during tracking to
     /// landmarks observed by the reference keyframe and up to `n`
     /// co-visible neighbour keyframes (ranked by shared-landmark count).
@@ -767,7 +775,7 @@ struct CliArgs {
     /// detected anchor-keyframe keypoint must exist. Maps to
     /// [`StereoReplenishConfig::anchor_keypoint_match_radius_px`].
     stereo_landmark_replenish_anchor_match_radius_px: Option<f64>,
-    /// Optional descriptor-distance gate on the borrowed anchor keypoint.
+    /// Optional descriptor-distance gate on the associated anchor keypoint.
     /// Maps to [`StereoReplenishConfig::anchor_keypoint_max_descriptor_distance`].
     stereo_landmark_replenish_anchor_max_descriptor_distance: Option<f32>,
     /// Radius (px) for geometric duplicate suppression against the anchor
@@ -967,6 +975,9 @@ struct CliArgs {
     /// allow earlier rescue keyframes when tracking quality drops soon
     /// after a promotion; `None` preserves the library default.
     keyframe_min_frame_gap: Option<u64>,
+    /// Force a keyframe after this many frames when tracking quality passes,
+    /// even if estimated translation remains below the metric threshold.
+    keyframe_max_frame_gap: Option<u64>,
     /// When `Some(r)`, also promotes a keyframe after the normal
     /// frame-id gap if the current PnP inlier count drops to `r` times
     /// the last keyframe's tracked-landmark count. This mirrors the
@@ -1237,6 +1248,13 @@ struct CliArgs {
     /// Defaults to `1`. Only meaningful when
     /// `pose_graph_refinement_enabled` is set.
     pose_graph_refinement_trigger_every: usize,
+    /// Optional fixed isotropic loop-edge weight. `None` (default) preserves
+    /// the legacy raw-PnP-inlier-count weight. A value such as `1.0` prevents
+    /// correspondence count from being mistaken for calibrated inverse pose
+    /// covariance relative to unit-weight sequential edges.
+    pose_graph_refinement_fixed_loop_edge_weight: Option<f64>,
+    /// Use covariance-aware anisotropic 6×6 information for PnP loop edges.
+    pose_graph_refinement_loop_pose_information: bool,
     /// Enable the Graduated Non-Convexity robust back-end solve
     /// (`OnlineSlamLoopClosureRefinementConfig::gnc`, using
     /// `gnc::GncConfig::default()`) instead of the plain iterative
@@ -1248,6 +1266,11 @@ struct CliArgs {
     /// `pcm::PcmConfig::default()`). Off by default. Only meaningful when
     /// `pose_graph_refinement_enabled` is set.
     pose_graph_refinement_pcm: bool,
+    /// Disable PCM's additional single-loop-vs-odometry pre-filter and rely on
+    /// pairwise consistency between verified loop measurements. This matches
+    /// the paper's drift-tolerant consistency-set test; the legacy individual
+    /// gate remains enabled by default.
+    pose_graph_refinement_pcm_require_individual: bool,
     /// Optional covariance-based chi-squared gate on verified loop
     /// closures. Mirrors
     /// `OnlineSlamLoopClosureRefinementConfig::covariance_gate`. `None`
@@ -1294,6 +1317,14 @@ struct CliArgs {
     /// catastrophic. Only meaningful when
     /// `pose_graph_refinement_appearance_loops` is set.
     pose_graph_refinement_appearance_min_inliers: usize,
+    /// Separate current keyframes required to confirm one covisible region.
+    pose_graph_refinement_appearance_confirmation_keyframes: usize,
+    /// Consecutive keyframe misses tolerated before a pending region resets.
+    pose_graph_refinement_appearance_confirmation_max_misses: usize,
+    /// Optional post-PnP projection-window rematch radius in pixels.
+    pose_graph_refinement_appearance_projection_radius_px: Option<f64>,
+    /// Minimum projection-guided matches required for refined PnP.
+    pose_graph_refinement_appearance_projection_min_matches: usize,
     /// Propagate each solved keyframe's pose correction to its anchored
     /// landmarks and to the tracker's continuation state
     /// (`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`).
@@ -1359,6 +1390,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut adaptive_motion_imu_velocity_refresh_policy: ImuVelocityRefreshPolicy =
         ImuVelocityRefreshPolicy::default();
     let mut motion_vi_init_enabled: bool = false;
+    let mut motion_vi_init_after_static_give_up: bool = false;
     let mut motion_vi_init_min_keyframes: usize = 10;
     let mut motion_vi_init_min_translation_meters: f64 = 2.0;
     let mut motion_vi_init_recover_scale: bool = false;
@@ -1381,6 +1413,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut local_vi_ba_adaptive_velocity_min_references: usize =
         default_adaptive_velocity_gate.min_reference_count;
     let mut motion_vi_init_max_velocity_mps: Option<f64> = None;
+    let mut motion_vi_init_max_gyro_bias_rad_s: Option<f64> = None;
+    let mut motion_vi_init_max_accel_bias_mps2: Option<f64> = None;
     let mut covisibility_local_map_max_keyframes: Option<usize> = None;
     let mut covisibility_local_map_min_shared: usize = 15;
     let mut covisibility_local_ba_enabled: bool = false;
@@ -1434,6 +1468,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut hog_orient: bool = false;
     let mut keyframe_min_translation: Option<f64> = None;
     let mut keyframe_min_frame_gap: Option<u64> = None;
+    let mut keyframe_max_frame_gap: Option<u64> = None;
     let mut keyframe_tracked_landmark_ratio: Option<f64> = None;
     let mut keyframe_min_tracked_landmarks_for_ratio: usize = 20;
     let mut keyframe_min_inliers: Option<usize> = None;
@@ -1479,8 +1514,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut rebootstrap_cooldown_frames: usize = 60;
     let mut pose_graph_refinement_enabled: bool = false;
     let mut pose_graph_refinement_trigger_every: usize = 1;
+    let mut pose_graph_refinement_fixed_loop_edge_weight: Option<f64> = None;
+    let mut pose_graph_refinement_loop_pose_information: bool = false;
     let mut pose_graph_refinement_gnc: bool = false;
     let mut pose_graph_refinement_pcm: bool = false;
+    let mut pose_graph_refinement_pcm_require_individual: bool = true;
     let mut pose_graph_refinement_covariance_gate: Option<f64> = None;
     let mut pose_graph_refinement_verifier: LoopRefinementVerifierKind =
         LoopRefinementVerifierKind::Essential;
@@ -1489,6 +1527,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_appearance_min_gap: u64 = 150;
     let mut pose_graph_refinement_appearance_max_candidates: usize = 3;
     let mut pose_graph_refinement_appearance_min_inliers: usize = 30;
+    let mut pose_graph_refinement_appearance_confirmation_keyframes: usize = 3;
+    let mut pose_graph_refinement_appearance_confirmation_max_misses: usize = 2;
+    let mut pose_graph_refinement_appearance_projection_radius_px: Option<f64> = None;
+    let mut pose_graph_refinement_appearance_projection_min_matches: usize = 50;
     let mut pose_graph_refinement_propagate: bool = false;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -1600,6 +1642,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_vi_init_enabled = true;
                 args.remove(i);
             }
+            "--motion-vi-init-after-static-give-up" => {
+                motion_vi_init_after_static_give_up = true;
+                args.remove(i);
+            }
             "--motion-vi-init-min-keyframes" => {
                 motion_vi_init_min_keyframes = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1682,6 +1728,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--motion-vi-init-max-velocity" => {
                 motion_vi_init_max_velocity_mps = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-max-gyro-bias" => {
+                motion_vi_init_max_gyro_bias_rad_s = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-max-accel-bias" => {
+                motion_vi_init_max_accel_bias_mps2 = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--covisibility-local-map-max-keyframes" => {
@@ -1988,6 +2042,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 keyframe_min_frame_gap = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--keyframe-max-frame-gap" => {
+                keyframe_max_frame_gap = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             "--keyframe-tracked-landmark-ratio" => {
                 keyframe_tracked_landmark_ratio = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -2175,12 +2233,24 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pose_graph_refinement_trigger_every = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pose-graph-refinement-fixed-loop-edge-weight" => {
+                pose_graph_refinement_fixed_loop_edge_weight = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--pose-graph-refinement-loop-pose-information" => {
+                pose_graph_refinement_loop_pose_information = true;
+                args.remove(i);
+            }
             "--pose-graph-refinement-gnc" => {
                 pose_graph_refinement_gnc = true;
                 args.remove(i);
             }
             "--pose-graph-refinement-pcm" => {
                 pose_graph_refinement_pcm = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-pcm-pairwise-only" => {
+                pose_graph_refinement_pcm_require_individual = false;
                 args.remove(i);
             }
             "--pose-graph-refinement-covariance-gate" => {
@@ -2231,6 +2301,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pose_graph_refinement_appearance_min_inliers = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pose-graph-refinement-appearance-confirmation-keyframes" => {
+                pose_graph_refinement_appearance_confirmation_keyframes =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-confirmation-max-misses" => {
+                pose_graph_refinement_appearance_confirmation_max_misses =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-projection-radius" => {
+                pose_graph_refinement_appearance_projection_radius_px =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--pose-graph-refinement-appearance-projection-min-matches" => {
+                pose_graph_refinement_appearance_projection_min_matches =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--pose-graph-refinement-propagate" => {
                 pose_graph_refinement_propagate = true;
                 args.remove(i);
@@ -2254,6 +2344,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if let Some(gap) = keyframe_min_frame_gap {
         if gap == 0 {
             return Err("--keyframe-min-frame-gap must be >= 1".into());
+        }
+    }
+    if let Some(gap) = keyframe_max_frame_gap {
+        if gap == 0 {
+            return Err("--keyframe-max-frame-gap must be >= 1".into());
+        }
+        if keyframe_min_frame_gap.is_some_and(|minimum| gap < minimum) {
+            return Err("--keyframe-max-frame-gap must be >= --keyframe-min-frame-gap".into());
         }
     }
     if !tracking_min_inlier_ratio.is_finite() || !(0.0..=1.0).contains(&tracking_min_inlier_ratio) {
@@ -2373,6 +2471,39 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if rebootstrap_cooldown_frames == 0 {
         return Err("--rebootstrap-cooldown-frames must be >= 1".into());
     }
+    if motion_vi_init_after_static_give_up && !motion_vi_init_enabled {
+        return Err("--motion-vi-init-after-static-give-up requires --motion-vi-init".into());
+    }
+    if !pose_graph_refinement_pcm_require_individual && !pose_graph_refinement_pcm {
+        return Err(
+            "--pose-graph-refinement-pcm-pairwise-only requires --pose-graph-refinement-pcm".into(),
+        );
+    }
+    if !motion_vi_init_enabled
+        && (motion_vi_init_max_velocity_mps.is_some()
+            || motion_vi_init_max_gyro_bias_rad_s.is_some()
+            || motion_vi_init_max_accel_bias_mps2.is_some())
+    {
+        return Err("motion-VI sanity limits require --motion-vi-init".into());
+    }
+    for (value, flag) in [
+        (
+            motion_vi_init_max_velocity_mps,
+            "--motion-vi-init-max-velocity",
+        ),
+        (
+            motion_vi_init_max_gyro_bias_rad_s,
+            "--motion-vi-init-max-gyro-bias",
+        ),
+        (
+            motion_vi_init_max_accel_bias_mps2,
+            "--motion-vi-init-max-accel-bias",
+        ),
+    ] {
+        if value.is_some_and(|limit| !limit.is_finite() || limit <= 0.0) {
+            return Err(format!("{flag} must be finite and > 0").into());
+        }
+    }
     if covisibility_local_ba_enabled {
         if covisibility_local_ba_min_keyframes == 0 {
             return Err("--covisibility-local-ba-min-keyframes must be >= 1".into());
@@ -2453,6 +2584,20 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         if pose_graph_refinement_trigger_every == 0 {
             return Err("--pose-graph-refinement-trigger-every must be >= 1".into());
         }
+        if pose_graph_refinement_fixed_loop_edge_weight
+            .is_some_and(|weight| !weight.is_finite() || weight <= 0.0)
+        {
+            return Err(
+                "--pose-graph-refinement-fixed-loop-edge-weight must be finite and > 0".into(),
+            );
+        }
+        if pose_graph_refinement_fixed_loop_edge_weight.is_some()
+            && pose_graph_refinement_loop_pose_information
+        {
+            return Err(
+                "fixed loop weight and loop pose information are mutually exclusive".into(),
+            );
+        }
         if let Some(gate) = pose_graph_refinement_covariance_gate {
             if !gate.is_finite() || gate <= 0.0 {
                 return Err("--pose-graph-refinement-covariance-gate must be positive".into());
@@ -2470,6 +2615,30 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             if pose_graph_refinement_appearance_min_inliers == 0 {
                 return Err("--pose-graph-refinement-appearance-min-inliers must be >= 1".into());
             }
+            if pose_graph_refinement_appearance_confirmation_keyframes == 0 {
+                return Err(
+                    "--pose-graph-refinement-appearance-confirmation-keyframes must be >= 1".into(),
+                );
+            }
+            if pose_graph_refinement_appearance_confirmation_max_misses == 0 {
+                return Err(
+                    "--pose-graph-refinement-appearance-confirmation-max-misses must be >= 1"
+                        .into(),
+                );
+            }
+            if pose_graph_refinement_appearance_projection_radius_px
+                .is_some_and(|radius| !radius.is_finite() || radius <= 0.0)
+            {
+                return Err(
+                    "--pose-graph-refinement-appearance-projection-radius must be finite and > 0"
+                        .into(),
+                );
+            }
+            if pose_graph_refinement_appearance_projection_min_matches == 0 {
+                return Err(
+                    "--pose-graph-refinement-appearance-projection-min-matches must be >= 1".into(),
+                );
+            }
         }
         if pose_graph_refinement_solver == LoopRefinementSolverKind::Sim3
             && pose_graph_refinement_gnc
@@ -2479,6 +2648,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                  --pose-graph-refinement-solver sim3 — Sim3PoseGraph has no GNC \
                  robust-outlier variant yet, so the flag is silently ignored on \
                  that path (see LoopRefinementSolver::Sim3's doc comment)."
+            );
+        }
+        if pose_graph_refinement_solver == LoopRefinementSolverKind::Sim3
+            && (stereo_bootstrap || stereo_landmark_replenish)
+        {
+            return Err(
+                "--pose-graph-refinement-solver sim3 is not valid for metric stereo maps; \
+                 ORB-SLAM2/3 fix loop scale to 1 for stereo/RGB-D, so use the default \
+                 --pose-graph-refinement-solver se3"
+                    .into(),
             );
         }
     }
@@ -2502,6 +2681,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         adaptive_motion_successes_to_switch_to_imu,
         adaptive_motion_imu_velocity_refresh_policy,
         motion_vi_init_enabled,
+        motion_vi_init_after_static_give_up,
         motion_vi_init_min_keyframes,
         motion_vi_init_min_translation_meters,
         motion_vi_init_recover_scale,
@@ -2517,6 +2697,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         local_vi_ba_adaptive_velocity_max_mps,
         local_vi_ba_adaptive_velocity_min_references,
         motion_vi_init_max_velocity_mps,
+        motion_vi_init_max_gyro_bias_rad_s,
+        motion_vi_init_max_accel_bias_mps2,
         covisibility_local_map_max_keyframes,
         covisibility_local_map_min_shared,
         covisibility_local_ba_enabled,
@@ -2570,6 +2752,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         hog_orient,
         keyframe_min_translation,
         keyframe_min_frame_gap,
+        keyframe_max_frame_gap,
         keyframe_tracked_landmark_ratio,
         keyframe_min_tracked_landmarks_for_ratio,
         keyframe_min_inliers,
@@ -2615,14 +2798,21 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         rebootstrap_cooldown_frames,
         pose_graph_refinement_enabled,
         pose_graph_refinement_trigger_every,
+        pose_graph_refinement_fixed_loop_edge_weight,
+        pose_graph_refinement_loop_pose_information,
         pose_graph_refinement_gnc,
         pose_graph_refinement_pcm,
+        pose_graph_refinement_pcm_require_individual,
         pose_graph_refinement_covariance_gate,
         pose_graph_refinement_verifier,
         pose_graph_refinement_appearance_loops,
         pose_graph_refinement_appearance_min_gap,
         pose_graph_refinement_appearance_max_candidates,
         pose_graph_refinement_appearance_min_inliers,
+        pose_graph_refinement_appearance_confirmation_keyframes,
+        pose_graph_refinement_appearance_confirmation_max_misses,
+        pose_graph_refinement_appearance_projection_radius_px,
+        pose_graph_refinement_appearance_projection_min_matches,
         pose_graph_refinement_propagate,
         pose_graph_refinement_solver,
     })
@@ -3256,6 +3446,18 @@ fn keyframe_reason_csv_fields(
             String::new(),
             String::new(),
         ),
+        KeyframeDecisionReason::MaximumFrameIdGap {
+            frame_id_gap,
+            max_frame_id_gap: _,
+        } => (
+            "MaximumFrameIdGap",
+            frame_id_gap.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
         KeyframeDecisionReason::TranslationTooSmall {
             translation,
             min_translation,
@@ -3282,6 +3484,7 @@ fn keyframe_reason_csv_fields(
 
 #[cfg(feature = "image-io")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let demo_started_at = Instant::now();
     let args = parse_args()?;
     let dataset = read_euroc_dataset_dir(&args.euroc_dir)?;
     println!(
@@ -3451,7 +3654,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "seed-frame extractor returned 0 corners after undistort — try reducing --corner-min-score or passing --no-undistort".into(),
         );
     }
-
     let seed_pose = world_to_camera_pose(
         &seed_gt.orientation_world,
         &seed_gt.position_world,
@@ -3627,10 +3829,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_keyframes: args.motion_vi_init_min_keyframes,
                 min_translation_meters: args.motion_vi_init_min_translation_meters,
                 gravity_world: args.gravity_world,
+                body_to_camera: body_to_camera.clone(),
                 viba2,
                 max_velocity_magnitude_mps: args.motion_vi_init_max_velocity_mps,
+                max_gyro_bias_magnitude_rad_s: args.motion_vi_init_max_gyro_bias_rad_s,
+                max_accel_bias_magnitude_mps2: args.motion_vi_init_max_accel_bias_mps2,
                 ..MotionBasedViInitializerConfig::default()
             },
+            allow_after_static_give_up: args.motion_vi_init_after_static_give_up,
             ..OnlineSlamMotionViInitConfig::default()
         })
     } else {
@@ -3639,6 +3845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_vi_ba_config = if args.local_vi_ba_enabled {
         Some(OnlineSlamLocalBaConfig {
             gravity_world: args.gravity_world,
+            body_to_camera: body_to_camera.clone(),
             freeze_biases_when_cost_ratio_above: args.local_vi_ba_freeze_biases_above,
             reject_writeback_when_cost_ratio_above: args.local_vi_ba_reject_writeback_above,
             reject_writeback_when_velocity_norm_above_mps: args
@@ -3709,13 +3916,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             pose_graph_config: PoseGraphSe3Config::default(),
+            fixed_loop_edge_weight: args.pose_graph_refinement_fixed_loop_edge_weight,
+            loop_pose_information: args
+                .pose_graph_refinement_loop_pose_information
+                .then(visloc_rs::slam::LoopPoseInformationConfig::default),
             gnc: if args.pose_graph_refinement_gnc {
                 Some(visloc_rs::slam::gnc::GncConfig::default())
             } else {
                 None
             },
             pcm: if args.pose_graph_refinement_pcm {
-                Some(visloc_rs::slam::pcm::PcmConfig::default())
+                Some(visloc_rs::slam::pcm::PcmConfig {
+                    require_individual: args.pose_graph_refinement_pcm_require_individual,
+                    ..visloc_rs::slam::pcm::PcmConfig::default()
+                })
             } else {
                 None
             },
@@ -3727,12 +3941,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             appearance_candidates: if args.pose_graph_refinement_appearance_loops {
                 Some(LoopAppearanceCandidateConfig {
                     min_keyframe_id_gap: args.pose_graph_refinement_appearance_min_gap,
-                    max_candidates_per_frame: args
-                        .pose_graph_refinement_appearance_max_candidates,
+                    max_candidates_per_frame: args.pose_graph_refinement_appearance_max_candidates,
                     pnp_verifier: PnPLoopClosureVerifierConfig {
                         min_inliers: args.pose_graph_refinement_appearance_min_inliers,
                         ..PnPLoopClosureVerifierConfig::default()
                     },
+                    region_confirmation_required_keyframes: args
+                        .pose_graph_refinement_appearance_confirmation_keyframes,
+                    region_confirmation_max_misses: args
+                        .pose_graph_refinement_appearance_confirmation_max_misses,
+                    projection_search_radius_px: args
+                        .pose_graph_refinement_appearance_projection_radius_px,
+                    min_projection_correspondence_count: args
+                        .pose_graph_refinement_appearance_projection_min_matches,
                     ..LoopAppearanceCandidateConfig::default()
                 })
             } else {
@@ -3884,6 +4105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(gap) = args.keyframe_min_frame_gap {
             cfg.min_frame_id_gap = gap;
         }
+        cfg.max_frame_id_gap = args.keyframe_max_frame_gap;
         cfg.tracked_landmark_keyframe_ratio = args.keyframe_tracked_landmark_ratio;
         cfg.min_tracked_landmarks_for_quality_keyframe =
             args.keyframe_min_tracked_landmarks_for_ratio;
@@ -3969,6 +4191,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relocalization_attempts_path = args.out_dir.join("relocalization_attempts.csv");
     let rebootstrap_log_path = args.out_dir.join("rebootstrap_log.csv");
     let loop_constraints_path = args.out_dir.join("loop_constraints.csv");
+    let loop_rejected_constraints_path = args.out_dir.join("loop_rejected_constraints.csv");
+    let loop_candidate_diagnostics_path = args.out_dir.join("loop_candidate_diagnostics.csv");
+    let loop_candidate_evidence_path = args.out_dir.join("loop_candidate_evidence.csv");
     // Post-run views computed once the frame loop (and any pose-graph
     // loop-closure back-propagation into `map.keyframes`) has finished:
     // `slam_trajectory.csv`/`slam_errors.csv` are causal, per-frame *live*
@@ -4011,10 +4236,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // constraints by range and check whether appearance-sourced constraints
     // (necessarily long-range) are the ones actually moving ATE.
     let mut loop_constraints_csv = String::from(
-        "frame_idx,from_keyframe_id,to_keyframe_id,keyframe_id_gap,translation_norm_m,inlier_count,source\n",
+        "frame_idx,from_keyframe_id,to_keyframe_id,keyframe_id_gap,translation_norm_m,relative_tx,relative_ty,relative_tz,relative_qw,relative_qx,relative_qy,relative_qz,inlier_count,source,gt_translation_error_m,gt_rotation_error_deg,gt_correct_0p5m_10deg\n",
+    );
+    let mut loop_rejected_constraints_csv = String::from(
+        "frame_idx,from_keyframe_id,to_keyframe_id,keyframe_id_gap,translation_norm_m,relative_tx,relative_ty,relative_tz,relative_qw,relative_qx,relative_qy,relative_qz,inlier_count,source,rejection_reason,gt_translation_error_m,gt_rotation_error_deg,gt_correct_0p5m_10deg\n",
+    );
+    let mut loop_candidate_diagnostics_csv = String::from(
+        "frame_idx,timestamp_ns,shared_candidates_seen,appearance_candidates_ranked,appearance_connected_region_rejected,appearance_primary_pnp_verified,appearance_projection_rejected,appearance_covisibility_rejected,appearance_pending_projection_attempted,appearance_pending_projection_verified,appearance_pending_projection_search_radius_px,appearance_pending_projection_correspondences,appearance_pending_projection_inliers,appearance_region_confirmation_waiting,appearance_region_confirmed,appearance_candidates_admitted,pcm_rejected,covariance_rejected\n",
+    );
+    let mut loop_candidate_evidence_csv = String::from(
+        "query_frame_id,matched_keyframe_id,appearance_similarity,matched_region_keyframes,matched_region_landmarks,primary_correspondences,primary_inliers,projection_attempted,projection_correspondences,projection_inliers,projection_accepted,current_covisible_keyframes,neighbor_pnp_verified,consistent_keyframes,min_translation_disagreement_m,min_rotation_disagreement_rad,accepted\n",
     );
     let mut pose_graph_refinement_constraints_shared: usize = 0;
     let mut pose_graph_refinement_constraints_appearance: usize = 0;
+    let mut pose_graph_refinement_gt_evaluated: usize = 0;
+    let mut pose_graph_refinement_gt_correct: usize = 0;
+    let mut pose_graph_refinement_rejected_gt_evaluated: usize = 0;
+    let mut pose_graph_refinement_rejected_gt_correct: usize = 0;
 
     let frame_cap = if args.max_frames == 0 {
         usize::MAX
@@ -4024,14 +4262,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut imu_idx = 0usize;
     let mut prev_imu_ts = imu_first_ts;
+    let mut vi_init_preseed_samples = 0usize;
     while imu_idx < dataset.imu_samples.len()
         && dataset.imu_samples[imu_idx].timestamp_nanoseconds < seed_gt.timestamp_nanoseconds
     {
-        prev_imu_ts = dataset.imu_samples[imu_idx].timestamp_nanoseconds;
+        let sample = &dataset.imu_samples[imu_idx];
+        let dt_ns = sample.timestamp_nanoseconds - prev_imu_ts;
+        if dt_ns > 0 {
+            slam.push_vi_initialization_measurement(
+                sample.gyro,
+                sample.accel,
+                dt_ns as f64 * 1.0e-9,
+            );
+            vi_init_preseed_samples += 1;
+        }
+        prev_imu_ts = sample.timestamp_nanoseconds;
         imu_idx += 1;
     }
 
     let mut frames_recorded = 0usize;
+    let mut frame_processing_times_ms: Vec<f64> = Vec::new();
     let mut tracking_successes = 0usize;
     let mut keyframe_insufficient_tracking_quality_rejections = 0usize;
     let mut relocalization_attempts = 0u64;
@@ -4147,7 +4397,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_candidates_seen: usize = 0;
     let mut pose_graph_refinement_verified_constraints: usize = 0;
     let mut pose_graph_refinement_appearance_ranked: usize = 0;
+    let mut pose_graph_refinement_appearance_connected_region_rejected: usize = 0;
     let mut pose_graph_refinement_appearance_pnp_verified: usize = 0;
+    let mut pose_graph_refinement_appearance_projection_rejected: usize = 0;
+    let mut pose_graph_refinement_appearance_covisibility_rejected: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_attempted: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_verified: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_correspondences: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_inliers: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_correspondences_max: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_inliers_max: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_radius_min: Option<f64> = None;
+    let mut pose_graph_refinement_appearance_pending_projection_radius_max: Option<f64> = None;
+    let mut pose_graph_refinement_appearance_region_confirmation_waiting: usize = 0;
+    let mut pose_graph_refinement_appearance_region_confirmed: usize = 0;
     let mut pose_graph_refinement_appearance_scale_failed: usize = 0;
     let mut pose_graph_refinement_appearance_scale_insufficient_points: usize = 0;
     let mut pose_graph_refinement_appearance_scale_insufficient_matches: usize = 0;
@@ -4156,6 +4419,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_pgo_solves: usize = 0;
     let mut pose_graph_refinement_pcm_rejected: usize = 0;
     let mut pose_graph_refinement_covariance_rejected: usize = 0;
+    let mut pose_graph_refinement_pose_information_rejected: usize = 0;
+    let mut pose_graph_refinement_with_pose_information: usize = 0;
+    let mut pose_graph_refinement_pose_information_estimates: usize = 0;
+    let mut pose_graph_refinement_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_pose_information_raw_condition_max: f64 = 0.0;
+    let mut pose_graph_refinement_pose_information_spectral_scale_min: Option<f64> = None;
+    let mut pose_graph_refinement_sequential_with_pose_information: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_fallbacks: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_raw_condition_max: f64 = 0.0;
+    let mut pose_graph_refinement_sequential_pose_information_spectral_scale_min: Option<f64> =
+        None;
     let mut pose_graph_refinement_landmarks_moved: usize = 0;
     let mut pose_graph_refinement_max_landmark_displacement_meters: f64 = 0.0;
     let mut pose_graph_refinement_tracker_corrections_applied: usize = 0;
@@ -4204,6 +4479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if frames_recorded >= frame_cap {
             break;
         }
+        let frame_processing_started_at = Instant::now();
         // Drain IMU samples whose timestamp falls on or before this cam0
         // frame.
         while imu_idx < dataset.imu_samples.len() {
@@ -4277,11 +4553,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let frame = frame_from_features(frame_idx as u64, camera_id, &features);
 
-        // Metric stereo points must exist before `process_frame`: appearance
-        // PnP runs inside that call, and its inlier query indices are the join
-        // key between old-map 3D points and these independent current-frame
-        // stereo depths for Sim3 scale estimation.
-        let stereo_metric_points = if args.stereo_landmark_replenish {
+        // Extract cam1 once per frame and share the undistorted features
+        // between re-bootstrap and landmark replenishment below. Metric
+        // stereo loop closure fixes scale to one (ORB-SLAM2/3 convention),
+        // so this demo deliberately does not build a second 3D point set for
+        // per-loop Sim3 scale estimation.
+        let cam1_features_for_frame = if args.stereo_landmark_replenish {
             if let Some(cam1_setup) = cam1_stereo_setup.as_ref() {
                 if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
                     entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
@@ -4300,37 +4577,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &cam1_setup.camera,
                                 &raw,
                             );
-                            build_stereo_metric_points(
-                                &camera,
-                                &cam1_setup.camera,
-                                &cam1_setup.cam0_to_cam1,
-                                &features,
-                                &cam1_features,
-                                &stereo_replenish_config,
-                            )
+                            Some(cam1_features)
                         } else {
-                            std::collections::HashMap::new()
+                            None
                         }
                     } else {
-                        std::collections::HashMap::new()
+                        None
                     }
                 } else {
-                    std::collections::HashMap::new()
+                    None
                 }
             } else {
-                std::collections::HashMap::new()
+                None
             }
         } else {
-            std::collections::HashMap::new()
+            None
         };
 
         // The most recently applied keyframe, captured *before* this
         // frame's own `process_frame` call, anchors any replenishment
         // candidates built below: `process_keyframe`'s triangulator only
         // accepts observations against keyframes already present in the
-        // map, so a second (synthesised) observation against this
-        // pre-existing keyframe is what lets a same-frame stereo match
-        // become a valid two-view `LandmarkCandidate`.
+        // map, so a second gated real observation from this pre-existing
+        // keyframe is what lets a same-frame stereo match become a valid
+        // two-view `LandmarkCandidate`.
         let replenish_anchor_frame_id = if args.stereo_landmark_replenish {
             slam.map().keyframes.keys().copied().max()
         } else {
@@ -4348,11 +4618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
-        let mut result = slam.process_frame_with_metric_points(
-            &frame,
-            candidates_to_submit,
-            &stereo_metric_points,
-        );
+        let mut result = slam.process_frame(&frame, candidates_to_submit);
         let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
             && result
@@ -4390,89 +4656,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         >= args.rebootstrap_after_lost_frames.unwrap_or(usize::MAX)
                 {
                     let min_stereo_matches = args.keyframe_min_inliers.unwrap_or(15).max(1);
-                    if let (Some(cam1_setup), Some(cam1_idx)) = (
-                        cam1_stereo_setup.as_ref(),
-                        dataset.cam1_images.iter().position(|entry| {
-                            entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
-                        }),
-                    ) {
-                        let cam1_image_path = dataset
-                            .cam1_image_dir
-                            .join(&dataset.cam1_images[cam1_idx].filename);
-                        if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
-                            extractor.set_camera(SuperPointCamera::Cam1);
-                            extractor.set_frame_idx(cam1_idx);
-                            let cam1_features_result = extractor.extract(&cam1_image);
-                            extractor.set_camera(SuperPointCamera::Cam0);
-                            if let Ok(cam1_features_raw) = cam1_features_result {
-                                let cam1_features = undistort_feature_keypoints(
-                                    &cam1_setup.distortion,
-                                    &cam1_setup.camera,
-                                    &cam1_features_raw,
-                                );
-                                let stereo_matches = bootstrap_stereo_landmarks(
-                                    &camera,
-                                    &cam1_setup.camera,
-                                    &cam1_setup.cam0_to_cam1,
-                                    &features,
-                                    &cam1_features,
-                                    &StereoBootstrapConfig::default(),
-                                );
-                                if stereo_matches.len() >= min_stereo_matches {
-                                    let gt = nearest_ground_truth(
-                                        &dataset.ground_truth,
-                                        image_entry.timestamp_nanoseconds,
-                                    );
-                                    let seed_pose = world_to_camera_pose(
-                                        &gt.orientation_world,
-                                        &gt.position_world,
-                                        &body_to_camera,
-                                    );
-                                    let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
-                                        slam.map_mut(),
-                                        &seed_pose,
-                                        &features,
-                                        &stereo_matches,
-                                        &mut next_rebootstrap_landmark_id,
-                                    );
-                                    let map_stats = map_provider_stats_from_map(slam.map());
-                                    let restart_tracking =
-                                        build_gt_seeded_rebootstrap_tracking_result(
-                                            frame_idx as u64,
-                                            seed_pose,
-                                            &stereo_matches,
-                                            &landmark_ids,
-                                            map_stats,
-                                        );
-                                    slam.tracker
-                                        .accept_segment_restart_result(restart_tracking.clone());
-                                    if let Some(state) = slam.relocalization_state.as_mut() {
-                                        state.consecutive_failed_attempts = 0;
-                                        state.pending_confirmation = None;
-                                    }
-                                    pending_replenish_candidates.clear();
-                                    let keyframe =
-                                        keyframe_from_tracking_result(&frame, &restart_tracking);
-                                    let map_snapshot = slam.map().clone();
-                                    let mapping_result = slam.mapper.process_keyframe(
-                                        &map_snapshot,
-                                        &restart_tracking,
-                                        keyframe,
-                                        Vec::<LandmarkCandidate>::new(),
-                                    );
-                                    if slam.config.apply_map_updates
-                                        && mapping_result.staged_update_validation.is_valid()
-                                    {
-                                        let _ = mapping_result
-                                            .staged_update
-                                            .clone()
-                                            .apply_to(slam.map_mut());
-                                    }
-                                    rebootstrap_mapping_override = Some(mapping_result);
-                                    segment_id += 1;
-                                    rebootstrap_events += 1;
-                                    rebootstrap_event_idx += 1;
-                                    rebootstrap_log_csv.push_str(&format!(
+                    if let (Some(cam1_setup), Some(cam1_features)) =
+                        (cam1_stereo_setup.as_ref(), cam1_features_for_frame.as_ref())
+                    {
+                        let stereo_matches = bootstrap_stereo_landmarks(
+                            &camera,
+                            &cam1_setup.camera,
+                            &cam1_setup.cam0_to_cam1,
+                            &features,
+                            cam1_features,
+                            &StereoBootstrapConfig::default(),
+                        );
+                        if stereo_matches.len() >= min_stereo_matches {
+                            let gt = nearest_ground_truth(
+                                &dataset.ground_truth,
+                                image_entry.timestamp_nanoseconds,
+                            );
+                            let seed_pose = world_to_camera_pose(
+                                &gt.orientation_world,
+                                &gt.position_world,
+                                &body_to_camera,
+                            );
+                            let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
+                                slam.map_mut(),
+                                &seed_pose,
+                                &features,
+                                &stereo_matches,
+                                &mut next_rebootstrap_landmark_id,
+                            );
+                            let map_stats = map_provider_stats_from_map(slam.map());
+                            let restart_tracking = build_gt_seeded_rebootstrap_tracking_result(
+                                frame_idx as u64,
+                                seed_pose,
+                                &stereo_matches,
+                                &landmark_ids,
+                                map_stats,
+                            );
+                            slam.tracker
+                                .accept_segment_restart_result(restart_tracking.clone());
+                            if let Some(state) = slam.relocalization_state.as_mut() {
+                                state.consecutive_failed_attempts = 0;
+                                state.pending_confirmation = None;
+                            }
+                            pending_replenish_candidates.clear();
+                            let keyframe = keyframe_from_tracking_result(&frame, &restart_tracking);
+                            let map_snapshot = slam.map().clone();
+                            let mapping_result = slam.mapper.process_keyframe(
+                                &map_snapshot,
+                                &restart_tracking,
+                                keyframe,
+                                Vec::<LandmarkCandidate>::new(),
+                            );
+                            if slam.config.apply_map_updates
+                                && mapping_result.staged_update_validation.is_valid()
+                            {
+                                let _ = mapping_result
+                                    .staged_update
+                                    .clone()
+                                    .apply_to(slam.map_mut());
+                            }
+                            rebootstrap_mapping_override = Some(mapping_result);
+                            segment_id += 1;
+                            rebootstrap_events += 1;
+                            rebootstrap_event_idx += 1;
+                            rebootstrap_log_csv.push_str(&format!(
                                         "{rebootstrap_event_idx},{segment_id},{frame_idx},{},gt_pose,{},{},{},{}\n",
                                         image_entry.timestamp_nanoseconds,
                                         stereo_matches.len(),
@@ -4485,12 +4732,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(0),
                                         consecutive_lost_frames,
                                     ));
-                                    last_rebootstrap_frame_idx = Some(frame_idx);
-                                    consecutive_lost_frames = 0;
-                                    result.tracking = restart_tracking;
-                                    success = true;
-                                    tracked = result.tracking.localization.pose.clone();
-                                    println!(
+                            last_rebootstrap_frame_idx = Some(frame_idx);
+                            consecutive_lost_frames = 0;
+                            result.tracking = restart_tracking;
+                            success = true;
+                            tracked = result.tracking.localization.pose.clone();
+                            println!(
                                         "rebootstrap segment_id={segment_id} frame_idx={frame_idx} stereo_matches={} landmarks_added={} keyframe_selected={}",
                                         stereo_matches.len(),
                                         landmark_ids.len(),
@@ -4499,8 +4746,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .map(|mapping| mapping.keyframe_decision.selected)
                                             .unwrap_or(false),
                                     );
-                                }
-                            }
                         }
                     }
                 }
@@ -4510,65 +4755,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracking_successes += 1;
         }
         // Stereo landmark replenishment: for cam0 keypoints tracking did NOT
-        // match to an existing landmark this frame, stereo-match against a
-        // freshly loaded/undistorted cam1 image and stage two-observation
-        // `LandmarkCandidate`s (this frame's real pixel + a synthesised
-        // observation reprojected into the most-recent keyframe) for
-        // submission on the *next* frame's `process_frame` call. All the
+        // match to an existing landmark this frame, reuse the cam1 features
+        // extracted above and stage two-observation
+        // `LandmarkCandidate`s (this frame's real pixel + a gated real
+        // observation in the most-recent keyframe, predicted by the stereo
+        // reprojection) for
+        // submission on the *next* frame's `process_frame` call. The anchor
+        // observation is a gated real keypoint measurement; the stereo 3D
+        // reprojection is used only to predict that association. All the
         // matching / triangulation / gating logic (the three-defect-hardened
         // module) lives in `build_stereo_replenish_candidates`; here we only
         // assemble its inputs — cam1 features for this instant, the
         // just-solved pose, and the PnP-inlier index set — and queue the
         // result.
         if args.stereo_landmark_replenish && success {
-            if let (Some(anchor_frame_id), Some(cam1_setup), Some(current_pose)) = (
+            if let (
+                Some(anchor_frame_id),
+                Some(cam1_setup),
+                Some(current_pose),
+                Some(cam1_features),
+            ) = (
                 replenish_anchor_frame_id,
                 cam1_stereo_setup.as_ref(),
                 tracked.as_ref(),
+                cam1_features_for_frame.as_ref(),
             ) {
-                if let Some(cam1_idx) = dataset.cam1_images.iter().position(|entry| {
-                    entry.timestamp_nanoseconds == image_entry.timestamp_nanoseconds
-                }) {
-                    let cam1_image_path = dataset
-                        .cam1_image_dir
-                        .join(&dataset.cam1_images[cam1_idx].filename);
-                    if let Ok(cam1_image) = read_common_image(&cam1_image_path) {
-                        extractor.set_camera(SuperPointCamera::Cam1);
-                        extractor.set_frame_idx(cam1_idx);
-                        let cam1_features_result = extractor.extract(&cam1_image);
-                        extractor.set_camera(SuperPointCamera::Cam0);
-                        if let Ok(cam1_features_raw) = cam1_features_result {
-                            let cam1_features = undistort_feature_keypoints(
-                                &cam1_setup.distortion,
-                                &cam1_setup.camera,
-                                &cam1_features_raw,
-                            );
-                            let matched_cam0_indices: std::collections::HashSet<usize> = result
-                                .tracking
-                                .localization
-                                .inlier_query_indices
-                                .iter()
-                                .copied()
-                                .collect();
-                            let new_candidates = build_stereo_replenish_candidates(
-                                slam.map(),
-                                anchor_frame_id,
-                                frame_idx as u64,
-                                &cam1_setup.camera,
-                                &cam1_setup.cam0_to_cam1,
-                                &features,
-                                &cam1_features,
-                                &matched_cam0_indices,
-                                current_pose,
-                                next_replenish_candidate_id,
-                                &stereo_replenish_config,
-                            );
-                            next_replenish_candidate_id += new_candidates.len() as u64;
-                            stereo_landmark_replenish_candidates_total += new_candidates.len();
-                            pending_replenish_candidates.extend(new_candidates);
-                        }
-                    }
-                }
+                let matched_cam0_indices: std::collections::HashSet<usize> = result
+                    .tracking
+                    .localization
+                    .inlier_query_indices
+                    .iter()
+                    .copied()
+                    .collect();
+                let new_candidates = build_stereo_replenish_candidates(
+                    slam.map(),
+                    anchor_frame_id,
+                    frame_idx as u64,
+                    &cam1_setup.camera,
+                    &cam1_setup.cam0_to_cam1,
+                    &features,
+                    cam1_features,
+                    &matched_cam0_indices,
+                    current_pose,
+                    next_replenish_candidate_id,
+                    &stereo_replenish_config,
+                );
+                next_replenish_candidate_id += new_candidates.len() as u64;
+                stereo_landmark_replenish_candidates_total += new_candidates.len();
+                pending_replenish_candidates.extend(new_candidates);
             }
         }
         if let Some(reloc) = result.relocalization.as_ref() {
@@ -5015,10 +5249,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
         if let Some(stats) = result.pose_graph_refinement.as_ref() {
+            loop_candidate_diagnostics_csv.push_str(&format!(
+                "{frame_idx},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                image_entry.timestamp_nanoseconds,
+                stats.verified_candidate_count,
+                stats.appearance_ranked_candidate_count,
+                stats.appearance_connected_region_rejected_count,
+                stats.appearance_pnp_verified_count,
+                stats.appearance_projection_rejected_count,
+                stats.appearance_covisibility_rejected_count,
+                stats.appearance_pending_projection_attempted_count,
+                stats.appearance_pending_projection_verified_count,
+                format_optional_f64(stats.appearance_pending_projection_search_radius_px),
+                stats.appearance_pending_projection_correspondence_count,
+                stats.appearance_pending_projection_inlier_count,
+                stats.appearance_region_confirmation_waiting,
+                stats.appearance_region_confirmed_count,
+                stats
+                    .admitted_constraints
+                    .iter()
+                    .filter(|constraint| {
+                        constraint.source == LoopClosureCandidateSource::Appearance
+                    })
+                    .count(),
+                stats.loop_closures_pcm_rejected,
+                stats.loop_closures_covariance_rejected,
+            ));
+            for diagnostic in &stats.appearance_candidate_diagnostics {
+                loop_candidate_evidence_csv.push_str(&format!(
+                    "{},{},{:.9},{},{},{},{},{},{},{},{},{},{},{},{:?},{:?},{}\n",
+                    diagnostic.query_frame_id,
+                    diagnostic.matched_keyframe_id,
+                    diagnostic.appearance_similarity,
+                    diagnostic.matched_region_keyframe_count,
+                    diagnostic.matched_region_landmark_count,
+                    diagnostic.primary_correspondence_count,
+                    diagnostic.primary_inlier_count,
+                    diagnostic.projection_attempted,
+                    diagnostic.projection_correspondence_count,
+                    diagnostic.projection_inlier_count,
+                    diagnostic.projection_accepted,
+                    diagnostic.current_covisible_keyframe_count,
+                    diagnostic.neighbor_pnp_verified_count,
+                    diagnostic.consistent_keyframe_count,
+                    diagnostic.minimum_translation_disagreement_meters,
+                    diagnostic.minimum_rotation_disagreement_radians,
+                    diagnostic.accepted,
+                ));
+            }
             pose_graph_refinement_candidates_seen += stats.verified_candidate_count;
             pose_graph_refinement_verified_constraints += stats.accepted_count;
             pose_graph_refinement_appearance_ranked += stats.appearance_ranked_candidate_count;
-            pose_graph_refinement_appearance_pnp_verified += stats.appearance_candidate_count;
+            pose_graph_refinement_appearance_connected_region_rejected +=
+                stats.appearance_connected_region_rejected_count;
+            pose_graph_refinement_appearance_pnp_verified += stats.appearance_pnp_verified_count;
+            pose_graph_refinement_appearance_projection_rejected +=
+                stats.appearance_projection_rejected_count;
+            pose_graph_refinement_appearance_covisibility_rejected +=
+                stats.appearance_covisibility_rejected_count;
+            pose_graph_refinement_appearance_pending_projection_attempted +=
+                stats.appearance_pending_projection_attempted_count;
+            pose_graph_refinement_appearance_pending_projection_verified +=
+                stats.appearance_pending_projection_verified_count;
+            pose_graph_refinement_appearance_pending_projection_correspondences +=
+                stats.appearance_pending_projection_correspondence_count;
+            pose_graph_refinement_appearance_pending_projection_inliers +=
+                stats.appearance_pending_projection_inlier_count;
+            pose_graph_refinement_appearance_pending_projection_correspondences_max =
+                pose_graph_refinement_appearance_pending_projection_correspondences_max
+                    .max(stats.appearance_pending_projection_correspondence_count);
+            pose_graph_refinement_appearance_pending_projection_inliers_max =
+                pose_graph_refinement_appearance_pending_projection_inliers_max
+                    .max(stats.appearance_pending_projection_inlier_count);
+            if let Some(radius) = stats.appearance_pending_projection_search_radius_px {
+                pose_graph_refinement_appearance_pending_projection_radius_min = Some(
+                    pose_graph_refinement_appearance_pending_projection_radius_min
+                        .map_or(radius, |value| value.min(radius)),
+                );
+                pose_graph_refinement_appearance_pending_projection_radius_max = Some(
+                    pose_graph_refinement_appearance_pending_projection_radius_max
+                        .map_or(radius, |value| value.max(radius)),
+                );
+            }
+            pose_graph_refinement_appearance_region_confirmation_waiting +=
+                usize::from(stats.appearance_region_confirmation_waiting);
+            pose_graph_refinement_appearance_region_confirmed +=
+                stats.appearance_region_confirmed_count;
             pose_graph_refinement_appearance_scale_failed +=
                 stats.appearance_scale_estimation_failed_count;
             pose_graph_refinement_appearance_scale_insufficient_points +=
@@ -5027,8 +5343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.appearance_scale_insufficient_matches_count;
             pose_graph_refinement_appearance_scale_no_consensus +=
                 stats.appearance_scale_no_consensus_count;
-            pose_graph_refinement_appearance_near_unit +=
-                stats.appearance_near_unit_scale_count;
+            pose_graph_refinement_appearance_near_unit += stats.appearance_near_unit_scale_count;
             if stats.pose_graph_result.is_some()
                 || stats.gnc_result.is_some()
                 || stats.sim3_pose_graph_result.is_some()
@@ -5040,6 +5355,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             pose_graph_refinement_pcm_rejected += stats.loop_closures_pcm_rejected;
             pose_graph_refinement_covariance_rejected += stats.loop_closures_covariance_rejected;
+            pose_graph_refinement_pose_information_rejected +=
+                stats.loop_closures_pose_information_rejected;
+            pose_graph_refinement_with_pose_information +=
+                stats.loop_closures_with_pose_information;
+            for diagnostic in &stats.loop_pose_information_diagnostics {
+                pose_graph_refinement_pose_information_estimates += 1;
+                pose_graph_refinement_pose_information_used_correspondences +=
+                    diagnostic.used_correspondence_count;
+                pose_graph_refinement_pose_information_raw_condition_max =
+                    pose_graph_refinement_pose_information_raw_condition_max
+                        .max(diagnostic.raw_condition_number);
+                pose_graph_refinement_pose_information_spectral_scale_min = Some(
+                    pose_graph_refinement_pose_information_spectral_scale_min
+                        .map_or(diagnostic.applied_spectral_scale, |value| {
+                            value.min(diagnostic.applied_spectral_scale)
+                        }),
+                );
+            }
+            pose_graph_refinement_sequential_with_pose_information +=
+                stats.sequential_edges_with_pose_information;
+            pose_graph_refinement_sequential_pose_information_fallbacks +=
+                stats.sequential_pose_information_fallbacks;
+            for diagnostic in &stats.sequential_pose_information_diagnostics {
+                pose_graph_refinement_sequential_pose_information_used_correspondences +=
+                    diagnostic.used_correspondence_count;
+                pose_graph_refinement_sequential_pose_information_raw_condition_max =
+                    pose_graph_refinement_sequential_pose_information_raw_condition_max
+                        .max(diagnostic.raw_condition_number);
+                pose_graph_refinement_sequential_pose_information_spectral_scale_min = Some(
+                    pose_graph_refinement_sequential_pose_information_spectral_scale_min
+                        .map_or(diagnostic.applied_spectral_scale, |value| {
+                            value.min(diagnostic.applied_spectral_scale)
+                        }),
+                );
+            }
             pose_graph_refinement_landmarks_moved += stats.landmarks_moved;
             if let Some(max_displacement) = stats.max_landmark_displacement_meters {
                 if max_displacement > pose_graph_refinement_max_landmark_displacement_meters {
@@ -5063,14 +5413,143 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let keyframe_id_gap = admitted
                     .to_keyframe_id
                     .saturating_sub(admitted.from_keyframe_id);
+                let gt_error = dataset
+                    .cam0_images
+                    .get(admitted.from_keyframe_id as usize)
+                    .zip(dataset.cam0_images.get(admitted.to_keyframe_id as usize))
+                    .map(|(from_image, to_image)| {
+                        let from_gt = nearest_ground_truth(
+                            &dataset.ground_truth,
+                            from_image.timestamp_nanoseconds,
+                        );
+                        let to_gt = nearest_ground_truth(
+                            &dataset.ground_truth,
+                            to_image.timestamp_nanoseconds,
+                        );
+                        let camera_to_world = |gt: &EurocGroundTruthSample| {
+                            let center = gt.position_world
+                                + gt.orientation_world
+                                    .transform_vector(&body_to_camera.translation);
+                            visloc_rs::SE3::new(
+                                gt.orientation_world * body_to_camera.rotation,
+                                center,
+                            )
+                        };
+                        let from_camera_to_world = camera_to_world(from_gt);
+                        let to_world_to_camera = camera_to_world(to_gt).inverse();
+                        let gt_relative = to_world_to_camera.compose(&from_camera_to_world);
+                        let residual = admitted.relative_pose.compose(&gt_relative.inverse());
+                        let translation_error = residual.translation.norm();
+                        let rotation_error_deg = residual.rotation.angle().to_degrees();
+                        let correct = translation_error <= 0.5 && rotation_error_deg <= 10.0;
+                        (translation_error, rotation_error_deg, correct)
+                    });
+                if let Some((_, _, correct)) = gt_error {
+                    pose_graph_refinement_gt_evaluated += 1;
+                    pose_graph_refinement_gt_correct += usize::from(correct);
+                }
+                let relative_q = admitted.relative_pose.rotation.quaternion();
+                let (gt_translation_error, gt_rotation_error, gt_correct) = gt_error
+                    .map(|(translation, rotation, correct)| {
+                        (
+                            translation.to_string(),
+                            rotation.to_string(),
+                            correct.to_string(),
+                        )
+                    })
+                    .unwrap_or_else(|| (String::new(), String::new(), String::new()));
                 loop_constraints_csv.push_str(&format!(
-                    "{frame_idx},{},{},{},{:.6},{},{}\n",
+                    "{frame_idx},{},{},{},{:.6},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{},{},{},{}\n",
                     admitted.from_keyframe_id,
                     admitted.to_keyframe_id,
                     keyframe_id_gap,
                     admitted.translation_norm_m,
+                    admitted.relative_pose.translation.x,
+                    admitted.relative_pose.translation.y,
+                    admitted.relative_pose.translation.z,
+                    relative_q.w,
+                    relative_q.i,
+                    relative_q.j,
+                    relative_q.k,
                     admitted.inlier_count,
                     source,
+                    gt_translation_error,
+                    gt_rotation_error,
+                    gt_correct,
+                ));
+            }
+            for rejected in &stats.rejected_constraints {
+                let source = match rejected.source {
+                    LoopClosureCandidateSource::SharedLandmark => "shared_landmark",
+                    LoopClosureCandidateSource::Appearance => "appearance",
+                };
+                let keyframe_id_gap = rejected
+                    .to_keyframe_id
+                    .saturating_sub(rejected.from_keyframe_id);
+                let gt_error = dataset
+                    .cam0_images
+                    .get(rejected.from_keyframe_id as usize)
+                    .zip(dataset.cam0_images.get(rejected.to_keyframe_id as usize))
+                    .map(|(from_image, to_image)| {
+                        let from_gt = nearest_ground_truth(
+                            &dataset.ground_truth,
+                            from_image.timestamp_nanoseconds,
+                        );
+                        let to_gt = nearest_ground_truth(
+                            &dataset.ground_truth,
+                            to_image.timestamp_nanoseconds,
+                        );
+                        let camera_to_world = |gt: &EurocGroundTruthSample| {
+                            let center = gt.position_world
+                                + gt.orientation_world
+                                    .transform_vector(&body_to_camera.translation);
+                            visloc_rs::SE3::new(
+                                gt.orientation_world * body_to_camera.rotation,
+                                center,
+                            )
+                        };
+                        let from_camera_to_world = camera_to_world(from_gt);
+                        let to_world_to_camera = camera_to_world(to_gt).inverse();
+                        let gt_relative = to_world_to_camera.compose(&from_camera_to_world);
+                        let residual = rejected.relative_pose.compose(&gt_relative.inverse());
+                        let translation_error = residual.translation.norm();
+                        let rotation_error_deg = residual.rotation.angle().to_degrees();
+                        let correct = translation_error <= 0.5 && rotation_error_deg <= 10.0;
+                        (translation_error, rotation_error_deg, correct)
+                    });
+                if let Some((_, _, correct)) = gt_error {
+                    pose_graph_refinement_rejected_gt_evaluated += 1;
+                    pose_graph_refinement_rejected_gt_correct += usize::from(correct);
+                }
+                let relative_q = rejected.relative_pose.rotation.quaternion();
+                let (gt_translation_error, gt_rotation_error, gt_correct) = gt_error
+                    .map(|(translation, rotation, correct)| {
+                        (
+                            translation.to_string(),
+                            rotation.to_string(),
+                            correct.to_string(),
+                        )
+                    })
+                    .unwrap_or_else(|| (String::new(), String::new(), String::new()));
+                loop_rejected_constraints_csv.push_str(&format!(
+                    "{frame_idx},{},{},{},{:.6},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{},{:?},{},{},{}\n",
+                    rejected.from_keyframe_id,
+                    rejected.to_keyframe_id,
+                    keyframe_id_gap,
+                    rejected.translation_norm_m,
+                    rejected.relative_pose.translation.x,
+                    rejected.relative_pose.translation.y,
+                    rejected.relative_pose.translation.z,
+                    relative_q.w,
+                    relative_q.i,
+                    relative_q.j,
+                    relative_q.k,
+                    rejected.inlier_count,
+                    source,
+                    rejected.reason,
+                    gt_translation_error,
+                    gt_rotation_error,
+                    gt_correct,
                 ));
             }
         }
@@ -5191,6 +5670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
 
+        frame_processing_times_ms.push(frame_processing_started_at.elapsed().as_secs_f64() * 1e3);
         frames_recorded += 1;
     }
 
@@ -5224,6 +5704,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.pose_graph_refinement_enabled {
         fs::write(&loop_constraints_path, &loop_constraints_csv)?;
+        fs::write(
+            &loop_rejected_constraints_path,
+            &loop_rejected_constraints_csv,
+        )?;
+        fs::write(
+            &loop_candidate_diagnostics_path,
+            &loop_candidate_diagnostics_csv,
+        )?;
+        fs::write(&loop_candidate_evidence_path, &loop_candidate_evidence_csv)?;
     }
 
     // Dump the metric landmark cloud (world frame) so downstream tools can seed
@@ -5304,6 +5793,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut final_keyframe_reference_positions: Vec<Point3<f64>> = Vec::new();
     let mut final_keyframe_timestamps: Vec<i128> = Vec::new();
     let mut final_keyframe_ids: Vec<u64> = Vec::new();
+    let mut final_keyframe_estimated_tum = String::new();
+    let mut final_keyframe_reference_tum = String::new();
 
     for &keyframe_id in &keyframe_ids {
         let keyframe = &slam.map().keyframes[&keyframe_id];
@@ -5325,6 +5816,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let gt_center = gt.position_world
             + gt.orientation_world
                 .transform_vector(&body_to_camera.translation);
+        let gt_camera_to_world_rotation = gt.orientation_world * body_to_camera.rotation;
+        let gt_q = gt_camera_to_world_rotation.quaternion();
+        final_keyframe_estimated_tum.push_str(&format!(
+            "{keyframe_id} {} {} {} {} {} {} {}\n",
+            center.x, center.y, center.z, q.i, q.j, q.k, q.w,
+        ));
+        final_keyframe_reference_tum.push_str(&format!(
+            "{keyframe_id} {} {} {} {} {} {} {}\n",
+            gt_center.x, gt_center.y, gt_center.z, gt_q.i, gt_q.j, gt_q.k, gt_q.w,
+        ));
 
         final_keyframe_estimated_positions.push(Point3::new(center.x, center.y, center.z));
         final_keyframe_reference_positions.push(Point3::new(gt_center.x, gt_center.y, gt_center.z));
@@ -5347,8 +5848,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .unwrap_or_else(TrajectorySimilarityTransform::identity);
 
-    let mut final_keyframe_errors_csv =
-        String::from("keyframe_id,timestamp_ns,position_error_m\n");
+    let mut final_keyframe_errors_csv = String::from("keyframe_id,timestamp_ns,position_error_m\n");
     let mut final_keyframe_rmse_sq_rigid = 0.0_f64;
     let mut final_keyframe_rmse_sq_sim = 0.0_f64;
     for (((id, ts), est), gt) in final_keyframe_ids
@@ -5376,6 +5876,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (0.0, 0.0)
         };
     let final_keyframe_ate_similarity_scale = final_keyframe_aligned_similarity.scale;
+    let final_keyframe_estimated_trajectory =
+        PoseTrajectory::from_tum_poses_str(&final_keyframe_estimated_tum)?;
+    let final_keyframe_reference_trajectory =
+        PoseTrajectory::from_tum_poses_str(&final_keyframe_reference_tum)?;
+    let final_keyframe_rpe_delta1 = final_keyframe_estimated_trajectory
+        .relative_pose_error_against(
+            &final_keyframe_reference_trajectory,
+            &RelativePoseErrorConfig {
+                delta: 1,
+                start_step: 1,
+            },
+        );
+    let final_keyframe_rpe_delta10 = final_keyframe_estimated_trajectory
+        .relative_pose_error_against(
+            &final_keyframe_reference_trajectory,
+            &RelativePoseErrorConfig {
+                delta: 10,
+                start_step: 1,
+            },
+        );
+    let final_keyframe_rpe_delta1_translation_rmse_m = final_keyframe_rpe_delta1
+        .translation
+        .map(|stats| stats.rmse);
+    let final_keyframe_rpe_delta1_rotation_rmse_deg = final_keyframe_rpe_delta1
+        .rotation_deg
+        .map(|stats| stats.rmse);
+    let final_keyframe_rpe_delta10_translation_rmse_m = final_keyframe_rpe_delta10
+        .translation
+        .map(|stats| stats.rmse);
+    let final_keyframe_rpe_delta10_rotation_rmse_deg = final_keyframe_rpe_delta10
+        .rotation_deg
+        .map(|stats| stats.rmse);
 
     let final_vi_status = slam.vi_initialization_status();
     let final_motion_vi_status = slam.motion_vi_initialization_status();
@@ -5407,11 +5939,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let wall_clock_seconds = demo_started_at.elapsed().as_secs_f64();
+    let wall_clock_ms_per_frame = if frames_recorded > 0 {
+        wall_clock_seconds * 1_000.0 / frames_recorded as f64
+    } else {
+        0.0
+    };
+    let wall_clock_fps = if wall_clock_seconds > 0.0 {
+        frames_recorded as f64 / wall_clock_seconds
+    } else {
+        0.0
+    };
+    frame_processing_times_ms.sort_by(f64::total_cmp);
+    let frame_time_percentile_ms = |quantile: f64| {
+        if frame_processing_times_ms.is_empty() {
+            return None;
+        }
+        let index = ((frame_processing_times_ms.len() - 1) as f64 * quantile)
+            .round()
+            .clamp(0.0, (frame_processing_times_ms.len() - 1) as f64) as usize;
+        frame_processing_times_ms.get(index).copied()
+    };
+    let frame_processing_ms_p50 = frame_time_percentile_ms(0.50);
+    let frame_processing_ms_p95 = frame_time_percentile_ms(0.95);
+    let frame_processing_ms_p99 = frame_time_percentile_ms(0.99);
     let summary = format!(
         "euroc_dir={}\n\
          frames_recorded={frames_recorded}\n\
+         wall_clock_seconds={wall_clock_seconds:.6}\n\
+         wall_clock_ms_per_frame={wall_clock_ms_per_frame:.6}\n\
+         wall_clock_fps={wall_clock_fps:.6}\n\
+         frame_processing_ms_p50={frame_processing_ms_p50:?}\n\
+         frame_processing_ms_p95={frame_processing_ms_p95:?}\n\
+         frame_processing_ms_p99={frame_processing_ms_p99:?}\n\
          tracking_success_rate={success_rate:.3}\n\
          imu_samples_consumed={imu_idx}\n\
+         vi_init_preseed_samples={vi_init_preseed_samples}\n\
          seed_frame_idx={seed_frame_idx}\n\
          undistort={undistort}\n\
          stereo_bootstrap={stereo_bootstrap_enabled}\n\
@@ -5435,6 +5998,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          vi_init_succeeded_frame={vi_succeeded:?}\n\
          vi_init_status_final={final_vi_status:?}\n\
          motion_vi_init_enabled={motion_enabled}\n\
+         motion_vi_init_after_static_give_up={motion_after_static_give_up}\n\
          motion_vi_init_first_event_frame={motion_first:?}\n\
          motion_vi_init_succeeded_frame={motion_succeeded:?}\n\
          motion_vi_init_recovered_scale={motion_scale:?}\n\
@@ -5452,6 +6016,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          local_vi_ba_adaptive_velocity_max_mps={local_vi_ba_adaptive_velocity_max_mps:?}\n\
          local_vi_ba_adaptive_velocity_min_references={local_vi_ba_adaptive_velocity_min_references}\n\
          motion_vi_init_max_velocity_mps={motion_vi_max_vel:?}\n\
+         motion_vi_init_max_gyro_bias_rad_s={motion_vi_max_gyro_bias:?}\n\
+         motion_vi_init_max_accel_bias_mps2={motion_vi_max_accel_bias:?}\n\
          covisibility_local_map_max_keyframes={covisibility_max_kf:?}\n\
          covisibility_local_map_min_shared={covisibility_min_shared}\n\
          covisibility_local_map_used_frames={covisibility_used_frames}\n\
@@ -5498,8 +6064,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_last_error={covis_ba_last_error:?}\n\
          pose_graph_refinement={pgr_enabled}\n\
          pose_graph_refinement_trigger_every={pgr_trigger_every}\n\
+         pose_graph_refinement_fixed_loop_edge_weight={pgr_fixed_loop_edge_weight:?}\n\
+         pose_graph_refinement_loop_pose_information={pgr_loop_pose_information}\n\
          pose_graph_refinement_gnc={pgr_gnc}\n\
          pose_graph_refinement_pcm={pgr_pcm}\n\
+         pose_graph_refinement_pcm_require_individual={pgr_pcm_require_individual}\n\
          pose_graph_refinement_covariance_gate={pgr_covariance_gate:?}\n\
          pose_graph_refinement_verifier={pgr_verifier}\n\
          pose_graph_refinement_solver={pgr_solver}\n\
@@ -5509,12 +6078,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_pgo_solves={pgr_pgo_solves}\n\
          pose_graph_refinement_pcm_rejected={pgr_pcm_rejected}\n\
          pose_graph_refinement_covariance_rejected={pgr_covariance_rejected}\n\
+         pose_graph_refinement_pose_information_rejected={pgr_pose_information_rejected}\n\
+         pose_graph_refinement_with_pose_information={pgr_with_pose_information}\n\
+         pose_graph_refinement_pose_information_estimates={pgr_pose_information_estimates}\n\
+         pose_graph_refinement_pose_information_used_correspondences={pgr_pose_information_used_correspondences}\n\
+         pose_graph_refinement_pose_information_raw_condition_max={pgr_pose_information_raw_condition_max:.9}\n\
+         pose_graph_refinement_pose_information_spectral_scale_min={pgr_pose_information_spectral_scale_min:?}\n\
+         pose_graph_refinement_sequential_with_pose_information={pgr_sequential_with_pose_information}\n\
+         pose_graph_refinement_sequential_pose_information_fallbacks={pgr_sequential_pose_information_fallbacks}\n\
+         pose_graph_refinement_sequential_pose_information_used_correspondences={pgr_sequential_pose_information_used_correspondences}\n\
+         pose_graph_refinement_sequential_pose_information_raw_condition_max={pgr_sequential_pose_information_raw_condition_max:.9}\n\
+         pose_graph_refinement_sequential_pose_information_spectral_scale_min={pgr_sequential_pose_information_spectral_scale_min:?}\n\
          pose_graph_refinement_appearance_loops={pgr_appearance_enabled}\n\
          pose_graph_refinement_appearance_min_gap={pgr_appearance_min_gap}\n\
          pose_graph_refinement_appearance_max_candidates={pgr_appearance_max_candidates}\n\
          pose_graph_refinement_appearance_min_inliers={pgr_appearance_min_inliers}\n\
+         pose_graph_refinement_appearance_confirmation_keyframes={pgr_appearance_confirmation_keyframes}\n\
+         pose_graph_refinement_appearance_confirmation_max_misses={pgr_appearance_confirmation_max_misses}\n\
+         pose_graph_refinement_appearance_projection_radius_px={pgr_appearance_projection_radius:?}\n\
+         pose_graph_refinement_appearance_projection_min_matches={pgr_appearance_projection_min_matches}\n\
          pose_graph_refinement_appearance_ranked={pgr_appearance_ranked}\n\
+         pose_graph_refinement_appearance_connected_region_rejected={pgr_appearance_connected_region_rejected}\n\
          pose_graph_refinement_appearance_pnp_verified={pgr_appearance_pnp_verified}\n\
+         pose_graph_refinement_appearance_projection_rejected={pgr_appearance_projection_rejected}\n\
+         pose_graph_refinement_appearance_covisibility_rejected={pgr_appearance_covisibility_rejected}\n\
+         pose_graph_refinement_appearance_pending_projection_attempted={pgr_appearance_pending_projection_attempted}\n\
+         pose_graph_refinement_appearance_pending_projection_verified={pgr_appearance_pending_projection_verified}\n\
+         pose_graph_refinement_appearance_pending_projection_correspondences={pgr_appearance_pending_projection_correspondences}\n\
+         pose_graph_refinement_appearance_pending_projection_inliers={pgr_appearance_pending_projection_inliers}\n\
+         pose_graph_refinement_appearance_pending_projection_correspondences_max={pgr_appearance_pending_projection_correspondences_max}\n\
+         pose_graph_refinement_appearance_pending_projection_inliers_max={pgr_appearance_pending_projection_inliers_max}\n\
+         pose_graph_refinement_appearance_pending_projection_radius_min={pgr_appearance_pending_projection_radius_min:?}\n\
+         pose_graph_refinement_appearance_pending_projection_radius_max={pgr_appearance_pending_projection_radius_max:?}\n\
+         pose_graph_refinement_appearance_region_confirmation_waiting={pgr_appearance_region_confirmation_waiting}\n\
+         pose_graph_refinement_appearance_region_confirmed={pgr_appearance_region_confirmed}\n\
          pose_graph_refinement_appearance_scale_failed={pgr_appearance_scale_failed}\n\
          pose_graph_refinement_appearance_scale_insufficient_points={pgr_appearance_scale_insufficient_points}\n\
          pose_graph_refinement_appearance_scale_insufficient_matches={pgr_appearance_scale_insufficient_matches}\n\
@@ -5522,6 +6119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_appearance_near_unit={pgr_appearance_near_unit}\n\
          pose_graph_refinement_constraints_shared={pgr_constraints_shared}\n\
          pose_graph_refinement_constraints_appearance={pgr_constraints_appearance}\n\
+         pose_graph_refinement_gt_evaluated={pgr_gt_evaluated}\n\
+         pose_graph_refinement_gt_correct_0p5m_10deg={pgr_gt_correct}\n\
+         pose_graph_refinement_gt_precision_0p5m_10deg={pgr_gt_precision:?}\n\
+         pose_graph_refinement_rejected_gt_evaluated={pgr_rejected_gt_evaluated}\n\
+         pose_graph_refinement_rejected_gt_correct_0p5m_10deg={pgr_rejected_gt_correct}\n\
+         pose_graph_refinement_rejected_gt_correct_ratio_0p5m_10deg={pgr_rejected_gt_correct_ratio:?}\n\
          pose_graph_refinement_propagate={pgr_propagate}\n\
          pose_graph_refinement_landmarks_moved={pgr_landmarks_moved}\n\
          pose_graph_refinement_max_landmark_displacement_meters={pgr_max_landmark_displacement_meters:.6}\n\
@@ -5565,6 +6168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          superpoint_onnx_model={superpoint_onnx_model:?}\n\
          keyframe_min_translation={kf_min_translation:?}\n\
          keyframe_min_frame_gap={kf_min_frame_gap:?}\n\
+         keyframe_max_frame_gap={kf_max_frame_gap:?}\n\
          keyframe_tracked_landmark_ratio={kf_tracked_ratio:?}\n\
          keyframe_min_tracked_landmarks_for_ratio={kf_min_tracked_for_ratio}\n\
          keyframe_min_inliers={kf_min_inliers:?}\n\
@@ -5670,8 +6274,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          final_keyframe_ate_rigid_rmse_m={final_keyframe_ate_rigid_rmse_m:.4}\n\
          final_keyframe_ate_similarity_rmse_m={final_keyframe_ate_similarity_rmse_m:.4}\n\
          final_keyframe_ate_similarity_scale={final_keyframe_ate_similarity_scale:.6}\n\
+         final_keyframe_rpe_delta1_pairs={}\n\
+         final_keyframe_rpe_delta1_translation_rmse_m={final_keyframe_rpe_delta1_translation_rmse_m:?}\n\
+         final_keyframe_rpe_delta1_rotation_rmse_deg={final_keyframe_rpe_delta1_rotation_rmse_deg:?}\n\
+         final_keyframe_rpe_delta10_pairs={}\n\
+         final_keyframe_rpe_delta10_translation_rmse_m={final_keyframe_rpe_delta10_translation_rmse_m:?}\n\
+         final_keyframe_rpe_delta10_rotation_rmse_deg={final_keyframe_rpe_delta10_rotation_rmse_deg:?}\n\
          final_keyframe_count={final_keyframe_count}\n",
         args.euroc_dir.display(),
+        final_keyframe_rpe_delta1.pair_count,
+        final_keyframe_rpe_delta10.pair_count,
         success_rate = if frames_recorded > 0 {
             tracking_successes as f64 / frames_recorded as f64
         } else {
@@ -5693,6 +6305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vi_first = vi_init_first_event_at_frame,
         vi_succeeded = vi_init_succeeded_at_frame,
         motion_enabled = args.motion_vi_init_enabled,
+        motion_after_static_give_up = args.motion_vi_init_after_static_give_up,
         motion_first = motion_vi_init_first_event_at_frame,
         motion_succeeded = motion_vi_init_succeeded_at_frame,
         motion_scale = motion_vi_init_recovered_scale,
@@ -5711,6 +6324,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_vi_ba_adaptive_velocity_min_references =
             args.local_vi_ba_adaptive_velocity_min_references,
         motion_vi_max_vel = args.motion_vi_init_max_velocity_mps,
+        motion_vi_max_gyro_bias = args.motion_vi_init_max_gyro_bias_rad_s,
+        motion_vi_max_accel_bias = args.motion_vi_init_max_accel_bias_mps2,
         covisibility_max_kf = args.covisibility_local_map_max_keyframes,
         covisibility_min_shared = args.covisibility_local_map_min_shared,
         covisibility_used_frames = covisibility_local_map_frames,
@@ -5769,8 +6384,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_last_error = covisibility_local_ba_last_error,
         pgr_enabled = args.pose_graph_refinement_enabled,
         pgr_trigger_every = args.pose_graph_refinement_trigger_every,
+        pgr_fixed_loop_edge_weight = args.pose_graph_refinement_fixed_loop_edge_weight,
+        pgr_loop_pose_information = args.pose_graph_refinement_loop_pose_information,
         pgr_gnc = args.pose_graph_refinement_gnc,
         pgr_pcm = args.pose_graph_refinement_pcm,
+        pgr_pcm_require_individual = args.pose_graph_refinement_pcm_require_individual,
         pgr_covariance_gate = args.pose_graph_refinement_covariance_gate,
         pgr_verifier = match args.pose_graph_refinement_verifier {
             LoopRefinementVerifierKind::Essential => "essential",
@@ -5786,12 +6404,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_pgo_solves = pose_graph_refinement_pgo_solves,
         pgr_pcm_rejected = pose_graph_refinement_pcm_rejected,
         pgr_covariance_rejected = pose_graph_refinement_covariance_rejected,
+        pgr_pose_information_rejected = pose_graph_refinement_pose_information_rejected,
+        pgr_with_pose_information = pose_graph_refinement_with_pose_information,
+        pgr_pose_information_estimates = pose_graph_refinement_pose_information_estimates,
+        pgr_pose_information_used_correspondences =
+            pose_graph_refinement_pose_information_used_correspondences,
+        pgr_pose_information_raw_condition_max =
+            pose_graph_refinement_pose_information_raw_condition_max,
+        pgr_pose_information_spectral_scale_min =
+            pose_graph_refinement_pose_information_spectral_scale_min,
+        pgr_sequential_with_pose_information =
+            pose_graph_refinement_sequential_with_pose_information,
+        pgr_sequential_pose_information_fallbacks =
+            pose_graph_refinement_sequential_pose_information_fallbacks,
+        pgr_sequential_pose_information_used_correspondences =
+            pose_graph_refinement_sequential_pose_information_used_correspondences,
+        pgr_sequential_pose_information_raw_condition_max =
+            pose_graph_refinement_sequential_pose_information_raw_condition_max,
+        pgr_sequential_pose_information_spectral_scale_min =
+            pose_graph_refinement_sequential_pose_information_spectral_scale_min,
         pgr_appearance_enabled = args.pose_graph_refinement_appearance_loops,
         pgr_appearance_min_gap = args.pose_graph_refinement_appearance_min_gap,
         pgr_appearance_max_candidates = args.pose_graph_refinement_appearance_max_candidates,
         pgr_appearance_min_inliers = args.pose_graph_refinement_appearance_min_inliers,
+        pgr_appearance_confirmation_keyframes =
+            args.pose_graph_refinement_appearance_confirmation_keyframes,
+        pgr_appearance_confirmation_max_misses =
+            args.pose_graph_refinement_appearance_confirmation_max_misses,
+        pgr_appearance_projection_radius =
+            args.pose_graph_refinement_appearance_projection_radius_px,
+        pgr_appearance_projection_min_matches =
+            args.pose_graph_refinement_appearance_projection_min_matches,
         pgr_appearance_ranked = pose_graph_refinement_appearance_ranked,
+        pgr_appearance_connected_region_rejected =
+            pose_graph_refinement_appearance_connected_region_rejected,
         pgr_appearance_pnp_verified = pose_graph_refinement_appearance_pnp_verified,
+        pgr_appearance_projection_rejected =
+            pose_graph_refinement_appearance_projection_rejected,
+        pgr_appearance_covisibility_rejected =
+            pose_graph_refinement_appearance_covisibility_rejected,
+        pgr_appearance_pending_projection_attempted =
+            pose_graph_refinement_appearance_pending_projection_attempted,
+        pgr_appearance_pending_projection_verified =
+            pose_graph_refinement_appearance_pending_projection_verified,
+        pgr_appearance_pending_projection_correspondences =
+            pose_graph_refinement_appearance_pending_projection_correspondences,
+        pgr_appearance_pending_projection_inliers =
+            pose_graph_refinement_appearance_pending_projection_inliers,
+        pgr_appearance_pending_projection_correspondences_max =
+            pose_graph_refinement_appearance_pending_projection_correspondences_max,
+        pgr_appearance_pending_projection_inliers_max =
+            pose_graph_refinement_appearance_pending_projection_inliers_max,
+        pgr_appearance_pending_projection_radius_min =
+            pose_graph_refinement_appearance_pending_projection_radius_min,
+        pgr_appearance_pending_projection_radius_max =
+            pose_graph_refinement_appearance_pending_projection_radius_max,
+        pgr_appearance_region_confirmation_waiting =
+            pose_graph_refinement_appearance_region_confirmation_waiting,
+        pgr_appearance_region_confirmed =
+            pose_graph_refinement_appearance_region_confirmed,
         pgr_appearance_scale_failed = pose_graph_refinement_appearance_scale_failed,
         pgr_appearance_scale_insufficient_points =
             pose_graph_refinement_appearance_scale_insufficient_points,
@@ -5802,6 +6473,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_appearance_near_unit = pose_graph_refinement_appearance_near_unit,
         pgr_constraints_shared = pose_graph_refinement_constraints_shared,
         pgr_constraints_appearance = pose_graph_refinement_constraints_appearance,
+        pgr_gt_evaluated = pose_graph_refinement_gt_evaluated,
+        pgr_gt_correct = pose_graph_refinement_gt_correct,
+        pgr_gt_precision = (pose_graph_refinement_gt_evaluated > 0).then(|| {
+            pose_graph_refinement_gt_correct as f64
+                / pose_graph_refinement_gt_evaluated as f64
+        }),
+        pgr_rejected_gt_evaluated = pose_graph_refinement_rejected_gt_evaluated,
+        pgr_rejected_gt_correct = pose_graph_refinement_rejected_gt_correct,
+        pgr_rejected_gt_correct_ratio = (pose_graph_refinement_rejected_gt_evaluated > 0).then(|| {
+            pose_graph_refinement_rejected_gt_correct as f64
+                / pose_graph_refinement_rejected_gt_evaluated as f64
+        }),
         pgr_propagate = args.pose_graph_refinement_propagate,
         pgr_landmarks_moved = pose_graph_refinement_landmarks_moved,
         pgr_max_landmark_displacement_meters = pose_graph_refinement_max_landmark_displacement_meters,
@@ -5886,6 +6569,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         superpoint_onnx_model = args.superpoint_onnx_model,
         kf_min_translation = args.keyframe_min_translation,
         kf_min_frame_gap = args.keyframe_min_frame_gap,
+        kf_max_frame_gap = args.keyframe_max_frame_gap,
         kf_tracked_ratio = args.keyframe_tracked_landmark_ratio,
         kf_min_tracked_for_ratio = args.keyframe_min_tracked_landmarks_for_ratio,
         kf_min_inliers = args.keyframe_min_inliers,
@@ -6402,13 +7086,8 @@ mod tests {
             &mut next_id,
         );
         let stats = map_provider_stats_from_map(&map);
-        let tracking = build_gt_seeded_rebootstrap_tracking_result(
-            42,
-            pose,
-            &matches,
-            &landmark_ids,
-            stats,
-        );
+        let tracking =
+            build_gt_seeded_rebootstrap_tracking_result(42, pose, &matches, &landmark_ids, stats);
         assert!(tracking.localization.success);
         assert_eq!(tracking.localization.inlier_count, 2);
         assert_eq!(tracking.localization.inlier_landmark_ids, landmark_ids);

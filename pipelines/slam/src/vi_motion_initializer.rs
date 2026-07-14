@@ -20,21 +20,19 @@
 //!
 //! Solve. [`MotionBasedViInitializer::try_initialize`] invokes
 //! [`crate::run_inertial_only_vi_ba`] over the accumulated keyframe set,
-//! which optimises poses + velocities + biases against IMU pre-
-//! integration factors only (landmarks are not touched — VIBA2 is out of
-//! scope for this first cut, see the design note's "What's missing"
-//! section). Scale is fixed at `1.0`; stereo / RGB-D sequences and
+//! which holds the vision-only poses fixed and optimises velocities plus a
+//! shared short-window bias against IMU preintegration factors (landmarks are
+//! not touched). Scale is fixed at `1.0`; stereo / RGB-D sequences and
 //! monocular sequences with a known metric anchor are well-served.
 //!
-//! Out of scope for this module. Full monocular scale recovery, joint
-//! visual-inertial bundle adjustment over a longer window with re-runs
-//! (VIBA2), and pipeline-level glue mirroring
-//! `OnlineSlamViInitState`. The design note enumerates what
-//! follow-ups close those gaps.
+//! The optional VIBA2 outer loop handles experimental monocular scale
+//! recovery. Full joint visual-inertial BA and consistent marginalization
+//! remain separate follow-ups.
 
 use std::collections::BTreeMap;
 
 use nalgebra::{Point3, Vector3};
+use visloc_core::geometry::SE3;
 use visloc_core::types::VisualMap;
 
 use crate::bundle::{BaConfig, BaResult};
@@ -59,6 +57,11 @@ pub struct MotionBasedViInitializerConfig {
     /// downstream diagnostics; the IMU factors fed into the solve carry
     /// their own gravity already.
     pub gravity_world: Vector3<f64>,
+    /// Rigid transform from the tracked camera/sensor frame into the IMU body
+    /// frame (EuRoC `T_BS` for cam0). The visual map stores world-to-camera
+    /// poses while preintegration residuals operate on world-to-body poses.
+    /// Identity preserves the co-located body/camera convention.
+    pub body_to_camera: SE3,
     /// Inner LM solver config. Default mirrors
     /// [`crate::OnlineSlamLocalBaConfig::default`] (sparse linear
     /// solver, 10 LM iterations).
@@ -80,6 +83,12 @@ pub struct MotionBasedViInitializerConfig {
     /// at `Some(10.0)` (~36 km/h ceiling); set higher for outdoor
     /// driving datasets.
     pub max_velocity_magnitude_mps: Option<f64>,
+    /// Optional post-solve upper bound on every recovered gyro-bias vector
+    /// magnitude (rad/s). `None` preserves legacy behavior.
+    pub max_gyro_bias_magnitude_rad_s: Option<f64>,
+    /// Optional post-solve upper bound on every recovered accelerometer-bias
+    /// vector magnitude (m/s²). `None` preserves legacy behavior.
+    pub max_accel_bias_magnitude_mps2: Option<f64>,
 }
 
 impl Default for MotionBasedViInitializerConfig {
@@ -88,6 +97,7 @@ impl Default for MotionBasedViInitializerConfig {
             min_keyframes: 10,
             min_translation_meters: 2.0,
             gravity_world: Vector3::new(0.0, 9.81, 0.0),
+            body_to_camera: SE3::identity(),
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 max_iterations: 10,
@@ -95,6 +105,8 @@ impl Default for MotionBasedViInitializerConfig {
             },
             viba2: None,
             max_velocity_magnitude_mps: None,
+            max_gyro_bias_magnitude_rad_s: None,
+            max_accel_bias_magnitude_mps2: None,
         }
     }
 }
@@ -150,15 +162,28 @@ pub enum MotionBasedViRejectionReason {
     /// Inner LM solver returned, but at least one per-keyframe
     /// `||velocity_world||` exceeded
     /// `MotionBasedViInitializerConfig::max_velocity_magnitude_mps`. The
-    /// solver's bias / velocity slots are NOT promoted to
-    /// `self.completed`, so the next trigger re-runs from the same
-    /// linearisation point. `kf_id` is the worst-offender keyframe;
+    /// solver's bias / velocity slots are NOT promoted to `self.completed`,
+    /// and its speculative map poses are discarded, so the next trigger
+    /// re-runs from the same linearisation point. `kf_id` is the worst-offender keyframe;
     /// `magnitude_mps` is its recovered speed; `limit_mps` echoes the
     /// configured gate.
     VelocityOutOfRange {
         kf_id: u64,
         magnitude_mps: f64,
         limit_mps: f64,
+    },
+    /// A recovered gyro bias exceeded the configured physical sanity bound.
+    GyroBiasOutOfRange {
+        kf_id: u64,
+        magnitude_rad_s: f64,
+        limit_rad_s: f64,
+    },
+    /// A recovered accelerometer bias exceeded the configured physical sanity
+    /// bound.
+    AccelBiasOutOfRange {
+        kf_id: u64,
+        magnitude_mps2: f64,
+        limit_mps2: f64,
     },
 }
 
@@ -314,6 +339,27 @@ impl MotionBasedViInitializer {
         preintegration_factors: &[ImuPreintegrationFactor],
         static_seed: &VisualInertialInitializationResult,
     ) -> Result<&MotionBasedViInitializationResult, MotionBasedViRejectionReason> {
+        self.try_initialize_with_bias_seed(
+            map,
+            preintegration_factors,
+            static_seed.bias_gyro,
+            static_seed.bias_acc,
+        )
+    }
+
+    /// Motion-based initialization from explicit bias linearisation values.
+    /// This is the safe fallback entry point for sequences that begin in
+    /// motion: the caller may retain its calibrated/configured biases after a
+    /// stationary initializer gives up, without fabricating a false static
+    /// gravity/bias result. The solver still requires its normal keyframe and
+    /// translation excitation gates.
+    pub fn try_initialize_with_bias_seed(
+        &mut self,
+        map: &mut VisualMap,
+        preintegration_factors: &[ImuPreintegrationFactor],
+        bias_gyro_seed: Vector3<f64>,
+        bias_acc_seed: Vector3<f64>,
+    ) -> Result<&MotionBasedViInitializationResult, MotionBasedViRejectionReason> {
         if let Some(_existing) = &self.completed {
             // SAFETY: borrow checker — re-fetch by `Option::as_ref` so
             // the `&mut self` borrow above can release before the
@@ -368,8 +414,8 @@ impl MotionBasedViInitializer {
                 kf_id,
                 KeyframeImuState {
                     velocity_world: velocity,
-                    bias_gyro: static_seed.bias_gyro,
-                    bias_acc: static_seed.bias_acc,
+                    bias_gyro: bias_gyro_seed,
+                    bias_acc: bias_acc_seed,
                 },
             );
         }
@@ -388,6 +434,25 @@ impl MotionBasedViInitializer {
             }
         }
 
+        // Solve transactionally. The inertial BA helpers write refined poses
+        // into their map argument before returning, but post-solve velocity
+        // gates below may still reject the result. Keep those speculative
+        // poses on a clone and publish them only after every gate passes.
+        let mut candidate_map = map.clone();
+        // The visual map stores T_cw, while the IMU factors are expressed in
+        // body coordinates. EuRoC T_BS for cam0 is T_bc (camera/sensor to
+        // body), hence T_bw = T_bc * T_cw. This conversion is speculative and
+        // exists only on the solver clone; the tracked camera map is never
+        // overwritten with body poses.
+        for kf_id in &kf_ids {
+            let pose = candidate_map
+                .keyframes
+                .get_mut(kf_id)
+                .and_then(|kf| kf.frame.pose.as_mut())
+                .expect("keyframe poses were validated above");
+            pose.world_to_camera = self.config.body_to_camera.compose(&pose.world_to_camera);
+        }
+
         // Dispatch on `viba2` config: when `Some`, run the VIBA2 outer
         // scale-recovery loop; otherwise run the standalone VIBA1
         // inertial-only path. Both paths return the same
@@ -396,7 +461,7 @@ impl MotionBasedViInitializer {
         // at `0`.
         let result = if let Some(viba2_cfg) = self.config.viba2.clone() {
             let stats = run_viba2_inertial_with_scale(
-                map,
+                &mut candidate_map,
                 &kf_ids,
                 preintegration_factors,
                 &initial_states,
@@ -429,7 +494,7 @@ impl MotionBasedViInitializer {
             }
         } else {
             let stats = run_inertial_only_vi_ba(
-                map,
+                &mut candidate_map,
                 &kf_ids,
                 preintegration_factors,
                 &initial_states,
@@ -475,6 +540,40 @@ impl MotionBasedViInitializer {
                     kf_id,
                     magnitude_mps: mag,
                     limit_mps: limit,
+                };
+                self.last_rejection = Some(err.clone());
+                return Err(err);
+            }
+        }
+        if let Some(limit) = self.config.max_gyro_bias_magnitude_rad_s {
+            let worst = result
+                .keyframe_states
+                .iter()
+                .map(|(kf_id, state)| (*kf_id, state.bias_gyro.norm()))
+                .filter(|(_, magnitude)| *magnitude > limit)
+                .max_by(|left, right| left.1.total_cmp(&right.1));
+            if let Some((kf_id, magnitude_rad_s)) = worst {
+                let err = MotionBasedViRejectionReason::GyroBiasOutOfRange {
+                    kf_id,
+                    magnitude_rad_s,
+                    limit_rad_s: limit,
+                };
+                self.last_rejection = Some(err.clone());
+                return Err(err);
+            }
+        }
+        if let Some(limit) = self.config.max_accel_bias_magnitude_mps2 {
+            let worst = result
+                .keyframe_states
+                .iter()
+                .map(|(kf_id, state)| (*kf_id, state.bias_acc.norm()))
+                .filter(|(_, magnitude)| *magnitude > limit)
+                .max_by(|left, right| left.1.total_cmp(&right.1));
+            if let Some((kf_id, magnitude_mps2)) = worst {
+                let err = MotionBasedViRejectionReason::AccelBiasOutOfRange {
+                    kf_id,
+                    magnitude_mps2,
+                    limit_mps2: limit,
                 };
                 self.last_rejection = Some(err.clone());
                 return Err(err);
@@ -678,6 +777,7 @@ mod tests {
             init.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
         }
         let mut map = build_constant_velocity_map(3);
+        let map_before = map.clone();
         let seed = synthetic_seed();
         let factors = vec![
             no_acceleration_factor(1, 2, 1.0, gravity),
@@ -688,18 +788,17 @@ mod tests {
             .try_initialize(&mut map, &factors, &seed)
             .expect("VIBA1 must succeed on synthetic constant-velocity stream")
             .clone();
+        assert_eq!(
+            map, map_before,
+            "inertial-only initialization must keep the visual trajectory fixed"
+        );
         assert_eq!(result.keyframe_ids, vec![1, 2, 3]);
         assert_eq!(result.imu_factors_used, 2);
         assert!((result.scale - 1.0).abs() < 1e-12);
         assert!((result.trigger_translation_meters - 2.0).abs() < 1e-12);
         // Solver populated every registered keyframe with a state slot,
-        // and the LM trace terminated below the initial cost. (Anchor
-        // is gauge-fixed at v=0 / b=0; absolute velocity recovery on a
-        // pure-inertial chain without visual residuals or velocity
-        // priors is intentionally NOT asserted here — the
-        // `stereo_stationary_replay_is_identity` test is the structural
-        // correctness check, and the future VIBA2 stage adds the
-        // visual side that makes constant-velocity-with-motion solvable.)
+        // preserved the fixed vision-only trajectory, and terminated below
+        // the initial cost.
         for kf_id in [1u64, 2, 3] {
             assert!(result.keyframe_states.contains_key(&kf_id));
         }
@@ -830,9 +929,14 @@ mod tests {
             gated.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
         }
         let mut gated_map = build_constant_velocity_map(3);
+        let gated_map_before = gated_map.clone();
         let err = gated
             .try_initialize(&mut gated_map, &factors, &seed)
             .expect_err("velocity gate must reject the LM result");
+        assert_eq!(
+            gated_map, gated_map_before,
+            "a rejected speculative motion-VI solve must not write poses back"
+        );
         match err {
             MotionBasedViRejectionReason::VelocityOutOfRange {
                 kf_id,
@@ -885,6 +989,80 @@ mod tests {
             MotionBasedViInitializationStatus::Initialised { .. } => {}
             other => panic!("expected Initialised, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gyro_bias_gate_rejects_transactionally() {
+        let mut init = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            max_gyro_bias_magnitude_rad_s: Some(0.05),
+            ..MotionBasedViInitializerConfig::default()
+        });
+        let gravity = init.config().gravity_world;
+        for i in 0..3 {
+            init.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let mut map = build_constant_velocity_map(3);
+        let map_before = map.clone();
+        let factors = vec![
+            no_acceleration_factor(1, 2, 1.0, gravity),
+            no_acceleration_factor(2, 3, 1.0, gravity),
+        ];
+        let err = init
+            .try_initialize_with_bias_seed(
+                &mut map,
+                &factors,
+                Vector3::new(0.1, 0.0, 0.0),
+                Vector3::zeros(),
+            )
+            .expect_err("anchored gyro bias must exceed the configured gate");
+        assert_eq!(map, map_before, "rejected solve must not mutate the map");
+        assert!(matches!(
+            err,
+            MotionBasedViRejectionReason::GyroBiasOutOfRange {
+                magnitude_rad_s,
+                limit_rad_s,
+                ..
+            } if magnitude_rad_s > limit_rad_s && (limit_rad_s - 0.05).abs() < 1.0e-12
+        ));
+    }
+
+    #[test]
+    fn accel_bias_gate_rejects_transactionally() {
+        let mut init = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            max_accel_bias_magnitude_mps2: Some(1.0),
+            ..MotionBasedViInitializerConfig::default()
+        });
+        let gravity = init.config().gravity_world;
+        for i in 0..3 {
+            init.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let mut map = build_constant_velocity_map(3);
+        let map_before = map.clone();
+        let factors = vec![
+            no_acceleration_factor(1, 2, 1.0, gravity),
+            no_acceleration_factor(2, 3, 1.0, gravity),
+        ];
+        let err = init
+            .try_initialize_with_bias_seed(
+                &mut map,
+                &factors,
+                Vector3::zeros(),
+                Vector3::new(2.0, 0.0, 0.0),
+            )
+            .expect_err("anchored accel bias must exceed the configured gate");
+        assert_eq!(map, map_before, "rejected solve must not mutate the map");
+        assert!(matches!(
+            err,
+            MotionBasedViRejectionReason::AccelBiasOutOfRange {
+                magnitude_mps2,
+                limit_mps2,
+                ..
+            } if magnitude_mps2 > limit_mps2 && (limit_mps2 - 1.0).abs() < 1.0e-12
+        ));
     }
 
     /// Helper: SO3 type sanity (compile coverage for the test imports).

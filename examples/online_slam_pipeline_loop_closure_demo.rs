@@ -82,6 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 verifier: LoopRefinementVerifier::EssentialMatrix,
                 pose_graph_config: PoseGraphSe3Config::default(),
+                fixed_loop_edge_weight: None,
+                loop_pose_information: None,
                 gnc: None,
                 pcm: None,
                 covariance_gate: None,

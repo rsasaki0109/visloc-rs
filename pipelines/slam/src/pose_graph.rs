@@ -426,6 +426,26 @@ impl PoseGraph {
     /// `1.0`) so loops with more inliers carry more pull on the solver.
     pub fn add_loop_closure_constraint(&mut self, constraint: &LoopClosureConstraint) {
         let weight = (constraint.inlier_count as f64).max(1.0);
+        self.add_loop_closure_constraint_with_weight(constraint, weight);
+    }
+
+    /// Append a loop-closure constraint with an explicit isotropic scalar
+    /// weight. This is the controlled alternative to interpreting a verifier's
+    /// raw inlier count as inverse covariance: correspondence count and pose
+    /// uncertainty do not share units, and a large count can otherwise make one
+    /// loop hundreds of times stiffer than every sequential edge. Invalid
+    /// weights are conservatively replaced by `1.0` so a malformed runtime
+    /// configuration cannot inject NaNs into the graph.
+    pub fn add_loop_closure_constraint_with_weight(
+        &mut self,
+        constraint: &LoopClosureConstraint,
+        weight: f64,
+    ) {
+        let weight = if weight.is_finite() && weight > 0.0 {
+            weight
+        } else {
+            1.0
+        };
         self.edges.push(PoseGraphEdge {
             from: constraint.from_keyframe_id,
             to: constraint.to_keyframe_id,

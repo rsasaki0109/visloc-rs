@@ -113,11 +113,13 @@ pub enum OnlineSlamConfigError {
     /// consumes IMU pre-integration factors emitted by the running
     /// pipeline; without an IMU stage they are never produced.
     MotionViInitRequiresImu,
-    /// `vi_motion_init: Some(_)` but `vi_init: None`. The motion-based
-    /// stage consumes the static seed `(R_w←b, b_g, b_a)` as its
-    /// linearisation point; without the static stage there is no seed
-    /// to refine.
+    /// `vi_motion_init: Some(_)` but `vi_init: None`. The motion-based stage
+    /// needs the static stage to select either its recovered bias seed or the
+    /// explicit terminal give-up fallback.
     MotionViInitRequiresStaticViInit,
+    /// Post-static-give-up motion initialization was requested, but the static
+    /// fallback removes the IMU stage whose configured biases are required.
+    MotionViInitAfterGiveUpRequiresKeepExistingSeed,
     /// `vi_motion_init.initializer.gravity_world != imu.gravity_world`.
     /// As with the static stage these are intentionally duplicated
     /// (the standalone module is also callable) but they must agree at
@@ -126,6 +128,18 @@ pub enum OnlineSlamConfigError {
         imu_gravity_world: Vector3<f64>,
         motion_gravity_world: Vector3<f64>,
     },
+    /// The stationary and motion-based stages were configured with different
+    /// camera-to-body extrinsics. The motion solver converts the fixed visual
+    /// camera trajectory into body poses, so both bootstrap stages must use
+    /// the same calibrated transform.
+    MotionExtrinsicMismatch,
+    /// Local VI-BA and VI initialization were configured with different
+    /// camera-to-body extrinsics, which would make the promoted inertial state
+    /// and the subsequent joint residuals refer to different body frames.
+    LocalViBaExtrinsicMismatch,
+    /// Local VI-BA random-walk information weights must both be finite and
+    /// strictly positive when configured.
+    InvalidLocalViBaBiasRandomWalkWeights,
 }
 
 impl std::fmt::Display for OnlineSlamConfigError {
@@ -156,6 +170,11 @@ impl std::fmt::Display for OnlineSlamConfigError {
                  is None: the motion-based stage refines the static seed produced by \
                  the static VI init stage"
             ),
+            Self::MotionViInitAfterGiveUpRequiresKeepExistingSeed => write!(
+                f,
+                "OnlineSlamConfig.vi_motion_init.allow_after_static_give_up requires \
+                 OnlineSlamConfig.vi_init.on_persistent_rejection=KeepExistingSeed"
+            ),
             Self::MotionGravityMismatch {
                 imu_gravity_world,
                 motion_gravity_world,
@@ -164,6 +183,21 @@ impl std::fmt::Display for OnlineSlamConfigError {
                 "OnlineSlamConfig.imu.gravity_world ({imu_gravity_world:?}) and \
                  OnlineSlamConfig.vi_motion_init.initializer.gravity_world \
                  ({motion_gravity_world:?}) must agree"
+            ),
+            Self::MotionExtrinsicMismatch => write!(
+                f,
+                "OnlineSlamConfig.vi_init.body_to_camera and \
+                 OnlineSlamConfig.vi_motion_init.initializer.body_to_camera must agree"
+            ),
+            Self::LocalViBaExtrinsicMismatch => write!(
+                f,
+                "OnlineSlamConfig.vi_init.body_to_camera and \
+                 OnlineSlamConfig.local_vi_ba.body_to_camera must agree"
+            ),
+            Self::InvalidLocalViBaBiasRandomWalkWeights => write!(
+                f,
+                "OnlineSlamConfig.local_vi_ba.bias_random_walk_weights must contain \
+                 finite, strictly positive gyro and accelerometer weights"
             ),
         }
     }

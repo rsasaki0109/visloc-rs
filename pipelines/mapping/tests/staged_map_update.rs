@@ -55,6 +55,27 @@ fn validates_and_applies_staged_keyframe_landmark_and_observation() {
 }
 
 #[test]
+fn embedded_keyframe_observation_is_mirrored_to_landmark_without_duplicates() {
+    let mut map = base_map();
+    map.landmarks.insert(100, landmark(100));
+    let obs = observation(10, 100, 0);
+    let mut staged_keyframe = keyframe(10, 1);
+    staged_keyframe.observations.push(obs.clone());
+    let update = StagedMapUpdate::new()
+        .with_keyframe(staged_keyframe)
+        // Some producers stage the same relation explicitly; application must
+        // keep both VisualMap indices set-like.
+        .with_observation(obs);
+
+    assert!(update.validate_against(&map).is_valid());
+    update.apply_to(&mut map).unwrap();
+
+    assert_eq!(map.keyframes[&10].observations.len(), 1);
+    assert_eq!(map.landmarks[&100].observations.len(), 1);
+    assert!(map.validate().is_valid());
+}
+
+#[test]
 fn reports_duplicate_staged_entities_and_existing_map_conflicts() {
     let mut map = base_map();
     map.keyframes.insert(10, keyframe(10, 1));

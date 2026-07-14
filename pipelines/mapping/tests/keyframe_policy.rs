@@ -169,6 +169,75 @@ fn applies_frame_gap_and_translation_thresholds() {
 }
 
 #[test]
+fn maximum_frame_gap_forces_a_quality_keyframe_without_translation() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 3,
+        max_frame_id_gap: Some(20),
+        min_translation: 10.0,
+        min_inliers: Some(20),
+        ..KeyframePolicyConfig::default()
+    });
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                50,
+            ))
+            .selected
+    );
+
+    let selected = policy.evaluate(&success_result_with_inliers(
+        30,
+        TrackingEvent::Tracked,
+        Vector3::new(0.01, 0.0, 0.0),
+        25,
+    ));
+    assert!(selected.selected);
+    assert_eq!(
+        selected.reason,
+        KeyframeDecisionReason::MaximumFrameIdGap {
+            frame_id_gap: 20,
+            max_frame_id_gap: 20,
+        }
+    );
+}
+
+#[test]
+fn maximum_frame_gap_does_not_bypass_tracking_quality() {
+    let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
+        min_frame_id_gap: 3,
+        max_frame_id_gap: Some(20),
+        min_translation: 10.0,
+        min_inliers: Some(20),
+        ..KeyframePolicyConfig::default()
+    });
+    assert!(
+        policy
+            .evaluate(&success_result_with_inliers(
+                10,
+                TrackingEvent::Initialized,
+                Vector3::zeros(),
+                50,
+            ))
+            .selected
+    );
+
+    let rejected = policy.evaluate(&success_result_with_inliers(
+        30,
+        TrackingEvent::Tracked,
+        Vector3::new(0.01, 0.0, 0.0),
+        19,
+    ));
+    assert!(!rejected.selected);
+    assert!(matches!(
+        rejected.reason,
+        KeyframeDecisionReason::InsufficientTrackingQuality { .. }
+    ));
+}
+
+#[test]
 fn can_select_relocalized_frame_immediately() {
     let mut policy = SimpleKeyframePolicy::new(KeyframePolicyConfig {
         min_frame_id_gap: 100,

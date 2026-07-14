@@ -1535,3 +1535,37 @@ fn projection_window_matching_disambiguates_identical_descriptors_at_different_l
     assert_eq!(pairs.get(&1), Some(&1));
     assert_eq!(pairs.get(&2), Some(&0));
 }
+
+#[test]
+fn projection_window_matching_selects_one_keypoint_and_applies_ratio_within_window() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::identity();
+    let point = Point3::new(0.0, 0.0, 5.0);
+    let projected = camera.project(&point).unwrap();
+    let mut landmark = Landmark::new(1, point);
+    landmark.descriptor = Some(vec![0.0]);
+    let mut map = VisualMap::new();
+    map.landmarks.insert(1, landmark);
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    descriptor_store.insert(1, vec![0.0]);
+    let query = QueryImage {
+        camera,
+        keypoints: vec![projected, Point2::new(projected.x + 1.0, projected.y)],
+        descriptors: vec![vec![0.10], vec![0.11]],
+    };
+
+    // The best and second-best descriptors are too similar, so a landmark ->
+    // window ratio test must reject the ambiguous assignment.
+    let ratio_result = ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: Some(0.8) })
+        .build_with_pose_prior(&query, &map, &descriptor_store, &pose, 5.0);
+    assert!(ratio_result.is_err());
+
+    // With the ratio gate disabled the same window still contributes only its
+    // single nearest keypoint, never both keypoints for one landmark.
+    let result = ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: None })
+        .build_with_pose_prior(&query, &map, &descriptor_store, &pose, 5.0)
+        .unwrap();
+    assert_eq!(result.correspondences.len(), 1);
+    assert_eq!(result.query_indices, vec![0]);
+    assert_eq!(result.landmark_ids, vec![1]);
+}

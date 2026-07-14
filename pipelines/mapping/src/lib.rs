@@ -26,6 +26,11 @@ pub trait KeyframePolicy {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframePolicyConfig {
     pub min_frame_id_gap: u64,
+    /// Force a new keyframe once this many frame ids have elapsed, even when
+    /// estimated translation remains below `min_translation`. The optional
+    /// tracking-quality floors still apply, preventing a weak localization
+    /// from being promoted merely because it is old.
+    pub max_frame_id_gap: Option<u64>,
     pub min_translation: f64,
     pub select_relocalized_frames: bool,
     pub tracked_landmark_keyframe_ratio: Option<f64>,
@@ -51,6 +56,7 @@ impl Default for KeyframePolicyConfig {
     fn default() -> Self {
         Self {
             min_frame_id_gap: 5,
+            max_frame_id_gap: None,
             min_translation: 1.0,
             select_relocalized_frames: true,
             tracked_landmark_keyframe_ratio: None,
@@ -89,6 +95,10 @@ pub enum KeyframeDecisionReason {
     FrameIdGapTooSmall {
         frame_id_gap: u64,
         min_frame_id_gap: u64,
+    },
+    MaximumFrameIdGap {
+        frame_id_gap: u64,
+        max_frame_id_gap: u64,
     },
     TranslationTooSmall {
         translation: f64,
@@ -277,6 +287,24 @@ impl KeyframePolicy for SimpleKeyframePolicy {
             return self.selected(result, pose, reason);
         }
 
+        if self
+            .config
+            .max_frame_id_gap
+            .is_some_and(|maximum| frame_id_gap >= maximum)
+        {
+            if let Some(reason) = self.insufficient_tracking_quality_reason(result) {
+                return self.rejected(result, reason);
+            }
+            return self.selected(
+                result,
+                pose,
+                KeyframeDecisionReason::MaximumFrameIdGap {
+                    frame_id_gap,
+                    max_frame_id_gap: self.config.max_frame_id_gap.unwrap_or(frame_id_gap),
+                },
+            );
+        }
+
         let translation = self
             .last_keyframe_pose
             .as_ref()
@@ -389,18 +417,48 @@ impl StagedMapUpdate {
             observation_count: self.observations.len(),
         };
 
+        let mut embedded_keyframe_observations = Vec::new();
         for keyframe in self.keyframes {
+            embedded_keyframe_observations.extend(keyframe.observations.iter().cloned());
             map.keyframes.insert(keyframe.frame.id, keyframe);
         }
         for landmark in self.landmarks {
             map.landmarks.insert(landmark.id, landmark);
         }
+        // A tracking-produced keyframe already carries its inlier
+        // observations. Mirror those into the existing landmark records just
+        // like explicitly staged observations; otherwise VisualMap's two
+        // observation indices silently diverge and later covariance /
+        // covisibility queries see an empty landmark history.
+        for observation in embedded_keyframe_observations {
+            if let Some(landmark) = map.landmarks.get_mut(&observation.landmark_id) {
+                if !landmark.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    landmark.observations.push(observation);
+                }
+            }
+        }
         for observation in self.observations {
             if let Some(keyframe) = map.keyframes.get_mut(&observation.frame_id) {
-                keyframe.observations.push(observation.clone());
+                if !keyframe.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    keyframe.observations.push(observation.clone());
+                }
             }
             if let Some(landmark) = map.landmarks.get_mut(&observation.landmark_id) {
-                landmark.observations.push(observation);
+                if !landmark.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    landmark.observations.push(observation);
+                }
             }
         }
 

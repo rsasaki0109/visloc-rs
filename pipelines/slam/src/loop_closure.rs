@@ -334,7 +334,8 @@ where
         keyframe_pose: &Pose,
         camera: &Camera,
     ) -> LoopClosureVerification {
-        self.verify_impl(correspondences, keyframe_pose, camera, None).0
+        self.verify_impl(correspondences, keyframe_pose, camera, None)
+            .0
     }
 
     /// Run PnP RANSAC with optional confidence-weighted sampling. This keeps the
@@ -347,7 +348,8 @@ where
         camera: &Camera,
         weights: Option<&[f32]>,
     ) -> LoopClosureVerification {
-        self.verify_impl(correspondences, keyframe_pose, camera, weights).0
+        self.verify_impl(correspondences, keyframe_pose, camera, weights)
+            .0
     }
 
     /// PnP verification plus indices into `correspondences` selected as
@@ -371,19 +373,22 @@ where
     ) -> (LoopClosureVerification, Vec<usize>) {
         let correspondence_count = correspondences.len();
         if correspondence_count < self.config.min_inliers {
-            return (LoopClosureVerification {
-                verified: false,
-                correspondence_count,
-                inlier_count: 0,
-                inlier_ratio: 0.0,
-                mean_sampson_error: 0.0,
-                score: 0.0,
-                failure_reason: Some(
-                    LoopClosureVerificationFailureReason::InsufficientCorrespondences,
-                ),
-                relative_pose: None,
-                mean_reprojection_error_px: None,
-            }, Vec::new());
+            return (
+                LoopClosureVerification {
+                    verified: false,
+                    correspondence_count,
+                    inlier_count: 0,
+                    inlier_ratio: 0.0,
+                    mean_sampson_error: 0.0,
+                    score: 0.0,
+                    failure_reason: Some(
+                        LoopClosureVerificationFailureReason::InsufficientCorrespondences,
+                    ),
+                    relative_pose: None,
+                    mean_reprojection_error_px: None,
+                },
+                Vec::new(),
+            );
         }
 
         let report = match weights {
@@ -399,19 +404,22 @@ where
             _ => self.ransac.estimate(correspondences, camera),
         };
         let Some(report) = report else {
-            return (LoopClosureVerification {
-                verified: false,
-                correspondence_count,
-                inlier_count: 0,
-                inlier_ratio: 0.0,
-                mean_sampson_error: 0.0,
-                score: 0.0,
-                failure_reason: Some(
-                    LoopClosureVerificationFailureReason::EssentialEstimationFailed,
-                ),
-                relative_pose: None,
-                mean_reprojection_error_px: None,
-            }, Vec::new());
+            return (
+                LoopClosureVerification {
+                    verified: false,
+                    correspondence_count,
+                    inlier_count: 0,
+                    inlier_ratio: 0.0,
+                    mean_sampson_error: 0.0,
+                    score: 0.0,
+                    failure_reason: Some(
+                        LoopClosureVerificationFailureReason::EssentialEstimationFailed,
+                    ),
+                    relative_pose: None,
+                    mean_reprojection_error_px: None,
+                },
+                Vec::new(),
+            );
         };
 
         let inlier_count = report.inliers.len();
@@ -439,17 +447,20 @@ where
             .world_to_camera
             .compose(&keyframe_pose.world_to_camera.inverse());
         let inlier_indices = report.inliers.clone();
-        (LoopClosureVerification {
-            verified,
-            correspondence_count,
-            inlier_count,
-            inlier_ratio,
-            mean_sampson_error: 0.0,
-            score,
-            failure_reason,
-            relative_pose: Some(relative_pose),
-            mean_reprojection_error_px: Some(mean_reprojection_error_px),
-        }, inlier_indices)
+        (
+            LoopClosureVerification {
+                verified,
+                correspondence_count,
+                inlier_count,
+                inlier_ratio,
+                mean_sampson_error: 0.0,
+                score,
+                failure_reason,
+                relative_pose: Some(relative_pose),
+                mean_reprojection_error_px: Some(mean_reprojection_error_px),
+            },
+            inlier_indices,
+        )
     }
 }
 
