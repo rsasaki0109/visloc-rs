@@ -417,18 +417,48 @@ impl StagedMapUpdate {
             observation_count: self.observations.len(),
         };
 
+        let mut embedded_keyframe_observations = Vec::new();
         for keyframe in self.keyframes {
+            embedded_keyframe_observations.extend(keyframe.observations.iter().cloned());
             map.keyframes.insert(keyframe.frame.id, keyframe);
         }
         for landmark in self.landmarks {
             map.landmarks.insert(landmark.id, landmark);
         }
+        // A tracking-produced keyframe already carries its inlier
+        // observations. Mirror those into the existing landmark records just
+        // like explicitly staged observations; otherwise VisualMap's two
+        // observation indices silently diverge and later covariance /
+        // covisibility queries see an empty landmark history.
+        for observation in embedded_keyframe_observations {
+            if let Some(landmark) = map.landmarks.get_mut(&observation.landmark_id) {
+                if !landmark.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    landmark.observations.push(observation);
+                }
+            }
+        }
         for observation in self.observations {
             if let Some(keyframe) = map.keyframes.get_mut(&observation.frame_id) {
-                keyframe.observations.push(observation.clone());
+                if !keyframe.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    keyframe.observations.push(observation.clone());
+                }
             }
             if let Some(landmark) = map.landmarks.get_mut(&observation.landmark_id) {
-                landmark.observations.push(observation);
+                if !landmark.observations.iter().any(|existing| {
+                    existing.frame_id == observation.frame_id
+                        && existing.landmark_id == observation.landmark_id
+                        && existing.keypoint_index == observation.keypoint_index
+                }) {
+                    landmark.observations.push(observation);
+                }
             }
         }
 

@@ -1435,6 +1435,159 @@ fn appearance_regions_overlap(
         .any(|keyframe_id| right_region.contains(keyframe_id))
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+struct AppearancePendingProjectionResult {
+    attempted: bool,
+    search_radius_px: Option<f64>,
+    correspondence_count: usize,
+    inlier_count: usize,
+    candidate: Option<LoopClosureCandidate>,
+}
+
+/// Carry an already verified appearance region into the next keyframe by
+/// projection matching under the pending region's recovered pose plus the
+/// intervening odometry motion. This is the temporal-consistency step: later
+/// confirmations do not depend on independently retrieving the same place by
+/// a global descriptor again.
+fn verify_pending_appearance_region_by_projection(
+    map: &VisualMap,
+    frame: &Frame,
+    camera: &Camera,
+    config: &LoopAppearanceCandidateConfig,
+    pending: &AppearancePendingRegion,
+) -> AppearancePendingProjectionResult {
+    let Some(search_radius_px) = config.projection_search_radius_px else {
+        return AppearancePendingProjectionResult::default();
+    };
+    let Some(root_keyframe) = map.keyframes.get(&pending.root_keyframe_id) else {
+        return AppearancePendingProjectionResult::default();
+    };
+    let Some(root_pose) = root_keyframe.frame.pose.as_ref() else {
+        return AppearancePendingProjectionResult::default();
+    };
+    let Some(last_current_pose) = map
+        .keyframes
+        .get(&pending.last_current_keyframe_id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref())
+    else {
+        return AppearancePendingProjectionResult::default();
+    };
+    let Some(current_pose) = map
+        .keyframes
+        .get(&frame.id)
+        .and_then(|keyframe| keyframe.frame.pose.as_ref())
+    else {
+        return AppearancePendingProjectionResult::default();
+    };
+
+    let mut region_keyframe_ids = vec![pending.root_keyframe_id];
+    region_keyframe_ids.extend(keyframes_ranked_by_covisibility(
+        map,
+        pending.root_keyframe_id,
+        config.covisibility_min_shared_landmarks,
+        config.covisibility_max_keyframes,
+    ));
+    let store = appearance_loop_region_descriptor_store(map, &region_keyframe_ids);
+    if store.len() < config.min_candidate_landmark_count {
+        return AppearancePendingProjectionResult::default();
+    }
+
+    let last_to_current = relative_world_to_camera(last_current_pose, current_pose);
+    let predicted_root_to_current = last_to_current.compose(&pending.root_to_last_current);
+    let predicted_current_pose = Pose {
+        world_to_camera: predicted_root_to_current.compose(&root_pose.world_to_camera),
+    };
+    let query = visloc_core::types::QueryImage::from_frame(frame, camera.clone());
+    let mut result = AppearancePendingProjectionResult {
+        attempted: true,
+        ..AppearancePendingProjectionResult::default()
+    };
+    let verifier = PnPLoopClosureVerifier {
+        ransac: PnPRansac::default(),
+        config: config.pnp_verifier,
+    };
+    let mut radii = [
+        (search_radius_px / 3.0).max(1.0),
+        (search_radius_px * 2.0 / 3.0).max(1.0),
+        search_radius_px,
+    ];
+    radii.sort_by(f64::total_cmp);
+    let mut previous_radius: Option<f64> = None;
+    let mut best_ratio = -1.0_f64;
+    for radius in radii {
+        if previous_radius.is_some_and(|previous| (radius - previous).abs() <= f64::EPSILON) {
+            continue;
+        }
+        previous_radius = Some(radius);
+        let projection_builder = visloc_localization::ProjectionCorrespondenceBuilder::new(
+            visloc_vision::matching::BruteForceMatcher::default(),
+        );
+        let Ok(correspondence_set) = projection_builder.build_with_pose_prior(
+            &query,
+            map,
+            &store,
+            &predicted_current_pose,
+            radius,
+        ) else {
+            continue;
+        };
+        let correspondence_count = correspondence_set.correspondences.len();
+        if correspondence_count < config.min_projection_correspondence_count {
+            if result.search_radius_px.is_none() {
+                result.search_radius_px = Some(radius);
+                result.correspondence_count = correspondence_count;
+            }
+            continue;
+        }
+        let (verification, pnp_inlier_indices) = verifier.verify_with_inlier_indices(
+            &correspondence_set.correspondences,
+            root_pose,
+            camera,
+        );
+        let ratio = if correspondence_count == 0 {
+            0.0
+        } else {
+            verification.inlier_count as f64 / correspondence_count as f64
+        };
+        if ratio > best_ratio
+            || (ratio == best_ratio && verification.inlier_count > result.inlier_count)
+        {
+            best_ratio = ratio;
+            result.search_radius_px = Some(radius);
+            result.correspondence_count = correspondence_count;
+            result.inlier_count = verification.inlier_count;
+        }
+        if !verification.verified {
+            continue;
+        }
+        result.search_radius_px = Some(radius);
+        result.correspondence_count = correspondence_count;
+        result.inlier_count = verification.inlier_count;
+        result.candidate = Some(LoopClosureCandidate {
+            query_frame_id: frame.id,
+            matched_keyframe_id: pending.root_keyframe_id,
+            shared_landmark_count: verification.inlier_count,
+            query_inlier_count: verification.inlier_count,
+            keyframe_observation_count: correspondence_set.candidate_landmark_count,
+            shared_landmark_ratio: verification.inlier_ratio,
+            score: verification.score,
+            geometrically_verified: true,
+            verification: Some(verification),
+            pnp_query_landmark_pairs: pnp_inlier_indices
+                .into_iter()
+                .filter_map(|index| {
+                    Some((
+                        *correspondence_set.query_indices.get(index)?,
+                        *correspondence_set.landmark_ids.get(index)?,
+                    ))
+                })
+                .collect(),
+        });
+        break;
+    }
+    result
+}
+
 fn confirm_appearance_region_across_keyframes(
     map: &VisualMap,
     current_keyframe_id: u64,
@@ -1826,12 +1979,62 @@ pub struct OnlineSlamAdmittedLoopConstraint {
     pub source: LoopClosureCandidateSource,
 }
 
+/// Controls the covariance-aware PnP loop-edge information estimator.
+///
+/// `max_information_eigenvalue` is an explicit back-end strength cap: the
+/// reprojection Hessian determines anisotropy and observability, while this
+/// scalar prevents its pixel-domain units from silently overpowering the
+/// pose graph's unit-weight odometry edges. It is reported/configured
+/// separately rather than folded into correspondence count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoopPoseInformationConfig {
+    pub pixel_sigma_px: f64,
+    pub max_reprojection_error_px: f64,
+    pub min_correspondences: usize,
+    pub min_landmark_observations: usize,
+    pub max_landmark_condition_number: f64,
+    pub max_pose_condition_number: f64,
+    pub max_information_eigenvalue: f64,
+    pub finite_difference_step: f64,
+}
+
+/// Numerical evidence emitted for each PnP loop whose covariance-aware pose
+/// information passed all gates. Eigenvalues are recorded before the explicit
+/// graph-strength cap; `applied_spectral_scale` is `1.0` when no cap was needed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoopPoseInformationDiagnostic {
+    pub pnp_inlier_count: usize,
+    pub used_correspondence_count: usize,
+    pub raw_min_eigenvalue: f64,
+    pub raw_max_eigenvalue: f64,
+    pub raw_condition_number: f64,
+    pub applied_spectral_scale: f64,
+}
+
+impl Default for LoopPoseInformationConfig {
+    fn default() -> Self {
+        Self {
+            pixel_sigma_px: 1.0,
+            max_reprojection_error_px: 4.0,
+            min_correspondences: 8,
+            min_landmark_observations: 2,
+            max_landmark_condition_number: 1.0e8,
+            max_pose_condition_number: 1.0e6,
+            max_information_eigenvalue: 1.0,
+            finite_difference_step: 1.0e-5,
+        }
+    }
+}
+
 /// Front-end gate that rejected an otherwise geometrically verified loop
 /// constraint before it entered the pose graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnlineSlamLoopConstraintRejectionReason {
     Pcm,
     Covariance,
+    /// The PnP inliers did not yield a full-rank, sufficiently conditioned
+    /// covariance-aware 6-DoF pose information matrix.
+    PoseInformation,
 }
 
 /// A verified loop measurement rejected before graph insertion. Keeping the
@@ -1881,6 +2084,24 @@ pub struct OnlineSlamLoopClosureRefinementConfig {
     /// shared SE(3) settings consumed by [`PoseGraph::optimize_se3_gnc`])
     /// when the trigger fires.
     pub pose_graph_config: PoseGraphSe3Config,
+    /// Override every admitted loop edge's isotropic scalar weight. `None`
+    /// preserves the legacy verifier-inlier-count weight. `Some(1.0)` gives a
+    /// loop the same scalar information as a sequential edge and is the
+    /// conservative control when no calibrated PnP covariance is available.
+    /// The same value is used by the SE(3) mirror and by directly admitted
+    /// Sim(3) edges. As documented on `pcm_batch_rescreen`, batch reconciliation
+    /// with the Sim(3) solver remains unsupported.
+    pub fixed_loop_edge_weight: Option<f64>,
+    /// Optional covariance-aware anisotropic information for PnP loop edges.
+    /// The estimator uses only the verifier's final inlier correspondences,
+    /// propagates each map landmark's multi-view covariance into the query
+    /// reprojection residual, and rejects rank-deficient/ill-conditioned
+    /// geometry instead of hiding it with a diagonal ridge. The identical
+    /// estimator and spectral cap are applied to sequential PnP edges so loop
+    /// and odometry factors share one information convention. `None` preserves
+    /// the scalar edge path. When set, this takes precedence over
+    /// `fixed_loop_edge_weight` for SE(3) loop edges.
+    pub loop_pose_information: Option<LoopPoseInformationConfig>,
     /// Optional Graduated Non-Convexity outlier rejection for the back-end
     /// solve. `None` (default) runs the plain
     /// [`PoseGraph::optimize_se3_iterative`] M-estimator. `Some(gnc)` runs
@@ -2042,6 +2263,9 @@ pub struct OnlineSlamLoopClosureRefinementState {
     /// admitted set; with `pcm_batch_rescreen` it is the latest batch
     /// maximum-consistent set.
     pub verified_constraints: Vec<LoopClosureConstraint>,
+    /// Covariance-derived information retained across PCM deferral/promotion.
+    /// Keyed by `(older_keyframe, query_keyframe)`.
+    loop_pose_information: HashMap<(u64, u64), Matrix6<f64>>,
     /// Essential-verified loop closures the incremental PCM screen *deferred*
     /// (not in the graph), retained so the batch re-screen
     /// ([`OnlineSlamLoopClosureRefinementConfig::pcm_batch_rescreen`]) can
@@ -2086,6 +2310,7 @@ impl OnlineSlamLoopClosureRefinementState {
             sim3_graph,
             keyframe_order: Vec::new(),
             verified_constraints: Vec::new(),
+            loop_pose_information: HashMap::new(),
             pcm_deferred: Vec::new(),
             pending_since_last_trigger: 0,
             trigger_count: 0,
@@ -2102,6 +2327,7 @@ impl OnlineSlamLoopClosureRefinementState {
             matches!(self.config.solver, LoopRefinementSolver::Sim3(_)).then(Sim3PoseGraph::new);
         self.keyframe_order.clear();
         self.verified_constraints.clear();
+        self.loop_pose_information.clear();
         self.pcm_deferred.clear();
         self.pending_since_last_trigger = 0;
         self.trigger_count = 0;
@@ -2161,6 +2387,22 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     /// under the relative-pose covariance). Always `0` when `covariance_gate`
     /// is unset.
     pub loop_closures_covariance_rejected: usize,
+    /// Number of verified PnP loops rejected because their covariance-aware
+    /// 6×6 information was unavailable, rank-deficient, or ill-conditioned.
+    pub loop_closures_pose_information_rejected: usize,
+    /// Number of admitted SE(3) loop edges carrying covariance-aware 6×6
+    /// information rather than an isotropic scalar.
+    pub loop_closures_with_pose_information: usize,
+    /// Per-loop numerical evidence for covariance-aware matrices that passed
+    /// the rank and condition gates, before PCM/covariance admission screens.
+    pub loop_pose_information_diagnostics: Vec<LoopPoseInformationDiagnostic>,
+    /// Sequential PnP edges carrying the same covariance-aware information
+    /// convention as loop edges during this frame.
+    pub sequential_edges_with_pose_information: usize,
+    /// Sequential edges that fell back to identity information because too few
+    /// usable landmark covariances survived. The chain is never dropped.
+    pub sequential_pose_information_fallbacks: usize,
+    pub sequential_pose_information_diagnostics: Vec<LoopPoseInformationDiagnostic>,
     /// Number of deferred loop closures the batch PCM re-screen *promoted* into
     /// the graph this frame (they joined the maximum-consistent consensus the
     /// incremental, order-dependent screen had wrongly excluded). Always `0`
@@ -2197,6 +2439,17 @@ pub struct OnlineSlamLoopClosureRefinementStats {
     pub appearance_projection_rejected_count: usize,
     /// Primary-PnP successes rejected by current-side covisibility checking.
     pub appearance_covisibility_rejected_count: usize,
+    /// Pending-region projection verification attempts on later keyframes.
+    pub appearance_pending_projection_attempted_count: usize,
+    /// Pending-region projection attempts that passed refined PnP.
+    pub appearance_pending_projection_verified_count: usize,
+    /// Projection correspondences produced for the pending-region attempt on
+    /// this keyframe (zero when not attempted or correspondence build failed).
+    pub appearance_pending_projection_correspondence_count: usize,
+    /// Refined-PnP inliers from the pending-region attempt on this keyframe.
+    pub appearance_pending_projection_inlier_count: usize,
+    /// Radius selected by the adaptive pending-region projection search.
+    pub appearance_pending_projection_search_radius_px: Option<f64>,
     /// Per-primary-PnP candidate evidence for reproducible gate analysis.
     pub appearance_candidate_diagnostics: Vec<AppearanceLoopCandidateDiagnostic>,
     /// A geometrically verified region is being carried into later keyframes.
@@ -3239,6 +3492,7 @@ where
             .keyframes
             .get(&new_keyframe_id)
             .and_then(|kf| kf.frame.pose.clone())?;
+        let mut stats = OnlineSlamLoopClosureRefinementStats::default();
 
         // Add the node + the sequential edge from the previous
         // keyframe in registration order. Anchor on the first registered
@@ -3272,9 +3526,59 @@ where
                         1.0,
                     );
                 }
-                state
-                    .graph
-                    .add_sequential_edge(prev_id, new_keyframe_id, relative);
+                let sequential_information =
+                    state
+                        .config
+                        .loop_pose_information
+                        .and_then(|information_config| {
+                            if !matches!(state.config.solver, LoopRefinementSolver::Se3) {
+                                return None;
+                            }
+                            let pnp_inliers: Vec<(usize, u64)> = tracking
+                                .localization
+                                .inlier_query_indices
+                                .iter()
+                                .copied()
+                                .zip(tracking.localization.inlier_landmark_ids.iter().copied())
+                                .collect();
+                            let measurement = LoopClosureConstraint {
+                                from_keyframe_id: prev_id,
+                                to_keyframe_id: new_keyframe_id,
+                                relative_pose: relative.clone(),
+                                inlier_count: pnp_inliers.len(),
+                                inlier_ratio: 1.0,
+                                mean_sampson_error: 0.0,
+                                score: pnp_inliers.len() as f64,
+                            };
+                            estimate_loop_pose_information(
+                                &self.map,
+                                frame,
+                                &state.config.camera,
+                                &measurement,
+                                &pnp_inliers,
+                                information_config,
+                            )
+                        });
+                if let Some((information, diagnostic)) = sequential_information {
+                    state.graph.add_edge_with_information(
+                        prev_id,
+                        new_keyframe_id,
+                        relative,
+                        PoseGraphEdgeKind::Sequential,
+                        information,
+                    );
+                    stats.sequential_edges_with_pose_information += 1;
+                    stats
+                        .sequential_pose_information_diagnostics
+                        .push(diagnostic);
+                } else {
+                    state
+                        .graph
+                        .add_sequential_edge(prev_id, new_keyframe_id, relative);
+                    if state.config.loop_pose_information.is_some() {
+                        stats.sequential_pose_information_fallbacks += 1;
+                    }
+                }
             }
         }
         state.keyframe_order.push(new_keyframe_id);
@@ -3298,7 +3602,6 @@ where
         // metric translation recovered from the map's triangulated
         // landmarks; candidates with too few 2D-3D correspondences are
         // rejected outright, never falling back to essential-matrix).
-        let mut stats = OnlineSlamLoopClosureRefinementStats::default();
         if !loop_closure_candidates.is_empty() {
             stats.verified_candidate_count = loop_closure_candidates.len();
             match &state.config.verifier {
@@ -3373,12 +3676,50 @@ where
             stats.appearance_pnp_verified_count = built.pnp_verified_count;
             stats.appearance_projection_rejected_count = built.projection_rejected_count;
             stats.appearance_covisibility_rejected_count = built.covisibility_rejected_count;
-            stats.appearance_candidate_count = built.candidates.len();
+            let mut candidates = built.candidates;
+            let pending_needs_projection =
+                state
+                    .appearance_pending_region
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        !candidates.iter().any(|candidate| {
+                            appearance_regions_overlap(
+                                &self.map,
+                                pending.root_keyframe_id,
+                                candidate.matched_keyframe_id,
+                                &appearance_config,
+                            )
+                        })
+                    });
+            if pending_needs_projection {
+                let projected = verify_pending_appearance_region_by_projection(
+                    &self.map,
+                    frame,
+                    &state.config.camera,
+                    &appearance_config,
+                    state
+                        .appearance_pending_region
+                        .as_ref()
+                        .expect("pending projection was requested"),
+                );
+                stats.appearance_pending_projection_attempted_count =
+                    usize::from(projected.attempted);
+                stats.appearance_pending_projection_verified_count =
+                    usize::from(projected.candidate.is_some());
+                stats.appearance_pending_projection_correspondence_count =
+                    projected.correspondence_count;
+                stats.appearance_pending_projection_inlier_count = projected.inlier_count;
+                stats.appearance_pending_projection_search_radius_px = projected.search_radius_px;
+                if let Some(candidate) = projected.candidate {
+                    candidates.push(candidate);
+                }
+            }
+            stats.appearance_candidate_count = candidates.len();
             stats.appearance_candidate_diagnostics = built.diagnostics;
             let (confirmed, waiting, just_confirmed) = confirm_appearance_region_across_keyframes(
                 &self.map,
                 frame.id,
-                built.candidates,
+                candidates,
                 &appearance_config,
                 &mut state.appearance_pending_region,
             );
@@ -3480,6 +3821,47 @@ where
                     } else {
                         None
                     };
+                let loop_information = if let Some(information_config) =
+                    state.config.loop_pose_information
+                {
+                    // The 6×6 matrix describes an SE(3) tangent. Do not
+                    // silently reuse it for the 7-DoF Sim(3) mirror.
+                    let estimate = if matches!(state.config.solver, LoopRefinementSolver::Se3) {
+                        estimate_loop_pose_information(
+                            &self.map,
+                            frame,
+                            &state.config.camera,
+                            &constraint,
+                            &candidate.pnp_query_landmark_pairs,
+                            information_config,
+                        )
+                    } else {
+                        None
+                    };
+                    let Some((information, diagnostic)) = estimate else {
+                        stats.loop_closures_pose_information_rejected += 1;
+                        stats
+                            .rejected_constraints
+                            .push(OnlineSlamRejectedLoopConstraint {
+                                from_keyframe_id: constraint.from_keyframe_id,
+                                to_keyframe_id: constraint.to_keyframe_id,
+                                inlier_count: constraint.inlier_count,
+                                translation_norm_m: constraint.relative_pose.translation.norm(),
+                                relative_pose: constraint.relative_pose.clone(),
+                                source,
+                                reason: OnlineSlamLoopConstraintRejectionReason::PoseInformation,
+                            });
+                        continue;
+                    };
+                    stats.loop_pose_information_diagnostics.push(diagnostic);
+                    state.loop_pose_information.insert(
+                        (constraint.from_keyframe_id, constraint.to_keyframe_id),
+                        information,
+                    );
+                    Some(information)
+                } else {
+                    None
+                };
                 // Front-end screens (both before the closure enters the graph):
                 // PCM combinatorial consistency, then the covariance metric gate.
                 let pcm_measurement = pcm_cfg.as_ref().map(|cfg| {
@@ -3526,9 +3908,26 @@ where
                 if let Some((_, m)) = pcm_measurement {
                     admitted.push(m);
                 }
-                state.graph.add_loop_closure_constraint(&constraint);
+                let loop_edge_weight = state
+                    .config
+                    .fixed_loop_edge_weight
+                    .filter(|weight| weight.is_finite() && *weight > 0.0)
+                    .unwrap_or_else(|| (constraint.inlier_count as f64).max(1.0));
+                if let Some(information) = loop_information {
+                    state.graph.add_edge_with_information(
+                        constraint.from_keyframe_id,
+                        constraint.to_keyframe_id,
+                        constraint.relative_pose.clone(),
+                        PoseGraphEdgeKind::LoopClosure,
+                        information,
+                    );
+                    stats.loop_closures_with_pose_information += 1;
+                } else {
+                    state
+                        .graph
+                        .add_loop_closure_constraint_with_weight(&constraint, loop_edge_weight);
+                }
                 if let Some(sim3_graph) = state.sim3_graph.as_mut() {
-                    let weight = (constraint.inlier_count as f64).max(1.0);
                     sim3_graph.add_edge(
                         constraint.from_keyframe_id,
                         constraint.to_keyframe_id,
@@ -3537,7 +3936,7 @@ where
                             constraint.relative_pose.translation,
                             measured_sim3_scale.unwrap_or(1.0),
                         ),
-                        weight,
+                        loop_edge_weight,
                     );
                 }
                 stats
@@ -3572,9 +3971,27 @@ where
                         &mut state.pcm_deferred,
                         &odometry,
                         &cfg,
+                        state.config.fixed_loop_edge_weight,
                     );
                     stats.loop_closures_pcm_promoted = promoted;
                     stats.loop_closures_pcm_evicted = evicted;
+                    // `pcm_batch_reconcile` reconstructs promoted edges via
+                    // the legacy scalar API. Restore the covariance-derived
+                    // matrix retained when that candidate was first verified.
+                    for edge in &mut state.graph.edges {
+                        if edge.kind != PoseGraphEdgeKind::LoopClosure || edge.information.is_some()
+                        {
+                            continue;
+                        }
+                        if let Some(information) = state
+                            .loop_pose_information
+                            .get(&(edge.from, edge.to))
+                            .copied()
+                        {
+                            edge.information = Some(information);
+                            stats.loop_closures_with_pose_information += 1;
+                        }
+                    }
                     // A changed loop-edge set must be re-solved.
                     state.pending_since_last_trigger += promoted + evicted;
                 }
@@ -4642,6 +5059,235 @@ fn sim3_at_unit_scale(se3: &SE3) -> Sim3 {
     Sim3::new(se3.rotation, se3.translation, 1.0)
 }
 
+/// Estimate the verified PnP loop measurement's 6×6 information in the pose
+/// graph's translation-first right-tangent convention.
+///
+/// For every final PnP inlier, the landmark covariance is recovered from the
+/// multi-view reprojection Hessian of its existing map observations. That
+/// covariance is propagated through the loop reprojection and added to the
+/// query pixel covariance before accumulating `J_poseᵀ S⁻¹ J_pose`. Both the
+/// landmark and pose Hessians must be positive full-rank and pass explicit
+/// condition-number gates; no ridge is added. The final spectral cap keeps the
+/// pixel-domain Hessian commensurate with the graph's unit-weight odometry
+/// edges while preserving its measured anisotropy.
+fn estimate_loop_pose_information(
+    map: &VisualMap,
+    query_frame: &Frame,
+    camera: &Camera,
+    constraint: &LoopClosureConstraint,
+    pnp_inliers: &[(usize, u64)],
+    config: LoopPoseInformationConfig,
+) -> Option<(Matrix6<f64>, LoopPoseInformationDiagnostic)> {
+    let valid_config = config.pixel_sigma_px.is_finite()
+        && config.pixel_sigma_px > 0.0
+        && config.max_reprojection_error_px.is_finite()
+        && config.max_reprojection_error_px > 0.0
+        && config.min_correspondences >= 3
+        && config.min_landmark_observations >= 2
+        && config.max_landmark_condition_number.is_finite()
+        && config.max_landmark_condition_number >= 1.0
+        && config.max_pose_condition_number.is_finite()
+        && config.max_pose_condition_number >= 1.0
+        && config.max_information_eigenvalue.is_finite()
+        && config.max_information_eigenvalue > 0.0
+        && config.finite_difference_step.is_finite()
+        && config.finite_difference_step > 0.0;
+    if !valid_config {
+        return None;
+    }
+    let from_pose = map
+        .keyframes
+        .get(&constraint.from_keyframe_id)?
+        .frame
+        .pose
+        .as_ref()?;
+    let sigma2 = config.pixel_sigma_px * config.pixel_sigma_px;
+    let eps = config.finite_difference_step;
+    let mut omega = Matrix6::<f64>::zeros();
+    let mut used = 0usize;
+
+    for &(query_index, landmark_id) in pnp_inliers {
+        let Some(&query_xy) = query_frame.keypoints.get(query_index) else {
+            continue;
+        };
+        let Some(landmark) = map.landmarks.get(&landmark_id) else {
+            continue;
+        };
+
+        // Recover a 3-D landmark covariance from the observations that built
+        // the map point. A single view has an unobservable ray direction and
+        // therefore fails the rank/condition gate below, as it should.
+        let mut landmark_hessian = Matrix3::<f64>::zeros();
+        let mut landmark_observation_count = 0usize;
+        for observation in &landmark.observations {
+            // The query pixel is the residual whose covariance we are about
+            // to form. Reusing it in the 3-D landmark covariance would count
+            // the same measurement twice and create an unmodelled correlation.
+            if observation.frame_id == query_frame.id {
+                continue;
+            }
+            let Some(observing_pose) = map
+                .keyframes
+                .get(&observation.frame_id)
+                .and_then(|keyframe| keyframe.frame.pose.as_ref())
+            else {
+                continue;
+            };
+            let base_camera = observing_pose.transform_world_point(&landmark.position);
+            let Some(predicted) = camera.project(&base_camera) else {
+                continue;
+            };
+            if (predicted - observation.xy).norm() > config.max_reprojection_error_px {
+                continue;
+            }
+            let mut jacobian = nalgebra::SMatrix::<f64, 2, 3>::zeros();
+            let mut finite = true;
+            for axis in 0..3 {
+                let mut plus = landmark.position;
+                let mut minus = landmark.position;
+                plus[axis] += eps;
+                minus[axis] -= eps;
+                let plus_camera = observing_pose.transform_world_point(&plus);
+                let minus_camera = observing_pose.transform_world_point(&minus);
+                let (Some(projected_plus), Some(projected_minus)) =
+                    (camera.project(&plus_camera), camera.project(&minus_camera))
+                else {
+                    finite = false;
+                    break;
+                };
+                jacobian[(0, axis)] = (projected_plus.x - projected_minus.x) / (2.0 * eps);
+                jacobian[(1, axis)] = (projected_plus.y - projected_minus.y) / (2.0 * eps);
+            }
+            if finite && jacobian.iter().all(|value| value.is_finite()) {
+                landmark_hessian += jacobian.transpose() * jacobian / sigma2;
+                landmark_observation_count += 1;
+            }
+        }
+        if landmark_observation_count < config.min_landmark_observations {
+            continue;
+        }
+        let landmark_eigenvalues = landmark_hessian.symmetric_eigen().eigenvalues;
+        let landmark_min = landmark_eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let landmark_max = landmark_eigenvalues.iter().copied().fold(0.0, f64::max);
+        if !landmark_min.is_finite()
+            || !landmark_max.is_finite()
+            || landmark_min <= 0.0
+            || landmark_max / landmark_min > config.max_landmark_condition_number
+        {
+            continue;
+        }
+        let Some(covariance_world) = landmark_hessian.try_inverse() else {
+            continue;
+        };
+
+        let older_point = from_pose.transform_world_point(&landmark.position);
+        let current_point = constraint.relative_pose.transform_point(&older_point);
+        let Some(predicted_query) = camera.project(&current_point) else {
+            continue;
+        };
+        if (predicted_query - query_xy).norm() > config.max_reprojection_error_px {
+            continue;
+        }
+
+        let mut pose_jacobian = nalgebra::SMatrix::<f64, 2, 6>::zeros();
+        let mut pose_jacobian_valid = true;
+        for axis in 0..6 {
+            let mut delta = Vector6::zeros();
+            delta[axis] = eps;
+            let plus_pose = constraint.relative_pose.compose(&SE3::exp(&delta));
+            delta[axis] = -eps;
+            let minus_pose = constraint.relative_pose.compose(&SE3::exp(&delta));
+            let (Some(projected_plus), Some(projected_minus)) = (
+                camera.project(&plus_pose.transform_point(&older_point)),
+                camera.project(&minus_pose.transform_point(&older_point)),
+            ) else {
+                pose_jacobian_valid = false;
+                break;
+            };
+            pose_jacobian[(0, axis)] = (projected_plus.x - projected_minus.x) / (2.0 * eps);
+            pose_jacobian[(1, axis)] = (projected_plus.y - projected_minus.y) / (2.0 * eps);
+        }
+        if !pose_jacobian_valid || !pose_jacobian.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+
+        // Pixel sensitivity to the uncertain point in the older camera frame.
+        let mut point_jacobian = nalgebra::SMatrix::<f64, 2, 3>::zeros();
+        let mut point_jacobian_valid = true;
+        for axis in 0..3 {
+            let mut plus = older_point;
+            let mut minus = older_point;
+            plus[axis] += eps;
+            minus[axis] -= eps;
+            let (Some(projected_plus), Some(projected_minus)) = (
+                camera.project(&constraint.relative_pose.transform_point(&plus)),
+                camera.project(&constraint.relative_pose.transform_point(&minus)),
+            ) else {
+                point_jacobian_valid = false;
+                break;
+            };
+            point_jacobian[(0, axis)] = (projected_plus.x - projected_minus.x) / (2.0 * eps);
+            point_jacobian[(1, axis)] = (projected_plus.y - projected_minus.y) / (2.0 * eps);
+        }
+        if !point_jacobian_valid || !point_jacobian.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        let rotation_world_to_older = from_pose
+            .world_to_camera
+            .rotation
+            .to_rotation_matrix()
+            .matrix()
+            .clone_owned();
+        let covariance_older =
+            rotation_world_to_older * covariance_world * rotation_world_to_older.transpose();
+        let residual_covariance = nalgebra::SMatrix::<f64, 2, 2>::identity() * sigma2
+            + point_jacobian * covariance_older * point_jacobian.transpose();
+        let Some(residual_precision) = residual_covariance.try_inverse() else {
+            continue;
+        };
+        omega += pose_jacobian.transpose() * residual_precision * pose_jacobian;
+        used += 1;
+    }
+
+    if used < config.min_correspondences {
+        return None;
+    }
+    omega = (omega + omega.transpose()) * 0.5;
+    let pose_eigenvalues = omega.symmetric_eigen().eigenvalues;
+    let pose_min = pose_eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let pose_max = pose_eigenvalues.iter().copied().fold(0.0, f64::max);
+    if !pose_min.is_finite()
+        || !pose_max.is_finite()
+        || pose_min <= 0.0
+        || pose_max / pose_min > config.max_pose_condition_number
+    {
+        return None;
+    }
+    let applied_spectral_scale = if pose_max > config.max_information_eigenvalue {
+        config.max_information_eigenvalue / pose_max
+    } else {
+        1.0
+    };
+    omega *= applied_spectral_scale;
+    Some((
+        omega,
+        LoopPoseInformationDiagnostic {
+            pnp_inlier_count: pnp_inliers.len(),
+            used_correspondence_count: used,
+            raw_min_eigenvalue: pose_min,
+            raw_max_eigenvalue: pose_max,
+            raw_condition_number: pose_max / pose_min,
+            applied_spectral_scale,
+        },
+    ))
+}
+
 /// Estimate the relative scale of two independently triangulated keyframe
 /// regions from descriptor-matched 3D landmarks. Pairwise-distance ratios are
 /// invariant to the loop rotation and translation, so their median supplies
@@ -4968,6 +5614,227 @@ mod sim3_scale_estimation_tests {
             }),
             pnp_query_landmark_pairs: Vec::new(),
         }
+    }
+
+    fn covariance_information_scene(
+        observations_per_landmark: usize,
+    ) -> (
+        VisualMap,
+        Frame,
+        Camera,
+        LoopClosureConstraint,
+        Vec<(usize, u64)>,
+    ) {
+        let camera = Camera::pinhole(1, 640, 480, 460.0, 455.0, 320.0, 240.0);
+        let mut map = VisualMap::new();
+        map.cameras.insert(camera.id, camera.clone());
+        let observing_poses = [
+            Pose::identity(),
+            Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(-0.35, 0.02, 0.0),
+            ),
+            Pose::from_world_to_camera(
+                nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.03, 0.0),
+                Vector3::new(0.25, -0.08, 0.02),
+            ),
+        ];
+        for (index, pose) in observing_poses.iter().enumerate() {
+            let mut frame = Frame::new(index as u64 + 1, camera.id);
+            frame.pose = Some(pose.clone());
+            map.keyframes.insert(
+                frame.id,
+                Keyframe {
+                    frame,
+                    observations: Vec::new(),
+                },
+            );
+        }
+        let points = [
+            Point3::new(-1.2, -0.7, 4.0),
+            Point3::new(-0.5, 0.9, 4.5),
+            Point3::new(0.4, -0.8, 5.0),
+            Point3::new(1.1, 0.6, 5.5),
+            Point3::new(-1.0, 0.2, 6.0),
+            Point3::new(0.2, 1.1, 6.5),
+            Point3::new(1.3, -0.1, 7.0),
+            Point3::new(-0.3, -1.0, 7.5),
+            Point3::new(0.8, 0.8, 8.0),
+            Point3::new(-1.4, 1.0, 5.8),
+            Point3::new(1.5, -0.9, 6.8),
+            Point3::new(0.0, 0.0, 4.8),
+        ];
+        let mut query = Frame::new(100, camera.id);
+        let mut pairs = Vec::new();
+        for (point_index, point) in points.into_iter().enumerate() {
+            let landmark_id = point_index as u64 + 10;
+            let mut landmark = Landmark::new(landmark_id, point);
+            for (view_index, pose) in observing_poses
+                .iter()
+                .take(observations_per_landmark.min(observing_poses.len()))
+                .enumerate()
+            {
+                let xy = camera.project(&pose.transform_world_point(&point)).unwrap();
+                landmark.observations.push(Observation {
+                    frame_id: view_index as u64 + 1,
+                    landmark_id,
+                    keypoint_index: point_index,
+                    xy,
+                });
+            }
+            map.landmarks.insert(landmark_id, landmark);
+            query.keypoints.push(camera.project(&point).unwrap());
+            pairs.push((point_index, landmark_id));
+        }
+        let constraint = LoopClosureConstraint {
+            from_keyframe_id: 1,
+            to_keyframe_id: query.id,
+            relative_pose: SE3::identity(),
+            inlier_count: points.len(),
+            inlier_ratio: 1.0,
+            mean_sampson_error: 0.0,
+            score: points.len() as f64,
+        };
+        (map, query, camera, constraint, pairs)
+    }
+
+    #[test]
+    fn covariance_loop_information_is_full_rank_anisotropic_and_spectrally_capped() {
+        let (map, query, camera, constraint, pairs) = covariance_information_scene(3);
+        let (information, diagnostic) = estimate_loop_pose_information(
+            &map,
+            &query,
+            &camera,
+            &constraint,
+            &pairs,
+            LoopPoseInformationConfig::default(),
+        )
+        .expect("well-spread multi-view geometry should yield information");
+        let eigenvalues = information.symmetric_eigen().eigenvalues;
+        let min = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = eigenvalues.iter().copied().fold(0.0, f64::max);
+        assert!(min > 0.0, "eigenvalues={eigenvalues:?}");
+        assert!(max <= 1.0 + 1.0e-9, "spectral cap violated: {max}");
+        assert!(max / min > 2.0, "expected anisotropy: {eigenvalues:?}");
+        assert_eq!(diagnostic.pnp_inlier_count, pairs.len());
+        assert_eq!(diagnostic.used_correspondence_count, pairs.len());
+        assert!(diagnostic.raw_condition_number > 2.0);
+        assert!(diagnostic.applied_spectral_scale < 1.0);
+    }
+
+    #[test]
+    fn covariance_loop_information_rejects_single_view_landmark_rays() {
+        let (map, query, camera, constraint, pairs) = covariance_information_scene(1);
+        assert!(estimate_loop_pose_information(
+            &map,
+            &query,
+            &camera,
+            &constraint,
+            &pairs,
+            LoopPoseInformationConfig::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn pending_appearance_region_is_carried_by_projection_without_retrieval() {
+        use nalgebra::{UnitQuaternion, Vector3};
+
+        let camera = Camera::pinhole(1, 640, 480, 420.0, 415.0, 320.0, 240.0);
+        let mut map = VisualMap::new();
+        map.cameras.insert(camera.id, camera.clone());
+        let mut root_frame = Frame::new(10, camera.id);
+        root_frame.pose = Some(Pose::identity());
+        let mut root_observations = Vec::new();
+        let mut current_frame = Frame::new(110, camera.id);
+        let current_pose =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.05, -0.02, 0.01));
+        current_frame.pose = Some(current_pose.clone());
+
+        for index in 0..64usize {
+            let row = index / 8;
+            let column = index % 8;
+            let point = Point3::new(
+                (column as f64 - 3.5) * 0.22,
+                (row as f64 - 3.5) * 0.18,
+                4.0 + (index % 7) as f64 * 0.35,
+            );
+            let mut descriptor = vec![0.0_f32; 64];
+            descriptor[index] = 1.0;
+            let landmark_id = index as u64 + 1;
+            let mut landmark = Landmark::new(landmark_id, point);
+            landmark.descriptor = Some(descriptor.clone());
+            let root_xy = camera.project(&point).unwrap();
+            let observation = Observation {
+                frame_id: root_frame.id,
+                landmark_id,
+                keypoint_index: index,
+                xy: root_xy,
+            };
+            root_frame.keypoints.push(root_xy);
+            root_frame.descriptors.push(descriptor.clone());
+            root_observations.push(observation.clone());
+            landmark.observations.push(observation);
+            current_frame.keypoints.push(
+                camera
+                    .project(&current_pose.transform_world_point(&point))
+                    .unwrap(),
+            );
+            current_frame.descriptors.push(descriptor);
+            map.landmarks.insert(landmark_id, landmark);
+        }
+        map.keyframes.insert(
+            root_frame.id,
+            Keyframe {
+                frame: root_frame,
+                observations: root_observations,
+            },
+        );
+        let mut last_frame = Frame::new(100, camera.id);
+        last_frame.pose = Some(Pose::identity());
+        map.keyframes.insert(
+            last_frame.id,
+            Keyframe {
+                frame: last_frame,
+                observations: Vec::new(),
+            },
+        );
+        map.keyframes.insert(
+            current_frame.id,
+            Keyframe {
+                frame: current_frame.clone(),
+                observations: Vec::new(),
+            },
+        );
+        let pending = AppearancePendingRegion {
+            root_keyframe_id: 10,
+            last_current_keyframe_id: 100,
+            root_to_last_current: SE3::identity(),
+            confirmation_count: 1,
+            miss_count: 0,
+        };
+        let config = LoopAppearanceCandidateConfig {
+            min_candidate_landmark_count: 30,
+            min_projection_correspondence_count: 50,
+            projection_search_radius_px: Some(15.0),
+            ..LoopAppearanceCandidateConfig::default()
+        };
+
+        let result = verify_pending_appearance_region_by_projection(
+            &map,
+            &current_frame,
+            &camera,
+            &config,
+            &pending,
+        );
+
+        assert!(result.attempted);
+        assert!(result.correspondence_count >= 50);
+        assert!(result.inlier_count >= config.pnp_verifier.min_inliers);
+        let candidate = result.candidate.expect("projection carry should verify");
+        assert_eq!(candidate.matched_keyframe_id, 10);
+        assert_eq!(candidate.query_frame_id, 110);
+        assert!(candidate.pnp_query_landmark_pairs.len() >= config.pnp_verifier.min_inliers);
     }
 
     #[test]

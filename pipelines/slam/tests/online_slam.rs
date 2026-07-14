@@ -1311,6 +1311,31 @@ fn pose_graph_translation_gauss_newton_pulls_drifted_loop_back_to_anchor() {
 }
 
 #[test]
+fn pose_graph_explicit_loop_weight_is_independent_of_inlier_count() {
+    let constraint = LoopClosureConstraint {
+        from_keyframe_id: 10,
+        to_keyframe_id: 30,
+        relative_pose: SE3::identity(),
+        inlier_count: 408,
+        inlier_ratio: 1.0,
+        mean_sampson_error: 1.0e-4,
+        score: 408.0,
+    };
+
+    let mut legacy = PoseGraph::new();
+    legacy.add_loop_closure_constraint(&constraint);
+    assert_eq!(legacy.edges[0].weight, 408.0);
+
+    let mut controlled = PoseGraph::new();
+    controlled.add_loop_closure_constraint_with_weight(&constraint, 0.1);
+    assert_eq!(controlled.edges[0].weight, 0.1);
+
+    let mut malformed = PoseGraph::new();
+    malformed.add_loop_closure_constraint_with_weight(&constraint, f64::NAN);
+    assert_eq!(malformed.edges[0].weight, 1.0);
+}
+
+#[test]
 fn pose_graph_optimize_returns_no_anchor_error_when_unset() {
     let mut graph = PoseGraph::new();
     graph.add_pose(1, pose_at(Vector3::zeros()));
@@ -4284,6 +4309,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
@@ -4328,6 +4355,8 @@ mod online_loop_closure_refinement {
                     verifier_config: LoopClosureVerifierConfig::default(),
                     verifier: LoopRefinementVerifier::Pnp(pnp_config),
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
@@ -4372,6 +4401,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
@@ -4523,6 +4554,126 @@ mod online_loop_closure_refinement {
                 "PGO fires iff at least one loop constraint was accepted (trigger threshold = 1)"
             );
         }
+    }
+
+    #[test]
+    fn covariance_loop_mode_uses_the_same_information_model_for_sequential_edges() {
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_pnp_pose_graph(
+            map.clone(),
+            camera.clone(),
+            100,
+            PnPLoopClosureVerifierConfig::default(),
+        );
+        slam.pose_graph_state
+            .as_mut()
+            .unwrap()
+            .config
+            .loop_pose_information = Some(visloc_slam::LoopPoseInformationConfig {
+            max_landmark_condition_number: 1.0e12,
+            max_pose_condition_number: 1.0e12,
+            ..visloc_slam::LoopPoseInformationConfig::default()
+        });
+
+        // The first edge has only one older observation per landmark after
+        // excluding the current pixel, so it must preserve the chain via the
+        // documented identity fallback. By the third keyframe, two older
+        // views provide full-rank landmark covariances and the edge is
+        // anisotropic.
+        let f0 = frame_at(10, Vector3::new(-1.0, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(0.2, 0.0, 0.0), &points, &camera, &map);
+        let r1 = slam.process_frame(&f1, []);
+        assert!(r1.tracking_succeeded());
+        assert_eq!(
+            r1.pose_graph_refinement
+                .as_ref()
+                .unwrap()
+                .sequential_pose_information_fallbacks,
+            1
+        );
+        let observation_counts: Vec<_> = slam
+            .map
+            .landmarks
+            .values()
+            .map(|landmark| landmark.observations.len())
+            .collect();
+        assert!(
+            observation_counts
+                .iter()
+                .filter(|&&count| count >= 2)
+                .count()
+                >= 8,
+            "expected multi-view landmark support before frame 3: {observation_counts:?}"
+        );
+
+        let f2 = frame_at(30, Vector3::new(1.4, 0.0, 0.0), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        let stats = r2.pose_graph_refinement.as_ref().unwrap();
+        assert_eq!(stats.sequential_edges_with_pose_information, 1);
+        assert_eq!(stats.sequential_pose_information_fallbacks, 0);
+        assert_eq!(stats.sequential_pose_information_diagnostics.len(), 1);
+
+        let sequential_edges: Vec<_> = slam
+            .pose_graph_state
+            .as_ref()
+            .unwrap()
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == visloc_slam::PoseGraphEdgeKind::Sequential)
+            .collect();
+        assert_eq!(sequential_edges.len(), 2);
+        assert!(sequential_edges[0].information.is_none());
+        assert!(sequential_edges[1].information.is_some());
+    }
+
+    #[test]
+    fn online_refinement_applies_fixed_weight_only_to_loop_edges() {
+        use visloc_slam::PoseGraphEdgeKind;
+
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut slam = pipeline_with_pose_graph(map.clone(), camera.clone(), 1);
+        slam.pose_graph_state
+            .as_mut()
+            .expect("pose-graph state configured")
+            .config
+            .fixed_loop_edge_weight = Some(0.125);
+
+        let f0 = frame_at(10, Vector3::zeros(), &points, &camera, &map);
+        assert!(slam.process_frame(&f0, []).tracking_succeeded());
+        let f1 = frame_at(20, Vector3::new(1.5, 0.0, 0.0), &points, &camera, &map);
+        assert!(slam.process_frame(&f1, []).tracking_succeeded());
+        let f2 = frame_at(30, Vector3::new(0.05, 0.0, 0.05), &points, &camera, &map);
+        let r2 = slam.process_frame(&f2, []);
+        assert!(r2.tracking_succeeded());
+        assert!(
+            r2.pose_graph_refinement
+                .as_ref()
+                .is_some_and(|stats| stats.accepted_count >= 1),
+            "synthetic revisit must admit at least one loop"
+        );
+
+        let graph = &slam.pose_graph_state.as_ref().unwrap().graph;
+        let loop_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == PoseGraphEdgeKind::LoopClosure)
+            .collect();
+        assert!(!loop_edges.is_empty());
+        assert!(loop_edges
+            .iter()
+            .all(|edge| (edge.weight - 0.125).abs() < f64::EPSILON));
+        assert!(graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == PoseGraphEdgeKind::Sequential)
+            .all(|edge| (edge.weight - 1.0).abs() < f64::EPSILON));
     }
 
     #[test]
@@ -4761,6 +4912,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     // TLS with a MAD auto-scaled inlier band (the band tracks
                     // the live graph's noise); no re-adapt — it is a BA-only
                     // win and over-rejects real edges on pose graphs.
@@ -4874,6 +5027,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: Some(PcmConfig::default()),
                     covariance_gate: None,
@@ -4958,6 +5113,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: Some(CHI2_95_6DOF),
@@ -5022,6 +5179,8 @@ mod online_loop_closure_refinement {
                     verifier_config: LoopClosureVerifierConfig::default(),
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
@@ -5459,6 +5618,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,
@@ -5869,6 +6030,8 @@ mod online_loop_closure_refinement {
                     },
                     verifier: LoopRefinementVerifier::EssentialMatrix,
                     pose_graph_config: PoseGraphSe3Config::default(),
+                    fixed_loop_edge_weight: None,
+                    loop_pose_information: None,
                     gnc: None,
                     pcm: None,
                     covariance_gate: None,

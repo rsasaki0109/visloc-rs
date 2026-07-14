@@ -36,9 +36,12 @@ the corresponding ablation is reproduced here.
 | [Lucas--Kanade (1981)](https://idl.uw.edu/living-papers-paper/lucas-kanade/index.pdf) | Iterative gradient-based image registration obtains subpixel displacement without an exhaustive correspondence search | Compare descriptor-only projection rematching with bidirectional patch refinement; gate the refined track on photometric residual, convergence, and forward/backward consistency |
 | [Shi--Tomasi, Good Features to Track (CVPR 1994)](https://publications.ri.cmu.edu/good-features-to-track) | Selects patches from the smaller structure-tensor eigenvalue and monitors affine tracking failure, occlusion, and disocclusion | Replenish tracks by predicted trackability and spatial coverage rather than detector score alone, and retire tracks when their local appearance ceases to support one physical point |
 | [Hartley--Sturm triangulation (CVIU 1997)](https://perception.inrialpes.fr/Publications/1997/HS97/HartleySturm-cviu97.pdf) | Finds the global minimum of a Gaussian image-coordinate correction instead of intersecting noisy rays or accepting a local minimum | Replace midpoint-style stereo depth confidence with reprojection-domain triangulation, cheirality, parallax, and propagated pixel covariance; never use raw 3-D distance as though depth noise were isotropic |
+| [MLPnP (ISPRS 2016)](https://arxiv.org/abs/1607.08112) and [authors' C++/MATLAB implementations](https://www.ipf.kit.edu/english/code_1840.php) | Propagates image-observation covariance to bearing-vector tangent space, solves a maximum-likelihood PnP problem, and recovers internal rotation/translation accuracy | After robust PnP refinement, derive a 6-DoF loop information matrix from the inlier reprojection Jacobian and observation covariances; reject rank-deficient/ill-conditioned geometry instead of replacing uncertainty with inlier count |
+| [Uncertainty-Aware Camera Pose Estimation from Points and Lines (CVPR 2021)](https://arxiv.org/abs/2107.03890) and [authors' implementation](https://alexandervakhitov.github.io/uncertain-pnp/) | Extends uncertainty-aware PnP and motion-only BA to model covariance in both the 2-D detections and the reconstructed 3-D points | Propagate rectified-stereo pixel/disparity covariance into each loop landmark's anisotropic 3-D covariance, then include both 2-D and 3-D uncertainty in pose refinement; MLPnP's 2-D-only model is insufficient for noisy stereo depth |
 | [Bundle Adjustment -- A Modern Synthesis (2000)](https://hal.inria.fr/inria-00548290) | Defines joint robust structure/camera refinement, gauge freedom, quality control, and sparse second-order methods | Every BA fixture must verify a fixed gauge, robust reprojection weighting, Schur landmark elimination, rejected-step rollback, and a decrease in the exact cost reported to the caller |
 | [g2o paper (ICRA 2011)](https://ais.informatik.uni-freiburg.de/publications/papers/kuemmerle11icra.pdf) and [official implementation](https://github.com/RainerKuemmerle/g2o) | Expresses pose SLAM and BA as extensible sparse nonlinear graph optimization and exploits each graph's block structure | Cross-check SE(3) residual direction, analytic/numeric Jacobians, gauge fixing, and LM/GN convergence on exported visloc-rs graphs before attributing a trajectory change to loop selection |
 | [iSAM2 (IJRR 2012)](https://www.cs.cmu.edu/~kaess/pub/Kaess12ijrr.html) and [GTSAM ISAM2](https://gtsam.org/doxygen/a04947.html) | Bayes-tree updates provide incremental variable reordering and selective relinearization without periodic full batch solves | Benchmark an incremental factor-history back end against batch PGO/BA, including loop-factor removal and delayed relinearization after GNC/PCM changes the accepted set; equal final cost is required before runtime can decide |
+| [Ceres covariance estimation](https://ceres-solver.readthedocs.io/latest/nnls_covariance.html) (official implementation documentation) | Computes selected covariance blocks from the solved Jacobian through sparse QR, or a pseudoinverse through dense SVD when rank deficiency must be represented | Cross-check each visloc-rs PnP covariance against an independently assembled finite-difference Jacobian; expose rank/condition diagnostics and never silently invert a near-singular normal matrix |
 
 ## Direct and hybrid systems
 
@@ -185,16 +188,17 @@ Zero accepted loops proves safety but not improvement.
 Run the binary-identical repeated experiment matrix sequentially so concurrent
 inference does not contaminate runtime measurements. Keep the host free of
 unrelated compute-heavy jobs for the entire matrix: the memory gate below
-prevents allocation-starved runs from being accepted, but it cannot by itself
-prove CPU exclusivity. Any overlap with an unrelated compute job invalidates
-the affected runtime samples and requires a clean rerun. The runner records the
+prevents allocation-starved runs, while the external-CPU gate rejects sustained
+CPU time consumed outside the benchmark process. This sampling still does not
+replace reserving the host: any known overlap with an unrelated compute job
+invalidates the affected runtime samples and requires a clean rerun. The runner records the
 Git revision, executable and model hashes, exact argument vector, timestamps,
 elapsed time, and exit status for every run:
 
 ```powershell
 $env:ORT_DYLIB_PATH = 'E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll'
 ./scripts/run_visual_slam_euroc_ab.ps1 `
-  -DatasetRoot C:/Users/rsasa/Workspace/old/simple_visual_slam/euroc_mav/machine_hall/machine_hall `
+  -DatasetRoot E:/datasets/euroc_mav/machine_hall `
   -OutRoot E:/visloc_archive/visual_slam_ab_20260713 `
   -Repetitions 5
 ```
@@ -206,15 +210,24 @@ It fails before launching when the dynamic ONNX runtime DLL is unavailable and
 records the Git revision, dirty status and diff fingerprint, executable/model/
 runtime DLL hashes, exact arguments, Rust toolchain, OS, CPU, logical processor
 count, installed memory, and 250-ms-sampled peak process working set. It also
+re-hashes the executable, SuperPoint model, and ONNX Runtime DLL immediately
+before every run, stores those hashes in the run manifest, and refuses to mix a
+changed artifact into an existing matrix. It also
 requires at least 4 GiB of available physical memory and 4 GiB of Windows
 commit headroom before each run, samples both every five seconds, and records
-the preflight and minimum values in each run manifest. If either reserve is
-crossed during a run, the runner stops only its benchmark child and records an
-environmental validation error separately from the child's real exit code.
+the preflight and minimum values in each run manifest. It also measures external
+process CPU for two seconds before launch and every resource interval during the
+run, excluding the runner and benchmark child; the default maximum is 0.5 CPU
+cores. The runner's ancestor chain (the waiting shell/orchestrator) is also
+excluded and recorded by PID so measurement overhead is not mistaken for a
+competing workload. If either memory reserve is crossed or external CPU exceeds the limit,
+the runner stops only its benchmark child and records an environmental
+validation error separately from the child's real exit code.
 Such a run is not an accuracy or runtime sample. The thresholds and sampling
 period can be changed explicitly with `-MinAvailableMemoryGiB`,
-`-MinCommitHeadroomGiB`, and `-ResourceSampleIntervalSeconds` when the host has
-a documented resource policy.
+`-MinCommitHeadroomGiB`, `-MaxExternalCpuCores`, and
+`-ResourceSampleIntervalSeconds` when the host has a documented resource
+policy.
 
 A dirty-tree run is therefore identifiable, while
 the executable hash remains the authoritative identity of what actually ran.
@@ -223,10 +236,10 @@ Only runs whose per-run manifest has exit code zero and whose `summary.txt`
 exists are skipped; an incomplete or failed directory is never overwritten
 implicitly. Resume is also refused when executable, SuperPoint model, or ORT
 DLL hashes, dataset root, sequence list, repetition count, or frame cap differ
-from the existing experiment. The schema-v3 manifest also fingerprints the
-common and per-variant argument protocol and the resource gate, preventing a
-changed treatment or environmental validity rule from being resumed into an
-older matrix. Each successful run is rejected by the
+from the existing experiment. The schema-v4 manifest also fingerprints the
+common and per-variant argument protocol plus the memory and external-CPU
+resource gates, preventing a changed treatment or environmental validity rule
+from being resumed into an older matrix. Each successful run is rejected by the
 runner if `summary.txt` does not report the expected
 `pose_graph_refinement=false` for `no_loop` or `true` for `appearance_loop`.
 
@@ -240,6 +253,12 @@ refiner also consumes shared-landmark loop candidates. The `appearance_loop`
 arm adds the complete robust loop subsystem (PnP verification, PCM, GNC,
 correction propagation, appearance retrieval), including a 15-pixel/50-match
 projection-rematch gate and its three-keyframe/two-miss confirmation state.
+Its loop edge uses the fixed scalar selected by the documented MH_01 prefix
+sweep (`-CandidateLoopEdgeWeight`) rather than treating the 408 PnP inliers
+observed on MH_01 as 408 times the inverse pose covariance. Inlier count remains
+evidence for verifier acceptance, not a dimensionally valid uncertainty
+estimate; calibrated anisotropic PnP information is the eventual replacement
+for every scalar choice.
 PCM uses pairwise-only consistency in this candidate because MH_01 directly
 demonstrates that the additional individual-vs-drifted-odometry gate rejects
 true loops; the default library behavior remains unchanged.
@@ -261,8 +280,9 @@ The generated conservative gate does not promote on a favorable mean alone:
 the worst candidate rigid ATE must beat the best no-loop rigid ATE across the
 recorded repetitions, every accepted loop must have a ground-truth verdict and
 all must be correct, candidate tracking coverage may fall by at most 0.005,
-the longest continuous run may fall by at most 1%, and runtime must be present
-for every run. The sampled peak working set must also be present for every run.
+the longest continuous run may fall by at most 1%, and the worst candidate
+delta-1/delta-10 translation and rotation RPE may exceed the best baseline by
+at most 1%. Runtime and sampled peak working set must be present for every run.
 `INCOMPLETE` means evidence is missing; `REJECT` means complete
 evidence violates at least one safety or improvement gate.
 
@@ -503,6 +523,249 @@ optimized keyframe rigid ATE as its primary accuracy gate, permits at most 1%
 live-ATE regression, caps runtime and peak-memory regression at 25%, and
 requires at least three paired counterbalanced repetitions. This diagnostic is
 therefore INCOMPLETE, not promoted.
+
+Two completed full-sequence MH_01 repetitions were deterministic and exposed a
+local-accuracy regression hidden by the ATE improvement. Pairwise-only PCM
+improved final-keyframe rigid ATE from 3.9434 m to 3.2506 m and live rigid ATE
+from 4.0558 m to 3.1126 m, but delta-1 translation/rotation RPE worsened from
+0.2127 m / 4.27 degrees to 0.2441 m / 4.54 degrees and delta-10 RPE worsened
+from 1.2667 m / 18.22 degrees to 1.4483 m / 19.06 degrees. The promotion gate
+now rejects a greater-than-1% regression in any of these four RPE metrics.
+Recomputing every RPE pair from the raw EuRoC ground truth and cam0 `T_BS`
+reproduced the summary values. Before frame 939, candidate delta-10 translation
+RPE was better (0.459 m versus 0.568 m); after closure it was worse in every
+segment, reaching 1.404 m versus 0.990 m after frame 2500. The degradation is
+therefore persistent post-correction tracking/map behaviour, not one RPE pair
+crossing the closure instant.
+
+The back end revealed a dimensionally invalid confidence mismatch: every
+sequential edge has scalar weight `1.0`, while
+`PoseGraph::add_loop_closure_constraint` used the PnP inlier count directly, so
+the accepted loop had weight `408.0`. Correspondence count is not inverse pose
+covariance. The legacy API remains unchanged, but online refinement can now use
+an explicit fixed positive loop weight, recorded in the run summary and checked
+by the matrix runner. A 1.0/0.1/0.01 MH_01 prefix sweep must establish whether a
+softer loop preserves the ATE gain without the RPE regression; none of these
+weights is promoted in advance of that measurement. The long-term replacement
+is a calibrated anisotropic PnP information matrix, not another universal
+scalar. MLPnP supplies the observation-side model: propagate each feature's
+pixel covariance to its bearing tangent plane. At the refined pose, assemble
+the inlier residual Jacobian `J` and block observation precision `W`, then use
+`J^T W J` as the local 6-DoF pose information only when its numerical rank and
+condition number pass an explicit gate. The matrix must be transformed into
+the pose graph edge's exact tangent/residual convention and checked against a
+finite-difference Jacobian. Ceres' covariance implementation provides the
+independent reference behaviour: QR for a full-rank Jacobian, or an SVD
+pseudoinverse when rank deficiency is deliberately represented. A synthetic
+geometry suite must cover well-spread points, near-planar points, narrow image
+support, depth imbalance, and pixel-noise rescaling before this information
+matrix is allowed into EuRoC evaluation.
+
+The repository already has the correct narrow integration seam:
+`crates/vision/src/pnp/mod.rs`'s `GaussNewtonPoseRefiner` assembles the final
+`2N x 6` finite-difference reprojection Jacobian, while
+`crates/vision/src/ransac/mod.rs`'s `RansacReport` retains the final inlier
+indices and per-inlier pixel errors. The next implementation should return a
+typed pose-information/covariance diagnostic from that final inlier-only
+refinement and carry it through `PnPLoopClosureVerifier` into
+`PoseGraphEdge::information`. It must not estimate information from all
+pre-RANSAC matches, from the RANSAC threshold, or from `inliers.len()`.
+
+There is an important non-reference implementation already in
+`pipelines/slam/src/vo_loop_closure.rs`: its optional offline
+`loop_edge_information` also forms a reprojection `J^T J`, but then
+trace-normalises the matrix to `6 * inlier_count` and adds a ridge to force
+positive definiteness. That preserves the same uncalibrated 408-versus-1 loop
+magnitude exposed by MH_01, and the ridge can hide deficient geometry instead
+of rejecting it. Its directional shape is useful test material, but neither
+its magnitude nor its degeneracy policy may be copied into the online path.
+The controlled replacement must separate (a) query-image 2-D observation-noise
+calibration, (b) older-keyframe stereo landmark covariance propagated from
+left/right pixel and disparity noise, (c) geometric rank/condition validation,
+and (d) any experimental global loop-strength multiplier, and report all four
+independently. The CVPR 2021 uncertainty-aware PnP refinement is the closer
+reference for this stereo case than 2-D-only MLPnP: treating an uncertain-depth
+landmark as a fixed 3-D point makes the resulting pose information
+overconfident precisely along the optical-axis direction that matters here.
+
+The fixed-weight diagnostic is deliberately long enough to observe the
+post-loop failure, not merely the closure instant. Run 2,800 MH_01 frames (the
+accepted loop occurs near frame 939 and the largest measured late RPE gap is
+after frame 2,500), one paired baseline/candidate run per weight:
+
+```powershell
+$weights = @(1.0, 0.1, 0.01)
+foreach ($weight in $weights) {
+  $tag = $weight.ToString('R', [Globalization.CultureInfo]::InvariantCulture).Replace('.', 'p')
+  $root = "E:/visloc_archive/mh01_loop_weight_sweep_20260713/weight_$tag"
+  ./scripts/run_visual_slam_euroc_ab.ps1 `
+    -DatasetRoot E:/datasets/euroc_mav/machine_hall `
+    -OutRoot $root `
+    -Sequences MH_01_easy `
+    -MaxFrames 2800 `
+    -Repetitions 1 `
+    -CandidateLoopEdgeWeight $weight
+  python scripts/summarize_visual_slam_evaluation.py `
+    --matrix-root $root `
+    --output "$root/summary.md" `
+    --json "$root/summary.json"
+}
+```
+
+This is a parameter screen only: its one repetition must remain `INCOMPLETE`
+under the promotion policy. The selected weight advances only if it has a
+correct accepted loop, improves rigid ATE, and does not worsen any delta-1 or
+delta-10 translation/rotation RPE metric by more than 1% on this prefix. It
+then receives the full three-repetition MH_01/MH_03/MH_05 promotion matrix;
+prefix evidence alone can never adopt it.
+
+The completed 2,800-frame screen rejected all three fixed weights. The
+same-binary no-loop baseline was deterministic across the three paired runs:
+tracking coverage `0.856`, longest segment `449`, live/final-keyframe rigid ATE
+`2.6562/2.7093 m`, delta-1 RPE `0.2334 m / 4.564 degrees`, and delta-10 RPE
+`1.4361 m / 19.744 degrees`. Each candidate's accepted loops were
+ground-truth-correct (precision `1.0`), but no scalar preserved every local
+accuracy metric:
+
+| fixed loop weight | accepted loops | live/final ATE (m) | delta-1 RPE (m / deg) | delta-10 RPE (m / deg) | decision |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| `1.0` | 3/3 | 2.7828 / 2.7958 | 0.2569 / 5.336 | 1.5370 / 23.174 | reject: ATE and all RPE regress |
+| `0.1` | 2/2 | 2.4745 / 2.4775 | 0.2469 / 4.740 | 1.4692 / 21.410 | reject: ATE improves, all RPE regress by more than 1% |
+| `0.01` | 3/3 | 3.0118 / 2.9194 | 0.2475 / 4.580 | 1.4418 / 18.660 | reject: ATE and delta-1 translation regress |
+
+These are deliberately diagnostic, single-repetition results, so the runner's
+promotion verdict remains `INCOMPLETE` independently of the metric failures.
+Their purpose is nevertheless complete: a universal isotropic loop strength
+cannot satisfy the MH_01 global- and local-accuracy gates. No fixed weight
+advances to the full sequence matrix. The next candidate must use the
+inlier-only reprojection Jacobian and observation/landmark covariance to retain
+directional observability, reject rank-deficient or ill-conditioned geometry,
+and expose any global strength cap separately from the measured matrix.
+
+The first controlled replacement is now implemented behind
+`--pose-graph-refinement-loop-pose-information`. It consumes only the final
+appearance-PnP inlier pairs retained by `LoopClosureCandidate`, never all
+descriptor matches. For each older-map landmark it forms a 3-D covariance by
+inverting the multi-view reprojection Hessian over that landmark's existing map
+observations. A one-view point remains rank deficient and is discarded rather
+than made invertible with a ridge. The covariance is rotated into the older
+camera frame and propagated through the loop projection; with query pixel
+noise `sigma_px`, each inlier contributes
+`J_pose^T (sigma_px^2 I + J_point Sigma_point J_point^T)^-1 J_pose`. The sum is
+accepted only when enough landmarks survive and the 6-DoF matrix is positive
+full-rank with condition number below the configured ceiling. Synthetic tests
+cover a well-spread, multi-depth scene and the single-view ray degeneracy.
+
+Absolute pixel-domain curvature is not dimensionally comparable to the current
+unit-information odometry chain. The implementation therefore exposes a
+separate maximum-eigenvalue cap (default `1.0`) instead of trace-normalising to
+the inlier count. It records the raw condition number, used correspondence
+count, and applied spectral scale in the EuRoC summary so the cap cannot be
+mistaken for measured covariance. This is still a controlled intermediate:
+`VisualMap::Landmark` retains left-image multi-view observations but not the
+original rectified right-image/disparity measurement. Consequently the current
+matrix accounts for triangulation geometry through accumulated left views but
+cannot yet reproduce the exact stereo seed covariance. Retaining the seed's
+`(u_l, v_l, u_r)` observation (or its propagated 3-D covariance) is required
+before claiming the full uncertainty-aware stereo-PnP model.
+
+The first 1,000-frame MH_01 same-binary diagnostic exercised this path in the
+real online pipeline. All three accepted appearance loops received a 6×6
+matrix (zero pose-information rejections), using 637 final PnP inliers in
+total; all three were ground-truth-correct. The worst raw matrix condition
+number was `564.13`, and the smallest spectral scale needed to impose the
+unit-eigenvalue cap was `2.41e-8`, confirming that raw pixel curvature and the
+legacy unit odometry edges differ by many orders of magnitude. Relative to the
+deterministic no-loop baseline, tracking changed `0.947 → 0.944` with the same
+449-frame longest segment, live rigid ATE improved `0.5289 → 0.5015 m`, final
+keyframe ATE improved `0.6911 → 0.4287 m`, delta-1 translation RPE was
+effectively unchanged (`0.184407 → 0.184445 m`), and delta-10 translation RPE
+improved `0.5615 → 0.4812 m`. Rotation RPE nevertheless regressed from
+`5.958 → 6.163 degrees` at delta 1 and `12.177 → 12.600 degrees` at delta 10.
+The promotion gate therefore rejects this loop-only information variant even
+though its ATE and translation RPE improve.
+
+The failure isolates the next correction: applying a covariance-shaped matrix
+only to loops while sequential edges remain isotropic identity still compares
+different information conventions. The online graph now applies the same
+inlier/covariance estimator and the same explicit spectral cap to sequential
+PnP edges, falling back to identity only when the chain has too little
+multi-view landmark support. While implementing that path, a map invariant bug
+was exposed and fixed: tracking-produced keyframes already contained their
+inlier observations, but `StagedMapUpdate::apply_to` did not mirror those
+relations into `Landmark::observations`. The two VisualMap observation indices
+are now synchronized without duplicates, which is required for covariance and
+covisibility consumers alike. This matched-information graph needs a fresh
+same-binary diagnostic; the loop-only result above must not be used to claim
+promotion.
+
+That fresh 1,000-frame MH_01 diagnostic is now complete, after the observation
+index repair and with the same executable for both variants. The no-loop
+baseline achieved tracking `0.934`, longest segment `307`, live/final-keyframe
+rigid ATE `0.2513/0.3457 m`, delta-1 RPE `0.1756 m / 6.074 degrees`, and
+delta-10 RPE `0.4649 m / 18.589 degrees`. The matched-information candidate
+put covariance-shaped matrices on 58 sequential edges (two early identity
+fallbacks) and its one accepted, ground-truth-correct loop (432 PnP inliers,
+raw condition number `222.52`, spectral cap scale `8.79e-9`). Rotation RPE
+improved to `5.916/16.667 degrees`, but every safety-critical translation or
+coverage headline regressed: tracking `0.926`, live/final ATE
+`0.2771/0.3750 m`, delta-1 translation RPE `0.1920 m`, and delta-10
+translation RPE `0.4809 m`. It is rejected and does not advance to 2,800
+frames. Matching the matrix *form* is insufficient when the relative-edge
+covariance still treats the older pose and its correlated map points as
+fixed; exact stereo seed uncertainty and pose/landmark correlation remain
+unmodelled.
+
+The failure audit also exposed a separate measurement-integrity defect in
+stereo replenishment. Candidate association selected a real anchor-keypoint
+index within the reprojection gate, but stored the stereo point's synthetic
+anchor reprojection as `Observation.xy`. Thus index and pixel described
+different measurements, and downstream two-view triangulation received a
+self-consistent prediction in place of image evidence. Replenishment now uses
+the selected keypoint's actual pixel coordinate; the stereo reprojection is
+only the search/gating prediction. A regression test deliberately offsets the
+real detection from the prediction and proves that the measured coordinate is
+retained. Since this changes map geometry for both variants, all subsequent
+EuRoC comparisons require a new same-binary baseline/candidate pair.
+
+The first post-fix 1,000-frame pair improved the no-loop tracking coverage to
+`0.959` and the longest segment to `527`, but it cannot evaluate loop quality:
+the candidate was bit-identical in every accuracy metric because no loop was
+confirmed. Appearance retrieval ranked 75 regions, rejected 60 connected
+regions, PnP-verified two candidates, and left three region tracks waiting for
+the configured three-keyframe confirmation; zero reached confirmation before
+the prefix ended. This is not a pass or a loop regression. The next diagnostic
+must retain the safety confirmation and extend MH_01 to 2,800 frames. It also
+records sequential-edge correspondence, condition-number, and spectral-cap
+aggregates so a later accepted loop can be interpreted against the odometry
+information distribution rather than only the loop matrix.
+
+The 2,800-frame extension still admitted zero loops and was therefore exactly
+equal to its paired baseline (`0.855` tracking, longest `527`, live/final ATE
+`3.4996/2.9476 m`, delta-1 RPE `0.2620 m / 4.802 degrees`, delta-10 RPE
+`1.5335 m / 19.728 degrees`). This was not a lack of loop evidence. At frame
+960, regions rooted at keyframes 58 and 75 had appearance similarity above
+`0.90`, primary PnP support of `300/360` inliers, and projection-rematched PnP
+support of `334/381` inliers. Both started temporal confirmation, but later
+keyframes did not independently retrieve and globally rematch the region, so
+the pending state expired. Across the run, 322 sequential edges received pose
+information (13 identity fallbacks, 33,042 used correspondences); the maximum
+raw condition number was `4919.22` and minimum spectral scale `5.35e-9`.
+
+That audit exposed a mismatch between the implementation and the ORB-SLAM3
+temporal-consistency procedure already cited above. The code comment said that
+one strong current-to-region pose is carried into later keyframes, but the
+confirmation implementation required appearance retrieval and global PnP to
+succeed from scratch on every later keyframe. A pending region is now actively
+carried forward: compose its recovered root-to-last pose with intervening
+odometry, projection-match the same covisible region into the new keyframe,
+and run refined PnP before incrementing confirmation. The original
+three-keyframe requirement and pose-disagreement gates remain intact. The
+summary separately reports pending-projection attempts and successful PnP
+verifications. A synthetic 64-point test proves that confirmation evidence can
+be recovered by projection without another global retrieval; the adaptive
+`5/10/15 px` search-radius schedule is unit-tested, but EuRoC must still
+show that this produces correct loops and safe ATE/RPE before promotion.
 
 The motion initializer now also supports optional post-solve gyro- and
 accelerometer-bias magnitude gates, alongside the existing velocity limit.

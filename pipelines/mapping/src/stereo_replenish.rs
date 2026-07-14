@@ -7,20 +7,19 @@
 //! did **not** match to an existing landmark, it stereo-matches against the
 //! same-instant cam1 image (reusing [`bootstrap_stereo_landmarks`]),
 //! triangulates the survivor, and stages a two-observation
-//! [`LandmarkCandidate`] — the current frame's real detected pixel plus a
-//! *synthesised* observation of the same triangulated world point
-//! reprojected into an already-existing keyframe (the "anchor"). The anchor
-//! observation is what makes the candidate a valid two-view triangulation
-//! problem for the [`crate::LinearTriangulator`] that runs at the next
-//! keyframe.
+//! [`LandmarkCandidate`] — the current frame's real detected pixel plus the
+//! matched real keypoint in an already-existing keyframe (the "anchor"). The
+//! provisional stereo point is used only to predict and gate that anchor
+//! match; the [`crate::LinearTriangulator`] that runs at the next keyframe
+//! receives two honest image measurements.
 //!
-//! The synthesised anchor observation is the delicate part: naively
-//! fabricating it (hardcoded keypoint index, no quality gates, no
-//! duplicate suppression) pollutes the map with bogus / duplicate
-//! landmarks. Every gate below exists to keep the synthesised bookkeeping
-//! honest and the triangulation well-conditioned; each is config-gated with
-//! permissive defaults so the common case still admits plenty of fresh
-//! landmarks.
+//! The anchor association is the delicate part: naively fabricating it
+//! (hardcoded keypoint index, no quality gates, no duplicate suppression) or
+//! pairing a real keypoint index with a synthetic pixel pollutes the map with
+//! bogus / over-confident landmarks. Every gate below exists to keep that
+//! association honest and the triangulation well-conditioned; each is
+//! config-gated with permissive defaults so the common case still admits
+//! plenty of fresh landmarks.
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,11 +50,10 @@ pub struct StereoReplenishConfig {
     pub bootstrap_config: StereoBootstrapConfig,
     /// Radius (px) around the reprojected anchor pixel within which a *real*
     /// detected anchor-keyframe keypoint must exist for the candidate to be
-    /// accepted. The synthesised anchor observation then borrows THAT real
-    /// keypoint's index rather than a fabricated one, so the anchor
-    /// keyframe's observation list only ever references keypoints it actually
-    /// detected. A few pixels of slack absorbs the accumulated anchor-pose /
-    /// current-pose error; too tight would strangle recall.
+    /// accepted. The anchor observation uses both THAT keypoint's index and
+    /// its measured pixel coordinate; the stereo reprojection remains only a
+    /// search prediction. A few pixels of slack absorbs the accumulated
+    /// anchor-pose / current-pose error; too tight would strangle recall.
     pub anchor_keypoint_match_radius_px: f64,
     /// Optional descriptor-distance gate between the candidate's cam0
     /// descriptor and the matched anchor keypoint's descriptor (L2, via
@@ -159,8 +157,9 @@ pub fn build_stereo_metric_points(
 /// (`matched_cam0_indices` are the PnP-inlier query indices to exclude),
 /// stereo-match against `cam1_features`, triangulate, gate, and — for
 /// survivors — stage a two-observation candidate: the current frame's real
-/// detection plus a synthesised observation of the same world point
-/// reprojected into the `anchor_frame_id` keyframe.
+/// detection plus the nearest gated real detection in the
+/// `anchor_frame_id` keyframe. The stereo reprojection is a prediction, not a
+/// replacement measurement.
 ///
 /// Returns an empty `Vec` (bails cleanly) when the anchor keyframe, its
 /// pose, its camera, or its keypoints are missing/empty — mirroring the
@@ -233,10 +232,10 @@ pub fn build_stereo_replenish_candidates(
     // Precompute the anchor keyframe's own existing landmarks reprojected into
     // the CURRENT frame (for geometric duplicate suppression), plus the set of
     // anchor keypoint indices already claimed by an existing observation (so a
-    // synthesised anchor observation never collides with a real one). We seed
+    // newly associated anchor observation never collides with one). We seed
     // `claimed_anchor_indices` with the existing observations and extend it as
     // we accept candidates, so two survivors in this same call cannot both
-    // borrow the same anchor keypoint either.
+    // claim the same anchor keypoint either.
     let mut existing_reprojections: Vec<Point2<f64>> =
         Vec::with_capacity(anchor_keyframe.observations.len());
     let mut claimed_anchor_indices: HashSet<usize> =
@@ -346,10 +345,11 @@ pub fn build_stereo_replenish_candidates(
             // an index (defect (a)).
             continue;
         };
+        let anchor_measured_xy = anchor_keyframe.frame.keypoints[anchor_keypoint_index];
 
         let candidate_descriptor = &cam0_features.descriptors[survivor.left_keypoint_index];
 
-        // Optional descriptor-distance gate on the borrowed anchor keypoint.
+        // Optional descriptor-distance gate on the associated anchor keypoint.
         if let Some(max_descriptor_distance) = config.anchor_keypoint_max_descriptor_distance {
             let Some(anchor_descriptor) =
                 anchor_keyframe.frame.descriptors.get(anchor_keypoint_index)
@@ -375,7 +375,7 @@ pub fn build_stereo_replenish_candidates(
                 .with_observation(LandmarkCandidateObservation::new(
                     anchor_frame_id,
                     anchor_keypoint_index,
-                    anchor_xy,
+                    anchor_measured_xy,
                 ))
                 .with_descriptor(candidate_descriptor.clone()),
         );
@@ -502,10 +502,42 @@ mod tests {
         // Current-frame real observation.
         assert_eq!(candidate.observations[0].frame_id, 42);
         assert_eq!(candidate.observations[0].keypoint_index, 0);
-        // Anchor observation borrows the REAL nearest index (2), not 0.
+        // Anchor observation uses the REAL nearest detection at index 2.
         assert_eq!(candidate.observations[1].frame_id, 10);
         assert_eq!(candidate.observations[1].keypoint_index, 2);
+        assert_eq!(candidate.observations[1].xy, anchor_pixel);
         assert!(candidate.descriptor.is_some());
+    }
+
+    #[test]
+    fn anchor_observation_uses_measured_pixel_not_stereo_prediction() {
+        let current = current_pose_shifted(0.3);
+        let world = Point3::new(0.2, -0.1, 4.0);
+        let (cam0_features, cam1_features) = stereo_features(&[world], &current);
+        let predicted = project_identity(&world);
+        // Stay inside the 5 px association radius while making the measured
+        // coordinate observably different from the stereo prediction.
+        let measured = predicted + nalgebra::Vector2::new(1.25, -0.75);
+        let map = base_map(anchor_keyframe(10, vec![measured]));
+
+        let candidates = build_stereo_replenish_candidates(
+            &map,
+            10,
+            42,
+            &cam0(),
+            &cam0_to_cam1(),
+            &cam0_features,
+            &cam1_features,
+            &HashSet::new(),
+            &current,
+            1000,
+            &StereoReplenishConfig::default(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].observations[1].keypoint_index, 0);
+        assert_eq!(candidates[0].observations[1].xy, measured);
+        assert_ne!(candidates[0].observations[1].xy, predicted);
     }
 
     #[test]

@@ -62,13 +62,16 @@ pub(crate) fn pcm_admits_loop(
 /// order-dependent screen, where a perceptual-aliasing closure admitted first
 /// (against the empty set) then poisons every genuine closure checked against
 /// it. `verified` / `deferred` are rewritten to the new partition; returns
-/// `(promoted, evicted)`.
+/// `(promoted, evicted)`. Newly promoted edges use
+/// `fixed_loop_edge_weight` when it is finite and positive; `None` preserves
+/// the legacy inlier-count weighting.
 pub(crate) fn pcm_batch_reconcile(
     graph: &mut PoseGraph,
     verified: &mut Vec<LoopClosureConstraint>,
     deferred: &mut Vec<LoopClosureConstraint>,
     odometry: &BTreeMap<u64, SE3>,
     cfg: &pcm::PcmConfig,
+    fixed_loop_edge_weight: Option<f64>,
 ) -> (usize, usize) {
     let admitted_n = verified.len();
     // Union, admitted first so index `< admitted_n` ⇔ currently in the graph.
@@ -86,7 +89,10 @@ pub(crate) fn pcm_batch_reconcile(
         let was_admitted = i < admitted_n;
         if keep.contains(&i) {
             if !was_admitted {
-                graph.add_loop_closure_constraint(&constraint);
+                let weight = fixed_loop_edge_weight
+                    .filter(|weight| weight.is_finite() && *weight > 0.0)
+                    .unwrap_or_else(|| (constraint.inlier_count as f64).max(1.0));
+                graph.add_loop_closure_constraint_with_weight(&constraint, weight);
                 promoted += 1;
             }
             verified.push(constraint);
@@ -238,8 +244,14 @@ mod pcm_batch_reconcile_tests {
             require_individual: true,
             noise: None,
         };
-        let (promoted, evicted) =
-            pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);
+        let (promoted, evicted) = pcm_batch_reconcile(
+            &mut graph,
+            &mut verified,
+            &mut deferred,
+            &odometry,
+            &cfg,
+            Some(0.125),
+        );
 
         assert_eq!(
             (promoted, evicted),
@@ -262,6 +274,14 @@ mod pcm_batch_reconcile_tests {
         // Graph loop edges match: genuine present, wrong gone.
         assert!(is_loop_edge(&graph, 0, 3));
         assert!(is_loop_edge(&graph, 1, 3));
+        assert!(graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == PoseGraphEdgeKind::LoopClosure
+                    && matches!((edge.from, edge.to), (0, 3) | (1, 3))
+            })
+            .all(|edge| (edge.weight - 0.125).abs() < f64::EPSILON));
         assert!(
             !is_loop_edge(&graph, 0, 2),
             "wrong loop edge must be evicted"
@@ -295,8 +315,14 @@ mod pcm_batch_reconcile_tests {
             require_individual: true,
             noise: None,
         };
-        let (promoted, evicted) =
-            pcm_batch_reconcile(&mut graph, &mut verified, &mut deferred, &odometry, &cfg);
+        let (promoted, evicted) = pcm_batch_reconcile(
+            &mut graph,
+            &mut verified,
+            &mut deferred,
+            &odometry,
+            &cfg,
+            None,
+        );
 
         assert_eq!((promoted, evicted), (0, 0));
         assert_eq!(verified.len(), 2);

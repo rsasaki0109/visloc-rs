@@ -775,7 +775,7 @@ struct CliArgs {
     /// detected anchor-keyframe keypoint must exist. Maps to
     /// [`StereoReplenishConfig::anchor_keypoint_match_radius_px`].
     stereo_landmark_replenish_anchor_match_radius_px: Option<f64>,
-    /// Optional descriptor-distance gate on the borrowed anchor keypoint.
+    /// Optional descriptor-distance gate on the associated anchor keypoint.
     /// Maps to [`StereoReplenishConfig::anchor_keypoint_max_descriptor_distance`].
     stereo_landmark_replenish_anchor_max_descriptor_distance: Option<f32>,
     /// Radius (px) for geometric duplicate suppression against the anchor
@@ -1248,6 +1248,13 @@ struct CliArgs {
     /// Defaults to `1`. Only meaningful when
     /// `pose_graph_refinement_enabled` is set.
     pose_graph_refinement_trigger_every: usize,
+    /// Optional fixed isotropic loop-edge weight. `None` (default) preserves
+    /// the legacy raw-PnP-inlier-count weight. A value such as `1.0` prevents
+    /// correspondence count from being mistaken for calibrated inverse pose
+    /// covariance relative to unit-weight sequential edges.
+    pose_graph_refinement_fixed_loop_edge_weight: Option<f64>,
+    /// Use covariance-aware anisotropic 6×6 information for PnP loop edges.
+    pose_graph_refinement_loop_pose_information: bool,
     /// Enable the Graduated Non-Convexity robust back-end solve
     /// (`OnlineSlamLoopClosureRefinementConfig::gnc`, using
     /// `gnc::GncConfig::default()`) instead of the plain iterative
@@ -1507,6 +1514,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut rebootstrap_cooldown_frames: usize = 60;
     let mut pose_graph_refinement_enabled: bool = false;
     let mut pose_graph_refinement_trigger_every: usize = 1;
+    let mut pose_graph_refinement_fixed_loop_edge_weight: Option<f64> = None;
+    let mut pose_graph_refinement_loop_pose_information: bool = false;
     let mut pose_graph_refinement_gnc: bool = false;
     let mut pose_graph_refinement_pcm: bool = false;
     let mut pose_graph_refinement_pcm_require_individual: bool = true;
@@ -2224,6 +2233,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pose_graph_refinement_trigger_every = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pose-graph-refinement-fixed-loop-edge-weight" => {
+                pose_graph_refinement_fixed_loop_edge_weight = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--pose-graph-refinement-loop-pose-information" => {
+                pose_graph_refinement_loop_pose_information = true;
+                args.remove(i);
+            }
             "--pose-graph-refinement-gnc" => {
                 pose_graph_refinement_gnc = true;
                 args.remove(i);
@@ -2567,6 +2584,20 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         if pose_graph_refinement_trigger_every == 0 {
             return Err("--pose-graph-refinement-trigger-every must be >= 1".into());
         }
+        if pose_graph_refinement_fixed_loop_edge_weight
+            .is_some_and(|weight| !weight.is_finite() || weight <= 0.0)
+        {
+            return Err(
+                "--pose-graph-refinement-fixed-loop-edge-weight must be finite and > 0".into(),
+            );
+        }
+        if pose_graph_refinement_fixed_loop_edge_weight.is_some()
+            && pose_graph_refinement_loop_pose_information
+        {
+            return Err(
+                "fixed loop weight and loop pose information are mutually exclusive".into(),
+            );
+        }
         if let Some(gate) = pose_graph_refinement_covariance_gate {
             if !gate.is_finite() || gate <= 0.0 {
                 return Err("--pose-graph-refinement-covariance-gate must be positive".into());
@@ -2767,6 +2798,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         rebootstrap_cooldown_frames,
         pose_graph_refinement_enabled,
         pose_graph_refinement_trigger_every,
+        pose_graph_refinement_fixed_loop_edge_weight,
+        pose_graph_refinement_loop_pose_information,
         pose_graph_refinement_gnc,
         pose_graph_refinement_pcm,
         pose_graph_refinement_pcm_require_individual,
@@ -3883,6 +3916,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             pose_graph_config: PoseGraphSe3Config::default(),
+            fixed_loop_edge_weight: args.pose_graph_refinement_fixed_loop_edge_weight,
+            loop_pose_information: args
+                .pose_graph_refinement_loop_pose_information
+                .then(visloc_rs::slam::LoopPoseInformationConfig::default),
             gnc: if args.pose_graph_refinement_gnc {
                 Some(visloc_rs::slam::gnc::GncConfig::default())
             } else {
@@ -4205,7 +4242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "frame_idx,from_keyframe_id,to_keyframe_id,keyframe_id_gap,translation_norm_m,relative_tx,relative_ty,relative_tz,relative_qw,relative_qx,relative_qy,relative_qz,inlier_count,source,rejection_reason,gt_translation_error_m,gt_rotation_error_deg,gt_correct_0p5m_10deg\n",
     );
     let mut loop_candidate_diagnostics_csv = String::from(
-        "frame_idx,timestamp_ns,shared_candidates_seen,appearance_candidates_ranked,appearance_connected_region_rejected,appearance_primary_pnp_verified,appearance_projection_rejected,appearance_covisibility_rejected,appearance_region_confirmation_waiting,appearance_region_confirmed,appearance_candidates_admitted,pcm_rejected,covariance_rejected\n",
+        "frame_idx,timestamp_ns,shared_candidates_seen,appearance_candidates_ranked,appearance_connected_region_rejected,appearance_primary_pnp_verified,appearance_projection_rejected,appearance_covisibility_rejected,appearance_pending_projection_attempted,appearance_pending_projection_verified,appearance_pending_projection_search_radius_px,appearance_pending_projection_correspondences,appearance_pending_projection_inliers,appearance_region_confirmation_waiting,appearance_region_confirmed,appearance_candidates_admitted,pcm_rejected,covariance_rejected\n",
     );
     let mut loop_candidate_evidence_csv = String::from(
         "query_frame_id,matched_keyframe_id,appearance_similarity,matched_region_keyframes,matched_region_landmarks,primary_correspondences,primary_inliers,projection_attempted,projection_correspondences,projection_inliers,projection_accepted,current_covisible_keyframes,neighbor_pnp_verified,consistent_keyframes,min_translation_disagreement_m,min_rotation_disagreement_rad,accepted\n",
@@ -4364,6 +4401,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_appearance_pnp_verified: usize = 0;
     let mut pose_graph_refinement_appearance_projection_rejected: usize = 0;
     let mut pose_graph_refinement_appearance_covisibility_rejected: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_attempted: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_verified: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_correspondences: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_inliers: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_correspondences_max: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_inliers_max: usize = 0;
+    let mut pose_graph_refinement_appearance_pending_projection_radius_min: Option<f64> = None;
+    let mut pose_graph_refinement_appearance_pending_projection_radius_max: Option<f64> = None;
     let mut pose_graph_refinement_appearance_region_confirmation_waiting: usize = 0;
     let mut pose_graph_refinement_appearance_region_confirmed: usize = 0;
     let mut pose_graph_refinement_appearance_scale_failed: usize = 0;
@@ -4374,6 +4419,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_pgo_solves: usize = 0;
     let mut pose_graph_refinement_pcm_rejected: usize = 0;
     let mut pose_graph_refinement_covariance_rejected: usize = 0;
+    let mut pose_graph_refinement_pose_information_rejected: usize = 0;
+    let mut pose_graph_refinement_with_pose_information: usize = 0;
+    let mut pose_graph_refinement_pose_information_estimates: usize = 0;
+    let mut pose_graph_refinement_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_pose_information_raw_condition_max: f64 = 0.0;
+    let mut pose_graph_refinement_pose_information_spectral_scale_min: Option<f64> = None;
+    let mut pose_graph_refinement_sequential_with_pose_information: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_fallbacks: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_raw_condition_max: f64 = 0.0;
+    let mut pose_graph_refinement_sequential_pose_information_spectral_scale_min: Option<f64> =
+        None;
     let mut pose_graph_refinement_landmarks_moved: usize = 0;
     let mut pose_graph_refinement_max_landmark_displacement_meters: f64 = 0.0;
     let mut pose_graph_refinement_tracker_corrections_applied: usize = 0;
@@ -4541,9 +4598,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // frame's own `process_frame` call, anchors any replenishment
         // candidates built below: `process_keyframe`'s triangulator only
         // accepts observations against keyframes already present in the
-        // map, so a second (synthesised) observation against this
-        // pre-existing keyframe is what lets a same-frame stereo match
-        // become a valid two-view `LandmarkCandidate`.
+        // map, so a second gated real observation from this pre-existing
+        // keyframe is what lets a same-frame stereo match become a valid
+        // two-view `LandmarkCandidate`.
         let replenish_anchor_frame_id = if args.stereo_landmark_replenish {
             slam.map().keyframes.keys().copied().max()
         } else {
@@ -4700,9 +4757,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stereo landmark replenishment: for cam0 keypoints tracking did NOT
         // match to an existing landmark this frame, reuse the cam1 features
         // extracted above and stage two-observation
-        // `LandmarkCandidate`s (this frame's real pixel + a synthesised
-        // observation reprojected into the most-recent keyframe) for
-        // submission on the *next* frame's `process_frame` call. All the
+        // `LandmarkCandidate`s (this frame's real pixel + a gated real
+        // observation in the most-recent keyframe, predicted by the stereo
+        // reprojection) for
+        // submission on the *next* frame's `process_frame` call. The anchor
+        // observation is a gated real keypoint measurement; the stereo 3D
+        // reprojection is used only to predict that association. All the
         // matching / triangulation / gating logic (the three-defect-hardened
         // module) lives in `build_stereo_replenish_candidates`; here we only
         // assemble its inputs — cam1 features for this instant, the
@@ -5190,7 +5250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(stats) = result.pose_graph_refinement.as_ref() {
             loop_candidate_diagnostics_csv.push_str(&format!(
-                "{frame_idx},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{frame_idx},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 image_entry.timestamp_nanoseconds,
                 stats.verified_candidate_count,
                 stats.appearance_ranked_candidate_count,
@@ -5198,6 +5258,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.appearance_pnp_verified_count,
                 stats.appearance_projection_rejected_count,
                 stats.appearance_covisibility_rejected_count,
+                stats.appearance_pending_projection_attempted_count,
+                stats.appearance_pending_projection_verified_count,
+                format_optional_f64(stats.appearance_pending_projection_search_radius_px),
+                stats.appearance_pending_projection_correspondence_count,
+                stats.appearance_pending_projection_inlier_count,
                 stats.appearance_region_confirmation_waiting,
                 stats.appearance_region_confirmed_count,
                 stats
@@ -5242,6 +5307,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.appearance_projection_rejected_count;
             pose_graph_refinement_appearance_covisibility_rejected +=
                 stats.appearance_covisibility_rejected_count;
+            pose_graph_refinement_appearance_pending_projection_attempted +=
+                stats.appearance_pending_projection_attempted_count;
+            pose_graph_refinement_appearance_pending_projection_verified +=
+                stats.appearance_pending_projection_verified_count;
+            pose_graph_refinement_appearance_pending_projection_correspondences +=
+                stats.appearance_pending_projection_correspondence_count;
+            pose_graph_refinement_appearance_pending_projection_inliers +=
+                stats.appearance_pending_projection_inlier_count;
+            pose_graph_refinement_appearance_pending_projection_correspondences_max =
+                pose_graph_refinement_appearance_pending_projection_correspondences_max
+                    .max(stats.appearance_pending_projection_correspondence_count);
+            pose_graph_refinement_appearance_pending_projection_inliers_max =
+                pose_graph_refinement_appearance_pending_projection_inliers_max
+                    .max(stats.appearance_pending_projection_inlier_count);
+            if let Some(radius) = stats.appearance_pending_projection_search_radius_px {
+                pose_graph_refinement_appearance_pending_projection_radius_min = Some(
+                    pose_graph_refinement_appearance_pending_projection_radius_min
+                        .map_or(radius, |value| value.min(radius)),
+                );
+                pose_graph_refinement_appearance_pending_projection_radius_max = Some(
+                    pose_graph_refinement_appearance_pending_projection_radius_max
+                        .map_or(radius, |value| value.max(radius)),
+                );
+            }
             pose_graph_refinement_appearance_region_confirmation_waiting +=
                 usize::from(stats.appearance_region_confirmation_waiting);
             pose_graph_refinement_appearance_region_confirmed +=
@@ -5266,6 +5355,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             pose_graph_refinement_pcm_rejected += stats.loop_closures_pcm_rejected;
             pose_graph_refinement_covariance_rejected += stats.loop_closures_covariance_rejected;
+            pose_graph_refinement_pose_information_rejected +=
+                stats.loop_closures_pose_information_rejected;
+            pose_graph_refinement_with_pose_information +=
+                stats.loop_closures_with_pose_information;
+            for diagnostic in &stats.loop_pose_information_diagnostics {
+                pose_graph_refinement_pose_information_estimates += 1;
+                pose_graph_refinement_pose_information_used_correspondences +=
+                    diagnostic.used_correspondence_count;
+                pose_graph_refinement_pose_information_raw_condition_max =
+                    pose_graph_refinement_pose_information_raw_condition_max
+                        .max(diagnostic.raw_condition_number);
+                pose_graph_refinement_pose_information_spectral_scale_min = Some(
+                    pose_graph_refinement_pose_information_spectral_scale_min
+                        .map_or(diagnostic.applied_spectral_scale, |value| {
+                            value.min(diagnostic.applied_spectral_scale)
+                        }),
+                );
+            }
+            pose_graph_refinement_sequential_with_pose_information +=
+                stats.sequential_edges_with_pose_information;
+            pose_graph_refinement_sequential_pose_information_fallbacks +=
+                stats.sequential_pose_information_fallbacks;
+            for diagnostic in &stats.sequential_pose_information_diagnostics {
+                pose_graph_refinement_sequential_pose_information_used_correspondences +=
+                    diagnostic.used_correspondence_count;
+                pose_graph_refinement_sequential_pose_information_raw_condition_max =
+                    pose_graph_refinement_sequential_pose_information_raw_condition_max
+                        .max(diagnostic.raw_condition_number);
+                pose_graph_refinement_sequential_pose_information_spectral_scale_min = Some(
+                    pose_graph_refinement_sequential_pose_information_spectral_scale_min
+                        .map_or(diagnostic.applied_spectral_scale, |value| {
+                            value.min(diagnostic.applied_spectral_scale)
+                        }),
+                );
+            }
             pose_graph_refinement_landmarks_moved += stats.landmarks_moved;
             if let Some(max_displacement) = stats.max_landmark_displacement_meters {
                 if max_displacement > pose_graph_refinement_max_landmark_displacement_meters {
@@ -5940,6 +6064,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_last_error={covis_ba_last_error:?}\n\
          pose_graph_refinement={pgr_enabled}\n\
          pose_graph_refinement_trigger_every={pgr_trigger_every}\n\
+         pose_graph_refinement_fixed_loop_edge_weight={pgr_fixed_loop_edge_weight:?}\n\
+         pose_graph_refinement_loop_pose_information={pgr_loop_pose_information}\n\
          pose_graph_refinement_gnc={pgr_gnc}\n\
          pose_graph_refinement_pcm={pgr_pcm}\n\
          pose_graph_refinement_pcm_require_individual={pgr_pcm_require_individual}\n\
@@ -5952,6 +6078,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_pgo_solves={pgr_pgo_solves}\n\
          pose_graph_refinement_pcm_rejected={pgr_pcm_rejected}\n\
          pose_graph_refinement_covariance_rejected={pgr_covariance_rejected}\n\
+         pose_graph_refinement_pose_information_rejected={pgr_pose_information_rejected}\n\
+         pose_graph_refinement_with_pose_information={pgr_with_pose_information}\n\
+         pose_graph_refinement_pose_information_estimates={pgr_pose_information_estimates}\n\
+         pose_graph_refinement_pose_information_used_correspondences={pgr_pose_information_used_correspondences}\n\
+         pose_graph_refinement_pose_information_raw_condition_max={pgr_pose_information_raw_condition_max:.9}\n\
+         pose_graph_refinement_pose_information_spectral_scale_min={pgr_pose_information_spectral_scale_min:?}\n\
+         pose_graph_refinement_sequential_with_pose_information={pgr_sequential_with_pose_information}\n\
+         pose_graph_refinement_sequential_pose_information_fallbacks={pgr_sequential_pose_information_fallbacks}\n\
+         pose_graph_refinement_sequential_pose_information_used_correspondences={pgr_sequential_pose_information_used_correspondences}\n\
+         pose_graph_refinement_sequential_pose_information_raw_condition_max={pgr_sequential_pose_information_raw_condition_max:.9}\n\
+         pose_graph_refinement_sequential_pose_information_spectral_scale_min={pgr_sequential_pose_information_spectral_scale_min:?}\n\
          pose_graph_refinement_appearance_loops={pgr_appearance_enabled}\n\
          pose_graph_refinement_appearance_min_gap={pgr_appearance_min_gap}\n\
          pose_graph_refinement_appearance_max_candidates={pgr_appearance_max_candidates}\n\
@@ -5965,6 +6102,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_appearance_pnp_verified={pgr_appearance_pnp_verified}\n\
          pose_graph_refinement_appearance_projection_rejected={pgr_appearance_projection_rejected}\n\
          pose_graph_refinement_appearance_covisibility_rejected={pgr_appearance_covisibility_rejected}\n\
+         pose_graph_refinement_appearance_pending_projection_attempted={pgr_appearance_pending_projection_attempted}\n\
+         pose_graph_refinement_appearance_pending_projection_verified={pgr_appearance_pending_projection_verified}\n\
+         pose_graph_refinement_appearance_pending_projection_correspondences={pgr_appearance_pending_projection_correspondences}\n\
+         pose_graph_refinement_appearance_pending_projection_inliers={pgr_appearance_pending_projection_inliers}\n\
+         pose_graph_refinement_appearance_pending_projection_correspondences_max={pgr_appearance_pending_projection_correspondences_max}\n\
+         pose_graph_refinement_appearance_pending_projection_inliers_max={pgr_appearance_pending_projection_inliers_max}\n\
+         pose_graph_refinement_appearance_pending_projection_radius_min={pgr_appearance_pending_projection_radius_min:?}\n\
+         pose_graph_refinement_appearance_pending_projection_radius_max={pgr_appearance_pending_projection_radius_max:?}\n\
          pose_graph_refinement_appearance_region_confirmation_waiting={pgr_appearance_region_confirmation_waiting}\n\
          pose_graph_refinement_appearance_region_confirmed={pgr_appearance_region_confirmed}\n\
          pose_graph_refinement_appearance_scale_failed={pgr_appearance_scale_failed}\n\
@@ -6239,6 +6384,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_last_error = covisibility_local_ba_last_error,
         pgr_enabled = args.pose_graph_refinement_enabled,
         pgr_trigger_every = args.pose_graph_refinement_trigger_every,
+        pgr_fixed_loop_edge_weight = args.pose_graph_refinement_fixed_loop_edge_weight,
+        pgr_loop_pose_information = args.pose_graph_refinement_loop_pose_information,
         pgr_gnc = args.pose_graph_refinement_gnc,
         pgr_pcm = args.pose_graph_refinement_pcm,
         pgr_pcm_require_individual = args.pose_graph_refinement_pcm_require_individual,
@@ -6257,6 +6404,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_pgo_solves = pose_graph_refinement_pgo_solves,
         pgr_pcm_rejected = pose_graph_refinement_pcm_rejected,
         pgr_covariance_rejected = pose_graph_refinement_covariance_rejected,
+        pgr_pose_information_rejected = pose_graph_refinement_pose_information_rejected,
+        pgr_with_pose_information = pose_graph_refinement_with_pose_information,
+        pgr_pose_information_estimates = pose_graph_refinement_pose_information_estimates,
+        pgr_pose_information_used_correspondences =
+            pose_graph_refinement_pose_information_used_correspondences,
+        pgr_pose_information_raw_condition_max =
+            pose_graph_refinement_pose_information_raw_condition_max,
+        pgr_pose_information_spectral_scale_min =
+            pose_graph_refinement_pose_information_spectral_scale_min,
+        pgr_sequential_with_pose_information =
+            pose_graph_refinement_sequential_with_pose_information,
+        pgr_sequential_pose_information_fallbacks =
+            pose_graph_refinement_sequential_pose_information_fallbacks,
+        pgr_sequential_pose_information_used_correspondences =
+            pose_graph_refinement_sequential_pose_information_used_correspondences,
+        pgr_sequential_pose_information_raw_condition_max =
+            pose_graph_refinement_sequential_pose_information_raw_condition_max,
+        pgr_sequential_pose_information_spectral_scale_min =
+            pose_graph_refinement_sequential_pose_information_spectral_scale_min,
         pgr_appearance_enabled = args.pose_graph_refinement_appearance_loops,
         pgr_appearance_min_gap = args.pose_graph_refinement_appearance_min_gap,
         pgr_appearance_max_candidates = args.pose_graph_refinement_appearance_max_candidates,
@@ -6277,6 +6443,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pose_graph_refinement_appearance_projection_rejected,
         pgr_appearance_covisibility_rejected =
             pose_graph_refinement_appearance_covisibility_rejected,
+        pgr_appearance_pending_projection_attempted =
+            pose_graph_refinement_appearance_pending_projection_attempted,
+        pgr_appearance_pending_projection_verified =
+            pose_graph_refinement_appearance_pending_projection_verified,
+        pgr_appearance_pending_projection_correspondences =
+            pose_graph_refinement_appearance_pending_projection_correspondences,
+        pgr_appearance_pending_projection_inliers =
+            pose_graph_refinement_appearance_pending_projection_inliers,
+        pgr_appearance_pending_projection_correspondences_max =
+            pose_graph_refinement_appearance_pending_projection_correspondences_max,
+        pgr_appearance_pending_projection_inliers_max =
+            pose_graph_refinement_appearance_pending_projection_inliers_max,
+        pgr_appearance_pending_projection_radius_min =
+            pose_graph_refinement_appearance_pending_projection_radius_min,
+        pgr_appearance_pending_projection_radius_max =
+            pose_graph_refinement_appearance_pending_projection_radius_max,
         pgr_appearance_region_confirmation_waiting =
             pose_graph_refinement_appearance_region_confirmation_waiting,
         pgr_appearance_region_confirmed =
