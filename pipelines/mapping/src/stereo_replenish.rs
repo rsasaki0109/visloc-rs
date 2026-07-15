@@ -9,9 +9,9 @@
 //! triangulates the survivor, and stages a two-observation
 //! [`LandmarkCandidate`] — the current frame's real detected pixel plus the
 //! matched real keypoint in an already-existing keyframe (the "anchor"). The
-//! provisional stereo point is used only to predict and gate that anchor
-//! match; the [`crate::LinearTriangulator`] that runs at the next keyframe
-//! receives two honest image measurements.
+//! provisional stereo point is used to predict and gate that anchor match; the
+//! [`crate::LinearTriangulator`] that runs at the next keyframe receives two
+//! honest image measurements.
 //!
 //! The anchor association is the delicate part: naively fabricating it
 //! (hardcoded keypoint index, no quality gates, no duplicate suppression) or
@@ -365,19 +365,31 @@ pub fn build_stereo_replenish_candidates(
         claimed_anchor_indices.insert(anchor_keypoint_index);
         let candidate_id = next_id;
         next_id += 1;
+        let rotation_camera_to_world = camera_to_world.rotation.to_rotation_matrix().into_inner();
+        let covariance_world = rotation_camera_to_world
+            * survivor.point_covariance_left_camera_frame
+            * rotation_camera_to_world.transpose();
         candidates.push(
             LandmarkCandidate::new(candidate_id)
-                .with_observation(LandmarkCandidateObservation::new(
-                    frame_id,
-                    survivor.left_keypoint_index,
-                    raw_left_pixel,
-                ))
+                .with_observation(
+                    LandmarkCandidateObservation::new(
+                        frame_id,
+                        survivor.left_keypoint_index,
+                        raw_left_pixel,
+                    )
+                    .with_stereo_measurement(
+                        cam1_camera.id,
+                        cam1_features.keypoints[survivor.right_keypoint_index],
+                        cam0_to_cam1.clone(),
+                    ),
+                )
                 .with_observation(LandmarkCandidateObservation::new(
                     anchor_frame_id,
                     anchor_keypoint_index,
                     anchor_measured_xy,
                 ))
-                .with_descriptor(candidate_descriptor.clone()),
+                .with_descriptor(candidate_descriptor.clone())
+                .with_position_covariance_world(covariance_world),
         );
     }
 
@@ -502,11 +514,24 @@ mod tests {
         // Current-frame real observation.
         assert_eq!(candidate.observations[0].frame_id, 42);
         assert_eq!(candidate.observations[0].keypoint_index, 0);
+        let stereo = candidate.observations[0]
+            .stereo
+            .as_ref()
+            .expect("current observation retains its cam1 measurement");
+        assert_eq!(stereo.right_camera_id, cam0().id);
+        assert_eq!(stereo.xy_right, cam1_features.keypoints[0]);
+        assert_eq!(stereo.left_to_right, cam0_to_cam1());
         // Anchor observation uses the REAL nearest detection at index 2.
         assert_eq!(candidate.observations[1].frame_id, 10);
         assert_eq!(candidate.observations[1].keypoint_index, 2);
         assert_eq!(candidate.observations[1].xy, anchor_pixel);
+        assert!(candidate.observations[1].stereo.is_none());
         assert!(candidate.descriptor.is_some());
+        let covariance = candidate
+            .position_covariance_world
+            .expect("stereo uncertainty is retained for downstream backend factors");
+        assert!(covariance.iter().all(|value| value.is_finite()));
+        assert!(covariance.trace() > 0.0);
     }
 
     #[test]

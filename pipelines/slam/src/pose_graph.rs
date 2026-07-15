@@ -492,7 +492,7 @@ impl PoseGraph {
             let displacement = expected_world_displacement(to, &edge.measurement);
             let actual = to.camera_center_world() - from.camera_center_world();
             let residual = actual - displacement;
-            total += edge.weight * residual.norm_squared();
+            total += translation_initialization_weight(edge) * residual.norm_squared();
         }
         total
     }
@@ -557,11 +557,18 @@ impl PoseGraph {
 
         // Assemble the normal equations `A^T A x = A^T b` directly. Each row
         // of `A` (per edge) has at most two nonzero 3×3 identity-shaped
-        // blocks (`+w · I` at `to`, `-w · I` at `from`), so the contribution
-        // to `A^T A` per edge is also block-structured: `w² · I` at the
-        // `(to, to)` and `(from, from)` diagonal blocks and `-w² · I` at
+        // blocks (`+sqrt(w) · I` at `to`, `-sqrt(w) · I` at `from`), so the
+        // contribution to `A^T A` per edge is block-structured: `w · I` at the
+        // `(to, to)` and `(from, from)` diagonal blocks and `-w · I` at
         // both off-diagonal blocks. Anchor-incident edges only push to one
         // diagonal and shift `A^T b` by the anchor center.
+        //
+        // This is only a seed for the full SE(3) solve, so a 6×6 information
+        // matrix is reduced to the rotationally invariant mean eigenvalue of
+        // its translation block (trace / 3). Crucially, this preserves any
+        // loop-only scalar applied to Ω; treating every information edge as
+        // scalar weight 1 would let a deliberately weak loop dominate the
+        // chordal seed before GNC starts.
         let dim = variable_count * 3;
         let mut h_dense = match linear_solver {
             LinearSolver::Dense => Some(DMatrix::<f64>::zeros(dim, dim)),
@@ -577,7 +584,7 @@ impl PoseGraph {
             let to_pose = &self.poses[&edge.to];
             let displacement = expected_world_displacement(to_pose, &edge.measurement);
             let mut rhs = displacement;
-            let w2 = edge.weight;
+            let w2 = translation_initialization_weight(edge);
 
             let i_to = node_index.get(&edge.to).copied();
             let i_from = node_index.get(&edge.from).copied();
@@ -749,7 +756,10 @@ impl PoseGraph {
 
     /// Per-edge (whitened) squared residual `sᵢ`, indexed by edge position —
     /// the same quantity the [`RobustKernel`] sees: the Mahalanobis distance
-    /// `rᵀΩr` for an edge carrying a full information matrix, else `‖r‖²`.
+    /// `rᵀΩr` for an edge carrying a full information matrix, else
+    /// `edge.weight · ‖r‖²`. Including the scalar information is essential:
+    /// GNC classification must use the same whitened residual scale as its
+    /// weighted least-squares inner solve.
     /// Edges referencing a missing node contribute `0.0` so the vector stays
     /// aligned with [`Self::edges`]. Used by the GNC driver to reweight edges.
     fn edge_squared_residuals(&self) -> Vec<f64> {
@@ -764,7 +774,7 @@ impl PoseGraph {
                 let r = edge.measurement.inverse().compose(&predicted).log();
                 match &edge.information {
                     Some(omega) => (r.transpose() * omega * r)[(0, 0)],
-                    None => r.norm_squared(),
+                    None => edge.weight * r.norm_squared(),
                 }
             })
             .collect()
@@ -2438,6 +2448,22 @@ fn add_dense_block3(
 fn chordal_rotation_weight(edge: &PoseGraphEdge) -> f64 {
     let w = match &edge.information {
         Some(omega) => (omega[(3, 3)] + omega[(4, 4)] + omega[(5, 5)]) / 3.0,
+        None => edge.weight,
+    };
+    if w.is_finite() && w > 0.0 {
+        w
+    } else {
+        1e-9
+    }
+}
+
+/// Scalar confidence used by the translation-only chordal seed. The full
+/// optimizer consumes all of `Ω`; this seed uses the trace of the translation
+/// block because trace is invariant under a change of 3-D coordinate basis and
+/// retains uniform information scaling exactly.
+fn translation_initialization_weight(edge: &PoseGraphEdge) -> f64 {
+    let w = match &edge.information {
+        Some(omega) => (omega[(0, 0)] + omega[(1, 1)] + omega[(2, 2)]) / 3.0,
         None => edge.weight,
     };
     if w.is_finite() && w > 0.0 {

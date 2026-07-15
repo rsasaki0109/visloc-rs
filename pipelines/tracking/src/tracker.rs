@@ -472,8 +472,8 @@ where
             );
         }
 
-        let tracking_failure_reason =
-            self.apply_tracking_quality_gate(frame.id, pose_prior.as_ref(), &mut localization);
+        let (tracking_failure_reason, continuation_pose) =
+            self.apply_tracking_quality_gate(frame, map, pose_prior.as_ref(), &mut localization);
 
         let previous_state = self.state;
         let event = if localization.success {
@@ -514,8 +514,12 @@ where
             covisibility_local_map_size,
         };
 
-        self.update_history(&result);
-        self.motion_model.observe(&result);
+        let mut continuation_result = result.clone();
+        if let Some(pose) = continuation_pose {
+            continuation_result.localization.pose = Some(pose);
+        }
+        self.update_history(&continuation_result);
+        self.motion_model.observe(&continuation_result);
         result
     }
 
@@ -532,7 +536,9 @@ where
         descriptor_store: &LandmarkDescriptorStore,
         pose_prior: Option<&Pose>,
     ) -> LocalizationResult {
-        if self.config.pnp_pose_prior_warm_start {
+        if self.config.pnp_pose_prior_warm_start
+            && self.motion_model.allows_pnp_pose_prior_warm_start()
+        {
             self.localization_pipeline
                 .localize_frame_with_pose_prior_warm_start_and_descriptor_store(
                     frame,
@@ -575,13 +581,14 @@ where
             self.stats.projection_guided_attempt_count += 1;
             projection_result = self
                 .localization_pipeline
-                .localize_frame_with_projection_window_and_descriptor_store(
+                .localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
                     frame,
                     map,
                     descriptor_store,
                     pose_prior,
                     self.config.last_pose_candidate_radius,
                     radius,
+                    config.max_query_landmark_distance_ratio,
                 );
             if projection_result.success {
                 break;
@@ -736,29 +743,36 @@ where
     }
 
     fn apply_tracking_quality_gate(
-        &self,
-        frame_id: FrameId,
+        &mut self,
+        frame: &Frame,
+        map: &VisualMap,
         pose_prior: Option<&Pose>,
         localization: &mut LocalizationResult,
-    ) -> Option<TrackingFailureReason> {
+    ) -> (Option<TrackingFailureReason>, Option<Pose>) {
         if !localization.success {
-            return None;
+            return (None, None);
         }
 
         if localization.inlier_count < self.config.min_inliers {
             *localization = localization.clone().rejected_by_quality_gate();
-            return Some(TrackingFailureReason::InsufficientInliers {
-                inlier_count: localization.inlier_count,
-                min_inliers: self.config.min_inliers,
-            });
+            return (
+                Some(TrackingFailureReason::InsufficientInliers {
+                    inlier_count: localization.inlier_count,
+                    min_inliers: self.config.min_inliers,
+                }),
+                None,
+            );
         }
 
         if localization.inlier_ratio < self.config.min_inlier_ratio {
             *localization = localization.clone().rejected_by_quality_gate();
-            return Some(TrackingFailureReason::InlierRatioTooLow {
-                inlier_ratio: localization.inlier_ratio,
-                min_inlier_ratio: self.config.min_inlier_ratio,
-            });
+            return (
+                Some(TrackingFailureReason::InlierRatioTooLow {
+                    inlier_ratio: localization.inlier_ratio,
+                    min_inlier_ratio: self.config.min_inlier_ratio,
+                }),
+                None,
+            );
         }
 
         if let (Some(reprojection_error), Some(max_reprojection_error)) = (
@@ -767,21 +781,30 @@ where
         ) {
             if reprojection_error > max_reprojection_error {
                 *localization = localization.clone().rejected_by_quality_gate();
-                return Some(TrackingFailureReason::MeanReprojectionErrorTooHigh {
-                    reprojection_error,
-                    max_reprojection_error,
-                });
+                return (
+                    Some(TrackingFailureReason::MeanReprojectionErrorTooHigh {
+                        reprojection_error,
+                        max_reprojection_error,
+                    }),
+                    None,
+                );
             }
         }
 
-        let max_translation_error = self.config.max_pose_prior_translation_error?;
-        let pose_prior = pose_prior?;
-        let estimated_pose = localization.pose.as_ref()?;
+        let Some(max_translation_error) = self.config.max_pose_prior_translation_error else {
+            return (None, None);
+        };
+        let Some(pose_prior) = pose_prior else {
+            return (None, None);
+        };
+        let Some(estimated_pose) = localization.pose.as_ref() else {
+            return (None, None);
+        };
 
         let translation_error =
             (estimated_pose.camera_center_world() - pose_prior.camera_center_world()).norm();
 
-        let max_translation_error = if self.config.pose_jump_gap_scaling {
+        let mut max_translation_error = if self.config.pose_jump_gap_scaling {
             // The pose prior comes from the motion model, which (for the
             // constant-pose / constant-velocity models used here) is
             // anchored to `last_successful_pose`. If tracking has been
@@ -792,7 +815,7 @@ where
             // a pose the camera left several frames ago.
             let frames_since_last_tracking_success = self
                 .last_successful_frame_id
-                .map(|last_id| frame_id.saturating_sub(last_id))
+                .map(|last_id| frame.id.saturating_sub(last_id))
                 .unwrap_or(1)
                 .max(1);
             let multiplier = pose_jump_gap_scaling_multiplier(
@@ -804,16 +827,204 @@ where
             max_translation_error
         };
 
+        let mut continuation_pose = None;
+        if let Some(override_config) = self.config.pose_prior_visual_override {
+            let rotation_error = pose_prior
+                .camera_to_world()
+                .rotation
+                .rotation_to(&estimated_pose.camera_to_world().rotation)
+                .angle();
+            if let Some(widened) = pose_prior_visual_override_threshold(
+                override_config,
+                localization,
+                translation_error,
+                rotation_error,
+                max_translation_error,
+            ) {
+                max_translation_error = widened;
+                self.stats.pose_prior_visual_override_count += 1;
+                continuation_pose = covariance_weighted_continuation_pose(
+                    frame,
+                    map,
+                    pose_prior,
+                    estimated_pose,
+                    localization,
+                    override_config,
+                )
+                .or_else(|| Some(pose_prior.clone()));
+            }
+        }
+
         if translation_error <= max_translation_error {
-            return None;
+            return (None, continuation_pose);
         }
 
         *localization = localization.clone().rejected_by_quality_gate();
-        Some(TrackingFailureReason::PosePriorTranslationErrorExceeded {
-            translation_error,
-            max_translation_error,
-        })
+        (
+            Some(TrackingFailureReason::PosePriorTranslationErrorExceeded {
+                translation_error,
+                max_translation_error,
+            }),
+            None,
+        )
     }
+}
+
+fn pose_prior_visual_override_satisfied(
+    config: crate::PosePriorVisualOverrideConfig,
+    localization: &LocalizationResult,
+) -> bool {
+    config.min_inliers > 0
+        && config.min_inlier_ratio.is_finite()
+        && (0.0..=1.0).contains(&config.min_inlier_ratio)
+        && config.max_translation_error_multiplier.is_finite()
+        && config.min_translation_error_multiplier.is_finite()
+        && config.min_translation_error_multiplier >= 1.0
+        && config.min_translation_error_multiplier <= config.max_translation_error_multiplier
+        && config.max_translation_error_multiplier >= 1.0
+        && localization.inlier_count >= config.min_inliers
+        && localization.inlier_ratio.is_finite()
+        && localization.inlier_ratio >= config.min_inlier_ratio
+        && config.max_mean_reprojection_error.is_none_or(|maximum| {
+            maximum.is_finite()
+                && maximum >= 0.0
+                && localization
+                    .reprojection_error
+                    .is_some_and(|value| value.is_finite() && value <= maximum)
+        })
+}
+
+fn pose_prior_visual_override_threshold(
+    config: crate::PosePriorVisualOverrideConfig,
+    localization: &LocalizationResult,
+    translation_error: f64,
+    rotation_error: f64,
+    base_threshold: f64,
+) -> Option<f64> {
+    let minimum = base_threshold * config.min_translation_error_multiplier;
+    let maximum = base_threshold * config.max_translation_error_multiplier;
+    (base_threshold.is_finite()
+        && base_threshold > 0.0
+        && translation_error.is_finite()
+        && translation_error >= minimum
+        && translation_error <= maximum
+        && config.max_rotation_error_radians.is_none_or(|maximum| {
+            maximum.is_finite()
+                && maximum >= 0.0
+                && rotation_error.is_finite()
+                && rotation_error <= maximum
+        })
+        && pose_prior_visual_override_satisfied(config, localization))
+    .then_some(maximum)
+}
+
+fn covariance_weighted_continuation_pose(
+    frame: &Frame,
+    map: &VisualMap,
+    pose_prior: &Pose,
+    estimated_pose: &Pose,
+    localization: &LocalizationResult,
+    config: crate::PosePriorVisualOverrideConfig,
+) -> Option<Pose> {
+    let camera = map.cameras.get(&frame.camera_id)?;
+    let prior_std = config.continuation_prior_translation_std_m;
+    let pixel_sigma = config.continuation_visual_pixel_sigma_px;
+    let max_gain = config.continuation_max_gain;
+    let max_condition = config.continuation_max_condition_number;
+    if !prior_std.is_finite()
+        || prior_std <= 0.0
+        || !pixel_sigma.is_finite()
+        || pixel_sigma <= 0.0
+        || !max_gain.is_finite()
+        || !(0.0..=1.0).contains(&max_gain)
+        || !max_condition.is_finite()
+        || max_condition < 1.0
+    {
+        return None;
+    }
+
+    let rotation = estimated_pose.world_to_camera.rotation;
+    let center = estimated_pose.camera_center_world().coords;
+    let eps = 1.0e-4;
+    let mut hessian = Matrix3::<f64>::zeros();
+    let mut used = 0usize;
+    for landmark_id in &localization.inlier_landmark_ids {
+        let Some(landmark) = map.landmarks.get(landmark_id) else {
+            continue;
+        };
+        let mut jacobian = nalgebra::SMatrix::<f64, 2, 3>::zeros();
+        let mut valid = true;
+        for axis in 0..3 {
+            let mut plus_center = center;
+            let mut minus_center = center;
+            plus_center[axis] += eps;
+            minus_center[axis] -= eps;
+            let plus_translation = -(rotation.transform_vector(&plus_center));
+            let minus_translation = -(rotation.transform_vector(&minus_center));
+            let plus_pose = Pose::from_world_to_camera(rotation, plus_translation);
+            let minus_pose = Pose::from_world_to_camera(rotation, minus_translation);
+            let Some(plus) = camera.project(&plus_pose.transform_world_point(&landmark.position))
+            else {
+                valid = false;
+                break;
+            };
+            let Some(minus) = camera.project(&minus_pose.transform_world_point(&landmark.position))
+            else {
+                valid = false;
+                break;
+            };
+            jacobian.set_column(axis, &((plus - minus) / (2.0 * eps)));
+        }
+        if valid && jacobian.iter().all(|value| value.is_finite()) {
+            hessian += jacobian.transpose() * jacobian / (pixel_sigma * pixel_sigma);
+            used += 1;
+        }
+    }
+    if used < 6 {
+        return None;
+    }
+    let eigenvalues = hessian.symmetric_eigen().eigenvalues;
+    let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+    if !minimum.is_finite()
+        || !maximum.is_finite()
+        || minimum <= 0.0
+        || maximum / minimum > max_condition
+    {
+        return None;
+    }
+    let visual_covariance = hessian.try_inverse()?;
+    let prior_variance = prior_std * prior_std;
+    let prior_covariance = Matrix3::<f64>::identity() * prior_variance;
+    let innovation_covariance = prior_covariance + visual_covariance;
+    let mut gain = prior_covariance * innovation_covariance.try_inverse()?;
+    gain = (gain + gain.transpose()) * 0.5;
+    let gain_maximum = gain
+        .symmetric_eigen()
+        .eigenvalues
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
+    if !gain_maximum.is_finite() || gain_maximum <= 0.0 {
+        return None;
+    }
+    if gain_maximum > max_gain {
+        gain *= max_gain / gain_maximum;
+    }
+
+    let prior_center = pose_prior.camera_center_world().coords;
+    let estimated_center = estimated_pose.camera_center_world().coords;
+    let fused_center = prior_center + gain * (estimated_center - prior_center);
+    let rotation_gain = (gain.trace() / 3.0).clamp(0.0, max_gain);
+    let fused_rotation = pose_prior
+        .world_to_camera
+        .rotation
+        .slerp(&estimated_pose.world_to_camera.rotation, rotation_gain);
+    let fused_translation = -(fused_rotation.transform_vector(&fused_center));
+    Some(Pose::from_world_to_camera(
+        fused_rotation,
+        fused_translation,
+    ))
 }
 
 /// Multiplier applied to `max_pose_prior_translation_error` when
@@ -1161,6 +1372,30 @@ pub trait FrameLocalizer {
         )
     }
 
+    /// Projection-guided localization with an additional reverse
+    /// query-keypoint -> landmark ambiguity ratio. Implementors without a
+    /// specialized path retain the projection/default behavior above.
+    #[allow(clippy::too_many_arguments)]
+    fn localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        search_radius_px: f64,
+        _max_query_landmark_distance_ratio: Option<f32>,
+    ) -> LocalizationResult {
+        self.localize_frame_with_projection_window_and_descriptor_store(
+            frame,
+            map,
+            descriptor_store,
+            pose_prior,
+            candidate_radius,
+            search_radius_px,
+        )
+    }
+
     /// Stage-3 local-map refinement: given an already-successful `estimated`
     /// localization, project `local_map_descriptor_store`'s landmarks with
     /// the ESTIMATED pose and harvest additional correspondences within
@@ -1296,6 +1531,29 @@ where
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        search_radius_px: f64,
+        max_query_landmark_distance_ratio: Option<f32>,
+    ) -> LocalizationResult {
+        LocalizationPipeline::localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
+            self,
+            frame,
+            map,
+            descriptor_store,
+            pose_prior,
+            candidate_radius,
+            search_radius_px,
+            max_query_landmark_distance_ratio,
+        )
+    }
+
     fn refine_pose_with_local_map_and_descriptor_store(
         &self,
         frame: &Frame,
@@ -1327,6 +1585,9 @@ pub struct TrackingStats {
     pub pose_prior_used_count: usize,
     pub external_localization_prior_used_count: usize,
     pub tracking_quality_gate_failure_count: usize,
+    /// Number of frames accepted only because a strong visual solution
+    /// activated the bounded pose-prior translation-gate widening.
+    pub pose_prior_visual_override_count: usize,
     pub total_inlier_count: usize,
     pub total_correspondence_count: usize,
     pub covisibility_local_map_used_count: usize,
@@ -1931,5 +2192,138 @@ mod pose_jump_gap_scaling_tests {
     fn multiplier_never_drops_below_one_even_with_a_zero_cap() {
         assert_eq!(pose_jump_gap_scaling_multiplier(0, 10), 1);
         assert_eq!(pose_jump_gap_scaling_multiplier(5, 0), 1);
+    }
+}
+
+#[cfg(test)]
+mod pose_prior_visual_override_tests {
+    use super::*;
+    use crate::PosePriorVisualOverrideConfig;
+    use visloc_core::types::{
+        Camera, Frame, Landmark, LocalizationFailureReason, LocalizationResult,
+    };
+
+    fn localization(
+        inliers: usize,
+        correspondences: usize,
+        reprojection: f64,
+    ) -> LocalizationResult {
+        let mut result = LocalizationResult::failure(
+            LocalizationFailureReason::QualityGateFailed,
+            correspondences,
+            correspondences,
+            correspondences,
+        );
+        result.inlier_count = inliers;
+        result.inlier_ratio = inliers as f64 / correspondences as f64;
+        result.reprojection_error = Some(reprojection);
+        result
+    }
+
+    #[test]
+    fn strong_visual_solution_enables_bounded_override() {
+        let result = localization(150, 200, 1.5);
+        assert!(pose_prior_visual_override_satisfied(
+            PosePriorVisualOverrideConfig::default(),
+            &result
+        ));
+    }
+
+    #[test]
+    fn weak_or_high_error_visual_solution_cannot_override_prior() {
+        let config = PosePriorVisualOverrideConfig::default();
+        assert!(!pose_prior_visual_override_satisfied(
+            config,
+            &localization(99, 120, 1.0)
+        ));
+        assert!(!pose_prior_visual_override_satisfied(
+            config,
+            &localization(150, 300, 1.0)
+        ));
+        assert!(!pose_prior_visual_override_satisfied(
+            config,
+            &localization(150, 200, 3.1)
+        ));
+    }
+
+    #[test]
+    fn invalid_override_config_is_fail_closed() {
+        let result = localization(150, 200, 1.0);
+        assert!(!pose_prior_visual_override_satisfied(
+            PosePriorVisualOverrideConfig {
+                max_translation_error_multiplier: 0.5,
+                ..PosePriorVisualOverrideConfig::default()
+            },
+            &result
+        ));
+    }
+
+    #[test]
+    fn hysteresis_rejects_marginal_crossing_but_accepts_cliff_innovation() {
+        let result = localization(306, 467, 2.0);
+        let config = PosePriorVisualOverrideConfig::default();
+        assert_eq!(
+            pose_prior_visual_override_threshold(config, &result, 0.216, 0.01, 0.2),
+            None
+        );
+        assert_eq!(
+            pose_prior_visual_override_threshold(config, &result, 0.311, 0.005, 0.2),
+            Some(0.5)
+        );
+        assert_eq!(
+            pose_prior_visual_override_threshold(config, &result, 0.6, 0.005, 0.2),
+            None,
+            "bounded override must still reject a teleport"
+        );
+        assert_eq!(
+            pose_prior_visual_override_threshold(config, &result, 0.311, 0.03, 0.2),
+            None,
+            "large rotation innovation must reject the visual override"
+        );
+    }
+
+    #[test]
+    fn continuation_pose_uses_capped_covariance_gain() {
+        let camera = Camera::pinhole(1, 640, 480, 400.0, 400.0, 320.0, 240.0);
+        let frame = Frame::new(10, 1);
+        let mut map = VisualMap::new();
+        map.cameras.insert(1, camera);
+        let mut result = localization(12, 12, 1.0);
+        for (index, (x, y, z)) in [
+            (-1.0, -0.5, 3.0),
+            (0.0, -0.5, 3.5),
+            (1.0, -0.5, 4.0),
+            (-1.0, 0.5, 4.5),
+            (0.0, 0.5, 5.0),
+            (1.0, 0.5, 5.5),
+            (-0.7, -0.2, 6.0),
+            (0.7, -0.2, 6.5),
+            (-0.7, 0.2, 7.0),
+            (0.7, 0.2, 7.5),
+            (-0.2, 0.0, 8.0),
+            (0.2, 0.0, 8.5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = index as u64 + 1;
+            map.landmarks
+                .insert(id, Landmark::new(id, Point3::new(x, y, z)));
+            result.inlier_landmark_ids.push(id);
+        }
+        let prior = Pose::identity();
+        let estimated =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let fused = covariance_weighted_continuation_pose(
+            &frame,
+            &map,
+            &prior,
+            &estimated,
+            &result,
+            PosePriorVisualOverrideConfig::default(),
+        )
+        .expect("well-conditioned inlier geometry should yield covariance");
+        let x = fused.camera_center_world().x;
+        assert!(x > 0.0 && x <= 0.15 + 1.0e-12, "fused x={x}");
     }
 }

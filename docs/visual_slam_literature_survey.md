@@ -196,14 +196,22 @@ Git revision, executable and model hashes, exact argument vector, timestamps,
 elapsed time, and exit status for every run:
 
 ```powershell
-$env:ORT_DYLIB_PATH = 'E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll'
+$env:ORT_DYLIB_PATH = 'E:/tools/colmap/bin/onnxruntime.dll'
+$env:Path = 'E:\tools\colmap\bin;E:\tools\venv-cu\Lib\site-packages\torch\lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin;' + $env:Path
+& "$HOME/.cargo/bin/cargo.exe" build --release `
+  --features 'image-io onnx-cuda' `
+  --example euroc_online_slam_vi_image_demo
 ./scripts/run_visual_slam_euroc_ab.ps1 `
   -DatasetRoot E:/datasets/euroc_mav/machine_hall `
   -OutRoot E:/visloc_archive/visual_slam_ab_20260713 `
+  -OnnxBackend cuda `
   -Repetitions 5
 ```
 
-The runner always passes `--max-frames`; its default `-MaxFrames 0` means every
+The runner defaults to strict `-OnnxBackend cuda`: a missing provider or CUDA
+dependency aborts model loading instead of silently falling back to CPU. Use
+`cpu` only for an explicitly labelled CPU experiment. It always passes
+`--max-frames`; its default `-MaxFrames 0` means every
 available frame. This is intentional because omitting the demo option would use
 the demo's 400-frame smoke-test default rather than a full sequence.
 It fails before launching when the dynamic ONNX runtime DLL is unavailable and
@@ -218,14 +226,18 @@ commit headroom before each run, samples both every five seconds, and records
 the preflight and minimum values in each run manifest. It also measures external
 process CPU for two seconds before launch and every resource interval during the
 run, excluding the runner and benchmark child; the default maximum is 0.5 CPU
-cores. The runner's ancestor chain (the waiting shell/orchestrator) is also
+cores. Preflight rejects one contaminated sample, while an active run requires
+three consecutive over-limit samples before termination so a scheduler spike
+is recorded but is not mislabeled as sustained contention. The runner's
+ancestor chain (the waiting shell/orchestrator) is also
 excluded and recorded by PID so measurement overhead is not mistaken for a
 competing workload. If either memory reserve is crossed or external CPU exceeds the limit,
 the runner stops only its benchmark child and records an environmental
 validation error separately from the child's real exit code.
 Such a run is not an accuracy or runtime sample. The thresholds and sampling
 period can be changed explicitly with `-MinAvailableMemoryGiB`,
-`-MinCommitHeadroomGiB`, `-MaxExternalCpuCores`, and
+`-MinCommitHeadroomGiB`, `-MaxExternalCpuCores`,
+`-ExternalCpuViolationSamples`, and
 `-ResourceSampleIntervalSeconds` when the host has a documented resource
 policy.
 
@@ -235,8 +247,10 @@ For a long interrupted matrix, repeat the same command with `-Resume`.
 Only runs whose per-run manifest has exit code zero and whose `summary.txt`
 exists are skipped; an incomplete or failed directory is never overwritten
 implicitly. Resume is also refused when executable, SuperPoint model, or ORT
-DLL hashes, dataset root, sequence list, repetition count, or frame cap differ
-from the existing experiment. The schema-v4 manifest also fingerprints the
+DLL hashes, dataset root, sequence list, or frame cap differ from the existing
+experiment. The requested repetition count may only increase: this safely
+extends a completed prefix while a decrease is refused so recorded runs cannot
+be orphaned. The schema-v9 manifest also fingerprints the
 common and per-variant argument protocol plus the memory and external-CPU
 resource gates, preventing a changed treatment or environmental validity rule
 from being resumed into an older matrix. Each successful run is rejected by the
@@ -277,14 +291,27 @@ python scripts/summarize_visual_slam_evaluation.py `
 ```
 
 The generated conservative gate does not promote on a favorable mean alone:
-the worst candidate rigid ATE must beat the best no-loop rigid ATE across the
-recorded repetitions, every accepted loop must have a ground-truth verdict and
-all must be correct, candidate tracking coverage may fall by at most 0.005,
-the longest continuous run may fall by at most 1%, and the worst candidate
-delta-1/delta-10 translation and rotation RPE may exceed the best baseline by
-at most 1%. Runtime and sampled peak working set must be present for every run.
-`INCOMPLETE` means evidence is missing; `REJECT` means complete
-evidence violates at least one safety or improvement gate.
+when loops are accepted, the worst candidate rigid ATE must beat the best
+no-loop rigid ATE across the recorded repetitions; every accepted loop must
+have a ground-truth verdict and all must be correct. A zero-loop sequence can
+instead be classified `SAFE_NO_OP`, but only when each paired repetition has
+identical SHA-256 hashes for `slam_trajectory.csv`, `slam_errors.csv`,
+`keyframe_trajectory.csv`, `frame_groundtruth.csv`, and
+`final_keyframe_errors.csv`. Rounded metric equality is not sufficient.
+Candidate tracking coverage may fall by at most 0.005, the longest continuous
+run may fall by at most 1%, and the worst candidate delta-1/delta-10 translation
+and rotation RPE may exceed the best baseline by at most 1%. Runtime and sampled
+peak working set must be present for every run, and the candidate may exceed its
+same-repetition control by at most 25% in either measure. Comparing the slowest
+candidate from one repetition against the fastest control from another would
+undo the matrix's counterbalancing and confound treatment overhead with host
+state. `INCOMPLETE` means evidence is missing; `REJECT` means complete evidence
+violates at least one safety or improvement gate.
+The report also emits one matrix decision. It is `PROMOTE` only when at least
+one declared sequence improves and every other declared sequence is either
+`PROMOTE` or a hash-proven `SAFE_NO_OP`; an all-no-op matrix cannot claim an
+improvement. Missing declared sequences or repetitions keep the matrix
+`INCOMPLETE`.
 
 ## Ordered implementation experiments
 
@@ -306,6 +333,21 @@ evidence violates at least one safety or improvement gate.
    relinearization and delayed prior reconstruction.
 9. Only then benchmark learned recurrent patch/pointmap front ends and dense map
    representations.
+
+Step 3 now has a stricter descriptor-level first stage. Lucas--Kanade assumes
+an approximate registration and iteratively reduces a local photometric
+residual; Shi--Tomasi additionally monitors appearance dissimilarity because a
+numerically trackable patch can still drift or become occluded. The current
+`Frame` API carries keypoints/descriptors but no source image, so it would be
+incorrect to label descriptor filtering as LK. Instead, matching now mirrors
+the complementary check visible in ORB-SLAM3's official
+`ORBmatcher::SearchByProjection`: retain the existing landmark-to-window
+best/second ratio, then also require the selected query keypoint to prefer its
+best competing projected landmark by a configurable reverse ratio. Exact or
+near descriptor collisions from overlapping windows are rejected before PnP;
+the appearance-global fallback remains available if too few survive. True
+pyramidal photometric refinement remains an explicit later experiment that
+requires retaining image pyramids alongside `Frame`.
 
 ## Recorded diagnostic result
 
@@ -656,18 +698,35 @@ accepted only when enough landmarks survive and the 6-DoF matrix is positive
 full-rank with condition number below the configured ceiling. Synthetic tests
 cover a well-spread, multi-depth scene and the single-view ray degeneracy.
 
+The estimator now returns a typed failure instead of collapsing every gate to
+`None`. Full-run summaries separately count invalid configuration, missing
+keyframe/pose state, insufficient usable correspondences, rank deficiency,
+ill-conditioning, and an unsupported solver. Loop-edge rejection and
+sequential-edge identity fallback therefore remain safe while EuRoC logs show
+whether more correspondence support or better-conditioned geometry is needed.
+
 Absolute pixel-domain curvature is not dimensionally comparable to the current
 unit-information odometry chain. The implementation therefore exposes a
 separate maximum-eigenvalue cap (default `1.0`) instead of trace-normalising to
 the inlier count. It records the raw condition number, used correspondence
 count, and applied spectral scale in the EuRoC summary so the cap cannot be
-mistaken for measured covariance. This is still a controlled intermediate:
-`VisualMap::Landmark` retains left-image multi-view observations but not the
-original rectified right-image/disparity measurement. Consequently the current
-matrix accounts for triangulation geometry through accumulated left views but
-cannot yet reproduce the exact stereo seed covariance. Retaining the seed's
-`(u_l, v_l, u_r)` observation (or its propagated 3-D covariance) is required
-before claiming the full uncertainty-aware stereo-PnP model.
+mistaken for measured covariance. The vision-layer stereo bootstrap now
+propagates independent `(u_l, v_l, u_r, v_r)` pixel noise through its general
+6-DoF DLT triangulator with a central-difference Jacobian and retains the
+resulting anisotropic 3-D covariance on each survivor. A rectified fixture
+checks the analytic `sigma_Z = sqrt(2) Z^2 sigma_px / (f b)` law, including its
+quadratic growth with range. This implements the standard post-triangulation
+error propagation required in Section 3.6 of Vakhitov et al.; their Eq. 21 then
+defines how the 3-D covariance must enter the pose residual covariance.
+`VisualMap` now carries these world-frame matrices in a validated landmark
+covariance sidecar. Seed and stereo re-bootstrap insertion rotate the
+left-camera covariance into the world frame, submap extraction preserves it,
+and loop pose-information prefers it over the left-view Hessian fallback. A
+single-left-view fixture that is correctly rank deficient without metadata
+becomes usable with a calibrated stereo covariance. BA still needs to propagate
+or relinearize the covariance when it moves a landmark, so full
+uncertainty-aware stereo-PnP remains an experimental path rather than a promoted
+default.
 
 The first 1,000-frame MH_01 same-binary diagnostic exercised this path in the
 real online pipeline. All three accepted appearance loops received a 6×6
@@ -773,6 +832,365 @@ All solves remain speculative until velocity and both bias bounds pass; a
 rejection leaves the live `VisualMap` unchanged. These thresholds are
 diagnostic controls, not promoted EuRoC defaults: their values still require
 sensor-specification or calibration evidence and a same-binary prefix run.
+
+### Projection query-to-landmark ambiguity gate: MH_01 rejection result (2026-07-14)
+
+The query-centric nearest/second-nearest descriptor ratio gate is available as
+an opt-in projection-tracking experiment, but is deliberately disabled by
+default. A deterministic 300-frame MH_01 comparison used the same SuperPoint
+ONNX input, projection window, covisibility local map, and stereo-replenishment
+settings. The legacy `None` configuration achieved tracking coverage `0.933`,
+rigid ATE `0.2340 m`, final-keyframe rigid ATE `0.2255 m`, and `601.10
+ms/frame`. A ratio of `0.9` improved rigid ATE to `0.1911 m` and
+final-keyframe rigid ATE to `0.2024 m`, but reduced tracking coverage to
+`0.837`, increased runtime to `615.01 ms/frame`, worsened delta-1 translation
+RPE (`0.1771 -> 0.1844 m`) and delta-10 rotation RPE (`8.27 -> 9.36 deg`).
+Because continuity is a primary adoption gate and the RPE result is mixed,
+`0.9` is rejected as a production default pending a wider sweep or a
+confidence-aware formulation. Reproduce with
+`--projection-query-landmark-distance-ratio none` and `0.9`, respectively.
+
+### Strict-CUDA three-sequence prefix baseline (2026-07-14)
+
+The CUDA-enabled release binary was then run for 300 frames on every required
+Machine Hall sequence with the rejected ambiguity gate disabled. Each run used
+`--superpoint-onnx-backend cuda`, so provider registration could not fall back
+to CPU. These are prefix diagnostics, not full-sequence promotion evidence:
+
+| sequence | tracking | rigid ATE (m) | final-KF rigid ATE (m) | d1 RPE (m / deg) | d10 RPE (m / deg) | ms/frame |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MH_01 | 0.917 | 0.2603 | 0.2483 | 0.1629 / 5.30 | 0.2786 / 11.49 | 129.63 |
+| MH_03 | 0.903 | 0.1718 | 0.2626 | 0.2844 / 6.20 | 0.4194 / 7.06 | 178.76 |
+| MH_05 | 0.920 | 0.3019 | 0.2916 | 0.2013 / 22.96 | 0.7346 / 27.66 | 136.82 |
+
+The corresponding MH_01 CPU-provider prefix took `601.10 ms/frame`; strict
+CUDA therefore reduced end-to-end time by 4.64x on that comparison. Its
+tracking and trajectory were not bit-identical to CUDA, so provider changes are
+treated as experiment changes: candidate and no-loop baseline must use the
+same binary, ONNX Runtime DLL, CUDA provider, and model hashes.
+
+### Loop welding and post-PGO fusion audit (2026-07-14)
+
+ORB-SLAM2 describes a fourth full-BA thread launched after loop closure, while
+ORB-SLAM3 formulates map estimation as BA and likewise runs full BA after a
+loop. The [official ORB-SLAM2 loop-closing source](https://github.com/raulmur/ORB_SLAM2/blob/master/src/LoopClosing.cc)
+makes the ordering concrete: `SearchAndFuse`, essential-graph optimization,
+then global BA. This is stronger than visloc-rs's historical pose-edge-only
+write-back, because the accepted image evidence becomes map observations that
+BA can optimize.
+
+An initial implementation persisted all accepted PnP pairs before PGO and ran
+a synchronous covisibility welding BA afterward. On the deterministic strict-
+CUDA MH_01 1,000-frame pair, the no-loop baseline was tracking `0.966`, live /
+final-keyframe rigid ATE `0.2737 / 0.3040 m`, d1 RPE `0.1743 m / 6.00 deg`, and
+d10 RPE `0.3576 m / 16.85 deg`. Welding inserted 204 observations (three
+reassignments) and optimized 21 keyframes / 1,942 landmarks. Live ATE improved
+to `0.2422 m`, but final-keyframe ATE regressed to `0.3334 m`, d1 to
+`0.2115 m / 7.68 deg`, and d10 translation to `0.4718 m`; it is rejected.
+Fusion without the immediate welding solve was also rejected: live ATE
+`0.2252 m`, final-keyframe ATE `0.3281 m`, and d10 translation RPE `0.5290 m`.
+The map mutation itself therefore disturbed subsequent local tracking, not
+only the explicit BA solve.
+
+The repository now defers fusion until a PGO solve succeeds. It also refuses
+to fuse a loop edge that final GNC classifies below its `0.5` inlier threshold,
+and reprojects every older landmark with the corrected query pose, retaining
+only pairs within the appearance PnP verifier's pixel-error threshold. The
+first fixed-weight `0.001` screen admitted three ground-truth-correct loops but
+GNC retained none for fusion: all 928 PnP pairs were robust-rejected, so zero
+observations were mutated and the result returned exactly to the prior PGO-only
+metrics (`0.2379 / 0.2877 m` live/final ATE).
+
+That diagnostic exposed a scalar/information inconsistency in GNC. Its inner
+solve multiplied isotropic edges by `edge.weight`, but its robust classifier
+used unweighted `||r||^2`; the equivalent full-matrix path correctly used
+`r^T Omega r`. Classification now uses `edge.weight * ||r||^2`, with a
+regression proving an isotropic scalar edge and `weight * I` receive identical
+GNC weights. On the follow-up screen GNC retained all three correct loops, but
+all 800 resulting pairs failed the corrected-pose 4 px reprojection gate, so
+fusion again safely mutated zero observations. PGO-only live/final ATE was
+`0.2596 / 0.3026 m`, d1 RPE `0.1898 m / 6.00 deg`, and d10 RPE
+`0.4199 m / 16.03 deg`; translation RPE still regressed against no-loop. This
+is a safe no-op, not a promotion. The remaining backend defect is that the
+weak loop PGO solution does not make even its accepted PnP map points mutually
+reprojection-consistent. Fusion must remain opt-in until pose correction and
+local-RPE gates agree.
+
+The next implementation follows the official ordering more closely. It first
+applies the accepted loop transform to the current covisibility region, moves
+that region's landmarks with the same rigid correction, transactionally fuses
+the geometrically consistent observations, runs a second essential-graph
+optimization, and finally runs local BA. Corrections above `0.5 m` or `0.2 rad`
+are rejected before map mutation, and every stage can restore the original map
+and graph. This made one fixed-weight `0.1` loop weld internally consistent,
+but exposed a generic BA defect: reprojection cost skipped observations behind
+the camera, allowing LM to improve its objective by moving 6.61% of selected
+landmark observations behind a camera.
+
+LM acceptance now separately counts non-projectable visual observations and
+rejects any candidate step that increases that count. A synthetic regression
+reproduces the former zero-cost-by-negative-depth failure. On the identical
+strict-CUDA MH_01 960-frame run, the behind-camera ratio fell from `6.61%` to
+`0%`; the transaction then committed 307 inserted and 61 reassigned
+observations while updating 21 keyframes and 2,056 landmarks. At 1,000 frames,
+the welded result improved final-keyframe rigid ATE from the no-loop `0.3040 m`
+to `0.2329 m`, and d10 RPE from `0.3576 m / 16.85 deg` to
+`0.3369 m / 14.44 deg`. However, d1 rotation RPE changed from `6.00 deg` to
+`6.11 deg` (about 1.9% worse), outside the current 1% non-regression margin.
+The cheirality fix is retained as a general optimizer invariant, while the
+20 px post-BA kernel remains rejected.
+
+Reducing the post-welding Huber transition to the same 5 px scale as the map's
+outlier gate removed that last MH_01 regression. On the strict-CUDA 1,000-frame
+screen, tracking was `0.965`; final-keyframe rigid ATE was `0.2543 m`; d1 RPE
+was `0.1734 m / 5.99 deg`; and d10 RPE was `0.3545 m / 14.20 deg`. These all
+meet the 1% non-regression margin against no-loop (`0.966`, `0.3040 m`,
+`0.1743 m / 6.00 deg`, and `0.3576 m / 16.85 deg`). The weld again committed
+307 inserted and 61 reassigned observations, optimized 21 keyframes / 2,056
+landmarks, and kept the behind-camera ratio at zero.
+
+The same candidate and an identical-binary no-loop control were then run for
+1,000 frames on MH_03 and MH_05. Neither prefix produced a verified loop, so
+all three trajectory/error CSV files were SHA-256-identical between candidate
+and control on both sequences. This is the required side-effect-free behavior,
+although it also shows that loop closure cannot repair their earlier tracking
+failure in this prefix:
+
+| sequence | candidate/control tracking | verified loops | final-KF ATE (m) | d1 RPE (m / deg) | d10 RPE (m / deg) | candidate / control ms/frame |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MH_03 | 0.872 | 0 | 2.7717 | 0.4272 / 6.29 | 3.2076 / 31.82 | 145.87 / 114.73 |
+| MH_05 | 0.889 | 0 | 5.3535 | 0.4153 / 12.46 | 3.3539 / 28.48 | 132.58 / 113.27 |
+
+Thus the 5 px configuration is the first screened loop-welding candidate that
+strictly improves MH_01 without changing MH_03/MH_05 trajectories when no loop
+is verified. The 17-27% candidate-discovery runtime overhead and the difficult-
+sequence tracking cliffs remain separate optimization targets; this evidence
+is a three-sequence 1,000-frame promotion screen, not a complete-sequence
+benchmark.
+
+### MH_03 tracking-cliff motion-model audit (2026-07-15)
+
+The [official ORB-SLAM2 tracker](https://github.com/raulmur/ORB_SLAM2/blob/master/src/Tracking.cc)
+uses a constant-velocity prediction only while the previous tracking state is
+healthy and otherwise falls back to reference-keyframe tracking. ORB-SLAM3's
+[visual-inertial formulation](https://arxiv.org/abs/2007.11898) and
+[VINS-Mono](https://arxiv.org/abs/1708.03852) jointly estimate pose, velocity,
+gravity, and IMU biases; raw strapdown integration with stale or zero biases is
+not equivalent to either system. This distinction predicts that an uncorrected
+IMU prior can look excellent briefly and then diverge.
+
+Strict-CUDA MH_03 experiments confirmed that prediction. IMU propagation with
+the calibrated cam0/body transform tracked all of the first 400 frames with
+`0.0114 m` final-keyframe rigid ATE, but at 1,000 frames coverage fell to
+`0.559` and final-keyframe ATE exploded to `41.95 m`. Adaptive IMU/pose fallback
+reached coverage `0.849` and ATE `4.2047 m`; a long-latched variant reached
+`0.906` and `3.0026 m`, but both failed the no-loop baseline's `0.872` coverage
+and `2.7717 m` ATE joint gate. Constant velocity was already unusable at 400
+frames (`0.287`, `14.49 m`). A larger pose-jump gate (`0.2 -> 0.3 m`) raised
+coverage to `0.911` but worsened final ATE to `3.1301 m`. Strict stereo removed
+the fixed-depth fallback but reduced coverage to `0.767` and yielded `3.1643 m`
+ATE. None is promoted.
+
+The failure CSVs show that MH_03/MH_05 are not primarily starved of descriptor
+matches: many rejected poses still have 90--160 PnP inliers. The common failure
+is disagreement with the pose prior while the metric map scale is already
+drifting. The tracker now refuses to feed a constant-pose fallback back into
+PnP as a warm start; adaptive tracking enables warm start only while its IMU
+mode is healthy. This is a safety invariant, not a claimed EuRoC gain: the
+projection-guided path handled the screened frames before the global fallback,
+so the 1,000-frame trajectory did not change.
+
+### Stereo covariance continuity and rejected PnP ranking (2026-07-15)
+
+The open-access primary study
+[Principled Uncertainty Propagation for Stereo Visual Odometry](https://link.springer.com/article/10.1007/s10846-026-02358-0)
+propagates per-feature pixel covariance through stereo triangulation and uses
+measurement covariance in maximum-likelihood pose refinement and graph
+factors. visloc-rs already propagated seed stereo covariance, but normal stereo
+replenishment discarded it when a `LandmarkCandidate` was staged. Replenished
+candidates now rotate the same-instant cam0/cam1 covariance into the world
+frame, carry it through temporal triangulation and the transactional map
+update, and validate finiteness, symmetry, positive semidefiniteness, entity
+existence, and uniqueness. A regression proves the sidecar survives candidate
+creation and map application. This makes fresh metric points available to the
+existing covariance-aware loop-edge estimator instead of leaving only the 412
+seed points annotated.
+
+An inverse-projected-covariance PROSAC experiment was also implemented and
+then removed after controlled rejection. With covariance only on the 412 seed
+points, MH_03 translation RPE improved (`d1 0.4272 -> 0.3902 m`, `d10 3.2076 ->
+2.9716 m`), but coverage regressed `0.872 -> 0.843`. After covariance continuity
+raised the final annotated map from 412 to 7,876 points, coverage fell further
+to `0.752`, final-keyframe ATE rose `2.7717 -> 3.1578 m`, and translation RPE
+also regressed. Stereo depth precision is not descriptor-match correctness;
+using it only to order RANSAC hypotheses misuses the uncertainty model. The
+paper's covariance propagation and map sidecar remain, while PnP sampling is
+restored to the baseline policy. A future uncertainty-aware PnP must use the
+full residual covariance in consensus scoring and refinement, with an explicit
+outlier model, rather than treating inverse depth variance as match confidence.
+
+A second experiment tested whether the calibrated same-instant stereo point
+should directly replace the temporally triangulated replenishment mean, as
+suggested by ORB-SLAM2's [stereo/RGB-D formulation](https://arxiv.org/abs/1610.06475)
+and official [`Frame::UnprojectStereo`](https://github.com/raulmur/ORB_SLAM2/blob/master/src/Frame.cc).
+The naive mean replacement was also removed: MH_03 coverage fell `0.872 ->
+0.808`, final-keyframe ATE rose `2.7717 -> 3.0321 m`, and the final map shrank
+from 9,306 to 6,702 points. The stereo point, lifted through the current
+estimated pose, often disagreed with the older anchor measurement under its
+already-drifted pose and failed the 2 px triangulation validation. The correct
+next design is an explicit right-image/depth observation factor jointly
+optimized with both poses and the landmark; replacing the mean while retaining
+a monocular two-view factor is not equivalent and is not kept.
+
+After removing both rejected consumers, a strict-CUDA 300-frame MH_03
+non-regression run reproduced the 2026-07-14 baseline exactly: tracking
+`0.903`, rigid/final-keyframe ATE `0.1718/0.2626 m`, d1 RPE `0.2844 m / 6.20
+deg`, and d10 RPE `0.4194 m / 7.06 deg`. All five trajectory, error, ground
+truth, keyframe-trajectory, and final-keyframe-error CSV SHA-256 hashes were
+identical. The only intended difference is map metadata: 1,563 of 2,349 final
+landmarks now carry validated stereo covariance instead of only the seed
+subset. Thus covariance continuity is retained without changing default
+tracking; it becomes active only for explicit covariance-aware backend
+consumers.
+
+### Non-rectified stereo BA factor and MH_03 rejection (2026-07-15)
+
+The next design was implemented as an actual observation factor rather than a
+replacement landmark mean. `BaGeneralStereoObservation` retains calibrated
+left and right pixels, the right camera intrinsics, and the fixed
+`T_right<-left` rig transform. Its residual is the four-vector
+`(u_l,v_l,u_r,v_r)` and its analytic pose/landmark Jacobians explicitly pass
+the right branch through the rotational cam0-to-cam1 extrinsic. Synthetic
+tests cover zero residual at truth, recovery of a perturbed landmark, and
+recovery of a perturbed six-DoF pose with unequal intrinsics, nonzero vertical
+translation, and a rotated right camera. This is necessary for EuRoC: reducing
+the rig to rectified `(u_l,v_l,u_r)` plus a scalar baseline discards real
+calibration geometry.
+
+The right measurement now survives seed bootstrap, stereo replenishment,
+candidate triangulation, transactional map staging, loop-observation
+reassignment, and covisibility/post-welding BA through a validated
+`StereoObservation` sidecar. The BA builder replaces the left monocular factor
+rather than adding it a second time. Missing or rejected right measurements
+fall back to the historical monocular factor, and the entire consumer remains
+opt-in through `--covisibility-local-ba-general-stereo`.
+
+Correct geometry did not imply a safe online policy. On the same strict-CUDA
+MH_03 300-frame run, mono covisibility BA achieved tracking `0.963`, rigid /
+final-keyframe ATE `0.1504 / 0.1636 m`, d1 RPE `0.2103 m / 4.16 deg`, and d10
+RPE `0.2893 m / 4.79 deg`. Unconditionally consuming the right sidecars reduced
+tracking to `0.873`, changed ATE to `0.1554 / 0.1946 m`, and worsened both
+rotation RPEs. A 5 px initial right-reprojection gate was worse still:
+tracking `0.807`, ATE `0.2515 / 0.3081 m`, d1 `0.2551 m / 4.92 deg`, and d10
+`0.4813 m / 8.04 deg`. Both stereo consumers are rejected as defaults. The
+factor and data path remain an explicit research control; the production
+default is unchanged. The result indicates that repeatedly constraining a
+temporally re-triangulated landmark with its original same-instant stereo
+pixel requires a better observation-lifetime/outlier model, not merely a
+tighter pixel gate.
+
+With the stereo consumer disabled, the new measurement sidecar is behaviorally
+inert. A strict-CUDA MH_03 300-frame rerun stored 1,563 right observations and
+still reproduced the pre-sidecar run exactly: all five trajectory, frame-error,
+ground-truth, keyframe-trajectory, and final-keyframe-error CSV SHA-256 hashes
+matched. Tracking remained `0.903`, rigid/final-keyframe ATE `0.1718/0.2626
+m`, d1 `0.2844 m / 6.20 deg`, and d10 `0.4194 m / 7.06 deg`.
+
+The same A/B also rechecked whether the historical monocular covisibility BA
+should be promoted independently of the new stereo factor. It looked strong
+at 300 frames (`0.963` tracking and `0.1636 m` final-keyframe ATE versus the
+no-BA prefix's `0.903` and `0.2626 m`), but reversed by 1,000 frames. Ungated
+mono BA reached tracking `0.892` yet worsened final-keyframe ATE from the no-BA
+`2.7717 m` to `4.0105 m`; d1 translation RPE exploded from `0.4272 m` to
+`4.4662 m`. Its first solve had no fixed boundary keyframe and reduced a
+`70.19 px` reprojection objective to `0.76 px`, exposing a locally valid but
+globally gauge-unsafe write-back. Enabling the existing transactional fixed-
+boundary (`fixed >= ceil(0.34 * optimized)`) and behind-camera (`<= 0.3`)
+gates prevented that collapse, but still failed the joint promotion gate:
+tracking `0.866`, final-keyframe ATE `2.7983 m`, d1 RPE `0.4790 m / 6.79 deg`,
+and d10 RPE `3.2106 m / 33.38 deg`, versus no-BA `0.872`, `2.7717 m`, `0.4272
+m / 6.29 deg`, and `3.2076 m / 31.82 deg`. Online covisibility BA therefore
+remains disabled in the adopted baseline; short-prefix reprojection gains are
+not treated as trajectory evidence.
+
+### Three-sequence counterbalanced promotion matrix (2026-07-15)
+
+The adopted loop-welding configuration completed the declared strict-CUDA
+matrix at
+`E:/visloc_archive/final_loop_welding_3seq_1000_20260715_pwsh`: MH_01,
+MH_03, and MH_05, no-loop control versus appearance-loop treatment, three
+counterbalanced repetitions, and 1,000 frames per run. All 18 root run
+manifests have exit code zero, no validation error, the same executable/model/
+ONNX Runtime hashes, and unique sequence/variant/repetition identities. The
+machine-readable and rendered reports are
+`docs/generated/visual_slam_final_3seq_1000_20260715.json` and
+`docs/generated/visual_slam_final_3seq_1000_20260715.md`.
+
+| sequence | variant | tracking / longest | live / final-KF rigid ATE m | d1 RPE m / deg | d10 RPE m / deg | accepted correct/evaluated | mean runtime ms/frame | decision |
+| --- | --- | --- | --- | --- | --- | --- | ---: | --- |
+| MH_01 | no loop | 0.966 / 558 | 0.2737 / 0.3040 | 0.1743 / 6.00 | 0.3576 / 16.85 | 0/0 | 131.8 +/- 28.6 | control |
+| MH_01 | loop welding | 0.965 / 558 | 0.2492 / 0.2543 | 0.1734 / 5.99 | 0.3545 / 14.20 | 6/6 | 127.0 +/- 12.9 | `PROMOTE` |
+| MH_03 | no loop | 0.872 / 215 | 2.5609 / 2.7717 | 0.4272 / 6.29 | 3.2076 / 31.82 | 0/0 | 135.9 +/- 13.5 | control |
+| MH_03 | loop welding | 0.872 / 215 | 2.5609 / 2.7717 | 0.4272 / 6.29 | 3.2076 / 31.82 | 0/0 | 140.8 +/- 13.5 | `SAFE_NO_OP` |
+| MH_05 | no loop | 0.889 / 144 | 5.1402 / 5.3535 | 0.4153 / 12.46 | 3.3539 / 28.48 | 0/0 | 144.6 +/- 19.7 | control |
+| MH_05 | loop welding | 0.889 / 144 | 5.1402 / 5.3535 | 0.4153 / 12.46 | 3.3539 / 28.48 | 0/0 | 127.7 +/- 12.9 | `SAFE_NO_OP` |
+
+MH_01's final-keyframe rigid ATE improves by 16.3% without reducing its
+longest continuous segment; delta-10 rotation RPE improves from 16.85 to 14.20
+degrees. All six accepted constraints are ground-truth-correct. MH_03 and
+MH_05 accept no loop, so numerical equality alone is not used as safety
+evidence: all 30 SHA-256 comparisons covering five accuracy artifacts, three
+repetitions, and two sequences match between treatment and paired control. The
+matrix-level decision is therefore `PROMOTE`: one declared sequence improves
+and the other two are hash-proven no-ops. Runtime and working-set gates use
+same-repetition ratios and remain within their 25% limits; the noisy runtime
+means are reported but are not claimed as a speedup.
+
+One first attempt at `MH_03_medium_appearance_loop_r03` was killed before it
+could produce a summary after unrelated external CPU load exceeded four cores
+for three consecutive resource samples. Its manifest is preserved under the
+matrix `_failed_attempts` directory and is not an accuracy/runtime sample. A
+same-protocol retry completed with exit code zero and is the only r03 candidate
+included in the 18-run report.
+
+The promoted treatment is the fixed-weight 0.1 SE(3) loop edge with PnP
+verification, pairwise-only PCM, GNC, correction propagation, transactional
+loop-observation fusion, and loop-welding BA. The generalized non-rectified
+stereo local-BA factor and continuous covisibility local BA remain opt-in and
+disabled because their MH_03 screens regressed the joint trajectory metrics.
+This is a reproducible 1,000-frame prefix decision, not a full-sequence EuRoC
+or ORB-SLAM3-parity claim; longer-horizon tracking and tight-VI promotion remain
+separate research work.
+
+### ROBOMECH 2026 overview cross-check (2026-07-15)
+
+The [SfM / Visual SLAM / Visual Localization overview presented for ROBOMECH
+2026](https://docswell.com/s/ystk_hara/K4N93D-sfm-vslam-vloc-robomech2026)
+is a useful secondary map of the field, especially its separation of local
+optimization from global BA/pose-graph correction and its emphasis on ATE,
+runtime, tracking interruptions, and learned local features. Repository
+decisions still use the cited primary papers for algorithmic claims. Applied to
+the current EuRoC evidence, the overview reinforces two concrete rules: a local
+reprojection reduction is not global trajectory evidence, and a tracking-cliff
+candidate must report continuity and recovery behavior alongside ATE. The
+selective tight-VI falsification screen and resulting next hypothesis are
+recorded in
+[`generated/selective_tight_vi_diagnostics_20260715.md`](generated/selective_tight_vi_diagnostics_20260715.md).
+
+The subsequent full-sequence result closes that experiment. Following
+[Forster et al.](https://arxiv.org/abs/1512.02363) for on-manifold preintegration,
+[VINS-Mono](https://arxiv.org/abs/1708.03852) and
+[OKVIS](https://github.com/ethz-asl/okvis) for a joint pose/velocity/bias visual-
+inertial window, and [ORB-SLAM3](https://arxiv.org/abs/2007.11898) for continued
+visual-inertial optimization and recovery context, the implementation now uses
+covariance-bounded continuation, strict initializer/local-NIS write-back gates,
+and a carried marginalization prior. A support-selective configuration was run
+on all MH_01/MH_03/MH_05 frames for three counterbalanced repetitions. MH_01
+and MH_03 are hash-exact control no-ops; MH_05 improves tracking coverage,
+longest continuity, rigid ATE, and both translation RPE horizons while its two
+rotation RPE regressions remain below the declared 2% non-inferiority limit.
+The reproducible report is
+[`generated/tracking_cliff_tight_vi_full_3rep_20260715.md`](generated/tracking_cliff_tight_vi_full_3rep_20260715.md).
 
 ## Literature backlog
 

@@ -1,0 +1,1138 @@
+{
+  "schema_version": 1,
+  "root": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715",
+  "manifest": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\tracking_cliff_tight_vi_manifest.json",
+  "artifact_hashes": {
+    "executable": "2A2AD342C6A68ED4E2A58D61480C926CA9AED6EAE9A12E95A1F760C6D9C75141",
+    "model": "B9ABB42967A0FB3AF858D5F1ED5573F1B33E96D234FAA4B27CDB3772EDE51EFC",
+    "onnx_runtime": "3B46571D12A9567791A42A2B2967A79C4E2E957AACDBA09A2DDB4FB391707BAA"
+  },
+  "run_count": 18,
+  "gate_policy": {
+    "accuracy_relative_tolerance": 0.02,
+    "tracking_and_continuity_tolerance": 0.0,
+    "runtime": "report-only",
+    "requires_cliff_improvement": true
+  },
+  "groups": {
+    "MH_01_easy": {
+      "control": {
+        "tracking": {
+          "median": 0.905,
+          "min": 0.905,
+          "max": 0.905
+        },
+        "longest_continuity": {
+          "median": 558,
+          "min": 558,
+          "max": 558
+        },
+        "tracking_segments": {
+          "median": 262,
+          "min": 262,
+          "max": 262
+        },
+        "rigid_ate_m": {
+          "median": 2.9272,
+          "min": 2.9272,
+          "max": 2.9272
+        },
+        "final_rigid_ate_m": {
+          "median": 3.0584,
+          "min": 3.0584,
+          "max": 3.0584
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.2537966282306878,
+          "min": 0.2537966282306878,
+          "max": 0.2537966282306878
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 4.77197409812124,
+          "min": 4.77197409812124,
+          "max": 4.77197409812124
+        },
+        "rpe_d10_translation_m": {
+          "median": 1.5217404797900593,
+          "min": 1.5217404797900593,
+          "max": 1.5217404797900593
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 21.103965519490053,
+          "min": 21.103965519490053,
+          "max": 21.103965519490053
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 798.330982,
+          "min": 763.731892,
+          "max": 819.177069
+        },
+        "repeat_hashes_identical": true
+      },
+      "candidate": {
+        "tracking": {
+          "median": 0.905,
+          "min": 0.905,
+          "max": 0.905
+        },
+        "longest_continuity": {
+          "median": 558,
+          "min": 558,
+          "max": 558
+        },
+        "tracking_segments": {
+          "median": 262,
+          "min": 262,
+          "max": 262
+        },
+        "rigid_ate_m": {
+          "median": 2.9272,
+          "min": 2.9272,
+          "max": 2.9272
+        },
+        "final_rigid_ate_m": {
+          "median": 3.0584,
+          "min": 3.0584,
+          "max": 3.0584
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.2537966282306878,
+          "min": 0.2537966282306878,
+          "max": 0.2537966282306878
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 4.77197409812124,
+          "min": 4.77197409812124,
+          "max": 4.77197409812124
+        },
+        "rpe_d10_translation_m": {
+          "median": 1.5217404797900593,
+          "min": 1.5217404797900593,
+          "max": 1.5217404797900593
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 21.103965519490053,
+          "min": 21.103965519490053,
+          "max": 21.103965519490053
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 1062.909807,
+          "min": 926.566493,
+          "max": 1083.538414
+        },
+        "repeat_hashes_identical": true
+      }
+    },
+    "MH_03_medium": {
+      "control": {
+        "tracking": {
+          "median": 0.767,
+          "min": 0.767,
+          "max": 0.767
+        },
+        "longest_continuity": {
+          "median": 215,
+          "min": 215,
+          "max": 215
+        },
+        "tracking_segments": {
+          "median": 322,
+          "min": 322,
+          "max": 322
+        },
+        "rigid_ate_m": {
+          "median": 3.6816,
+          "min": 3.6816,
+          "max": 3.6816
+        },
+        "final_rigid_ate_m": {
+          "median": 3.36,
+          "min": 3.36,
+          "max": 3.36
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.435696821909106,
+          "min": 0.435696821909106,
+          "max": 0.435696821909106
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 6.083674788455849,
+          "min": 6.083674788455849,
+          "max": 6.083674788455849
+        },
+        "rpe_d10_translation_m": {
+          "median": 3.2276294304753037,
+          "min": 3.2276294304753037,
+          "max": 3.2276294304753037
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 33.953753070272086,
+          "min": 33.953753070272086,
+          "max": 33.953753070272086
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 604.772399,
+          "min": 515.99564,
+          "max": 671.595651
+        },
+        "repeat_hashes_identical": true
+      },
+      "candidate": {
+        "tracking": {
+          "median": 0.767,
+          "min": 0.767,
+          "max": 0.767
+        },
+        "longest_continuity": {
+          "median": 215,
+          "min": 215,
+          "max": 215
+        },
+        "tracking_segments": {
+          "median": 322,
+          "min": 322,
+          "max": 322
+        },
+        "rigid_ate_m": {
+          "median": 3.6816,
+          "min": 3.6816,
+          "max": 3.6816
+        },
+        "final_rigid_ate_m": {
+          "median": 3.36,
+          "min": 3.36,
+          "max": 3.36
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.435696821909106,
+          "min": 0.435696821909106,
+          "max": 0.435696821909106
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 6.083674788455849,
+          "min": 6.083674788455849,
+          "max": 6.083674788455849
+        },
+        "rpe_d10_translation_m": {
+          "median": 3.2276294304753037,
+          "min": 3.2276294304753037,
+          "max": 3.2276294304753037
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 33.953753070272086,
+          "min": 33.953753070272086,
+          "max": 33.953753070272086
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 705.333253,
+          "min": 660.072907,
+          "max": 796.352293
+        },
+        "repeat_hashes_identical": true
+      }
+    },
+    "MH_05_difficult": {
+      "control": {
+        "tracking": {
+          "median": 0.843,
+          "min": 0.843,
+          "max": 0.843
+        },
+        "longest_continuity": {
+          "median": 144,
+          "min": 144,
+          "max": 144
+        },
+        "tracking_segments": {
+          "median": 256,
+          "min": 256,
+          "max": 256
+        },
+        "rigid_ate_m": {
+          "median": 6.494,
+          "min": 6.494,
+          "max": 6.494
+        },
+        "final_rigid_ate_m": {
+          "median": 6.9302,
+          "min": 6.9302,
+          "max": 6.9302
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.4730284516260039,
+          "min": 0.4730284516260039,
+          "max": 0.4730284516260039
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 5.032940146335937,
+          "min": 5.032940146335937,
+          "max": 5.032940146335937
+        },
+        "rpe_d10_translation_m": {
+          "median": 3.748219797956611,
+          "min": 3.748219797956611,
+          "max": 3.748219797956611
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 27.37042112637188,
+          "min": 27.37042112637188,
+          "max": 27.37042112637188
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 352.006118,
+          "min": 322.50562,
+          "max": 356.73301
+        },
+        "repeat_hashes_identical": true
+      },
+      "candidate": {
+        "tracking": {
+          "median": 0.884,
+          "min": 0.884,
+          "max": 0.884
+        },
+        "longest_continuity": {
+          "median": 391,
+          "min": 391,
+          "max": 391
+        },
+        "tracking_segments": {
+          "median": 196,
+          "min": 196,
+          "max": 196
+        },
+        "rigid_ate_m": {
+          "median": 6.3923,
+          "min": 6.3923,
+          "max": 6.3923
+        },
+        "final_rigid_ate_m": {
+          "median": 6.5986,
+          "min": 6.5986,
+          "max": 6.5986
+        },
+        "rpe_d1_translation_m": {
+          "median": 0.450584254972525,
+          "min": 0.450584254972525,
+          "max": 0.450584254972525
+        },
+        "rpe_d1_rotation_deg": {
+          "median": 5.074719500338299,
+          "min": 5.074719500338299,
+          "max": 5.074719500338299
+        },
+        "rpe_d10_translation_m": {
+          "median": 3.583845643945972,
+          "min": 3.583845643945972,
+          "max": 3.583845643945972
+        },
+        "rpe_d10_rotation_deg": {
+          "median": 27.839724599194316,
+          "min": 27.839724599194316,
+          "max": 27.839724599194316
+        },
+        "loop_precision": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "runtime_s": {
+          "median": 390.475817,
+          "min": 326.9101,
+          "max": 416.119401
+        },
+        "repeat_hashes_identical": true
+      }
+    }
+  },
+  "comparisons": {
+    "MH_01_easy": {
+      "checks": {
+        "tracking_non_regression": true,
+        "continuity_non_regression": true,
+        "loop_precision_non_regression": true,
+        "rigid_ate_m_within_2pct": true,
+        "final_rigid_ate_m_within_2pct": true,
+        "rpe_d1_translation_m_within_2pct": true,
+        "rpe_d1_rotation_deg_within_2pct": true,
+        "rpe_d10_translation_m_within_2pct": true,
+        "rpe_d10_rotation_deg_within_2pct": true
+      },
+      "gate_pass": true,
+      "deltas_percent": {
+        "tracking": 0.0,
+        "longest_continuity": 0.0,
+        "rigid_ate_m": 0.0,
+        "final_rigid_ate_m": 0.0,
+        "rpe_d1_translation_m": 0.0,
+        "rpe_d1_rotation_deg": 0.0,
+        "rpe_d10_translation_m": 0.0,
+        "rpe_d10_rotation_deg": 0.0,
+        "runtime_s": 33.14149531528516
+      }
+    },
+    "MH_03_medium": {
+      "checks": {
+        "tracking_non_regression": true,
+        "continuity_non_regression": true,
+        "loop_precision_non_regression": true,
+        "rigid_ate_m_within_2pct": true,
+        "final_rigid_ate_m_within_2pct": true,
+        "rpe_d1_translation_m_within_2pct": true,
+        "rpe_d1_rotation_deg_within_2pct": true,
+        "rpe_d10_translation_m_within_2pct": true,
+        "rpe_d10_rotation_deg_within_2pct": true
+      },
+      "gate_pass": true,
+      "deltas_percent": {
+        "tracking": 0.0,
+        "longest_continuity": 0.0,
+        "rigid_ate_m": 0.0,
+        "final_rigid_ate_m": 0.0,
+        "rpe_d1_translation_m": 0.0,
+        "rpe_d1_rotation_deg": 0.0,
+        "rpe_d10_translation_m": 0.0,
+        "rpe_d10_rotation_deg": 0.0,
+        "runtime_s": 16.62788417035548
+      }
+    },
+    "MH_05_difficult": {
+      "checks": {
+        "tracking_non_regression": true,
+        "continuity_non_regression": true,
+        "loop_precision_non_regression": true,
+        "rigid_ate_m_within_2pct": true,
+        "final_rigid_ate_m_within_2pct": true,
+        "rpe_d1_translation_m_within_2pct": true,
+        "rpe_d1_rotation_deg_within_2pct": true,
+        "rpe_d10_translation_m_within_2pct": true,
+        "rpe_d10_rotation_deg_within_2pct": true
+      },
+      "gate_pass": true,
+      "deltas_percent": {
+        "tracking": 4.8635824436536135,
+        "longest_continuity": 171.52777777777777,
+        "rigid_ate_m": -1.5660609793655689,
+        "final_rigid_ate_m": -4.784854693948226,
+        "rpe_d1_translation_m": -4.744787882489609,
+        "rpe_d1_rotation_deg": 0.8301182368079196,
+        "rpe_d10_translation_m": -4.385392609586292,
+        "rpe_d10_rotation_deg": 1.7146373841148366,
+        "runtime_s": 10.928701813074726
+      }
+    }
+  },
+  "cliff_improved": true,
+  "overall_gate_pass": true,
+  "runs": [
+    {
+      "sequence": "MH_01_easy",
+      "variant": "candidate",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_candidate_r01",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 1062.909807,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_01_easy",
+      "variant": "candidate",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_candidate_r02",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 1083.538414,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_01_easy",
+      "variant": "candidate",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_candidate_r03",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 926.566493,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_01_easy",
+      "variant": "control",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_control_r01",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 798.330982,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_01_easy",
+      "variant": "control",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_control_r02",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 819.177069,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_01_easy",
+      "variant": "control",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_01_easy_control_r03",
+      "frames": 3660,
+      "tracking": 0.905,
+      "longest_continuity": 558,
+      "tracking_segments": 262,
+      "rigid_ate_m": 2.9272,
+      "final_rigid_ate_m": 3.0584,
+      "rpe_d1_translation_m": 0.2537966282306878,
+      "rpe_d1_rotation_deg": 4.77197409812124,
+      "rpe_d10_translation_m": 1.5217404797900593,
+      "rpe_d10_rotation_deg": 21.103965519490053,
+      "loop_precision": 1.0,
+      "runtime_s": 763.731892,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "ea3040a8b0e0b287c4b707d18c98a947c2041493258411da024576f6795a71e7",
+        "keyframe_trajectory.csv": "2a20b47bf210ff8e3096dfc6dc15a6775813cb9dad26991f9299fea13c04a7fb",
+        "tracking_diagnostics.csv": "9bc98597026f3ca7e0f96584a23d9f3477988027724f0cda5aeb6cb0bfb0fef5",
+        "final_keyframe_errors.csv": "ede08f7418ab02edbbd3ceeda38a3f9535eb2ad80b0b387ff59ad52abcf6abaf",
+        "loop_constraints.csv": "d9954dd3345ccfb26a064ef830947113ad9e6f495d1bcec135bd19dfc6633b88"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "candidate",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_candidate_r01",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 660.072907,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "candidate",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_candidate_r02",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 796.352293,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "candidate",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_candidate_r03",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 705.333253,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "control",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_control_r01",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 671.595651,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "control",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_control_r02",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 604.772399,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_03_medium",
+      "variant": "control",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_03_medium_control_r03",
+      "frames": 2653,
+      "tracking": 0.767,
+      "longest_continuity": 215,
+      "tracking_segments": 322,
+      "rigid_ate_m": 3.6816,
+      "final_rigid_ate_m": 3.36,
+      "rpe_d1_translation_m": 0.435696821909106,
+      "rpe_d1_rotation_deg": 6.083674788455849,
+      "rpe_d10_translation_m": 3.2276294304753037,
+      "rpe_d10_rotation_deg": 33.953753070272086,
+      "loop_precision": 1.0,
+      "runtime_s": 515.99564,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "c56a394d8d0cfce62b1eafdad4cfe3621efaea15e0837885f0ed3825717dff02",
+        "keyframe_trajectory.csv": "072bf311c288372d2849077d36c207c67ec105717af7f7c63b616761ec538747",
+        "tracking_diagnostics.csv": "3d1a79bcce1cf22d8e57f95f233e8ca282f6f6cd4d127632b43d2b9dd1305e58",
+        "final_keyframe_errors.csv": "97618633fe23fa97097f8be207495610325f6dba57bd6ab91169c65539b1db3d",
+        "loop_constraints.csv": "7fae77359b9c2c78a6cbefaf37775f04a92a7431d5f9cab29d7d1bffe8357ef1"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "candidate",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_candidate_r01",
+      "frames": 2244,
+      "tracking": 0.884,
+      "longest_continuity": 391,
+      "tracking_segments": 196,
+      "rigid_ate_m": 6.3923,
+      "final_rigid_ate_m": 6.5986,
+      "rpe_d1_translation_m": 0.450584254972525,
+      "rpe_d1_rotation_deg": 5.074719500338299,
+      "rpe_d10_translation_m": 3.583845643945972,
+      "rpe_d10_rotation_deg": 27.839724599194316,
+      "loop_precision": 1.0,
+      "runtime_s": 390.475817,
+      "visual_override_count": 1,
+      "motion_vi_initialized": true,
+      "motion_vi_init_frame": "Some(216)",
+      "motion_vi_scale": 1.0,
+      "covis_ba_triggers": 281,
+      "covis_ba_successes": 111,
+      "local_vi_triggers": 263,
+      "local_vi_accepted": 3,
+      "local_vi_rejected": 260,
+      "local_vi_imu_nis_rejected": 247,
+      "local_vi_pose_rejected": 253,
+      "local_vi_marginalization_successes": 3,
+      "local_vi_mirrors": 3,
+      "hashes": {
+        "slam_trajectory.csv": "8cb7d98dd9c7b4f8ec21dc9889dbb83d784177f13e42ac945414f66f0d8a015b",
+        "keyframe_trajectory.csv": "20e47b7f82122695f83a6910b5ff58ef87d83fd4925373cbbecd78a271514b28",
+        "tracking_diagnostics.csv": "c80bab6f3cdd75da26d4d8412c69b44394b261c0864ce361b1b43dfd848c6527",
+        "final_keyframe_errors.csv": "dcee0357e795d7e2e89461159e8c68c4bbdb173ab114c347489fda05f22095ec",
+        "loop_constraints.csv": "2ddff5aebb456f650cd7506f22689b6bb3ed7f6d7bc808496a345bfdc9ad2198"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "candidate",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_candidate_r02",
+      "frames": 2244,
+      "tracking": 0.884,
+      "longest_continuity": 391,
+      "tracking_segments": 196,
+      "rigid_ate_m": 6.3923,
+      "final_rigid_ate_m": 6.5986,
+      "rpe_d1_translation_m": 0.450584254972525,
+      "rpe_d1_rotation_deg": 5.074719500338299,
+      "rpe_d10_translation_m": 3.583845643945972,
+      "rpe_d10_rotation_deg": 27.839724599194316,
+      "loop_precision": 1.0,
+      "runtime_s": 326.9101,
+      "visual_override_count": 1,
+      "motion_vi_initialized": true,
+      "motion_vi_init_frame": "Some(216)",
+      "motion_vi_scale": 1.0,
+      "covis_ba_triggers": 281,
+      "covis_ba_successes": 111,
+      "local_vi_triggers": 263,
+      "local_vi_accepted": 3,
+      "local_vi_rejected": 260,
+      "local_vi_imu_nis_rejected": 247,
+      "local_vi_pose_rejected": 253,
+      "local_vi_marginalization_successes": 3,
+      "local_vi_mirrors": 3,
+      "hashes": {
+        "slam_trajectory.csv": "8cb7d98dd9c7b4f8ec21dc9889dbb83d784177f13e42ac945414f66f0d8a015b",
+        "keyframe_trajectory.csv": "20e47b7f82122695f83a6910b5ff58ef87d83fd4925373cbbecd78a271514b28",
+        "tracking_diagnostics.csv": "c80bab6f3cdd75da26d4d8412c69b44394b261c0864ce361b1b43dfd848c6527",
+        "final_keyframe_errors.csv": "dcee0357e795d7e2e89461159e8c68c4bbdb173ab114c347489fda05f22095ec",
+        "loop_constraints.csv": "2ddff5aebb456f650cd7506f22689b6bb3ed7f6d7bc808496a345bfdc9ad2198"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "candidate",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_candidate_r03",
+      "frames": 2244,
+      "tracking": 0.884,
+      "longest_continuity": 391,
+      "tracking_segments": 196,
+      "rigid_ate_m": 6.3923,
+      "final_rigid_ate_m": 6.5986,
+      "rpe_d1_translation_m": 0.450584254972525,
+      "rpe_d1_rotation_deg": 5.074719500338299,
+      "rpe_d10_translation_m": 3.583845643945972,
+      "rpe_d10_rotation_deg": 27.839724599194316,
+      "loop_precision": 1.0,
+      "runtime_s": 416.119401,
+      "visual_override_count": 1,
+      "motion_vi_initialized": true,
+      "motion_vi_init_frame": "Some(216)",
+      "motion_vi_scale": 1.0,
+      "covis_ba_triggers": 281,
+      "covis_ba_successes": 111,
+      "local_vi_triggers": 263,
+      "local_vi_accepted": 3,
+      "local_vi_rejected": 260,
+      "local_vi_imu_nis_rejected": 247,
+      "local_vi_pose_rejected": 253,
+      "local_vi_marginalization_successes": 3,
+      "local_vi_mirrors": 3,
+      "hashes": {
+        "slam_trajectory.csv": "8cb7d98dd9c7b4f8ec21dc9889dbb83d784177f13e42ac945414f66f0d8a015b",
+        "keyframe_trajectory.csv": "20e47b7f82122695f83a6910b5ff58ef87d83fd4925373cbbecd78a271514b28",
+        "tracking_diagnostics.csv": "c80bab6f3cdd75da26d4d8412c69b44394b261c0864ce361b1b43dfd848c6527",
+        "final_keyframe_errors.csv": "dcee0357e795d7e2e89461159e8c68c4bbdb173ab114c347489fda05f22095ec",
+        "loop_constraints.csv": "2ddff5aebb456f650cd7506f22689b6bb3ed7f6d7bc808496a345bfdc9ad2198"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "control",
+      "repetition": 1,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_control_r01",
+      "frames": 2244,
+      "tracking": 0.843,
+      "longest_continuity": 144,
+      "tracking_segments": 256,
+      "rigid_ate_m": 6.494,
+      "final_rigid_ate_m": 6.9302,
+      "rpe_d1_translation_m": 0.4730284516260039,
+      "rpe_d1_rotation_deg": 5.032940146335937,
+      "rpe_d10_translation_m": 3.748219797956611,
+      "rpe_d10_rotation_deg": 27.37042112637188,
+      "loop_precision": 1.0,
+      "runtime_s": 322.50562,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "3212882331b27ff8270be5060c3c6d6f39d17f349542e051ee829466b6a24b62",
+        "keyframe_trajectory.csv": "565525aef7f187004cde22dd025ddd49c3deba1f18aab2c55e7292c0c2e9d77c",
+        "tracking_diagnostics.csv": "59cd810cdb4175ebf0329f65065190bc44d44cd88763a04fade048a56373e7f6",
+        "final_keyframe_errors.csv": "49bd89df9e5539e66cf976be2e39b219be896d09162387683cc6d46b4a720054",
+        "loop_constraints.csv": "7794ad785b5b6735a88d5451397973a8e29c22800fafa4a39a2a7bb8d52fe7eb"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "control",
+      "repetition": 2,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_control_r02",
+      "frames": 2244,
+      "tracking": 0.843,
+      "longest_continuity": 144,
+      "tracking_segments": 256,
+      "rigid_ate_m": 6.494,
+      "final_rigid_ate_m": 6.9302,
+      "rpe_d1_translation_m": 0.4730284516260039,
+      "rpe_d1_rotation_deg": 5.032940146335937,
+      "rpe_d10_translation_m": 3.748219797956611,
+      "rpe_d10_rotation_deg": 27.37042112637188,
+      "loop_precision": 1.0,
+      "runtime_s": 356.73301,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "3212882331b27ff8270be5060c3c6d6f39d17f349542e051ee829466b6a24b62",
+        "keyframe_trajectory.csv": "565525aef7f187004cde22dd025ddd49c3deba1f18aab2c55e7292c0c2e9d77c",
+        "tracking_diagnostics.csv": "59cd810cdb4175ebf0329f65065190bc44d44cd88763a04fade048a56373e7f6",
+        "final_keyframe_errors.csv": "49bd89df9e5539e66cf976be2e39b219be896d09162387683cc6d46b4a720054",
+        "loop_constraints.csv": "7794ad785b5b6735a88d5451397973a8e29c22800fafa4a39a2a7bb8d52fe7eb"
+      }
+    },
+    {
+      "sequence": "MH_05_difficult",
+      "variant": "control",
+      "repetition": 3,
+      "directory": "E:\\visloc_archive\\tracking_cliff_seedgate_tight_full_20260715\\MH_05_difficult_control_r03",
+      "frames": 2244,
+      "tracking": 0.843,
+      "longest_continuity": 144,
+      "tracking_segments": 256,
+      "rigid_ate_m": 6.494,
+      "final_rigid_ate_m": 6.9302,
+      "rpe_d1_translation_m": 0.4730284516260039,
+      "rpe_d1_rotation_deg": 5.032940146335937,
+      "rpe_d10_translation_m": 3.748219797956611,
+      "rpe_d10_rotation_deg": 27.37042112637188,
+      "loop_precision": 1.0,
+      "runtime_s": 352.006118,
+      "visual_override_count": 0,
+      "motion_vi_initialized": false,
+      "motion_vi_init_frame": "None",
+      "motion_vi_scale": null,
+      "covis_ba_triggers": 0,
+      "covis_ba_successes": 0,
+      "local_vi_triggers": 0,
+      "local_vi_accepted": 0,
+      "local_vi_rejected": 0,
+      "local_vi_imu_nis_rejected": 0,
+      "local_vi_pose_rejected": 0,
+      "local_vi_marginalization_successes": 0,
+      "local_vi_mirrors": 0,
+      "hashes": {
+        "slam_trajectory.csv": "3212882331b27ff8270be5060c3c6d6f39d17f349542e051ee829466b6a24b62",
+        "keyframe_trajectory.csv": "565525aef7f187004cde22dd025ddd49c3deba1f18aab2c55e7292c0c2e9d77c",
+        "tracking_diagnostics.csv": "59cd810cdb4175ebf0329f65065190bc44d44cd88763a04fade048a56373e7f6",
+        "final_keyframe_errors.csv": "49bd89df9e5539e66cf976be2e39b219be896d09162387683cc6d46b4a720054",
+        "loop_constraints.csv": "7794ad785b5b6735a88d5451397973a8e29c22800fafa4a39a2a7bb8d52fe7eb"
+      }
+    }
+  ]
+}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import statistics
@@ -47,6 +48,9 @@ class RunSummary:
     wall_clock_ms_per_frame: float | None
     frame_processing_ms_p95: float | None
     sampled_peak_working_set_mb: float | None
+    loop_pose_information_failures: dict[str, int] | None = None
+    sequential_pose_information_failures: dict[str, int] | None = None
+    accuracy_artifact_sha256: dict[str, str] | None = None
 
 
 @dataclass
@@ -84,6 +88,8 @@ class AggregateSummary:
     frame_processing_ms_p95_std: float | None
     sampled_peak_working_set_mb_mean: float | None
     sampled_peak_working_set_mb_std: float | None
+    loop_pose_information_failures: dict[str, int] | None = None
+    sequential_pose_information_failures: dict[str, int] | None = None
 
 
 @dataclass
@@ -97,6 +103,7 @@ class PromotionVerdict:
     accepted_loops: int
     evaluated_loops: int
     correct_loops: int
+    exact_no_op_pairs: int
     reasons: list[str]
 
 
@@ -105,6 +112,28 @@ class RunIdentity:
     sequence: str
     variant: str
     repetition: int
+
+
+def expected_matrix_identities(root: Path) -> set[RunIdentity]:
+    experiment_path = root / "experiment_manifest.json"
+    experiment = json.loads(experiment_path.read_text(encoding="utf-8-sig"))
+    sequences = experiment.get("sequences")
+    repetitions = experiment.get("repetitions")
+    if (
+        not isinstance(sequences, list)
+        or not sequences
+        or any(not isinstance(sequence, str) or not sequence for sequence in sequences)
+        or len(set(sequences)) != len(sequences)
+    ):
+        raise ValueError("matrix experiment manifest has invalid sequences")
+    if not isinstance(repetitions, int) or repetitions < 1:
+        raise ValueError("matrix experiment manifest has invalid repetitions")
+    return {
+        RunIdentity(sequence, variant, repetition)
+        for sequence in sequences
+        for variant in ("no_loop", "appearance_loop")
+        for repetition in range(1, repetitions + 1)
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -145,6 +174,113 @@ def optional_float(value: str | None) -> float | None:
         value = value[5:-1]
     parsed = float(value)
     return parsed if math.isfinite(parsed) else None
+
+
+POSE_INFORMATION_FAILURE_KEYS = (
+    "invalid_config",
+    "missing_keyframe",
+    "missing_pose",
+    "insufficient_correspondences",
+    "rank_deficient",
+    "ill_conditioned",
+    "unsupported_solver",
+)
+
+# These files jointly cover causal tracking, live errors, final keyframe poses,
+# their ground-truth association, and final keyframe errors.  An appearance-loop
+# run with no accepted loops is a safe no-op only when every file is byte-for-byte
+# identical to its paired no-loop run; rounded summary metrics are insufficient.
+ACCURACY_ARTIFACTS = (
+    "slam_trajectory.csv",
+    "slam_errors.csv",
+    "keyframe_trajectory.csv",
+    "frame_groundtruth.csv",
+    "final_keyframe_errors.csv",
+)
+
+
+def accuracy_artifact_hashes(directory: Path) -> dict[str, str] | None:
+    hashes: dict[str, str] = {}
+    for name in ACCURACY_ARTIFACTS:
+        path = directory / name
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        hashes[name] = digest.hexdigest().upper()
+    return hashes
+
+
+def parse_pose_information_failure_counts(
+    value: str | None,
+) -> dict[str, int] | None:
+    if value is None:
+        return None
+    counts: dict[str, int] = {}
+    for entry in value.split(","):
+        if ":" not in entry:
+            raise ValueError(f"malformed pose-information failure entry {entry!r}")
+        key, raw_count = entry.split(":", 1)
+        if key not in POSE_INFORMATION_FAILURE_KEYS:
+            raise ValueError(f"unknown pose-information failure key {key!r}")
+        if key in counts:
+            raise ValueError(f"duplicate pose-information failure key {key!r}")
+        if not raw_count.isascii() or not raw_count.isdecimal():
+            raise ValueError(
+                f"pose-information failure count for {key!r} is not a non-negative integer"
+            )
+        counts[key] = int(raw_count)
+    missing = set(POSE_INFORMATION_FAILURE_KEYS) - counts.keys()
+    if missing:
+        raise ValueError(
+            "pose-information failure counts are missing " + ", ".join(sorted(missing))
+        )
+    return counts
+
+
+def validate_pose_information_failure_counts(
+    values: dict[str, str], run_dir: Path
+) -> None:
+    pairs = (
+        (
+            "pose_graph_refinement_pose_information_failure_counts",
+            "pose_graph_refinement_pose_information_rejected",
+        ),
+        (
+            "pose_graph_refinement_sequential_pose_information_failure_counts",
+            "pose_graph_refinement_sequential_pose_information_fallbacks",
+        ),
+    )
+    for counts_key, total_key in pairs:
+        try:
+            counts = parse_pose_information_failure_counts(values.get(counts_key))
+        except ValueError as error:
+            raise ValueError(f"{run_dir}: invalid {counts_key}: {error}") from error
+        if counts is None:
+            raise ValueError(f"{run_dir}: missing {counts_key}")
+        raw_total = values.get(total_key)
+        if raw_total is None or not raw_total.isascii() or not raw_total.isdecimal():
+            raise ValueError(f"{run_dir}: invalid {total_key}={raw_total!r}")
+        total = int(raw_total)
+        if sum(counts.values()) != total:
+            raise ValueError(
+                f"{run_dir}: {counts_key} sums to {sum(counts.values())}, "
+                f"but {total_key}={total}"
+            )
+
+
+def sum_pose_information_failure_counts(
+    members: list[dict[str, int] | None],
+) -> dict[str, int] | None:
+    available = [counts for counts in members if counts is not None]
+    if not available:
+        return None
+    return {
+        key: sum(counts[key] for counts in available)
+        for key in POSE_INFORMATION_FAILURE_KEYS
+    }
 
 
 def tracking_continuity(path: Path) -> tuple[int, int]:
@@ -235,6 +371,15 @@ def load_run(spec: str) -> RunSummary:
             is not None
             else None
         ),
+        loop_pose_information_failures=parse_pose_information_failure_counts(
+            values.get("pose_graph_refinement_pose_information_failure_counts")
+        ),
+        sequential_pose_information_failures=parse_pose_information_failure_counts(
+            values.get(
+                "pose_graph_refinement_sequential_pose_information_failure_counts"
+            )
+        ),
+        accuracy_artifact_sha256=accuracy_artifact_hashes(directory),
     )
 
 
@@ -271,17 +416,57 @@ def valid_metric_values(
     return values
 
 
+def paired_metric_ratios(
+    baseline: list[RunSummary],
+    candidate: list[RunSummary],
+    groups: dict[str, RunIdentity],
+    attribute: str,
+) -> list[float] | None:
+    baseline_by_repetition = {
+        groups[run.label].repetition: run
+        for run in baseline
+        if run.label in groups
+    }
+    candidate_by_repetition = {
+        groups[run.label].repetition: run
+        for run in candidate
+        if run.label in groups
+    }
+    if (
+        not baseline_by_repetition
+        or baseline_by_repetition.keys() != candidate_by_repetition.keys()
+        or len(baseline_by_repetition) != len(baseline)
+        or len(candidate_by_repetition) != len(candidate)
+    ):
+        return None
+    ratios: list[float] = []
+    for repetition in sorted(baseline_by_repetition):
+        baseline_value = getattr(baseline_by_repetition[repetition], attribute)
+        candidate_value = getattr(candidate_by_repetition[repetition], attribute)
+        if (
+            baseline_value is None
+            or candidate_value is None
+            or not math.isfinite(baseline_value)
+            or not math.isfinite(candidate_value)
+            or baseline_value <= 0.0
+            or candidate_value < 0.0
+        ):
+            return None
+        ratios.append(candidate_value / baseline_value)
+    return ratios
+
+
 def validate_matrix_protocol(
     root: Path,
-) -> tuple[int, int, float | None, bool, float, dict[str, str]]:
+) -> tuple[int, int, float | None, bool, float, float, bool, bool, float, int, dict[str, str]]:
     experiment_path = root / "experiment_manifest.json"
     if not experiment_path.exists():
         raise ValueError(f"matrix is missing {experiment_path}")
     experiment = json.loads(experiment_path.read_text(encoding="utf-8-sig"))
-    if experiment.get("schema_version") != 4:
+    if experiment.get("schema_version") != 9:
         raise ValueError(
-            "matrix must use schema_version=4; older runner protocols did not "
-            "prove a genuinely loop-free control plus memory- and CPU-valid runs"
+            "matrix must use schema_version=9; older runner protocols did not "
+            "record loop welding BA, observation fusion, and sustained-load controls"
         )
     artifact_hashes: dict[str, str] = {}
     for field in (
@@ -328,6 +513,38 @@ def validate_matrix_protocol(
     )
     if not isinstance(candidate_loop_pose_information, bool):
         raise ValueError("matrix protocol has an invalid loop pose information mode")
+    candidate_fuse_loop_observations = protocol.get(
+        "candidate_fuse_loop_observations", False
+    )
+    if not isinstance(candidate_fuse_loop_observations, bool):
+        raise ValueError("matrix protocol has an invalid loop observation fusion mode")
+    fusion_switch = "--pose-graph-refinement-fuse-loop-observations"
+    fusion_count = sum(str(arg) == fusion_switch for arg in appearance)
+    if fusion_count != int(candidate_fuse_loop_observations):
+        raise ValueError("appearance_loop protocol has a mismatched loop fusion switch")
+    candidate_loop_welding_ba = protocol.get("candidate_loop_welding_ba", False)
+    if not isinstance(candidate_loop_welding_ba, bool):
+        raise ValueError("matrix protocol has an invalid loop welding BA mode")
+    if candidate_loop_welding_ba and not candidate_fuse_loop_observations:
+        raise ValueError("matrix protocol enables loop welding BA without fusion")
+    welding_switch = "--pose-graph-refinement-loop-welding-ba"
+    welding_count = sum(str(arg) == welding_switch for arg in appearance)
+    if welding_count != int(candidate_loop_welding_ba):
+        raise ValueError("appearance_loop protocol has a mismatched loop welding BA switch")
+    candidate_information_cap = protocol.get("candidate_loop_information_max_eigenvalue")
+    candidate_information_loop_scale = protocol.get(
+        "candidate_loop_information_loop_edge_scale"
+    )
+    for label, value in (
+        ("information spectral cap", candidate_information_cap),
+        ("loop-only information scale", candidate_information_loop_scale),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError(f"matrix protocol has no positive finite {label}")
     weight_switch = "--pose-graph-refinement-fixed-loop-edge-weight"
     information_switch = "--pose-graph-refinement-loop-pose-information"
     weight_indices = [index for index, arg in enumerate(appearance) if str(arg) == weight_switch]
@@ -340,6 +557,29 @@ def validate_matrix_protocol(
                 "loop-pose-information switch and no fixed loop-edge weight"
             )
         candidate_loop_edge_weight = None
+        for switch, expected, label in (
+            (
+                "--pose-graph-refinement-loop-pose-information-max-eigenvalue",
+                candidate_information_cap,
+                "information spectral cap",
+            ),
+            (
+                "--pose-graph-refinement-loop-pose-information-loop-edge-scale",
+                candidate_information_loop_scale,
+                "loop-only information scale",
+            ),
+        ):
+            indices = [index for index, arg in enumerate(appearance) if str(arg) == switch]
+            if len(indices) != 1 or indices[0] + 1 >= len(appearance):
+                raise ValueError(f"appearance_loop protocol has no unique {label}")
+            try:
+                actual = float(appearance[indices[0] + 1])
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"appearance_loop protocol has an invalid {label}") from error
+            if not math.isfinite(actual) or not math.isclose(
+                actual, float(expected), rel_tol=1.0e-12, abs_tol=1.0e-12
+            ):
+                raise ValueError(f"appearance_loop protocol has a mismatched {label}")
     else:
         if information_count:
             raise ValueError(
@@ -362,6 +602,7 @@ def validate_matrix_protocol(
     minimum_commit = resource_gate.get("minimum_commit_headroom_bytes")
     maximum_external_cpu = resource_gate.get("maximum_external_cpu_cores")
     sample_interval = resource_gate.get("sample_interval_seconds")
+    violation_samples = resource_gate.get("external_cpu_violation_samples")
     if not isinstance(minimum_available, int) or minimum_available <= 0:
         raise ValueError("matrix resource gate has no positive physical-memory reserve")
     if not isinstance(minimum_commit, int) or minimum_commit <= 0:
@@ -374,12 +615,19 @@ def validate_matrix_protocol(
         raise ValueError("matrix resource gate has no positive finite external-CPU limit")
     if not isinstance(sample_interval, int) or sample_interval < 1:
         raise ValueError("matrix resource gate has an invalid sample interval")
+    if not isinstance(violation_samples, int) or violation_samples < 1:
+        raise ValueError("matrix resource gate has an invalid sustained-load sample count")
     return (
         minimum_available,
         minimum_commit,
         candidate_loop_edge_weight,
         candidate_loop_pose_information,
+        float(candidate_information_cap),
+        float(candidate_information_loop_scale),
+        candidate_fuse_loop_observations,
+        candidate_loop_welding_ba,
         float(maximum_external_cpu),
+        violation_samples,
         artifact_hashes,
     )
 
@@ -390,7 +638,12 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
         required_commit,
         candidate_loop_edge_weight,
         candidate_loop_pose_information,
+        candidate_information_cap,
+        candidate_information_loop_scale,
+        candidate_fuse_loop_observations,
+        candidate_loop_welding_ba,
         maximum_external_cpu,
+        allowed_consecutive_external_cpu_violations,
         artifact_hashes,
     ) = validate_matrix_protocol(root)
     runs: list[RunSummary] = []
@@ -425,10 +678,7 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
             )
         preflight_external_cpu = manifest.get("preflight_external_cpu_cores")
         sampled_max_external_cpu = manifest.get("sampled_max_external_cpu_cores")
-        for label, value in (
-            ("preflight", preflight_external_cpu),
-            ("sampled maximum", sampled_max_external_cpu),
-        ):
+        for label, value in (("preflight", preflight_external_cpu),):
             if (
                 not isinstance(value, (int, float))
                 or not math.isfinite(value)
@@ -439,6 +689,35 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
                     f"{manifest_path.parent}: external-CPU {label} does not satisfy "
                     "the experiment resource gate"
                 )
+        if (
+            not isinstance(sampled_max_external_cpu, (int, float))
+            or not math.isfinite(sampled_max_external_cpu)
+            or sampled_max_external_cpu < 0.0
+        ):
+            raise ValueError(
+                f"{manifest_path.parent}: external-CPU sampled maximum is invalid"
+            )
+        maximum_consecutive_violations = manifest.get(
+            "maximum_consecutive_external_cpu_violations"
+        )
+        if (
+            not isinstance(maximum_consecutive_violations, int)
+            or maximum_consecutive_violations < 0
+            or maximum_consecutive_violations
+            >= allowed_consecutive_external_cpu_violations
+        ):
+            raise ValueError(
+                f"{manifest_path.parent}: sustained external-CPU load does not satisfy "
+                "the experiment resource gate"
+            )
+        if (
+            sampled_max_external_cpu > maximum_external_cpu
+            and maximum_consecutive_violations < 1
+        ):
+            raise ValueError(
+                f"{manifest_path.parent}: external-CPU spike is inconsistent with "
+                "the recorded consecutive-violation count"
+            )
         run_dir = manifest_path.parent
         if not (run_dir / "summary.txt").exists():
             continue
@@ -464,6 +743,59 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
         information_raw = summary_values.get(
             "pose_graph_refinement_loop_pose_information"
         )
+        information_cap_raw = summary_values.get(
+            "pose_graph_refinement_loop_pose_information_max_eigenvalue"
+        )
+        information_loop_scale_raw = summary_values.get(
+            "pose_graph_refinement_loop_pose_information_loop_edge_scale"
+        )
+        fusion_raw = summary_values.get(
+            "pose_graph_refinement_fuse_loop_observations"
+        )
+        expected_fusion = (
+            candidate_fuse_loop_observations
+            if identity.variant == "appearance_loop"
+            else False
+        )
+        if fusion_raw != str(expected_fusion).lower():
+            raise ValueError(
+                f"{run_dir}: loop observation fusion {fusion_raw!r} does not match "
+                f"protocol {expected_fusion}"
+            )
+        welding_raw = summary_values.get("pose_graph_refinement_loop_welding_ba")
+        expected_welding = (
+            candidate_loop_welding_ba if identity.variant == "appearance_loop" else False
+        )
+        if welding_raw != str(expected_welding).lower():
+            raise ValueError(
+                f"{run_dir}: loop welding BA {welding_raw!r} does not match "
+                f"protocol {expected_welding}"
+            )
+        expected_information_cap = (
+            candidate_information_cap
+            if identity.variant == "appearance_loop" and candidate_loop_pose_information
+            else 1.0
+        )
+        expected_information_loop_scale = (
+            candidate_information_loop_scale
+            if identity.variant == "appearance_loop" and candidate_loop_pose_information
+            else 1.0
+        )
+        for metric_label, raw, expected in (
+            ("information spectral cap", information_cap_raw, expected_information_cap),
+            (
+                "loop-only information scale",
+                information_loop_scale_raw,
+                expected_information_loop_scale,
+            ),
+        ):
+            actual = optional_float(raw)
+            if actual is None or not math.isclose(
+                actual, expected, rel_tol=1.0e-9, abs_tol=1.0e-9
+            ):
+                raise ValueError(
+                    f"{run_dir}: {metric_label} {raw!r} does not match protocol {expected}"
+                )
         if identity.variant == "no_loop":
             if fixed_weight_raw != "None":
                 raise ValueError(
@@ -481,6 +813,7 @@ def load_matrix(root: Path) -> tuple[list[RunSummary], dict[str, RunIdentity]]:
                     f"{run_dir}: information candidate records fixed weight "
                     f"{fixed_weight_raw!r} and information mode {information_raw!r}"
                 )
+            validate_pose_information_failure_counts(summary_values, run_dir)
         else:
             actual_fixed_weight = optional_float(fixed_weight_raw)
             if (
@@ -570,6 +903,12 @@ def aggregate(
                 frame_processing_ms_p95_std=p95[1],
                 sampled_peak_working_set_mb_mean=memory[0],
                 sampled_peak_working_set_mb_std=memory[1],
+                loop_pose_information_failures=sum_pose_information_failure_counts(
+                    [run.loop_pose_information_failures for run in members]
+                ),
+                sequential_pose_information_failures=sum_pose_information_failure_counts(
+                    [run.sequential_pose_information_failures for run in members]
+                ),
             )
         )
     return summaries
@@ -611,7 +950,9 @@ def aggregate_markdown(groups: list[AggregateSummary]) -> str:
 
 
 def promotion_verdicts(
-    runs: list[RunSummary], groups: dict[str, RunIdentity]
+    runs: list[RunSummary],
+    groups: dict[str, RunIdentity],
+    expected_identities: set[RunIdentity] | None = None,
 ) -> list[PromotionVerdict]:
     by_group: dict[tuple[str, str], list[RunSummary]] = {}
     for run in runs:
@@ -619,7 +960,13 @@ def promotion_verdicts(
             identity = groups[run.label]
             by_group.setdefault((identity.sequence, identity.variant), []).append(run)
 
-    sequences = sorted({sequence for sequence, _ in by_group})
+    sequences = sorted(
+        {sequence for sequence, _ in by_group}
+        | {
+            identity.sequence
+            for identity in (expected_identities or set())
+        }
+    )
     verdicts: list[PromotionVerdict] = []
     for sequence in sequences:
         baseline = by_group.get((sequence, "no_loop"), [])
@@ -639,6 +986,45 @@ def promotion_verdicts(
         }
         if baseline_repetitions != candidate_repetitions:
             reasons.append("baseline and candidate repetition IDs are not paired")
+        if expected_identities is not None:
+            expected_repetitions = {
+                identity.repetition
+                for identity in expected_identities
+                if identity.sequence == sequence
+            }
+            if (
+                baseline_repetitions != expected_repetitions
+                or candidate_repetitions != expected_repetitions
+            ):
+                reasons.append("missing declared repetitions")
+
+        accepted = sum(run.accepted_loops for run in candidate)
+        evaluated = sum(run.evaluated_loops for run in candidate)
+        correct = sum(run.correct_loops for run in candidate)
+        baseline_by_repetition = {
+            groups[run.label].repetition: run
+            for run in baseline
+            if run.label in groups
+        }
+        candidate_by_repetition = {
+            groups[run.label].repetition: run
+            for run in candidate
+            if run.label in groups
+        }
+        exact_no_op_pairs = sum(
+            1
+            for repetition in baseline_repetitions & candidate_repetitions
+            if baseline_by_repetition[repetition].accuracy_artifact_sha256 is not None
+            and baseline_by_repetition[repetition].accuracy_artifact_sha256
+            == candidate_by_repetition[repetition].accuracy_artifact_sha256
+        )
+        exact_no_op = (
+            accepted == 0
+            and bool(baseline)
+            and len(baseline) == len(candidate)
+            and baseline_repetitions == candidate_repetitions
+            and exact_no_op_pairs == len(baseline)
+        )
 
         baseline_final_ates = valid_metric_values(
             baseline, "final_keyframe_rigid_ate_m"
@@ -658,7 +1044,7 @@ def promotion_verdicts(
         )
         if baseline_best_final is None or candidate_worst_final is None:
             reasons.append("missing final-keyframe rigid ATE")
-        elif candidate_worst_final >= baseline_best_final:
+        elif not exact_no_op and candidate_worst_final >= baseline_best_final:
             reasons.append(
                 "candidate worst final-keyframe rigid ATE does not beat baseline best"
             )
@@ -681,7 +1067,7 @@ def promotion_verdicts(
         )
         if baseline_best_live is None or candidate_worst_live is None:
             reasons.append("missing live rigid ATE")
-        elif candidate_worst_live > baseline_best_live * 1.01:
+        elif not exact_no_op and candidate_worst_live > baseline_best_live * 1.01:
             reasons.append("live rigid ATE regresses by more than 1%")
 
         rpe_metrics = (
@@ -712,13 +1098,10 @@ def promotion_verdicts(
                 or not candidate
             ):
                 reasons.append(f"missing {metric_label}")
-            elif max(candidate_values) > min(baseline_values) * 1.01:
+            elif not exact_no_op and max(candidate_values) > min(baseline_values) * 1.01:
                 reasons.append(f"{metric_label} regresses by more than 1%")
 
-        accepted = sum(run.accepted_loops for run in candidate)
-        evaluated = sum(run.evaluated_loops for run in candidate)
-        correct = sum(run.correct_loops for run in candidate)
-        if accepted == 0:
+        if accepted == 0 and not exact_no_op:
             reasons.append("zero accepted loops")
         if evaluated != accepted:
             reasons.append("not every accepted loop has ground-truth evaluation")
@@ -742,30 +1125,27 @@ def promotion_verdicts(
             if candidate_longest < 0.99 * baseline_longest:
                 reasons.append("longest continuous run regresses by more than 1%")
 
-        baseline_runtime = valid_metric_values(baseline, "wall_clock_ms_per_frame")
-        candidate_runtime = valid_metric_values(candidate, "wall_clock_ms_per_frame")
-        if len(baseline_runtime) != len(baseline) or len(candidate_runtime) != len(candidate):
+        runtime_ratios = paired_metric_ratios(
+            baseline, candidate, groups, "wall_clock_ms_per_frame"
+        )
+        if runtime_ratios is None:
             reasons.append("missing runtime measurement")
-        elif baseline and candidate:
-            baseline_best_runtime = min(baseline_runtime)
-            candidate_worst_runtime = max(candidate_runtime)
-            if candidate_worst_runtime > baseline_best_runtime * 1.25:
-                reasons.append("runtime regresses by more than 25%")
-        baseline_memory = valid_metric_values(baseline, "sampled_peak_working_set_mb")
-        candidate_memory = valid_metric_values(candidate, "sampled_peak_working_set_mb")
-        if len(baseline_memory) != len(baseline) or len(candidate_memory) != len(candidate):
+        elif max(runtime_ratios) > 1.25:
+            reasons.append("paired runtime regresses by more than 25%")
+        memory_ratios = paired_metric_ratios(
+            baseline, candidate, groups, "sampled_peak_working_set_mb"
+        )
+        if memory_ratios is None:
             reasons.append("missing peak working-set measurement")
-        elif baseline and candidate:
-            baseline_best_memory = min(baseline_memory)
-            candidate_worst_memory = max(candidate_memory)
-            if candidate_worst_memory > baseline_best_memory * 1.25:
-                reasons.append("peak working-set regresses by more than 25%")
+        elif max(memory_ratios) > 1.25:
+            reasons.append("paired peak working-set regresses by more than 25%")
 
         incomplete_markers = {
             "missing baseline or candidate runs",
             "unbalanced repetition count",
             "fewer than 3 paired repetitions",
             "baseline and candidate repetition IDs are not paired",
+            "missing declared repetitions",
             "missing final-keyframe rigid ATE",
             "missing live rigid ATE",
             "missing delta-1 translation RPE",
@@ -776,8 +1156,14 @@ def promotion_verdicts(
             "missing runtime measurement",
             "missing peak working-set measurement",
         }
-        status = "PROMOTE" if not reasons else (
-            "INCOMPLETE" if any(reason in incomplete_markers for reason in reasons) else "REJECT"
+        status = (
+            "SAFE_NO_OP"
+            if not reasons and exact_no_op
+            else "PROMOTE"
+            if not reasons
+            else "INCOMPLETE"
+            if any(reason in incomplete_markers for reason in reasons)
+            else "REJECT"
         )
         verdicts.append(
             PromotionVerdict(
@@ -790,6 +1176,7 @@ def promotion_verdicts(
                 accepted_loops=accepted,
                 evaluated_loops=evaluated,
                 correct_loops=correct,
+                exact_no_op_pairs=exact_no_op_pairs,
                 reasons=reasons,
             )
         )
@@ -799,8 +1186,8 @@ def promotion_verdicts(
 def promotion_markdown(verdicts: list[PromotionVerdict]) -> str:
     lines = [
         "\n## Conservative promotion gate\n",
-        "| sequence | verdict | candidate worst final-KF rigid ATE m | baseline best final-KF rigid ATE m | candidate worst live rigid ATE m | baseline best live rigid ATE m | loops correct/eval/accepted | reason |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| sequence | verdict | candidate worst final-KF rigid ATE m | baseline best final-KF rigid ATE m | candidate worst live rigid ATE m | baseline best live rigid ATE m | loops correct/eval/accepted | exact no-op pairs | reason |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for verdict in verdicts:
         reason = "; ".join(verdict.reasons) if verdict.reasons else "all gates passed"
@@ -811,9 +1198,25 @@ def promotion_markdown(verdicts: list[PromotionVerdict]) -> str:
             f"{number(verdict.candidate_worst_live_rigid_ate_m)} | "
             f"{number(verdict.baseline_best_live_rigid_ate_m)} | "
             f"{verdict.correct_loops}/{verdict.evaluated_loops}/{verdict.accepted_loops} | "
+            f"{verdict.exact_no_op_pairs} | "
             f"{reason} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def matrix_promotion_status(verdicts: list[PromotionVerdict]) -> str | None:
+    if not verdicts:
+        return None
+    statuses = {verdict.status for verdict in verdicts}
+    if "INCOMPLETE" in statuses:
+        return "INCOMPLETE"
+    if "REJECT" in statuses:
+        return "REJECT"
+    if "PROMOTE" in statuses:
+        return "PROMOTE"
+    if statuses == {"SAFE_NO_OP"}:
+        return "SAFE_NO_OP"
+    raise ValueError(f"unsupported promotion statuses: {sorted(statuses)!r}")
 
 
 def markdown(runs: list[RunSummary]) -> str:
@@ -843,16 +1246,21 @@ def main() -> int:
     args = parse_args()
     runs = [load_run(spec) for spec in (args.run or [])]
     matrix_groups: dict[str, RunIdentity] = {}
+    expected_identities: set[RunIdentity] | None = None
     if args.matrix_root is not None:
         matrix_runs, matrix_groups = load_matrix(args.matrix_root)
+        expected_identities = expected_matrix_identities(args.matrix_root)
         runs.extend(matrix_runs)
     aggregates = aggregate(runs, matrix_groups)
-    verdicts = promotion_verdicts(runs, matrix_groups)
+    verdicts = promotion_verdicts(runs, matrix_groups, expected_identities)
+    matrix_status = matrix_promotion_status(verdicts)
     output = markdown(runs)
     if aggregates:
         output += aggregate_markdown(aggregates)
     if verdicts:
         output += promotion_markdown(verdicts)
+    if matrix_status is not None:
+        output += f"\n## Matrix decision\n\n`{matrix_status}`\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output, encoding="utf-8")
@@ -867,6 +1275,7 @@ def main() -> int:
                     "runs": [asdict(run) for run in runs],
                     "aggregates": [asdict(group) for group in aggregates],
                     "promotion_verdicts": [asdict(verdict) for verdict in verdicts],
+                    "matrix_promotion_status": matrix_status,
                 },
                 indent=2,
             )

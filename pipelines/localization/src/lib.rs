@@ -342,6 +342,12 @@ impl InMemoryMapProvider {
             .filter(|(landmark_id, _)| landmark_ids.contains(landmark_id))
             .map(|(landmark_id, landmark)| (*landmark_id, landmark.clone()))
             .collect();
+        map.landmark_position_covariances = source_map
+            .landmark_position_covariances
+            .iter()
+            .filter(|(landmark_id, _)| landmark_ids.contains(landmark_id))
+            .map(|(landmark_id, covariance)| (*landmark_id, *covariance))
+            .collect();
         map.keyframes = source_map
             .keyframes
             .iter()
@@ -861,6 +867,31 @@ where
         candidate_radius: Option<f64>,
         search_radius_px: f64,
     ) -> LocalizationResult {
+        self.localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
+            frame,
+            map,
+            descriptor_store,
+            pose_prior,
+            candidate_radius,
+            search_radius_px,
+            None,
+        )
+    }
+
+    // This compatibility entry point exposes the existing projection-window
+    // arguments plus the optional reverse-ratio gate without replacing the
+    // shorter public wrapper above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn localize_frame_with_projection_window_descriptor_store_and_query_landmark_ratio(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        candidate_radius: Option<f64>,
+        search_radius_px: f64,
+        max_query_landmark_distance_ratio: Option<f32>,
+    ) -> LocalizationResult {
         let Some(camera) = map.cameras.get(&frame.camera_id).cloned() else {
             return LocalizationResult::failure(
                 LocalizationFailureReason::MissingCamera {
@@ -878,22 +909,24 @@ where
                 RadiusLandmarkSelector::new(pose_prior.camera_center_world(), radius);
             let candidate_selector =
                 IntersectCandidateSelector::new(self.candidate_selector.clone(), radius_selector);
-            self.localize_with_projection_window_and_descriptor_store(
+            self.localize_with_projection_window_descriptor_store_and_query_landmark_ratio(
                 &query,
                 map,
                 descriptor_store,
                 candidate_selector,
                 pose_prior,
                 search_radius_px,
+                max_query_landmark_distance_ratio,
             )
         } else {
-            self.localize_with_projection_window_and_descriptor_store(
+            self.localize_with_projection_window_descriptor_store_and_query_landmark_ratio(
                 &query,
                 map,
                 descriptor_store,
                 self.candidate_selector.clone(),
                 pose_prior,
                 search_radius_px,
+                max_query_landmark_distance_ratio,
             )
         }
     }
@@ -910,12 +943,46 @@ where
     where
         S2: CandidateSelector + Clone,
     {
+        self.localize_with_projection_window_descriptor_store_and_query_landmark_ratio(
+            query,
+            map,
+            descriptor_store,
+            candidate_selector,
+            pose_prior,
+            search_radius_px,
+            None,
+        )
+    }
+
+    // Keep the selector-generic compatibility entry point parallel to the
+    // frame wrapper; callers that do not need the reverse ratio use the
+    // shorter method above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn localize_with_projection_window_descriptor_store_and_query_landmark_ratio<S2>(
+        &self,
+        query: &QueryImage,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        candidate_selector: S2,
+        pose_prior: &Pose,
+        search_radius_px: f64,
+        max_query_landmark_distance_ratio: Option<f32>,
+    ) -> LocalizationResult
+    where
+        S2: CandidateSelector + Clone,
+    {
         let correspondence_set = match ProjectionCorrespondenceBuilder::with_candidate_selector(
             self.matcher.clone(),
             candidate_selector,
         )
-        .build_with_pose_prior(query, map, descriptor_store, pose_prior, search_radius_px)
-        {
+        .build_with_pose_prior_and_query_landmark_ratio(
+            query,
+            map,
+            descriptor_store,
+            pose_prior,
+            search_radius_px,
+            max_query_landmark_distance_ratio,
+        ) {
             Ok(correspondence_set) => correspondence_set,
             Err(error) => return result_from_correspondence_error(error),
         };
@@ -1358,6 +1425,12 @@ fn result_from_correspondence_error(error: CorrespondenceBuildError) -> Localiza
         } => LocalizationResult::failure(
             LocalizationFailureReason::NoDescriptorMatches,
             candidate_landmark_count,
+            0,
+            0,
+        ),
+        CorrespondenceBuildError::InvalidQueryLandmarkRatio => LocalizationResult::failure(
+            LocalizationFailureReason::InvalidProjectionQueryLandmarkRatio,
+            0,
             0,
             0,
         ),

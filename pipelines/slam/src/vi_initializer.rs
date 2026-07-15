@@ -60,6 +60,11 @@ pub struct VisualInertialInitializerConfig {
     /// signal in the window (rad / s). Above this threshold the
     /// window is rejected as non-stationary.
     pub max_gyro_std: f64,
+    /// Maximum norm of the time-weighted mean angular rate (rad/s). A low
+    /// standard deviation alone cannot distinguish a stationary sensor from
+    /// one rotating at nearly constant speed; without this gate that motion is
+    /// silently absorbed as gyro bias.
+    pub max_mean_gyro_magnitude: f64,
     /// Maximum acceptable per-axis standard deviation of the accel
     /// signal in the window (m / s²).
     pub max_accel_std: f64,
@@ -94,6 +99,7 @@ impl Default for VisualInertialInitializerConfig {
             gravity_world: Vector3::new(0.0, 0.0, -9.81),
             min_stationary_window_seconds: 0.5,
             max_gyro_std: 0.05,
+            max_mean_gyro_magnitude: 0.05,
             max_accel_std: 0.5,
             max_accel_magnitude_error: 0.5,
             min_samples: 50,
@@ -204,6 +210,10 @@ pub enum StationaryRejectionReason {
     },
     GyroNoiseTooHigh {
         observed: Vector3<f64>,
+        limit: f64,
+    },
+    MeanGyroMagnitudeTooHigh {
+        observed: f64,
         limit: f64,
     },
     AccelNoiseTooHigh {
@@ -323,6 +333,15 @@ impl VisualInertialInitializer {
             return Err(StationaryRejectionReason::GyroNoiseTooHigh {
                 observed: gyro_std,
                 limit: self.config.max_gyro_std,
+            });
+        }
+        let mean_gyro_magnitude = gyro_mean.norm();
+        if !mean_gyro_magnitude.is_finite()
+            || mean_gyro_magnitude > self.config.max_mean_gyro_magnitude
+        {
+            return Err(StationaryRejectionReason::MeanGyroMagnitudeTooHigh {
+                observed: mean_gyro_magnitude,
+                limit: self.config.max_mean_gyro_magnitude,
             });
         }
         if accel_std
@@ -496,6 +515,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_low_variance_constant_rotation_as_non_stationary() {
+        let mut initializer = VisualInertialInitializer::new(euroc_config());
+        for _ in 0..100 {
+            initializer.push_sample(
+                Vector3::new(0.0, 0.0, 0.08),
+                Vector3::new(0.0, 0.0, 9.81),
+                0.01,
+            );
+        }
+        match initializer.try_initialize().expect_err("constant rotation") {
+            StationaryRejectionReason::MeanGyroMagnitudeTooHigh { observed, limit } => {
+                assert!((observed - 0.08).abs() < 1.0e-12);
+                assert_eq!(limit, 0.05);
+            }
+            other => panic!("expected MeanGyroMagnitudeTooHigh, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_noisy_gyro() {
         let mut initializer = VisualInertialInitializer::new(euroc_config());
         let dt = 0.005;
@@ -665,6 +703,7 @@ mod tests {
             min_samples: 2,
             min_stationary_window_seconds: 0.0,
             max_gyro_std: f64::INFINITY,
+            max_mean_gyro_magnitude: f64::INFINITY,
             max_accel_std: f64::INFINITY,
             max_accel_magnitude_error: f64::INFINITY,
             ..Default::default()

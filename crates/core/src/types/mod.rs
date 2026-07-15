@@ -10,6 +10,6 @@ pub use localization::{
     PoseEstimationFailureDiagnostics, PoseEstimationFailureReason, PoseEstimatorDiagnostics,
 };
 pub use map::{
-    Landmark, LandmarkDescriptorStore, LandmarkId, VisualMap, VisualMapValidationIssue,
-    VisualMapValidationReport,
+    Landmark, LandmarkDescriptorStore, LandmarkId, StereoObservation, VisualMap,
+    VisualMapValidationIssue, VisualMapValidationReport,
 };

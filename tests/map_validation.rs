@@ -1,7 +1,8 @@
-use nalgebra::{Point2, Point3};
+use nalgebra::{Matrix3, Point2, Point3};
+use visloc_rs::core::geometry::SE3;
 use visloc_rs::core::types::{
-    Camera, Frame, Keyframe, Landmark, LandmarkDescriptorStore, Observation, VisualMap,
-    VisualMapValidationIssue,
+    Camera, Frame, Keyframe, Landmark, LandmarkDescriptorStore, Observation, StereoObservation,
+    VisualMap, VisualMapValidationIssue,
 };
 
 fn valid_map() -> VisualMap {
@@ -144,4 +145,69 @@ fn visual_map_validation_reports_descriptor_gaps() {
     assert!(external_report
         .issues
         .contains(&VisualMapValidationIssue::DescriptorForMissingLandmark { landmark_id: 999 }));
+}
+
+#[test]
+fn visual_map_validation_checks_landmark_covariance_sidecar() {
+    let mut map = valid_map();
+    map.landmark_position_covariances
+        .insert(100, Matrix3::from_diagonal_element(0.01));
+    assert!(map.validate().is_valid());
+
+    map.landmark_position_covariances
+        .insert(999, Matrix3::identity());
+    map.landmark_position_covariances.insert(
+        100,
+        Matrix3::new(1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0),
+    );
+    let report = map.validate();
+    assert!(report
+        .issues
+        .contains(&VisualMapValidationIssue::CovarianceForMissingLandmark { landmark_id: 999 }));
+    assert!(report
+        .issues
+        .contains(&VisualMapValidationIssue::InvalidLandmarkCovariance { landmark_id: 100 }));
+}
+
+#[test]
+fn visual_map_validation_checks_stereo_observation_sidecar() {
+    let mut map = valid_map();
+    map.cameras
+        .insert(2, Camera::pinhole(2, 640, 480, 505.0, 498.0, 318.0, 241.0));
+    map.stereo_observations.push(StereoObservation {
+        frame_id: 10,
+        landmark_id: 100,
+        right_camera_id: 2,
+        xy_right: Point2::new(305.0, 240.5),
+        left_to_right: SE3::identity(),
+    });
+    assert!(map.validate().is_valid());
+
+    map.stereo_observations.push(StereoObservation {
+        frame_id: 404,
+        landmark_id: 999,
+        right_camera_id: 77,
+        xy_right: Point2::new(1.0, 2.0),
+        left_to_right: SE3::identity(),
+    });
+    let report = map.validate();
+    assert!(report.issues.contains(
+        &VisualMapValidationIssue::StereoObservationMissingKeyframe {
+            frame_id: 404,
+            landmark_id: 999,
+        }
+    ));
+    assert!(report.issues.contains(
+        &VisualMapValidationIssue::StereoObservationMissingLandmark {
+            frame_id: 404,
+            landmark_id: 999,
+        }
+    ));
+    assert!(report.issues.contains(
+        &VisualMapValidationIssue::StereoObservationMissingRightCamera {
+            frame_id: 404,
+            landmark_id: 999,
+            camera_id: 77,
+        }
+    ));
 }

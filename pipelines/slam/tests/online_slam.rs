@@ -418,6 +418,7 @@ fn online_slam_imu_factor_propagates_gravity_weights_and_bias_linearisation() {
         weight_position: 3.0,
         weight_velocity: 5.0,
         weight_rotation: 7.0,
+        noise_model: None,
     };
     let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
     let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
@@ -691,10 +692,15 @@ fn online_slam_runs_covisibility_local_ba_on_new_keyframe_trigger() {
             local_vi_ba: None,
             covisibility_local_ba: Some(OnlineSlamCovisibilityLocalBaConfig {
                 min_keyframes: 3,
+                max_keyframes: None,
+                motion_vi_raw_residual_activation: None,
+                max_seed_landmarks_for_activation: None,
                 trigger_every_new_keyframes: 1,
                 max_outlier_observation_ratio: None,
                 max_behind_camera_landmark_ratio: None,
                 min_fixed_to_optimized_ratio: None,
+                max_pose_translation_correction_m: None,
+                max_pose_rotation_correction_rad: None,
                 ba: CovisibilityLocalBaConfig {
                     max_neighbor_keyframes: 1,
                     min_shared_landmarks: 4,
@@ -774,10 +780,15 @@ fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
             local_vi_ba: None,
             covisibility_local_ba: Some(OnlineSlamCovisibilityLocalBaConfig {
                 min_keyframes: 3,
+                max_keyframes: None,
+                motion_vi_raw_residual_activation: None,
+                max_seed_landmarks_for_activation: None,
                 trigger_every_new_keyframes: 1,
                 max_outlier_observation_ratio: Some(0.0),
                 max_behind_camera_landmark_ratio: None,
                 min_fixed_to_optimized_ratio: None,
+                max_pose_translation_correction_m: None,
+                max_pose_rotation_correction_rad: None,
                 ba: CovisibilityLocalBaConfig {
                     max_neighbor_keyframes: 1,
                     min_shared_landmarks: 4,
@@ -828,6 +839,72 @@ fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
     ));
     assert_eq!(slam.map().keyframes.len(), 3);
     assert_eq!(slam.map().keyframes[&30].observations[0].xy, corrupted_xy);
+}
+
+#[test]
+fn online_covisibility_local_ba_pose_correction_gate_rejects_writeback() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+    let (_, third_frame) = map_and_frame_with_extra_landmarks(50, 1, Vector3::new(3.0, 0.0, 0.0));
+    let mut slam = OnlineSlamPipeline::new(
+        map,
+        Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+        LocalMappingPipeline::default(),
+        OnlineSlamConfig {
+            apply_map_updates: true,
+            loop_closure: LoopClosureConfig {
+                min_frame_id_gap: 5,
+                min_shared_landmarks: 4,
+                min_shared_landmark_ratio_percent: 50,
+                ..LoopClosureConfig::default()
+            },
+            covisibility_local_ba: Some(OnlineSlamCovisibilityLocalBaConfig {
+                min_keyframes: 3,
+                trigger_every_new_keyframes: 1,
+                max_pose_translation_correction_m: Some(0.0),
+                ba: CovisibilityLocalBaConfig {
+                    max_neighbor_keyframes: 1,
+                    min_shared_landmarks: 4,
+                    max_boundary_keyframes: 1,
+                    min_boundary_observations: 1,
+                    min_observations_per_landmark: 2,
+                    ..CovisibilityLocalBaConfig::default()
+                },
+                ..OnlineSlamCovisibilityLocalBaConfig::default()
+            }),
+            ..OnlineSlamConfig::default()
+        },
+    );
+
+    assert!(slam.process_frame(&first_frame, []).tracking_succeeded());
+    assert!(slam.process_frame(&second_frame, []).tracking_succeeded());
+    let second_center_before = slam.map().keyframes[&30]
+        .frame
+        .pose
+        .as_ref()
+        .expect("stored second-frame pose")
+        .camera_center_world();
+    let result = slam.process_frame(&third_frame, []);
+    let stats = result
+        .covisibility_local_ba
+        .as_ref()
+        .expect("covisibility BA should run on the third keyframe");
+
+    assert!(!stats.success);
+    assert!(stats.pose_correction_gate_rejected);
+    assert_eq!(stats.updated_keyframe_count, 0);
+    assert!(stats.max_pose_translation_correction_m.unwrap() > 0.0);
+    assert!(matches!(
+        stats.error.as_ref(),
+        Some(CovisibilityLocalBaError::PoseCorrectionGateRejected { .. })
+    ));
+    let second_center_after = slam.map().keyframes[&30]
+        .frame
+        .pose
+        .as_ref()
+        .expect("stored second-frame pose")
+        .camera_center_world();
+    assert!((second_center_after - second_center_before).norm() < 1.0e-12);
 }
 
 // Drives the opt-in fixed-anchor-ratio write-back gate end-to-end. The healthy
@@ -898,10 +975,15 @@ fn online_covisibility_local_ba_fixed_ratio_gate_rejects_writeback() {
     fn config(min_fixed_to_optimized_ratio: Option<f64>) -> OnlineSlamCovisibilityLocalBaConfig {
         OnlineSlamCovisibilityLocalBaConfig {
             min_keyframes: 3,
+            max_keyframes: None,
+            motion_vi_raw_residual_activation: None,
+            max_seed_landmarks_for_activation: None,
             trigger_every_new_keyframes: 1,
             max_outlier_observation_ratio: None,
             max_behind_camera_landmark_ratio: None,
             min_fixed_to_optimized_ratio,
+            max_pose_translation_correction_m: None,
+            max_pose_rotation_correction_rad: None,
             ba: CovisibilityLocalBaConfig {
                 max_neighbor_keyframes: 1,
                 min_shared_landmarks: 4,
@@ -1903,6 +1985,44 @@ fn pose_graph_se3_information_matrix_steers_solution() {
     assert!(
         pulled_far > 2.5,
         "strong far-info should pull toward x=3.0, got {pulled_far}"
+    );
+}
+
+#[test]
+fn chordal_translation_seed_respects_information_scale() {
+    use nalgebra::Matrix6;
+    use visloc_slam::PoseGraphEdgeKind;
+
+    let anchor = pose_at(Vector3::zeros());
+    let target_near = pose_at(Vector3::new(1.0, 0.0, 0.0));
+    let target_far = pose_at(Vector3::new(3.0, 0.0, 0.0));
+    let mut graph = PoseGraph::new();
+    graph.add_pose(10, anchor.clone());
+    graph.add_pose(20, pose_at(Vector3::new(2.0, 0.0, 0.0)));
+    graph.anchor(10);
+    graph.add_edge_with_information(
+        10,
+        20,
+        relative_world_to_camera(&anchor, &target_near),
+        PoseGraphEdgeKind::Sequential,
+        Matrix6::identity(),
+    );
+    graph.add_edge_with_information(
+        10,
+        20,
+        relative_world_to_camera(&anchor, &target_far),
+        PoseGraphEdgeKind::LoopClosure,
+        Matrix6::identity() * 0.001,
+    );
+
+    graph
+        .optimize_translations_once()
+        .expect("translation seed solve");
+    let actual_x = graph.poses[&20].camera_center_world().x;
+    let expected_x = (1.0 + 0.001 * 3.0) / 1.001;
+    assert!(
+        (actual_x - expected_x).abs() < 1.0e-10,
+        "weak loop must not receive unit seed weight: actual={actual_x} expected={expected_x}"
     );
 }
 
@@ -4072,6 +4192,12 @@ mod vi_motion_init_integration {
                     allow_after_static_give_up: true,
                     ..OnlineSlamMotionViInitConfig::default()
                 }),
+                local_vi_ba: Some(OnlineSlamLocalBaConfig {
+                    gravity_world: gravity,
+                    body_to_camera: SE3::identity(),
+                    ..OnlineSlamLocalBaConfig::default()
+                }),
+                keep_pre_promotion_imu_factors: true,
                 ..OnlineSlamConfig::default()
             },
         );
@@ -4102,6 +4228,19 @@ mod vi_motion_init_integration {
             second.vi_motion_init,
             Some(MotionViInitializationEvent::StillWaiting { .. })
         ));
+        assert!(
+            second.local_vi_ba.is_none(),
+            "local VI-BA must stay gated until motion VI actually succeeds"
+        );
+        assert_eq!(
+            slam.local_vi_ba_state
+                .as_ref()
+                .expect("configured local VI state")
+                .factor_history
+                .len(),
+            1,
+            "pre-promotion factor should be banked, not optimized"
+        );
         match slam.motion_vi_initialization_status() {
             MotionViInitializationStatus::Waiting {
                 keyframes_observed,
@@ -4319,6 +4458,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -4365,6 +4506,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -4411,6 +4554,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -4594,6 +4739,16 @@ mod online_loop_closure_refinement {
                 .sequential_pose_information_fallbacks,
             1
         );
+        assert_eq!(
+            r1.pose_graph_refinement
+                .as_ref()
+                .unwrap()
+                .sequential_pose_information_failures,
+            visloc_slam::LoopPoseInformationFailureCounts {
+                insufficient_usable_correspondences: 1,
+                ..Default::default()
+            }
+        );
         let observation_counts: Vec<_> = slam
             .map
             .landmarks
@@ -4616,6 +4771,10 @@ mod online_loop_closure_refinement {
         assert_eq!(stats.sequential_edges_with_pose_information, 1);
         assert_eq!(stats.sequential_pose_information_fallbacks, 0);
         assert_eq!(stats.sequential_pose_information_diagnostics.len(), 1);
+        assert_eq!(
+            stats.sequential_pose_information_failures,
+            visloc_slam::LoopPoseInformationFailureCounts::default()
+        );
 
         let sequential_edges: Vec<_> = slam
             .pose_graph_state
@@ -4629,6 +4788,74 @@ mod online_loop_closure_refinement {
         assert_eq!(sequential_edges.len(), 2);
         assert!(sequential_edges[0].information.is_none());
         assert!(sequential_edges[1].information.is_some());
+    }
+
+    #[test]
+    fn covariance_loop_scale_does_not_change_sequential_information() {
+        use visloc_slam::PoseGraphEdgeKind;
+
+        let camera = camera();
+        let points = shared_landmarks();
+        let map = build_seeded_map(&points, &camera);
+        let mut unscaled = pipeline_with_pnp_pose_graph(
+            map.clone(),
+            camera.clone(),
+            100,
+            PnPLoopClosureVerifierConfig::default(),
+        );
+        let mut scaled = pipeline_with_pnp_pose_graph(
+            map.clone(),
+            camera.clone(),
+            100,
+            PnPLoopClosureVerifierConfig::default(),
+        );
+        for (slam, loop_edge_scale) in [(&mut unscaled, 1.0), (&mut scaled, 0.1)] {
+            slam.pose_graph_state
+                .as_mut()
+                .unwrap()
+                .config
+                .loop_pose_information = Some(visloc_slam::LoopPoseInformationConfig {
+                max_landmark_condition_number: 1.0e12,
+                max_pose_condition_number: 1.0e12,
+                loop_edge_scale,
+                ..visloc_slam::LoopPoseInformationConfig::default()
+            });
+
+            let f0 = frame_at(10, Vector3::new(-1.0, 0.0, 0.0), &points, &camera, &map);
+            assert!(slam.process_frame(&f0, []).tracking_succeeded());
+            let f1 = frame_at(20, Vector3::new(0.2, 0.0, 0.0), &points, &camera, &map);
+            assert!(slam.process_frame(&f1, []).tracking_succeeded());
+            let f2 = frame_at(30, Vector3::new(1.4, 0.0, 0.0), &points, &camera, &map);
+            let result = slam.process_frame(&f2, []);
+            assert!(result.tracking_succeeded());
+            assert!(
+                result
+                    .pose_graph_refinement
+                    .as_ref()
+                    .is_some_and(|stats| { stats.sequential_edges_with_pose_information >= 1 }),
+                "third keyframe must produce covariance-informed sequential odometry"
+            );
+        }
+
+        let unscaled_graph = &unscaled.pose_graph_state.as_ref().unwrap().graph;
+        let scaled_graph = &scaled.pose_graph_state.as_ref().unwrap().graph;
+        for unscaled_edge in &unscaled_graph.edges {
+            let scaled_edge = scaled_graph
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.from == unscaled_edge.from
+                        && edge.to == unscaled_edge.to
+                        && edge.kind == unscaled_edge.kind
+                })
+                .expect("identical synthetic run must produce the same graph topology");
+            if unscaled_edge.kind == PoseGraphEdgeKind::Sequential {
+                assert_eq!(
+                    scaled_edge.information, unscaled_edge.information,
+                    "loop_edge_scale must not alter sequential information"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4931,6 +5158,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -5037,6 +5266,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -5123,6 +5354,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -5189,6 +5422,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints: 1,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: false,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -5628,6 +5863,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: true,
                     solver: LoopRefinementSolver::Se3,
                 }),
@@ -6040,6 +6277,8 @@ mod online_loop_closure_refinement {
                     marginalization_sparsify: false,
                     trigger_every_new_constraints,
                     appearance_candidates: None,
+                    fuse_loop_observations: false,
+                    loop_welding_ba: None,
                     propagate_corrections: true,
                     solver: LoopRefinementSolver::Sim3(Sim3PoseGraphConfig::default()),
                 }),

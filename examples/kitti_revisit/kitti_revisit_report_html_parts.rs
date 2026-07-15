@@ -77,6 +77,7 @@ mod tests {
             shared_landmark_ratio: 0.0,
             score: 16083.0719,
             geometrically_verified: true,
+            pnp_query_landmark_pairs: Vec::new(),
             verification: Some(LoopClosureVerification {
                 verified: true,
                 correspondence_count: 95,

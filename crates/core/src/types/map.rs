@@ -1,7 +1,8 @@
-use nalgebra::Point3;
-use std::collections::HashMap;
+use nalgebra::{Matrix3, Point2, Point3};
+use std::collections::{HashMap, HashSet};
 
 use super::{Camera, CameraId, FrameId, Keyframe, Observation};
+use crate::geometry::SE3;
 
 pub type LandmarkId = u64;
 
@@ -24,10 +25,29 @@ impl Landmark {
     }
 }
 
+/// Calibrated right-image measurement paired with the normal left-camera
+/// [`Observation`] stored on a keyframe. This preserves the full stereo
+/// measurement without assuming that the rig is rectified.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StereoObservation {
+    pub frame_id: FrameId,
+    pub landmark_id: LandmarkId,
+    pub right_camera_id: CameraId,
+    pub xy_right: Point2<f64>,
+    /// Fixed rig transform `T_right<-left` for this measurement.
+    pub left_to_right: SE3,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VisualMap {
     pub cameras: HashMap<CameraId, Camera>,
     pub landmarks: HashMap<LandmarkId, Landmark>,
+    /// Optional world-frame position covariance for landmarks whose source
+    /// geometry provides one (for example a calibrated stereo seed).
+    pub landmark_position_covariances: HashMap<LandmarkId, Matrix3<f64>>,
+    /// Right-image measurements paired by `(frame_id, landmark_id)` with the
+    /// ordinary left observations in `keyframes` / `landmarks`.
+    pub stereo_observations: Vec<StereoObservation>,
     pub keyframes: HashMap<u64, Keyframe>,
 }
 
@@ -79,6 +99,95 @@ impl VisualMap {
         for (landmark_id, landmark) in landmarks {
             for observation in &landmark.observations {
                 self.validate_landmark_observation(*landmark_id, observation, report);
+            }
+        }
+
+        let mut covariances = self
+            .landmark_position_covariances
+            .iter()
+            .collect::<Vec<_>>();
+        covariances.sort_by_key(|(landmark_id, _)| **landmark_id);
+        for (landmark_id, covariance) in covariances {
+            if !self.landmarks.contains_key(landmark_id) {
+                report.push(VisualMapValidationIssue::CovarianceForMissingLandmark {
+                    landmark_id: *landmark_id,
+                });
+                continue;
+            }
+            let symmetry_error = (covariance - covariance.transpose()).norm();
+            let scale = 1.0 + covariance.norm();
+            let finite = covariance.iter().all(|value| value.is_finite());
+            let positive_semidefinite = finite
+                && ((covariance + covariance.transpose()) * 0.5)
+                    .symmetric_eigen()
+                    .eigenvalues
+                    .iter()
+                    .all(|value| *value >= -1.0e-12);
+            if !finite || symmetry_error > 1.0e-9 * scale || !positive_semidefinite {
+                report.push(VisualMapValidationIssue::InvalidLandmarkCovariance {
+                    landmark_id: *landmark_id,
+                });
+            }
+        }
+
+        let mut seen_stereo = HashSet::new();
+        for stereo in &self.stereo_observations {
+            let key = (stereo.frame_id, stereo.landmark_id);
+            if !seen_stereo.insert(key) {
+                report.push(VisualMapValidationIssue::DuplicateStereoObservation {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            if !self.keyframes.contains_key(&stereo.frame_id) {
+                report.push(VisualMapValidationIssue::StereoObservationMissingKeyframe {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            if !self.landmarks.contains_key(&stereo.landmark_id) {
+                report.push(VisualMapValidationIssue::StereoObservationMissingLandmark {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            if !self.cameras.contains_key(&stereo.right_camera_id) {
+                report.push(
+                    VisualMapValidationIssue::StereoObservationMissingRightCamera {
+                        frame_id: stereo.frame_id,
+                        landmark_id: stereo.landmark_id,
+                        camera_id: stereo.right_camera_id,
+                    },
+                );
+            }
+            let has_left = self
+                .keyframes
+                .get(&stereo.frame_id)
+                .is_some_and(|keyframe| {
+                    keyframe
+                        .observations
+                        .iter()
+                        .any(|obs| obs.landmark_id == stereo.landmark_id)
+                });
+            if !has_left {
+                report.push(
+                    VisualMapValidationIssue::StereoObservationMissingLeftObservation {
+                        frame_id: stereo.frame_id,
+                        landmark_id: stereo.landmark_id,
+                    },
+                );
+            }
+            let transform_finite = stereo
+                .left_to_right
+                .translation
+                .iter()
+                .chain(stereo.left_to_right.rotation.coords.iter())
+                .all(|value| value.is_finite());
+            if !stereo.xy_right.coords.iter().all(|value| value.is_finite()) || !transform_finite {
+                report.push(VisualMapValidationIssue::InvalidStereoObservation {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
             }
         }
     }
@@ -235,6 +344,37 @@ pub enum VisualMapValidationIssue {
         landmark_id: LandmarkId,
     },
     DescriptorForMissingLandmark {
+        landmark_id: LandmarkId,
+    },
+    CovarianceForMissingLandmark {
+        landmark_id: LandmarkId,
+    },
+    InvalidLandmarkCovariance {
+        landmark_id: LandmarkId,
+    },
+    DuplicateStereoObservation {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingKeyframe {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingLandmark {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingRightCamera {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        camera_id: CameraId,
+    },
+    StereoObservationMissingLeftObservation {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    InvalidStereoObservation {
+        frame_id: FrameId,
         landmark_id: LandmarkId,
     },
 }

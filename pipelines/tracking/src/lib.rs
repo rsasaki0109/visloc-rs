@@ -47,6 +47,11 @@ pub struct TrackingConfig {
     pub min_successive_failures_to_lost: usize,
     pub last_pose_candidate_radius: Option<f64>,
     pub max_pose_prior_translation_error: Option<f64>,
+    /// Permit a bounded widening of the pose-prior translation gate when the
+    /// independently estimated visual pose has unusually strong geometric
+    /// support. This addresses motion-prior disagreement during fast motion
+    /// without disabling the teleport guard for weak/repetitive matches.
+    pub pose_prior_visual_override: Option<PosePriorVisualOverrideConfig>,
     pub min_inliers: usize,
     pub min_inlier_ratio: f64,
     pub max_mean_reprojection_error: Option<f64>,
@@ -90,6 +95,54 @@ pub struct TrackingConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PosePriorVisualOverrideConfig {
+    /// Minimum PnP inlier count required to widen the prior gate.
+    pub min_inliers: usize,
+    /// Minimum PnP inlier fraction required to widen the prior gate.
+    pub min_inlier_ratio: f64,
+    /// Optional mean reprojection-error ceiling for the visual solution.
+    pub max_mean_reprojection_error: Option<f64>,
+    /// Require the innovation to exceed this multiple of the ordinary gate
+    /// before widening it. Hysteresis avoids perturbing the map for marginal
+    /// threshold crossings that recover naturally on the next frame.
+    pub min_translation_error_multiplier: f64,
+    /// Optional rotation innovation ceiling in radians. Translation-only
+    /// disagreement may indicate a stale velocity prior; simultaneous large
+    /// rotation disagreement is more likely an unsafe pose branch.
+    pub max_rotation_error_radians: Option<f64>,
+    /// Isotropic translation standard deviation assigned to the motion prior
+    /// for continuation-state fusion.
+    pub continuation_prior_translation_std_m: f64,
+    /// Pixel noise used when converting the PnP inlier reprojection Hessian
+    /// into a translation covariance.
+    pub continuation_visual_pixel_sigma_px: f64,
+    /// Spectral cap on the covariance-derived continuation Kalman gain.
+    pub continuation_max_gain: f64,
+    /// Maximum accepted condition number of the translation Hessian.
+    pub continuation_max_condition_number: f64,
+    /// Maximum widened gate as a multiple of
+    /// `TrackingConfig::max_pose_prior_translation_error`. Must be >= 1.
+    pub max_translation_error_multiplier: f64,
+}
+
+impl Default for PosePriorVisualOverrideConfig {
+    fn default() -> Self {
+        Self {
+            min_inliers: 100,
+            min_inlier_ratio: 0.6,
+            max_mean_reprojection_error: Some(3.0),
+            min_translation_error_multiplier: 1.25,
+            max_rotation_error_radians: Some(std::f64::consts::PI / 180.0),
+            continuation_prior_translation_std_m: 0.02,
+            continuation_visual_pixel_sigma_px: 2.0,
+            continuation_max_gain: 0.5,
+            continuation_max_condition_number: 1.0e6,
+            max_translation_error_multiplier: 2.5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProjectionGuidedTrackingConfig {
     /// Initial per-landmark projection-window radius, in pixels.
     pub search_radius_px: f64,
@@ -101,6 +154,11 @@ pub struct ProjectionGuidedTrackingConfig {
     /// projection attempts per frame is `1 + max_widen_retries`; if all of
     /// them fail, the tracker falls back to the appearance-global path.
     pub max_widen_retries: u32,
+    /// Optional reverse ambiguity ratio across landmarks competing for the
+    /// same query keypoint. `Some(r)` requires the best descriptor distance
+    /// to be strictly below `r * second_best`; `None` preserves deterministic
+    /// first-wins assignment for overlapping projection windows.
+    pub max_query_landmark_distance_ratio: Option<f32>,
     /// When `true`, after ANY successful pose estimate (projection path or
     /// appearance-global fallback), project the covisibility local map with
     /// the estimated pose and re-optimize over the union of harvested and
@@ -122,6 +180,7 @@ impl Default for ProjectionGuidedTrackingConfig {
             search_radius_px: 15.0,
             widen_factor: 2.0,
             max_widen_retries: 2,
+            max_query_landmark_distance_ratio: None,
             local_map_refinement: true,
             refinement_search_radius_px: 8.0,
         }
@@ -158,6 +217,7 @@ impl Default for TrackingConfig {
             min_successive_failures_to_lost: 3,
             last_pose_candidate_radius: None,
             max_pose_prior_translation_error: None,
+            pose_prior_visual_override: None,
             min_inliers: 0,
             min_inlier_ratio: 0.0,
             max_mean_reprojection_error: None,

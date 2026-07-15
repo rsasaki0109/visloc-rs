@@ -26,7 +26,7 @@
 //! Matches that fail any of those gates are silently dropped — the caller
 //! can keep using a fall-back depth seed for the unmatched left keypoints.
 
-use nalgebra::{Matrix4, Point2, Point3};
+use nalgebra::{Matrix3, Matrix3x4, Matrix4, Point2, Point3};
 use visloc_core::geometry::SE3;
 use visloc_core::types::Camera;
 
@@ -51,6 +51,10 @@ pub struct StereoBootstrapConfig {
     /// Maximum allowed reprojection error (in pixels) for either of the
     /// two observations. Larger errors are dropped as outliers.
     pub max_reprojection_error_pixels: f64,
+    /// Independent one-sigma localisation error assigned to each of
+    /// `(u_left, v_left, u_right, v_right)`. The DLT Jacobian propagates this
+    /// pixel covariance into an anisotropic 3-D covariance for every survivor.
+    pub pixel_stddev_pixels: f64,
 }
 
 impl Default for StereoBootstrapConfig {
@@ -60,6 +64,7 @@ impl Default for StereoBootstrapConfig {
             min_depth_meters: 0.1,
             max_depth_meters: 50.0,
             max_reprojection_error_pixels: 2.0,
+            pixel_stddev_pixels: 1.0,
         }
     }
 }
@@ -81,6 +86,9 @@ pub struct StereoBootstrapLandmark {
     /// Reprojection error (in pixels) of the triangulated point in the
     /// right image.
     pub right_reprojection_error_pixels: f64,
+    /// First-order covariance of the triangulated point in the left-camera
+    /// frame, propagated from the four input pixel coordinates.
+    pub point_covariance_left_camera_frame: Matrix3<f64>,
 }
 
 /// Match descriptors between the two feature sets, triangulate each
@@ -155,17 +163,103 @@ pub fn bootstrap_stereo_landmarks(
             continue;
         }
 
+        let Some(point_covariance_left_camera_frame) = propagate_stereo_pixel_covariance(
+            left_camera,
+            right_camera,
+            left_to_right,
+            &left_keypoint,
+            &right_keypoint,
+            config.pixel_stddev_pixels,
+        ) else {
+            continue;
+        };
+
         survivors.push(StereoBootstrapLandmark {
             left_keypoint_index: descriptor_match.query_index,
             right_keypoint_index: descriptor_match.train_index,
             point_left_camera_frame: point_left,
             left_reprojection_error_pixels: left_error,
             right_reprojection_error_pixels: right_error,
+            point_covariance_left_camera_frame,
         });
     }
 
     survivors.sort_by_key(|landmark| landmark.left_keypoint_index);
     survivors
+}
+
+/// Propagate independent isotropic left/right keypoint noise through the
+/// general two-view DLT triangulator.
+///
+/// The returned first-order covariance is `J sigma² I Jᵀ`, where the columns
+/// of `J` are central finite differences with respect to
+/// `(u_left, v_left, u_right, v_right)`. This supports EuRoC's non-rectified
+/// 6-DoF cam0/cam1 transform while retaining the familiar quadratic growth of
+/// rectified-stereo depth uncertainty with range.
+pub fn propagate_stereo_pixel_covariance(
+    left_camera: &Camera,
+    right_camera: &Camera,
+    left_to_right: &SE3,
+    left_pixel: &Point2<f64>,
+    right_pixel: &Point2<f64>,
+    pixel_stddev_pixels: f64,
+) -> Option<Matrix3<f64>> {
+    if !pixel_stddev_pixels.is_finite() || pixel_stddev_pixels <= 0.0 {
+        return None;
+    }
+    let epsilon = (pixel_stddev_pixels * 1.0e-3).max(1.0e-4);
+    let mut jacobian = Matrix3x4::<f64>::zeros();
+    for coordinate in 0..4 {
+        let mut left_plus = *left_pixel;
+        let mut left_minus = *left_pixel;
+        let mut right_plus = *right_pixel;
+        let mut right_minus = *right_pixel;
+        match coordinate {
+            0 => {
+                left_plus.x += epsilon;
+                left_minus.x -= epsilon;
+            }
+            1 => {
+                left_plus.y += epsilon;
+                left_minus.y -= epsilon;
+            }
+            2 => {
+                right_plus.x += epsilon;
+                right_minus.x -= epsilon;
+            }
+            3 => {
+                right_plus.y += epsilon;
+                right_minus.y -= epsilon;
+            }
+            _ => unreachable!(),
+        }
+        let plus = triangulate_two_view_left_frame(
+            left_camera,
+            right_camera,
+            left_to_right,
+            &left_plus,
+            &right_plus,
+        )?;
+        let minus = triangulate_two_view_left_frame(
+            left_camera,
+            right_camera,
+            left_to_right,
+            &left_minus,
+            &right_minus,
+        )?;
+        jacobian.set_column(coordinate, &((plus - minus) / (2.0 * epsilon)));
+    }
+    let covariance = jacobian * jacobian.transpose() * pixel_stddev_pixels.powi(2);
+    if covariance.iter().all(|value| value.is_finite())
+        && covariance
+            .diagonal()
+            .iter()
+            .all(|variance| *variance >= 0.0)
+    {
+        Some((covariance + covariance.transpose()) * 0.5)
+    } else {
+        None
+    }
 }
 
 /// DLT triangulation for one (left, right) observation pair, returning the
@@ -272,6 +366,77 @@ mod tests {
             "round-trip error {} on {point:?}",
             (recovered - point).norm()
         );
+    }
+
+    #[test]
+    fn propagated_rectified_depth_stddev_matches_disparity_jacobian() {
+        let left = pinhole();
+        let right = pinhole();
+        let baseline = 0.11;
+        let left_to_right = SE3::new(
+            UnitQuaternion::identity(),
+            Vector3::new(-baseline, 0.0, 0.0),
+        );
+        let depth = 4.0;
+        let point = Point3::new(0.0, 0.0, depth);
+        let (left_pixel, right_pixel) =
+            project_left_and_right(&left, &right, &left_to_right, &point);
+        let sigma_pixels = 1.0;
+        let covariance = propagate_stereo_pixel_covariance(
+            &left,
+            &right,
+            &left_to_right,
+            &left_pixel,
+            &right_pixel,
+            sigma_pixels,
+        )
+        .expect("valid covariance");
+        let expected_depth_stddev =
+            2.0_f64.sqrt() * depth * depth * sigma_pixels / (458.0 * baseline);
+        let observed_depth_stddev = covariance[(2, 2)].sqrt();
+        assert!(
+            ((observed_depth_stddev - expected_depth_stddev) / expected_depth_stddev).abs() < 0.02,
+            "observed={observed_depth_stddev} expected={expected_depth_stddev}"
+        );
+    }
+
+    #[test]
+    fn propagated_stereo_depth_uncertainty_grows_quadratically_with_range() {
+        let left = pinhole();
+        let right = pinhole();
+        let left_to_right = SE3::new(UnitQuaternion::identity(), Vector3::new(-0.11, 0.0, 0.0));
+        let depth_stddev = |depth: f64| {
+            let point = Point3::new(0.1, 0.0, depth);
+            let (left_pixel, right_pixel) =
+                project_left_and_right(&left, &right, &left_to_right, &point);
+            propagate_stereo_pixel_covariance(
+                &left,
+                &right,
+                &left_to_right,
+                &left_pixel,
+                &right_pixel,
+                1.0,
+            )
+            .unwrap()[(2, 2)]
+                .sqrt()
+        };
+        let ratio = depth_stddev(8.0) / depth_stddev(4.0);
+        assert!((ratio - 4.0).abs() < 0.05, "observed ratio={ratio}");
+    }
+
+    #[test]
+    fn propagated_stereo_covariance_rejects_invalid_pixel_noise() {
+        let camera = pinhole();
+        let transform = SE3::new(UnitQuaternion::identity(), Vector3::new(-0.11, 0.0, 0.0));
+        assert!(propagate_stereo_pixel_covariance(
+            &camera,
+            &camera,
+            &transform,
+            &Point2::new(400.0, 240.0),
+            &Point2::new(380.0, 240.0),
+            0.0,
+        )
+        .is_none());
     }
 
     #[test]

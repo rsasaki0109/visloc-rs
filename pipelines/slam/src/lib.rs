@@ -9,18 +9,19 @@
 
 pub mod bundle;
 pub use bundle::{
-    BaConfig, BaError, BaGncResult, BaIterationStats, BaObservation, BaResult, BaStereoObservation,
-    BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner, GravityPrior,
-    PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior,
-    PositionPriorObservation,
+    BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
+    BaResult, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner,
+    GravityPrior, NavigationStatePrior, PairwisePoseFactor, PerPoseGravityObservation,
+    PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 
 pub mod covisibility_ba;
 pub use covisibility_ba::{
     behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,
-    refine_visual_map_with_covisibility_ba, required_fixed_keyframes,
-    select_covisibility_local_ba_window, CovisibilityKeyframeScore, CovisibilityLocalBaConfig,
-    CovisibilityLocalBaError, CovisibilityLocalBaResult, CovisibilityLocalBaSelection,
+    mean_selected_reprojection_px, refine_visual_map_with_covisibility_ba,
+    required_fixed_keyframes, select_covisibility_local_ba_window, CovisibilityKeyframeScore,
+    CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalBaResult,
+    CovisibilityLocalBaSelection,
 };
 
 pub mod incremental_sfm;
@@ -30,19 +31,24 @@ pub use incremental_sfm::{
 };
 
 pub mod imu_preintegration;
-pub use imu_preintegration::{ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator};
+pub use imu_preintegration::{
+    ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator, Matrix9,
+};
 
 pub mod g2o;
 pub use g2o::{read_g2o, write_g2o, G2oError};
 
 mod block_cholesky;
 pub mod covariance;
+mod finite_difference;
 pub mod gnc;
 pub mod incremental_pose_graph;
 pub mod marginalization;
 pub mod pcm;
 mod reordering;
 pub mod sparsification;
+
+pub(crate) use finite_difference::central_difference_projection_jacobian;
 
 pub mod sim3_pose_graph;
 pub use sim3_pose_graph::{
@@ -137,6 +143,8 @@ pub use loop_closure::*;
 
 mod loop_gating;
 pub(crate) use loop_gating::*;
+
+mod loop_pose_information;
 
 pub mod online_slam;
 pub use online_slam::*;

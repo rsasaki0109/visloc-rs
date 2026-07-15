@@ -5,10 +5,10 @@
 //! defining keyframe-selection interfaces that can consume tracking results and
 //! later feed staged map updates, triangulation, and local refinement.
 
-use nalgebra::{DMatrix, Point2, Point3};
-use visloc_core::geometry::Pose;
+use nalgebra::{DMatrix, Matrix3, Point2, Point3};
+use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{
-    CameraId, FrameId, Keyframe, Landmark, LandmarkId, Observation, VisualMap,
+    CameraId, FrameId, Keyframe, Landmark, LandmarkId, Observation, StereoObservation, VisualMap,
 };
 use visloc_tracking::{TrackingEvent, TrackingResult};
 
@@ -346,7 +346,9 @@ impl KeyframePolicy for SimpleKeyframePolicy {
 pub struct StagedMapUpdate {
     pub keyframes: Vec<Keyframe>,
     pub landmarks: Vec<Landmark>,
+    pub landmark_position_covariances: Vec<(LandmarkId, Matrix3<f64>)>,
     pub observations: Vec<Observation>,
+    pub stereo_observations: Vec<StereoObservation>,
 }
 
 impl StagedMapUpdate {
@@ -362,8 +364,21 @@ impl StagedMapUpdate {
         self.landmarks.push(landmark);
     }
 
+    pub fn stage_landmark_position_covariance(
+        &mut self,
+        landmark_id: LandmarkId,
+        covariance_world: Matrix3<f64>,
+    ) {
+        self.landmark_position_covariances
+            .push((landmark_id, covariance_world));
+    }
+
     pub fn stage_observation(&mut self, observation: Observation) {
         self.observations.push(observation);
+    }
+
+    pub fn stage_stereo_observation(&mut self, observation: StereoObservation) {
+        self.stereo_observations.push(observation);
     }
 
     pub fn with_keyframe(mut self, keyframe: Keyframe) -> Self {
@@ -376,29 +391,56 @@ impl StagedMapUpdate {
         self
     }
 
+    pub fn with_landmark_position_covariance(
+        mut self,
+        landmark_id: LandmarkId,
+        covariance_world: Matrix3<f64>,
+    ) -> Self {
+        self.stage_landmark_position_covariance(landmark_id, covariance_world);
+        self
+    }
+
     pub fn with_observation(mut self, observation: Observation) -> Self {
         self.stage_observation(observation);
         self
     }
 
     pub fn stage_triangulated_landmark(&mut self, triangulated: TriangulatedLandmark) {
-        let mut landmark = triangulated.landmark;
+        let TriangulatedLandmark {
+            mut landmark,
+            position_covariance_world,
+            stereo_observations,
+            ..
+        } = triangulated;
         let observations = std::mem::take(&mut landmark.observations);
+        let landmark_id = landmark.id;
         self.stage_landmark(landmark);
+        if let Some(covariance) = position_covariance_world {
+            self.stage_landmark_position_covariance(landmark_id, covariance);
+        }
         for observation in observations {
             self.stage_observation(observation);
+        }
+        for observation in stereo_observations {
+            self.stage_stereo_observation(observation);
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keyframes.is_empty() && self.landmarks.is_empty() && self.observations.is_empty()
+        self.keyframes.is_empty()
+            && self.landmarks.is_empty()
+            && self.landmark_position_covariances.is_empty()
+            && self.observations.is_empty()
+            && self.stereo_observations.is_empty()
     }
 
     pub fn validate_against(&self, map: &VisualMap) -> MapUpdateValidationReport {
         let mut report = MapUpdateValidationReport::default();
         self.validate_keyframes(map, &mut report);
         self.validate_landmarks(map, &mut report);
+        self.validate_landmark_covariances(map, &mut report);
         self.validate_observations(map, &mut report);
+        self.validate_stereo_observations(map, &mut report);
         report
     }
 
@@ -415,6 +457,7 @@ impl StagedMapUpdate {
             keyframe_count: self.keyframes.len(),
             landmark_count: self.landmarks.len(),
             observation_count: self.observations.len(),
+            stereo_observation_count: self.stereo_observations.len(),
         };
 
         let mut embedded_keyframe_observations = Vec::new();
@@ -424,6 +467,10 @@ impl StagedMapUpdate {
         }
         for landmark in self.landmarks {
             map.landmarks.insert(landmark.id, landmark);
+        }
+        for (landmark_id, covariance) in self.landmark_position_covariances {
+            map.landmark_position_covariances
+                .insert(landmark_id, covariance);
         }
         // A tracking-produced keyframe already carries its inlier
         // observations. Mirror those into the existing landmark records just
@@ -461,6 +508,7 @@ impl StagedMapUpdate {
                 }
             }
         }
+        map.stereo_observations.extend(self.stereo_observations);
 
         Ok(applied)
     }
@@ -500,6 +548,48 @@ impl StagedMapUpdate {
                 });
             }
             staged_landmark_ids.push(landmark.id);
+        }
+    }
+
+    fn validate_landmark_covariances(
+        &self,
+        map: &VisualMap,
+        report: &mut MapUpdateValidationReport,
+    ) {
+        let mut seen = Vec::new();
+        for (landmark_id, covariance) in &self.landmark_position_covariances {
+            if seen.contains(landmark_id) {
+                report.push(
+                    MapUpdateValidationIssue::DuplicateStagedLandmarkCovariance {
+                        landmark_id: *landmark_id,
+                    },
+                );
+            }
+            seen.push(*landmark_id);
+            let landmark_exists = self
+                .landmarks
+                .iter()
+                .any(|landmark| landmark.id == *landmark_id)
+                || map.landmarks.contains_key(landmark_id);
+            if !landmark_exists {
+                report.push(MapUpdateValidationIssue::CovarianceMissingLandmark {
+                    landmark_id: *landmark_id,
+                });
+            }
+            let symmetry_error = (covariance - covariance.transpose()).norm();
+            let scale = 1.0 + covariance.norm();
+            let finite = covariance.iter().all(|value| value.is_finite());
+            let positive_semidefinite = finite
+                && ((covariance + covariance.transpose()) * 0.5)
+                    .symmetric_eigen()
+                    .eigenvalues
+                    .iter()
+                    .all(|value| *value >= -1.0e-12);
+            if !finite || symmetry_error > 1.0e-9 * scale || !positive_semidefinite {
+                report.push(MapUpdateValidationIssue::InvalidStagedLandmarkCovariance {
+                    landmark_id: *landmark_id,
+                });
+            }
         }
     }
 
@@ -554,6 +644,84 @@ impl StagedMapUpdate {
             }
         }
     }
+
+    fn validate_stereo_observations(
+        &self,
+        map: &VisualMap,
+        report: &mut MapUpdateValidationReport,
+    ) {
+        let mut seen = Vec::new();
+        for stereo in &self.stereo_observations {
+            let key = (stereo.frame_id, stereo.landmark_id);
+            if seen.contains(&key)
+                || map.stereo_observations.iter().any(|existing| {
+                    existing.frame_id == stereo.frame_id
+                        && existing.landmark_id == stereo.landmark_id
+                })
+            {
+                report.push(MapUpdateValidationIssue::DuplicateStagedStereoObservation {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            seen.push(key);
+            let keyframe_exists = self
+                .keyframes
+                .iter()
+                .any(|keyframe| keyframe.frame.id == stereo.frame_id)
+                || map.keyframes.contains_key(&stereo.frame_id);
+            if !keyframe_exists {
+                report.push(MapUpdateValidationIssue::StereoObservationMissingKeyframe {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            let landmark_exists = self
+                .landmarks
+                .iter()
+                .any(|landmark| landmark.id == stereo.landmark_id)
+                || map.landmarks.contains_key(&stereo.landmark_id);
+            if !landmark_exists {
+                report.push(MapUpdateValidationIssue::StereoObservationMissingLandmark {
+                    frame_id: stereo.frame_id,
+                    landmark_id: stereo.landmark_id,
+                });
+            }
+            if !map.cameras.contains_key(&stereo.right_camera_id) {
+                report.push(
+                    MapUpdateValidationIssue::StereoObservationMissingRightCamera {
+                        frame_id: stereo.frame_id,
+                        landmark_id: stereo.landmark_id,
+                        camera_id: stereo.right_camera_id,
+                    },
+                );
+            }
+            let staged_left = self.observations.iter().any(|observation| {
+                observation.frame_id == stereo.frame_id
+                    && observation.landmark_id == stereo.landmark_id
+            }) || self.keyframes.iter().any(|keyframe| {
+                keyframe.frame.id == stereo.frame_id
+                    && keyframe
+                        .observations
+                        .iter()
+                        .any(|observation| observation.landmark_id == stereo.landmark_id)
+            });
+            let existing_left = map.keyframes.get(&stereo.frame_id).is_some_and(|keyframe| {
+                keyframe
+                    .observations
+                    .iter()
+                    .any(|observation| observation.landmark_id == stereo.landmark_id)
+            });
+            if !staged_left && !existing_left {
+                report.push(
+                    MapUpdateValidationIssue::StereoObservationMissingLeftObservation {
+                        frame_id: stereo.frame_id,
+                        landmark_id: stereo.landmark_id,
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -561,6 +729,7 @@ pub struct AppliedMapUpdate {
     pub keyframe_count: usize,
     pub landmark_count: usize,
     pub observation_count: usize,
+    pub stereo_observation_count: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -608,6 +777,15 @@ pub enum MapUpdateValidationIssue {
     DuplicateStagedLandmark {
         landmark_id: LandmarkId,
     },
+    DuplicateStagedLandmarkCovariance {
+        landmark_id: LandmarkId,
+    },
+    CovarianceMissingLandmark {
+        landmark_id: LandmarkId,
+    },
+    InvalidStagedLandmarkCovariance {
+        landmark_id: LandmarkId,
+    },
     ObservationMissingKeyframe {
         frame_id: FrameId,
         landmark_id: LandmarkId,
@@ -628,6 +806,27 @@ pub enum MapUpdateValidationIssue {
         frame_id: FrameId,
         landmark_id: LandmarkId,
         keypoint_index: usize,
+    },
+    DuplicateStagedStereoObservation {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingKeyframe {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingLandmark {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+    },
+    StereoObservationMissingRightCamera {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
+        camera_id: CameraId,
+    },
+    StereoObservationMissingLeftObservation {
+        frame_id: FrameId,
+        landmark_id: LandmarkId,
     },
 }
 
@@ -739,6 +938,10 @@ pub struct LandmarkCandidate {
     pub id: LandmarkCandidateId,
     pub observations: Vec<LandmarkCandidateObservation>,
     pub descriptor: Option<Vec<f32>>,
+    /// Optional world-frame covariance supplied by a metric depth source.
+    /// The multi-view triangulator may update the point mean while retaining
+    /// this first-order uncertainty model for covariance-aware backend factors.
+    pub position_covariance_world: Option<Matrix3<f64>>,
 }
 
 impl LandmarkCandidate {
@@ -747,6 +950,7 @@ impl LandmarkCandidate {
             id,
             observations: Vec::new(),
             descriptor: None,
+            position_covariance_world: None,
         }
     }
 
@@ -757,6 +961,11 @@ impl LandmarkCandidate {
 
     pub fn with_descriptor(mut self, descriptor: Vec<f32>) -> Self {
         self.descriptor = Some(descriptor);
+        self
+    }
+
+    pub fn with_position_covariance_world(mut self, covariance: Matrix3<f64>) -> Self {
+        self.position_covariance_world = Some(covariance);
         self
     }
 
@@ -782,7 +991,6 @@ impl LandmarkCandidate {
                 min_observations,
             });
         }
-
         let mut seen = Vec::new();
         for observation in &self.observations {
             let key = candidate_observation_key(observation);
@@ -829,6 +1037,14 @@ pub struct LandmarkCandidateObservation {
     pub frame_id: FrameId,
     pub keypoint_index: usize,
     pub xy: Point2<f64>,
+    pub stereo: Option<LandmarkCandidateStereoMeasurement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandmarkCandidateStereoMeasurement {
+    pub right_camera_id: CameraId,
+    pub xy_right: Point2<f64>,
+    pub left_to_right: SE3,
 }
 
 impl LandmarkCandidateObservation {
@@ -837,7 +1053,22 @@ impl LandmarkCandidateObservation {
             frame_id,
             keypoint_index,
             xy,
+            stereo: None,
         }
+    }
+
+    pub fn with_stereo_measurement(
+        mut self,
+        right_camera_id: CameraId,
+        xy_right: Point2<f64>,
+        left_to_right: SE3,
+    ) -> Self {
+        self.stereo = Some(LandmarkCandidateStereoMeasurement {
+            right_camera_id,
+            xy_right,
+            left_to_right,
+        });
+        self
     }
 }
 
@@ -1054,6 +1285,20 @@ impl Triangulator for LinearTriangulator {
 
         Ok(TriangulatedLandmark {
             landmark,
+            position_covariance_world: candidate.position_covariance_world,
+            stereo_observations: candidate
+                .observations
+                .iter()
+                .filter_map(|observation| {
+                    observation.stereo.as_ref().map(|stereo| StereoObservation {
+                        frame_id: observation.frame_id,
+                        landmark_id: candidate.id,
+                        right_camera_id: stereo.right_camera_id,
+                        xy_right: stereo.xy_right,
+                        left_to_right: stereo.left_to_right.clone(),
+                    })
+                })
+                .collect(),
             observation_count: candidate.observations.len(),
             mean_reprojection_error,
             max_reprojection_error,
@@ -1084,6 +1329,8 @@ impl Default for TriangulationConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriangulatedLandmark {
     pub landmark: Landmark,
+    pub position_covariance_world: Option<Matrix3<f64>>,
+    pub stereo_observations: Vec<StereoObservation>,
     pub observation_count: usize,
     pub mean_reprojection_error: f64,
     pub max_reprojection_error: f64,

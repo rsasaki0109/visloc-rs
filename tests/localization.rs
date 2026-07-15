@@ -1569,3 +1569,68 @@ fn projection_window_matching_selects_one_keypoint_and_applies_ratio_within_wind
     assert_eq!(result.query_indices, vec![0]);
     assert_eq!(result.landmark_ids, vec![1]);
 }
+
+#[test]
+fn projection_window_reverse_ratio_rejects_landmark_collision_for_one_keypoint() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let pose = Pose::identity();
+    let first_point = Point3::new(0.0, 0.0, 5.0);
+    let second_point = Point3::new(0.01, 0.0, 5.0);
+    let projected = camera.project(&first_point).unwrap();
+    let mut map = VisualMap::new();
+    map.landmarks.insert(1, Landmark::new(1, first_point));
+    map.landmarks.insert(2, Landmark::new(2, second_point));
+    let mut descriptor_store = LandmarkDescriptorStore::new();
+    descriptor_store.insert(1, vec![0.10]);
+    descriptor_store.insert(2, vec![0.11]);
+    let query = QueryImage {
+        camera,
+        keypoints: vec![projected],
+        descriptors: vec![vec![0.0]],
+    };
+    let builder = ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: None });
+
+    let ungated = builder
+        .build_with_pose_prior(&query, &map, &descriptor_store, &pose, 5.0)
+        .unwrap();
+    assert_eq!(ungated.landmark_ids, vec![1]);
+
+    let gated = builder.build_with_pose_prior_and_query_landmark_ratio(
+        &query,
+        &map,
+        &descriptor_store,
+        &pose,
+        5.0,
+        Some(0.8),
+    );
+    assert_eq!(
+        gated.unwrap_err(),
+        visloc_localization::CorrespondenceBuildError::NoDescriptorMatches {
+            candidate_landmark_count: 2
+        }
+    );
+}
+
+#[test]
+fn projection_window_reverse_ratio_rejects_invalid_configuration() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let query = QueryImage {
+        camera,
+        keypoints: Vec::new(),
+        descriptors: Vec::new(),
+    };
+    let builder = ProjectionCorrespondenceBuilder::new(BruteForceMatcher { ratio: None });
+    assert_eq!(
+        builder
+            .build_with_pose_prior_and_query_landmark_ratio(
+                &query,
+                &VisualMap::new(),
+                &LandmarkDescriptorStore::new(),
+                &Pose::identity(),
+                5.0,
+                Some(1.0),
+            )
+            .unwrap_err(),
+        visloc_localization::CorrespondenceBuildError::InvalidQueryLandmarkRatio
+    );
+}

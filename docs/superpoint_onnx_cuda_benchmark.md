@@ -31,6 +31,19 @@ vs 1020.7 after the score gate — the sub-keypoint difference is GPU
 reduction-order non-determinism, not a behavioural change), so the GPU path is a
 pure latency win, not an accuracy trade.
 
+### Windows strict-CUDA verification (2026-07-14)
+
+The Windows evaluation host was independently checked with the same
+`superpoint_onnx_throughput` executable over 30 MH_01 images at 752×480. ONNX
+Runtime 1.24.2 used CUDA 12.8 and cuDNN 9 on a GeForce GTX 1660 Ti. Strict CUDA
+session creation succeeded; CPU measured `241.77 ms/frame` (4.1 fps) and CUDA
+measured `23.76 ms/frame` (42.1 fps), a 10.2× extraction speedup. Both providers
+returned the same average `1307.6` keypoints. A 30-frame EuRoC SLAM smoke then
+recorded `superpoint_onnx_backend=cuda`, tracked all frames, and completed at
+`189.43 ms/frame` end-to-end; this end-to-end number includes stereo extraction,
+matching, tracking, mapping, logging, and startup, so it is not comparable to
+the extraction-only latency above.
+
 ![CPU vs CUDA throughput](assets/superpoint_onnx_cuda.png)
 
 ## What this lands, and what it does not

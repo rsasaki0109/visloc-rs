@@ -15,6 +15,11 @@ param(
 
     [string]$SuperPointModel,
 
+    # `cuda` is strict: model loading fails instead of silently falling back
+    # to CPU when the CUDA execution provider or one of its DLLs is missing.
+    [ValidateSet('cuda', 'cuda-then-cpu', 'cpu')]
+    [string]$OnnxBackend = 'cuda',
+
     # The demo interprets zero as all available frames (its omitted default is 400).
     [int]$MaxFrames = 0,
 
@@ -22,11 +27,25 @@ param(
 
     [switch]$CandidateLoopPoseInformation,
 
+    [double]$CandidateLoopInformationMaxEigenvalue = 1.0,
+
+    # Multiplicative strength of covariance-derived loop edges only. The
+    # sequential PnP information matrices retain their calibrated scale.
+    [double]$CandidateLoopInformationLoopEdgeScale = 1.0,
+
+    [switch]$CandidateFuseLoopObservations,
+
+    [switch]$CandidateLoopWeldingBa,
+
     [double]$MinAvailableMemoryGiB = 4.0,
 
     [double]$MinCommitHeadroomGiB = 4.0,
 
     [double]$MaxExternalCpuCores = 0.5,
+
+    # Reject sustained external load while tolerating one-off scheduler or
+    # monitoring spikes. Preflight remains a strict single-sample gate.
+    [int]$ExternalCpuViolationSamples = 3,
 
     [int]$ResourceSampleIntervalSeconds = 5,
 
@@ -37,6 +56,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+function Get-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    $resolvedPath = [IO.Path]::GetFullPath($LiteralPath)
+    $stream = [IO.File]::OpenRead($resolvedPath)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
 
 # Windows PowerShell evaluates parameter-default expressions before it
 # populates `$PSScriptRoot`. Resolve repository-relative defaults in the script
@@ -59,6 +95,19 @@ if ([double]::IsNaN($CandidateLoopEdgeWeight) -or
     $CandidateLoopEdgeWeight -le 0.0) {
     throw 'CandidateLoopEdgeWeight must be finite and positive.'
 }
+if ([double]::IsNaN($CandidateLoopInformationMaxEigenvalue) -or
+    [double]::IsInfinity($CandidateLoopInformationMaxEigenvalue) -or
+    $CandidateLoopInformationMaxEigenvalue -le 0.0) {
+    throw 'CandidateLoopInformationMaxEigenvalue must be finite and positive.'
+}
+if ([double]::IsNaN($CandidateLoopInformationLoopEdgeScale) -or
+    [double]::IsInfinity($CandidateLoopInformationLoopEdgeScale) -or
+    $CandidateLoopInformationLoopEdgeScale -le 0.0) {
+    throw 'CandidateLoopInformationLoopEdgeScale must be finite and positive.'
+}
+if ($CandidateLoopWeldingBa -and -not $CandidateFuseLoopObservations) {
+    throw 'CandidateLoopWeldingBa requires CandidateFuseLoopObservations.'
+}
 if ([double]::IsNaN($MinAvailableMemoryGiB) -or
     [double]::IsInfinity($MinAvailableMemoryGiB) -or
     $MinAvailableMemoryGiB -le 0.0) {
@@ -73,6 +122,9 @@ if ([double]::IsNaN($MaxExternalCpuCores) -or
     [double]::IsInfinity($MaxExternalCpuCores) -or
     $MaxExternalCpuCores -le 0.0) {
     throw 'MaxExternalCpuCores must be finite and positive.'
+}
+if ($ExternalCpuViolationSamples -lt 1) {
+    throw 'ExternalCpuViolationSamples must be at least 1.'
 }
 if ($ResourceSampleIntervalSeconds -lt 1) {
     throw 'ResourceSampleIntervalSeconds must be at least 1.'
@@ -238,7 +290,7 @@ $operatingSystem = Get-CimInstance Win32_OperatingSystem
 $rustcVersion = (& (Join-Path $HOME '.cargo\bin\rustc.exe') --version 2>$null)
 $cargoVersion = (& (Join-Path $HOME '.cargo\bin\cargo.exe') --version 2>$null)
 $ortDylibSha256 = if ($env:ORT_DYLIB_PATH -and (Test-Path -LiteralPath $env:ORT_DYLIB_PATH)) {
-    (Get-FileHash -LiteralPath $env:ORT_DYLIB_PATH -Algorithm SHA256).Hash
+    Get-FileSha256 -LiteralPath $env:ORT_DYLIB_PATH
 } else {
     $null
 }
@@ -248,6 +300,7 @@ $commonArgs = @(
     '--gravity', '0,0,-9.81',
     '--feature-extractor', 'superpoint-onnx',
     '--superpoint-onnx-model', $SuperPointModel,
+    '--superpoint-onnx-backend', $OnnxBackend,
     '--cross-check-matcher',
     '--keyframe-min-translation', '0.1',
     '--max-pose-jump-meters', '0.2',
@@ -260,9 +313,30 @@ $candidateLoopEdgeWeightText = $CandidateLoopEdgeWeight.ToString(
     [Globalization.CultureInfo]::InvariantCulture
 )
 $candidateInformationArguments = if ($CandidateLoopPoseInformation) {
-    @('--pose-graph-refinement-loop-pose-information')
+    @(
+        '--pose-graph-refinement-loop-pose-information',
+        '--pose-graph-refinement-loop-pose-information-max-eigenvalue',
+        $CandidateLoopInformationMaxEigenvalue.ToString(
+            'R',
+            [Globalization.CultureInfo]::InvariantCulture
+        ),
+        '--pose-graph-refinement-loop-pose-information-loop-edge-scale',
+        $CandidateLoopInformationLoopEdgeScale.ToString(
+            'R',
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    )
 } else {
     @('--pose-graph-refinement-fixed-loop-edge-weight', $candidateLoopEdgeWeightText)
+}
+$candidateFusionArguments = if ($CandidateFuseLoopObservations) {
+    $arguments = @('--pose-graph-refinement-fuse-loop-observations')
+    if ($CandidateLoopWeldingBa) {
+        $arguments += '--pose-graph-refinement-loop-welding-ba'
+    }
+    $arguments
+} else {
+    @()
 }
 
 # Keep the baseline genuinely loop-free.  Pose-graph refinement consumes
@@ -272,7 +346,7 @@ $variantArguments = [ordered]@{
     no_loop = @()
     appearance_loop = @(
         '--pose-graph-refinement'
-    ) + $candidateInformationArguments + @(
+    ) + $candidateInformationArguments + $candidateFusionArguments + @(
         '--pose-graph-refinement-verifier', 'pnp',
         '--pose-graph-refinement-gnc',
         '--pose-graph-refinement-pcm',
@@ -289,28 +363,34 @@ $variantArguments = [ordered]@{
 $initialMemorySnapshot = Get-SystemMemorySnapshot
 
 $experiment = [ordered]@{
-    schema_version = 4
+    schema_version = 9
     created_at = (Get-Date).ToString('o')
     git_sha = $gitSha
     git_dirty = ($gitStatus.Count -gt 0)
     git_status_porcelain = $gitStatus
     git_diff_sha256 = $gitDiffSha256
     executable = $Executable
-    executable_sha256 = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
+    executable_sha256 = Get-FileSha256 -LiteralPath $Executable
     dataset_root = $DatasetRoot
     superpoint_model = $SuperPointModel
-    superpoint_model_sha256 = (Get-FileHash -LiteralPath $SuperPointModel -Algorithm SHA256).Hash
+    superpoint_model_sha256 = Get-FileSha256 -LiteralPath $SuperPointModel
     repetitions = $Repetitions
     sequences = $Sequences
     max_frames = $MaxFrames
     protocol = [ordered]@{
         common_arguments = $commonArgs
+        onnx_backend = $OnnxBackend
         candidate_loop_pose_information = [bool]$CandidateLoopPoseInformation
+        candidate_loop_information_max_eigenvalue = $CandidateLoopInformationMaxEigenvalue
+        candidate_loop_information_loop_edge_scale = $CandidateLoopInformationLoopEdgeScale
+        candidate_fuse_loop_observations = [bool]$CandidateFuseLoopObservations
+        candidate_loop_welding_ba = [bool]$CandidateLoopWeldingBa
         variant_arguments = $variantArguments
         resource_gate = [ordered]@{
             minimum_available_physical_bytes = $minAvailableMemoryBytes
             minimum_commit_headroom_bytes = $minCommitHeadroomBytes
             maximum_external_cpu_cores = $MaxExternalCpuCores
+            external_cpu_violation_samples = $ExternalCpuViolationSamples
             sample_interval_seconds = $ResourceSampleIntervalSeconds
         }
     }
@@ -345,7 +425,6 @@ if ($Resume -and (Test-Path -LiteralPath $experimentPath)) {
         'superpoint_model_sha256',
         'ort_dylib_sha256',
         'dataset_root',
-        'repetitions',
         'max_frames'
     )) {
         if ($existingExperiment.$field -ne $experiment.$field) {
@@ -365,6 +444,11 @@ if ($Resume -and (Test-Path -LiteralPath $experimentPath)) {
     $requestedProtocol = $experiment.protocol | ConvertTo-Json -Depth 8 -Compress
     if ($existingProtocol -ne $requestedProtocol) {
         $resumeMismatches.Add('protocol')
+    }
+    # A completed prefix may be extended with more repetitions, but shrinking
+    # the declared matrix would silently orphan already-recorded runs.
+    if ([int]$Repetitions -lt [int]$existingExperiment.repetitions) {
+        $resumeMismatches.Add('repetitions_decrease')
     }
     if ($resumeMismatches.Count -gt 0) {
         throw "Resume configuration does not match the existing experiment: $($resumeMismatches -join ', ')"
@@ -407,9 +491,9 @@ foreach ($sequence in $Sequences) {
                 throw "Refusing to overwrite incomplete or failed run directory: $runDir"
             }
 
-            $runExecutableSha256 = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
-            $runSuperPointModelSha256 = (Get-FileHash -LiteralPath $SuperPointModel -Algorithm SHA256).Hash
-            $runOrtDylibSha256 = (Get-FileHash -LiteralPath $env:ORT_DYLIB_PATH -Algorithm SHA256).Hash
+            $runExecutableSha256 = Get-FileSha256 -LiteralPath $Executable
+            $runSuperPointModelSha256 = Get-FileSha256 -LiteralPath $SuperPointModel
+            $runOrtDylibSha256 = Get-FileSha256 -LiteralPath $env:ORT_DYLIB_PATH
             if ($runExecutableSha256 -ne $experiment.executable_sha256 -or
                 $runSuperPointModelSha256 -ne $experiment.superpoint_model_sha256 -or
                 $runOrtDylibSha256 -ne $experiment.ort_dylib_sha256) {
@@ -465,6 +549,7 @@ foreach ($sequence in $Sequences) {
                 minimum_commit_headroom_bytes = $preflightMemorySnapshot.commit_headroom_bytes
                 preflight_external_cpu_cores = $preflightExternalCpuCores
                 sampled_max_external_cpu_cores = $preflightExternalCpuCores
+                maximum_consecutive_external_cpu_violations = 0
                 external_cpu_excluded_process_ids = $externalCpuExcludedProcessIds
             }
             $runRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDir 'run_manifest.json') -Encoding utf8
@@ -494,6 +579,8 @@ foreach ($sequence in $Sequences) {
                 $minimumCommitHeadroomBytes = $preflightMemorySnapshot.commit_headroom_bytes
                 $resourceValidationError = $null
                 $maximumExternalCpuCores = $preflightExternalCpuCores
+                $consecutiveExternalCpuViolations = 0
+                $maximumConsecutiveExternalCpuViolations = 0
                 $runCpuExcludedProcessIds = @(
                     $externalCpuExcludedProcessIds
                     $process.Id
@@ -537,10 +624,19 @@ foreach ($sequence in $Sequences) {
                             $externalCpuCores
                         )
                         if ($externalCpuCores -gt $MaxExternalCpuCores) {
-                            $resourceValidationError = "resource gate failed during ${runName}: external CPU load $([math]::Round($externalCpuCores, 3)) cores exceeds allowed $MaxExternalCpuCores cores"
-                            $process.Kill()
-                            [void]$process.WaitForExit()
-                            break
+                            $consecutiveExternalCpuViolations += 1
+                            $maximumConsecutiveExternalCpuViolations = [math]::Max(
+                                $maximumConsecutiveExternalCpuViolations,
+                                $consecutiveExternalCpuViolations
+                            )
+                            if ($consecutiveExternalCpuViolations -ge $ExternalCpuViolationSamples) {
+                                $resourceValidationError = "resource gate failed during ${runName}: external CPU load $([math]::Round($externalCpuCores, 3)) cores exceeded allowed $MaxExternalCpuCores cores for $consecutiveExternalCpuViolations consecutive samples"
+                                $process.Kill()
+                                [void]$process.WaitForExit()
+                                break
+                            }
+                        } else {
+                            $consecutiveExternalCpuViolations = 0
                         }
                         $previousExternalCpuSnapshot = $externalCpuSnapshot
                         $previousExternalCpuSampleAt = $externalCpuSampleAt
@@ -631,6 +727,92 @@ foreach ($sequence in $Sequences) {
                         }
                     }
                     if ($null -eq $validationError) {
+                        $informationCapMatch = [regex]::Match(
+                            $summaryText,
+                            '(?m)^pose_graph_refinement_loop_pose_information_max_eigenvalue=([^\r\n]+)\r?$'
+                        )
+                        if (-not $informationCapMatch.Success) {
+                            $validationError = 'summary.txt does not record loop pose information spectral cap'
+                        } else {
+                            $actualInformationCap = [double]::Parse(
+                                $informationCapMatch.Groups[1].Value,
+                                [Globalization.CultureInfo]::InvariantCulture
+                            )
+                            $expectedInformationCap = if (
+                                $variant -eq 'appearance_loop' -and
+                                [bool]$CandidateLoopPoseInformation
+                            ) {
+                                $CandidateLoopInformationMaxEigenvalue
+                            } else {
+                                1.0
+                            }
+                            if ([math]::Abs($actualInformationCap - $expectedInformationCap) -gt
+                                1.0e-9 * [math]::Max(1.0, [math]::Abs($expectedInformationCap))) {
+                                $validationError = "loop pose information cap mismatch for ${variant}: actual=$actualInformationCap expected=$expectedInformationCap"
+                            }
+                        }
+                    }
+                    if ($null -eq $validationError) {
+                        $informationScaleMatch = [regex]::Match(
+                            $summaryText,
+                            '(?m)^pose_graph_refinement_loop_pose_information_loop_edge_scale=([^\r\n]+)\r?$'
+                        )
+                        if (-not $informationScaleMatch.Success) {
+                            $validationError = 'summary.txt does not record loop-only pose information scale'
+                        } else {
+                            $actualInformationScale = [double]::Parse(
+                                $informationScaleMatch.Groups[1].Value,
+                                [Globalization.CultureInfo]::InvariantCulture
+                            )
+                            $expectedInformationScale = if (
+                                $variant -eq 'appearance_loop' -and
+                                [bool]$CandidateLoopPoseInformation
+                            ) {
+                                $CandidateLoopInformationLoopEdgeScale
+                            } else {
+                                1.0
+                            }
+                            if ([math]::Abs($actualInformationScale - $expectedInformationScale) -gt
+                                1.0e-9 * [math]::Max(1.0, [math]::Abs($expectedInformationScale))) {
+                                $validationError = "loop pose information scale mismatch for ${variant}: actual=$actualInformationScale expected=$expectedInformationScale"
+                            }
+                        }
+                    }
+                    if ($null -eq $validationError) {
+                        $fusionMatch = [regex]::Match(
+                            $summaryText,
+                            '(?m)^pose_graph_refinement_fuse_loop_observations=(true|false)\r?$'
+                        )
+                        if (-not $fusionMatch.Success) {
+                            $validationError = 'summary.txt does not record loop observation fusion mode'
+                        } else {
+                            $actualFusion = $fusionMatch.Groups[1].Value -eq 'true'
+                            $expectedFusion =
+                                $variant -eq 'appearance_loop' -and
+                                [bool]$CandidateFuseLoopObservations
+                            if ($actualFusion -ne $expectedFusion) {
+                                $validationError = "loop observation fusion mismatch for ${variant}: actual=$actualFusion expected=$expectedFusion"
+                            }
+                        }
+                    }
+                    if ($null -eq $validationError) {
+                        $weldingMatch = [regex]::Match(
+                            $summaryText,
+                            '(?m)^pose_graph_refinement_loop_welding_ba=(true|false)\r?$'
+                        )
+                        if (-not $weldingMatch.Success) {
+                            $validationError = 'summary.txt does not record loop welding BA mode'
+                        } else {
+                            $actualWelding = $weldingMatch.Groups[1].Value -eq 'true'
+                            $expectedWelding =
+                                $variant -eq 'appearance_loop' -and
+                                [bool]$CandidateLoopWeldingBa
+                            if ($actualWelding -ne $expectedWelding) {
+                                $validationError = "loop welding BA mismatch for ${variant}: actual=$actualWelding expected=$expectedWelding"
+                            }
+                        }
+                    }
+                    if ($null -eq $validationError) {
                         $pcmMatch = [regex]::Match(
                             $summaryText,
                             '(?m)^pose_graph_refinement_pcm=(true|false)\r?$'
@@ -669,6 +851,8 @@ foreach ($sequence in $Sequences) {
             $runRecord.minimum_available_physical_bytes = $minimumAvailablePhysicalBytes
             $runRecord.minimum_commit_headroom_bytes = $minimumCommitHeadroomBytes
             $runRecord.sampled_max_external_cpu_cores = $maximumExternalCpuCores
+            $runRecord.maximum_consecutive_external_cpu_violations =
+                $maximumConsecutiveExternalCpuViolations
             $runRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $runDir 'run_manifest.json') -Encoding utf8
             $experiment.runs += $runRecord
             $experiment | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $experimentPath -Encoding utf8

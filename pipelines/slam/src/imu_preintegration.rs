@@ -16,8 +16,30 @@
 //! the first-order correction `(δb_g, δb_a) = b_now − b_lin` instead of
 //! requiring a full re-integration when the bias estimate moves.
 
-use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 use visloc_core::geometry::SO3;
+
+pub type Matrix9 = SMatrix<f64, 9, 9>;
+type Matrix9x6 = SMatrix<f64, 9, 6>;
+type Matrix6 = SMatrix<f64, 6, 6>;
+
+/// Continuous-time white-noise densities used by covariance propagation.
+/// Units match EuRoC's `sensor.yaml`: gyro in rad/s/sqrt(Hz), accelerometer
+/// in m/s^2/sqrt(Hz). Bias random walks are separate factors in the BA state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImuNoiseModel {
+    pub gyroscope_noise_density: f64,
+    pub accelerometer_noise_density: f64,
+}
+
+impl ImuNoiseModel {
+    pub fn is_valid(self) -> bool {
+        self.gyroscope_noise_density.is_finite()
+            && self.gyroscope_noise_density >= 0.0
+            && self.accelerometer_noise_density.is_finite()
+            && self.accelerometer_noise_density >= 0.0
+    }
+}
 
 /// Output of pre-integrating a window of IMU samples between two keyframes.
 /// Quantities are in keyframe-`i`'s body frame and gravity-free; the
@@ -50,6 +72,9 @@ pub struct ImuPreintegratedDelta {
     pub j_position_ba: Matrix3<f64>,
     /// `∂Δp / ∂b_g` (Forster eq. 39).
     pub j_position_bg: Matrix3<f64>,
+    /// Covariance of `[Log(ΔR), Δv, Δp]` in the same ordering and frame as
+    /// the factor residual. Zero preserves the legacy scalar-weight path.
+    pub covariance: Matrix9,
 }
 
 impl ImuPreintegratedDelta {
@@ -68,6 +93,7 @@ impl ImuPreintegratedDelta {
             j_velocity_bg: Matrix3::zeros(),
             j_position_ba: Matrix3::zeros(),
             j_position_bg: Matrix3::zeros(),
+            covariance: Matrix9::zeros(),
         }
     }
 
@@ -130,6 +156,7 @@ pub struct ImuPreintegrator {
     delta: ImuPreintegratedDelta,
     bias_gyro: Vector3<f64>,
     bias_acc: Vector3<f64>,
+    noise: Option<ImuNoiseModel>,
 }
 
 impl ImuPreintegrator {
@@ -151,7 +178,24 @@ impl ImuPreintegrator {
             delta,
             bias_gyro,
             bias_acc,
+            noise: None,
         }
+    }
+
+    /// Start a preintegrator that also propagates the 9-state measurement
+    /// covariance. Invalid noise densities are rejected instead of silently
+    /// producing a non-physical information matrix.
+    pub fn new_with_bias_and_noise(
+        bias_gyro: Vector3<f64>,
+        bias_acc: Vector3<f64>,
+        noise: ImuNoiseModel,
+    ) -> Option<Self> {
+        if !noise.is_valid() {
+            return None;
+        }
+        let mut integrator = Self::new_with_bias(bias_gyro, bias_acc);
+        integrator.noise = Some(noise);
+        Some(integrator)
     }
 
     /// Fold one body-frame IMU sample into the running delta. `dt` is the
@@ -171,6 +215,45 @@ impl ImuPreintegrator {
         let j_v_g_pre = self.delta.j_velocity_bg;
         let j_r_pre = self.delta.j_rotation_bg;
         let alpha_skew = skew(&alpha);
+        let omega_dt = omega * dt;
+        let step_rot_mat: Matrix3<f64> = nalgebra::Rotation3::from_scaled_axis(omega_dt).into();
+        let jr_omega_dt = right_jacobian_so3(&omega_dt);
+
+        if let Some(noise) = self.noise {
+            // Discrete first-order error propagation for state ordering
+            // [δθ, δv, δp]. The sampled measurement variance is density²/dt,
+            // while B contains the integration powers of dt, yielding the
+            // expected continuous-time growth (e.g. Var(δθ)=σ_g²·dt).
+            let mut a = Matrix9::identity();
+            a.fixed_view_mut::<3, 3>(0, 0)
+                .copy_from(&step_rot_mat.transpose());
+            a.fixed_view_mut::<3, 3>(3, 0)
+                .copy_from(&(-rot_pre_mat * alpha_skew * dt));
+            a.fixed_view_mut::<3, 3>(6, 0)
+                .copy_from(&(-rot_pre_mat * alpha_skew * (0.5 * dt * dt)));
+            a.fixed_view_mut::<3, 3>(6, 3)
+                .copy_from(&(Matrix3::identity() * dt));
+
+            let mut b = Matrix9x6::zeros();
+            b.fixed_view_mut::<3, 3>(0, 0)
+                .copy_from(&(-jr_omega_dt * dt));
+            b.fixed_view_mut::<3, 3>(3, 3)
+                .copy_from(&(-rot_pre_mat * dt));
+            b.fixed_view_mut::<3, 3>(6, 3)
+                .copy_from(&(-rot_pre_mat * (0.5 * dt * dt)));
+            let mut q_sample = Matrix6::zeros();
+            let gyro_variance = noise.gyroscope_noise_density.powi(2) / dt;
+            let accel_variance = noise.accelerometer_noise_density.powi(2) / dt;
+            q_sample
+                .fixed_view_mut::<3, 3>(0, 0)
+                .copy_from(&(Matrix3::identity() * gyro_variance));
+            q_sample
+                .fixed_view_mut::<3, 3>(3, 3)
+                .copy_from(&(Matrix3::identity() * accel_variance));
+            let propagated =
+                a * self.delta.covariance * a.transpose() + b * q_sample * b.transpose();
+            self.delta.covariance = 0.5 * (propagated + propagated.transpose());
+        }
 
         // First update Δp and Δv using the rotation BEFORE this step.
         let alpha_in_i: Vector3<f64> = rot_pre_mat * alpha;
@@ -189,15 +272,12 @@ impl ImuPreintegrator {
         self.delta.j_velocity_bg = j_v_g_pre - rot_pre_mat * alpha_skew * j_r_pre * dt;
 
         // Then advance the rotation by exp(ω · dt).
-        let omega_dt = omega * dt;
         let delta_q = UnitQuaternion::from_scaled_axis(omega_dt);
         let new_q = self.delta.delta_rotation.quaternion() * delta_q;
         self.delta.delta_rotation = SO3::from_quaternion(new_q);
 
         // Rotation bias-Jacobian (Forster eq. 35):
         //   J_R^{k+1} = exp(ω·dt)^T · J_R^k − Jr(ω·dt) · dt
-        let step_rot_mat: Matrix3<f64> = nalgebra::Rotation3::from_scaled_axis(omega_dt).into();
-        let jr_omega_dt = right_jacobian_so3(&omega_dt);
         self.delta.j_rotation_bg = step_rot_mat.transpose() * j_r_pre - jr_omega_dt * dt;
 
         self.delta.delta_time += dt;
@@ -252,6 +332,28 @@ pub struct ImuPreintegrationFactor {
 }
 
 impl ImuPreintegrationFactor {
+    /// Square-root information `W` for the preintegrated measurement, with
+    /// `WᵀW = covariance⁻¹`. Returns `None` for the legacy zero-covariance
+    /// delta so callers can retain scalar block weights. A relative spectral
+    /// floor makes the whitening finite under near-null numerical modes while
+    /// preserving the covariance eigenvectors and cross-correlations.
+    pub fn covariance_sqrt_information(&self) -> Option<Matrix9> {
+        let covariance = 0.5 * (self.delta.covariance + self.delta.covariance.transpose());
+        if !covariance.iter().all(|value| value.is_finite()) || covariance.trace() <= 0.0 {
+            return None;
+        }
+        let eigen = covariance.symmetric_eigen();
+        let max_eigenvalue = eigen.eigenvalues.max();
+        if !max_eigenvalue.is_finite() || max_eigenvalue <= 0.0 {
+            return None;
+        }
+        let floor = (max_eigenvalue * 1.0e-12).max(1.0e-24);
+        let inverse_sqrt = SVector::<f64, 9>::from_fn(|index, _| {
+            eigen.eigenvalues[index].max(floor).sqrt().recip()
+        });
+        Some(Matrix9::from_diagonal(&inverse_sqrt) * eigen.eigenvectors.transpose())
+    }
+
     /// Compute the gravity-compensated `(r_R, r_v, r_p)` residual triplet
     /// against world-frame state `(R_i, p_i, v_i)` and `(R_j, p_j, v_j)`,
     /// returning the 9-vector stacked as `[r_R; r_v; r_p]`. Sign and
@@ -386,6 +488,131 @@ mod tests {
             "expected identity rotation, got angle {angle}"
         );
         assert!(approx_eq(d.delta_time, 0.10, 1.0e-12));
+        assert_eq!(d.covariance, Matrix9::zeros());
+    }
+
+    #[test]
+    fn white_noise_covariance_matches_single_axis_closed_form() {
+        let noise = ImuNoiseModel {
+            gyroscope_noise_density: 2.0e-4,
+            accelerometer_noise_density: 3.0e-3,
+        };
+        let dt = 0.01;
+        let mut pre =
+            ImuPreintegrator::new_with_bias_and_noise(Vector3::zeros(), Vector3::zeros(), noise)
+                .expect("valid noise");
+        pre.integrate_sample(Vector3::zeros(), Vector3::zeros(), dt);
+        let covariance = pre.delta().covariance;
+
+        let expected_rotation = noise.gyroscope_noise_density.powi(2) * dt;
+        let expected_velocity = noise.accelerometer_noise_density.powi(2) * dt;
+        let expected_position = 0.25 * noise.accelerometer_noise_density.powi(2) * dt.powi(3);
+        let expected_velocity_position =
+            0.5 * noise.accelerometer_noise_density.powi(2) * dt.powi(2);
+        for axis in 0..3 {
+            assert!(approx_eq(
+                covariance[(axis, axis)],
+                expected_rotation,
+                1.0e-18
+            ));
+            assert!(approx_eq(
+                covariance[(3 + axis, 3 + axis)],
+                expected_velocity,
+                1.0e-18
+            ));
+            assert!(approx_eq(
+                covariance[(6 + axis, 6 + axis)],
+                expected_position,
+                1.0e-20
+            ));
+            assert!(approx_eq(
+                covariance[(3 + axis, 6 + axis)],
+                expected_velocity_position,
+                1.0e-19
+            ));
+        }
+        assert!((covariance - covariance.transpose()).norm() < 1.0e-20);
+    }
+
+    #[test]
+    fn covariance_stays_symmetric_positive_semidefinite_over_motion() {
+        let mut pre = ImuPreintegrator::new_with_bias_and_noise(
+            Vector3::zeros(),
+            Vector3::zeros(),
+            ImuNoiseModel {
+                gyroscope_noise_density: 1.6968e-4,
+                accelerometer_noise_density: 2.0e-3,
+            },
+        )
+        .expect("valid EuRoC noise");
+        for step in 0..500 {
+            let t = step as f64 * 0.005;
+            pre.integrate_sample(
+                Vector3::new(0.1 * t.sin(), -0.05, 0.08 * t.cos()),
+                Vector3::new(0.4, 0.2 * t.cos(), 9.81),
+                0.005,
+            );
+        }
+        let covariance = pre.delta().covariance;
+        assert!((covariance - covariance.transpose()).norm() < 1.0e-15);
+        let eigen = covariance.symmetric_eigen();
+        assert!(
+            eigen.eigenvalues.min() >= -1.0e-15,
+            "minimum covariance eigenvalue = {}",
+            eigen.eigenvalues.min()
+        );
+        assert!(covariance.trace() > 0.0);
+    }
+
+    #[test]
+    fn covariance_sqrt_information_whitens_full_rank_delta() {
+        let mut pre = ImuPreintegrator::new_with_bias_and_noise(
+            Vector3::zeros(),
+            Vector3::zeros(),
+            ImuNoiseModel {
+                gyroscope_noise_density: 1.6968e-4,
+                accelerometer_noise_density: 2.0e-3,
+            },
+        )
+        .expect("valid EuRoC noise");
+        for step in 0..20 {
+            pre.integrate_sample(
+                Vector3::new(0.01 * step as f64, -0.02, 0.03),
+                Vector3::new(0.2, -0.1, 9.81),
+                0.005,
+            );
+        }
+        let factor = ImuPreintegrationFactor {
+            keyframe_id_from: 1,
+            keyframe_id_to: 2,
+            delta: pre.delta(),
+            gravity_world: Vector3::new(0.0, 0.0, -9.81),
+            weight_position: 1.0,
+            weight_velocity: 1.0,
+            weight_rotation: 1.0,
+        };
+        let whitener = factor
+            .covariance_sqrt_information()
+            .expect("nonzero covariance has information");
+        let identity = whitener * factor.delta.covariance * whitener.transpose();
+        assert!(
+            (identity - Matrix9::identity()).norm() < 1.0e-6,
+            "whitened covariance error = {}",
+            (identity - Matrix9::identity()).norm()
+        );
+    }
+
+    #[test]
+    fn invalid_noise_density_is_rejected() {
+        assert!(ImuPreintegrator::new_with_bias_and_noise(
+            Vector3::zeros(),
+            Vector3::zeros(),
+            ImuNoiseModel {
+                gyroscope_noise_density: -1.0,
+                accelerometer_noise_density: 1.0,
+            },
+        )
+        .is_none());
     }
 
     #[test]

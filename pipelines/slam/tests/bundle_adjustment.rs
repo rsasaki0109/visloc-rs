@@ -3,11 +3,11 @@ use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Camera, Frame, Keyframe, Landmark, Observation, VisualMap};
 use visloc_mapping::{LocalMapWindow, LocalRefinementReason, LocalRefiner, StagedMapUpdate};
 use visloc_slam::{
-    pairwise_pose_factors_from_loop_closures, BaConfig, BaError, BaObservation,
-    BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner,
-    GravityPrior, ImuPreintegrationFactor, ImuPreintegrator, LinearSolver, LoopClosureConstraint,
-    PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior,
-    PositionPriorObservation, RobustKernel,
+    pairwise_pose_factors_from_loop_closures, BaConfig, BaError, BaGeneralStereoObservation,
+    BaObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
+    BundleAdjustmentRefiner, GravityPrior, ImuPreintegrationFactor, ImuPreintegrator, LinearSolver,
+    LoopClosureConstraint, PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior,
+    PositionPrior, PositionPriorObservation, RobustKernel,
 };
 
 fn pinhole() -> Camera {
@@ -300,6 +300,36 @@ fn bundle_optimize_recovers_drifted_landmark_from_two_views() {
         (recovered - Point3::new(0.0, 0.0, 6.0)).norm() < 1.0e-7,
         "recovered LM5 {recovered:?}"
     );
+}
+
+#[test]
+fn bundle_lm_does_not_reduce_cost_by_moving_observation_behind_camera() {
+    let camera = pinhole();
+    let mut ba = BundleAdjustment::new(camera);
+    ba.add_pose(10, pose_at(Vector3::zeros()));
+    ba.fix_pose(10);
+    ba.add_landmark(1, Point3::new(1.0, 0.0, 0.1));
+    // This deliberately inconsistent measurement asks the local linear model
+    // to make depth negative.  A cost-only accept test would then see the
+    // observation disappear from the objective and accept a zero-cost state.
+    ba.add_observation(BaObservation {
+        keyframe_id: 10,
+        landmark_id: 1,
+        xy: nalgebra::Point2::new(105_320.0, 240.0),
+    });
+
+    let initial = ba.landmarks[&1];
+    let result = ba.optimize(&BaConfig {
+        max_iterations: 1,
+        ..BaConfig::default()
+    });
+    let result = result.expect("damped BA must return a rejected iteration");
+
+    assert_eq!(ba.landmarks[&1], initial, "infeasible step must roll back");
+    assert!(ba.landmarks[&1].z > 0.0);
+    assert_eq!(result.iterations.len(), 1);
+    assert!(!result.iterations[0].step_accepted);
+    assert_eq!(result.final_cost, result.initial_cost);
 }
 
 #[test]
@@ -758,6 +788,126 @@ fn bundle_stereo_recovers_drifted_landmark() {
     assert!(
         (recovered - Point3::new(0.0, 0.0, 6.0)).norm() < 1.0e-8,
         "recovered LM5 {recovered:?}"
+    );
+}
+
+fn truth_general_stereo_bundle() -> (BundleAdjustment, Point3<f64>) {
+    let left_camera = pinhole();
+    let right_camera = Camera::pinhole(2, 640, 480, 510.0, 495.0, 318.0, 242.0);
+    // Deliberately include rotation, vertical translation, and unequal
+    // intrinsics: none of these can be represented by BaStereoObservation.
+    let left_to_right = SE3::new(
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+        Vector3::new(-0.11, 0.002, 0.001),
+    );
+    let pose = Pose::identity();
+    let truth = Point3::new(0.2, -0.1, 4.0);
+    let point_left = pose.transform_world_point(&truth);
+    let point_right = left_to_right.transform_point(&point_left);
+    let xy_left = left_camera.project(&point_left).expect("left projection");
+    let xy_right = right_camera
+        .project(&point_right)
+        .expect("right projection");
+
+    let mut ba = BundleAdjustment::new(left_camera);
+    ba.add_pose(10, pose);
+    ba.fix_pose(10);
+    ba.add_landmark(5, truth);
+    ba.add_general_stereo_observation(BaGeneralStereoObservation {
+        keyframe_id: 10,
+        landmark_id: 5,
+        xy_left,
+        xy_right,
+        right_camera,
+        left_to_right,
+    });
+    (ba, truth)
+}
+
+#[test]
+fn bundle_general_stereo_cost_is_zero_at_truth() {
+    let (ba, _) = truth_general_stereo_bundle();
+    assert!(
+        ba.cost() < 1.0e-20,
+        "general stereo cost at truth must vanish: {}",
+        ba.cost()
+    );
+}
+
+#[test]
+fn bundle_general_stereo_recovers_landmark_with_rotated_right_camera() {
+    let (mut ba, truth) = truth_general_stereo_bundle();
+    ba.add_landmark(5, Point3::new(0.45, 0.08, 4.8));
+    let cost_before = ba.cost();
+    assert!(cost_before > 1.0);
+
+    let result = ba
+        .optimize(&BaConfig::default())
+        .expect("general stereo BA");
+    assert!(
+        result.final_cost < 1.0e-14,
+        "general stereo BA did not converge: {}",
+        result.final_cost
+    );
+    let recovered = ba.landmarks[&5];
+    assert!(
+        (recovered - truth).norm() < 1.0e-8,
+        "recovered {recovered:?}, truth {truth:?}"
+    );
+}
+
+#[test]
+fn bundle_general_stereo_recovers_pose_with_rotated_right_camera() {
+    let left_camera = pinhole();
+    let right_camera = Camera::pinhole(2, 640, 480, 510.0, 495.0, 318.0, 242.0);
+    let left_to_right = SE3::new(
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+        Vector3::new(-0.11, 0.002, 0.001),
+    );
+    let truth_pose = pose_with_yaw(Vector3::new(0.25, -0.03, 0.04), 0.035);
+    let mut ba = BundleAdjustment::new(left_camera.clone());
+    ba.add_pose(
+        10,
+        Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(0.025, 0.07, -0.018),
+            Vector3::new(-0.39, 0.12, -0.08),
+        ),
+    );
+    for (landmark_id, point) in world_grid() {
+        let point_left = truth_pose.transform_world_point(&point);
+        let point_right = left_to_right.transform_point(&point_left);
+        let xy_left = left_camera.project(&point_left).expect("left projection");
+        let xy_right = right_camera
+            .project(&point_right)
+            .expect("right projection");
+        ba.add_landmark(landmark_id, point);
+        ba.fix_landmark(landmark_id);
+        ba.add_general_stereo_observation(BaGeneralStereoObservation {
+            keyframe_id: 10,
+            landmark_id,
+            xy_left,
+            xy_right,
+            right_camera: right_camera.clone(),
+            left_to_right: left_to_right.clone(),
+        });
+    }
+
+    let result = ba
+        .optimize(&BaConfig::default())
+        .expect("general stereo pose BA");
+    assert!(
+        result.final_cost < 1.0e-12,
+        "general stereo pose BA did not converge: {}",
+        result.final_cost
+    );
+    let recovered = &ba.poses[&10];
+    assert!((recovered.camera_center_world() - truth_pose.camera_center_world()).norm() < 1.0e-7);
+    assert!(
+        recovered
+            .world_to_camera
+            .rotation
+            .angle_to(&truth_pose.world_to_camera.rotation)
+            < 1.0e-7
     );
 }
 

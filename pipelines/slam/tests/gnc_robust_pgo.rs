@@ -12,7 +12,8 @@ use nalgebra::{Matrix6, UnitQuaternion, Vector3};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_slam::gnc::{GncConfig, GncKernel, AUTO_SCALE_K};
 use visloc_slam::{
-    relative_world_to_camera, LinearSolver, PoseGraph, PoseGraphEdgeKind, PoseGraphSe3Config,
+    relative_world_to_camera, LinearSolver, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind,
+    PoseGraphSe3Config,
 };
 
 fn pose_with_yaw(camera_center: Vector3<f64>, yaw_rad: f64) -> Pose {
@@ -210,6 +211,54 @@ fn gnc_truncated_least_squares_also_rejects_outlier() {
     assert!(result.edge_weights[outlier_idx] < 1.0e-6);
     assert_eq!(result.outlier_count(0.5), 1);
     assert!(max_center_error(&graph, &truth) < 1.0e-6);
+}
+
+#[test]
+fn gnc_scalar_weight_matches_equivalent_information_matrix() {
+    let truth = truth_chain();
+    let weak_information = 1.0e-3;
+    let measurement = outlier_chord(&truth);
+
+    let mut scalar_graph = graph_at_truth(&truth);
+    scalar_graph.edges.push(PoseGraphEdge {
+        from: 1,
+        to: 3,
+        measurement: measurement.clone(),
+        kind: PoseGraphEdgeKind::LoopClosure,
+        weight: weak_information,
+        information: None,
+    });
+    let scalar_index = scalar_graph.edges.len() - 1;
+
+    let mut matrix_graph = graph_at_truth(&truth);
+    matrix_graph.add_edge_with_information(
+        1,
+        3,
+        measurement,
+        PoseGraphEdgeKind::LoopClosure,
+        Matrix6::identity() * weak_information,
+    );
+    let matrix_index = matrix_graph.edges.len() - 1;
+
+    let gnc = GncConfig {
+        kernel: GncKernel::GemanMcClure,
+        c: 0.3,
+        inner_iterations: 10,
+        ..GncConfig::default()
+    };
+    let scalar = scalar_graph
+        .optimize_se3_gnc(&no_chordal_config(), &gnc)
+        .unwrap();
+    let matrix = matrix_graph
+        .optimize_se3_gnc(&no_chordal_config(), &gnc)
+        .unwrap();
+
+    let scalar_weight = scalar.edge_weights[scalar_index];
+    let matrix_weight = matrix.edge_weights[matrix_index];
+    assert!(
+        (scalar_weight - matrix_weight).abs() < 1.0e-9,
+        "equivalent scalar/matrix information produced {scalar_weight} vs {matrix_weight}"
+    );
 }
 
 #[test]

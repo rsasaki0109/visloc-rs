@@ -35,7 +35,7 @@ use nalgebra::{Point3, Vector3};
 use visloc_core::geometry::SE3;
 use visloc_core::types::VisualMap;
 
-use crate::bundle::{BaConfig, BaResult};
+use crate::bundle::{BaConfig, BaCostBreakdown, BaResult};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::online_slam_vi_ba::{
     run_inertial_only_vi_ba, run_viba2_inertial_with_scale, KeyframeImuState, Viba2Config,
@@ -89,6 +89,17 @@ pub struct MotionBasedViInitializerConfig {
     /// Optional post-solve upper bound on every recovered accelerometer-bias
     /// vector magnitude (m/s²). `None` preserves legacy behavior.
     pub max_accel_bias_magnitude_mps2: Option<f64>,
+    /// Optional statistical consistency gate on the final whitened IMU
+    /// residual. The value is NIS divided by 9 residual DoF per factor;
+    /// a well-modelled solve is expected near one. `None` preserves the
+    /// historical behavior.
+    pub max_final_imu_nis_per_dof: Option<f64>,
+    /// Coarse physical-unit gate for fixed-pose initialization. Unlike NIS,
+    /// these bounds do not assume the visual keyframe poses are already
+    /// statistically consistent with the IMU covariance.
+    pub max_final_imu_rotation_residual_rms_rad: Option<f64>,
+    pub max_final_imu_velocity_residual_rms_mps: Option<f64>,
+    pub max_final_imu_position_residual_rms_meters: Option<f64>,
 }
 
 impl Default for MotionBasedViInitializerConfig {
@@ -107,6 +118,10 @@ impl Default for MotionBasedViInitializerConfig {
             max_velocity_magnitude_mps: None,
             max_gyro_bias_magnitude_rad_s: None,
             max_accel_bias_magnitude_mps2: None,
+            max_final_imu_nis_per_dof: None,
+            max_final_imu_rotation_residual_rms_rad: None,
+            max_final_imu_velocity_residual_rms_mps: None,
+            max_final_imu_position_residual_rms_meters: None,
         }
     }
 }
@@ -137,6 +152,8 @@ pub struct MotionBasedViInitializationResult {
     /// Inner LM solve outcome (from the final VIBA2 inner solve when
     /// applicable, else the single VIBA1 solve).
     pub ba_result: BaResult,
+    pub initial_cost_breakdown: BaCostBreakdown,
+    pub final_cost_breakdown: BaCostBreakdown,
 }
 
 /// Why a [`MotionBasedViInitializer::try_initialize`] call returned
@@ -184,6 +201,26 @@ pub enum MotionBasedViRejectionReason {
         kf_id: u64,
         magnitude_mps2: f64,
         limit_mps2: f64,
+    },
+    /// The covariance-whitened IMU residual is statistically inconsistent
+    /// with the proposed state, so promotion would hand a bad
+    /// linearisation point to local VI-BA.
+    ImuNisOutOfRange {
+        normalized_nis_per_dof: f64,
+        rotation_residual_rms_rad: Option<f64>,
+        velocity_residual_rms_mps: Option<f64>,
+        position_residual_rms_meters: Option<f64>,
+        limit: f64,
+    },
+    /// The fixed-pose inertial initializer is too far from the IMU in
+    /// physical units to seed the subsequent joint visual-inertial solve.
+    ImuRawResidualOutOfRange {
+        rotation_residual_rms_rad: Option<f64>,
+        velocity_residual_rms_mps: Option<f64>,
+        position_residual_rms_meters: Option<f64>,
+        max_rotation_residual_rms_rad: Option<f64>,
+        max_velocity_residual_rms_mps: Option<f64>,
+        max_position_residual_rms_meters: Option<f64>,
     },
 }
 
@@ -491,6 +528,8 @@ impl MotionBasedViInitializer {
                 viba2_iterations_run: stats.outer_iterations_run,
                 trigger_translation_meters: self.cumulative_translation,
                 ba_result: stats.ba_result,
+                initial_cost_breakdown: stats.initial_cost_breakdown,
+                final_cost_breakdown: stats.final_cost_breakdown,
             }
         } else {
             let stats = run_inertial_only_vi_ba(
@@ -524,8 +563,74 @@ impl MotionBasedViInitializer {
                 viba2_iterations_run: 0,
                 trigger_translation_meters: self.cumulative_translation,
                 ba_result: stats.ba_result,
+                initial_cost_breakdown: stats.initial_cost_breakdown,
+                final_cost_breakdown: stats.final_cost_breakdown,
             }
         };
+
+        let final_cost = &result.final_cost_breakdown;
+        let rotation_exceeded = self
+            .config
+            .max_final_imu_rotation_residual_rms_rad
+            .is_some_and(|limit| {
+                final_cost
+                    .imu_rotation_residual_rms_rad
+                    .is_none_or(|value| !value.is_finite() || value > limit)
+            });
+        let velocity_exceeded = self
+            .config
+            .max_final_imu_velocity_residual_rms_mps
+            .is_some_and(|limit| {
+                final_cost
+                    .imu_velocity_residual_rms_mps
+                    .is_none_or(|value| !value.is_finite() || value > limit)
+            });
+        let position_exceeded = self
+            .config
+            .max_final_imu_position_residual_rms_meters
+            .is_some_and(|limit| {
+                final_cost
+                    .imu_position_residual_rms_meters
+                    .is_none_or(|value| !value.is_finite() || value > limit)
+            });
+        if rotation_exceeded || velocity_exceeded || position_exceeded {
+            let err = MotionBasedViRejectionReason::ImuRawResidualOutOfRange {
+                rotation_residual_rms_rad: final_cost.imu_rotation_residual_rms_rad,
+                velocity_residual_rms_mps: final_cost.imu_velocity_residual_rms_mps,
+                position_residual_rms_meters: final_cost.imu_position_residual_rms_meters,
+                max_rotation_residual_rms_rad: self.config.max_final_imu_rotation_residual_rms_rad,
+                max_velocity_residual_rms_mps: self.config.max_final_imu_velocity_residual_rms_mps,
+                max_position_residual_rms_meters: self
+                    .config
+                    .max_final_imu_position_residual_rms_meters,
+            };
+            self.last_rejection = Some(err.clone());
+            return Err(err);
+        }
+
+        if let Some(limit) = self.config.max_final_imu_nis_per_dof {
+            if let Some(normalized_nis_per_dof) = result
+                .final_cost_breakdown
+                .imu_normalized_squared_residual_per_dof
+                .filter(|value| !value.is_finite() || *value > limit)
+            {
+                let err = MotionBasedViRejectionReason::ImuNisOutOfRange {
+                    normalized_nis_per_dof,
+                    rotation_residual_rms_rad: result
+                        .final_cost_breakdown
+                        .imu_rotation_residual_rms_rad,
+                    velocity_residual_rms_mps: result
+                        .final_cost_breakdown
+                        .imu_velocity_residual_rms_mps,
+                    position_residual_rms_meters: result
+                        .final_cost_breakdown
+                        .imu_position_residual_rms_meters,
+                    limit,
+                };
+                self.last_rejection = Some(err.clone());
+                return Err(err);
+            }
+        }
 
         if let Some(limit) = self.config.max_velocity_magnitude_mps {
             let mut worst: Option<(u64, f64)> = None;
@@ -960,6 +1065,112 @@ mod tests {
             }
             other => panic!("expected Waiting after gate rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalized_imu_nis_gate_rejects_inconsistent_promotion() {
+        let mut probe = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            ..MotionBasedViInitializerConfig::default()
+        });
+        let gravity = probe.config().gravity_world;
+        for i in 0..3 {
+            probe.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let factors = vec![
+            no_acceleration_factor(1, 2, 1.0, gravity),
+            no_acceleration_factor(2, 3, 1.0, gravity),
+        ];
+        let seed = synthetic_seed();
+        let mut probe_map = build_constant_velocity_map(3);
+        let observed = probe
+            .try_initialize(&mut probe_map, &factors, &seed)
+            .expect("probe solve")
+            .final_cost_breakdown
+            .imu_normalized_squared_residual_per_dof
+            .expect("IMU factors produce a normalized residual");
+        assert!(observed.is_finite() && observed > 0.0);
+
+        let limit = observed * 0.5;
+        let mut gated = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            max_final_imu_nis_per_dof: Some(limit),
+            ..MotionBasedViInitializerConfig::default()
+        });
+        for i in 0..3 {
+            gated.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let mut gated_map = build_constant_velocity_map(3);
+        let map_before = gated_map.clone();
+        let error = gated
+            .try_initialize(&mut gated_map, &factors, &seed)
+            .expect_err("NIS gate must reject the inconsistent promotion");
+        assert_eq!(gated_map, map_before);
+        assert!(matches!(
+            error,
+            MotionBasedViRejectionReason::ImuNisOutOfRange {
+                normalized_nis_per_dof,
+                rotation_residual_rms_rad: _,
+                velocity_residual_rms_mps: _,
+                position_residual_rms_meters: _,
+                limit: rejected_limit,
+            } if (normalized_nis_per_dof - observed).abs() < 1.0e-9
+                && (rejected_limit - limit).abs() < 1.0e-12
+        ));
+    }
+
+    #[test]
+    fn physical_imu_residual_gate_rejects_inconsistent_promotion() {
+        let mut probe = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            ..MotionBasedViInitializerConfig::default()
+        });
+        let gravity = probe.config().gravity_world;
+        for i in 0..3 {
+            probe.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let factors = vec![
+            no_acceleration_factor(1, 2, 1.0, gravity),
+            no_acceleration_factor(2, 3, 1.0, gravity),
+        ];
+        let seed = synthetic_seed();
+        let mut probe_map = build_constant_velocity_map(3);
+        let observed = probe
+            .try_initialize(&mut probe_map, &factors, &seed)
+            .expect("probe solve")
+            .final_cost_breakdown
+            .imu_velocity_residual_rms_mps
+            .expect("velocity residual");
+        assert!(observed.is_finite() && observed > 0.0);
+
+        let limit = observed * 0.5;
+        let mut gated = MotionBasedViInitializer::new(MotionBasedViInitializerConfig {
+            min_keyframes: 3,
+            min_translation_meters: 1.0,
+            max_final_imu_velocity_residual_rms_mps: Some(limit),
+            ..MotionBasedViInitializerConfig::default()
+        });
+        for i in 0..3 {
+            gated.register_keyframe((i as u64) + 1, Point3::new(i as f64, 0.0, 0.0));
+        }
+        let mut gated_map = build_constant_velocity_map(3);
+        let map_before = gated_map.clone();
+        let error = gated
+            .try_initialize(&mut gated_map, &factors, &seed)
+            .expect_err("physical residual gate must reject promotion");
+        assert_eq!(gated_map, map_before);
+        assert!(matches!(
+            error,
+            MotionBasedViRejectionReason::ImuRawResidualOutOfRange {
+                velocity_residual_rms_mps: Some(value),
+                max_velocity_residual_rms_mps: Some(rejected_limit),
+                ..
+            } if (value - observed).abs() < 1.0e-9
+                && (rejected_limit - limit).abs() < 1.0e-12
+        ));
     }
 
     #[test]

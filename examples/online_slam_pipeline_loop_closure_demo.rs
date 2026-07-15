@@ -92,6 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 marginalization_sparsify: false,
                 trigger_every_new_constraints: 1,
                 appearance_candidates: None,
+                fuse_loop_observations: false,
+                loop_welding_ba: None,
                 propagate_corrections: false,
                 solver: LoopRefinementSolver::Se3,
             }),

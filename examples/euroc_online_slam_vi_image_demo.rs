@@ -95,7 +95,8 @@ use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
 #[cfg(feature = "image-io")]
 use visloc_rs::core::types::{
-    Camera, Frame, Keyframe, Landmark, LocalizationResult, Observation, VisualMap,
+    Camera, Frame, Keyframe, Landmark, LocalizationResult, Observation, StereoObservation,
+    VisualMap,
 };
 #[cfg(feature = "image-io")]
 use visloc_rs::io::euroc::{
@@ -104,7 +105,7 @@ use visloc_rs::io::euroc::{
 #[cfg(feature = "image-io")]
 use visloc_rs::io::images::read_common_image;
 #[cfg(feature = "image-io")]
-use visloc_rs::slam::OnlineSlamImuConfig;
+use visloc_rs::slam::{ImuNoiseModel, OnlineSlamImuConfig};
 #[cfg(feature = "image-io")]
 use visloc_rs::vision::distortion::RadialTangential;
 #[cfg(feature = "image-io")]
@@ -120,21 +121,22 @@ use visloc_rs::vision::stereo_bootstrap::{
 use visloc_rs::{
     build_stereo_replenish_candidates, read_external_deep_features_txt,
     umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
-    AdaptiveMotionMode, AdaptiveVelocityGateConfig, BruteForceMatcher, ConstantPoseMotionModel,
-    ConstantVelocityMotionModel, CovisibilityLocalBaConfig, CovisibilityLocalBaError,
-    CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch, ImuPredictiveMotionModel,
-    ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
-    KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline, LocalMappingResult,
-    LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
+    AdaptiveMotionMode, AdaptiveVelocityGateConfig, BaConfig, BruteForceMatcher,
+    ConstantPoseMotionModel, ConstantVelocityMotionModel, CovisibilityLocalBaConfig,
+    CovisibilityLocalBaError, CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch,
+    ImuPredictiveMotionModel, ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy,
+    KeyframeDecisionReason, KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline,
+    LocalMappingResult, LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
     LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig, LoopRefinementSolver,
     LoopRefinementVerifier, MapProviderStats, Matcher, MotionBasedViInitializerConfig, MotionModel,
-    MotionViInitializationEvent, MutualSoftmaxConfig, MutualSoftmaxMatcher, OnlineSlamConfig,
-    OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig,
-    OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
-    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, PnPLoopClosureVerifierConfig,
-    PoseGraphSe3Config, PoseTrajectory, ProjectionGuidedTrackingConfig, RelativePoseErrorConfig,
-    Sim3PoseGraphConfig, SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig,
-    TrackingEvent, TrackingResult, TrackingState, TrajectorySimilarityTransform, ViInitFallback,
+    MotionViInitializationEvent, MotionViRawResidualActivationConfig, MutualSoftmaxConfig,
+    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
+    OnlineSlamLocalBaConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig,
+    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
+    PnPLoopClosureVerifierConfig, PoseGraphSe3Config, PosePriorVisualOverrideConfig,
+    PoseTrajectory, ProjectionGuidedTrackingConfig, RelativePoseErrorConfig, Sim3PoseGraphConfig,
+    SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig, TrackingEvent,
+    TrackingResult, TrackingState, TrajectorySimilarityTransform, ViInitFallback,
     ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
 };
 
@@ -267,6 +269,15 @@ impl MotionModel for DemoMotionModel {
         }
     }
 
+    fn allows_pnp_pose_prior_warm_start(&self) -> bool {
+        match self {
+            DemoMotionModel::Pose(inner) => inner.allows_pnp_pose_prior_warm_start(),
+            DemoMotionModel::Velocity(inner) => inner.allows_pnp_pose_prior_warm_start(),
+            DemoMotionModel::ImuPredictive(inner) => inner.allows_pnp_pose_prior_warm_start(),
+            DemoMotionModel::AdaptiveImuPose(inner) => inner.allows_pnp_pose_prior_warm_start(),
+        }
+    }
+
     fn reset(&mut self) {
         match self {
             DemoMotionModel::Pose(inner) => inner.reset(),
@@ -336,6 +347,36 @@ enum DemoExtractor {
     /// with a clear error message pointing the operator at the
     /// feature flag and the model path.
     SuperPointOnnx(visloc_vision::features::superpoint_onnx::SuperPointOnnxExtractor),
+}
+
+#[cfg(feature = "image-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperPointOnnxBackendArg {
+    CudaThenCpu,
+    Cuda,
+    Cpu,
+}
+
+#[cfg(feature = "image-io")]
+impl SuperPointOnnxBackendArg {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "cuda-then-cpu" => Ok(Self::CudaThenCpu),
+            "cuda" => Ok(Self::Cuda),
+            "cpu" => Ok(Self::Cpu),
+            other => Err(format!(
+                "--superpoint-onnx-backend: expected 'cuda-then-cpu', 'cuda', or 'cpu', got {other:?}"
+            )),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CudaThenCpu => "cuda-then-cpu",
+            Self::Cuda => "cuda",
+            Self::Cpu => "cpu",
+        }
+    }
 }
 
 #[cfg(feature = "image-io")]
@@ -587,6 +628,7 @@ struct CliArgs {
     gravity_world: Vector3<f64>,
     vi_init_max_wait_seconds: f64,
     vi_init_gyro_std_limit: Option<f64>,
+    vi_init_mean_gyro_magnitude_limit: Option<f64>,
     vi_init_accel_std_limit: Option<f64>,
     /// Phase-19 lever. Maps to
     /// `OnlineSlamViInitConfig::try_initialize_on_every_frame`.
@@ -648,6 +690,12 @@ struct CliArgs {
     /// baseline behaviour. Mirrors `OnlineSlamLocalBaConfig::default()`
     /// with `gravity_world` rebased onto `--gravity`.
     local_vi_ba_enabled: bool,
+    /// Schur-marginalize the outgoing navigation state into a dense FEJ prior
+    /// on the next window anchor.
+    local_vi_ba_marginalization: bool,
+    /// Optional finite initialization uncertainty `(velocity, gyro bias,
+    /// accel bias)` used by the first marginal prior.
+    local_vi_ba_initial_prior_std_devs: Option<(f64, f64, f64)>,
     /// When `Some(v)`, runs the local VI-BA conditioning fallback:
     /// after the joint solve, if `final_cost / initial_cost > v`, the
     /// window is re-solved with biases gauge-frozen and the bias
@@ -660,11 +708,14 @@ struct CliArgs {
     /// rejected passes return diagnostics but leave map poses,
     /// landmarks, velocities, and biases untouched.
     local_vi_ba_reject_writeback_above: Option<f64>,
+    local_vi_ba_reject_final_imu_nis_per_dof_above: Option<f64>,
     /// When `Some(v)`, rejects the entire local VI-BA writeback when
     /// any refined in-window `||velocity_world|| > v`. This catches
     /// non-physical tight-VIO updates that can still reduce reprojection
     /// cost by injecting bad velocity state.
     local_vi_ba_reject_velocity_above_mps: Option<f64>,
+    local_vi_ba_reject_pose_translation_above_meters: Option<f64>,
+    local_vi_ba_reject_pose_rotation_above_degrees: Option<f64>,
     /// Enable the adaptive local VI-BA refined-velocity writeback gate.
     /// The gate derives a per-trigger velocity threshold from the local
     /// window's existing velocity state, pose-delta / IMU-`dt` finite
@@ -694,6 +745,11 @@ struct CliArgs {
     motion_vi_init_max_gyro_bias_rad_s: Option<f64>,
     /// Optional post-solve magnitude bound for every recovered accel bias.
     motion_vi_init_max_accel_bias_mps2: Option<f64>,
+    /// Optional upper bound on the final whitened IMU NIS per residual DoF.
+    motion_vi_init_max_imu_nis_per_dof: Option<f64>,
+    motion_vi_init_max_rotation_residual_rms_rad: Option<f64>,
+    motion_vi_init_max_velocity_residual_rms_mps: Option<f64>,
+    motion_vi_init_max_position_residual_rms_meters: Option<f64>,
     /// When `Some(n)`, restricts descriptor matching during tracking to
     /// landmarks observed by the reference keyframe and up to `n`
     /// co-visible neighbour keyframes (ranked by shared-landmark count).
@@ -714,6 +770,9 @@ struct CliArgs {
     /// can run. Skips startup windows that cannot anchor a useful local
     /// solve.
     covisibility_local_ba_min_keyframes: usize,
+    covisibility_local_ba_max_keyframes: Option<usize>,
+    covisibility_local_ba_motion_vi_raw_activation: Option<(f64, f64, f64)>,
+    covisibility_local_ba_max_seed_landmarks_for_activation: Option<usize>,
     /// Run online covisibility local BA after every N newly-applied
     /// keyframes. Values below 1 are rejected during argument parsing.
     covisibility_local_ba_trigger_every: usize,
@@ -742,6 +801,10 @@ struct CliArgs {
     /// Remove post-BA observations above
     /// `covisibility_local_ba_outlier_threshold_px`.
     covisibility_local_ba_remove_outliers: bool,
+    /// Use calibrated non-rectified cam0/cam1 factors for stored stereo
+    /// observations in covisibility local BA.
+    covisibility_local_ba_general_stereo: bool,
+    covisibility_local_ba_general_stereo_max_right_reprojection_px: Option<f64>,
     /// Reject covisibility BA map write-back when post-BA outlier
     /// observations exceed this fraction of selected observations.
     covisibility_local_ba_max_outlier_observation_ratio: Option<f64>,
@@ -757,6 +820,10 @@ struct CliArgs {
     /// Reject covisibility BA map write-back unless
     /// `fixed >= ceil(optimized * ratio)`. Off (`None`) by default.
     covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64>,
+    /// Reject a solved covisibility BA update above this camera-centre shift.
+    covisibility_local_ba_max_pose_translation_correction_m: Option<f64>,
+    /// Reject a solved covisibility BA update above this rotation change.
+    covisibility_local_ba_max_pose_rotation_correction_deg: Option<f64>,
     /// Optional gauge/global-anchoring pose-prior weight for optimized
     /// covisibility-BA keyframes. Off (`None`) by default.
     covisibility_local_ba_anchor_weight: Option<f64>,
@@ -801,6 +868,9 @@ struct CliArgs {
     /// (~0.5 m/s walking pace, 50 ms cam0 cadence) values in the
     /// `0.2`–`1.0` m range are reasonable.
     max_pose_jump_meters: Option<f64>,
+    /// Allow a bounded pose-prior gate widening for PnP solutions with at
+    /// least 100 inliers, 0.6 inlier ratio, and 3 px mean reprojection error.
+    pose_prior_visual_override: bool,
     /// When `true`, scale `--max-pose-jump-meters` by the number of frames
     /// elapsed since the last successful track (capped at
     /// `--pose-jump-gap-scaling-max-multiplier`, floored at 1) before
@@ -868,6 +938,10 @@ struct CliArgs {
     /// projection-window attempt. Total projection attempts per frame is
     /// `1 + projection_max_widen_retries`.
     projection_max_widen_retries: u32,
+    /// Reverse descriptor ambiguity ratio across projected landmarks that
+    /// compete for one query keypoint. `None` restores the legacy
+    /// deterministic first-wins behavior.
+    projection_query_landmark_distance_ratio: Option<f32>,
     /// Disable stage-3 local-map refinement (on by default when
     /// `--projection-guided-tracking` is set): re-projects the
     /// covisibility local map with the estimated pose, harvests
@@ -1060,6 +1134,10 @@ struct CliArgs {
     /// `--features onnx-inference`; otherwise the first `extract()`
     /// call fails with `FeatureDisabled`.
     superpoint_onnx_model: Option<PathBuf>,
+    /// ONNX execution-provider policy. `cuda` is strict and aborts at model
+    /// loading when CUDA cannot be registered, preventing an evaluation from
+    /// silently reporting CPU inference as a GPU run.
+    superpoint_onnx_backend: SuperPointOnnxBackendArg,
     /// Export one L2-normalized mean local descriptor per processed cam0
     /// frame to `frame_appearance_descriptors.csv`. This is a diagnostic
     /// input for offline retrieval-candidate recall scripts; it does not
@@ -1255,6 +1333,11 @@ struct CliArgs {
     pose_graph_refinement_fixed_loop_edge_weight: Option<f64>,
     /// Use covariance-aware anisotropic 6×6 information for PnP loop edges.
     pose_graph_refinement_loop_pose_information: bool,
+    /// Spectral cap applied to covariance-derived loop/sequential information.
+    pose_graph_refinement_loop_pose_information_max_eigenvalue: f64,
+    /// Relative strength applied to loop matrices only; sequential PnP edge
+    /// information remains unchanged.
+    pose_graph_refinement_loop_pose_information_loop_edge_scale: f64,
     /// Enable the Graduated Non-Convexity robust back-end solve
     /// (`OnlineSlamLoopClosureRefinementConfig::gnc`, using
     /// `gnc::GncConfig::default()`) instead of the plain iterative
@@ -1325,6 +1408,10 @@ struct CliArgs {
     pose_graph_refinement_appearance_projection_radius_px: Option<f64>,
     /// Minimum projection-guided matches required for refined PnP.
     pose_graph_refinement_appearance_projection_min_matches: usize,
+    /// Persist accepted appearance-PnP inliers as cross-loop observations.
+    pose_graph_refinement_fuse_loop_observations: bool,
+    /// Run covisibility welding BA after a solved, fused loop.
+    pose_graph_refinement_loop_welding_ba: bool,
     /// Propagate each solved keyframe's pose correction to its anchored
     /// landmarks and to the tracker's continuation state
     /// (`OnlineSlamLoopClosureRefinementConfig::propagate_corrections`).
@@ -1377,6 +1464,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut vi_init_max_wait_seconds: f64 = 5.0;
     let mut vi_init_try_initialize_on_every_frame: bool = false;
     let mut vi_init_gyro_std_limit: Option<f64> = None;
+    let mut vi_init_mean_gyro_magnitude_limit: Option<f64> = None;
     let mut vi_init_accel_std_limit: Option<f64> = None;
     let mut bootstrap_depth_meters: f64 = 4.0;
     let mut corner_max_features: usize = 1500;
@@ -1395,9 +1483,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut motion_vi_init_min_translation_meters: f64 = 2.0;
     let mut motion_vi_init_recover_scale: bool = false;
     let mut local_vi_ba_enabled: bool = false;
+    let mut local_vi_ba_marginalization: bool = false;
+    let mut local_vi_ba_initial_prior_std_devs: Option<(f64, f64, f64)> = None;
     let mut local_vi_ba_freeze_biases_above: Option<f64> = None;
     let mut local_vi_ba_reject_writeback_above: Option<f64> = None;
+    let mut local_vi_ba_reject_final_imu_nis_per_dof_above: Option<f64> = None;
     let mut local_vi_ba_reject_velocity_above_mps: Option<f64> = None;
+    let mut local_vi_ba_reject_pose_translation_above_meters: Option<f64> = None;
+    let mut local_vi_ba_reject_pose_rotation_above_degrees: Option<f64> = None;
     let mut local_vi_ba_adaptive_velocity_gate: bool = false;
     let default_adaptive_velocity_gate = AdaptiveVelocityGateConfig::default();
     let mut local_vi_ba_adaptive_velocity_quantile: f64 =
@@ -1415,10 +1508,17 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut motion_vi_init_max_velocity_mps: Option<f64> = None;
     let mut motion_vi_init_max_gyro_bias_rad_s: Option<f64> = None;
     let mut motion_vi_init_max_accel_bias_mps2: Option<f64> = None;
+    let mut motion_vi_init_max_imu_nis_per_dof: Option<f64> = None;
+    let mut motion_vi_init_max_rotation_residual_rms_rad: Option<f64> = None;
+    let mut motion_vi_init_max_velocity_residual_rms_mps: Option<f64> = None;
+    let mut motion_vi_init_max_position_residual_rms_meters: Option<f64> = None;
     let mut covisibility_local_map_max_keyframes: Option<usize> = None;
     let mut covisibility_local_map_min_shared: usize = 15;
     let mut covisibility_local_ba_enabled: bool = false;
     let mut covisibility_local_ba_min_keyframes: usize = 3;
+    let mut covisibility_local_ba_max_keyframes: Option<usize> = None;
+    let mut covisibility_local_ba_motion_vi_raw_activation: Option<(f64, f64, f64)> = None;
+    let mut covisibility_local_ba_max_seed_landmarks_for_activation: Option<usize> = None;
     let mut covisibility_local_ba_trigger_every: usize = 1;
     let mut covisibility_local_ba_max_neighbor_keyframes: usize = 10;
     let mut covisibility_local_ba_min_shared: usize = 15;
@@ -1429,11 +1529,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_min_active_observations: usize = 1;
     let mut covisibility_local_ba_outlier_threshold_px: Option<f64> = Some(5.0);
     let mut covisibility_local_ba_remove_outliers: bool = false;
+    let mut covisibility_local_ba_general_stereo: bool = false;
+    let mut covisibility_local_ba_general_stereo_max_right_reprojection_px: Option<f64> = Some(5.0);
     let mut covisibility_local_ba_max_outlier_observation_ratio: Option<f64> = None;
     let mut covisibility_local_ba_boundary_support_min_optimized_keyframes: Option<usize> = None;
     let mut covisibility_local_ba_boundary_support_min_fixed_keyframes: usize = 0;
     let mut covisibility_local_ba_max_behind_camera_ratio: Option<f64> = None;
     let mut covisibility_local_ba_min_fixed_to_optimized_ratio: Option<f64> = None;
+    let mut covisibility_local_ba_max_pose_translation_correction_m: Option<f64> = None;
+    let mut covisibility_local_ba_max_pose_rotation_correction_deg: Option<f64> = None;
     let mut covisibility_local_ba_anchor_weight: Option<f64> = None;
     let mut stereo_landmark_replenish: bool = false;
     let mut stereo_landmark_replenish_max_per_frame: usize = 100;
@@ -1444,6 +1548,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut stereo_landmark_replenish_min_depth_meters: Option<f64> = None;
     let mut stereo_landmark_replenish_max_depth_meters: Option<f64> = None;
     let mut max_pose_jump_meters: Option<f64> = None;
+    let mut pose_prior_visual_override: bool = false;
     let mut pose_jump_gap_scaling: bool = false;
     let mut pose_jump_gap_scaling_max_multiplier: usize = 10;
     let mut tracking_min_inliers: usize = 0;
@@ -1454,6 +1559,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut projection_search_radius_px: f64 = 15.0;
     let mut projection_widen_factor: f64 = 2.0;
     let mut projection_max_widen_retries: u32 = 2;
+    let mut projection_query_landmark_distance_ratio: Option<f32> = None;
     let mut projection_no_local_map_refinement: bool = false;
     let mut projection_refinement_search_radius_px: f64 = 8.0;
     let mut pnp_reprojection_threshold_px: Option<f64> = None;
@@ -1480,6 +1586,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut superpoint_features_dir: Option<PathBuf> = None;
     let mut superpoint_cam1_features_dir: Option<PathBuf> = None;
     let mut superpoint_onnx_model: Option<PathBuf> = None;
+    let mut superpoint_onnx_backend = SuperPointOnnxBackendArg::CudaThenCpu;
     let mut export_frame_appearance_descriptors: bool = false;
     let mut run_local_vi_ba_at_vi_init_promotion: bool = false;
     let mut relocalization_enabled: bool = false;
@@ -1516,6 +1623,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_trigger_every: usize = 1;
     let mut pose_graph_refinement_fixed_loop_edge_weight: Option<f64> = None;
     let mut pose_graph_refinement_loop_pose_information: bool = false;
+    let mut pose_graph_refinement_loop_pose_information_max_eigenvalue: f64 = 1.0;
+    let mut pose_graph_refinement_loop_pose_information_loop_edge_scale: f64 = 1.0;
     let mut pose_graph_refinement_gnc: bool = false;
     let mut pose_graph_refinement_pcm: bool = false;
     let mut pose_graph_refinement_pcm_require_individual: bool = true;
@@ -1531,6 +1640,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_appearance_confirmation_max_misses: usize = 2;
     let mut pose_graph_refinement_appearance_projection_radius_px: Option<f64> = None;
     let mut pose_graph_refinement_appearance_projection_min_matches: usize = 50;
+    let mut pose_graph_refinement_fuse_loop_observations: bool = false;
+    let mut pose_graph_refinement_loop_welding_ba: bool = false;
     let mut pose_graph_refinement_propagate: bool = false;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -1571,6 +1682,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--vi-init-gyro-std-limit" => {
                 vi_init_gyro_std_limit = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--vi-init-mean-gyro-magnitude-limit" => {
+                vi_init_mean_gyro_magnitude_limit = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--vi-init-accel-std-limit" => {
@@ -1662,6 +1777,32 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 local_vi_ba_enabled = true;
                 args.remove(i);
             }
+            "--local-vi-ba-marginalization" => {
+                local_vi_ba_marginalization = true;
+                args.remove(i);
+            }
+            "--local-vi-ba-initial-prior-std-devs" => {
+                let value = args.remove(i + 1);
+                let parts: Vec<&str> = value.split(',').collect();
+                if parts.len() != 3 {
+                    return Err("--local-vi-ba-initial-prior-std-devs expects '<velocity_mps>,<gyro_bias_rad_s>,<accel_bias_mps2>'".into());
+                }
+                let parsed = (
+                    parts[0].parse::<f64>()?,
+                    parts[1].parse::<f64>()?,
+                    parts[2].parse::<f64>()?,
+                );
+                if [parsed.0, parsed.1, parsed.2]
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                {
+                    return Err(
+                        "--local-vi-ba-initial-prior-std-devs values must be finite and > 0".into(),
+                    );
+                }
+                local_vi_ba_initial_prior_std_devs = Some(parsed);
+                args.remove(i);
+            }
             "--local-vi-ba-freeze-biases-above" => {
                 local_vi_ba_freeze_biases_above = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -1670,12 +1811,38 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 local_vi_ba_reject_writeback_above = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--local-vi-ba-reject-final-imu-nis-per-dof-above" => {
+                local_vi_ba_reject_final_imu_nis_per_dof_above = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             "--local-vi-ba-reject-velocity-above" => {
                 let threshold: f64 = args.remove(i + 1).parse()?;
                 if threshold < 0.0 {
                     return Err("--local-vi-ba-reject-velocity-above must be >= 0".into());
                 }
                 local_vi_ba_reject_velocity_above_mps = Some(threshold);
+                args.remove(i);
+            }
+            "--local-vi-ba-reject-pose-translation-above" => {
+                let threshold: f64 = args.remove(i + 1).parse()?;
+                if !threshold.is_finite() || threshold < 0.0 {
+                    return Err(
+                        "--local-vi-ba-reject-pose-translation-above must be finite and >= 0"
+                            .into(),
+                    );
+                }
+                local_vi_ba_reject_pose_translation_above_meters = Some(threshold);
+                args.remove(i);
+            }
+            "--local-vi-ba-reject-pose-rotation-above-deg" => {
+                let threshold: f64 = args.remove(i + 1).parse()?;
+                if !threshold.is_finite() || threshold < 0.0 {
+                    return Err(
+                        "--local-vi-ba-reject-pose-rotation-above-deg must be finite and >= 0"
+                            .into(),
+                    );
+                }
+                local_vi_ba_reject_pose_rotation_above_degrees = Some(threshold);
                 args.remove(i);
             }
             "--local-vi-ba-adaptive-velocity-gate" => {
@@ -1738,6 +1905,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_vi_init_max_accel_bias_mps2 = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--motion-vi-init-max-imu-nis-per-dof" => {
+                motion_vi_init_max_imu_nis_per_dof = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-max-rotation-residual-rms-rad" => {
+                motion_vi_init_max_rotation_residual_rms_rad = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-max-velocity-residual-rms-mps" => {
+                motion_vi_init_max_velocity_residual_rms_mps = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-max-position-residual-rms-m" => {
+                motion_vi_init_max_position_residual_rms_meters = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             "--covisibility-local-map-max-keyframes" => {
                 covisibility_local_map_max_keyframes = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -1752,6 +1935,37 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--covisibility-local-ba-min-keyframes" => {
                 covisibility_local_ba_min_keyframes = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-keyframes" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_max_keyframes = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
+                args.remove(i);
+            }
+            "--covisibility-local-ba-motion-vi-raw-activation" => {
+                let raw = args.remove(i + 1);
+                let values = raw
+                    .split(',')
+                    .map(str::parse::<f64>)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if values.len() != 3
+                    || values
+                        .iter()
+                        .any(|value| !value.is_finite() || *value <= 0.0)
+                {
+                    return Err("--covisibility-local-ba-motion-vi-raw-activation expects three positive finite values: '<rotation_rad>,<velocity_mps>,<position_m>'".into());
+                }
+                covisibility_local_ba_motion_vi_raw_activation =
+                    Some((values[0], values[1], values[2]));
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-seed-landmarks-for-activation" => {
+                covisibility_local_ba_max_seed_landmarks_for_activation =
+                    Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--covisibility-local-ba-trigger-every" => {
@@ -1810,6 +2024,20 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 covisibility_local_ba_remove_outliers = true;
                 args.remove(i);
             }
+            "--covisibility-local-ba-general-stereo" => {
+                covisibility_local_ba_general_stereo = true;
+                args.remove(i);
+            }
+            "--covisibility-local-ba-general-stereo-max-right-reprojection-px" => {
+                let raw = args.remove(i + 1);
+                covisibility_local_ba_general_stereo_max_right_reprojection_px =
+                    if raw.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(raw.parse()?)
+                    };
+                args.remove(i);
+            }
             "--covisibility-local-ba-max-outlier-observation-ratio" => {
                 let raw = args.remove(i + 1);
                 covisibility_local_ba_max_outlier_observation_ratio =
@@ -1859,6 +2087,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 covisibility_local_ba_anchor_weight = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--covisibility-local-ba-max-pose-translation-correction-m" => {
+                covisibility_local_ba_max_pose_translation_correction_m =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--covisibility-local-ba-max-pose-rotation-correction-deg" => {
+                covisibility_local_ba_max_pose_rotation_correction_deg =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
             "--stereo-landmark-replenish" => {
                 stereo_landmark_replenish = true;
                 args.remove(i);
@@ -1897,6 +2135,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 max_pose_jump_meters = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--pose-prior-visual-override" => {
+                pose_prior_visual_override = true;
+                args.remove(i);
+            }
             "--pose-jump-gap-scaling" => {
                 pose_jump_gap_scaling = true;
                 args.remove(i);
@@ -1928,6 +2170,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--projection-guided-tracking" => {
                 projection_guided_tracking = true;
+                args.remove(i);
+            }
+            "--projection-query-landmark-distance-ratio" => {
+                let raw = args.remove(i + 1);
+                projection_query_landmark_distance_ratio = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(raw.parse()?)
+                };
                 args.remove(i);
             }
             "--projection-search-radius-px" => {
@@ -2012,6 +2263,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--superpoint-onnx-model" => {
                 superpoint_onnx_model = Some(PathBuf::from(args.remove(i + 1)));
+                args.remove(i);
+            }
+            "--superpoint-onnx-backend" => {
+                superpoint_onnx_backend = SuperPointOnnxBackendArg::parse(&args.remove(i + 1))?;
                 args.remove(i);
             }
             "--export-frame-appearance-descriptors" => {
@@ -2241,6 +2496,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 pose_graph_refinement_loop_pose_information = true;
                 args.remove(i);
             }
+            "--pose-graph-refinement-loop-pose-information-max-eigenvalue" => {
+                pose_graph_refinement_loop_pose_information_max_eigenvalue =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-loop-pose-information-loop-edge-scale" => {
+                pose_graph_refinement_loop_pose_information_loop_edge_scale =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--pose-graph-refinement-gnc" => {
                 pose_graph_refinement_gnc = true;
                 args.remove(i);
@@ -2321,6 +2586,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--pose-graph-refinement-fuse-loop-observations" => {
+                pose_graph_refinement_fuse_loop_observations = true;
+                args.remove(i);
+            }
+            "--pose-graph-refinement-loop-welding-ba" => {
+                pose_graph_refinement_loop_welding_ba = true;
+                args.remove(i);
+            }
             "--pose-graph-refinement-propagate" => {
                 pose_graph_refinement_propagate = true;
                 args.remove(i);
@@ -2357,9 +2630,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if !tracking_min_inlier_ratio.is_finite() || !(0.0..=1.0).contains(&tracking_min_inlier_ratio) {
         return Err("--tracking-min-inlier-ratio must be in [0, 1]".into());
     }
+    if max_pose_jump_meters.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        return Err("--max-pose-jump-meters must be finite and positive".into());
+    }
+    if pose_prior_visual_override && max_pose_jump_meters.is_none() {
+        return Err("--pose-prior-visual-override requires --max-pose-jump-meters".into());
+    }
     if let Some(max_reprojection_error) = tracking_max_reprojection_error {
         if !max_reprojection_error.is_finite() || max_reprojection_error <= 0.0 {
             return Err("--tracking-max-reprojection-error must be positive or 'none'".into());
+        }
+    }
+    if let Some(ratio) = projection_query_landmark_distance_ratio {
+        if !ratio.is_finite() || ratio <= 0.0 || ratio >= 1.0 {
+            return Err(
+                "--projection-query-landmark-distance-ratio must be in (0, 1) or 'none'".into(),
+            );
         }
     }
     if !projection_search_radius_px.is_finite() || projection_search_radius_px <= 0.0 {
@@ -2482,7 +2768,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if !motion_vi_init_enabled
         && (motion_vi_init_max_velocity_mps.is_some()
             || motion_vi_init_max_gyro_bias_rad_s.is_some()
-            || motion_vi_init_max_accel_bias_mps2.is_some())
+            || motion_vi_init_max_accel_bias_mps2.is_some()
+            || motion_vi_init_max_imu_nis_per_dof.is_some()
+            || motion_vi_init_max_rotation_residual_rms_rad.is_some()
+            || motion_vi_init_max_velocity_residual_rms_mps.is_some()
+            || motion_vi_init_max_position_residual_rms_meters.is_some())
     {
         return Err("motion-VI sanity limits require --motion-vi-init".into());
     }
@@ -2499,14 +2789,54 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             motion_vi_init_max_accel_bias_mps2,
             "--motion-vi-init-max-accel-bias",
         ),
+        (
+            motion_vi_init_max_imu_nis_per_dof,
+            "--motion-vi-init-max-imu-nis-per-dof",
+        ),
+        (
+            motion_vi_init_max_rotation_residual_rms_rad,
+            "--motion-vi-init-max-rotation-residual-rms-rad",
+        ),
+        (
+            motion_vi_init_max_velocity_residual_rms_mps,
+            "--motion-vi-init-max-velocity-residual-rms-mps",
+        ),
+        (
+            motion_vi_init_max_position_residual_rms_meters,
+            "--motion-vi-init-max-position-residual-rms-m",
+        ),
     ] {
         if value.is_some_and(|limit| !limit.is_finite() || limit <= 0.0) {
             return Err(format!("{flag} must be finite and > 0").into());
         }
     }
+    if local_vi_ba_reject_final_imu_nis_per_dof_above
+        .is_some_and(|limit| !limit.is_finite() || limit <= 0.0)
+    {
+        return Err(
+            "--local-vi-ba-reject-final-imu-nis-per-dof-above must be finite and > 0".into(),
+        );
+    }
+    if covisibility_local_ba_motion_vi_raw_activation.is_some()
+        && (!covisibility_local_ba_enabled || !motion_vi_init_enabled)
+    {
+        return Err("--covisibility-local-ba-motion-vi-raw-activation requires --covisibility-local-ba and --motion-vi-init".into());
+    }
+    if let Some(maximum) = covisibility_local_ba_max_seed_landmarks_for_activation {
+        if !covisibility_local_ba_enabled || maximum == 0 {
+            return Err("--covisibility-local-ba-max-seed-landmarks-for-activation requires --covisibility-local-ba and a value >= 1".into());
+        }
+    }
     if covisibility_local_ba_enabled {
         if covisibility_local_ba_min_keyframes == 0 {
             return Err("--covisibility-local-ba-min-keyframes must be >= 1".into());
+        }
+        if covisibility_local_ba_max_keyframes
+            .is_some_and(|maximum| maximum < covisibility_local_ba_min_keyframes)
+        {
+            return Err(
+                "--covisibility-local-ba-max-keyframes must be >= the minimum or 'none'".into(),
+            );
         }
         if covisibility_local_ba_trigger_every == 0 {
             return Err("--covisibility-local-ba-trigger-every must be >= 1".into());
@@ -2529,6 +2859,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             if !px.is_finite() || px <= 0.0 {
                 return Err(
                     "--covisibility-local-ba-outlier-threshold-px must be positive or 'none'"
+                        .into(),
+                );
+            }
+        }
+        if let Some(px) = covisibility_local_ba_general_stereo_max_right_reprojection_px {
+            if !px.is_finite() || px <= 0.0 {
+                return Err(
+                    "--covisibility-local-ba-general-stereo-max-right-reprojection-px must be positive or 'none'"
                         .into(),
                 );
             }
@@ -2564,6 +2902,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 );
             }
         }
+        if let Some(limit) = covisibility_local_ba_max_pose_translation_correction_m {
+            if !limit.is_finite() || limit < 0.0 {
+                return Err("--covisibility-local-ba-max-pose-translation-correction-m must be finite and >= 0".into());
+            }
+        }
+        if let Some(limit) = covisibility_local_ba_max_pose_rotation_correction_deg {
+            if !limit.is_finite() || limit < 0.0 {
+                return Err("--covisibility-local-ba-max-pose-rotation-correction-deg must be finite and >= 0".into());
+            }
+        }
         if let Some(min_optimized) = covisibility_local_ba_boundary_support_min_optimized_keyframes
         {
             if min_optimized < 1 {
@@ -2581,6 +2929,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         }
     }
     if pose_graph_refinement_enabled {
+        if pose_graph_refinement_fuse_loop_observations && !pose_graph_refinement_appearance_loops {
+            return Err(
+                "--pose-graph-refinement-fuse-loop-observations requires --pose-graph-refinement-appearance-loops"
+                    .into(),
+            );
+        }
+        if pose_graph_refinement_loop_welding_ba && !pose_graph_refinement_fuse_loop_observations {
+            return Err(
+                "--pose-graph-refinement-loop-welding-ba requires --pose-graph-refinement-fuse-loop-observations"
+                    .into(),
+            );
+        }
         if pose_graph_refinement_trigger_every == 0 {
             return Err("--pose-graph-refinement-trigger-every must be >= 1".into());
         }
@@ -2596,6 +2956,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         {
             return Err(
                 "fixed loop weight and loop pose information are mutually exclusive".into(),
+            );
+        }
+        if !pose_graph_refinement_loop_pose_information_max_eigenvalue.is_finite()
+            || pose_graph_refinement_loop_pose_information_max_eigenvalue <= 0.0
+        {
+            return Err(
+                "--pose-graph-refinement-loop-pose-information-max-eigenvalue must be finite and > 0"
+                    .into(),
+            );
+        }
+        if !pose_graph_refinement_loop_pose_information_loop_edge_scale.is_finite()
+            || pose_graph_refinement_loop_pose_information_loop_edge_scale <= 0.0
+        {
+            return Err(
+                "--pose-graph-refinement-loop-pose-information-loop-edge-scale must be finite and > 0"
+                    .into(),
             );
         }
         if let Some(gate) = pose_graph_refinement_covariance_gate {
@@ -2669,6 +3045,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         vi_init_max_wait_seconds,
         vi_init_try_initialize_on_every_frame,
         vi_init_gyro_std_limit,
+        vi_init_mean_gyro_magnitude_limit,
         vi_init_accel_std_limit,
         bootstrap_depth_meters,
         corner_max_features,
@@ -2686,9 +3063,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         motion_vi_init_min_translation_meters,
         motion_vi_init_recover_scale,
         local_vi_ba_enabled,
+        local_vi_ba_marginalization,
+        local_vi_ba_initial_prior_std_devs,
         local_vi_ba_freeze_biases_above,
         local_vi_ba_reject_writeback_above,
+        local_vi_ba_reject_final_imu_nis_per_dof_above,
         local_vi_ba_reject_velocity_above_mps,
+        local_vi_ba_reject_pose_translation_above_meters,
+        local_vi_ba_reject_pose_rotation_above_degrees,
         local_vi_ba_adaptive_velocity_gate,
         local_vi_ba_adaptive_velocity_quantile,
         local_vi_ba_adaptive_velocity_multiplier,
@@ -2699,10 +3081,17 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         motion_vi_init_max_velocity_mps,
         motion_vi_init_max_gyro_bias_rad_s,
         motion_vi_init_max_accel_bias_mps2,
+        motion_vi_init_max_imu_nis_per_dof,
+        motion_vi_init_max_rotation_residual_rms_rad,
+        motion_vi_init_max_velocity_residual_rms_mps,
+        motion_vi_init_max_position_residual_rms_meters,
         covisibility_local_map_max_keyframes,
         covisibility_local_map_min_shared,
         covisibility_local_ba_enabled,
         covisibility_local_ba_min_keyframes,
+        covisibility_local_ba_max_keyframes,
+        covisibility_local_ba_motion_vi_raw_activation,
+        covisibility_local_ba_max_seed_landmarks_for_activation,
         covisibility_local_ba_trigger_every,
         covisibility_local_ba_max_neighbor_keyframes,
         covisibility_local_ba_min_shared,
@@ -2713,11 +3102,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         covisibility_local_ba_min_active_observations,
         covisibility_local_ba_outlier_threshold_px,
         covisibility_local_ba_remove_outliers,
+        covisibility_local_ba_general_stereo,
+        covisibility_local_ba_general_stereo_max_right_reprojection_px,
         covisibility_local_ba_max_outlier_observation_ratio,
         covisibility_local_ba_boundary_support_min_optimized_keyframes,
         covisibility_local_ba_boundary_support_min_fixed_keyframes,
         covisibility_local_ba_max_behind_camera_ratio,
         covisibility_local_ba_min_fixed_to_optimized_ratio,
+        covisibility_local_ba_max_pose_translation_correction_m,
+        covisibility_local_ba_max_pose_rotation_correction_deg,
         covisibility_local_ba_anchor_weight,
         stereo_landmark_replenish,
         stereo_landmark_replenish_max_per_frame,
@@ -2728,6 +3121,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         stereo_landmark_replenish_min_depth_meters,
         stereo_landmark_replenish_max_depth_meters,
         max_pose_jump_meters,
+        pose_prior_visual_override,
         pose_jump_gap_scaling,
         pose_jump_gap_scaling_max_multiplier,
         tracking_min_inliers,
@@ -2738,6 +3132,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         projection_search_radius_px,
         projection_widen_factor,
         projection_max_widen_retries,
+        projection_query_landmark_distance_ratio,
         projection_no_local_map_refinement,
         projection_refinement_search_radius_px,
         pnp_reprojection_threshold_px,
@@ -2764,6 +3159,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         superpoint_features_dir,
         superpoint_cam1_features_dir,
         superpoint_onnx_model,
+        superpoint_onnx_backend,
         export_frame_appearance_descriptors,
         run_local_vi_ba_at_vi_init_promotion,
         relocalization_enabled,
@@ -2800,6 +3196,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         pose_graph_refinement_trigger_every,
         pose_graph_refinement_fixed_loop_edge_weight,
         pose_graph_refinement_loop_pose_information,
+        pose_graph_refinement_loop_pose_information_max_eigenvalue,
+        pose_graph_refinement_loop_pose_information_loop_edge_scale,
         pose_graph_refinement_gnc,
         pose_graph_refinement_pcm,
         pose_graph_refinement_pcm_require_individual,
@@ -2813,6 +3211,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         pose_graph_refinement_appearance_confirmation_max_misses,
         pose_graph_refinement_appearance_projection_radius_px,
         pose_graph_refinement_appearance_projection_min_matches,
+        pose_graph_refinement_fuse_loop_observations,
+        pose_graph_refinement_loop_welding_ba,
         pose_graph_refinement_propagate,
         pose_graph_refinement_solver,
     })
@@ -2915,6 +3315,7 @@ fn bootstrap_map_from_first_frame(
     features: &FeatureSet,
     bootstrap_depth_meters: f64,
     stereo_world_points: &[Option<Point3<f64>>],
+    stereo_world_covariances: &[Option<nalgebra::Matrix3<f64>>],
     strict_stereo: bool,
 ) -> VisualMap {
     let mut map = VisualMap::new();
@@ -2922,6 +3323,7 @@ fn bootstrap_map_from_first_frame(
     let use_overrides = !stereo_world_points.is_empty();
     if use_overrides {
         debug_assert_eq!(stereo_world_points.len(), features.keypoints.len());
+        debug_assert_eq!(stereo_world_covariances.len(), features.keypoints.len());
     }
     for (index, (keypoint, descriptor)) in features
         .keypoints
@@ -2955,6 +3357,12 @@ fn bootstrap_map_from_first_frame(
         };
         let mut landmark = Landmark::new(index as u64 + 1, world_point);
         landmark.descriptor = Some(descriptor.clone());
+        if use_overrides {
+            if let Some(covariance_world) = stereo_world_covariances[index] {
+                map.landmark_position_covariances
+                    .insert(landmark.id, covariance_world);
+            }
+        }
         map.landmarks.insert(landmark.id, landmark);
     }
     map
@@ -3006,6 +3414,15 @@ fn append_stereo_bootstrap_landmarks_to_map(
         *next_landmark_id += 1;
         let mut landmark = Landmark::new(id, world_point);
         landmark.descriptor = Some(features.descriptors[survivor.left_keypoint_index].clone());
+        let rotation_camera_to_world = cam0_pose_camera_to_world
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
+        let covariance_world = rotation_camera_to_world
+            * survivor.point_covariance_left_camera_frame
+            * rotation_camera_to_world.transpose();
+        map.landmark_position_covariances
+            .insert(id, covariance_world);
         map.landmarks.insert(id, landmark);
         landmark_ids.push(id);
     }
@@ -3623,6 +4040,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model_path = args.superpoint_onnx_model.as_ref().ok_or(
                 "--feature-extractor superpoint-onnx requires --superpoint-onnx-model <path>",
             )?;
+            #[cfg(feature = "onnx-inference")]
+            let extractor = {
+                use visloc_vision::features::superpoint_onnx::{
+                    OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxExtractor,
+                };
+                let backend = match args.superpoint_onnx_backend {
+                    SuperPointOnnxBackendArg::CudaThenCpu => OnnxBackend::CudaThenCpu,
+                    SuperPointOnnxBackendArg::Cuda => OnnxBackend::Cuda,
+                    SuperPointOnnxBackendArg::Cpu => OnnxBackend::Cpu,
+                };
+                SuperPointOnnxExtractor::load_from_path_with_backend(
+                    model_path,
+                    SuperPointOnnxConfig::default(),
+                    backend,
+                )
+                .map_err(|err| format!("SuperPoint ONNX load failed: {err}"))?
+            };
+            #[cfg(not(feature = "onnx-inference"))]
             let extractor =
                 visloc_vision::features::superpoint_onnx::SuperPointOnnxExtractor::load_from_path(
                     model_path,
@@ -3630,8 +4065,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .map_err(|err| format!("SuperPoint ONNX load_from_path failed: {err}"))?;
             println!(
-                "loaded SuperPoint ONNX model from {} (onnx-inference feature: {})",
+                "loaded SuperPoint ONNX model from {} (backend={}, onnx-inference feature: {})",
                 model_path.display(),
+                args.superpoint_onnx_backend.as_str(),
                 cfg!(feature = "onnx-inference"),
             );
             DemoExtractor::SuperPointOnnx(extractor)
@@ -3667,6 +4103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fixed-`bootstrap_depth` back-projection for the matched cam0
     // keypoints below.
     let mut stereo_world_points: Vec<Option<Point3<f64>>> =
+        vec![None; seed_features.keypoints.len()];
+    let mut stereo_world_covariances: Vec<Option<nalgebra::Matrix3<f64>>> =
+        vec![None; seed_features.keypoints.len()];
+    let mut stereo_right_pixels: Vec<Option<Point2<f64>>> =
         vec![None; seed_features.keypoints.len()];
     let mut stereo_bootstrap_matches: Vec<StereoBootstrapLandmark> = Vec::new();
     let mut stereo_cam1_features_count: usize = 0;
@@ -3754,10 +4194,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &StereoBootstrapConfig::default(),
         );
         let cam0_pose_camera_to_world = seed_pose.camera_to_world();
+        let rotation_camera_to_world = cam0_pose_camera_to_world
+            .rotation
+            .to_rotation_matrix()
+            .into_inner();
         for survivor in &stereo_bootstrap_matches {
             let world_point =
                 cam0_pose_camera_to_world.transform_point(&survivor.point_left_camera_frame);
             stereo_world_points[survivor.left_keypoint_index] = Some(world_point);
+            stereo_world_covariances[survivor.left_keypoint_index] = Some(
+                rotation_camera_to_world
+                    * survivor.point_covariance_left_camera_frame
+                    * rotation_camera_to_world.transpose(),
+            );
+            stereo_right_pixels[survivor.left_keypoint_index] =
+                Some(cam1_features.keypoints[survivor.right_keypoint_index]);
         }
         println!(
             "stereo_bootstrap cam1_seed_idx={cam1_seed_idx} cam1_features={} after_undistort={} triangulated_matches={}",
@@ -3767,14 +4218,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let map = bootstrap_map_from_first_frame(
+    let mut map = bootstrap_map_from_first_frame(
         &camera,
         &seed_pose,
         &seed_features,
         args.bootstrap_depth_meters,
         &stereo_world_points,
+        &stereo_world_covariances,
         args.stereo_bootstrap_strict,
     );
+    let mut seed_stereo_observations = Vec::new();
+    if let Some(cam1_setup) = cam1_stereo_setup.as_ref() {
+        map.cameras
+            .insert(cam1_setup.camera.id, cam1_setup.camera.clone());
+        for survivor in &stereo_bootstrap_matches {
+            let landmark_id = survivor.left_keypoint_index as u64 + 1;
+            let Some(xy_right) = stereo_right_pixels[survivor.left_keypoint_index] else {
+                continue;
+            };
+            if map.landmarks.contains_key(&landmark_id) {
+                seed_stereo_observations.push(StereoObservation {
+                    frame_id: seed_frame_idx as u64,
+                    landmark_id,
+                    right_camera_id: cam1_setup.camera.id,
+                    xy_right,
+                    left_to_right: cam1_setup.cam0_to_cam1.clone(),
+                });
+            }
+        }
+    }
+    let bootstrap_landmark_count = map.landmarks.len();
     println!(
         "bootstrap landmarks={} bootstrap_depth={:.2}m stereo_overrides={} gt_seed_t_ns={} body_position=[{:.3},{:.3},{:.3}]",
         map.landmarks.len(),
@@ -3792,6 +4265,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(limit) = args.vi_init_gyro_std_limit {
         initializer_config.max_gyro_std = limit;
+    }
+    if let Some(limit) = args.vi_init_mean_gyro_magnitude_limit {
+        initializer_config.max_mean_gyro_magnitude = limit;
     }
     if let Some(limit) = args.vi_init_accel_std_limit {
         initializer_config.max_accel_std = limit;
@@ -3813,6 +4289,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let imu_config = OnlineSlamImuConfig {
         gravity_world: args.gravity_world,
+        noise_model: Some(ImuNoiseModel {
+            gyroscope_noise_density: dataset.imu_calibration.gyroscope_noise_density,
+            accelerometer_noise_density: dataset.imu_calibration.accelerometer_noise_density,
+        }),
         ..OnlineSlamImuConfig::default()
     };
     let vi_motion_init_config = if args.motion_vi_init_enabled {
@@ -3834,6 +4314,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_velocity_magnitude_mps: args.motion_vi_init_max_velocity_mps,
                 max_gyro_bias_magnitude_rad_s: args.motion_vi_init_max_gyro_bias_rad_s,
                 max_accel_bias_magnitude_mps2: args.motion_vi_init_max_accel_bias_mps2,
+                max_final_imu_nis_per_dof: args.motion_vi_init_max_imu_nis_per_dof,
+                max_final_imu_rotation_residual_rms_rad: args
+                    .motion_vi_init_max_rotation_residual_rms_rad,
+                max_final_imu_velocity_residual_rms_mps: args
+                    .motion_vi_init_max_velocity_residual_rms_mps,
+                max_final_imu_position_residual_rms_meters: args
+                    .motion_vi_init_max_position_residual_rms_meters,
                 ..MotionBasedViInitializerConfig::default()
             },
             allow_after_static_give_up: args.motion_vi_init_after_static_give_up,
@@ -3846,10 +4333,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(OnlineSlamLocalBaConfig {
             gravity_world: args.gravity_world,
             body_to_camera: body_to_camera.clone(),
+            bias_random_walk_noise_densities: Some((
+                dataset.imu_calibration.gyroscope_random_walk,
+                dataset.imu_calibration.accelerometer_random_walk,
+            )),
             freeze_biases_when_cost_ratio_above: args.local_vi_ba_freeze_biases_above,
             reject_writeback_when_cost_ratio_above: args.local_vi_ba_reject_writeback_above,
+            reject_writeback_when_final_imu_nis_per_dof_above: args
+                .local_vi_ba_reject_final_imu_nis_per_dof_above,
             reject_writeback_when_velocity_norm_above_mps: args
                 .local_vi_ba_reject_velocity_above_mps,
+            reject_writeback_when_pose_translation_above_meters: args
+                .local_vi_ba_reject_pose_translation_above_meters,
+            reject_writeback_when_pose_rotation_above_radians: args
+                .local_vi_ba_reject_pose_rotation_above_degrees
+                .map(f64::to_radians),
             adaptive_velocity_gate: args.local_vi_ba_adaptive_velocity_gate.then_some(
                 AdaptiveVelocityGateConfig {
                     reference_quantile: args.local_vi_ba_adaptive_velocity_quantile,
@@ -3862,6 +4360,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             relinearise_imu_factor_bias_thresholds: args.relinearise_imu_factor_bias_thresholds,
             run_at_vi_init_promotion: args.run_local_vi_ba_at_vi_init_promotion,
+            marginalize_navigation_state: args.local_vi_ba_marginalization,
+            initial_navigation_prior_std_devs: args.local_vi_ba_initial_prior_std_devs,
             ..OnlineSlamLocalBaConfig::default()
         })
     } else {
@@ -3870,10 +4370,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let covisibility_local_ba_config = if args.covisibility_local_ba_enabled {
         Some(OnlineSlamCovisibilityLocalBaConfig {
             min_keyframes: args.covisibility_local_ba_min_keyframes,
+            max_keyframes: args.covisibility_local_ba_max_keyframes,
+            motion_vi_raw_residual_activation: args
+                .covisibility_local_ba_motion_vi_raw_activation
+                .map(
+                    |(rotation, velocity, position)| MotionViRawResidualActivationConfig {
+                        max_rotation_residual_rms_rad: rotation,
+                        max_velocity_residual_rms_mps: velocity,
+                        max_position_residual_rms_meters: position,
+                    },
+                ),
+            max_seed_landmarks_for_activation: args
+                .covisibility_local_ba_max_seed_landmarks_for_activation,
             trigger_every_new_keyframes: args.covisibility_local_ba_trigger_every,
             max_outlier_observation_ratio: args.covisibility_local_ba_max_outlier_observation_ratio,
             max_behind_camera_landmark_ratio: args.covisibility_local_ba_max_behind_camera_ratio,
             min_fixed_to_optimized_ratio: args.covisibility_local_ba_min_fixed_to_optimized_ratio,
+            max_pose_translation_correction_m: args
+                .covisibility_local_ba_max_pose_translation_correction_m,
+            max_pose_rotation_correction_rad: args
+                .covisibility_local_ba_max_pose_rotation_correction_deg
+                .map(f64::to_radians),
             ba: CovisibilityLocalBaConfig {
                 max_neighbor_keyframes: args.covisibility_local_ba_max_neighbor_keyframes,
                 min_shared_landmarks: args.covisibility_local_ba_min_shared,
@@ -3889,6 +4406,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .covisibility_local_ba_boundary_support_min_fixed_keyframes,
                 outlier_reprojection_threshold_px: args.covisibility_local_ba_outlier_threshold_px,
                 remove_outlier_observations: args.covisibility_local_ba_remove_outliers,
+                use_general_stereo_observations: args.covisibility_local_ba_general_stereo,
+                general_stereo_max_initial_right_reprojection_error_px: args
+                    .covisibility_local_ba_general_stereo_max_right_reprojection_px,
                 pose_anchor_prior_weight: args.covisibility_local_ba_anchor_weight,
                 ..CovisibilityLocalBaConfig::default()
             },
@@ -3917,9 +4437,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             pose_graph_config: PoseGraphSe3Config::default(),
             fixed_loop_edge_weight: args.pose_graph_refinement_fixed_loop_edge_weight,
-            loop_pose_information: args
-                .pose_graph_refinement_loop_pose_information
-                .then(visloc_rs::slam::LoopPoseInformationConfig::default),
+            loop_pose_information: args.pose_graph_refinement_loop_pose_information.then(|| {
+                visloc_rs::slam::LoopPoseInformationConfig {
+                    max_information_eigenvalue: args
+                        .pose_graph_refinement_loop_pose_information_max_eigenvalue,
+                    loop_edge_scale: args
+                        .pose_graph_refinement_loop_pose_information_loop_edge_scale,
+                    ..visloc_rs::slam::LoopPoseInformationConfig::default()
+                }
+            }),
             gnc: if args.pose_graph_refinement_gnc {
                 Some(visloc_rs::slam::gnc::GncConfig::default())
             } else {
@@ -3959,6 +4485,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             },
+            fuse_loop_observations: args.pose_graph_refinement_fuse_loop_observations,
+            loop_welding_ba: args.pose_graph_refinement_loop_welding_ba.then(|| {
+                CovisibilityLocalBaConfig {
+                    max_neighbor_keyframes: 20,
+                    min_shared_landmarks: 5,
+                    max_boundary_keyframes: 20,
+                    min_boundary_observations: 3,
+                    min_active_observations: 8,
+                    boundary_support_min_optimized_keyframes: Some(2),
+                    boundary_support_min_fixed_keyframes: 1,
+                    pose_anchor_prior_weight: Some(100.0),
+                    // Welding starts from the geometrically verified PnP
+                    // alignment. Keep this synchronous pass deliberately
+                    // short so it refines the seam without rotating the
+                    // whole local trajectory away from that initialization.
+                    ba_config: BaConfig {
+                        max_iterations: 3,
+                        ..BaConfig::default()
+                    },
+                    ..CovisibilityLocalBaConfig::default()
+                }
+            }),
             propagate_corrections: args.pose_graph_refinement_propagate,
             solver: match args.pose_graph_refinement_solver {
                 LoopRefinementSolverKind::Se3 => LoopRefinementSolver::Se3,
@@ -4015,6 +4563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             search_radius_px: args.projection_search_radius_px,
             widen_factor: args.projection_widen_factor,
             max_widen_retries: args.projection_max_widen_retries,
+            max_query_landmark_distance_ratio: args.projection_query_landmark_distance_ratio,
             local_map_refinement: !args.projection_no_local_map_refinement,
             refinement_search_radius_px: args.projection_refinement_search_radius_px,
         })
@@ -4024,6 +4573,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracking_config = TrackingConfig {
         covisibility_local_map: covisibility_config,
         max_pose_prior_translation_error: args.max_pose_jump_meters,
+        pose_prior_visual_override: args
+            .pose_prior_visual_override
+            .then(PosePriorVisualOverrideConfig::default),
         min_inliers: args.tracking_min_inliers,
         min_inlier_ratio: args.tracking_min_inlier_ratio,
         max_mean_reprojection_error: args.tracking_max_reprojection_error,
@@ -4184,7 +4736,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vi_init_log_path = args.out_dir.join("vi_init_log.txt");
     let motion_vi_init_log_path = args.out_dir.join("motion_vi_init_log.txt");
     let covisibility_local_ba_log_path = args.out_dir.join("covisibility_ba_log.txt");
+    let local_vi_ba_diagnostics_path = args.out_dir.join("local_vi_ba_diagnostics.csv");
     let keyframe_decision_log_path = args.out_dir.join("keyframe_decisions.csv");
+    let tracking_diagnostics_path = args.out_dir.join("tracking_diagnostics.csv");
     let relocalization_appearance_candidates_path = args
         .out_dir
         .join("relocalization_appearance_candidates.csv");
@@ -4215,10 +4769,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vi_init_log = String::new();
     let mut motion_vi_init_log = String::new();
     let mut covisibility_local_ba_log = String::from(
-        "frame_idx,timestamp_ns,success,error,elapsed_ms,optimized_keyframes,fixed_keyframes,landmarks,observations,boundary_fallback_used,mean_reprojection_before_px,mean_reprojection_after_px,updated_keyframes,updated_landmarks,outlier_observations,outlier_observation_ratio,quality_gate_rejected,removed_observations\n",
+        "frame_idx,timestamp_ns,success,error,elapsed_ms,optimized_keyframes,fixed_keyframes,landmarks,observations,boundary_fallback_used,mean_reprojection_before_px,mean_reprojection_after_px,max_pose_translation_correction_m,max_pose_rotation_correction_rad,updated_keyframes,updated_landmarks,outlier_observations,outlier_observation_ratio,quality_gate_rejected,pose_correction_gate_rejected,removed_observations\n",
     );
     let mut keyframe_decision_log = String::from(
         "frame_idx,timestamp_ns,tracking_success,selected,reason,last_keyframe_frame_id,selected_keyframe_count,localization_inliers,localization_inlier_ratio,frame_id_gap,translation_m,min_translation_m,tracked_landmarks,last_keyframe_tracked_landmarks,min_tracked_landmark_ratio,tracking_failure_reason\n",
+    );
+    let mut tracking_diagnostics_csv = String::from(
+        "frame_idx,timestamp_ns,state,event,success,successive_failures,used_pose_prior,pose_present,estimated_px,estimated_py,estimated_pz,estimated_qw,estimated_qx,estimated_qy,estimated_qz,tracking_path,projection_attempt_count,projection_widen_retry_count,local_map_refinement_accepted,local_map_refinement_rejected,candidate_landmark_count,match_count,correspondence_count,inlier_count,outlier_count,inlier_ratio,mean_reprojection_error_px,median_reprojection_error_px,max_reprojection_error_px,pose_prior_translation_innovation_m,pose_prior_rotation_innovation_deg,tracking_failure_reason,localization_failure_reason,refinement_applied,pre_refinement_mean_reprojection_error_px,post_refinement_mean_reprojection_error_px,refinement_error_delta_px,pose_prior_visual_override_used\n",
     );
     let mut relocalization_appearance_candidates_csv = String::from(
         "query_frame_id,matched_keyframe_id,score,rank,timestamp_ns,descriptor_store_landmark_count,appearance_descriptor_store_landmark_count,recovery_attempted,recovery_succeeded,passed_acceptance_gates,used_appearance_store,used_broader_fallback\n",
@@ -4362,11 +4919,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut local_vi_ba_mirrors: usize = 0;
     let mut imu_factors_staged: usize = 0;
     let mut local_vi_ba_relinearised_factor_total: usize = 0;
+    let mut local_vi_ba_stereo_observation_total: usize = 0;
+    let mut local_vi_ba_marginalization_priors_applied: usize = 0;
+    let mut local_vi_ba_marginalization_successes: usize = 0;
     let mut local_vi_ba_quality_gate_rejections: usize = 0;
     let mut local_vi_ba_cost_ratio_gate_rejections: usize = 0;
+    let mut local_vi_ba_imu_nis_gate_rejections: usize = 0;
     let mut local_vi_ba_velocity_gate_rejections: usize = 0;
+    let mut local_vi_ba_pose_correction_gate_rejections: usize = 0;
+    let mut local_vi_ba_max_pose_translation_correction_meters: f64 = 0.0;
+    let mut local_vi_ba_max_pose_rotation_correction_degrees: f64 = 0.0;
     let mut local_vi_ba_adaptive_velocity_gate_rejections: usize = 0;
     let mut local_vi_ba_last_adaptive_velocity_threshold_mps: Option<f64> = None;
+    let mut local_vi_ba_diagnostic_rows = vec![
+        "frame_idx,timestamp_ns,window_keyframe_ids,observations,stereo_observations,imu_factors,quality_gate_rejected,imu_nis_gate_rejected,max_pose_translation_correction_m,max_pose_rotation_correction_deg,initial_total,initial_visual,initial_imu,initial_bias_random_walk,initial_navigation_prior,initial_other_structural,initial_imu_nis_per_dof,initial_imu_rotation_rms_rad,initial_imu_velocity_rms_mps,initial_imu_position_rms_m,final_total,final_visual,final_imu,final_bias_random_walk,final_navigation_prior,final_other_structural,final_imu_nis_per_dof,final_imu_rotation_rms_rad,final_imu_velocity_rms_mps,final_imu_position_rms_m".to_string(),
+    ];
     let mut last_mirrored_velocity_world: Option<Vector3<f64>> = None;
     let mut last_mirrored_bias_gyro: Option<Vector3<f64>> = None;
     let mut last_mirrored_bias_acc: Option<Vector3<f64>> = None;
@@ -4391,6 +4958,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut covisibility_local_ba_boundary_support_failures: usize = 0;
     let mut covisibility_local_ba_behind_camera_gate_failures: usize = 0;
     let mut covisibility_local_ba_fixed_ratio_gate_failures: usize = 0;
+    let mut covisibility_local_ba_pose_correction_gate_failures: usize = 0;
     let mut covisibility_local_ba_other_failures: usize = 0;
     // Online loop-closure + pose-graph refinement stage bookkeeping (opt-in
     // via `--pose-graph-refinement`).
@@ -4417,20 +4985,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pose_graph_refinement_appearance_scale_no_consensus: usize = 0;
     let mut pose_graph_refinement_appearance_near_unit: usize = 0;
     let mut pose_graph_refinement_pgo_solves: usize = 0;
+    let mut pose_graph_refinement_gnc_rejected_loop_edges_max: usize = 0;
     let mut pose_graph_refinement_pcm_rejected: usize = 0;
     let mut pose_graph_refinement_covariance_rejected: usize = 0;
     let mut pose_graph_refinement_pose_information_rejected: usize = 0;
     let mut pose_graph_refinement_with_pose_information: usize = 0;
     let mut pose_graph_refinement_pose_information_estimates: usize = 0;
     let mut pose_graph_refinement_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_pose_information_stereo_covariance_correspondences: usize = 0;
     let mut pose_graph_refinement_pose_information_raw_condition_max: f64 = 0.0;
     let mut pose_graph_refinement_pose_information_spectral_scale_min: Option<f64> = None;
+    let mut pose_graph_refinement_pose_information_failures =
+        visloc_rs::slam::LoopPoseInformationFailureCounts::default();
     let mut pose_graph_refinement_sequential_with_pose_information: usize = 0;
     let mut pose_graph_refinement_sequential_pose_information_fallbacks: usize = 0;
     let mut pose_graph_refinement_sequential_pose_information_used_correspondences: usize = 0;
+    let mut pose_graph_refinement_sequential_pose_information_stereo_covariance_correspondences:
+        usize = 0;
     let mut pose_graph_refinement_sequential_pose_information_raw_condition_max: f64 = 0.0;
     let mut pose_graph_refinement_sequential_pose_information_spectral_scale_min: Option<f64> =
         None;
+    let mut pose_graph_refinement_sequential_pose_information_failures =
+        visloc_rs::slam::LoopPoseInformationFailureCounts::default();
+    let mut pose_graph_refinement_loop_fusion_pairs_considered: usize = 0;
+    let mut pose_graph_refinement_loop_fusion_observations_inserted: usize = 0;
+    let mut pose_graph_refinement_loop_fusion_observations_reassigned: usize = 0;
+    let mut pose_graph_refinement_loop_fusion_pairs_skipped: usize = 0;
+    let mut pose_graph_refinement_loop_fusion_pairs_robust_rejected: usize = 0;
+    let mut pose_graph_refinement_loop_fusion_pairs_reprojection_rejected: usize = 0;
+    let mut pose_graph_refinement_loop_welding_ba_attempted: usize = 0;
+    let mut pose_graph_refinement_loop_welding_ba_succeeded: usize = 0;
+    let mut pose_graph_refinement_loop_welding_ba_rejected_or_failed: usize = 0;
+    let mut pose_graph_refinement_loop_welding_ba_updated_keyframes: usize = 0;
+    let mut pose_graph_refinement_loop_welding_ba_updated_landmarks: usize = 0;
+    let mut pose_graph_refinement_loop_welding_post_pgo_attempted: usize = 0;
+    let mut pose_graph_refinement_loop_welding_post_pgo_succeeded: usize = 0;
+    let mut pose_graph_refinement_loop_welding_post_pgo_reprojection_max: Option<f64> = None;
+    let mut pose_graph_refinement_loop_welding_post_ba_last_error: Option<String> = None;
+    let mut pose_graph_refinement_loop_welding_post_ba_behind_camera_ratio_max: Option<f64> = None;
+    let mut pose_graph_refinement_loop_welding_initial_translation_max: Option<f64> = None;
+    let mut pose_graph_refinement_loop_welding_initial_rotation_max: Option<f64> = None;
     let mut pose_graph_refinement_landmarks_moved: usize = 0;
     let mut pose_graph_refinement_max_landmark_displacement_meters: f64 = 0.0;
     let mut pose_graph_refinement_tracker_corrections_applied: usize = 0;
@@ -4618,7 +5212,163 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
+        let tracking_stats_before = slam.tracker.stats().clone();
         let mut result = slam.process_frame(&frame, candidates_to_submit);
+        let tracking_stats_after = slam.tracker.stats();
+        let projection_attempt_count = tracking_stats_after
+            .projection_guided_attempt_count
+            .saturating_sub(tracking_stats_before.projection_guided_attempt_count);
+        let projection_widen_retry_count = tracking_stats_after
+            .projection_guided_widen_retry_count
+            .saturating_sub(tracking_stats_before.projection_guided_widen_retry_count);
+        let projection_succeeded = tracking_stats_after.projection_guided_success_count
+            > tracking_stats_before.projection_guided_success_count;
+        let appearance_fallback_succeeded = tracking_stats_after
+            .projection_guided_fallback_success_count
+            > tracking_stats_before.projection_guided_fallback_success_count;
+        let local_map_refinement_accepted = tracking_stats_after
+            .local_map_refinement_accepted_count
+            > tracking_stats_before.local_map_refinement_accepted_count;
+        let local_map_refinement_rejected = tracking_stats_after
+            .local_map_refinement_rejected_count
+            > tracking_stats_before.local_map_refinement_rejected_count;
+        let pose_prior_visual_override_used = tracking_stats_after.pose_prior_visual_override_count
+            > tracking_stats_before.pose_prior_visual_override_count;
+        let tracking_path = if projection_succeeded {
+            "projection"
+        } else if appearance_fallback_succeeded {
+            "appearance_fallback"
+        } else if projection_attempt_count > 0 {
+            "projection_and_fallback_failed"
+        } else {
+            "appearance_global"
+        };
+        // Preserve the raw tracker decision before optional relocalization or
+        // rebootstrap replaces it below. In particular, quality-gate rejected
+        // PnP estimates intentionally retain their pose and reprojection
+        // statistics, which makes this log able to distinguish an observation
+        // cliff from a motion-prior innovation-gate rejection.
+        let (pose_prior_translation_innovation_m, pose_prior_rotation_innovation_deg) = result
+            .tracking
+            .pose_prior
+            .as_ref()
+            .zip(result.tracking.localization.pose.as_ref())
+            .map(|(prior, estimated)| {
+                let translation =
+                    (estimated.camera_center_world() - prior.camera_center_world()).norm();
+                let prior_rotation = prior.camera_to_world().rotation;
+                let estimated_rotation = estimated.camera_to_world().rotation;
+                let rotation_deg = prior_rotation
+                    .rotation_to(&estimated_rotation)
+                    .angle()
+                    .to_degrees();
+                (Some(translation), Some(rotation_deg))
+            })
+            .unwrap_or((None, None));
+        let estimator_diagnostics = result.tracking.localization.estimator_diagnostics.as_ref();
+        let estimated_pose_fields = result
+            .tracking
+            .localization
+            .pose
+            .as_ref()
+            .map(|pose| {
+                let center = pose.camera_center_world();
+                let rotation = pose.camera_to_world().rotation;
+                (
+                    Some(center.x),
+                    Some(center.y),
+                    Some(center.z),
+                    Some(rotation.w),
+                    Some(rotation.i),
+                    Some(rotation.j),
+                    Some(rotation.k),
+                )
+            })
+            .unwrap_or((None, None, None, None, None, None, None));
+        tracking_diagnostics_csv.push_str(&format!(
+            "{frame_idx},{},{:?},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.9},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            image_entry.timestamp_nanoseconds,
+            result.tracking.state,
+            result.tracking.event,
+            bool_as_u8(result.tracking.localization.success),
+            result.tracking.successive_failures,
+            bool_as_u8(result.tracking.used_pose_prior),
+            bool_as_u8(result.tracking.localization.pose.is_some()),
+            format_optional_f64(estimated_pose_fields.0),
+            format_optional_f64(estimated_pose_fields.1),
+            format_optional_f64(estimated_pose_fields.2),
+            format_optional_f64(estimated_pose_fields.3),
+            format_optional_f64(estimated_pose_fields.4),
+            format_optional_f64(estimated_pose_fields.5),
+            format_optional_f64(estimated_pose_fields.6),
+            tracking_path,
+            projection_attempt_count,
+            projection_widen_retry_count,
+            bool_as_u8(local_map_refinement_accepted),
+            bool_as_u8(local_map_refinement_rejected),
+            result.tracking.localization.candidate_landmark_count,
+            result.tracking.localization.match_count,
+            result.tracking.localization.correspondence_count,
+            result.tracking.localization.inlier_count,
+            result.tracking.localization.outlier_count,
+            result.tracking.localization.inlier_ratio,
+            format_optional_f64(result.tracking.localization.reprojection_error),
+            format_optional_f64(result.tracking.localization.median_reprojection_error),
+            format_optional_f64(result.tracking.localization.max_reprojection_error),
+            format_optional_f64(pose_prior_translation_innovation_m),
+            format_optional_f64(pose_prior_rotation_innovation_deg),
+            quote_csv_field(
+                &result
+                    .tracking
+                    .tracking_failure_reason
+                    .as_ref()
+                    .map(|reason| format!("{reason:?}"))
+                    .unwrap_or_default(),
+            ),
+            quote_csv_field(
+                &result
+                    .tracking
+                    .localization
+                    .failure_reason
+                    .as_ref()
+                    .map(|reason| format!("{reason:?}"))
+                    .unwrap_or_default(),
+            ),
+            estimator_diagnostics
+                .map(|diagnostics| bool_as_u8(diagnostics.refinement_applied).to_string())
+                .unwrap_or_default(),
+            format_optional_f64(
+                estimator_diagnostics
+                    .and_then(|diagnostics| diagnostics.pre_refinement_mean_reprojection_error),
+            ),
+            format_optional_f64(
+                estimator_diagnostics
+                    .and_then(|diagnostics| diagnostics.post_refinement_mean_reprojection_error),
+            ),
+            format_optional_f64(
+                estimator_diagnostics.and_then(|diagnostics| diagnostics.refinement_error_delta),
+            ),
+            bool_as_u8(pose_prior_visual_override_used),
+        ));
+        if frame_idx == seed_frame_idx {
+            let observed_landmarks = slam
+                .map()
+                .keyframes
+                .get(&(frame_idx as u64))
+                .map(|keyframe| {
+                    keyframe
+                        .observations
+                        .iter()
+                        .map(|observation| observation.landmark_id)
+                        .collect::<std::collections::HashSet<_>>()
+                })
+                .unwrap_or_default();
+            seed_stereo_observations
+                .retain(|stereo| observed_landmarks.contains(&stereo.landmark_id));
+            slam.map_mut()
+                .stereo_observations
+                .append(&mut seed_stereo_observations);
+        }
         let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
             && result
@@ -4714,6 +5464,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .staged_update
                                     .clone()
                                     .apply_to(slam.map_mut());
+                            }
+                            let observed_landmarks = slam
+                                .map()
+                                .keyframes
+                                .get(&(frame_idx as u64))
+                                .map(|keyframe| {
+                                    keyframe
+                                        .observations
+                                        .iter()
+                                        .map(|observation| observation.landmark_id)
+                                        .collect::<std::collections::HashSet<_>>()
+                                })
+                                .unwrap_or_default();
+                            for (stereo_match, landmark_id) in
+                                stereo_matches.iter().zip(landmark_ids.iter().copied())
+                            {
+                                if observed_landmarks.contains(&landmark_id) {
+                                    slam.map_mut().stereo_observations.push(StereoObservation {
+                                        frame_id: frame_idx as u64,
+                                        landmark_id,
+                                        right_camera_id: cam1_setup.camera.id,
+                                        xy_right: cam1_features.keypoints
+                                            [stereo_match.right_keypoint_index],
+                                        left_to_right: cam1_setup.cam0_to_cam1.clone(),
+                                    });
+                                }
                             }
                             rebootstrap_mapping_override = Some(mapping_result);
                             segment_id += 1;
@@ -5058,6 +5834,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
 
+        // Static VI initialization promotes its calibrated velocity and IMU
+        // biases into the SLAM preintegrator. Mirror the same state into the
+        // optional IMU motion model; otherwise `--motion-model imu` would keep
+        // integrating with its construction-time zero biases even after the
+        // estimator has accepted nonzero calibrated values.
+        if let Some(ViInitializationEvent::Succeeded { result, .. }) = result.vi_init.as_ref() {
+            slam.tracker.motion_model_mut().mirror_vi_ba_state(
+                result.initial_velocity_world,
+                result.bias_gyro,
+                result.bias_acc,
+            );
+        }
+
         // Refresh the IMU motion model's `velocity_world` from the
         // finite-difference of two successive successful poses, but
         // only when `--imu-extrinsic-from-cam0` is on — the flag is
@@ -5099,20 +5888,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(stats) = result.local_vi_ba.as_ref() {
             local_vi_ba_triggers += 1;
             local_vi_ba_relinearised_factor_total += stats.relinearised_factor_count;
+            local_vi_ba_stereo_observation_total += stats.stereo_observation_count;
+            if stats.marginalization_prior_applied {
+                local_vi_ba_marginalization_priors_applied += 1;
+            }
+            if stats.marginalization_succeeded {
+                local_vi_ba_marginalization_successes += 1;
+            }
             if stats.quality_gate_rejected {
                 local_vi_ba_quality_gate_rejections += 1;
             }
             if stats.cost_ratio_gate_rejected {
                 local_vi_ba_cost_ratio_gate_rejections += 1;
             }
+            if stats.imu_nis_gate_rejected {
+                local_vi_ba_imu_nis_gate_rejections += 1;
+            }
             if stats.velocity_gate_rejected {
                 local_vi_ba_velocity_gate_rejections += 1;
             }
+            if stats.pose_correction_gate_rejected {
+                local_vi_ba_pose_correction_gate_rejections += 1;
+            }
+            local_vi_ba_max_pose_translation_correction_meters =
+                local_vi_ba_max_pose_translation_correction_meters
+                    .max(stats.max_pose_translation_correction_meters);
+            local_vi_ba_max_pose_rotation_correction_degrees =
+                local_vi_ba_max_pose_rotation_correction_degrees
+                    .max(stats.max_pose_rotation_correction_radians.to_degrees());
             if stats.adaptive_velocity_gate_rejected {
                 local_vi_ba_adaptive_velocity_gate_rejections += 1;
             }
             local_vi_ba_last_adaptive_velocity_threshold_mps =
                 stats.adaptive_velocity_gate_threshold_mps;
+            let fmt_optional =
+                |value: Option<f64>| value.map(|value| format!("{value:.9}")).unwrap_or_default();
+            let window_ids = stats
+                .window_keyframe_ids
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(";");
+            let initial = stats.initial_cost_breakdown;
+            let final_cost = stats.final_cost_breakdown;
+            local_vi_ba_diagnostic_rows.push(format!(
+                "{frame_idx},{},{window_ids},{},{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{},{},{}",
+                image_entry.timestamp_nanoseconds,
+                stats.observation_count,
+                stats.stereo_observation_count,
+                stats.imu_factor_count,
+                stats.quality_gate_rejected,
+                stats.imu_nis_gate_rejected,
+                stats.max_pose_translation_correction_meters,
+                stats.max_pose_rotation_correction_radians.to_degrees(),
+                initial.total,
+                initial.visual,
+                initial.imu,
+                initial.bias_random_walk,
+                initial.navigation_prior,
+                initial.other_structural,
+                fmt_optional(initial.imu_normalized_squared_residual_per_dof),
+                fmt_optional(initial.imu_rotation_residual_rms_rad),
+                fmt_optional(initial.imu_velocity_residual_rms_mps),
+                fmt_optional(initial.imu_position_residual_rms_meters),
+                final_cost.total,
+                final_cost.visual,
+                final_cost.imu,
+                final_cost.bias_random_walk,
+                final_cost.navigation_prior,
+                final_cost.other_structural,
+                fmt_optional(final_cost.imu_normalized_squared_residual_per_dof),
+                fmt_optional(final_cost.imu_rotation_residual_rms_rad),
+                fmt_optional(final_cost.imu_velocity_residual_rms_mps),
+                fmt_optional(final_cost.imu_position_residual_rms_meters),
+            ));
             if !stats.bias_frozen && !stats.quality_gate_rejected {
                 if let (Some(state), Some(latest_kf)) = (
                     slam.local_vi_ba_state.as_ref(),
@@ -5187,6 +6036,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(CovisibilityLocalBaError::FixedSupportRatioRejected { .. }) => {
                         covisibility_local_ba_fixed_ratio_gate_failures += 1;
                     }
+                    Some(CovisibilityLocalBaError::PoseCorrectionGateRejected { .. }) => {
+                        covisibility_local_ba_pose_correction_gate_failures += 1;
+                    }
                     Some(CovisibilityLocalBaError::Ba(_)) => {
                         covisibility_local_ba_solver_failures += 1;
                     }
@@ -5233,18 +6085,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (0, 0, 0, 0, false)
             };
             covisibility_local_ba_log.push_str(&format!(
-                "{frame_idx},{},{},{},{:.6},{optimized_keyframes},{fixed_keyframes},{landmarks},{observations},{boundary_fallback_used},{:?},{:?},{},{},{},{:?},{},{}\n",
+                "{frame_idx},{},{},{},{:.6},{optimized_keyframes},{fixed_keyframes},{landmarks},{observations},{boundary_fallback_used},{:?},{:?},{:?},{:?},{},{},{},{:?},{},{},{}\n",
                 image_entry.timestamp_nanoseconds,
                 stats.success,
                 error.replace(',', ";"),
                 stats.elapsed_ms,
                 stats.mean_reprojection_before_px,
                 stats.mean_reprojection_after_px,
+                stats.max_pose_translation_correction_m,
+                stats.max_pose_rotation_correction_rad,
                 stats.updated_keyframe_count,
                 stats.updated_landmark_count,
                 stats.outlier_observation_count,
                 stats.outlier_observation_ratio,
                 stats.quality_gate_rejected,
+                stats.pose_correction_gate_rejected,
                 stats.removed_observation_count,
             ));
         }
@@ -5350,6 +6205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 pose_graph_refinement_pgo_solves += 1;
             }
+            pose_graph_refinement_gnc_rejected_loop_edges_max =
+                pose_graph_refinement_gnc_rejected_loop_edges_max.max(stats.loop_closures_rejected);
             if let Some(spread) = stats.sim3_scale_spread {
                 pose_graph_refinement_last_solve_scale_spread = Some(spread);
             }
@@ -5363,6 +6220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pose_graph_refinement_pose_information_estimates += 1;
                 pose_graph_refinement_pose_information_used_correspondences +=
                     diagnostic.used_correspondence_count;
+                pose_graph_refinement_pose_information_stereo_covariance_correspondences +=
+                    diagnostic.stereo_covariance_correspondence_count;
                 pose_graph_refinement_pose_information_raw_condition_max =
                     pose_graph_refinement_pose_information_raw_condition_max
                         .max(diagnostic.raw_condition_number);
@@ -5373,6 +6232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }),
                 );
             }
+            pose_graph_refinement_pose_information_failures
+                .merge(stats.loop_pose_information_failures);
             pose_graph_refinement_sequential_with_pose_information +=
                 stats.sequential_edges_with_pose_information;
             pose_graph_refinement_sequential_pose_information_fallbacks +=
@@ -5380,6 +6241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for diagnostic in &stats.sequential_pose_information_diagnostics {
                 pose_graph_refinement_sequential_pose_information_used_correspondences +=
                     diagnostic.used_correspondence_count;
+                pose_graph_refinement_sequential_pose_information_stereo_covariance_correspondences +=
+                    diagnostic.stereo_covariance_correspondence_count;
                 pose_graph_refinement_sequential_pose_information_raw_condition_max =
                     pose_graph_refinement_sequential_pose_information_raw_condition_max
                         .max(diagnostic.raw_condition_number);
@@ -5388,6 +6251,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_or(diagnostic.applied_spectral_scale, |value| {
                             value.min(diagnostic.applied_spectral_scale)
                         }),
+                );
+            }
+            pose_graph_refinement_sequential_pose_information_failures
+                .merge(stats.sequential_pose_information_failures);
+            pose_graph_refinement_loop_fusion_pairs_considered +=
+                stats.loop_fusion_pairs_considered;
+            pose_graph_refinement_loop_fusion_observations_inserted +=
+                stats.loop_fusion_observations_inserted;
+            pose_graph_refinement_loop_fusion_observations_reassigned +=
+                stats.loop_fusion_observations_reassigned;
+            pose_graph_refinement_loop_fusion_pairs_skipped += stats.loop_fusion_pairs_skipped;
+            pose_graph_refinement_loop_fusion_pairs_robust_rejected +=
+                stats.loop_fusion_pairs_robust_rejected;
+            pose_graph_refinement_loop_fusion_pairs_reprojection_rejected +=
+                stats.loop_fusion_pairs_reprojection_rejected;
+            pose_graph_refinement_loop_welding_ba_attempted +=
+                usize::from(stats.loop_welding_ba_attempted);
+            pose_graph_refinement_loop_welding_ba_succeeded +=
+                usize::from(stats.loop_welding_ba_succeeded);
+            pose_graph_refinement_loop_welding_ba_rejected_or_failed +=
+                usize::from(stats.loop_welding_ba_rejected_or_failed);
+            pose_graph_refinement_loop_welding_ba_updated_keyframes +=
+                stats.loop_welding_ba_updated_keyframes;
+            pose_graph_refinement_loop_welding_ba_updated_landmarks +=
+                stats.loop_welding_ba_updated_landmarks;
+            pose_graph_refinement_loop_welding_post_pgo_attempted +=
+                usize::from(stats.loop_welding_post_pgo_attempted);
+            pose_graph_refinement_loop_welding_post_pgo_succeeded +=
+                usize::from(stats.loop_welding_post_pgo_succeeded);
+            if let Some(value) = stats.loop_welding_post_pgo_mean_reprojection_px {
+                pose_graph_refinement_loop_welding_post_pgo_reprojection_max = Some(
+                    pose_graph_refinement_loop_welding_post_pgo_reprojection_max
+                        .map_or(value, |current| current.max(value)),
+                );
+            }
+            if let Some(error) = &stats.loop_welding_post_ba_error {
+                pose_graph_refinement_loop_welding_post_ba_last_error = Some(format!("{error:?}"));
+            }
+            if let Some(value) = stats.loop_welding_post_ba_behind_camera_ratio {
+                pose_graph_refinement_loop_welding_post_ba_behind_camera_ratio_max = Some(
+                    pose_graph_refinement_loop_welding_post_ba_behind_camera_ratio_max
+                        .map_or(value, |current| current.max(value)),
+                );
+            }
+            if let Some(value) = stats.loop_welding_initial_translation_meters {
+                pose_graph_refinement_loop_welding_initial_translation_max = Some(
+                    pose_graph_refinement_loop_welding_initial_translation_max
+                        .map_or(value, |current| current.max(value)),
+                );
+            }
+            if let Some(value) = stats.loop_welding_initial_rotation_radians {
+                pose_graph_refinement_loop_welding_initial_rotation_max = Some(
+                    pose_graph_refinement_loop_welding_initial_rotation_max
+                        .map_or(value, |current| current.max(value)),
                 );
             }
             pose_graph_refinement_landmarks_moved += stats.landmarks_moved;
@@ -5693,7 +6610,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&vi_init_log_path, &vi_init_log)?;
     fs::write(&motion_vi_init_log_path, &motion_vi_init_log)?;
     fs::write(&covisibility_local_ba_log_path, &covisibility_local_ba_log)?;
+    fs::write(
+        &local_vi_ba_diagnostics_path,
+        local_vi_ba_diagnostic_rows.join("\n") + "\n",
+    )?;
     fs::write(&keyframe_decision_log_path, &keyframe_decision_log)?;
+    fs::write(&tracking_diagnostics_path, &tracking_diagnostics_csv)?;
     fs::write(
         &relocalization_appearance_candidates_path,
         &relocalization_appearance_candidates_csv,
@@ -5913,6 +6835,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_motion_vi_status = slam.motion_vi_initialization_status();
     let map_keyframes = slam.map().keyframes.len();
     let map_landmarks = slam.map().landmarks.len();
+    let map_landmark_covariances = slam.map().landmark_position_covariances.len();
+    let map_stereo_observations = slam.map().stereo_observations.len();
     let mean_features = if frames_recorded > 0 {
         feature_count_sum as f64 / frames_recorded as f64
     } else {
@@ -5973,6 +6897,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          frame_processing_ms_p95={frame_processing_ms_p95:?}\n\
          frame_processing_ms_p99={frame_processing_ms_p99:?}\n\
          tracking_success_rate={success_rate:.3}\n\
+         pose_prior_visual_override_count={pose_prior_visual_override_count}\n\
          imu_samples_consumed={imu_idx}\n\
          vi_init_preseed_samples={vi_init_preseed_samples}\n\
          seed_frame_idx={seed_frame_idx}\n\
@@ -5994,6 +6919,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          frame_appearance_descriptor_count={appearance_descriptor_count}\n\
          map_keyframes={map_keyframes}\n\
          map_landmarks={map_landmarks}\n\
+         map_landmark_position_covariances={map_landmark_covariances}\n\
+         map_stereo_observations={map_stereo_observations}\n\
          vi_init_first_event_frame={vi_first:?}\n\
          vi_init_succeeded_frame={vi_succeeded:?}\n\
          vi_init_status_final={final_vi_status:?}\n\
@@ -6005,9 +6932,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          motion_vi_init_viba2_iterations={motion_iters:?}\n\
          motion_vi_init_status_final={final_motion_vi_status:?}\n\
          local_vi_ba_enabled={local_vi_ba_enabled}\n\
+         local_vi_ba_marginalization={local_vi_ba_marginalization}\n\
+         local_vi_ba_general_stereo=true\n\
+         local_vi_ba_initial_prior_std_devs={local_vi_ba_initial_prior_std_devs:?}\n\
          local_vi_ba_freeze_biases_above={local_vi_ba_freeze:?}\n\
          local_vi_ba_reject_writeback_above={local_vi_ba_reject_writeback:?}\n\
+         local_vi_ba_reject_final_imu_nis_per_dof_above={local_vi_ba_reject_final_imu_nis:?}\n\
          local_vi_ba_reject_velocity_above_mps={local_vi_ba_reject_velocity:?}\n\
+         local_vi_ba_reject_pose_translation_above_meters={local_vi_ba_reject_pose_translation:?}\n\
+         local_vi_ba_reject_pose_rotation_above_degrees={local_vi_ba_reject_pose_rotation:?}\n\
          local_vi_ba_adaptive_velocity_gate={local_vi_ba_adaptive_velocity_gate}\n\
          local_vi_ba_adaptive_velocity_quantile={local_vi_ba_adaptive_velocity_quantile:.3}\n\
          local_vi_ba_adaptive_velocity_multiplier={local_vi_ba_adaptive_velocity_multiplier:.3}\n\
@@ -6018,12 +6951,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          motion_vi_init_max_velocity_mps={motion_vi_max_vel:?}\n\
          motion_vi_init_max_gyro_bias_rad_s={motion_vi_max_gyro_bias:?}\n\
          motion_vi_init_max_accel_bias_mps2={motion_vi_max_accel_bias:?}\n\
+         motion_vi_init_max_imu_nis_per_dof={motion_vi_max_imu_nis:?}\n\
+         motion_vi_init_max_rotation_residual_rms_rad={motion_vi_max_rotation_residual_rms_rad:?}\n\
+         motion_vi_init_max_velocity_residual_rms_mps={motion_vi_max_velocity_residual_rms_mps:?}\n\
+         motion_vi_init_max_position_residual_rms_m={motion_vi_max_position_residual_rms_m:?}\n\
          covisibility_local_map_max_keyframes={covisibility_max_kf:?}\n\
          covisibility_local_map_min_shared={covisibility_min_shared}\n\
          covisibility_local_map_used_frames={covisibility_used_frames}\n\
          covisibility_local_map_mean_size={covisibility_mean_size:.2}\n\
          covisibility_local_ba_enabled={covis_ba_enabled}\n\
          covisibility_local_ba_min_keyframes={covis_ba_min_keyframes}\n\
+         covisibility_local_ba_max_keyframes={covis_ba_max_keyframes:?}\n\
+         covisibility_local_ba_motion_vi_raw_activation={covis_ba_motion_vi_raw_activation:?}\n\
+         covisibility_local_ba_max_seed_landmarks_for_activation={covis_ba_max_seed_landmarks:?}\n\
          covisibility_local_ba_trigger_every={covis_ba_trigger_every}\n\
          covisibility_local_ba_max_neighbor_keyframes={covis_ba_max_neighbors}\n\
          covisibility_local_ba_min_shared={covis_ba_min_shared}\n\
@@ -6034,11 +6974,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_min_active_observations={covis_ba_min_active_obs}\n\
          covisibility_local_ba_outlier_threshold_px={covis_ba_outlier_threshold:?}\n\
          covisibility_local_ba_remove_outliers={covis_ba_remove_outliers}\n\
+         covisibility_local_ba_general_stereo={covis_ba_general_stereo}\n\
+         covisibility_local_ba_general_stereo_max_right_reprojection_px={covis_ba_general_stereo_max_right_reprojection_px:?}\n\
          covisibility_local_ba_max_outlier_observation_ratio={covis_ba_max_outlier_ratio:?}\n\
          covisibility_local_ba_boundary_support_min_optimized_keyframes={covis_ba_boundary_support_min_optimized:?}\n\
          covisibility_local_ba_boundary_support_min_fixed_keyframes={covis_ba_boundary_support_min_fixed}\n\
          covisibility_local_ba_max_behind_camera_ratio={covis_ba_max_behind_camera_ratio:?}\n\
          covisibility_local_ba_min_fixed_to_optimized_ratio={covis_ba_min_fixed_to_optimized_ratio:?}\n\
+         covisibility_local_ba_max_pose_translation_correction_m={covis_ba_max_pose_translation_correction_m:?}\n\
+         covisibility_local_ba_max_pose_rotation_correction_deg={covis_ba_max_pose_rotation_correction_deg:?}\n\
          covisibility_local_ba_triggers={covis_ba_triggers}\n\
          covisibility_local_ba_successes={covis_ba_successes}\n\
          covisibility_local_ba_failures={covis_ba_failures}\n\
@@ -6048,6 +6992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          covisibility_local_ba_boundary_support_failures={covis_ba_boundary_support_failures}\n\
          covisibility_local_ba_behind_camera_gate_failures={covis_ba_behind_camera_gate_failures}\n\
          covisibility_local_ba_fixed_ratio_gate_failures={covis_ba_fixed_ratio_gate_failures}\n\
+         covisibility_local_ba_pose_correction_gate_failures={covis_ba_pose_correction_gate_failures}\n\
          covisibility_local_ba_no_local_landmarks_failures={covis_ba_no_local_landmarks_failures}\n\
          covisibility_local_ba_no_observations_failures={covis_ba_no_observations_failures}\n\
          covisibility_local_ba_solver_failures={covis_ba_solver_failures}\n\
@@ -6066,6 +7011,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_trigger_every={pgr_trigger_every}\n\
          pose_graph_refinement_fixed_loop_edge_weight={pgr_fixed_loop_edge_weight:?}\n\
          pose_graph_refinement_loop_pose_information={pgr_loop_pose_information}\n\
+         pose_graph_refinement_loop_pose_information_max_eigenvalue={pgr_loop_pose_information_max_eigenvalue:.9}\n\
+         pose_graph_refinement_loop_pose_information_loop_edge_scale={pgr_loop_pose_information_loop_edge_scale:.9}\n\
          pose_graph_refinement_gnc={pgr_gnc}\n\
          pose_graph_refinement_pcm={pgr_pcm}\n\
          pose_graph_refinement_pcm_require_individual={pgr_pcm_require_individual}\n\
@@ -6076,19 +7023,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_candidates_seen={pgr_candidates_seen}\n\
          pose_graph_refinement_verified_constraints={pgr_verified_constraints}\n\
          pose_graph_refinement_pgo_solves={pgr_pgo_solves}\n\
+         pose_graph_refinement_gnc_rejected_loop_edges_max={pgr_gnc_rejected_loop_edges_max}\n\
          pose_graph_refinement_pcm_rejected={pgr_pcm_rejected}\n\
          pose_graph_refinement_covariance_rejected={pgr_covariance_rejected}\n\
          pose_graph_refinement_pose_information_rejected={pgr_pose_information_rejected}\n\
          pose_graph_refinement_with_pose_information={pgr_with_pose_information}\n\
          pose_graph_refinement_pose_information_estimates={pgr_pose_information_estimates}\n\
          pose_graph_refinement_pose_information_used_correspondences={pgr_pose_information_used_correspondences}\n\
+         pose_graph_refinement_pose_information_stereo_covariance_correspondences={pgr_pose_information_stereo_covariance_correspondences}\n\
          pose_graph_refinement_pose_information_raw_condition_max={pgr_pose_information_raw_condition_max:.9}\n\
          pose_graph_refinement_pose_information_spectral_scale_min={pgr_pose_information_spectral_scale_min:?}\n\
+         pose_graph_refinement_pose_information_failure_counts={pgr_pose_information_failure_counts}\n\
          pose_graph_refinement_sequential_with_pose_information={pgr_sequential_with_pose_information}\n\
          pose_graph_refinement_sequential_pose_information_fallbacks={pgr_sequential_pose_information_fallbacks}\n\
          pose_graph_refinement_sequential_pose_information_used_correspondences={pgr_sequential_pose_information_used_correspondences}\n\
+         pose_graph_refinement_sequential_pose_information_stereo_covariance_correspondences={pgr_sequential_pose_information_stereo_covariance_correspondences}\n\
          pose_graph_refinement_sequential_pose_information_raw_condition_max={pgr_sequential_pose_information_raw_condition_max:.9}\n\
          pose_graph_refinement_sequential_pose_information_spectral_scale_min={pgr_sequential_pose_information_spectral_scale_min:?}\n\
+         pose_graph_refinement_sequential_pose_information_failure_counts={pgr_sequential_pose_information_failure_counts}\n\
          pose_graph_refinement_appearance_loops={pgr_appearance_enabled}\n\
          pose_graph_refinement_appearance_min_gap={pgr_appearance_min_gap}\n\
          pose_graph_refinement_appearance_max_candidates={pgr_appearance_max_candidates}\n\
@@ -6097,6 +7049,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_appearance_confirmation_max_misses={pgr_appearance_confirmation_max_misses}\n\
          pose_graph_refinement_appearance_projection_radius_px={pgr_appearance_projection_radius:?}\n\
          pose_graph_refinement_appearance_projection_min_matches={pgr_appearance_projection_min_matches}\n\
+         pose_graph_refinement_fuse_loop_observations={pgr_fuse_loop_observations}\n\
+         pose_graph_refinement_loop_fusion_pairs_considered={pgr_loop_fusion_pairs_considered}\n\
+         pose_graph_refinement_loop_fusion_observations_inserted={pgr_loop_fusion_observations_inserted}\n\
+         pose_graph_refinement_loop_fusion_observations_reassigned={pgr_loop_fusion_observations_reassigned}\n\
+         pose_graph_refinement_loop_fusion_pairs_skipped={pgr_loop_fusion_pairs_skipped}\n\
+         pose_graph_refinement_loop_fusion_pairs_robust_rejected={pgr_loop_fusion_pairs_robust_rejected}\n\
+         pose_graph_refinement_loop_fusion_pairs_reprojection_rejected={pgr_loop_fusion_pairs_reprojection_rejected}\n\
+         pose_graph_refinement_loop_welding_ba={pgr_loop_welding_ba}\n\
+         pose_graph_refinement_loop_welding_ba_attempted={pgr_loop_welding_ba_attempted}\n\
+         pose_graph_refinement_loop_welding_ba_succeeded={pgr_loop_welding_ba_succeeded}\n\
+         pose_graph_refinement_loop_welding_ba_rejected_or_failed={pgr_loop_welding_ba_rejected_or_failed}\n\
+         pose_graph_refinement_loop_welding_ba_updated_keyframes={pgr_loop_welding_ba_updated_keyframes}\n\
+         pose_graph_refinement_loop_welding_ba_updated_landmarks={pgr_loop_welding_ba_updated_landmarks}\n\
+         pose_graph_refinement_loop_welding_post_pgo_attempted={pgr_loop_welding_post_pgo_attempted}\n\
+         pose_graph_refinement_loop_welding_post_pgo_succeeded={pgr_loop_welding_post_pgo_succeeded}\n\
+         pose_graph_refinement_loop_welding_post_pgo_reprojection_max_px={pgr_loop_welding_post_pgo_reprojection_max:?}\n\
+         pose_graph_refinement_loop_welding_post_ba_last_error={pgr_loop_welding_post_ba_last_error:?}\n\
+         pose_graph_refinement_loop_welding_post_ba_behind_camera_ratio_max={pgr_loop_welding_post_ba_behind_camera_ratio_max:?}\n\
+         pose_graph_refinement_loop_welding_initial_translation_max_m={pgr_loop_welding_initial_translation_max:?}\n\
+         pose_graph_refinement_loop_welding_initial_rotation_max_rad={pgr_loop_welding_initial_rotation_max:?}\n\
          pose_graph_refinement_appearance_ranked={pgr_appearance_ranked}\n\
          pose_graph_refinement_appearance_connected_region_rejected={pgr_appearance_connected_region_rejected}\n\
          pose_graph_refinement_appearance_pnp_verified={pgr_appearance_pnp_verified}\n\
@@ -6130,6 +7102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          pose_graph_refinement_max_landmark_displacement_meters={pgr_max_landmark_displacement_meters:.6}\n\
          pose_graph_refinement_tracker_corrections_applied={pgr_tracker_corrections_applied}\n\
          max_pose_jump_meters={max_pose_jump:?}\n\
+         pose_prior_visual_override={pose_prior_visual_override}\n\
          pose_jump_gap_scaling={pose_jump_gap_scaling}\n\
          pose_jump_gap_scaling_max_multiplier={pose_jump_gap_scaling_max_multiplier}\n\
          tracking_min_inliers={tracking_min_inliers}\n\
@@ -6137,6 +7110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          tracking_max_reprojection_error={tracking_max_reprojection_error:?}\n\
          pnp_pose_prior_warm_start={pnp_warm_start}\n\
          projection_guided_tracking={projection_guided_tracking}\n\
+         projection_query_landmark_distance_ratio={projection_query_landmark_ratio:?}\n\
          projection_search_radius_px={projection_search_radius_px:.3}\n\
          projection_widen_factor={projection_widen_factor:.3}\n\
          projection_max_widen_retries={projection_max_widen_retries}\n\
@@ -6166,6 +7140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          superpoint_features_dir={superpoint_features_dir:?}\n\
          superpoint_cam1_features_dir={superpoint_cam1_features_dir:?}\n\
          superpoint_onnx_model={superpoint_onnx_model:?}\n\
+         superpoint_onnx_backend={superpoint_onnx_backend}\n\
          keyframe_min_translation={kf_min_translation:?}\n\
          keyframe_min_frame_gap={kf_min_frame_gap:?}\n\
          keyframe_max_frame_gap={kf_max_frame_gap:?}\n\
@@ -6252,9 +7227,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          imu_factors_staged={imu_factors_staged}\n\
          local_vi_ba_triggers={local_vi_ba_triggers}\n\
          local_vi_ba_relinearised_factor_total={local_vi_ba_relinearised_factor_total}\n\
+         local_vi_ba_stereo_observation_total={local_vi_ba_stereo_observation_total}\n\
+         local_vi_ba_marginalization_priors_applied={local_vi_ba_marginalization_priors_applied}\n\
+         local_vi_ba_marginalization_successes={local_vi_ba_marginalization_successes}\n\
          local_vi_ba_quality_gate_rejections={local_vi_ba_quality_gate_rejections}\n\
          local_vi_ba_cost_ratio_gate_rejections={local_vi_ba_cost_ratio_gate_rejections}\n\
+         local_vi_ba_imu_nis_gate_rejections={local_vi_ba_imu_nis_gate_rejections}\n\
          local_vi_ba_velocity_gate_rejections={local_vi_ba_velocity_gate_rejections}\n\
+         local_vi_ba_pose_correction_gate_rejections={local_vi_ba_pose_correction_gate_rejections}\n\
+         local_vi_ba_max_pose_translation_correction_meters={local_vi_ba_max_pose_translation_correction_meters:.9}\n\
+         local_vi_ba_max_pose_rotation_correction_degrees={local_vi_ba_max_pose_rotation_correction_degrees:.9}\n\
          local_vi_ba_adaptive_velocity_gate_rejections={local_vi_ba_adaptive_velocity_gate_rejections}\n\
          local_vi_ba_last_adaptive_velocity_threshold_mps={local_vi_ba_last_adaptive_velocity_threshold_mps:?}\n\
          local_vi_ba_mirrors_into_imu_motion_model={local_vi_ba_mirrors}\n\
@@ -6289,6 +7271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         },
+        pose_prior_visual_override_count = slam.tracker.stats().pose_prior_visual_override_count,
         undistort = args.undistort,
         stereo_bootstrap_enabled = args.stereo_bootstrap,
         stereo_bootstrap_strict = args.stereo_bootstrap_strict,
@@ -6299,7 +7282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stereo_landmark_replenish_max_per_frame = args.stereo_landmark_replenish_max_per_frame,
         stereo_landmark_replenish_candidates_total = stereo_landmark_replenish_candidates_total,
         bootstrap_depth = args.bootstrap_depth_meters,
-        bootstrap_landmarks = seed_features.len(),
+        bootstrap_landmarks = bootstrap_landmark_count,
         appearance_descriptors_exported = args.export_frame_appearance_descriptors,
         appearance_descriptor_count = frame_appearance_descriptor_count,
         vi_first = vi_init_first_event_at_frame,
@@ -6311,9 +7294,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         motion_scale = motion_vi_init_recovered_scale,
         motion_iters = motion_vi_init_viba2_iterations,
         local_vi_ba_enabled = args.local_vi_ba_enabled,
+        local_vi_ba_marginalization = args.local_vi_ba_marginalization,
+        local_vi_ba_initial_prior_std_devs = args.local_vi_ba_initial_prior_std_devs,
         local_vi_ba_freeze = args.local_vi_ba_freeze_biases_above,
         local_vi_ba_reject_writeback = args.local_vi_ba_reject_writeback_above,
+        local_vi_ba_reject_final_imu_nis =
+            args.local_vi_ba_reject_final_imu_nis_per_dof_above,
         local_vi_ba_reject_velocity = args.local_vi_ba_reject_velocity_above_mps,
+        local_vi_ba_reject_pose_translation =
+            args.local_vi_ba_reject_pose_translation_above_meters,
+        local_vi_ba_reject_pose_rotation = args.local_vi_ba_reject_pose_rotation_above_degrees,
         local_vi_ba_adaptive_velocity_gate = args.local_vi_ba_adaptive_velocity_gate,
         local_vi_ba_adaptive_velocity_quantile = args.local_vi_ba_adaptive_velocity_quantile,
         local_vi_ba_adaptive_velocity_multiplier = args.local_vi_ba_adaptive_velocity_multiplier,
@@ -6326,6 +7316,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         motion_vi_max_vel = args.motion_vi_init_max_velocity_mps,
         motion_vi_max_gyro_bias = args.motion_vi_init_max_gyro_bias_rad_s,
         motion_vi_max_accel_bias = args.motion_vi_init_max_accel_bias_mps2,
+        motion_vi_max_imu_nis = args.motion_vi_init_max_imu_nis_per_dof,
+        motion_vi_max_rotation_residual_rms_rad =
+            args.motion_vi_init_max_rotation_residual_rms_rad,
+        motion_vi_max_velocity_residual_rms_mps =
+            args.motion_vi_init_max_velocity_residual_rms_mps,
+        motion_vi_max_position_residual_rms_m =
+            args.motion_vi_init_max_position_residual_rms_meters,
         covisibility_max_kf = args.covisibility_local_map_max_keyframes,
         covisibility_min_shared = args.covisibility_local_map_min_shared,
         covisibility_used_frames = covisibility_local_map_frames,
@@ -6336,6 +7333,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         covis_ba_enabled = args.covisibility_local_ba_enabled,
         covis_ba_min_keyframes = args.covisibility_local_ba_min_keyframes,
+        covis_ba_max_keyframes = args.covisibility_local_ba_max_keyframes,
+        covis_ba_motion_vi_raw_activation = args.covisibility_local_ba_motion_vi_raw_activation,
+        covis_ba_max_seed_landmarks = args
+            .covisibility_local_ba_max_seed_landmarks_for_activation,
         covis_ba_trigger_every = args.covisibility_local_ba_trigger_every,
         covis_ba_max_neighbors = args.covisibility_local_ba_max_neighbor_keyframes,
         covis_ba_min_shared = args.covisibility_local_ba_min_shared,
@@ -6347,6 +7348,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_min_active_obs = args.covisibility_local_ba_min_active_observations,
         covis_ba_outlier_threshold = args.covisibility_local_ba_outlier_threshold_px,
         covis_ba_remove_outliers = args.covisibility_local_ba_remove_outliers,
+        covis_ba_general_stereo = args.covisibility_local_ba_general_stereo,
+        covis_ba_general_stereo_max_right_reprojection_px = args
+            .covisibility_local_ba_general_stereo_max_right_reprojection_px,
         covis_ba_max_outlier_ratio = args.covisibility_local_ba_max_outlier_observation_ratio,
         covis_ba_boundary_support_min_optimized = args
             .covisibility_local_ba_boundary_support_min_optimized_keyframes,
@@ -6355,6 +7359,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_max_behind_camera_ratio = args.covisibility_local_ba_max_behind_camera_ratio,
         covis_ba_min_fixed_to_optimized_ratio =
             args.covisibility_local_ba_min_fixed_to_optimized_ratio,
+        covis_ba_max_pose_translation_correction_m = args
+            .covisibility_local_ba_max_pose_translation_correction_m,
+        covis_ba_max_pose_rotation_correction_deg = args
+            .covisibility_local_ba_max_pose_rotation_correction_deg,
         covis_ba_triggers = covisibility_local_ba_triggers,
         covis_ba_successes = covisibility_local_ba_successes,
         covis_ba_failures = covisibility_local_ba_failures,
@@ -6367,6 +7375,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         covis_ba_behind_camera_gate_failures =
             covisibility_local_ba_behind_camera_gate_failures,
         covis_ba_fixed_ratio_gate_failures = covisibility_local_ba_fixed_ratio_gate_failures,
+        covis_ba_pose_correction_gate_failures =
+            covisibility_local_ba_pose_correction_gate_failures,
         covis_ba_no_local_landmarks_failures = covisibility_local_ba_no_local_landmarks_failures,
         covis_ba_no_observations_failures = covisibility_local_ba_no_observations_failures,
         covis_ba_solver_failures = covisibility_local_ba_solver_failures,
@@ -6386,6 +7396,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_trigger_every = args.pose_graph_refinement_trigger_every,
         pgr_fixed_loop_edge_weight = args.pose_graph_refinement_fixed_loop_edge_weight,
         pgr_loop_pose_information = args.pose_graph_refinement_loop_pose_information,
+        pgr_loop_pose_information_max_eigenvalue =
+            args.pose_graph_refinement_loop_pose_information_max_eigenvalue,
+        pgr_loop_pose_information_loop_edge_scale =
+            args.pose_graph_refinement_loop_pose_information_loop_edge_scale,
         pgr_gnc = args.pose_graph_refinement_gnc,
         pgr_pcm = args.pose_graph_refinement_pcm,
         pgr_pcm_require_individual = args.pose_graph_refinement_pcm_require_individual,
@@ -6402,6 +7416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_candidates_seen = pose_graph_refinement_candidates_seen,
         pgr_verified_constraints = pose_graph_refinement_verified_constraints,
         pgr_pgo_solves = pose_graph_refinement_pgo_solves,
+        pgr_gnc_rejected_loop_edges_max = pose_graph_refinement_gnc_rejected_loop_edges_max,
         pgr_pcm_rejected = pose_graph_refinement_pcm_rejected,
         pgr_covariance_rejected = pose_graph_refinement_covariance_rejected,
         pgr_pose_information_rejected = pose_graph_refinement_pose_information_rejected,
@@ -6409,20 +7424,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_pose_information_estimates = pose_graph_refinement_pose_information_estimates,
         pgr_pose_information_used_correspondences =
             pose_graph_refinement_pose_information_used_correspondences,
+        pgr_pose_information_stereo_covariance_correspondences =
+            pose_graph_refinement_pose_information_stereo_covariance_correspondences,
         pgr_pose_information_raw_condition_max =
             pose_graph_refinement_pose_information_raw_condition_max,
         pgr_pose_information_spectral_scale_min =
             pose_graph_refinement_pose_information_spectral_scale_min,
+        pgr_pose_information_failure_counts =
+            pose_graph_refinement_pose_information_failures,
         pgr_sequential_with_pose_information =
             pose_graph_refinement_sequential_with_pose_information,
         pgr_sequential_pose_information_fallbacks =
             pose_graph_refinement_sequential_pose_information_fallbacks,
         pgr_sequential_pose_information_used_correspondences =
             pose_graph_refinement_sequential_pose_information_used_correspondences,
+        pgr_sequential_pose_information_stereo_covariance_correspondences =
+            pose_graph_refinement_sequential_pose_information_stereo_covariance_correspondences,
         pgr_sequential_pose_information_raw_condition_max =
             pose_graph_refinement_sequential_pose_information_raw_condition_max,
         pgr_sequential_pose_information_spectral_scale_min =
             pose_graph_refinement_sequential_pose_information_spectral_scale_min,
+        pgr_sequential_pose_information_failure_counts =
+            pose_graph_refinement_sequential_pose_information_failures,
         pgr_appearance_enabled = args.pose_graph_refinement_appearance_loops,
         pgr_appearance_min_gap = args.pose_graph_refinement_appearance_min_gap,
         pgr_appearance_max_candidates = args.pose_graph_refinement_appearance_max_candidates,
@@ -6435,6 +7458,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.pose_graph_refinement_appearance_projection_radius_px,
         pgr_appearance_projection_min_matches =
             args.pose_graph_refinement_appearance_projection_min_matches,
+        pgr_fuse_loop_observations = args.pose_graph_refinement_fuse_loop_observations,
+        pgr_loop_fusion_pairs_considered = pose_graph_refinement_loop_fusion_pairs_considered,
+        pgr_loop_fusion_observations_inserted =
+            pose_graph_refinement_loop_fusion_observations_inserted,
+        pgr_loop_fusion_observations_reassigned =
+            pose_graph_refinement_loop_fusion_observations_reassigned,
+        pgr_loop_fusion_pairs_skipped = pose_graph_refinement_loop_fusion_pairs_skipped,
+        pgr_loop_fusion_pairs_robust_rejected =
+            pose_graph_refinement_loop_fusion_pairs_robust_rejected,
+        pgr_loop_fusion_pairs_reprojection_rejected =
+            pose_graph_refinement_loop_fusion_pairs_reprojection_rejected,
+        pgr_loop_welding_ba = args.pose_graph_refinement_loop_welding_ba,
+        pgr_loop_welding_ba_attempted = pose_graph_refinement_loop_welding_ba_attempted,
+        pgr_loop_welding_ba_succeeded = pose_graph_refinement_loop_welding_ba_succeeded,
+        pgr_loop_welding_ba_rejected_or_failed =
+            pose_graph_refinement_loop_welding_ba_rejected_or_failed,
+        pgr_loop_welding_ba_updated_keyframes =
+            pose_graph_refinement_loop_welding_ba_updated_keyframes,
+        pgr_loop_welding_ba_updated_landmarks =
+            pose_graph_refinement_loop_welding_ba_updated_landmarks,
+        pgr_loop_welding_post_pgo_attempted =
+            pose_graph_refinement_loop_welding_post_pgo_attempted,
+        pgr_loop_welding_post_pgo_succeeded =
+            pose_graph_refinement_loop_welding_post_pgo_succeeded,
+        pgr_loop_welding_post_pgo_reprojection_max =
+            pose_graph_refinement_loop_welding_post_pgo_reprojection_max,
+        pgr_loop_welding_post_ba_last_error =
+            pose_graph_refinement_loop_welding_post_ba_last_error,
+        pgr_loop_welding_post_ba_behind_camera_ratio_max =
+            pose_graph_refinement_loop_welding_post_ba_behind_camera_ratio_max,
+        pgr_loop_welding_initial_translation_max =
+            pose_graph_refinement_loop_welding_initial_translation_max,
+        pgr_loop_welding_initial_rotation_max =
+            pose_graph_refinement_loop_welding_initial_rotation_max,
         pgr_appearance_ranked = pose_graph_refinement_appearance_ranked,
         pgr_appearance_connected_region_rejected =
             pose_graph_refinement_appearance_connected_region_rejected,
@@ -6490,6 +7547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pgr_max_landmark_displacement_meters = pose_graph_refinement_max_landmark_displacement_meters,
         pgr_tracker_corrections_applied = pose_graph_refinement_tracker_corrections_applied,
         max_pose_jump = args.max_pose_jump_meters,
+        pose_prior_visual_override = args.pose_prior_visual_override,
         pose_jump_gap_scaling = args.pose_jump_gap_scaling,
         pose_jump_gap_scaling_max_multiplier = args.pose_jump_gap_scaling_max_multiplier,
         tracking_min_inliers = args.tracking_min_inliers,
@@ -6497,6 +7555,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracking_max_reprojection_error = args.tracking_max_reprojection_error,
         pnp_warm_start = args.pnp_pose_prior_warm_start,
         projection_guided_tracking = args.projection_guided_tracking,
+        projection_query_landmark_ratio = projection_guided_tracking_config
+            .and_then(|config| config.max_query_landmark_distance_ratio),
         projection_search_radius_px = args.projection_search_radius_px,
         projection_widen_factor = args.projection_widen_factor,
         projection_max_widen_retries = args.projection_max_widen_retries,
@@ -6567,6 +7627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         superpoint_features_dir = args.superpoint_features_dir,
         superpoint_cam1_features_dir = args.superpoint_cam1_features_dir,
         superpoint_onnx_model = args.superpoint_onnx_model,
+        superpoint_onnx_backend = args.superpoint_onnx_backend.as_str(),
         kf_min_translation = args.keyframe_min_translation,
         kf_min_frame_gap = args.keyframe_min_frame_gap,
         kf_max_frame_gap = args.keyframe_max_frame_gap,
@@ -6736,9 +7797,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imu_factors_staged = imu_factors_staged,
         local_vi_ba_triggers = local_vi_ba_triggers,
         local_vi_ba_relinearised_factor_total = local_vi_ba_relinearised_factor_total,
+        local_vi_ba_stereo_observation_total = local_vi_ba_stereo_observation_total,
+        local_vi_ba_marginalization_priors_applied =
+            local_vi_ba_marginalization_priors_applied,
+        local_vi_ba_marginalization_successes = local_vi_ba_marginalization_successes,
         local_vi_ba_quality_gate_rejections = local_vi_ba_quality_gate_rejections,
         local_vi_ba_cost_ratio_gate_rejections = local_vi_ba_cost_ratio_gate_rejections,
         local_vi_ba_velocity_gate_rejections = local_vi_ba_velocity_gate_rejections,
+        local_vi_ba_pose_correction_gate_rejections =
+            local_vi_ba_pose_correction_gate_rejections,
+        local_vi_ba_max_pose_translation_correction_meters =
+            local_vi_ba_max_pose_translation_correction_meters,
+        local_vi_ba_max_pose_rotation_correction_degrees =
+            local_vi_ba_max_pose_rotation_correction_degrees,
         local_vi_ba_adaptive_velocity_gate_rejections =
             local_vi_ba_adaptive_velocity_gate_rejections,
         local_vi_ba_last_adaptive_velocity_threshold_mps =
@@ -6753,13 +7824,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
     println!(
-        "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} (+ summary.txt)",
+        "wrote {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} (+ summary.txt)",
         traj_path.display(),
         err_path.display(),
         frame_groundtruth_path.display(),
         vi_init_log_path.display(),
         motion_vi_init_log_path.display(),
         covisibility_local_ba_log_path.display(),
+        local_vi_ba_diagnostics_path.display(),
         keyframe_decision_log_path.display(),
         relocalization_appearance_candidates_path.display(),
         relocalization_attempts_path.display(),
@@ -6778,6 +7850,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(all(test, feature = "image-io"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superpoint_onnx_backend_arg_parses_strict_cuda_without_fallback() {
+        assert_eq!(
+            SuperPointOnnxBackendArg::parse("cuda"),
+            Ok(SuperPointOnnxBackendArg::Cuda)
+        );
+        assert!(SuperPointOnnxBackendArg::parse("gpu").is_err());
+    }
 
     fn fake_cam0() -> EurocCameraCalibration {
         EurocCameraCalibration {
@@ -6850,7 +7931,7 @@ mod tests {
             vec![vec![0.1, 0.2, 0.3], vec![-0.1, 0.0, 0.5]],
         )
         .expect("valid feature set");
-        let map = bootstrap_map_from_first_frame(&camera, &pose, &features, 4.0, &[], false);
+        let map = bootstrap_map_from_first_frame(&camera, &pose, &features, 4.0, &[], &[], false);
         assert_eq!(map.landmarks.len(), 2);
         // Each seeded landmark must carry the source corner descriptor.
         for landmark in map.landmarks.values() {
@@ -6972,18 +8053,22 @@ mod tests {
         // Override the first keypoint with an explicit world point.
         let override_point = Point3::new(7.0, -1.5, 9.0);
         let stereo_overrides = vec![Some(override_point), None];
+        let covariance = nalgebra::Matrix3::from_diagonal_element(0.25);
+        let stereo_covariances = vec![Some(covariance), None];
         let map = bootstrap_map_from_first_frame(
             &camera,
             &pose,
             &features,
             4.0,
             &stereo_overrides,
+            &stereo_covariances,
             false,
         );
         assert_eq!(map.landmarks.len(), 2);
         // Landmark id = index + 1.
         let first = map.landmarks.get(&1).expect("override landmark seeded");
         assert!((first.position - override_point).norm() < 1.0e-9);
+        assert_eq!(map.landmark_position_covariances.get(&1), Some(&covariance));
         let second = map.landmarks.get(&2).expect("fallback landmark seeded");
         // Fallback path: back-project the other pixel at depth 4.0 m and
         // confirm the seeded landmark sits there.
@@ -7011,8 +8096,16 @@ mod tests {
         .expect("valid feature set");
         let override_point = Point3::new(7.0, -1.5, 9.0);
         let stereo_overrides = vec![Some(override_point), None];
-        let strict_map =
-            bootstrap_map_from_first_frame(&camera, &pose, &features, 4.0, &stereo_overrides, true);
+        let stereo_covariances = vec![Some(nalgebra::Matrix3::identity()), None];
+        let strict_map = bootstrap_map_from_first_frame(
+            &camera,
+            &pose,
+            &features,
+            4.0,
+            &stereo_overrides,
+            &stereo_covariances,
+            true,
+        );
         assert_eq!(strict_map.landmarks.len(), 1);
         let kept = strict_map
             .landmarks
@@ -7066,6 +8159,7 @@ mod tests {
                 point_left_camera_frame: Point3::new(0.1, 0.2, 2.0),
                 left_reprojection_error_pixels: 0.5,
                 right_reprojection_error_pixels: 0.5,
+                point_covariance_left_camera_frame: nalgebra::Matrix3::identity(),
             },
             StereoBootstrapLandmark {
                 left_keypoint_index: 1,
@@ -7073,6 +8167,7 @@ mod tests {
                 point_left_camera_frame: Point3::new(-0.2, 0.1, 3.0),
                 left_reprojection_error_pixels: 0.4,
                 right_reprojection_error_pixels: 0.4,
+                point_covariance_left_camera_frame: nalgebra::Matrix3::identity(),
             },
         ];
         let mut map = VisualMap::new();

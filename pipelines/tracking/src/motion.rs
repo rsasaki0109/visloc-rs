@@ -15,6 +15,18 @@ pub trait MotionModel {
 
     fn reset(&mut self) {}
 
+    /// Whether this model's prediction is informative enough to seed the
+    /// PnP optimizer itself. Candidate selection and pose-quality gating may
+    /// still use every returned prior when this is `false`.
+    ///
+    /// A constant-pose prediction is deliberately excluded: on a moving
+    /// camera, injecting "no motion" into PnP creates a self-reinforcing
+    /// frozen-pose solution. Predictive velocity and IMU models retain the
+    /// historical warm-start behavior.
+    fn allows_pnp_pose_prior_warm_start(&self) -> bool {
+        true
+    }
+
     /// Apply a rigid world-frame correction to any cached world-frame
     /// state the model carries (velocities, cached poses). `correction`
     /// maps OLD world-frame points/poses to NEW world-frame points/poses:
@@ -177,6 +189,10 @@ impl MotionModel for ConstantPoseMotionModel {
         last_successful_pose: Option<&Pose>,
     ) -> Option<Pose> {
         last_successful_pose.cloned()
+    }
+
+    fn allows_pnp_pose_prior_warm_start(&self) -> bool {
+        false
     }
 }
 
@@ -862,6 +878,10 @@ impl MotionModel for AdaptiveImuPoseMotionModel {
                     .predict_pose(frame, last_result, last_successful_pose)
             }
         }
+    }
+
+    fn allows_pnp_pose_prior_warm_start(&self) -> bool {
+        self.mode == AdaptiveMotionMode::Imu
     }
 
     fn observe(&mut self, result: &TrackingResult) {

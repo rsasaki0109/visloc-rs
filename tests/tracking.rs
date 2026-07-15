@@ -20,6 +20,14 @@ use visloc_rs::{
     VisualOdometryEstimate, VisualOdometryFrontend, VisualOdometryPriorProvider,
 };
 
+#[test]
+fn projection_query_landmark_ratio_is_opt_in_by_default() {
+    assert_eq!(
+        ProjectionGuidedTrackingConfig::default().max_query_landmark_distance_ratio,
+        None
+    );
+}
+
 #[derive(Debug, Clone)]
 struct FixedPoseMotionModel {
     pose: Pose,
@@ -1892,6 +1900,7 @@ fn projection_guided_tracking_widen_retry_triggers_when_prior_is_slightly_off() 
                 search_radius_px: 2.0,
                 widen_factor: 5.0,
                 max_widen_retries: 2,
+                max_query_landmark_distance_ratio: Some(0.9),
                 local_map_refinement: false,
                 refinement_search_radius_px: 8.0,
             }),
@@ -1925,6 +1934,7 @@ fn projection_guided_tracking_falls_back_to_appearance_global_when_all_widen_att
                 search_radius_px: 2.0,
                 widen_factor: 2.0,
                 max_widen_retries: 2,
+                max_query_landmark_distance_ratio: Some(0.9),
                 local_map_refinement: false,
                 refinement_search_radius_px: 8.0,
             }),
@@ -1973,6 +1983,7 @@ fn projection_guided_local_map_refinement_accepts_only_when_inliers_do_not_decre
             search_radius_px: 15.0,
             widen_factor: 2.0,
             max_widen_retries: 2,
+            max_query_landmark_distance_ratio: Some(0.9),
             local_map_refinement: true,
             refinement_search_radius_px: 8.0,
         }),

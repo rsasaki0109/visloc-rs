@@ -11,6 +11,7 @@ pub enum LocalizationFailureReason {
     NoCandidateLandmarks,
     NoMapDescriptors,
     NoDescriptorMatches,
+    InvalidProjectionQueryLandmarkRatio,
     PoseEstimationFailed {
         correspondence_count: usize,
     },

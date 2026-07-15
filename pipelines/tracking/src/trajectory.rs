@@ -2299,6 +2299,32 @@ mod umeyama_alignment_tests {
     }
 
     #[test]
+    fn pose_fallback_disables_pnp_warm_start_until_adaptive_imu_recovers() {
+        assert!(!ConstantPoseMotionModel.allows_pnp_pose_prior_warm_start());
+
+        let mut model = AdaptiveImuPoseMotionModel::new(
+            ImuPredictiveMotionModel::new(ImuPredictiveMotionModelConfig::default()),
+            ConstantPoseMotionModel,
+            AdaptiveImuPoseMotionModelConfig {
+                failures_to_switch_to_pose: 1,
+                successes_to_switch_to_imu: 2,
+                ..AdaptiveImuPoseMotionModelConfig::default()
+            },
+        );
+        assert!(model.allows_pnp_pose_prior_warm_start());
+
+        model.observe(&fake_failure_tracking_result(1));
+        assert_eq!(model.mode(), AdaptiveMotionMode::Pose);
+        assert!(!model.allows_pnp_pose_prior_warm_start());
+
+        model.observe(&fake_success_tracking_result(2));
+        assert!(!model.allows_pnp_pose_prior_warm_start());
+        model.observe(&fake_success_tracking_result(3));
+        assert_eq!(model.mode(), AdaptiveMotionMode::Imu);
+        assert!(model.allows_pnp_pose_prior_warm_start());
+    }
+
+    #[test]
     fn adaptive_motion_switches_back_to_imu_after_consecutive_successes() {
         let mut model = AdaptiveImuPoseMotionModel::new(
             ImuPredictiveMotionModel::new(ImuPredictiveMotionModelConfig::default()),

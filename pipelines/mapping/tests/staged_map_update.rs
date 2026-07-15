@@ -1,5 +1,8 @@
-use nalgebra::{Point2, Point3};
-use visloc_core::types::{Camera, Frame, Keyframe, Landmark, Observation, VisualMap};
+use nalgebra::{Matrix3, Point2, Point3};
+use visloc_core::geometry::SE3;
+use visloc_core::types::{
+    Camera, Frame, Keyframe, Landmark, Observation, StereoObservation, VisualMap,
+};
 use visloc_mapping::{MapUpdateValidationIssue, StagedMapUpdate};
 
 fn base_map() -> VisualMap {
@@ -34,10 +37,21 @@ fn observation(frame_id: u64, landmark_id: u64, keypoint_index: usize) -> Observ
 #[test]
 fn validates_and_applies_staged_keyframe_landmark_and_observation() {
     let mut map = base_map();
-    let update = StagedMapUpdate::new()
+    map.cameras
+        .insert(2, Camera::pinhole(2, 640, 480, 505.0, 498.0, 318.0, 241.0));
+    let covariance = Matrix3::identity() * 0.01;
+    let mut update = StagedMapUpdate::new()
         .with_keyframe(keyframe(10, 1))
         .with_landmark(landmark(100))
+        .with_landmark_position_covariance(100, covariance)
         .with_observation(observation(10, 100, 0));
+    update.stage_stereo_observation(StereoObservation {
+        frame_id: 10,
+        landmark_id: 100,
+        right_camera_id: 2,
+        xy_right: Point2::new(86.0, 120.5),
+        left_to_right: SE3::identity(),
+    });
 
     let report = update.validate_against(&map);
     assert!(report.is_valid());
@@ -47,10 +61,16 @@ fn validates_and_applies_staged_keyframe_landmark_and_observation() {
     assert_eq!(applied.keyframe_count, 1);
     assert_eq!(applied.landmark_count, 1);
     assert_eq!(applied.observation_count, 1);
+    assert_eq!(applied.stereo_observation_count, 1);
     assert!(map.keyframes.contains_key(&10));
     assert!(map.landmarks.contains_key(&100));
+    assert_eq!(
+        map.landmark_position_covariances.get(&100),
+        Some(&covariance)
+    );
     assert_eq!(map.keyframes.get(&10).unwrap().observations.len(), 1);
     assert_eq!(map.landmarks.get(&100).unwrap().observations.len(), 1);
+    assert_eq!(map.stereo_observations.len(), 1);
     assert!(map.validate().is_valid());
 }
 

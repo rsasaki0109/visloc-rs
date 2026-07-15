@@ -34,13 +34,37 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nalgebra::{Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, Vector3, Vector6};
 use visloc_core::geometry::SE3;
 use visloc_core::types::{Camera, VisualMap};
 
-use crate::bundle::{BaConfig, BaObservation, BaResult, BiasRandomWalkFactor, BundleAdjustment};
+use crate::bundle::{
+    BaConfig, BaCostBreakdown, BaGeneralStereoObservation, BaObservation, BaResult,
+    BiasRandomWalkFactor, BundleAdjustment, NavigationStatePrior,
+};
 use crate::imu_preintegration::ImuPreintegrationFactor;
+use crate::marginalization::marginalize;
 use crate::LinearSolver;
+
+fn bias_random_walk_information(
+    noise_densities: (f64, f64),
+    delta_time: f64,
+) -> Option<(f64, f64)> {
+    let (sigma_gyro, sigma_accel) = noise_densities;
+    if !sigma_gyro.is_finite()
+        || sigma_gyro <= 0.0
+        || !sigma_accel.is_finite()
+        || sigma_accel <= 0.0
+        || !delta_time.is_finite()
+        || delta_time <= 0.0
+    {
+        return None;
+    }
+    Some((
+        1.0 / (sigma_gyro * sigma_gyro * delta_time),
+        1.0 / (sigma_accel * sigma_accel * delta_time),
+    ))
+}
 
 /// Adaptive refined-velocity writeback gate for [`OnlineSlamLocalBaConfig`].
 ///
@@ -102,6 +126,14 @@ pub struct OnlineSlamLocalBaConfig {
     /// "seen once in the window" landmarks that would only add a single
     /// 2-row block per BA iteration without disambiguating geometry.
     pub min_observations_per_landmark: usize,
+    /// Use calibrated right-camera measurements when the map carries a
+    /// matching stereo observation. This anchors metric structure inside the
+    /// same tight pose/landmark/IMU solve rather than treating a stereo map as
+    /// monocular after bootstrap.
+    pub use_general_stereo_observations: bool,
+    /// Optional right-image reprojection gate applied before admitting an
+    /// existing stereo observation into the local solve.
+    pub general_stereo_max_initial_right_reprojection_error_px: Option<f64>,
     /// Inner [`BaConfig`] passed straight through to
     /// [`BundleAdjustment::optimize`]. Default uses
     /// [`LinearSolver::Sparse`] to keep the solve cheap on larger windows.
@@ -125,6 +157,11 @@ pub struct OnlineSlamLocalBaConfig {
     /// `None` preserves the diagnostic legacy behavior; promoted tight VI
     /// fusion must provide a physically calibrated prior.
     pub bias_random_walk_weights: Option<(f64, f64)>,
+    /// Optional continuous-time gyro/accelerometer bias random-walk noise
+    /// densities. When set, each adjacent factor receives information
+    /// `1 / (sigma² * delta_time)`, so irregular keyframe spacing is handled
+    /// physically. Takes precedence over `bias_random_walk_weights`.
+    pub bias_random_walk_noise_densities: Option<(f64, f64)>,
     /// Conditioning fallback: when the first BA pass has
     /// `final_cost / initial_cost > threshold`, the cost surface is too
     /// far from quadratic for the joint pose + velocity + bias solve to
@@ -149,6 +186,9 @@ pub struct OnlineSlamLocalBaConfig {
     /// not reduce cost at all, or lower values when bad IMU factors are
     /// known to destabilize tracking.
     pub reject_writeback_when_cost_ratio_above: Option<f64>,
+    /// Reject writeback when the selected joint solve's covariance-whitened
+    /// IMU NIS per residual DoF remains above this limit.
+    pub reject_writeback_when_final_imu_nis_per_dof_above: Option<f64>,
     /// Writeback velocity sanity gate: when any refined in-window
     /// `||velocity_world||` exceeds this threshold, the trigger returns
     /// diagnostics but skips all map/state writeback. This catches the
@@ -159,6 +199,12 @@ pub struct OnlineSlamLocalBaConfig {
     /// can start with a conservative `Some(10.0)` and then tighten once
     /// dataset-specific velocity envelopes are measured.
     pub reject_writeback_when_velocity_norm_above_mps: Option<f64>,
+    /// Reject the whole local solve when any keyframe camera centre moves by
+    /// more than this many metres relative to the pre-solve map.
+    pub reject_writeback_when_pose_translation_above_meters: Option<f64>,
+    /// Reject the whole local solve when any keyframe rotation changes by
+    /// more than this many radians relative to the pre-solve map.
+    pub reject_writeback_when_pose_rotation_above_radians: Option<f64>,
     /// Adaptive writeback velocity gate. Unlike
     /// [`Self::reject_writeback_when_velocity_norm_above_mps`], this is
     /// not a raw scene-scale `m/s` threshold. It derives a per-trigger
@@ -211,6 +257,16 @@ pub struct OnlineSlamLocalBaConfig {
     /// arrives late or never), so the promotion event itself is the
     /// only reliable trigger for a refinement pass.
     pub run_at_vi_init_promotion: bool,
+    /// Carry the inertial Markov blanket across window shifts by
+    /// marginalizing the outgoing 15-DoF navigation state into a dense FEJ
+    /// prior on its successor. This replaces repeatedly fixing the newest
+    /// window anchor with infinite confidence.
+    pub marginalize_navigation_state: bool,
+    /// Optional `(velocity, gyro-bias, accel-bias)` 1-sigma uncertainty for
+    /// the sequence's first navigation state. With marginalization enabled,
+    /// this avoids treating static-init velocity/bias estimates as infinitely
+    /// certain. The global pose gauge remains fixed exactly.
+    pub initial_navigation_prior_std_devs: Option<(f64, f64, f64)>,
 }
 
 impl Default for OnlineSlamLocalBaConfig {
@@ -219,6 +275,8 @@ impl Default for OnlineSlamLocalBaConfig {
             trigger_every: 1,
             window_size: 5,
             min_observations_per_landmark: 2,
+            use_general_stereo_observations: true,
+            general_stereo_max_initial_right_reprojection_error_px: Some(5.0),
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 max_iterations: 10,
@@ -229,12 +287,18 @@ impl Default for OnlineSlamLocalBaConfig {
             bias_gyro_init: Vector3::zeros(),
             bias_acc_init: Vector3::zeros(),
             bias_random_walk_weights: None,
+            bias_random_walk_noise_densities: None,
             freeze_biases_when_cost_ratio_above: None,
             reject_writeback_when_cost_ratio_above: None,
+            reject_writeback_when_final_imu_nis_per_dof_above: None,
             reject_writeback_when_velocity_norm_above_mps: None,
+            reject_writeback_when_pose_translation_above_meters: None,
+            reject_writeback_when_pose_rotation_above_radians: None,
             adaptive_velocity_gate: None,
             relinearise_imu_factor_bias_thresholds: None,
             run_at_vi_init_promotion: false,
+            marginalize_navigation_state: false,
+            initial_navigation_prior_std_devs: None,
         }
     }
 }
@@ -263,6 +327,8 @@ pub struct OnlineSlamLocalBaState {
     /// Number of new factors observed since the last successful trigger;
     /// rolled forward by [`Self::register_new_factor`].
     pub pending_factors_since_last_trigger: usize,
+    /// Dense prior on the first state of the next window.
+    pub navigation_prior: Option<NavigationStatePrior>,
 }
 
 impl OnlineSlamLocalBaState {
@@ -272,6 +338,7 @@ impl OnlineSlamLocalBaState {
             keyframe_state: BTreeMap::new(),
             factor_history: Vec::new(),
             pending_factors_since_last_trigger: 0,
+            navigation_prior: None,
         }
     }
 
@@ -281,6 +348,7 @@ impl OnlineSlamLocalBaState {
         self.keyframe_state.clear();
         self.factor_history.clear();
         self.pending_factors_since_last_trigger = 0;
+        self.navigation_prior = None;
     }
 
     /// Append a freshly-staged IMU factor to the rolling history and bump
@@ -308,6 +376,9 @@ pub struct OnlineSlamLocalBaStats {
     pub landmark_count: usize,
     /// Number of reprojection observations fed into the solve.
     pub observation_count: usize,
+    /// Subset of `observation_count` represented by calibrated 4-row stereo
+    /// residuals instead of 2-row left-only residuals.
+    pub stereo_observation_count: usize,
     /// Number of IMU factors whose `from / to` pair fell inside the
     /// window.
     pub imu_factor_count: usize,
@@ -317,6 +388,11 @@ pub struct OnlineSlamLocalBaStats {
     /// dropped on the floor. When [`Self::quality_gate_rejected`] is
     /// `true`, this result was NOT written back.
     pub ba_result: BaResult,
+    /// Residual-family costs at the selected solve's input and output
+    /// states. These remain available when transactional writeback is
+    /// rejected, which makes visual/inertial conflicts diagnosable.
+    pub initial_cost_breakdown: BaCostBreakdown,
+    pub final_cost_breakdown: BaCostBreakdown,
     /// `final_cost / initial_cost` for [`Self::ba_result`]. Uses `0.0`
     /// when `initial_cost == 0.0` because there was no residual energy
     /// to reduce.
@@ -325,6 +401,8 @@ pub struct OnlineSlamLocalBaStats {
     /// selected BA result. This is reported even when writeback is
     /// rejected so runners can tune the velocity sanity gate.
     pub max_refined_velocity_norm_mps: f64,
+    pub max_pose_translation_correction_meters: f64,
+    pub max_pose_rotation_correction_radians: f64,
     /// Adaptive velocity threshold used for this trigger, if the
     /// adaptive gate was enabled and enough finite local reference
     /// velocities were available.
@@ -344,9 +422,11 @@ pub struct OnlineSlamLocalBaStats {
     /// `true` when the cost-ratio part of the writeback quality gate
     /// rejected this trigger.
     pub cost_ratio_gate_rejected: bool,
+    pub imu_nis_gate_rejected: bool,
     /// `true` when the refined-velocity part of the writeback quality
     /// gate rejected this trigger.
     pub velocity_gate_rejected: bool,
+    pub pose_correction_gate_rejected: bool,
     /// `true` when the adaptive refined-velocity gate rejected this
     /// trigger.
     pub adaptive_velocity_gate_rejected: bool,
@@ -358,6 +438,10 @@ pub struct OnlineSlamLocalBaStats {
     /// `state.factor_history` whole-vector ensures future windows
     /// inherit the up-to-date linearisation point.
     pub relinearised_factor_count: usize,
+    /// Whether a carried navigation prior constrained this solve.
+    pub marginalization_prior_applied: bool,
+    /// Whether this trigger produced the prior for the next shifted window.
+    pub marginalization_succeeded: bool,
 }
 
 fn ba_cost_ratio(result: &BaResult) -> f64 {
@@ -374,6 +458,27 @@ fn compute_max_refined_velocity_norm_mps(ba: &BundleAdjustment, window_ids: &[u6
         .filter_map(|kf_id| ba.velocities.get(kf_id))
         .map(|velocity| velocity.norm())
         .fold(0.0_f64, f64::max)
+}
+
+fn max_pose_correction(map: &VisualMap, ba: &BundleAdjustment, window_ids: &[u64]) -> (f64, f64) {
+    let mut max_translation = 0.0_f64;
+    let mut max_rotation = 0.0_f64;
+    for id in window_ids {
+        let (Some(before), Some(after)) = (
+            map.keyframes
+                .get(id)
+                .and_then(|keyframe| keyframe.frame.pose.as_ref()),
+            ba.poses.get(id),
+        ) else {
+            continue;
+        };
+        max_translation = max_translation
+            .max((after.camera_center_world() - before.camera_center_world()).norm());
+        let rotation_delta =
+            before.world_to_camera.rotation.inverse() * after.world_to_camera.rotation;
+        max_rotation = max_rotation.max(rotation_delta.angle());
+    }
+    (max_translation, max_rotation)
 }
 
 fn robust_quantile(values: &mut Vec<f64>, quantile: f64) -> Option<f64> {
@@ -512,6 +617,169 @@ fn compute_adaptive_velocity_gate_threshold_mps(
     Some(threshold)
 }
 
+fn next_navigation_prior(
+    map: &VisualMap,
+    state: &OnlineSlamLocalBaState,
+    window_ids: &[u64],
+    factors: &[ImuPreintegrationFactor],
+) -> Option<NavigationStatePrior> {
+    let (&old_id, &next_id) = (window_ids.first()?, window_ids.get(1)?);
+    let boundary = factors
+        .iter()
+        .find(|factor| factor.keyframe_id_from == old_id && factor.keyframe_id_to == next_id)?;
+    let camera_id = map.keyframes.get(&old_id)?.frame.camera_id;
+    let camera = map.cameras.get(&camera_id)?.clone();
+    let mut boundary_problem = BundleAdjustment::new(camera);
+    boundary_problem.set_imu_body_to_camera(state.config.body_to_camera.clone());
+
+    for id in [old_id, next_id] {
+        let pose = map.keyframes.get(&id)?.frame.pose.clone()?;
+        let nav = state.keyframe_state.get(&id)?;
+        boundary_problem.add_pose(id, pose);
+        boundary_problem.add_velocity(id, nav.velocity_world);
+        boundary_problem.add_bias(
+            id,
+            Vector6::new(
+                nav.bias_gyro.x,
+                nav.bias_gyro.y,
+                nav.bias_gyro.z,
+                nav.bias_acc.x,
+                nav.bias_acc.y,
+                nav.bias_acc.z,
+            ),
+        );
+    }
+
+    let carried_prior = state
+        .navigation_prior
+        .as_ref()
+        .filter(|prior| prior.keyframe_ids.as_slice() == [old_id]);
+    if let Some(prior) = carried_prior {
+        boundary_problem.set_navigation_state_prior(prior.clone());
+    } else {
+        // The sequence's first state defines the global gauge. The first
+        // pose is exact, but velocity/static-init biases should retain their
+        // finite initialization uncertainty when calibrated standard
+        // deviations are available.
+        boundary_problem.fix_pose(old_id);
+        if let Some((sigma_velocity, sigma_gyro_bias, sigma_accel_bias)) =
+            state.config.initial_navigation_prior_std_devs
+        {
+            if !sigma_velocity.is_finite()
+                || sigma_velocity <= 0.0
+                || !sigma_gyro_bias.is_finite()
+                || sigma_gyro_bias <= 0.0
+                || !sigma_accel_bias.is_finite()
+                || sigma_accel_bias <= 0.0
+            {
+                return None;
+            }
+            let mut information = DMatrix::zeros(15, 15);
+            for component in 6..9 {
+                information[(component, component)] = 1.0 / sigma_velocity.powi(2);
+            }
+            for component in 9..12 {
+                information[(component, component)] = 1.0 / sigma_gyro_bias.powi(2);
+            }
+            for component in 12..15 {
+                information[(component, component)] = 1.0 / sigma_accel_bias.powi(2);
+            }
+            let old_nav = state.keyframe_state.get(&old_id)?;
+            let old_pose = map.keyframes.get(&old_id)?.frame.pose.clone()?;
+            boundary_problem.set_navigation_state_prior(NavigationStatePrior {
+                keyframe_ids: vec![old_id],
+                reference_poses: BTreeMap::from([(old_id, old_pose)]),
+                reference_velocities: BTreeMap::from([(old_id, old_nav.velocity_world)]),
+                reference_biases: BTreeMap::from([(
+                    old_id,
+                    Vector6::new(
+                        old_nav.bias_gyro.x,
+                        old_nav.bias_gyro.y,
+                        old_nav.bias_gyro.z,
+                        old_nav.bias_acc.x,
+                        old_nav.bias_acc.y,
+                        old_nav.bias_acc.z,
+                    ),
+                )]),
+                information,
+                gradient: DVector::zeros(15),
+                constant_cost: 0.0,
+            });
+        } else {
+            boundary_problem.fix_velocity(old_id);
+            boundary_problem.fix_bias(old_id);
+        }
+    }
+    boundary_problem.add_imu_factor(boundary.clone());
+    if state.config.bias_random_walk_noise_densities.is_some()
+        || state.config.bias_random_walk_weights.is_some()
+    {
+        let (weight_gyro, weight_accel) =
+            if let Some(noise) = state.config.bias_random_walk_noise_densities {
+                bias_random_walk_information(noise, boundary.delta.delta_time)?
+            } else {
+                state.config.bias_random_walk_weights?
+            };
+        boundary_problem.add_bias_random_walk_factor(BiasRandomWalkFactor {
+            keyframe_id_from: old_id,
+            keyframe_id_to: next_id,
+            weight_gyro,
+            weight_accel,
+        });
+    } else {
+        // Without a bias-evolution model the successor's six bias DoFs have
+        // no information and the marginal is necessarily singular.
+        return None;
+    }
+
+    let linearized = boundary_problem.linearized_navigation_system()?;
+    let pose_offset = 0usize;
+    let velocity_offset = linearized.pose_ids.len() * 6;
+    let bias_offset = velocity_offset + linearized.velocity_ids.len() * 3;
+    let pose_slot = linearized.pose_ids.iter().position(|id| *id == next_id)?;
+    let velocity_slot = linearized
+        .velocity_ids
+        .iter()
+        .position(|id| *id == next_id)?;
+    let bias_slot = linearized.bias_ids.iter().position(|id| *id == next_id)?;
+    let mut keep = Vec::with_capacity(15);
+    keep.extend((0..6).map(|component| pose_offset + pose_slot * 6 + component));
+    keep.extend((0..3).map(|component| velocity_offset + velocity_slot * 3 + component));
+    keep.extend((0..6).map(|component| bias_offset + bias_slot * 6 + component));
+
+    // Normal equations use gradient g = J^T r, whereas information form uses
+    // eta = -g for a local mean dx = -H^-1 g.
+    let eta = -linearized.gradient;
+    let (information, eta) = marginalize(&linearized.information, &eta, &keep)?;
+    let gradient = -eta;
+    let constant_cost = information
+        .clone()
+        .cholesky()
+        .map(|chol| gradient.dot(&chol.solve(&gradient)))
+        .unwrap_or(0.0);
+    let nav = state.keyframe_state.get(&next_id)?;
+    let pose = map.keyframes.get(&next_id)?.frame.pose.clone()?;
+    Some(NavigationStatePrior {
+        keyframe_ids: vec![next_id],
+        reference_poses: BTreeMap::from([(next_id, pose)]),
+        reference_velocities: BTreeMap::from([(next_id, nav.velocity_world)]),
+        reference_biases: BTreeMap::from([(
+            next_id,
+            Vector6::new(
+                nav.bias_gyro.x,
+                nav.bias_gyro.y,
+                nav.bias_gyro.z,
+                nav.bias_acc.x,
+                nav.bias_acc.y,
+                nav.bias_acc.z,
+            ),
+        )]),
+        information: 0.5 * (&information + information.transpose()),
+        gradient,
+        constant_cost,
+    })
+}
+
 /// Run one local VI-BA trigger over `map`'s trailing window of keyframes.
 ///
 /// Returns `None` when the window is too short to support BA (`< 2`
@@ -641,14 +909,23 @@ pub fn run_local_vi_ba(
         .map(|(id, _)| *id)
         .collect();
 
-    let build_ba = |freeze_all_biases: bool| -> Option<(BundleAdjustment, usize)> {
+    let marginalization_prior_applied = state.config.marginalize_navigation_state
+        && state
+            .navigation_prior
+            .as_ref()
+            .is_some_and(|prior| prior.keyframe_ids.as_slice() == [anchor_id]);
+
+    let build_ba = |freeze_all_biases: bool| -> Option<(BundleAdjustment, usize, usize)> {
         let mut ba = BundleAdjustment::new(camera.clone());
         ba.set_imu_body_to_camera(state.config.body_to_camera.clone());
+        if marginalization_prior_applied {
+            ba.set_navigation_state_prior(state.navigation_prior.clone()?);
+        }
         for kf_id in &window_ids {
             let kf = map.keyframes.get(kf_id)?;
             let pose = kf.frame.pose.clone()?;
             ba.add_pose(*kf_id, pose);
-            if *kf_id == anchor_id {
+            if *kf_id == anchor_id && !marginalization_prior_applied {
                 ba.fix_pose(*kf_id);
             }
         }
@@ -664,7 +941,7 @@ pub fn run_local_vi_ba(
                     per_kf.bias_acc.z,
                 );
                 ba.add_bias(*kf_id, bias);
-                if *kf_id == anchor_id {
+                if *kf_id == anchor_id && !marginalization_prior_applied {
                     ba.fix_velocity(*kf_id);
                     ba.fix_bias(*kf_id);
                 } else if freeze_all_biases {
@@ -672,8 +949,23 @@ pub fn run_local_vi_ba(
                 }
             }
         }
-        if let Some((weight_gyro, weight_accel)) = state.config.bias_random_walk_weights {
+        if state.config.bias_random_walk_noise_densities.is_some()
+            || state.config.bias_random_walk_weights.is_some()
+        {
             for factor in &in_window_factors {
+                let (weight_gyro, weight_accel) = if let Some((sigma_gyro, sigma_accel)) =
+                    state.config.bias_random_walk_noise_densities
+                {
+                    bias_random_walk_information(
+                        (sigma_gyro, sigma_accel),
+                        factor.delta.delta_time,
+                    )?
+                } else {
+                    state
+                        .config
+                        .bias_random_walk_weights
+                        .expect("fixed weights were checked above")
+                };
                 ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
                     keyframe_id_from: factor.keyframe_id_from,
                     keyframe_id_to: factor.keyframe_id_to,
@@ -683,6 +975,7 @@ pub fn run_local_vi_ba(
             }
         }
         let mut observation_count = 0usize;
+        let mut stereo_observation_count = 0usize;
         for landmark_id in &active_landmarks {
             let Some(landmark) = map.landmarks.get(landmark_id) else {
                 continue;
@@ -690,13 +983,63 @@ pub fn run_local_vi_ba(
             ba.add_landmark(*landmark_id, landmark.position);
             for kf_id in &window_ids {
                 let kf = map.keyframes.get(kf_id)?;
+                let pose = ba.poses.get(kf_id)?.clone();
                 for obs in &kf.observations {
                     if obs.landmark_id == *landmark_id {
-                        ba.add_observation(BaObservation {
-                            keyframe_id: *kf_id,
-                            landmark_id: *landmark_id,
-                            xy: obs.xy,
-                        });
+                        let stereo = state
+                            .config
+                            .use_general_stereo_observations
+                            .then(|| {
+                                map.stereo_observations
+                                    .iter()
+                                    .find(|stereo| {
+                                        stereo.frame_id == *kf_id
+                                            && stereo.landmark_id == *landmark_id
+                                    })
+                                    .and_then(|stereo| {
+                                        map.cameras
+                                            .get(&stereo.right_camera_id)
+                                            .map(|right_camera| (stereo, right_camera))
+                                    })
+                                    .filter(|(stereo, right_camera)| {
+                                        let Some(max_error) = state
+                                            .config
+                                            .general_stereo_max_initial_right_reprojection_error_px
+                                        else {
+                                            return true;
+                                        };
+                                        if !max_error.is_finite() || max_error <= 0.0 {
+                                            return false;
+                                        }
+                                        let point_left =
+                                            pose.transform_world_point(&landmark.position);
+                                        right_camera
+                                            .project(
+                                                &stereo.left_to_right.transform_point(&point_left),
+                                            )
+                                            .is_some_and(|predicted| {
+                                                (predicted - stereo.xy_right).norm() <= max_error
+                                            })
+                                    })
+                            })
+                            .flatten();
+                        if let Some((stereo, right_camera)) = stereo {
+                            ba.add_general_stereo_observation(BaGeneralStereoObservation {
+                                keyframe_id: *kf_id,
+                                landmark_id: *landmark_id,
+                                xy_left: obs.xy,
+                                xy_right: stereo.xy_right,
+                                right_camera: right_camera.clone(),
+                                left_to_right: stereo.left_to_right.clone(),
+                            });
+                            stereo_observation_count += 1;
+                        } else {
+                            ba.add_observation(BaObservation {
+                                keyframe_id: *kf_id,
+                                landmark_id: *landmark_id,
+                                xy: obs.xy,
+                            });
+                        }
                         observation_count += 1;
                     }
                 }
@@ -705,15 +1048,17 @@ pub fn run_local_vi_ba(
         for factor in &in_window_factors {
             ba.add_imu_factor(factor.clone());
         }
-        Some((ba, observation_count))
+        Some((ba, observation_count, stereo_observation_count))
     };
 
     let imu_factor_count = in_window_factors.len();
-    let (mut ba, observation_count) = build_ba(false)?;
+    let (mut ba, observation_count, stereo_observation_count) = build_ba(false)?;
+    let mut initial_cost_breakdown = ba.cost_breakdown(&state.config.ba_config.robust_kernel);
     let mut ba_result = match ba.optimize(&state.config.ba_config) {
         Ok(result) => result,
         Err(_) => return None,
     };
+    let mut final_cost_breakdown = ba.cost_breakdown(&state.config.ba_config.robust_kernel);
 
     // Conditioning fallback: if the joint pose + velocity + bias solve
     // failed to bring the cost down enough, the bias updates are not
@@ -724,11 +1069,17 @@ pub fn run_local_vi_ba(
     if let Some(threshold) = state.config.freeze_biases_when_cost_ratio_above {
         let ratio = ba_cost_ratio(&ba_result);
         if ratio > threshold {
-            let (mut ba_frozen, _) = build_ba(true)?;
+            let (mut ba_frozen, _, _) = build_ba(true)?;
+            let frozen_initial_cost_breakdown =
+                ba_frozen.cost_breakdown(&state.config.ba_config.robust_kernel);
             match ba_frozen.optimize(&state.config.ba_config) {
                 Ok(result) => {
+                    let frozen_final_cost_breakdown =
+                        ba_frozen.cost_breakdown(&state.config.ba_config.robust_kernel);
                     ba = ba_frozen;
                     ba_result = result;
+                    initial_cost_breakdown = frozen_initial_cost_breakdown;
+                    final_cost_breakdown = frozen_final_cost_breakdown;
                     bias_frozen = true;
                 }
                 Err(_) => {
@@ -743,6 +1094,8 @@ pub fn run_local_vi_ba(
 
     let cost_ratio = ba_cost_ratio(&ba_result);
     let max_refined_velocity_norm_mps = compute_max_refined_velocity_norm_mps(&ba, &window_ids);
+    let (max_pose_translation_correction_meters, max_pose_rotation_correction_radians) =
+        max_pose_correction(map, &ba, &window_ids);
     let adaptive_velocity_gate_threshold_mps = state
         .config
         .adaptive_velocity_gate
@@ -760,30 +1113,58 @@ pub fn run_local_vi_ba(
         .config
         .reject_writeback_when_cost_ratio_above
         .is_some_and(|threshold| cost_ratio > threshold);
+    let imu_nis_gate_rejected = state
+        .config
+        .reject_writeback_when_final_imu_nis_per_dof_above
+        .is_some_and(|threshold| {
+            final_cost_breakdown
+                .imu_normalized_squared_residual_per_dof
+                .is_none_or(|value| !value.is_finite() || value > threshold)
+        });
     let velocity_gate_rejected = state
         .config
         .reject_writeback_when_velocity_norm_above_mps
         .is_some_and(|threshold| max_refined_velocity_norm_mps > threshold);
+    let pose_correction_gate_rejected = state
+        .config
+        .reject_writeback_when_pose_translation_above_meters
+        .is_some_and(|threshold| max_pose_translation_correction_meters > threshold)
+        || state
+            .config
+            .reject_writeback_when_pose_rotation_above_radians
+            .is_some_and(|threshold| max_pose_rotation_correction_radians > threshold);
     let adaptive_velocity_gate_rejected = adaptive_velocity_gate_threshold_mps
         .is_some_and(|threshold| max_refined_velocity_norm_mps > threshold);
-    let quality_gate_rejected =
-        cost_ratio_gate_rejected || velocity_gate_rejected || adaptive_velocity_gate_rejected;
+    let quality_gate_rejected = cost_ratio_gate_rejected
+        || imu_nis_gate_rejected
+        || velocity_gate_rejected
+        || pose_correction_gate_rejected
+        || adaptive_velocity_gate_rejected;
     if quality_gate_rejected {
         return Some(OnlineSlamLocalBaStats {
             window_keyframe_ids: window_ids,
             landmark_count: active_landmarks.len(),
             observation_count,
+            stereo_observation_count,
             imu_factor_count,
             ba_result,
+            initial_cost_breakdown,
+            final_cost_breakdown,
             cost_ratio,
             max_refined_velocity_norm_mps,
+            max_pose_translation_correction_meters,
+            max_pose_rotation_correction_radians,
             adaptive_velocity_gate_threshold_mps,
             bias_frozen,
             quality_gate_rejected,
             cost_ratio_gate_rejected,
+            imu_nis_gate_rejected,
             velocity_gate_rejected,
+            pose_correction_gate_rejected,
             adaptive_velocity_gate_rejected,
             relinearised_factor_count,
+            marginalization_prior_applied,
+            marginalization_succeeded: false,
         });
     }
 
@@ -819,21 +1200,40 @@ pub fn run_local_vi_ba(
         }
     }
 
+    let marginalization_succeeded = if state.config.marginalize_navigation_state {
+        let next_prior = next_navigation_prior(map, state, &window_ids, &in_window_factors);
+        let succeeded = next_prior.is_some();
+        state.navigation_prior = next_prior;
+        succeeded
+    } else {
+        state.navigation_prior = None;
+        false
+    };
+
     Some(OnlineSlamLocalBaStats {
         window_keyframe_ids: window_ids,
         landmark_count: active_landmarks.len(),
         observation_count,
+        stereo_observation_count,
         imu_factor_count,
         ba_result,
+        initial_cost_breakdown,
+        final_cost_breakdown,
         cost_ratio,
         max_refined_velocity_norm_mps,
+        max_pose_translation_correction_meters,
+        max_pose_rotation_correction_radians,
         adaptive_velocity_gate_threshold_mps,
         bias_frozen,
         quality_gate_rejected,
         cost_ratio_gate_rejected,
+        imu_nis_gate_rejected,
         velocity_gate_rejected,
+        pose_correction_gate_rejected,
         adaptive_velocity_gate_rejected,
         relinearised_factor_count,
+        marginalization_prior_applied,
+        marginalization_succeeded,
     })
 }
 
@@ -853,6 +1253,8 @@ pub struct InertialOnlyViBaStats {
     pub keyframe_states: BTreeMap<u64, KeyframeImuState>,
     /// Optimiser outcome; carries the LM trace + final / initial cost.
     pub ba_result: crate::bundle::BaResult,
+    pub initial_cost_breakdown: BaCostBreakdown,
+    pub final_cost_breakdown: BaCostBreakdown,
 }
 
 /// Run an inertial-only sliding-window MAP solve over `keyframe_ids`'s
@@ -929,18 +1331,35 @@ pub fn run_inertial_only_vi_ba(
         let bias = Vector6::new(bias_g.x, bias_g.y, bias_g.z, bias_a.x, bias_a.y, bias_a.z);
         ba.add_bias(*kf_id, bias);
     }
-    // The inertial-only initialization paper estimates a single gyro and
-    // accelerometer bias over its short window. Approximate that exact shared
-    // variable in the generic per-keyframe BA representation with a hard
-    // equality constraint. This is intentionally far stronger than a normal
-    // running bias random walk.
-    const SHARED_BIAS_EQUALITY_WEIGHT: f64 = 1.0e8;
+    // The inertial-only initialization paper estimates one shared gyro/accel
+    // bias over the short window. The generic BA owns one slot per keyframe,
+    // so tie them relative to the strongest IMU information in this problem.
+    // A fixed 1e8 penalty was not invariant to covariance whitening: EuRoC
+    // factors can carry 1e10..1e12 information, making that supposedly "hard"
+    // equality weak enough for 0.1 rad/s inter-keyframe bias drift.
+    let strongest_factor_information = in_window_factors
+        .iter()
+        .map(|factor| {
+            factor
+                .covariance_sqrt_information()
+                .map(|whitener| whitener.norm_squared())
+                .unwrap_or_else(|| {
+                    factor
+                        .weight_rotation
+                        .max(factor.weight_velocity)
+                        .max(factor.weight_position)
+                })
+        })
+        .fold(1.0_f64, f64::max);
+    let shared_bias_equality_weight = (strongest_factor_information * 1.0e4)
+        .max(1.0e8)
+        .min(1.0e20);
     for pair in sorted_ids.windows(2) {
         ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
             keyframe_id_from: pair[0],
             keyframe_id_to: pair[1],
-            weight_gyro: SHARED_BIAS_EQUALITY_WEIGHT,
-            weight_accel: SHARED_BIAS_EQUALITY_WEIGHT,
+            weight_gyro: shared_bias_equality_weight,
+            weight_accel: shared_bias_equality_weight,
         });
     }
 
@@ -949,7 +1368,9 @@ pub fn run_inertial_only_vi_ba(
         ba.add_imu_factor(factor);
     }
 
+    let initial_cost_breakdown = ba.cost_breakdown(&ba_config.robust_kernel);
     let ba_result = ba.optimize(ba_config).ok()?;
+    let final_cost_breakdown = ba.cost_breakdown(&ba_config.robust_kernel);
 
     // Collect refined per-keyframe states for the caller.
     let mut keyframe_states: BTreeMap<u64, KeyframeImuState> = BTreeMap::new();
@@ -977,6 +1398,8 @@ pub fn run_inertial_only_vi_ba(
         imu_factor_count,
         keyframe_states,
         ba_result,
+        initial_cost_breakdown,
+        final_cost_breakdown,
     })
 }
 
@@ -1051,6 +1474,8 @@ pub struct Viba2Stats {
     pub outer_iterations_run: usize,
     /// Final inner-solve BA result.
     pub ba_result: crate::bundle::BaResult,
+    pub initial_cost_breakdown: BaCostBreakdown,
+    pub final_cost_breakdown: BaCostBreakdown,
 }
 
 /// Run the VIBA2 inertial-with-scale outer loop.
@@ -1139,6 +1564,8 @@ pub fn run_viba2_inertial_with_scale(
         scale_history,
         outer_iterations_run: outer_iter_run,
         ba_result: stats.ba_result,
+        initial_cost_breakdown: stats.initial_cost_breakdown,
+        final_cost_breakdown: stats.final_cost_breakdown,
     })
 }
 
@@ -1273,9 +1700,97 @@ mod tests {
     use super::*;
     use nalgebra::{Point3, UnitQuaternion};
     use visloc_core::geometry::{Pose, SO3};
-    use visloc_core::types::{Camera, Frame, Keyframe, Landmark, Observation, VisualMap};
+    use visloc_core::types::{
+        Camera, Frame, Keyframe, Landmark, Observation, StereoObservation, VisualMap,
+    };
 
     use crate::imu_preintegration::ImuPreintegratedDelta;
+
+    #[test]
+    fn bias_random_walk_information_scales_with_factor_duration() {
+        let noise = (2.0e-5, 3.0e-3);
+        let short = bias_random_walk_information(noise, 0.5).expect("valid short factor");
+        let long = bias_random_walk_information(noise, 2.0).expect("valid long factor");
+        assert!((short.0 / long.0 - 4.0).abs() < 1.0e-12);
+        assert!((short.1 / long.1 - 4.0).abs() < 1.0e-12);
+        assert!(bias_random_walk_information(noise, 0.0).is_none());
+    }
+
+    #[test]
+    fn navigation_prior_propagates_across_two_window_shifts() {
+        let map = build_three_keyframe_map();
+        let mut config = OnlineSlamLocalBaConfig::default();
+        config.bias_random_walk_weights = Some((10.0, 10.0));
+        config.marginalize_navigation_state = true;
+        config.initial_navigation_prior_std_devs = Some((1.0, 0.01, 0.1));
+        let mut state = OnlineSlamLocalBaState::new(config);
+        for id in [10_u64, 20, 30] {
+            state.keyframe_state.insert(
+                id,
+                KeyframeImuState {
+                    velocity_world: Vector3::new(0.0, 0.0, -1.0),
+                    bias_gyro: Vector3::zeros(),
+                    bias_acc: Vector3::zeros(),
+                },
+            );
+        }
+        let f_10_20 = constant_velocity_factor(10, 20, 1.0);
+        let f_20_30 = constant_velocity_factor(20, 30, 1.0);
+        let first = next_navigation_prior(&map, &state, &[10, 20], std::slice::from_ref(&f_10_20))
+            .expect("initial fixed-gauge prior");
+        assert_eq!(first.keyframe_ids, vec![20]);
+        assert_eq!(first.information.shape(), (15, 15));
+        assert!(first.information.clone().cholesky().is_some());
+
+        state.navigation_prior = Some(first);
+        let second = next_navigation_prior(&map, &state, &[20, 30], std::slice::from_ref(&f_20_30))
+            .expect("Schur-propagated finite prior");
+        assert_eq!(second.keyframe_ids, vec![30]);
+        assert!(second.information.clone().cholesky().is_some());
+        assert!(second.gradient.iter().all(|value| value.is_finite()));
+
+        state.navigation_prior = Some(second);
+        state.reset();
+        assert!(state.navigation_prior.is_none());
+    }
+
+    #[test]
+    fn covariance_whitened_initializer_keeps_bias_shared_across_keyframes() {
+        let mut map = build_three_keyframe_map();
+        let mut first = constant_velocity_factor(10, 20, 0.1);
+        let mut second = constant_velocity_factor(20, 30, 0.1);
+        first.delta.delta_rotation = SO3::from_quaternion(UnitQuaternion::from_scaled_axis(
+            Vector3::new(0.01, 0.0, 0.0),
+        ));
+        second.delta.delta_rotation = SO3::from_quaternion(UnitQuaternion::from_scaled_axis(
+            Vector3::new(0.0, 0.02, 0.0),
+        ));
+        first.delta.j_rotation_bg = nalgebra::Matrix3::identity() * 0.1;
+        second.delta.j_rotation_bg = nalgebra::Matrix3::identity() * 0.1;
+        first.delta.covariance = crate::imu_preintegration::Matrix9::identity() * 1.0e-8;
+        second.delta.covariance = crate::imu_preintegration::Matrix9::identity() * 1.0e-8;
+        let result = run_inertial_only_vi_ba(
+            &mut map,
+            &[10, 20, 30],
+            &[first, second],
+            &BTreeMap::new(),
+            &BaConfig::default(),
+        )
+        .expect("inertial initializer");
+        let biases: Vec<Vector3<f64>> = result
+            .keyframe_states
+            .values()
+            .map(|state| state.bias_gyro)
+            .collect();
+        for pair in biases.windows(2) {
+            assert!(
+                (pair[1] - pair[0]).norm() < 1.0e-6,
+                "shared initialization bias drifted: {:?} vs {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
 
     fn make_camera() -> Camera {
         Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0)
@@ -1372,6 +1887,7 @@ mod tests {
             j_velocity_bg: nalgebra::Matrix3::zeros(),
             j_position_ba: nalgebra::Matrix3::zeros(),
             j_position_bg: nalgebra::Matrix3::zeros(),
+            covariance: crate::imu_preintegration::Matrix9::zeros(),
         };
         ImuPreintegrationFactor {
             keyframe_id_from: from_id,
@@ -1417,6 +1933,46 @@ mod tests {
         for kf_id in &result.window_keyframe_ids {
             assert!(state.keyframe_state.contains_key(kf_id));
         }
+    }
+
+    #[test]
+    fn local_vi_ba_uses_calibrated_stereo_observations() {
+        let mut map = build_three_keyframe_map();
+        let right_camera = Camera::pinhole(2, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        map.cameras.insert(right_camera.id, right_camera.clone());
+        let left_to_right = SE3::new(UnitQuaternion::identity(), Vector3::new(-0.1, 0.0, 0.0));
+        for (keyframe_id, keyframe) in &map.keyframes {
+            let pose = keyframe.frame.pose.as_ref().unwrap();
+            for observation in &keyframe.observations {
+                let point = map.landmarks[&observation.landmark_id].position;
+                let point_right =
+                    left_to_right.transform_point(&pose.transform_world_point(&point));
+                let Some(xy_right) = right_camera.project(&point_right) else {
+                    continue;
+                };
+                map.stereo_observations.push(StereoObservation {
+                    frame_id: *keyframe_id,
+                    landmark_id: observation.landmark_id,
+                    right_camera_id: right_camera.id,
+                    xy_right,
+                    left_to_right: left_to_right.clone(),
+                });
+            }
+        }
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            use_general_stereo_observations: true,
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+        let result = run_local_vi_ba(&mut map, &mut state).expect("stereo VI-BA");
+        assert!(result.stereo_observation_count > 0);
+        assert_eq!(result.stereo_observation_count, result.observation_count);
     }
 
     #[test]
@@ -1541,6 +2097,70 @@ mod tests {
     }
 
     #[test]
+    fn local_vi_ba_imu_nis_gate_rejects_writeback() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map
+            .keyframes
+            .get(&20)
+            .and_then(|kf| kf.frame.pose.clone())
+            .expect("kf 20 has pose");
+        let original_landmark_1 = map.landmarks.get(&1).expect("landmark exists").position;
+
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            // Any finite final NIS is above negative infinity, which makes
+            // this a deterministic transactional-gate test.
+            reject_writeback_when_final_imu_nis_per_dof_above: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        for kf_id in [10u64, 20, 30] {
+            state.keyframe_state.insert(
+                kf_id,
+                KeyframeImuState {
+                    velocity_world: Vector3::new(kf_id as f64, 0.5, -0.25),
+                    bias_gyro: Vector3::new(0.01, -0.02, 0.03),
+                    bias_acc: Vector3::new(0.1, -0.2, 0.3),
+                },
+            );
+        }
+        let original_keyframe_state = state.keyframe_state.clone();
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(!result.cost_ratio_gate_rejected);
+        assert!(result.imu_nis_gate_rejected);
+        assert!(!result.velocity_gate_rejected);
+        assert!(result
+            .final_cost_breakdown
+            .imu_normalized_squared_residual_per_dof
+            .is_some_and(f64::is_finite));
+        assert_eq!(
+            map.keyframes
+                .get(&20)
+                .and_then(|kf| kf.frame.pose.clone())
+                .expect("kf 20 has pose"),
+            original_pose_20,
+            "NIS-gated VI-BA must not write poses back"
+        );
+        assert_eq!(
+            map.landmarks.get(&1).expect("landmark exists").position,
+            original_landmark_1,
+            "NIS-gated VI-BA must not write landmarks back"
+        );
+        assert_eq!(
+            state.keyframe_state, original_keyframe_state,
+            "NIS-gated VI-BA must not write velocity/bias slots back"
+        );
+    }
+
+    #[test]
     fn local_vi_ba_velocity_gate_rejects_writeback() {
         let mut map = build_three_keyframe_map();
         let original_pose_20 = map
@@ -1577,6 +2197,31 @@ mod tests {
             original_pose_20,
             "velocity-gated VI-BA must not write poses back"
         );
+    }
+
+    #[test]
+    fn local_vi_ba_pose_correction_gate_rejects_transactionally() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map.keyframes[&20].frame.pose.clone().unwrap();
+        let original_landmark = map.landmarks[&1].position;
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            reject_writeback_when_pose_translation_above_meters: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+        assert!(result.quality_gate_rejected);
+        assert!(result.pose_correction_gate_rejected);
+        assert!(result.max_pose_translation_correction_meters.is_finite());
+        assert_eq!(map.keyframes[&20].frame.pose, Some(original_pose_20));
+        assert_eq!(map.landmarks[&1].position, original_landmark);
+        assert!(state.navigation_prior.is_none());
     }
 
     #[test]
@@ -1857,6 +2502,7 @@ mod tests {
                 j_velocity_bg: nalgebra::Matrix3::zeros(),
                 j_position_ba: nalgebra::Matrix3::zeros(),
                 j_position_bg: nalgebra::Matrix3::zeros(),
+                covariance: crate::imu_preintegration::Matrix9::zeros(),
             };
             factors.push(ImuPreintegrationFactor {
                 keyframe_id_from: (i as u64) + 1,
@@ -1992,6 +2638,7 @@ mod tests {
             j_velocity_bg: nalgebra::Matrix3::zeros(),
             j_position_ba: nalgebra::Matrix3::zeros(),
             j_position_bg: nalgebra::Matrix3::zeros(),
+            covariance: crate::imu_preintegration::Matrix9::zeros(),
         };
         let factor = ImuPreintegrationFactor {
             keyframe_id_from: 1,

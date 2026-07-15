@@ -1,4 +1,4 @@
-use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::{
     Camera, Frame, Keyframe, LocalizationResult, LocalizationSuccess, VisualMap,
@@ -85,7 +85,8 @@ fn map_keyframe_candidate() -> (VisualMap, Keyframe, TrackingResult, LandmarkCan
     let tracking = tracking_success(2, pose_b);
     let candidate = LandmarkCandidate::new(100)
         .with_observation(LandmarkCandidateObservation::new(1, 0, pixel_a))
-        .with_observation(LandmarkCandidateObservation::new(2, 0, pixel_b));
+        .with_observation(LandmarkCandidateObservation::new(2, 0, pixel_b))
+        .with_position_covariance_world(Matrix3::identity() * 0.01);
 
     (map, selected_keyframe, tracking, candidate)
 }
@@ -125,6 +126,7 @@ fn local_mapping_pipeline_stages_selected_keyframe_and_triangulated_landmark() {
     assert!(result.is_ready_to_apply());
     assert_eq!(result.staged_update.keyframes.len(), 1);
     assert_eq!(result.staged_update.landmarks.len(), 1);
+    assert_eq!(result.staged_update.landmark_position_covariances.len(), 1);
     assert_eq!(result.staged_update.observations.len(), 2);
 
     let applied = result.staged_update.apply_to(&mut map).unwrap();
@@ -132,6 +134,7 @@ fn local_mapping_pipeline_stages_selected_keyframe_and_triangulated_landmark() {
     assert_eq!(applied.keyframe_count, 1);
     assert_eq!(applied.landmark_count, 1);
     assert_eq!(applied.observation_count, 2);
+    assert!(map.landmark_position_covariances.contains_key(&100));
     assert!(map.validate().is_valid());
 }
 

@@ -12,8 +12,8 @@ use nalgebra::Vector3;
 use visloc_core::types::{Camera, FrameId, LandmarkId, Observation, VisualMap};
 
 use crate::{
-    BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, LinearSolver, PositionPrior,
-    PositionPriorObservation, RobustKernel,
+    BaConfig, BaError, BaGeneralStereoObservation, BaObservation, BaResult, BundleAdjustment,
+    LinearSolver, PositionPrior, PositionPriorObservation, RobustKernel,
 };
 
 /// A keyframe ranked by how many selected landmarks it shares.
@@ -101,6 +101,14 @@ pub struct CovisibilityLocalBaConfig {
     /// [`Self::outlier_reprojection_threshold_px`] are removed from both
     /// keyframes and landmarks after a successful BA.
     pub remove_outlier_observations: bool,
+    /// Replace a monocular left factor with the calibrated 4D
+    /// `(u_l,v_l,u_r,v_r)` factor when a matching right-image sidecar exists.
+    /// `false` preserves the historical local-BA objective.
+    pub use_general_stereo_observations: bool,
+    /// Optional pre-solve right-image reprojection gate for general stereo
+    /// sidecars. Stale or incorrectly associated right measurements fall back
+    /// to the ordinary monocular factor instead of entering BA.
+    pub general_stereo_max_initial_right_reprojection_error_px: Option<f64>,
     /// Optional gauge/global-anchoring prior weight. When `Some(w)` with a
     /// finite `w > 0`, every optimized (non-fixed) keyframe in the window gets
     /// an absolute camera-center prior pulling it toward its pre-BA (tracking)
@@ -129,6 +137,8 @@ impl Default for CovisibilityLocalBaConfig {
             max_landmarks: None,
             outlier_reprojection_threshold_px: Some(5.0),
             remove_outlier_observations: false,
+            use_general_stereo_observations: false,
+            general_stereo_max_initial_right_reprojection_error_px: Some(5.0),
             pose_anchor_prior_weight: None,
             ba_config: BaConfig {
                 max_iterations: 12,
@@ -147,6 +157,10 @@ pub struct CovisibilityLocalBaResult {
     pub ba_result: BaResult,
     pub mean_reprojection_before_px: f64,
     pub mean_reprojection_after_px: f64,
+    /// Largest camera-centre displacement applied to an optimized keyframe.
+    pub max_pose_translation_correction_m: f64,
+    /// Largest world-to-camera rotation change applied to an optimized keyframe.
+    pub max_pose_rotation_correction_rad: f64,
     pub updated_keyframe_count: usize,
     pub updated_landmark_count: usize,
     pub outlier_observation_count: usize,
@@ -196,6 +210,14 @@ pub enum CovisibilityLocalBaError {
         fixed_keyframe_count: usize,
         required_fixed_keyframes: usize,
         min_fixed_to_optimized_ratio: f64,
+    },
+    /// Write-back rejected because the solved keyframe poses moved farther
+    /// than the configured transactional safety bounds.
+    PoseCorrectionGateRejected {
+        translation_correction_m: f64,
+        rotation_correction_rad: f64,
+        max_translation_correction_m: Option<f64>,
+        max_rotation_correction_rad: Option<f64>,
     },
     Ba(BaError),
 }
@@ -254,6 +276,15 @@ impl std::fmt::Display for CovisibilityLocalBaError {
             } => write!(
                 f,
                 "covisibility local BA rejected by fixed-support ratio gate: {fixed_keyframe_count} fixed boundary keyframes below required {required_fixed_keyframes} for {optimized_keyframe_count} optimized keyframes at ratio {min_fixed_to_optimized_ratio}"
+            ),
+            Self::PoseCorrectionGateRejected {
+                translation_correction_m,
+                rotation_correction_rad,
+                max_translation_correction_m,
+                max_rotation_correction_rad,
+            } => write!(
+                f,
+                "covisibility local BA rejected by pose-correction gate: translation {translation_correction_m} m (max {max_translation_correction_m:?}), rotation {rotation_correction_rad} rad (max {max_rotation_correction_rad:?})"
             ),
             Self::Ba(err) => write!(f, "bundle adjustment failed: {err}"),
         }
@@ -468,6 +499,24 @@ pub fn refine_visual_map_with_covisibility_ba(
     let mean_reprojection_before_px = mean_reprojection_px(&ba);
     let ba_result = ba.optimize(&config.ba_config)?;
     let mean_reprojection_after_px = mean_reprojection_px(&ba);
+    let mut max_pose_translation_correction_m = 0.0_f64;
+    let mut max_pose_rotation_correction_rad = 0.0_f64;
+    for keyframe_id in &selection.optimized_keyframe_ids {
+        let (Some(before), Some(after)) = (
+            map.keyframes
+                .get(keyframe_id)
+                .and_then(|keyframe| keyframe.frame.pose.as_ref()),
+            ba.poses.get(keyframe_id),
+        ) else {
+            continue;
+        };
+        max_pose_translation_correction_m = max_pose_translation_correction_m
+            .max((after.camera_center_world() - before.camera_center_world()).norm());
+        let rotation_delta =
+            before.world_to_camera.rotation.inverse() * after.world_to_camera.rotation;
+        max_pose_rotation_correction_rad =
+            max_pose_rotation_correction_rad.max(rotation_delta.angle());
+    }
 
     let mut updated_keyframe_count = 0usize;
     for keyframe_id in &selection.optimized_keyframe_ids {
@@ -493,14 +542,22 @@ pub fn refine_visual_map_with_covisibility_ba(
         };
         if let Some(landmark) = map.landmarks.get_mut(landmark_id) {
             landmark.position = refined_position;
+            // The stored stereo covariance was linearized at the seed point.
+            // Until BA marginal covariance recovery is wired here, dropping a
+            // stale matrix is safer than using it with a moved landmark.
+            map.landmark_position_covariances.remove(landmark_id);
             updated_landmark_count += 1;
         }
     }
 
     let outlier_keys = match config.outlier_reprojection_threshold_px {
-        Some(threshold) if threshold.is_finite() && threshold > 0.0 => {
-            selected_outlier_keys(map, &camera, &selection, threshold)
-        }
+        Some(threshold) if threshold.is_finite() && threshold > 0.0 => selected_outlier_keys(
+            map,
+            &camera,
+            &selection,
+            threshold,
+            config.use_general_stereo_observations,
+        ),
         _ => BTreeSet::new(),
     };
     let outlier_observation_count = outlier_keys.len();
@@ -515,6 +572,8 @@ pub fn refine_visual_map_with_covisibility_ba(
         ba_result,
         mean_reprojection_before_px,
         mean_reprojection_after_px,
+        max_pose_translation_correction_m,
+        max_pose_rotation_correction_rad,
         updated_keyframe_count,
         updated_landmark_count,
         outlier_observation_count,
@@ -582,11 +641,60 @@ fn build_ba_from_selection(
                 continue;
             }
             if ba.poses.contains_key(&obs.frame_id) && ba.landmarks.contains_key(&obs.landmark_id) {
-                ba.add_observation(BaObservation {
-                    keyframe_id: obs.frame_id,
-                    landmark_id: obs.landmark_id,
-                    xy: obs.xy,
-                });
+                let stereo = config
+                    .use_general_stereo_observations
+                    .then(|| {
+                        map.stereo_observations
+                            .iter()
+                            .find(|stereo| {
+                                stereo.frame_id == obs.frame_id
+                                    && stereo.landmark_id == obs.landmark_id
+                            })
+                            .and_then(|stereo| {
+                                map.cameras
+                                    .get(&stereo.right_camera_id)
+                                    .map(|camera| (stereo, camera))
+                            })
+                            .filter(|(stereo, right_camera)| {
+                                let Some(max_error) =
+                                    config.general_stereo_max_initial_right_reprojection_error_px
+                                else {
+                                    return true;
+                                };
+                                if !max_error.is_finite() || max_error <= 0.0 {
+                                    return false;
+                                }
+                                let Some(pose) = ba.poses.get(&obs.frame_id) else {
+                                    return false;
+                                };
+                                let Some(point_world) = ba.landmarks.get(&obs.landmark_id) else {
+                                    return false;
+                                };
+                                let point_left = pose.transform_world_point(point_world);
+                                right_camera
+                                    .project(&stereo.left_to_right.transform_point(&point_left))
+                                    .is_some_and(|predicted| {
+                                        (predicted - stereo.xy_right).norm() <= max_error
+                                    })
+                            })
+                    })
+                    .flatten();
+                if let Some((stereo, right_camera)) = stereo {
+                    ba.add_general_stereo_observation(BaGeneralStereoObservation {
+                        keyframe_id: obs.frame_id,
+                        landmark_id: obs.landmark_id,
+                        xy_left: obs.xy,
+                        xy_right: stereo.xy_right,
+                        right_camera: right_camera.clone(),
+                        left_to_right: stereo.left_to_right.clone(),
+                    });
+                } else {
+                    ba.add_observation(BaObservation {
+                        keyframe_id: obs.frame_id,
+                        landmark_id: obs.landmark_id,
+                        xy: obs.xy,
+                    });
+                }
             }
         }
     }
@@ -811,6 +919,42 @@ fn mean_reprojection_px(ba: &BundleAdjustment) -> f64 {
     }
 }
 
+/// Mean pixel reprojection error of the observations represented by a
+/// covisibility selection in a written-back map. This is intentionally public
+/// so transactional callers can apply an additional pose constraint (for
+/// example loop-welding rotation anchoring) and re-run the same observable
+/// quality check before committing their cloned map.
+pub fn mean_selected_reprojection_px(
+    map: &VisualMap,
+    selection: &CovisibilityLocalBaSelection,
+) -> Option<f64> {
+    let selected_landmarks: BTreeSet<LandmarkId> = selection.landmark_ids.iter().copied().collect();
+    let mut keyframe_ids = selection.optimized_keyframe_ids.clone();
+    keyframe_ids.extend(selection.fixed_keyframe_ids.iter().copied());
+    keyframe_ids.sort_unstable();
+    keyframe_ids.dedup();
+
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for keyframe_id in keyframe_ids {
+        let keyframe = map.keyframes.get(&keyframe_id)?;
+        let pose = keyframe.frame.pose.as_ref()?;
+        let camera = map.cameras.get(&keyframe.frame.camera_id)?;
+        for observation in &keyframe.observations {
+            if !selected_landmarks.contains(&observation.landmark_id) {
+                continue;
+            }
+            let point = &map.landmarks.get(&observation.landmark_id)?.position;
+            let Some(predicted) = camera.project(&pose.transform_world_point(point)) else {
+                continue;
+            };
+            sum += (predicted - observation.xy).norm();
+            count += 1;
+        }
+    }
+    (count > 0).then_some(sum / count as f64)
+}
+
 /// Number of fixed boundary keyframes a solve must carry to satisfy
 /// [`fixed_to_optimized_ratio_satisfied`].
 ///
@@ -910,6 +1054,7 @@ fn selected_outlier_keys(
     camera: &Camera,
     selection: &CovisibilityLocalBaSelection,
     threshold_px: f64,
+    use_general_stereo_observations: bool,
 ) -> BTreeSet<ObservationKey> {
     let landmark_ids: BTreeSet<LandmarkId> = selection.landmark_ids.iter().copied().collect();
     let mut outliers = BTreeSet::new();
@@ -927,10 +1072,32 @@ fn selected_outlier_keys(
             let Some(landmark) = map.landmarks.get(&obs.landmark_id) else {
                 continue;
             };
-            let residual = camera
+            let mut residual = camera
                 .project(&pose.transform_world_point(&landmark.position))
                 .map(|predicted| (predicted - obs.xy).norm())
                 .unwrap_or(f64::INFINITY);
+            if let Some((stereo, right_camera)) = use_general_stereo_observations
+                .then(|| {
+                    map.stereo_observations
+                        .iter()
+                        .find(|stereo| {
+                            stereo.frame_id == obs.frame_id && stereo.landmark_id == obs.landmark_id
+                        })
+                        .and_then(|stereo| {
+                            map.cameras
+                                .get(&stereo.right_camera_id)
+                                .map(|camera| (stereo, camera))
+                        })
+                })
+                .flatten()
+            {
+                let point_left = pose.transform_world_point(&landmark.position);
+                let right_residual = right_camera
+                    .project(&stereo.left_to_right.transform_point(&point_left))
+                    .map(|predicted| (predicted - stereo.xy_right).norm())
+                    .unwrap_or(f64::INFINITY);
+                residual = residual.max(right_residual);
+            }
             if !residual.is_finite() || residual > threshold_px {
                 outliers.insert(ObservationKey {
                     frame_id: obs.frame_id,
@@ -968,14 +1135,19 @@ fn remove_observations(map: &mut VisualMap, outliers: &BTreeSet<ObservationKey>)
             })
         });
     }
+    map.stereo_observations.retain(|stereo| {
+        !outliers.iter().any(|outlier| {
+            outlier.frame_id == stereo.frame_id && outlier.landmark_id == stereo.landmark_id
+        })
+    });
     removed
 }
 
 #[cfg(test)]
 mod tests {
     use nalgebra::{Point3, UnitQuaternion, Vector3};
-    use visloc_core::geometry::Pose;
-    use visloc_core::types::{Camera, Frame, Keyframe, Landmark};
+    use visloc_core::geometry::{Pose, SE3};
+    use visloc_core::types::{Camera, Frame, Keyframe, Landmark, StereoObservation};
 
     use super::*;
 
@@ -1082,6 +1254,51 @@ mod tests {
         assert_eq!(selection.landmark_ids.len(), 24);
         assert_eq!(selection.observation_count, 96);
         assert!(!selection.boundary_fallback_used);
+    }
+
+    #[test]
+    fn bundle_builder_uses_general_stereo_instead_of_double_counting_left_pixel() {
+        let (mut map, _) = synthetic_map();
+        let right_camera = Camera::pinhole(2, 640, 480, 325.0, 315.0, 318.0, 242.0);
+        let left_to_right = SE3::new(
+            UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+            Vector3::new(-0.11, 0.002, 0.001),
+        );
+        let pose = map.keyframes[&2].frame.pose.as_ref().unwrap();
+        let point_left = pose.transform_world_point(&map.landmarks[&0].position);
+        let xy_right = right_camera
+            .project(&left_to_right.transform_point(&point_left))
+            .unwrap();
+        map.cameras.insert(2, right_camera);
+        map.stereo_observations.push(StereoObservation {
+            frame_id: 2,
+            landmark_id: 0,
+            right_camera_id: 2,
+            xy_right,
+            left_to_right,
+        });
+        let config = CovisibilityLocalBaConfig {
+            max_neighbor_keyframes: 1,
+            min_shared_landmarks: 1,
+            max_boundary_keyframes: 2,
+            min_boundary_observations: 1,
+            min_observations_per_landmark: 2,
+            use_general_stereo_observations: true,
+            ..CovisibilityLocalBaConfig::default()
+        };
+        let selection = select_covisibility_local_ba_window(&map, 2, &config).unwrap();
+        let ba = build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
+            .unwrap();
+
+        assert_eq!(ba.general_stereo_observations.len(), 1);
+        assert_eq!(ba.observations.len(), selection.observation_count - 1);
+
+        map.stereo_observations[0].xy_right.x += 100.0;
+        let gated =
+            build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
+                .unwrap();
+        assert!(gated.general_stereo_observations.is_empty());
+        assert_eq!(gated.observations.len(), selection.observation_count);
     }
 
     #[test]

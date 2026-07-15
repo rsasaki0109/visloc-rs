@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::Point3;
 use visloc_core::geometry::Pose;
@@ -19,6 +19,7 @@ pub enum CorrespondenceBuildError {
     NoDescriptorMatches {
         candidate_landmark_count: usize,
     },
+    InvalidQueryLandmarkRatio,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -297,6 +298,37 @@ where
         pose_prior: &Pose,
         search_radius_px: f64,
     ) -> Result<CorrespondenceSet, CorrespondenceBuildError> {
+        self.build_with_pose_prior_and_query_landmark_ratio(
+            query,
+            map,
+            descriptor_store,
+            pose_prior,
+            search_radius_px,
+            None,
+        )
+    }
+
+    /// Projection matching with an optional reverse ambiguity gate. The
+    /// matcher's normal ratio test operates landmark -> keypoints in one
+    /// projection window. `max_query_landmark_distance_ratio` additionally
+    /// requires the winning landmark for a query keypoint to be strictly
+    /// better than the second-best landmark whose projection window contains
+    /// that keypoint. This rejects repeated-texture collisions between
+    /// overlapping windows before PnP.
+    pub fn build_with_pose_prior_and_query_landmark_ratio(
+        &self,
+        query: &QueryImage,
+        map: &VisualMap,
+        descriptor_store: &LandmarkDescriptorStore,
+        pose_prior: &Pose,
+        search_radius_px: f64,
+        max_query_landmark_distance_ratio: Option<f32>,
+    ) -> Result<CorrespondenceSet, CorrespondenceBuildError> {
+        if let Some(ratio) = max_query_landmark_distance_ratio {
+            if !ratio.is_finite() || ratio <= 0.0 || ratio >= 1.0 {
+                return Err(CorrespondenceBuildError::InvalidQueryLandmarkRatio);
+            }
+        }
         if query.keypoints.len() != query.descriptors.len() {
             return Err(CorrespondenceBuildError::QueryFeatureShapeMismatch {
                 keypoint_count: query.keypoints.len(),
@@ -384,6 +416,41 @@ where
             return Err(CorrespondenceBuildError::NoDescriptorMatches {
                 candidate_landmark_count,
             });
+        }
+
+        if let Some(ratio) = max_query_landmark_distance_ratio {
+            let mut distances_by_query: HashMap<usize, Vec<f32>> = HashMap::new();
+            for proposal in &proposals {
+                if proposal.4.distance.is_finite() {
+                    distances_by_query
+                        .entry(proposal.3)
+                        .or_default()
+                        .push(proposal.4.distance);
+                }
+            }
+            for distances in distances_by_query.values_mut() {
+                distances.sort_by(f32::total_cmp);
+            }
+            proposals.retain(|proposal| {
+                let Some(distances) = distances_by_query.get(&proposal.3) else {
+                    return false;
+                };
+                let Some(&best) = distances.first() else {
+                    return false;
+                };
+                if proposal.4.distance != best {
+                    return false;
+                }
+                match distances.get(1) {
+                    Some(&second) => best < ratio * second,
+                    None => true,
+                }
+            });
+            if proposals.is_empty() {
+                return Err(CorrespondenceBuildError::NoDescriptorMatches {
+                    candidate_landmark_count,
+                });
+            }
         }
 
         // Different projected landmarks can still compete for the same image
