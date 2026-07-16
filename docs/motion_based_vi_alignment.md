@@ -3039,3 +3039,566 @@ many failed recovery attempts, not by proving better place recognition. The
 next retrieval investment should be a real global descriptor /
 candidate-recall benchmark with geometric verification, not more tuning of mean
 HOG descriptor cosine thresholds.
+
+## Moving-start configured-bias gate (2026-07-16)
+
+The static-first lifecycle previously prevented motion-VI from observing any
+keyframes before the aggressive 75-frame tracking-cliff test had already
+restarted. `--motion-vi-init-from-configured-bias` now provides an explicit,
+off-by-default moving-start path: it begins collecting factors immediately
+from the configured running IMU bias, while preserving the existing
+`KeepExistingSeed` safety contract. A unit test verifies that the motion stage
+can become active before the noisy static stage succeeds or gives up.
+
+The first real gate,
+`E:\visloc_archive\moving_start_tight_vi_gate_75_20260716_v1`, proves the new
+lifecycle wiring but rejects every promotion. Motion-VI emits its first event
+at frame 0 and reaches a three-keyframe solve at frame 4, where the recovered
+accelerometer bias magnitude is 12.047 m/s² and fails the 1.0 m/s² physical
+gate. Later candidates fail the raw IMU consistency gate (roughly 0.02 rad
+rotation RMS and initially 1--2.6 m/s velocity RMS), and the final segment
+again proposes an implausible 20.974 m/s² accelerometer bias. Consequently
+`motion_vi_init_succeeded_frame=None`, local VI-BA never triggers, and tracking
+is exactly equal to the 75-frame control: local 89.3%, verified global 80.0%
+(60/75).
+
+This is a rejected accuracy experiment, not evidence for loosening the gates.
+It isolates the next tight-fusion change: a three-keyframe moving-start window
+must not jointly solve weakly observable biases. Keep the configured/calibrated
+bias fixed during the first short inertial alignment, estimate velocity (and
+only well-conditioned pose corrections), then release bias variables after a
+larger-excitation window. This mirrors the broader frontend/backend separation
+seen in DROID-SLAM even though DROID-SLAM itself is visual-only: fast local
+state correction should not be allowed to corrupt slower global/calibration
+state.
+
+## Staged bias release (2026-07-16)
+
+The moving-start configured-bias gate finding above pinned the exact failure
+mode: firing VIBA1 with bias free over a 3-keyframe window let the recovered
+accelerometer bias diverge to 12.047 m/s² (and later, on a different window,
+20.974 m/s²). The window simply does not carry enough independent excitation
+to make velocity AND bias jointly observable yet — but rejecting the solve
+outright (the physical-bias-magnitude gate) also throws away the well-
+conditioned half of that solve: velocity.
+
+**The fix is a two-stage schedule, not a stricter gate.** `MotionBasedViInitializerConfig::bias_release: Option<BiasReleaseSchedule>`
+(`pipelines/slam/src/vi_motion_initializer.rs`) adds a second, independent
+excitation gate on top of the existing `min_keyframes` /
+`min_translation_meters` base gates:
+
+```rust
+pub struct BiasReleaseSchedule {
+    pub min_keyframes: usize,
+    pub min_translation_meters: f64,
+}
+```
+
+* **Stage A ("velocity stage").** While the base gates are met but the
+  schedule's (typically stricter) gates are not, `try_initialize_with_bias_seed`
+  runs the inertial-only solve with every keyframe's bias slot gauge-fixed at
+  the seed — [`run_inertial_only_vi_ba_with_options`] with `solve_bias = false`
+  — and only per-keyframe velocities are free to move. The result carries
+  `bias_released: false` and the initializer does NOT go terminal: it caches
+  the result on `velocity_stage_result()` and keeps accepting new
+  keyframes/translation. A second call before the release gate is met returns
+  `Err(AwaitingBiasReleaseExcitation { .. })` rather than re-running the
+  (already-cached) Stage A solve.
+* **Stage B ("bias release").** Once `keyframes_observed >=
+  schedule.min_keyframes && cumulative_translation_meters >=
+  schedule.min_translation_meters`, the normal solve runs with bias free
+  (dispatching to VIBA2 when configured) exactly like the legacy path. The
+  result carries `bias_released: true` and this firing IS terminal, as before.
+* **VIBA2 never runs during Stage A**, even when `viba2` is configured: scale
+  recovery needs free bias by construction (rescaling the IMU factors and
+  solving for velocity/bias jointly is exactly what the 1-D least-squares
+  scale estimator assumes), so Stage A always takes the plain
+  inertial-only path regardless of the `viba2` config.
+
+`bias_release: None` (the default) preserves the legacy single-stage
+behaviour byte-for-byte: `bias_free` is unconditionally `true`, so every
+successful solve reports `bias_released: true` and fires exactly once, as
+before.
+
+**Pipeline mirroring** (`OnlineSlamPipeline::promote_motion_vi_init_result`,
+`pipelines/slam/src/online_slam.rs`): the velocity + IMU-bias mirroring steps
+run unconditionally on every `Succeeded` event — Stage A's biases equal the
+seed, so mirroring them onto `local_vi_ba_state` / `imu_state` is value-
+neutral, while mirroring its refined velocities is the entire point of running
+Stage A. Only the "mark stage completed" step is conditional on
+`result.bias_released`: a Stage A result leaves the pipeline's motion-VI stage
+active (`is_active() == true`) so `run_motion_vi_init_step` keeps registering
+keyframes/factors toward a later Stage B firing. Consumers of
+`OnlineSlamResult::vi_motion_init` / `MotionViInitializationEvent::Succeeded`
+MUST check `result.bias_released` rather than treating every `Succeeded` event
+as terminal.
+
+**Config knobs** (both EuRoC demo examples,
+`examples/euroc_online_slam_vi_demo.rs` and
+`examples/euroc_online_slam_vi_image_demo.rs`): `--vi-bias-release-min-keyframes
+<N>` and `--vi-bias-release-min-translation <m>`. Either flag alone enables the
+schedule (`Some(BiasReleaseSchedule { .. })`), with the other knob falling back
+to the schedule's own defaults (10 keyframes / 2.0 m — deliberately the same
+defaults as the base gates, so the schedule is a no-op unless the caller
+actually widens one of the two numbers past the base gate). Both demos surface
+`bias_released` on the `Succeeded` event line and `velocity_stage_completed`
+via the `Debug`-formatted final motion-VI status.
+
+This is an opt-in schedule, not a new default: `bias_release` stays `None`
+until an EuRoC A/B run confirms the two-stage schedule actually prevents the
+12 m/s² / 20 m/s² divergences seen above on a moving-start sequence without
+regressing the sequences where the single-stage path already converges
+cleanly. See the A/B below — the divergence is eliminated, but promotion
+itself is not achieved on this fixture, so the schedule's defaults are
+unchanged.
+
+## Staged bias release A/B (2026-07-16) — divergence eliminated, promotion still gated (honest negative)
+
+Runs: `E:/visloc_archive/staged_bias_release_ab_20260716/{control75,treat75,control300,treat300}`,
+`euroc_online_slam_vi_image_demo` on the GT-free moving-start fixture
+`E:/visloc_archive/gt_free_fixture_20260715/MH_01_easy`. `control75`/`control300`
+reconstruct `E:\visloc_archive\moving_start_tight_vi_gate_75_20260716_v1` byte-for-byte
+(tracking 0.893, globally aligned 0.800 = 60/75, `map_keyframes` 32, `map_landmarks` 940,
+`imu_samples_consumed` 742, frame-4 `AccelBiasOutOfRange` 12.046986599862377, frame-74
+20.973589631969087). `treat75`/`treat300` add
+`--vi-bias-release-min-keyframes 8 --vi-bias-release-min-translation 1.0` on top of the
+same Phase-config as the `moving_start_tight_vi_gate` archive plus
+`--motion-vi-init-min-translation 0.01` (the tight translation gate that lets the
+3-keyframe candidate fire quickly on this low-motion prefix):
+
+```sh
+target/release/examples/euroc_online_slam_vi_image_demo.exe \
+  --euroc-dir E:/visloc_archive/gt_free_fixture_20260715/MH_01_easy \
+  --out-dir <control75|treat75|control300|treat300> --max-frames <75|300> \
+  --stereo-bootstrap-strict --stereo-landmark-replenish --projection-guided-tracking \
+  --keyframe-min-translation 0.01 --max-pose-jump-meters 0.1 \
+  --covisibility-local-map-max-keyframes 10 \
+  --rebootstrap-after-lost-frames 2 --rebootstrap-cooldown-frames 30 \
+  --rebootstrap-independent-submap \
+  --motion-vi-init --motion-vi-init-from-configured-bias \
+  --motion-vi-init-min-keyframes 3 --motion-vi-init-min-translation 0.01 \
+  --motion-vi-init-max-velocity 10 --motion-vi-init-max-gyro-bias 0.2 \
+  --motion-vi-init-max-accel-bias 1.0 --motion-vi-init-max-imu-nis-per-dof 20000 \
+  --motion-vi-init-max-rotation-residual-rms-rad 0.01 \
+  --motion-vi-init-max-velocity-residual-rms-mps 0.25 \
+  --motion-vi-init-max-position-residual-rms-m 0.08
+  # treatment only: --vi-bias-release-min-keyframes 8 --vi-bias-release-min-translation 1.0
+```
+
+Reconstructed from each run's `summary.txt`; the archive dirs above hold the complete
+per-run flag echo and logs.
+
+**Result 1 — the fix works as designed.** `AccelBiasOutOfRange` rejections drop from 2
+(one per control run) to 0 in both treatment runs; no recovered/mirrored accel-bias
+magnitude appears anywhere in the treatment `motion_vi_init_log.txt`. The 12/21 m/s²
+divergence path is structurally eliminated.
+
+**Result 2 — honest negative.** Stage A never produces a `Succeeded` event. With bias
+fixed at the configured seed, the same candidate windows now reject on
+`ImuRawResidualOutOfRange` instead: `treat75` rejections = `ImuRawResidualOutOfRange`×27
++ `InsufficientKeyframes`×6, final candidate rot=0.00519 rad (under the 0.01 gate),
+vel=1.4362 m/s (vs 0.25 gate), pos=0.09578 m (vs 0.08 gate); `treat300` =
+`ImuRawResidualOutOfRange`×109 + `InsufficientKeyframes`×8, final candidate
+rot=0.03257 (vs 0.01), vel=0.26001 (vs 0.25), pos=0.02924 (under).
+
+**Net effect.** `tracking_success_rate`, globally-aligned rate, `map_keyframes`,
+`map_landmarks`, and `local_vi_ba_triggers` (still 0) are bit-identical between control
+and treatment at both 75 and 300 frames (75f: 0.893/0.800; 300f: 0.917/0.200 raw). The
+only observable difference is which rejection reason is reported.
+
+**Interpretation.** The control's accel-bias divergence was the free-bias solve
+absorbing a genuine visual-inertial inconsistency — rebootstrapped moving-start
+segments, 3 atlas submaps — into the bias variable; fixing bias exposes that same
+inconsistency as a raw velocity/position residual, which the physical gates then
+(correctly) reject. The binding constraint on this fixture is upstream visual pose
+consistency across rebootstrap segments, not bias observability. A gyro-free /
+accel-fixed split Stage A was considered and rejected for now: `treat75`'s binding gate
+is the velocity residual (1.44 m/s; rotation already passes at 0.0052 rad), which gyro
+freedom alone would not fix. `bias_release` stays opt-in and none of the existing gates
+change.
+
+This "binding gate is a raw residual, not a bias" diagnosis is exactly what the next
+two sections below (**Gravity-direction recovery** and **Gyro-bias recovery**) chase
+down and close on this same fixture — see the **Moving-start tight-VI arc** section at
+the end of this document for how the day's full thread (gyro-bias GN diagnosis →
+time-offset refutation → gravity/gyro estimation → SP-ONNX promotion → crash fix →
+local-VI-BA ungate → NIS sweep) fits together. Gravity/gyro outcomes are no longer
+open questions as of that arc.
+
+## Gravity-direction recovery (2026-07-16)
+
+The staged-bias-release A/B above left an honest negative: `treat75`'s binding gate is
+`ImuRawResidualOutOfRange` with `velocity_residual_rms_mps=1.4362` against the `0.25`
+gate — a large, systematic residual even with bias FIXED at the configured seed, so the
+free-bias solve wasn't absorbing noise; something about the assumed physics was wrong.
+Re-examining the raw IMU stream underneath `treat75`'s submap 2 (one of the three atlas
+submaps created by rebootstrap on this moving-start fixture) explains it: the specific-
+force reaction the accelerometer reports — the component that should cancel gravity when
+the body is roughly level — sits on the **Y axis at −7..−8 m/s²**, while the pipeline was
+configured with `gravity_world=(0, 0, -9.81)` (Z-axis convention). That is *not* sensor
+noise; it is a ~90-degree mismatch between the axis the config assumes gravity acts along
+and the axis the IMU evidence actually supports **in that submap's world frame**.
+
+**Root cause.** Every identity-seeded (sub)map's world frame has *some* orientation
+relative to true gravity, and nothing upstream of this feature ever measured or corrected
+it. The static bootstrap ([`crate::VisualInertialInitializer`]) is the ONLY stage that
+recovers `R_w←b` from real evidence (a stationary IMU window's specific-force direction);
+on a moving-start sequence — or a rebootstrapped submap that never passes back through a
+stationary window — that stage never fires, and every consumer downstream (the motion-
+based initializer here, the IMU pre-integration factor staging, local VI-BA) falls back to
+trusting `gravity_world` from config as ground truth. The motion-based initializer
+([`MotionBasedViInitializer::try_initialize_with_bias_seed`]) holds the vision-only poses
+FIXED and feeds `run_inertial_only_vi_ba` factors whose `gravity_world` field is the
+(possibly wrong) config value; with vision pinned, the ONLY way the solver can explain a
+misaligned gravity assumption is by drifting velocities in a way that leaves a large,
+irreducible position + velocity residual once the chain of consecutive keyframes is long
+enough to over-constrain the fit — precisely the 1.44 m/s residual the A/B measured.
+Reproducing this directly from the raw IMU samples (integrating the submap-2 window's
+gyro/accel stream and comparing the resulting `Δv`/`Δp` against the configured `-Z`
+gravity) confirms the same order-of-magnitude residual arises purely from the axis
+mismatch, with no contribution from bias error.
+
+### The fix: estimate gravity from the window itself, then re-run the existing solve
+
+This is the missing piece of ORB-SLAM3's inertial-only MAP step / VINS-Mono's visual-
+inertial alignment (Qin & Shen, "VINS-Mono: A Robust and Versatile Monocular
+Visual-Inertial State Estimator," IEEE T-RO 2018, §5.3 "Gravity Refinement"): with the
+visual poses (and hence `R_w←b_i`, `p_i` per keyframe) already fixed, the IMU
+preintegration relations become LINEAR in the unknowns `x = [v_1..v_N, g]` — no need to
+assume the world frame's gravity direction at all; ESTIMATE it from the same IMU evidence
+that will subsequently be checked against it. [`estimate_gravity_and_velocities`]
+(`pipelines/slam/src/vi_motion_initializer.rs`) implements this:
+
+* **Formulation.** Per in-window factor `i→j`, with bias-corrected deltas (first-order
+  corrected at the seed bias via [`crate::imu_preintegration::ImuPreintegratedDelta::corrected`]
+  when the delta carries bias Jacobians):
+  * Position: `v_i·Δt + ½·g·Δt² = (p_j − p_i) − R_wb_i·Δp_ij`
+  * Velocity: `−v_i + v_j − g·Δt = R_wb_i·Δv_ij`
+
+  Each factor contributes 6 linear rows. The window is capped to the most recent 10
+  keyframes (`MAX_ALIGNMENT_WINDOW`) — a handful of well-spaced factors already fully
+  constrains 3-DoF gravity, and the cap keeps the dense `nalgebra` SVD solve small
+  regardless of how long a [`BiasReleaseSchedule`] Stage A window grows while awaiting its
+  release gate. Fewer than 2 usable factors (or a non-finite/near-zero unconstrained
+  gravity norm) is reported degenerate (`None`).
+* **Norm-constrained refinement.** The unconstrained solve's gravity estimate
+  (`raw_gravity_norm`) is the OBSERVABILITY check (see the gate below); the vector is then
+  refined onto the caller's expected magnitude using the VINS-Mono tangent-space
+  parameterization: `g = mag·normalize(ĝ + w1·b1 + w2·b2)`, where `(b1, b2)` spans the
+  plane tangent to the current unit estimate. Each of 4 fixed iterations re-solves the
+  linear system with `g`'s 3 free components replaced by the 2 tangent coordinates,
+  updates `ĝ`, and rebuilds the tangent basis. A plain scale-to-norm rescale of the
+  unconstrained estimate is used ONLY as a documented fallback if any iteration's solve
+  fails or produces a non-finite update — it is never taken when the tangent iteration
+  converges.
+* **Observability gate.** [`MotionBasedViInitializerConfig::estimate_gravity`] (default
+  `false`, preserving legacy behaviour) turns the alignment on;
+  [`MotionBasedViInitializerConfig::max_gravity_norm_deviation_ratio`] (default `0.3`)
+  gates acceptance on how close the UNCONSTRAINED `raw_gravity_norm` sits to
+  `gravity_world.norm()` — a well-conditioned window recovers a norm near the true
+  physical magnitude on its own, with no norm constraint imposed anywhere in that solve;
+  a large deviation means the window's excitation does not yet make gravity direction
+  reliably observable, and the attempt is rejected
+  (`MotionBasedViRejectionReason::GravityEstimateOutOfRange`) rather than silently
+  promoting a bogus direction. A degenerate alignment (see above) is reported separately
+  as `GravityEstimateDegenerate`.
+* **Feeding the existing solve.** On acceptance, [`MotionBasedViInitializer::try_initialize_with_bias_seed`]
+  clones the in-window factors with `gravity_world` overwritten to the estimate, uses the
+  alignment's own per-keyframe velocities as the initial seed (replacing the legacy
+  finite-difference seeding), and then dispatches to the SAME Stage A / Stage B /
+  VIBA1 / VIBA2 solve paths unchanged. Every existing post-solve gate
+  (`ImuRawResidualOutOfRange`, `ImuNisOutOfRange`, velocity/bias magnitude gates) still
+  applies — with a corrected gravity assumption they now measure genuine visual-inertial
+  consistency instead of being dominated by axis mismatch.
+
+### What gets mirrored on promotion — and what does NOT
+
+[`crate::OnlineSlamPipeline::promote_motion_vi_init_result`]'s Step 3 mirrors a `Some`
+[`MotionBasedViInitializationResult::estimated_gravity_world`] into every sink that reads
+gravity for FUTURE factor staging or VI solves:
+
+1. `imu_state.config.gravity_world` — the running IMU stage that stamps `gravity_world`
+   onto every newly-staged [`crate::imu_preintegration::ImuPreintegrationFactor`];
+2. `config.imu.gravity_world` — the persisted config mirror of (1);
+3. `local_vi_ba_state.config.gravity_world` and (4) `config.local_vi_ba.gravity_world` —
+   the local VI-BA stage's own gravity copy (seeds bias-slot initial values);
+4. the motion initializer's own running config, via [`MotionBasedViInitializer::set_gravity_world`],
+   so a LATER window (a subsequent `BiasReleaseSchedule` Stage B, or a fresh sequence after
+   `reset_sequence_state`) starts from the corrected assumption instead of the original
+   (possibly wrong) config value; and
+5. `config.vi_motion_init.initializer.gravity_world`, the persisted mirror of (4).
+
+**The map gauge is NEVER rotated to match.** Only the gravity ASSUMPTION used by future
+factor staging and VI solves moves — no keyframe pose, landmark position, or velocity in
+the existing map is touched by this mirroring step. This mirrors the existing bias-
+mirroring pattern exactly (same Step-by-step structure as the staged-bias-release
+mirroring above) and keeps the promotion transactional: a rejected gravity estimate
+(`GravityEstimateDegenerate` / `GravityEstimateOutOfRange`) never reaches this code path
+at all, since it returns an `Err` before any solve or mirroring occurs.
+
+### CLI + status surface
+
+`--motion-vi-init-estimate-gravity` (bool) and
+`--motion-vi-init-max-gravity-norm-deviation <ratio>` (both demos) map onto the two config
+fields above. The event log's `Succeeded` line and the demo summary echo
+`motion_vi_init_estimated_gravity=` (the recovered vector, `None` when the feature is
+off or hasn't fired) alongside the existing `bias_released` / scale fields; the new
+rejection variants (`GravityEstimateDegenerate`, `GravityEstimateOutOfRange { raw_norm_mps2,
+expected_mps2, max_deviation_ratio }`) surface through the same `StillWaiting { reason }`
+event as every other rejection reason, so the raw recovered norm is visible in the log
+the moment the observability gate fires.
+
+## Gyro-bias recovery (2026-07-16)
+
+Gravity-direction recovery closed one gap but not the promotion gate itself: on the
+same moving-start EuRoC fixture, the final fitted IMU rotation residual RMS still sits at
+**0.014–0.022 rad against the 0.01 gate**, and this number is **bit-identical with and
+without `estimate_gravity` enabled**. That is the diagnostic signature of a
+gravity-INDEPENDENT residual — and indeed `ImuPreintegrationFactor::residual_corrected_internal`'s
+rotation term `r_R = Log(ΔR⁻¹ · R_iᵀ · R_j)` never references `gravity_world` at all; only
+`r_v` and `r_p` do. So no amount of gravity-direction correction can move this number.
+
+**The arithmetic matches EuRoC's known gyro bias.** EuRoC MH sequences carry a gyro bias on
+the order of **~0.08 rad/s** in norm. At the diagnosed per-factor `Δt≈0.15 s`, an
+uncompensated bias of that size contributes a rotation-vector error of
+`0.08 × 0.15 ≈ 0.012 rad` per factor — squarely inside the observed 0.014–0.022 rad band.
+Meanwhile the bias seed feeding every solve in this window sits at the configured **zero**
+the whole time: nothing upstream of this feature ever estimates it from the window's own
+rotation evidence.
+
+### The fix: estimate gyro bias from rotation alignment, before gravity
+
+This is exactly the FIRST step ORB-SLAM3's inertial-only initialization and VINS-Mono's IMU
+alignment run, ahead of both gravity/velocity alignment and the staged bias-release solve:
+recover the gyro bias from PURE ROTATION evidence, since gyro bias is the only unknown left
+once poses are fixed and gravity has not yet entered the picture.
+
+**Formulation.** With fixed visual poses `(R_i, R_j)` (world-to-body, matching the
+convention already established for gravity alignment) and a window's IMU preintegration
+factors, [`estimate_gyro_bias`] (`pipelines/slam/src/vi_motion_initializer.rs`) solves
+
+```
+min_{b_g} Σ_ij ‖ Log( ΔR_ij(b_g)⁻¹ · R_iᵀ · R_j ) ‖²
+```
+
+via Gauss-Newton, where `ΔR_ij(b_g)` is
+[`crate::imu_preintegration::ImuPreintegratedDelta::corrected`]'s bias-corrected rotation
+(accelerometer bias held at the factor's own linearisation point — this residual has no
+accelerometer dependence) and `j_rotation_bg` (the preintegrator's own `∂(Log ΔR)/∂b_g`
+Jacobian, Forster eq. 35) is reused unchanged as the per-iteration local model, exactly as
+the codebase's existing `corrected()` machinery already does for BA-side residual
+linearisation — no new SO(3) Jacobian derivation was needed. Per iteration:
+
+```
+(Σ Jᵢⱼᵀ Jᵢⱼ) · δ = Σ Jᵢⱼᵀ · r_ij(b_g),   b_g ← b_g + δ
+```
+
+re-evaluating the exact (nonlinear) residual at the updated `b_g` each time. Up to 5
+iterations run, stopping early once `‖δ‖ < 1e-10`. This is the same normal-equation shape
+VINS-Mono's `solveGyroscopeBias` uses (there, a single linear solve at `b_g = 0`);
+iterating here lets the alignment start from a nonzero seed and re-linearise around the
+improving estimate. The window is capped to the most recent 10 keyframes, mirroring
+[`estimate_gravity_and_velocities`]'s own cap. Degenerate cases — fewer than 2 usable
+in-window factors (missing pose, non-positive `delta_time`, or no factor connecting the
+window), or a singular normal-equation system on the very first iteration — return `None`.
+
+**Ordering.** [`MotionBasedViInitializer::try_initialize_with_bias_seed`] runs this
+alignment FIRST — right after the body-pose conversion, BEFORE gravity/velocity
+recovery — exactly ORB-SLAM3's sequence (gyro bias → gravity → velocity/bias solve). On
+success, the recovered bias replaces `bias_gyro_seed` for the REST of that attempt: the
+gravity/velocity alignment call's own bias-corrected deltas, the per-keyframe
+`initial_states` seeding, and — when a [`BiasReleaseSchedule`] Stage A fires — the
+fixed-bias solve, which now fixes gyro bias at the ESTIMATE rather than the raw seed
+(accelerometer bias stays at the seed either way; this stage has no accelerometer
+evidence). The existing `max_gyro_bias_magnitude_rad_s` sanity gate additionally rejects
+upfront (`GyroBiasOutOfRange`) if the estimate alone is already insane, before any solve
+runs. Every step stays transactional: a rejected estimate
+(`GyroBiasEstimateDegenerate` or an upfront `GyroBiasOutOfRange`) returns before touching
+the map.
+
+**Why the rotation residual is gravity-independent — and why that makes this safe to test
+in isolation.** Because `r_R` never reads `gravity_world`, a [`BiasReleaseSchedule`] Stage A
+window (bias held fixed) reports the SAME rotation residual regardless of the solver's
+velocity/position outcome — it is a pure function of the fixed visual poses and the
+(bias-fixed) IMU delta. This is what let the unit tests pin an EXACT hand-crafted
+regression: a synthetic "truly stationary" factor (`R_i = R_j = identity`) whose raw,
+bias-seed-zero delta shows a spurious rotation `Exp(bias_gyro_true · Δt)` with bias
+Jacobian `j_rotation_bg = -Δt·I` has a rotation residual that is EXACTLY zero at
+`bias_gyro = bias_gyro_true` (`Exp(a) ⊗ Exp(-a)` is the identity for any vector `a`, no
+small-angle approximation required), so recovery is exact to floating-point precision
+regardless of the injected bias's magnitude or direction. A second, real-preintegrator-driven
+test (`estimate_gyro_bias`'s own unit tests) drives actual raw gyro samples carrying a
+known constant bias through `ImuPreintegrator`, closing the gap the previous session's
+gravity tests left open (those used hand-built factors exclusively) — including a
+composition regression that runs `estimate_gyro_bias` then `estimate_gravity_and_velocities`
+over the SAME real-integrated, bias-corrupted factors and confirms gravity is still
+recovered accurately.
+
+### What gets mirrored on promotion
+
+No new plumbing was needed in `OnlineSlamPipeline::promote_motion_vi_init_result`: because
+the gyro-bias estimate is folded into `initial_states` before ANY solve dispatch, every
+branch's `keyframe_states` output (Stage A, Stage B, VIBA1, VIBA2) already carries the
+resolved bias, and the existing Step-2 bias mirroring (into `imu_state`, `local_vi_ba_state`,
+and their `config` mirrors) picks it up automatically — the same mechanism that already
+mirrors an LM-refined bias mirrors a gyro-bias-alignment-refined one.
+[`MotionBasedViInitializationResult::estimated_gyro_bias`] is additionally surfaced
+directly for diagnostics, `None` on the legacy path.
+
+### CLI + status surface
+
+`--motion-vi-init-estimate-gyro-bias` (both demos) maps onto
+[`MotionBasedViInitializerConfig::estimate_gyro_bias`]. The event log's `Succeeded` line and
+the demo summary echo `motion_vi_init_estimated_gyro_bias=` (the recovered vector, `None`
+when the feature is off or hasn't fired) alongside the existing gravity / scale fields; the
+image demo's per-frame `StillWaiting` line additionally echoes the most recent
+[`MotionBasedViInitializer::last_gyro_bias_alignment`] (bias vector, iteration count, RMS
+before/after) the same way it already does for `last_gravity_alignment`, since most
+real-data attempts are rejected by a downstream gate that carries no gyro-bias vector of
+its own. The new `GyroBiasEstimateDegenerate` rejection variant surfaces through the same
+`StillWaiting { reason }` event as every other rejection reason.
+
+## Moving-start tight-VI arc: from divergence to live fusion (2026-07-16)
+
+The four sections above (**Moving-start configured-bias gate**, **Staged bias release**,
+**Staged bias release A/B**, **Gravity-direction recovery**, **Gyro-bias recovery**) were
+one continuous investigation on the same GT-free moving-start fixture
+(`E:/visloc_archive/gt_free_fixture_20260715/MH_01_easy`). This section is the
+end-of-day consolidation — it cross-references rather than repeats the mechanism-level
+detail already written up above, and adds the parts of the thread not yet recorded:
+the corner-frontend GN gyro-bias diagnostic, the time-offset refutation, the SP-ONNX
+frontend flip, the rebootstrap-reconstruction crash fix, the local-VI-BA ungate, and
+the resulting NIS sweep.
+
+### 1. GN gyro-bias estimation on the corner frontend confirms "not a constant bias"
+
+`E:/visloc_archive/gyro_bias_ab_20260716/` (corner-feature frontend, `--motion-vi-init-estimate-gyro-bias`
+only). The Gauss-Newton estimator (see **Gyro-bias recovery** for the formulation) is
+well-conditioned enough to converge every attempt, but it converges to physically
+implausible values: `GyroBiasOutOfRange` (limit `0.2 rad/s`) fires 11× at 75 frames
+(recovered magnitude `0.206`–`0.251 rad/s`) and 39× at 300 frames (`0.204`–`0.426 rad/s`).
+Across the rejected 300-frame windows, `rotation_residual_rms_before` spans
+`0.019`–`0.064 rad` and `rotation_residual_rms_after` `0.013`–`0.059 rad` — GN shrinks the
+residual by only 10–30%, nowhere near the `0.01 rad` gate. A real constant gyro bias
+would fully explain the rotation misfit and converge the residual toward zero; here it
+does neither. **Conclusion: on the corner frontend, the rotation misfit is not
+explained by a constant bias term** — motivating the time-offset check below.
+
+### 2. Time-offset hypothesis refuted
+
+A plausible alternative explanation for a systematic rotation misfit is a fixed
+cam0/IMU clock offset. `scratchpad/delta_sweep.py` tests this directly: it re-integrates
+the raw gyro stream under `gyro_grav300`'s keyframe pairs with every offset δ ∈
+[−100, 100] ms in 5 ms steps, and compares the resulting Δrotation against the visual
+relative rotation (via the EuRoC `R_BS` cam0-to-body extrinsic). Reproduced result: RMS
+misfit is flat across the whole sweep, `0.0333`–`0.0344 rad`, with the minimum at
+δ = −50 ms only ~3% below δ = 0 (`0.03334` vs `0.03366 rad`) — no offset materially
+helps. Re-integrating with the true EuRoC gyro bias (`[-0.002, 0.021, 0.078]`, no offset)
+gives RMS `0.03135 rad`, essentially the same order of magnitude as every offset in the
+sweep. A code audit of the factor-staging path corroborates a null result structurally:
+preintegration windows are exactly `(t_i, t_j]` and the demo drains every IMU sample with
+`timestamp <= frame_ts` before calling `process_frame`, so there is no off-by-one or
+late-arrival mechanism to produce a spurious lag. **Verdict: the residual is corner-frontend
+visual rotation noise, running at ~3× the `0.01 rad` gate — a frontend problem, not a
+timing or bias problem**, which is exactly why gravity/gyro estimation (a frontend-independent
+mechanism) was the next lever, and why an SP-ONNX frontend swap was worth trying.
+
+### 3. SP-ONNX frontend flips the promotion outcome
+
+`E:/visloc_archive/sp_frontend_init_ab_20260716/` and `_v2` (post crash-fix, see below):
+same fixture, `--feature-extractor superpoint-onnx --superpoint-onnx-model
+models/superpoint_1500.onnx --cross-check-matcher`, `--motion-vi-init-estimate-gravity
+--motion-vi-init-estimate-gyro-bias` (the "full estimate chain"). The corner frontend's
+~3× noise floor is gone: gyro-bias-alignment rotation residual drops to `rms_before ≈
+0.005 rad`, `rms_after ≈ 0.0003 rad` (GN converges cleanly, unlike case 1 above), and
+Stage A **promotes** (`Succeeded`, `bias_released=false`) at frame 4 with
+`estimated_gyro_bias=[-0.0048, 0.0236, 0.0802]` — matching EuRoC's true gyro bias
+`(-0.002, 0.021, 0.078)` to within the estimator's own noise floor — and
+`estimated_gravity_world=[0.168, 9.363, 2.922]` (Y-dominant, confirming the axis-mismatch
+diagnosis in **Gravity-direction recovery**). On the 300-frame run the stage re-promotes
+per rebootstrapped submap, at frames 4, 20, and 133.
+
+### 4. Crash found and fixed: gravity mirror missed a 7th sink
+
+Running the `_v2` 300-frame arm's independent-submap rebootstrap path hit a real panic:
+`OnlineSlamPipeline::new` reconstructs the pipeline from `slam.config.clone()` on every
+rebootstrap, and `OnlineSlamConfig::validate`'s `GravityMismatch` check compares
+`config.imu.gravity_world` against `config.vi_init.initializer.gravity_world` — a sink the
+gravity-mirroring step (**Gravity-direction recovery**, "What gets mirrored") did not
+update. The estimate reached `config.imu.gravity_world` and
+`config.vi_motion_init.initializer.gravity_world` but left the STATIC stage's copy stale,
+so the very next rebootstrap panicked. Fix: mirror sink (7),
+`config.vi_init.initializer.gravity_world`, added alongside the existing six (see the
+sink-numbered comment at `OnlineSlamPipeline::promote_motion_vi_init_result` in
+`pipelines/slam/src/online_slam.rs`). A regression test,
+`gravity_mirror_keeps_config_reconstructible_after_rebootstrap`, builds a real non-default
+config, drives a synthetic Stage-B result with a moved gravity estimate through
+`promote_motion_vi_init_result`, then reconstructs the pipeline from the mutated config's
+clone and asserts every gravity-agreement invariant `validate` checks still holds —
+pinning exactly the sequence that crashed.
+
+### 5. Local VI-BA ungate: Stage A is "initialization enough"
+
+Even with Stage A promoting (item 3), local VI-BA stayed permanently gated: its trigger
+checks `vi_initialization_pending()`, which historically required the FULL static +
+motion-VI stack to reach a terminal state. Since Stage A is this codebase's VIBA1 — it
+already refines velocity and mirrors a real (estimated, not placeholder-zero) bias into
+`imu_state`/`local_vi_ba_state` — the zero-placeholder-bias rationale for gating on
+`vi_motion_init_state.completed` no longer applies once Stage A has fired.
+`vi_initialization_pending()` now also returns `false` once
+`vi_motion_init_state.velocity_stage_fired()` is `true`, independent of whether the stage
+has gone terminal. `E:/visloc_archive/sp_frontend_init_ab_20260716_v3/`: `local_vi_ba_triggers`
+goes from `0` (control, gate never opens) to `28` at 75 frames / `102` at 300 frames — every
+row rejected by `imu_nis_gate_rejected` (28/28, 102/102) at the local-VI-BA bench default
+`reject_final_imu_nis_per_dof_above = 5.0`, which is wildly tighter than the motion-VI NIS
+gate's own `20000.0` on this exact stack — an inconsistency, not a deliberate choice.
+Relaxing the `BiasReleaseSchedule` release gates to 5 keyframes / 0.2 m (`sp_relaxed*`)
+additionally lets Stage B (`bias_released=true`) fire — 1× at 75 frames, 2× at 300 frames —
+without changing the local-VI-BA trigger counts (`28`/`102` either way).
+
+### 6. NIS sweep: 50 is the sweet spot, 5000 regresses
+
+`E:/visloc_archive/sp_frontend_init_ab_20260716_v4/` reruns the relaxed release-gate,
+full-estimate-chain config from item 5 with the local-VI-BA NIS gate raised to `50.0` and
+`5000.0` (vs. `sp_control`'s effectively-closed gate and the corner baseline from the
+**Staged bias release A/B** section):
+
+| Arm | tracking | globally aligned | local-VI-BA triggers | accepted writebacks | map KFs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| corner baseline (75f) | 0.893 | 0.800 | 0 | 0 | 32 |
+| `sp_control` (75f) | 0.947 | 0.173 | 0 | 0 | 7 |
+| **`nis50` (75f)** | **0.933** | **0.933** | 30 | 3 | 32 |
+| `nis5000` (75f) | 0.880 | 0.493 | 28 | 11 | 18 |
+| `sp_control` (300f) | 0.957 | 0.043 | 0 | 0 | 7 |
+| **`nis50` (300f)** | **0.973** | **0.363** | 98 | 4 | 49 |
+| `nis5000` (300f) | 0.890 | 0.123 | 104 | 16 | 18 |
+
+`nis50` lifts globally-aligned tracking from `sp_control`'s `0.173`/`0.043` to `0.933`/`0.363`
+with only 3 (75f) / 4 (300f) accepted local-VI-BA writebacks — a small number of well-
+conditioned corrections goes a long way once the seed bias/gravity are no longer garbage.
+`nis5000` REGRESSES plain tracking to `0.880`/`0.890` (below even the corner baseline):
+too loose a NIS gate admits bad writebacks that the tighter `50.0` gate correctly
+rejects. **Ablation note:** without the full estimate chain (items 3–5), motion-VI never
+promotes on this fixture and local VI-BA never unblocks regardless of the NIS setting —
+so the `nis50` win is attributable to the whole chain, not the NIS threshold alone.
+**Caveats, recorded honestly:** (a) the mirrored accel-bias vector's dominant component
+still exceeds `1 m/s²` on accepted writebacks (`1.28` at `nis50` 75f, `1.86` at `nis50`
+300f) — a candidate for a local-VI-BA bias-magnitude gate, analogous to the existing
+motion-VI one; (b) keyframe cadence varies enormously across arms (7 keyframes for
+`sp_control` vs. 32/49 for `nis50` vs. 18 for `nis5000`), so `map_keyframes`/`map_landmarks`
+are not like-for-like across arms and only the tracking/aligned rates above are directly
+comparable; (c) every run in this arc is on the GT-free fixture — no ATE is available for
+any of these numbers, only tracking/coverage rates.
+
+### Open items
+
+1. **Finer NIS sweep.** Only `5.0` (effectively closed), `50.0`, and `5000.0` have been
+   tried; the true sweet spot is unlocated between `50` and `5000`, and may differ by
+   sequence.
+2. **Local-VI-BA bias-magnitude gate.** Mirror the motion-VI accel/gyro bias sanity gates
+   (`max_accel_bias_magnitude_mps2` etc.) onto local VI-BA's own writeback, since accepted
+   `nis50` writebacks already exceed `1 m/s²`.
+3. **GT-enabled validation.** Everything in this arc ran on the GT-free fixture; the next
+   step is repeating the `nis50`-style config on GT-enabled MH_01/V1 EuRoC sequences (real
+   ATE) and on true moving-start datasets (not a moving-start VIEW of a stationary-start
+   recording), to confirm the tracking/coverage win survives contact with ground truth.
