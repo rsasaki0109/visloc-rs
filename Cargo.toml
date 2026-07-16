@@ -55,7 +55,7 @@ image-io = ["visloc-io/image-io"]
 # in the vision crate. Combine with `image-io` for the EuRoC demo
 # wiring (`--feature-extractor superpoint-onnx --superpoint-onnx-model
 # <path>`). See `docs/superpoint_onnx_runtime_plan.md`.
-onnx-inference = ["visloc-vision/onnx-inference"]
+onnx-inference = ["visloc-vision/onnx-inference", "visloc-slam/onnx-inference", "dep:ndarray"]
 # As above, but with the CUDA execution provider (GPU SuperPoint inference,
 # CPU fallback). See `crates/vision/Cargo.toml` for the runtime requirements.
 onnx-cuda = ["onnx-inference", "visloc-vision/onnx-cuda"]
@@ -70,6 +70,7 @@ visloc-tracking = { path = "pipelines/tracking", version = "0.1.0" }
 visloc-mapping = { path = "pipelines/mapping", version = "0.1.0" }
 visloc-slam = { path = "pipelines/slam", version = "0.1.0" }
 visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
+ndarray = { version = "0.17", optional = true }
 
 [[example]]
 name = "multi_session_place_recognition_kitti_demo"
@@ -139,6 +140,11 @@ required-features = ["image-io", "onnx-inference"]
 [[example]]
 name = "vpr_global_descriptor_demo"
 path = "examples/vpr_global_descriptor_demo.rs"
+required-features = ["image-io", "onnx-inference"]
+
+[[example]]
+name = "euroc_dpvo_vo_demo"
+path = "examples/euroc_dpvo_vo_demo.rs"
 required-features = ["image-io", "onnx-inference"]
 
 [dev-dependencies]

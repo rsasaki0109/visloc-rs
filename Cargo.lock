@@ -750,6 +750,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "nalgebra",
+ "ndarray",
  "rayon",
  "visloc-core",
  "visloc-fusion",
@@ -767,6 +768,8 @@ version = "0.1.0"
 dependencies = [
  "nalgebra",
  "nalgebra-sparse",
+ "ndarray",
+ "rand",
  "rayon",
  "visloc-core",
  "visloc-localization",

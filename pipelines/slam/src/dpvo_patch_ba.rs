@@ -547,6 +547,146 @@ fn transform_edge(
     }
 }
 
+/// Jacobian-free core of `projective_ops.py::transform` (lines 56-68: `iproj`,
+/// the `SE3`/`Gij` action, `proj`), evaluated at one arbitrary pixel
+/// `(x, y)` with shared inverse depth `d` — i.e. exactly [`transform_edge`]'s
+/// geometry computation minus the analytic Jacobians, generalized to any
+/// pixel of a patch's `3×3` grid rather than only its center. Added for
+/// Milestone M4 (`docs/dpvo_droid_port_plan.md`): the per-frame VO loop needs
+/// this for two things `dpvo_patch_ba`'s BA-only M3 scope never required —
+/// correlation-lookup coordinates for the *whole* patch grid
+/// ([`reproject_patch_grid`]) and the keyframe motion-magnitude gate
+/// ([`flow_mag`]), neither of which touches a Jacobian.
+#[allow(clippy::too_many_arguments)]
+fn project_no_jacobian(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    intr_i: &DpvoIntrinsics,
+    intr_j: &DpvoIntrinsics,
+    x: f64,
+    y: f64,
+    inverse_depth: f64,
+    translation_only: bool,
+) -> Vector2<f64> {
+    let xn = (x - intr_i.cx) / intr_i.fx;
+    let yn = (y - intr_i.cy) / intr_i.fy;
+    let d = inverse_depth;
+
+    // Gij = poses[jj] * poses[ii].inv() (projective_ops.py:60), optionally
+    // with its rotation zeroed to the identity (projective_ops.py:62-63:
+    // `Gij[...,3:] = [0,0,0,1]` — DPVO's 7-vector layout is
+    // `[tx,ty,tz,qx,qy,qz,qw]`, so slicing `[3:]` zeroes the *quaternion*
+    // slots, i.e. `tonly` keeps translation and discards rotation, despite
+    // sounding like the opposite). Used by [`flow_mag`]'s `tonly=True` call.
+    let mut g_ij = pose_j.compose(&pose_i.inverse());
+    if translation_only {
+        g_ij = SE3::new(UnitQuaternion::identity(), g_ij.translation);
+    }
+
+    let r = g_ij.rotation.to_rotation_matrix().into_inner();
+    let t = g_ij.translation;
+    let xyz0 = Vector3::new(xn, yn, 1.0);
+    let xyz1 = r * xyz0 + t * d;
+    let z1 = xyz1.z;
+
+    // proj (projective_ops.py:32-50): perspective-divide by Z.
+    let depth_inv_proj = 1.0 / z1.max(PROJECT_MIN_Z);
+    Vector2::new(
+        intr_j.fx * (depth_inv_proj * xyz1.x) + intr_j.cx,
+        intr_j.fy * (depth_inv_proj * xyz1.y) + intr_j.cy,
+    )
+}
+
+/// Reproject a patch's anchor pixel `(x, y, d)` from frame `i` into frame
+/// `j`, no Jacobian, matching `projective_ops.py::transform(...,
+/// jacobian=False)` for a single point. `translation_only` is `transform`'s
+/// `tonly` flag (see [`project_no_jacobian`]'s doc for what it actually
+/// zeroes).
+pub fn transform_point(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    intr_i: &DpvoIntrinsics,
+    intr_j: &DpvoIntrinsics,
+    patch: &DpvoPatch,
+    translation_only: bool,
+) -> Vector2<f64> {
+    project_no_jacobian(pose_i, pose_j, intr_i, intr_j, patch.x, patch.y, patch.inverse_depth, translation_only)
+}
+
+/// Reproject every pixel of a patch's `3×3` grid (integer offsets `dx, dy ∈
+/// {-1, 0, 1}` from the anchor, sharing the patch's one scalar inverse
+/// depth — see the module doc's "projective transform" section on why a
+/// DPVO patch's `3×3` grid shares one `(x, y, d)`-anchored depth but *not*
+/// one `(x, y)`) from frame `i` into frame `j`. This is what
+/// [`DPVO.reproject`]-equivalent correlation-coordinate computation needs
+/// (M2's `corr_cpu` consumes a per-patch-pixel coordinate, not just a
+/// center), unlike [`transform_edge`]'s BA-only center-pixel scope.
+///
+/// Returns a `[[Vector2<f64>; 3]; 3]` indexed `[dy+1][dx+1]` (row-major,
+/// matching `corr_cpu`'s own `(py, px)` axis order in
+/// `crates/vision/src/dpvo/correlation.rs`).
+///
+/// [`DPVO.reproject`]: https://github.com/princeton-vl/DPVO/blob/main/dpvo/dpvo.py
+pub fn reproject_patch_grid(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    intr_i: &DpvoIntrinsics,
+    intr_j: &DpvoIntrinsics,
+    patch: &DpvoPatch,
+) -> [[Vector2<f64>; 3]; 3] {
+    let mut out = [[Vector2::new(0.0, 0.0); 3]; 3];
+    for (row_index, dy) in (-1..=1i32).enumerate() {
+        for (col_index, dx) in (-1..=1i32).enumerate() {
+            out[row_index][col_index] = project_no_jacobian(
+                pose_i,
+                pose_j,
+                intr_i,
+                intr_j,
+                patch.x + dx as f64,
+                patch.y + dy as f64,
+                patch.inverse_depth,
+                false,
+            );
+        }
+    }
+    out
+}
+
+/// Port of `projective_ops.py::flow_mag` (lines 120-130), used by
+/// `dpvo.py::motionmag`/`keyframe` (this crate's [`crate::dpvo_patch_graph`]
+/// module) to decide whether a candidate keyframe carries enough motion to
+/// keep. `beta` weights the "full 6-DoF reprojection flow" (`flow1`) against
+/// the "translation-only reprojection flow" (`flow2`); `motionmag`'s own call
+/// site always uses `beta = 0.5` (`dpvo.py:263`).
+///
+/// `coords0 = transform(poses, patches, intrinsics, ii, ii, kk)`
+/// (`projective_ops.py:123`) reprojects the patch into its *own* source
+/// frame — since `Gij` collapses to the identity whenever `i == j` and the
+/// third `iproj` component is the constant `1` (not the depth), this
+/// evaluates to exactly the anchor pixel `(x, y)` for *any* pose/intrinsics,
+/// independent of the patch's depth — confirmed algebraically here (not
+/// asserted blindly): `iproj` gives `(xn, yn, 1, d)`; the identity action
+/// leaves it unchanged; `proj` computes `depth = 1/max(Z,0.1) = 1/max(1,0.1)
+/// = 1`, so `x = fx·xn + cx = x`, `y = fy·yn + cy = y` exactly. This module
+/// still calls [`transform_point`] with `pose_i == pose_j` rather than
+/// hardcoding `(x, y)`, so a future reader can verify the derivation by
+/// inspection rather than trust this comment.
+pub fn flow_mag(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    intr_i: &DpvoIntrinsics,
+    intr_j: &DpvoIntrinsics,
+    patch: &DpvoPatch,
+    beta: f64,
+) -> f64 {
+    let coords0 = transform_point(pose_i, pose_i, intr_i, intr_i, patch, false);
+    let coords1 = transform_point(pose_i, pose_j, intr_i, intr_j, patch, false);
+    let coords2 = transform_point(pose_i, pose_j, intr_i, intr_j, patch, true);
+    let flow1 = (coords1 - coords0).norm();
+    let flow2 = (coords2 - coords0).norm();
+    beta * flow1 + (1.0 - beta) * flow2
+}
+
 /// Run [`dpvo_ba_step`] `config.iterations` times, re-linearizing at the
 /// updated poses/patches each time and keeping `targets`/`weights`/`edges`
 /// fixed — the caller-side loop DPVO's real (CUDA) `fastba.BA(..., iterations=2)`
@@ -1032,5 +1172,73 @@ mod tests {
         let r1 = residual_after(&one);
         let r2 = residual_after(&two);
         assert!(r2 <= r1 + 1e-9, "second GN iteration should not increase the residual: r1={r1} r2={r2}");
+    }
+
+    // --- M4 additions: transform_point / reproject_patch_grid / flow_mag ---
+
+    #[test]
+    fn transform_point_center_matches_reproject_patch_grid_center_entry() {
+        let pose_i = SE3::identity();
+        let pose_j = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.05, 0.0)), Vector3::new(0.3, 0.0, 0.0));
+        let intrinsics = intr(120.0, 120.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.6 };
+
+        let via_transform_point = transform_point(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch, false);
+        let grid = reproject_patch_grid(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch);
+        let via_grid_center = grid[1][1];
+        assert!(
+            (via_transform_point - via_grid_center).norm() < 1e-12,
+            "center of reproject_patch_grid must exactly match transform_point: {via_transform_point:?} vs {via_grid_center:?}"
+        );
+    }
+
+    #[test]
+    fn reproject_patch_grid_offsets_are_distinct_for_a_tilted_view() {
+        // A non-identity relative pose should generally map the 9 grid
+        // offsets to 9 distinct pixels (sanity check that the grid isn't
+        // silently collapsing to one repeated point).
+        let pose_i = SE3::identity();
+        let pose_j = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.02, 0.03, 0.0)), Vector3::new(0.2, 0.05, 0.0));
+        let intrinsics = intr(150.0, 150.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.5 };
+        let grid = reproject_patch_grid(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch);
+        let mut flat: Vec<Vector2<f64>> = Vec::new();
+        for row in &grid {
+            for &v in row {
+                flat.push(v);
+            }
+        }
+        for i in 0..flat.len() {
+            for j in (i + 1)..flat.len() {
+                assert!((flat[i] - flat[j]).norm() > 1e-6, "grid offsets {i} and {j} coincide: {flat:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn flow_mag_is_zero_for_an_identical_pose_pair() {
+        // i == j (both poses/intrinsics identical) => Gij is the identity
+        // for both the full and translation-only transforms => flow1 =
+        // flow2 = 0 regardless of beta.
+        let pose = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)), Vector3::new(1.0, 2.0, 3.0));
+        let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.7 };
+        let flow = flow_mag(&pose, &pose, &intrinsics, &intrinsics, &patch, 0.5);
+        assert!(flow < 1e-10, "expected zero flow for an identical pose pair, got {flow}");
+    }
+
+    #[test]
+    fn flow_mag_grows_with_translation_magnitude() {
+        let pose_i = SE3::identity();
+        let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.5 };
+        let small = SE3::new(UnitQuaternion::identity(), Vector3::new(0.05, 0.0, 0.0));
+        let large = SE3::new(UnitQuaternion::identity(), Vector3::new(0.5, 0.0, 0.0));
+        let flow_small = flow_mag(&pose_i, &small, &intrinsics, &intrinsics, &patch, 0.5);
+        let flow_large = flow_mag(&pose_i, &large, &intrinsics, &intrinsics, &patch, 0.5);
+        assert!(
+            flow_large > flow_small,
+            "larger translation should produce larger flow magnitude: small={flow_small} large={flow_large}"
+        );
     }
 }

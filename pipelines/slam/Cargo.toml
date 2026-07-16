@@ -15,15 +15,29 @@ categories.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+default = []
+# Milestone M4 (docs/dpvo_droid_port_plan.md): the ONNX-inference-dependent
+# half of the DPVO visual-odometry loop (`dpvo_vo.rs` — fnet/inet/GRU-update
+# session calls, the correlation pyramid assembly). Forwards straight to
+# `visloc-vision`'s own `onnx-inference` feature (see that crate's Cargo.toml
+# for what it pulls in: `ort` with `load-dynamic`, `ndarray`). The
+# graph/BA logic (`dpvo_patch_graph.rs`, `dpvo_patch_ba.rs`) needs neither
+# this feature nor `ndarray`/`rand` and stays compiled unconditionally, per
+# the plan doc's M4 scope note ("the graph/BA logic can be unconditional").
+onnx-inference = ["visloc-vision/onnx-inference", "dep:ndarray"]
+
 [dependencies]
 nalgebra = { workspace = true }
 nalgebra-sparse = "0.10"
+rand = { workspace = true }
 rayon = { workspace = true }
 visloc-core = { path = "../../crates/core", version = "0.1.0" }
 visloc-localization = { path = "../localization", version = "0.1.0" }
 visloc-mapping = { path = "../mapping", version = "0.1.0" }
 visloc-tracking = { path = "../tracking", version = "0.1.0" }
 visloc-vision = { path = "../../crates/vision", version = "0.1.0" }
+ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
 nalgebra = { workspace = true }

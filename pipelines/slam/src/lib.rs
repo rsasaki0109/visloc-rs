@@ -44,9 +44,14 @@ mod block_cholesky;
 pub mod covariance;
 pub mod dpvo_patch_ba;
 pub use dpvo_patch_ba::{
-    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, se3_from_dpvo_pose, DpvoBaConfig, DpvoBaError,
-    DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
+    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, flow_mag, reproject_patch_grid, se3_from_dpvo_pose,
+    transform_point, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
 };
+pub mod dpvo_patch_graph;
+pub use dpvo_patch_graph::{
+    active_edge_triples, DpvoGraphError, DpvoGraphEdge, DpvoGraphFrame, DpvoPatchGraph, DpvoVoConfig,
+};
+pub mod dpvo_vo;
 mod finite_difference;
 pub mod gnc;
 pub mod incremental_pose_graph;

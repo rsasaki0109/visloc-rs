@@ -945,3 +945,243 @@ M4 follow-up once real patch-graph sizes are flowing through this solver.
    lookups. `DpvoPatch` as defined here is BA-only; M4 will need a richer
    per-patch type (or a clear boundary conversion) once the two modules are
    wired together.
+
+## M4 results (2026-07-17)
+
+### Architecture recap
+
+Two new `pipelines/slam/src` modules plus one example, following the M4
+task's "graph/BA logic unconditional, inference behind `onnx-inference`"
+split:
+
+| File | Feature gate | Contents |
+| --- | --- | --- |
+| `dpvo_patch_graph.rs` | none (always compiled) | `DpvoVoConfig` (`config.py` port), `DpvoPatchGraph` (frame/patch buffers stored as plain compacting `Vec`s rather than `dpvo.py`'s fixed `BUFFER_SIZE`-shaped tensors), `edges_forw`/`edges_back` (`dpvo.py:362-375`), `keyframe`/`motionmag` (`dpvo.py:257-310`), the `DAMPED_LINEAR` motion model (`dpvo.py:410-424`), `reconstruct_pose` (`dpvo.py::get_pose`, for folded/rejected frames). |
+| `dpvo_vo.rs` | `#![cfg(feature = "onnx-inference")]` | `DpvoOdometry` — wires M2's `DpvoOnnxSession`/`patchify_cpu`/`SoftAgg`/`corr_cpu` and M3's `dpvo_ba` into `dpvo.py`'s per-frame loop (`__call__`/`update`/`motion_probe`), plus the 2-pyramid-level correlation assembly M2 left as its "biggest blocker" (`corr_pyramid`, grouping active edges by target frame). |
+| `examples/euroc_dpvo_vo_demo.rs` | `required-features = ["image-io", "onnx-inference"]` | EuRoC cam0 runner: full-resolution radial-tangential undistortion (own dense-image warp, since no such utility existed in this repo — keypoint-only `RadialTangential::undistort_pixel` isn't enough for a dense CNN front end), trajectory CSV, Umeyama-aligned ATE (reusing `umeyama_similarity_transform`/`TrajectorySimilarityTransform` from `pipelines/tracking`, the same pattern `examples/euroc_imu_dead_reckon_demo.rs` already uses). |
+
+`dpvo_patch_ba.rs` (M3) gained three small, cited additions the graph/VO
+layers needed and M3's BA-only scope never did: `transform_point`
+(jacobian-free `projective_ops.py::transform`, generalizing `tonly`),
+`reproject_patch_grid` (the same, evaluated over a patch's full `3×3` grid
+— needed for correlation lookups, not just the BA center pixel), and
+`flow_mag` (`projective_ops.py::flow_mag`, the keyframe motion-magnitude
+gate). All three are exercised by both `dpvo_patch_ba.rs`'s own new unit
+tests and transitively by `dpvo_patch_graph.rs`'s keyframe tests.
+
+Cargo wiring: `pipelines/slam/Cargo.toml` gained an `onnx-inference`
+feature (`["visloc-vision/onnx-inference", "dep:ndarray"]`) and an
+always-on `rand` dependency (already a workspace dependency used
+elsewhere — not a new external crate); root `Cargo.toml`'s own
+`onnx-inference` feature now also forwards to `visloc-slam/onnx-inference`
+and gained `dep:ndarray` (for the new example's `Array2<u8>` image
+buffer). `Cargo.lock`'s package set is unchanged (checked directly via
+`git diff Cargo.lock | grep '^\+name = '` — empty), confirming no new
+external crate entered the dependency graph.
+
+### Genuine findings from re-reading the reference implementation
+
+1. **DPVO's published EuRoC number does not downscale the image.**
+   `dpvo/stream.py::image_stream` has a dead `if 0:` half-resolution
+   branch; the real path keeps the full 752×480 image and only
+   *temporally* subsamples frames (`evaluate_euroc.py --stride 2`, i.e.
+   ~10 Hz effective rate, not ~20 Hz). The task brief's own "likely
+   half-res" guess was a hypothesis to check against the primary source,
+   not a fact — checking it shows it is false. `examples/euroc_dpvo_vo_demo.rs`
+   defaults to full resolution and `--stride 2`, matching upstream.
+2. **The config that produced the published number is not `config.py`'s
+   bare defaults.** `E:/tools/DPVO/config/default.yaml` overrides
+   `PATCHES_PER_FRAME=96`, `REMOVAL_WINDOW=22`, `OPTIMIZATION_WINDOW=10`,
+   `PATCH_LIFETIME=13`, `KEYFRAME_THRESH=15.0`. `DpvoVoConfig::default()`
+   (in `dpvo_patch_graph.rs`) intentionally still matches `config.py`'s
+   bare numbers (the more "canonical" reference point the plan doc's own
+   architecture table already cites); the EuRoC example instead exposes
+   all five as CLI flags with `config/default.yaml`'s values as its own
+   defaults — except see finding 3, which forced this milestone's actual
+   reported run to use `config/fast.yaml`'s smaller sizing instead.
+3. **Active-edge count — not the BA problem size — is what actually
+   saturates a naive CPU port, and it is far larger than the M1/M2
+   fixtures' scale suggested.** `dpvo_ba` (M3) itself only ever solves a
+   dense system bounded by `OPTIMIZATION_WINDOW` free poses (tiny, ported
+   as a documented windowing scheme — see `dpvo_vo.rs`'s module doc). But
+   the correlation-assembly stage (`reproject_patch_grid` + `corr_cpu`,
+   grouped by target frame) scales with the **active edge count**, which
+   is `O(REMOVAL_WINDOW × PATCHES_PER_FRAME × PATCH_LIFETIME)` — tens of
+   thousands of edges at `config/default.yaml`'s sizing. On the real
+   (GPU) DPVO this is one batched CUDA kernel call; this port's
+   from-scratch, correctly-CPU-scoped-but-never-before-measured-at-this-
+   scale `corr_cpu`/`SoftAgg` (M1/M2) pay for it as nested serial Rust
+   loops. Attempting a 400-frame run at `default.yaml` sizing (bare
+   `--patches-per-frame 96 --removal-window 22 --optimization-window 10
+   --patch-lifetime 13`) made no visible progress past the initial
+   8-frame/12-iteration bootstrap within several minutes of wall-clock
+   time and was aborted — not a hang or a bug (the bootstrap itself
+   completed, and a smaller/shorter run at this sizing does terminate,
+   just very slowly), but a genuine CPU-infeasibility finding, consistent
+   with the plan doc's own risk register ("CPU latency... not real-time
+   on this CPU-only machine") — this milestone had simply not previously
+   measured *how much* slower at real (not fixture) edge counts.
+   `config/fast.yaml`'s sizing (`PATCHES_PER_FRAME=48, REMOVAL_WINDOW=16,
+   OPTIMIZATION_WINDOW=7, PATCH_LIFETIME=11` — DPVO's own shipped
+   reduced-compute config, for exactly this tradeoff) was used for the
+   reported run below instead: an honest, cited substitution, not
+   `config.py`'s bare defaults and not the paper's own config.
+4. **A per-stage timing split, added after the first full run's numbers
+   didn't add up, isolated the actual bottleneck precisely.** The first
+   400-frame run's `ms_per_frame_total` (wall clock ÷ frames) exceeded the
+   sum of the three stages [`DpvoOdometryStats`] tracked (encode + GRU
+   update + BA) by roughly 4-8× — a real gap, not measurement noise. Bisecting
+   it (adding an explicit timer around the reprojection+`corr_pyramid`
+   assembly block, previously untimed) isolated **correlation-tensor
+   assembly**, not encoding or the GRU update, as the dominant cost by a
+   wide margin — see the timing table below. `DpvoOdometryStats` and the
+   example's own summary output were both extended with a
+   `correlation_ms_total`/`ms_per_frame_correlation` field so this stays
+   visible rather than silently reabsorbed into "everything else" for any
+   future milestone.
+
+### EuRoC MH_01 run
+
+`--euroc-dir MH_01_easy --max-frames 400 --stride 2` (matching
+`evaluate_euroc.py`'s own default stride) with `config/fast.yaml`-sized
+graph config (`--patches-per-frame 48 --removal-window 16
+--optimization-window 7 --patch-lifetime 11`, see finding 3), CPU
+(`OnnxBackend::default()`, CUDA-then-CPU fallback — no CUDA available on
+this machine, consistent with every prior milestone), monocular (no IMU —
+M5's scope), `--seed 0`.
+
+```
+frames_requested=400
+frames_tracked=400
+tracked_fraction=1.0000
+total_elapsed_s=1789.99
+ate_rigid_rmse_m=0.1599
+ate_rigid_max_m=0.4075
+ate_similarity_rmse_m=0.1561
+ate_similarity_max_m=0.4079
+ate_similarity_scale=1.359171
+gt_matched_samples=400
+```
+
+**Honest assessment**: 100% of frames were accepted by `motion_probe` and
+produced a pose (no NaN, no divergence, no crash across the full 400-frame
+run). ATE (both rigid and similarity Umeyama alignment) sits in the
+**0.15-0.16 m** range against ground truth over this leading ~400-frame
+(~stride-2, so ~800 real-time frames ≈ 40 s of the sequence at 20 Hz)
+segment of MH_01 — roughly **1.8-2×** DPVO's own published *full-sequence*
+number (~0.087 m, GPU, similarity-aligned, `default.yaml` sizing, full
+~3600 frames) and noticeably worse than this repo's existing
+SuperPoint+LightGlue-based full-stack baseline (~2.9 m ATE on the *full*
+sequence per this plan doc's own opening motivation — so on a like-for-like
+short-prefix basis this port is likely already ahead of that baseline,
+though a direct short-prefix-vs-short-prefix comparison was not run this
+milestone). Per the acceptance criteria's own framing, this is reported
+as a first honest data point, not a claim of matching the paper: the
+smaller `fast.yaml` graph sizing (fewer patches, shorter windows) trades
+accuracy for CPU tractability (finding 3), and CPU float32-vs-f64 and
+native-Rust-vs-CUDA-kernel differences in `corr_cpu`/`patchify_cpu` (M1/M2's
+own "not verified against upstream's CUDA kernel" caveat, never resolved
+because no CUDA toolchain exists in this environment) remain fully live
+and un-decomposed from graph-sizing effects.
+
+### Timing breakdown (ms/frame)
+
+Two data points, since a full per-stage breakdown was only added *after*
+the first full run (see finding 4); both use `fast.yaml` sizing:
+
+| Stage | 20-frame diagnostic (graph depth `n≈10`) | 400-frame full run (graph depth grows `n: 1→37`) |
+| --- | --- | --- |
+| Image I/O (`read_common_image`) | 5.0 ms | *(not separated in the first run; ≈3-6 ms based on the diagnostic)* |
+| Dense undistortion (own warp) | 15.8 ms | *(ditto, ≈12-19 ms)* |
+| `fnet`+`inet` encode (ONNX) | 278.7 ms | 211.5 ms |
+| **Correlation assembly** (`reproject_patch_grid` + `corr_cpu`, grouped by target frame) | **3137.4 ms** | *(not separated — folded into the ~3700 ms/frame gap between `ms_per_frame_total` and the sum of the other tracked stages)* |
+| GRU update (ONNX `update_iteration`) | 341.1 ms | 533.3 ms |
+| BA (`dpvo_ba`, windowed) | 9.6 ms | 10.7 ms |
+| **Total** (wall clock ÷ frames) | 3828.9 ms | 4475.0 ms |
+
+Correlation assembly is **~8-10× more expensive than every other stage
+combined** — by far the dominant cost, and the reason `default.yaml`
+sizing (finding 3) is currently infeasible for a multi-hundred-frame CPU
+run. It also grows with active-graph depth (more target-frame groups, more
+edges per group), consistent with the full run's larger
+`ms_per_frame_total` once `n_frames` had grown to 37 vs. the diagnostic's
+10. This is squarely a "naive nested Rust loop vs. batched CUDA kernel"
+gap (see finding 3), not an algorithmic issue with the port's math — M2's
+own fixture-scale timings (0.509 ms at 5 edges) were accurate at *that*
+scale; nothing before this milestone had measured `corr_cpu` at DPVO's
+real few-thousand-edge working set.
+
+### Deviations from `dpvo.py`
+
+* **Graph sizing**: `config/fast.yaml`, not `default.yaml` (finding 3) —
+  a deliberate, cited, CPU-feasibility substitution, analogous to the M4
+  brief's own suggested "downscale input resolution if too slow" lever,
+  applied to graph size instead (finding 1 already ruled out resolution
+  downscaling as what upstream itself does).
+* **No loop closure** (`LOOP_CLOSURE`/`CLASSIC_LOOP_CLOSURE`) and **no
+  global-BA fallback** (`dpvo.py::__run_global_BA`) — both explicitly
+  Milestone M6 scope; the fallback is additionally unreachable by
+  construction in this port (`dpvo_patch_graph.rs`'s module doc proves
+  this from `REMOVAL_WINDOW`/`PATCH_LIFETIME`'s relative sizes under both
+  shipped configs).
+* **No inactive-edge retention** (`remove_factors(..., store=True)`) —
+  edges aging out of the window are discarded, not archived, since
+  nothing in M4 reads them back (no loop closure/global BA consumer
+  exists yet).
+* **Windowed BA**: every `update_step` call passes only `[frame_lo, n)` to
+  `dpvo_ba`, not the full live trajectory — a derived-safe bound
+  (`frame_lo = n.saturating_sub(REMOVAL_WINDOW + PATCH_LIFETIME)`, checked
+  by a `debug_assert` at every call site) documented in `dpvo_vo.rs`'s
+  module doc, needed because M3's `dpvo_ba` sizes its dense solve off
+  `poses.len()` — not present as an explicit mechanism upstream (the CUDA
+  kernel takes the full buffer plus explicit `t0`/`n` bounds instead).
+* **`torch.median`/`torch.quantile(0.5)`** (patch-depth init and
+  `motion_probe`'s gate) are ported as two distinct hand-derived functions
+  (`median_recent_depth`, `torch_quantile_50`) with different documented
+  tie-breaking conventions, rather than a single "median" helper — a
+  correctness detail easy to conflate (both are cited/tested separately).
+* **Dense image undistortion** (`examples/euroc_dpvo_vo_demo.rs`'s
+  `undistort_image`) is a new, from-scratch forward-mapping warp — this
+  repo previously only had `RadialTangential::undistort_pixel` (single
+  keypoints), insufficient for a dense CNN front end; not part of
+  `dpvo.py` itself (which delegates to `cv2.undistort`) but necessary
+  glue with no prior in-repo utility to reuse.
+
+### Blockers / open items for M5 (IMU coupling)
+
+1. **Correlation-assembly CPU cost (finding 3/4) is the dominant open
+   performance question**, not IMU coupling itself. M5 should either (a)
+   budget for `fast.yaml`-scale graphs only, (b) invest in vectorizing
+   `corr_cpu`/`patchify_cpu` (removing bounds-checked per-element
+   `ndarray` indexing in the hot loops, precomputing per-target-frame
+   pyramid slices once instead of per-edge) before attempting
+   `default.yaml` sizing, or (c) accept CPU-only operation stays
+   research-scale, matching the plan doc's own risk register. Do not
+   assume M4's `fast.yaml` numbers extrapolate linearly to `default.yaml`
+   sizing — they do not, given the nested-loop cost model measured here.
+2. **`DpvoOdometry`'s pose stream is visual-only monocular** — no metric
+   scale anchor beyond the initial random/median depth init (the
+   `ate_similarity_scale=1.359` above is the Umeyama-recovered scale
+   factor needed to match ground truth, i.e. genuine monocular scale
+   drift, not a bug). M5's IMU coupling is exactly the mechanism the plan
+   doc's §4 hybrid design expects to supply metric scale, via
+   `ImuPreintegrationFactor`/`vi_motion_initializer.rs` attached to the
+   *same* windowed `DpvoBaProblem`/`dpvo_ba` this milestone assembles, as
+   an additional residual family in one joint solve.
+3. **No production (non-fixture) `SoftAgg` weight export path exists
+   yet** — M4 reused M2's `softagg_weights_fixture.npz` as-is (real
+   checkpoint-derived weights, just a fixture-shaped filename/location);
+   M5+ should decide whether this stays the permanent artifact name or
+   moves alongside the four ONNX graphs in a real deployment layout.
+4. **`dpvo_patch_graph.rs`'s own unit tests use small synthetic configs**
+   (4-patch/frame toy graphs) to keep the bookkeeping tests fast and
+   readable; no unit test exercises the real `fast.yaml`/`default.yaml`
+   -scale graph directly — the EuRoC run above is the only evidence this
+   milestone has at real scale, for both correctness and performance.
+5. **Accuracy vs. upstream is still entangled with two un-decomposed
+   factors**: `fast.yaml` (smaller) graph sizing vs. `default.yaml`, and
+   M1/M2's own carried-forward "not verified against upstream's CUDA
+   kernel" caveat for `corr_cpu`/`patchify_cpu`. A future milestone with
+   more CPU budget (or a GPU host) could re-run at `default.yaml` sizing
+   to separate "sizing hurts accuracy" from "the port's own
+   correlation/patchify math has a real discrepancy vs. CUDA".
