@@ -39,6 +39,10 @@ pub struct LocalizationResult {
     pub inliers: Vec<usize>,
     pub inlier_query_indices: Vec<usize>,
     pub inlier_landmark_ids: Vec<LandmarkId>,
+    /// Matcher confidence aligned with `inlier_query_indices` and
+    /// `inlier_landmark_ids`. `None` means that the frontend supplied no
+    /// confidence signal, not that the correspondence has zero confidence.
+    pub inlier_confidences: Vec<Option<f32>>,
     pub estimator_diagnostics: Option<PoseEstimatorDiagnostics>,
     pub pose_failure_diagnostics: Option<PoseEstimationFailureDiagnostics>,
 }
@@ -52,6 +56,7 @@ pub struct LocalizationSuccess {
     pub inliers: Vec<usize>,
     pub inlier_query_indices: Vec<usize>,
     pub inlier_landmark_ids: Vec<LandmarkId>,
+    pub inlier_confidences: Vec<Option<f32>>,
     pub inlier_reprojection_errors: Vec<f64>,
     pub mean_reprojection_error: f64,
     pub median_reprojection_error: f64,
@@ -107,6 +112,7 @@ impl LocalizationResult {
             inliers: Vec::new(),
             inlier_query_indices: Vec::new(),
             inlier_landmark_ids: Vec::new(),
+            inlier_confidences: Vec::new(),
             estimator_diagnostics: None,
             pose_failure_diagnostics: None,
         }
@@ -120,6 +126,14 @@ impl LocalizationResult {
         } else {
             inlier_count as f64 / success.correspondence_count as f64
         };
+
+        let aligned_correspondence_count = success
+            .inlier_query_indices
+            .len()
+            .min(success.inlier_landmark_ids.len());
+        let mut inlier_confidences = success.inlier_confidences;
+        inlier_confidences.resize(aligned_correspondence_count, None);
+        inlier_confidences.truncate(aligned_correspondence_count);
 
         Self {
             success: true,
@@ -138,6 +152,7 @@ impl LocalizationResult {
             inliers: success.inliers,
             inlier_query_indices: success.inlier_query_indices,
             inlier_landmark_ids: success.inlier_landmark_ids,
+            inlier_confidences,
             estimator_diagnostics: None,
             pose_failure_diagnostics: None,
         }

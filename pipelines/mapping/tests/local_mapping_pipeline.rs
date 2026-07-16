@@ -45,6 +45,7 @@ fn tracking_success(frame_id: u64, pose: Pose) -> TrackingResult {
             inliers: Vec::new(),
             inlier_query_indices: Vec::new(),
             inlier_landmark_ids: Vec::new(),
+            inlier_confidences: Vec::new(),
             inlier_reprojection_errors: Vec::new(),
             mean_reprojection_error: 0.0,
             median_reprojection_error: 0.0,

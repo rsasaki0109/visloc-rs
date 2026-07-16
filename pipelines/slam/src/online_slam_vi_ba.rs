@@ -39,8 +39,8 @@ use visloc_core::geometry::SE3;
 use visloc_core::types::{Camera, VisualMap};
 
 use crate::bundle::{
-    BaConfig, BaCostBreakdown, BaGeneralStereoObservation, BaObservation, BaResult,
-    BiasRandomWalkFactor, BundleAdjustment, NavigationStatePrior,
+    relative_observation_confidence_weights, BaConfig, BaCostBreakdown, BaGeneralStereoObservation,
+    BaObservation, BaResult, BiasRandomWalkFactor, BundleAdjustment, NavigationStatePrior,
 };
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::marginalization::marginalize;
@@ -134,6 +134,10 @@ pub struct OnlineSlamLocalBaConfig {
     /// Optional right-image reprojection gate applied before admitting an
     /// existing stereo observation into the local solve.
     pub general_stereo_max_initial_right_reprojection_error_px: Option<f64>,
+    /// Consume matcher confidence preserved on map observations. Set false to
+    /// run the identical window with uniform visual weights for an A/B
+    /// tracking-cliff ablation.
+    pub use_observation_confidence_weights: bool,
     /// Inner [`BaConfig`] passed straight through to
     /// [`BundleAdjustment::optimize`]. Default uses
     /// [`LinearSolver::Sparse`] to keep the solve cheap on larger windows.
@@ -277,6 +281,7 @@ impl Default for OnlineSlamLocalBaConfig {
             min_observations_per_landmark: 2,
             use_general_stereo_observations: true,
             general_stereo_max_initial_right_reprojection_error_px: Some(5.0),
+            use_observation_confidence_weights: false,
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
                 max_iterations: 10,
@@ -915,150 +920,196 @@ pub fn run_local_vi_ba(
             .as_ref()
             .is_some_and(|prior| prior.keyframe_ids.as_slice() == [anchor_id]);
 
-    let build_ba = |freeze_all_biases: bool| -> Option<(BundleAdjustment, usize, usize)> {
-        let mut ba = BundleAdjustment::new(camera.clone());
-        ba.set_imu_body_to_camera(state.config.body_to_camera.clone());
-        if marginalization_prior_applied {
-            ba.set_navigation_state_prior(state.navigation_prior.clone()?);
-        }
-        for kf_id in &window_ids {
-            let kf = map.keyframes.get(kf_id)?;
-            let pose = kf.frame.pose.clone()?;
-            ba.add_pose(*kf_id, pose);
-            if *kf_id == anchor_id && !marginalization_prior_applied {
-                ba.fix_pose(*kf_id);
+    let build_ba =
+        |freeze_all_biases: bool| -> Option<(BundleAdjustment, usize, usize, Option<Vec<f64>>)> {
+            let mut ba = BundleAdjustment::new(camera.clone());
+            ba.set_imu_body_to_camera(state.config.body_to_camera.clone());
+            if marginalization_prior_applied {
+                ba.set_navigation_state_prior(state.navigation_prior.clone()?);
             }
-        }
-        for kf_id in &window_ids {
-            if let Some(per_kf) = state.keyframe_state.get(kf_id) {
-                ba.add_velocity(*kf_id, per_kf.velocity_world);
-                let bias = Vector6::new(
-                    per_kf.bias_gyro.x,
-                    per_kf.bias_gyro.y,
-                    per_kf.bias_gyro.z,
-                    per_kf.bias_acc.x,
-                    per_kf.bias_acc.y,
-                    per_kf.bias_acc.z,
-                );
-                ba.add_bias(*kf_id, bias);
-                if *kf_id == anchor_id && !marginalization_prior_applied {
-                    ba.fix_velocity(*kf_id);
-                    ba.fix_bias(*kf_id);
-                } else if freeze_all_biases {
-                    ba.fix_bias(*kf_id);
-                }
-            }
-        }
-        if state.config.bias_random_walk_noise_densities.is_some()
-            || state.config.bias_random_walk_weights.is_some()
-        {
-            for factor in &in_window_factors {
-                let (weight_gyro, weight_accel) = if let Some((sigma_gyro, sigma_accel)) =
-                    state.config.bias_random_walk_noise_densities
-                {
-                    bias_random_walk_information(
-                        (sigma_gyro, sigma_accel),
-                        factor.delta.delta_time,
-                    )?
-                } else {
-                    state
-                        .config
-                        .bias_random_walk_weights
-                        .expect("fixed weights were checked above")
-                };
-                ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
-                    keyframe_id_from: factor.keyframe_id_from,
-                    keyframe_id_to: factor.keyframe_id_to,
-                    weight_gyro,
-                    weight_accel,
-                });
-            }
-        }
-        let mut observation_count = 0usize;
-        let mut stereo_observation_count = 0usize;
-        for landmark_id in &active_landmarks {
-            let Some(landmark) = map.landmarks.get(landmark_id) else {
-                continue;
-            };
-            ba.add_landmark(*landmark_id, landmark.position);
             for kf_id in &window_ids {
                 let kf = map.keyframes.get(kf_id)?;
-                let pose = ba.poses.get(kf_id)?.clone();
-                for obs in &kf.observations {
-                    if obs.landmark_id == *landmark_id {
-                        let stereo = state
+                let pose = kf.frame.pose.clone()?;
+                ba.add_pose(*kf_id, pose);
+                if *kf_id == anchor_id && !marginalization_prior_applied {
+                    ba.fix_pose(*kf_id);
+                }
+            }
+            for kf_id in &window_ids {
+                if let Some(per_kf) = state.keyframe_state.get(kf_id) {
+                    ba.add_velocity(*kf_id, per_kf.velocity_world);
+                    let bias = Vector6::new(
+                        per_kf.bias_gyro.x,
+                        per_kf.bias_gyro.y,
+                        per_kf.bias_gyro.z,
+                        per_kf.bias_acc.x,
+                        per_kf.bias_acc.y,
+                        per_kf.bias_acc.z,
+                    );
+                    ba.add_bias(*kf_id, bias);
+                    if *kf_id == anchor_id && !marginalization_prior_applied {
+                        ba.fix_velocity(*kf_id);
+                        ba.fix_bias(*kf_id);
+                    } else if freeze_all_biases {
+                        ba.fix_bias(*kf_id);
+                    }
+                }
+            }
+            if state.config.bias_random_walk_noise_densities.is_some()
+                || state.config.bias_random_walk_weights.is_some()
+            {
+                for factor in &in_window_factors {
+                    let (weight_gyro, weight_accel) = if let Some((sigma_gyro, sigma_accel)) =
+                        state.config.bias_random_walk_noise_densities
+                    {
+                        bias_random_walk_information(
+                            (sigma_gyro, sigma_accel),
+                            factor.delta.delta_time,
+                        )?
+                    } else {
+                        state
                             .config
-                            .use_general_stereo_observations
-                            .then(|| {
-                                map.stereo_observations
-                                    .iter()
-                                    .find(|stereo| {
-                                        stereo.frame_id == *kf_id
-                                            && stereo.landmark_id == *landmark_id
-                                    })
-                                    .and_then(|stereo| {
-                                        map.cameras
-                                            .get(&stereo.right_camera_id)
-                                            .map(|right_camera| (stereo, right_camera))
-                                    })
-                                    .filter(|(stereo, right_camera)| {
-                                        let Some(max_error) = state
+                            .bias_random_walk_weights
+                            .expect("fixed weights were checked above")
+                    };
+                    ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
+                        keyframe_id_from: factor.keyframe_id_from,
+                        keyframe_id_to: factor.keyframe_id_to,
+                        weight_gyro,
+                        weight_accel,
+                    });
+                }
+            }
+            let mut observation_count = 0usize;
+            let mut stereo_observation_count = 0usize;
+            let mut mono_confidences = Vec::new();
+            let mut general_stereo_confidences = Vec::new();
+            for landmark_id in &active_landmarks {
+                let Some(landmark) = map.landmarks.get(landmark_id) else {
+                    continue;
+                };
+                ba.add_landmark(*landmark_id, landmark.position);
+                for kf_id in &window_ids {
+                    let kf = map.keyframes.get(kf_id)?;
+                    let pose = ba.poses.get(kf_id)?.clone();
+                    for obs in &kf.observations {
+                        if obs.landmark_id == *landmark_id {
+                            let stereo = state
+                                .config
+                                .use_general_stereo_observations
+                                .then(|| {
+                                    map.stereo_observations
+                                        .iter()
+                                        .find(|stereo| {
+                                            stereo.frame_id == *kf_id
+                                                && stereo.landmark_id == *landmark_id
+                                        })
+                                        .and_then(|stereo| {
+                                            map.cameras
+                                                .get(&stereo.right_camera_id)
+                                                .map(|right_camera| (stereo, right_camera))
+                                        })
+                                        .filter(|(stereo, right_camera)| {
+                                            let Some(max_error) = state
                                             .config
                                             .general_stereo_max_initial_right_reprojection_error_px
                                         else {
                                             return true;
                                         };
-                                        if !max_error.is_finite() || max_error <= 0.0 {
-                                            return false;
-                                        }
-                                        let point_left =
-                                            pose.transform_world_point(&landmark.position);
-                                        right_camera
-                                            .project(
-                                                &stereo.left_to_right.transform_point(&point_left),
-                                            )
-                                            .is_some_and(|predicted| {
-                                                (predicted - stereo.xy_right).norm() <= max_error
-                                            })
-                                    })
-                            })
-                            .flatten();
-                        if let Some((stereo, right_camera)) = stereo {
-                            ba.add_general_stereo_observation(BaGeneralStereoObservation {
-                                keyframe_id: *kf_id,
-                                landmark_id: *landmark_id,
-                                xy_left: obs.xy,
-                                xy_right: stereo.xy_right,
-                                right_camera: right_camera.clone(),
-                                left_to_right: stereo.left_to_right.clone(),
-                            });
-                            stereo_observation_count += 1;
-                        } else {
-                            ba.add_observation(BaObservation {
-                                keyframe_id: *kf_id,
-                                landmark_id: *landmark_id,
-                                xy: obs.xy,
-                            });
+                                            if !max_error.is_finite() || max_error <= 0.0 {
+                                                return false;
+                                            }
+                                            let point_left =
+                                                pose.transform_world_point(&landmark.position);
+                                            right_camera
+                                                .project(
+                                                    &stereo
+                                                        .left_to_right
+                                                        .transform_point(&point_left),
+                                                )
+                                                .is_some_and(|predicted| {
+                                                    (predicted - stereo.xy_right).norm()
+                                                        <= max_error
+                                                })
+                                        })
+                                })
+                                .flatten();
+                            if let Some((stereo, right_camera)) = stereo {
+                                ba.add_general_stereo_observation(BaGeneralStereoObservation {
+                                    keyframe_id: *kf_id,
+                                    landmark_id: *landmark_id,
+                                    xy_left: obs.xy,
+                                    xy_right: stereo.xy_right,
+                                    right_camera: right_camera.clone(),
+                                    left_to_right: stereo.left_to_right.clone(),
+                                });
+                                let confidence = state
+                                    .config
+                                    .use_observation_confidence_weights
+                                    .then(|| map.observation_confidence(obs))
+                                    .flatten();
+                                general_stereo_confidences.push(confidence);
+                                stereo_observation_count += 1;
+                            } else {
+                                ba.add_observation(BaObservation {
+                                    keyframe_id: *kf_id,
+                                    landmark_id: *landmark_id,
+                                    xy: obs.xy,
+                                });
+                                let confidence = state
+                                    .config
+                                    .use_observation_confidence_weights
+                                    .then(|| map.observation_confidence(obs))
+                                    .flatten();
+                                mono_confidences.push(confidence);
+                            }
+                            observation_count += 1;
                         }
-                        observation_count += 1;
                     }
                 }
             }
-        }
-        for factor in &in_window_factors {
-            ba.add_imu_factor(factor.clone());
-        }
-        Some((ba, observation_count, stereo_observation_count))
-    };
+            for factor in &in_window_factors {
+                ba.add_imu_factor(factor.clone());
+            }
+            let observation_weights = relative_observation_confidence_weights(
+                mono_confidences
+                    .into_iter()
+                    .chain(general_stereo_confidences),
+            );
+            Some((
+                ba,
+                observation_count,
+                stereo_observation_count,
+                observation_weights,
+            ))
+        };
 
     let imu_factor_count = in_window_factors.len();
-    let (mut ba, observation_count, stereo_observation_count) = build_ba(false)?;
-    let mut initial_cost_breakdown = ba.cost_breakdown(&state.config.ba_config.robust_kernel);
-    let mut ba_result = match ba.optimize(&state.config.ba_config) {
+    let (mut ba, observation_count, stereo_observation_count, observation_weights) =
+        build_ba(false)?;
+    let cost_breakdown = |problem: &BundleAdjustment, weights: Option<&[f64]>| {
+        weights.map_or_else(
+            || Some(problem.cost_breakdown(&state.config.ba_config.robust_kernel)),
+            |weights| {
+                problem
+                    .cost_breakdown_with_observation_weights(
+                        &state.config.ba_config.robust_kernel,
+                        weights,
+                    )
+                    .ok()
+            },
+        )
+    };
+    let mut initial_cost_breakdown = cost_breakdown(&ba, observation_weights.as_deref())?;
+    let weighted_result = match observation_weights.as_deref() {
+        Some(weights) => ba.optimize_with_observation_weights(&state.config.ba_config, weights),
+        None => ba.optimize(&state.config.ba_config),
+    };
+    let mut ba_result = match weighted_result {
         Ok(result) => result,
         Err(_) => return None,
     };
-    let mut final_cost_breakdown = ba.cost_breakdown(&state.config.ba_config.robust_kernel);
+    let mut final_cost_breakdown = cost_breakdown(&ba, observation_weights.as_deref())?;
 
     // Conditioning fallback: if the joint pose + velocity + bias solve
     // failed to bring the cost down enough, the bias updates are not
@@ -1069,13 +1120,19 @@ pub fn run_local_vi_ba(
     if let Some(threshold) = state.config.freeze_biases_when_cost_ratio_above {
         let ratio = ba_cost_ratio(&ba_result);
         if ratio > threshold {
-            let (mut ba_frozen, _, _) = build_ba(true)?;
+            let (mut ba_frozen, _, _, frozen_observation_weights) = build_ba(true)?;
             let frozen_initial_cost_breakdown =
-                ba_frozen.cost_breakdown(&state.config.ba_config.robust_kernel);
-            match ba_frozen.optimize(&state.config.ba_config) {
+                cost_breakdown(&ba_frozen, frozen_observation_weights.as_deref())?;
+            let frozen_result = match frozen_observation_weights.as_deref() {
+                Some(weights) => {
+                    ba_frozen.optimize_with_observation_weights(&state.config.ba_config, weights)
+                }
+                None => ba_frozen.optimize(&state.config.ba_config),
+            };
+            match frozen_result {
                 Ok(result) => {
                     let frozen_final_cost_breakdown =
-                        ba_frozen.cost_breakdown(&state.config.ba_config.robust_kernel);
+                        cost_breakdown(&ba_frozen, frozen_observation_weights.as_deref())?;
                     ba = ba_frozen;
                     ba_result = result;
                     initial_cost_breakdown = frozen_initial_cost_breakdown;
@@ -1238,9 +1295,10 @@ pub fn run_local_vi_ba(
 }
 
 /// Per-trigger inertial-only BA outcome, returned by
-/// [`run_inertial_only_vi_ba`]. Mirrors [`OnlineSlamLocalBaStats`] but
-/// drops the landmark / observation counters (always zero for the
-/// inertial-only path) and replaces them with the keyframe count.
+/// [`run_inertial_only_vi_ba`] / [`run_inertial_only_vi_ba_with_options`].
+/// Mirrors [`OnlineSlamLocalBaStats`] but drops the landmark / observation
+/// counters (always zero for the inertial-only path) and replaces them with
+/// the keyframe count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InertialOnlyViBaStats {
     /// Sorted keyframe ids included in this solve.
@@ -1280,12 +1338,55 @@ pub struct InertialOnlyViBaStats {
 /// * no IMU factor fully sits inside the keyframe set,
 /// * any keyframe is missing its pose, or
 /// * the LM solver itself fails (singular system, etc.).
+///
+/// Thin wrapper over [`run_inertial_only_vi_ba_with_options`] with
+/// `solve_bias = true` — this entry point's public signature/behaviour is
+/// unchanged; see the sibling function for the bias-fixed "velocity stage"
+/// mode used by [`crate::vi_motion_initializer::BiasReleaseSchedule`].
 pub fn run_inertial_only_vi_ba(
     map: &mut VisualMap,
     keyframe_ids: &[u64],
     factors: &[ImuPreintegrationFactor],
     initial_states: &BTreeMap<u64, KeyframeImuState>,
     ba_config: &crate::bundle::BaConfig,
+) -> Option<InertialOnlyViBaStats> {
+    run_inertial_only_vi_ba_with_options(map, keyframe_ids, factors, initial_states, ba_config, true)
+}
+
+/// [`run_inertial_only_vi_ba`] with an explicit `solve_bias` switch.
+///
+/// `solve_bias = true` reproduces `run_inertial_only_vi_ba` exactly (the
+/// public entry point is now a thin wrapper around this function). `solve_bias
+/// = false` is the "velocity stage" half of
+/// [`crate::vi_motion_initializer::BiasReleaseSchedule`]'s staged bias
+/// release: every keyframe's bias slot is added at the caller-supplied seed
+/// and then immediately gauge-fixed via [`BundleAdjustment::fix_bias`], so the
+/// LM solve can only move per-keyframe velocities (and, indirectly, the
+/// residual's rotation/position terms through the fixed poses). The
+/// [`BiasRandomWalkFactor`] equality ties that keep adjacent bias slots
+/// coherent are skipped in this mode: they exist to prevent per-keyframe bias
+/// drift on a *free* bias, which is meaningless when every slot is already
+/// pinned to the same fixed value.
+///
+/// Motivation (see `docs/motion_based_vi_alignment.md`): firing the VIBA1
+/// solve with bias free from the very first keyframe, over a short
+/// (~3-keyframe) window, on a moving-start EuRoC sequence let the recovered
+/// accelerometer bias diverge to magnitudes around 12 m/s² — the window
+/// simply does not carry enough independent excitation to identify bias
+/// safely yet. Holding bias fixed and only refining velocity is the
+/// well-conditioned partial solve for that regime; the caller graduates to
+/// `solve_bias = true` once more excitation has accumulated.
+///
+/// The returned [`InertialOnlyViBaStats::keyframe_states`] carries the seed
+/// biases back out **unchanged** (down to solver floating-point noise) when
+/// `solve_bias = false`, with refined velocities.
+pub fn run_inertial_only_vi_ba_with_options(
+    map: &mut VisualMap,
+    keyframe_ids: &[u64],
+    factors: &[ImuPreintegrationFactor],
+    initial_states: &BTreeMap<u64, KeyframeImuState>,
+    ba_config: &crate::bundle::BaConfig,
+    solve_bias: bool,
 ) -> Option<InertialOnlyViBaStats> {
     if keyframe_ids.len() < 2 {
         return None;
@@ -1330,6 +1431,14 @@ pub fn run_inertial_only_vi_ba(
         ba.add_velocity(*kf_id, velocity);
         let bias = Vector6::new(bias_g.x, bias_g.y, bias_g.z, bias_a.x, bias_a.y, bias_a.z);
         ba.add_bias(*kf_id, bias);
+        if !solve_bias {
+            // Velocity stage: gauge-fix every bias slot at the seed value.
+            // The LM solve can then only move velocities (and, through the
+            // fixed poses, the IMU residual's rotation/position terms),
+            // which is exactly the well-conditioned partial solve this mode
+            // exists for.
+            ba.fix_bias(*kf_id);
+        }
     }
     // The inertial-only initialization paper estimates one shared gyro/accel
     // bias over the short window. The generic BA owns one slot per keyframe,
@@ -1337,30 +1446,36 @@ pub fn run_inertial_only_vi_ba(
     // A fixed 1e8 penalty was not invariant to covariance whitening: EuRoC
     // factors can carry 1e10..1e12 information, making that supposedly "hard"
     // equality weak enough for 0.1 rad/s inter-keyframe bias drift.
-    let strongest_factor_information = in_window_factors
-        .iter()
-        .map(|factor| {
-            factor
-                .covariance_sqrt_information()
-                .map(|whitener| whitener.norm_squared())
-                .unwrap_or_else(|| {
-                    factor
-                        .weight_rotation
-                        .max(factor.weight_velocity)
-                        .max(factor.weight_position)
-                })
-        })
-        .fold(1.0_f64, f64::max);
-    let shared_bias_equality_weight = (strongest_factor_information * 1.0e4)
-        .max(1.0e8)
-        .min(1.0e20);
-    for pair in sorted_ids.windows(2) {
-        ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
-            keyframe_id_from: pair[0],
-            keyframe_id_to: pair[1],
-            weight_gyro: shared_bias_equality_weight,
-            weight_accel: shared_bias_equality_weight,
-        });
+    //
+    // Skipped entirely when `solve_bias == false`: every bias slot is already
+    // gauge-fixed at the same seed value above, so an equality tie between
+    // fixed slots contributes nothing but wasted Jacobian rows.
+    if solve_bias {
+        let strongest_factor_information = in_window_factors
+            .iter()
+            .map(|factor| {
+                factor
+                    .covariance_sqrt_information()
+                    .map(|whitener| whitener.norm_squared())
+                    .unwrap_or_else(|| {
+                        factor
+                            .weight_rotation
+                            .max(factor.weight_velocity)
+                            .max(factor.weight_position)
+                    })
+            })
+            .fold(1.0_f64, f64::max);
+        let shared_bias_equality_weight = (strongest_factor_information * 1.0e4)
+            .max(1.0e8)
+            .min(1.0e20);
+        for pair in sorted_ids.windows(2) {
+            ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
+                keyframe_id_from: pair[0],
+                keyframe_id_to: pair[1],
+                weight_gyro: shared_bias_equality_weight,
+                weight_accel: shared_bias_equality_weight,
+            });
+        }
     }
 
     let imu_factor_count = in_window_factors.len();
@@ -1789,6 +1904,104 @@ mod tests {
                 pair[0],
                 pair[1]
             );
+        }
+    }
+
+    #[test]
+    fn solve_bias_false_fixes_bias_exactly_while_velocity_still_converges() {
+        // Same 3-keyframe / 2-factor constant-velocity fixture used by
+        // `covariance_whitened_initializer_keeps_bias_shared_across_keyframes`
+        // above, but seeded with a nonzero bias and zero velocity, then
+        // solved with `solve_bias = false`. The camera centers move by
+        // exactly (0, 0, -1) per 1-second hop (see `build_three_keyframe_map`),
+        // so the position residual (which depends on the FIXED poses, not on
+        // bias) pulls every keyframe's velocity to that same value from the
+        // zero seed, while the bias slots — gauge-fixed at the seed — must
+        // come back completely unchanged.
+        let mut map = build_three_keyframe_map();
+        let f1 = constant_velocity_factor(10, 20, 1.0);
+        let f2 = constant_velocity_factor(20, 30, 1.0);
+
+        let seed_bias_gyro = Vector3::new(0.01, -0.02, 0.03);
+        let seed_bias_acc = Vector3::new(0.05, 0.04, -0.03);
+        let mut initial_states = BTreeMap::new();
+        for kf_id in [10u64, 20, 30] {
+            initial_states.insert(
+                kf_id,
+                KeyframeImuState {
+                    velocity_world: Vector3::zeros(),
+                    bias_gyro: seed_bias_gyro,
+                    bias_acc: seed_bias_acc,
+                },
+            );
+        }
+
+        let result = run_inertial_only_vi_ba_with_options(
+            &mut map,
+            &[10, 20, 30],
+            &[f1, f2],
+            &initial_states,
+            &BaConfig::default(),
+            false,
+        )
+        .expect("velocity-only solve must converge");
+
+        let expected_velocity = Vector3::new(0.0, 0.0, -1.0);
+        for (kf_id, state) in &result.keyframe_states {
+            assert!(
+                (state.bias_gyro - seed_bias_gyro).norm() < 1.0e-12,
+                "kf {kf_id}: gyro bias moved despite solve_bias=false: {:?}",
+                state.bias_gyro
+            );
+            assert!(
+                (state.bias_acc - seed_bias_acc).norm() < 1.0e-12,
+                "kf {kf_id}: accel bias moved despite solve_bias=false: {:?}",
+                state.bias_acc
+            );
+            assert!(
+                (state.velocity_world - expected_velocity).norm() < 1.0e-6,
+                "kf {kf_id}: velocity failed to converge: {:?}",
+                state.velocity_world
+            );
+        }
+    }
+
+    #[test]
+    fn solve_bias_true_path_matches_public_wrapper() {
+        // `run_inertial_only_vi_ba_with_options(.., solve_bias = true)` must
+        // reproduce `run_inertial_only_vi_ba` exactly — the public entry
+        // point is now a thin wrapper around the options function.
+        let mut map_a = build_three_keyframe_map();
+        let mut map_b = map_a.clone();
+        let f1 = constant_velocity_factor(10, 20, 1.0);
+        let f2 = constant_velocity_factor(20, 30, 1.0);
+
+        let via_wrapper = run_inertial_only_vi_ba(
+            &mut map_a,
+            &[10, 20, 30],
+            &[f1.clone(), f2.clone()],
+            &BTreeMap::new(),
+            &BaConfig::default(),
+        )
+        .expect("wrapper solve");
+        let via_options = run_inertial_only_vi_ba_with_options(
+            &mut map_b,
+            &[10, 20, 30],
+            &[f1, f2],
+            &BTreeMap::new(),
+            &BaConfig::default(),
+            true,
+        )
+        .expect("explicit solve_bias=true solve");
+
+        assert_eq!(via_wrapper.keyframe_ids, via_options.keyframe_ids);
+        assert_eq!(via_wrapper.imu_factor_count, via_options.imu_factor_count);
+        for kf_id in &via_wrapper.keyframe_ids {
+            let a = &via_wrapper.keyframe_states[kf_id];
+            let b = &via_options.keyframe_states[kf_id];
+            assert!((a.velocity_world - b.velocity_world).norm() < 1.0e-12);
+            assert!((a.bias_gyro - b.bias_gyro).norm() < 1.0e-12);
+            assert!((a.bias_acc - b.bias_acc).norm() < 1.0e-12);
         }
     }
 

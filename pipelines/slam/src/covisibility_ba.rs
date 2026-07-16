@@ -12,8 +12,9 @@ use nalgebra::Vector3;
 use visloc_core::types::{Camera, FrameId, LandmarkId, Observation, VisualMap};
 
 use crate::{
-    BaConfig, BaError, BaGeneralStereoObservation, BaObservation, BaResult, BundleAdjustment,
-    LinearSolver, PositionPrior, PositionPriorObservation, RobustKernel,
+    bundle::relative_observation_confidence_weights, BaConfig, BaError, BaGeneralStereoObservation,
+    BaObservation, BaResult, BundleAdjustment, LinearSolver, PositionPrior,
+    PositionPriorObservation, RobustKernel,
 };
 
 /// A keyframe ranked by how many selected landmarks it shares.
@@ -109,6 +110,10 @@ pub struct CovisibilityLocalBaConfig {
     /// sidecars. Stale or incorrectly associated right measurements fall back
     /// to the ordinary monocular factor instead of entering BA.
     pub general_stereo_max_initial_right_reprojection_error_px: Option<f64>,
+    /// Consume optional frontend matcher confidence stored on map
+    /// observations. Disable for the classical-only side of a weighting
+    /// ablation; observations without a score always remain weight `1`.
+    pub use_observation_confidence_weights: bool,
     /// Optional gauge/global-anchoring prior weight. When `Some(w)` with a
     /// finite `w > 0`, every optimized (non-fixed) keyframe in the window gets
     /// an absolute camera-center prior pulling it toward its pre-BA (tracking)
@@ -139,6 +144,7 @@ impl Default for CovisibilityLocalBaConfig {
             remove_outlier_observations: false,
             use_general_stereo_observations: false,
             general_stereo_max_initial_right_reprojection_error_px: Some(5.0),
+            use_observation_confidence_weights: false,
             pose_anchor_prior_weight: None,
             ba_config: BaConfig {
                 max_iterations: 12,
@@ -338,6 +344,22 @@ pub fn select_covisibility_local_ba_window(
     active_keyframe_id: FrameId,
     config: &CovisibilityLocalBaConfig,
 ) -> Result<CovisibilityLocalBaSelection, CovisibilityLocalBaError> {
+    select_covisibility_local_ba_window_with_neighbor_allowlist(
+        map,
+        active_keyframe_id,
+        config,
+        None,
+    )
+}
+
+/// Select a local-BA window while restricting variable neighbor keyframes to
+/// an upstream active-factor set. Fixed boundary anchors remain unrestricted.
+pub fn select_covisibility_local_ba_window_with_neighbor_allowlist(
+    map: &VisualMap,
+    active_keyframe_id: FrameId,
+    config: &CovisibilityLocalBaConfig,
+    neighbor_allowlist: Option<&BTreeSet<FrameId>>,
+) -> Result<CovisibilityLocalBaSelection, CovisibilityLocalBaError> {
     let active_kf = map.keyframes.get(&active_keyframe_id).ok_or(
         CovisibilityLocalBaError::ActiveKeyframeMissing(active_keyframe_id),
     )?;
@@ -367,6 +389,9 @@ pub fn select_covisibility_local_ba_window(
         config.min_shared_landmarks,
         None,
     );
+    if let Some(allowlist) = neighbor_allowlist {
+        neighbor_candidates.retain(|candidate| allowlist.contains(&candidate.keyframe_id));
+    }
     let mut neighbor_ids: Vec<FrameId> = neighbor_candidates
         .iter()
         .take(config.max_neighbor_keyframes)
@@ -478,7 +503,29 @@ pub fn refine_visual_map_with_covisibility_ba(
     active_keyframe_id: FrameId,
     config: &CovisibilityLocalBaConfig,
 ) -> Result<CovisibilityLocalBaResult, CovisibilityLocalBaError> {
-    let selection = select_covisibility_local_ba_window(map, active_keyframe_id, config)?;
+    refine_visual_map_with_covisibility_ba_and_neighbor_allowlist(
+        map,
+        active_keyframe_id,
+        config,
+        None,
+    )
+}
+
+/// Run covisibility BA with variable neighbors admitted by the active sparse
+/// factor graph. Boundary anchors outside the allowlist still constrain the
+/// solve and therefore preserve the local/global gauge relationship.
+pub fn refine_visual_map_with_covisibility_ba_and_neighbor_allowlist(
+    map: &mut VisualMap,
+    active_keyframe_id: FrameId,
+    config: &CovisibilityLocalBaConfig,
+    neighbor_allowlist: Option<&BTreeSet<FrameId>>,
+) -> Result<CovisibilityLocalBaResult, CovisibilityLocalBaError> {
+    let selection = select_covisibility_local_ba_window_with_neighbor_allowlist(
+        map,
+        active_keyframe_id,
+        config,
+        neighbor_allowlist,
+    )?;
     let active_camera = map
         .keyframes
         .get(&selection.active_keyframe_id)
@@ -495,9 +542,13 @@ pub fn refine_visual_map_with_covisibility_ba(
         ))?
         .clone();
 
-    let mut ba = build_ba_from_selection(map, &camera, &selection, config)?;
+    let (mut ba, observation_weights) = build_ba_from_selection(map, &camera, &selection, config)?;
     let mean_reprojection_before_px = mean_reprojection_px(&ba);
-    let ba_result = ba.optimize(&config.ba_config)?;
+    let ba_result = if let Some(weights) = observation_weights.as_deref() {
+        ba.optimize_with_observation_weights(&config.ba_config, weights)?
+    } else {
+        ba.optimize(&config.ba_config)?
+    };
     let mean_reprojection_after_px = mean_reprojection_px(&ba);
     let mut max_pose_translation_correction_m = 0.0_f64;
     let mut max_pose_rotation_correction_rad = 0.0_f64;
@@ -586,8 +637,10 @@ fn build_ba_from_selection(
     camera: &Camera,
     selection: &CovisibilityLocalBaSelection,
     config: &CovisibilityLocalBaConfig,
-) -> Result<BundleAdjustment, CovisibilityLocalBaError> {
+) -> Result<(BundleAdjustment, Option<Vec<f64>>), CovisibilityLocalBaError> {
     let mut ba = BundleAdjustment::new(camera.clone());
+    let mut mono_confidences = Vec::new();
+    let mut general_stereo_confidences = Vec::new();
 
     for keyframe_id in &selection.optimized_keyframe_ids {
         let keyframe = map.keyframes.get(keyframe_id).ok_or(
@@ -688,12 +741,22 @@ fn build_ba_from_selection(
                         right_camera: right_camera.clone(),
                         left_to_right: stereo.left_to_right.clone(),
                     });
+                    let confidence = config
+                        .use_observation_confidence_weights
+                        .then(|| map.observation_confidence(obs))
+                        .flatten();
+                    general_stereo_confidences.push(confidence);
                 } else {
                     ba.add_observation(BaObservation {
                         keyframe_id: obs.frame_id,
                         landmark_id: obs.landmark_id,
                         xy: obs.xy,
                     });
+                    let confidence = config
+                        .use_observation_confidence_weights
+                        .then(|| map.observation_confidence(obs))
+                        .flatten();
+                    mono_confidences.push(confidence);
                 }
             }
         }
@@ -721,7 +784,12 @@ fn build_ba_from_selection(
         }
     }
 
-    Ok(ba)
+    let observation_weights = relative_observation_confidence_weights(
+        mono_confidences
+            .into_iter()
+            .chain(general_stereo_confidences),
+    );
+    Ok((ba, observation_weights))
 }
 
 fn observed_landmark_set(observations: &[Observation], map: &VisualMap) -> BTreeSet<LandmarkId> {
@@ -1114,6 +1182,22 @@ fn remove_observations(map: &mut VisualMap, outliers: &BTreeSet<ObservationKey>)
     if outliers.is_empty() {
         return 0;
     }
+    let confidence_observations = map
+        .keyframes
+        .values()
+        .flat_map(|keyframe| keyframe.observations.iter())
+        .filter(|obs| {
+            outliers.contains(&ObservationKey {
+                frame_id: obs.frame_id,
+                landmark_id: obs.landmark_id,
+                keypoint_index: obs.keypoint_index,
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for observation in &confidence_observations {
+        map.remove_observation_confidence(observation);
+    }
     let mut removed = 0usize;
     for keyframe in map.keyframes.values_mut() {
         let before = keyframe.observations.len();
@@ -1257,6 +1341,33 @@ mod tests {
     }
 
     #[test]
+    fn sparse_factor_allowlist_controls_variable_neighbors_not_fixed_boundary() {
+        let (map, _) = synthetic_map();
+        let config = CovisibilityLocalBaConfig {
+            max_neighbor_keyframes: 3,
+            min_shared_landmarks: 1,
+            max_boundary_keyframes: 3,
+            min_boundary_observations: 1,
+            min_observations_per_landmark: 2,
+            ..CovisibilityLocalBaConfig::default()
+        };
+        let allowlist = BTreeSet::from([1]);
+
+        let selection = select_covisibility_local_ba_window_with_neighbor_allowlist(
+            &map,
+            2,
+            &config,
+            Some(&allowlist),
+        )
+        .unwrap();
+
+        assert_eq!(selection.optimized_keyframe_ids, vec![2, 1]);
+        assert_eq!(selection.neighbor_candidates.len(), 1);
+        assert_eq!(selection.neighbor_candidates[0].keyframe_id, 1);
+        assert_eq!(selection.fixed_keyframe_ids, vec![0, 3]);
+    }
+
+    #[test]
     fn bundle_builder_uses_general_stereo_instead_of_double_counting_left_pixel() {
         let (mut map, _) = synthetic_map();
         let right_camera = Camera::pinhole(2, 640, 480, 325.0, 315.0, 318.0, 242.0);
@@ -1287,18 +1398,82 @@ mod tests {
             ..CovisibilityLocalBaConfig::default()
         };
         let selection = select_covisibility_local_ba_window(&map, 2, &config).unwrap();
-        let ba = build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
-            .unwrap();
+        let (ba, _) =
+            build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
+                .unwrap();
 
         assert_eq!(ba.general_stereo_observations.len(), 1);
         assert_eq!(ba.observations.len(), selection.observation_count - 1);
 
         map.stereo_observations[0].xy_right.x += 100.0;
-        let gated =
+        let (gated, _) =
             build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
                 .unwrap();
         assert!(gated.general_stereo_observations.is_empty());
         assert_eq!(gated.observations.len(), selection.observation_count);
+    }
+
+    #[test]
+    fn bundle_builder_preserves_map_confidence_in_ba_flattened_order() {
+        let (mut map, _) = synthetic_map();
+        let scored_observation = map.keyframes[&2]
+            .observations
+            .iter()
+            .find(|observation| observation.landmark_id == 0)
+            .cloned()
+            .unwrap();
+        let strong_observation = map.keyframes[&2]
+            .observations
+            .iter()
+            .find(|observation| observation.landmark_id == 1)
+            .cloned()
+            .unwrap();
+        assert!(map.set_observation_confidence(&scored_observation, 0.2));
+        assert!(map.set_observation_confidence(&strong_observation, 0.8));
+        let config = CovisibilityLocalBaConfig {
+            max_neighbor_keyframes: 1,
+            min_shared_landmarks: 1,
+            max_boundary_keyframes: 2,
+            min_boundary_observations: 1,
+            min_observations_per_landmark: 2,
+            use_observation_confidence_weights: true,
+            ..CovisibilityLocalBaConfig::default()
+        };
+        let selection = select_covisibility_local_ba_window(&map, 2, &config).unwrap();
+        let (ba, weights) =
+            build_ba_from_selection(&map, map.cameras.get(&1).unwrap(), &selection, &config)
+                .unwrap();
+        let weights = weights.expect("learned confidence should activate weighting");
+        let index = ba
+            .observations
+            .iter()
+            .position(|observation| observation.keyframe_id == 2 && observation.landmark_id == 0)
+            .unwrap();
+        let strong_index = ba
+            .observations
+            .iter()
+            .position(|observation| observation.keyframe_id == 2 && observation.landmark_id == 1)
+            .unwrap();
+
+        assert_eq!(weights.len(), ba.observations.len());
+        assert!((weights[index] - 0.4).abs() < 1.0e-6);
+        assert!((weights[strong_index] - 1.6).abs() < 1.0e-6);
+        assert!(weights.iter().enumerate().all(|(other, weight)| {
+            other == index || other == strong_index || (*weight - 1.0).abs() < f64::EPSILON
+        }));
+
+        let uniform_config = CovisibilityLocalBaConfig {
+            use_observation_confidence_weights: false,
+            ..config
+        };
+        let (_, uniform_weights) = build_ba_from_selection(
+            &map,
+            map.cameras.get(&1).unwrap(),
+            &selection,
+            &uniform_config,
+        )
+        .unwrap();
+        assert_eq!(uniform_weights, None);
     }
 
     #[test]

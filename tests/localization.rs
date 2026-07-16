@@ -7,7 +7,8 @@ use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::Pose;
 use visloc_rs::core::types::{
     Camera, Frame, Landmark, LandmarkDescriptorStore, LocalizationFailureReason,
-    PoseEstimationFailureReason, PoseEstimatorDiagnostics, QueryImage, VisualMap,
+    LocalizationResult, LocalizationSuccess, PoseEstimationFailureReason, PoseEstimatorDiagnostics,
+    QueryImage, VisualMap,
 };
 use visloc_rs::vision::features::{FeatureExtractor, FeatureSet};
 use visloc_rs::vision::matching::{BruteForceMatcher, DescriptorMatch, Matcher};
@@ -1245,7 +1246,7 @@ fn localization_pipeline_routes_correspondence_confidence_to_pose_estimator() {
     assert!(result.success);
     assert_eq!(
         *recorded_weights.lock().unwrap(),
-        Some(Some(vec![0.1, 0.0, 0.8]))
+        Some(Some(vec![0.1, 1.0, 0.8]))
     );
 }
 
@@ -1470,6 +1471,65 @@ fn projection_window_matching_finds_the_same_pose_as_appearance_matching_on_a_cl
     let appearance_center = appearance_result.pose.unwrap().camera_center_world();
     let projection_center = projection_result.pose.unwrap().camera_center_world();
     assert!((appearance_center - projection_center).norm() < 1.0e-9);
+}
+
+#[test]
+fn unchanged_local_map_refinement_is_noop_and_fresh_revision_can_reassign_a_query() {
+    let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+    let mut map = VisualMap::new();
+    map.cameras.insert(camera.id, camera.clone());
+    // Both landmarks project onto the same query keypoint. The projection
+    // builder deterministically keeps landmark 1, while the prior result is
+    // deliberately assigned to landmark 2.
+    for landmark_id in [1, 2] {
+        map.landmarks.insert(
+            landmark_id,
+            Landmark::new(landmark_id, Point3::new(0.0, 0.0, 5.0)),
+        );
+    }
+    let mut store = LandmarkDescriptorStore::new();
+    store.insert(1, vec![0.0]);
+    store.insert(2, vec![0.0]);
+    let mut frame = Frame::new(10, camera.id);
+    frame.keypoints.push(Point2::new(320.0, 240.0));
+    frame.descriptors.push(vec![0.0]);
+    let estimated = LocalizationResult::success(LocalizationSuccess {
+        pose: Pose::identity(),
+        candidate_landmark_count: 1,
+        match_count: 1,
+        correspondence_count: 1,
+        inliers: vec![0],
+        inlier_query_indices: vec![0],
+        inlier_landmark_ids: vec![2],
+        inlier_confidences: vec![Some(0.3)],
+        inlier_reprojection_errors: vec![0.0],
+        mean_reprojection_error: 0.0,
+        median_reprojection_error: 0.0,
+        max_reprojection_error: 0.0,
+    });
+    let pipeline = LocalizationPipeline::with_pose_estimator(
+        FixedConfidenceMatcher {
+            confidences: vec![Some(0.8)],
+        },
+        FixedLandmarkSelector::new(vec![1, 2]),
+        IdentityPoseEstimator,
+        LocalizationConfig::default(),
+    );
+
+    let conservative = pipeline.refine_frame_pose_with_local_map_and_descriptor_store(
+        &frame, &map, &store, &estimated, 5.0,
+    );
+    assert!(conservative.is_none());
+
+    let revised = pipeline
+        .revise_frame_pose_with_local_map_and_descriptor_store(
+            &frame, &map, &store, &estimated, 5.0,
+        )
+        .unwrap();
+    assert_eq!(revised.correspondence_count, 1);
+    assert_eq!(revised.inlier_query_indices, vec![0]);
+    assert_eq!(revised.inlier_landmark_ids, vec![1]);
+    assert_eq!(revised.inlier_confidences, vec![Some(0.8)]);
 }
 
 #[test]

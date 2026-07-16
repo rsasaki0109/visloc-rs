@@ -47,10 +47,10 @@ use visloc_rs::io::euroc::{
 };
 use visloc_rs::slam::OnlineSlamImuConfig;
 use visloc_rs::{
-    umeyama_similarity_transform, LocalMappingPipeline, LocalizationPipeline, LoopClosureConfig,
-    MotionBasedViInitializerConfig, MotionViInitializationEvent, OnlineSlamConfig,
-    OnlineSlamMotionViInitConfig, OnlineSlamPipeline, OnlineSlamViInitConfig, Tracker,
-    TrackingConfig, TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent,
+    umeyama_similarity_transform, BiasReleaseSchedule, LocalMappingPipeline, LocalizationPipeline,
+    LoopClosureConfig, MotionBasedViInitializerConfig, MotionViInitializationEvent,
+    OnlineSlamConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline, OnlineSlamViInitConfig,
+    Tracker, TrackingConfig, TrajectorySimilarityTransform, ViInitFallback, ViInitializationEvent,
     Viba2Config, VisualInertialInitializerConfig,
 };
 
@@ -82,6 +82,33 @@ struct CliArgs {
     motion_vi_init_min_keyframes: usize,
     motion_vi_init_min_translation_meters: f64,
     motion_vi_init_recover_scale: bool,
+    /// Optional staged bias-release schedule
+    /// ([`visloc_rs::BiasReleaseSchedule`]). `Some` when either
+    /// `--vi-bias-release-min-keyframes` or
+    /// `--vi-bias-release-min-translation` is passed; the other knob
+    /// falls back to the schedule's documented default (10 keyframes /
+    /// 2.0 m) when only one flag is given.
+    vi_bias_release_min_keyframes: Option<usize>,
+    vi_bias_release_min_translation_meters: Option<f64>,
+    /// Enable gravity-direction recovery
+    /// ([`visloc_rs::MotionBasedViInitializerConfig::estimate_gravity`]):
+    /// estimate the world-frame gravity vector from this window's IMU
+    /// preintegration factors + fixed visual poses instead of trusting
+    /// `--gravity` as ground truth. See `docs/motion_based_vi_alignment.md`'s
+    /// "Gravity-direction recovery" section.
+    motion_vi_init_estimate_gravity: bool,
+    /// Override
+    /// [`visloc_rs::MotionBasedViInitializerConfig::max_gravity_norm_deviation_ratio`]
+    /// (default `0.3`). Ignored unless `motion_vi_init_estimate_gravity` is
+    /// set.
+    motion_vi_init_max_gravity_norm_deviation: Option<f64>,
+    /// Enable gyro-bias recovery
+    /// ([`visloc_rs::MotionBasedViInitializerConfig::estimate_gyro_bias`]):
+    /// estimate the shared gyro bias from rotation-only alignment against
+    /// this window's fixed visual poses, BEFORE gravity/velocity alignment
+    /// and before the staged solve. Off by default. See
+    /// `docs/motion_based_vi_alignment.md`'s "Gyro-bias recovery" section.
+    motion_vi_init_estimate_gyro_bias: bool,
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -96,6 +123,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut motion_vi_init_min_keyframes: usize = 10;
     let mut motion_vi_init_min_translation_meters: f64 = 2.0;
     let mut motion_vi_init_recover_scale: bool = false;
+    let mut vi_bias_release_min_keyframes: Option<usize> = None;
+    let mut vi_bias_release_min_translation_meters: Option<f64> = None;
+    let mut motion_vi_init_estimate_gravity: bool = false;
+    let mut motion_vi_init_max_gravity_norm_deviation: Option<f64> = None;
+    let mut motion_vi_init_estimate_gyro_bias: bool = false;
 
     let mut args: Vec<String> = env::args().skip(1).collect();
     let i = 0;
@@ -153,6 +185,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_vi_init_recover_scale = true;
                 args.remove(i);
             }
+            "--vi-bias-release-min-keyframes" => {
+                vi_bias_release_min_keyframes = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--vi-bias-release-min-translation" => {
+                vi_bias_release_min_translation_meters = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-estimate-gravity" => {
+                motion_vi_init_estimate_gravity = true;
+                args.remove(i);
+            }
+            "--motion-vi-init-max-gravity-norm-deviation" => {
+                motion_vi_init_max_gravity_norm_deviation = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-estimate-gyro-bias" => {
+                motion_vi_init_estimate_gyro_bias = true;
+                args.remove(i);
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -170,6 +222,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         motion_vi_init_min_keyframes,
         motion_vi_init_min_translation_meters,
         motion_vi_init_recover_scale,
+        vi_bias_release_min_keyframes,
+        vi_bias_release_min_translation_meters,
+        motion_vi_init_estimate_gravity,
+        motion_vi_init_max_gravity_norm_deviation,
+        motion_vi_init_estimate_gyro_bias,
     })
 }
 
@@ -364,12 +421,15 @@ fn format_motion_vi_init_event(event: &MotionViInitializationEvent) -> String {
             format!("StillWaiting reason={reason:?}")
         }
         MotionViInitializationEvent::Succeeded { result } => format!(
-            "Succeeded keyframes={} imu_factors={} scale={:.6} viba2_iters={} trigger_translation_m={:.3}",
+            "Succeeded keyframes={} imu_factors={} scale={:.6} viba2_iters={} trigger_translation_m={:.3} bias_released={} estimated_gravity_world={:?} estimated_gyro_bias={:?}",
             result.keyframe_ids.len(),
             result.imu_factors_used,
             result.scale,
             result.viba2_iterations_run,
             result.trigger_translation_meters,
+            result.bias_released,
+            result.estimated_gravity_world.as_ref().map(|g| g.as_slice().to_vec()),
+            result.estimated_gyro_bias.as_ref().map(|b| b.as_slice().to_vec()),
         ),
     }
 }
@@ -481,14 +541,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
+        let bias_release = if args.vi_bias_release_min_keyframes.is_some()
+            || args.vi_bias_release_min_translation_meters.is_some()
+        {
+            Some(BiasReleaseSchedule {
+                min_keyframes: args.vi_bias_release_min_keyframes.unwrap_or(10),
+                min_translation_meters: args
+                    .vi_bias_release_min_translation_meters
+                    .unwrap_or(2.0),
+            })
+        } else {
+            None
+        };
+        let mut initializer = MotionBasedViInitializerConfig {
+            min_keyframes: args.motion_vi_init_min_keyframes,
+            min_translation_meters: args.motion_vi_init_min_translation_meters,
+            gravity_world: args.gravity_world,
+            viba2,
+            bias_release,
+            estimate_gravity: args.motion_vi_init_estimate_gravity,
+            estimate_gyro_bias: args.motion_vi_init_estimate_gyro_bias,
+            ..MotionBasedViInitializerConfig::default()
+        };
+        if let Some(ratio) = args.motion_vi_init_max_gravity_norm_deviation {
+            initializer.max_gravity_norm_deviation_ratio = ratio;
+        }
         Some(OnlineSlamMotionViInitConfig {
-            initializer: MotionBasedViInitializerConfig {
-                min_keyframes: args.motion_vi_init_min_keyframes,
-                min_translation_meters: args.motion_vi_init_min_translation_meters,
-                gravity_world: args.gravity_world,
-                viba2,
-                ..MotionBasedViInitializerConfig::default()
-            },
+            initializer,
             ..OnlineSlamMotionViInitConfig::default()
         })
     } else {
@@ -504,6 +583,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             imu: Some(imu_config),
             local_vi_ba: None,
             covisibility_local_ba: None,
+            sparse_factor_graph: None,
             vi_init: Some(vi_init_config),
             vi_motion_init: vi_motion_init_config,
             keep_pre_promotion_imu_factors: false,
@@ -554,6 +634,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut motion_vi_init_succeeded_at_frame: Option<usize> = None;
     let mut motion_vi_init_recovered_scale: Option<f64> = None;
     let mut motion_vi_init_viba2_iterations: Option<usize> = None;
+    let mut motion_vi_init_estimated_gravity: Option<Vector3<f64>> = None;
+    let mut motion_vi_init_estimated_gyro_bias: Option<Vector3<f64>> = None;
 
     let mut estimated_positions: Vec<Point3<f64>> = Vec::new();
     let mut reference_positions: Vec<Point3<f64>> = Vec::new();
@@ -639,6 +721,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     motion_vi_init_succeeded_at_frame = Some(frame_idx);
                     motion_vi_init_recovered_scale = Some(result.scale);
                     motion_vi_init_viba2_iterations = Some(result.viba2_iterations_run);
+                    motion_vi_init_estimated_gravity = result.estimated_gravity_world;
+                    motion_vi_init_estimated_gyro_bias = result.estimated_gyro_bias;
                 }
             }
         }
@@ -782,6 +866,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          motion_vi_init_succeeded_frame={motion_succeeded:?}\n\
          motion_vi_init_recovered_scale={motion_scale:?}\n\
          motion_vi_init_viba2_iterations={motion_iters:?}\n\
+         vi_bias_release_min_keyframes={bias_release_min_kf:?}\n\
+         vi_bias_release_min_translation_meters={bias_release_min_translation:?}\n\
+         motion_vi_init_estimate_gravity={motion_estimate_gravity}\n\
+         motion_vi_init_max_gravity_norm_deviation={motion_max_gravity_deviation:?}\n\
+         motion_vi_init_estimated_gravity={motion_estimated_gravity:?}\n\
+         motion_vi_init_estimate_gyro_bias={motion_estimate_gyro_bias}\n\
+         motion_vi_init_estimated_gyro_bias={motion_estimated_gyro_bias:?}\n\
          motion_vi_init_status_final={final_motion_vi_status:?}\n\
          ate_position_rmse_m={rmse_pos:.4}\n\
          ate_position_max_m={max_position_err:.4}\n\
@@ -805,6 +896,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         motion_succeeded = motion_vi_init_succeeded_at_frame,
         motion_scale = motion_vi_init_recovered_scale,
         motion_iters = motion_vi_init_viba2_iterations,
+        bias_release_min_kf = args.vi_bias_release_min_keyframes,
+        bias_release_min_translation = args.vi_bias_release_min_translation_meters,
+        motion_estimate_gravity = args.motion_vi_init_estimate_gravity,
+        motion_max_gravity_deviation = args.motion_vi_init_max_gravity_norm_deviation,
+        motion_estimated_gravity = motion_vi_init_estimated_gravity.map(|g| g.as_slice().to_vec()),
+        motion_estimate_gyro_bias = args.motion_vi_init_estimate_gyro_bias,
+        motion_estimated_gyro_bias = motion_vi_init_estimated_gyro_bias.map(|b| b.as_slice().to_vec()),
         scale = aligned_similarity.scale,
     );
     println!("{summary}");

@@ -172,6 +172,25 @@ pub struct ProjectionGuidedTrackingConfig {
     /// refinement starts from an already-estimated (not merely predicted)
     /// pose and can afford a tighter window.
     pub refinement_search_radius_px: f64,
+    /// Number of alternating correspondence-rebuild / pose-update rounds.
+    /// One preserves the original single-pass behavior.
+    pub refinement_iterations: u32,
+    /// Multiplier applied to the projection radius after each refinement
+    /// round. Values in `(0, 1]` progressively tighten geometric support.
+    pub refinement_radius_shrink_factor: f64,
+    /// Rebuild each round from fresh projected correspondences, allowing a
+    /// query keypoint to change its landmark assignment. When false, retain
+    /// the conservative legacy union-with-existing-inliers behavior.
+    pub refinement_reassign_correspondences: bool,
+    /// Minimum fraction of the current inlier query/landmark pairs that must
+    /// survive a revised round. Zero disables the factor-graph edge-retention
+    /// gate; values near one permit only bounded correspondence revisions.
+    pub refinement_min_inlier_pair_retention_ratio: f64,
+    /// Optional trust-region bound on camera-centre correction per accepted
+    /// refinement round.
+    pub refinement_max_pose_translation_correction_m: Option<f64>,
+    /// Optional trust-region bound on rotation correction per accepted round.
+    pub refinement_max_pose_rotation_correction_rad: Option<f64>,
 }
 
 impl Default for ProjectionGuidedTrackingConfig {
@@ -183,6 +202,12 @@ impl Default for ProjectionGuidedTrackingConfig {
             max_query_landmark_distance_ratio: None,
             local_map_refinement: true,
             refinement_search_radius_px: 8.0,
+            refinement_iterations: 1,
+            refinement_radius_shrink_factor: 1.0,
+            refinement_reassign_correspondences: false,
+            refinement_min_inlier_pair_retention_ratio: 0.0,
+            refinement_max_pose_translation_correction_m: None,
+            refinement_max_pose_rotation_correction_rad: None,
         }
     }
 }

@@ -616,6 +616,66 @@ fn bundle_robust_kernel_none_matches_pure_gauss_newton() {
 }
 
 #[test]
+fn confidence_weight_zero_mutes_a_bad_correspondence() {
+    let mut ba = over_determined_bundle_with_optional_outlier(true);
+    let mut weights = vec![1.0; ba.observations.len()];
+    let bad_index = ba
+        .observations
+        .iter()
+        .position(|obs| obs.keyframe_id == 50 && obs.landmark_id == 1)
+        .expect("injected outlier");
+    weights[bad_index] = 0.0;
+
+    let weighted_breakdown = ba
+        .cost_breakdown_with_observation_weights(&RobustKernel::None, &weights)
+        .expect("weighted diagnostic cost");
+    assert!(
+        weighted_breakdown.visual < 1.0e-18,
+        "muted outlier remained in diagnostic cost: {}",
+        weighted_breakdown.visual
+    );
+
+    let result = ba
+        .optimize_with_observation_weights(&BaConfig::default(), &weights)
+        .expect("confidence-weighted BA");
+    let recovered = ba.poses[&50].camera_center_world();
+
+    assert!(
+        recovered
+            .coords
+            .metric_distance(&Vector3::new(2.0, 0.0, 0.0))
+            < 1.0e-10,
+        "zero-confidence outlier moved the pose to {recovered:?}"
+    );
+    assert!(
+        result.final_cost < 1.0e-18,
+        "muted outlier remained in weighted cost: {}",
+        result.final_cost
+    );
+}
+
+#[test]
+fn confidence_weights_reject_invalid_inputs() {
+    let config = BaConfig::default();
+    let mut ba = over_determined_bundle_with_optional_outlier(false);
+    let expected = ba.observations.len();
+    assert_eq!(
+        ba.optimize_with_observation_weights(&config, &[1.0]),
+        Err(BaError::ObservationWeightCount {
+            expected,
+            actual: 1,
+        })
+    );
+
+    let mut weights = vec![1.0; expected];
+    weights[3] = f64::NAN;
+    assert_eq!(
+        ba.optimize_with_observation_weights(&config, &weights),
+        Err(BaError::InvalidObservationWeight(3))
+    );
+}
+
+#[test]
 fn bundle_robust_cost_clips_large_residuals_below_quadratic() {
     // Cost-function semantics: at a state with a single 50-pixel outlier,
     // the squared cost is `50² + 50² = 5000` while Huber(δ=10) returns

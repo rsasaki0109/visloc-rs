@@ -1,6 +1,10 @@
 #![allow(clippy::useless_vec)]
 
-use std::{convert::Infallible, fs};
+use std::{
+    convert::Infallible,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_rs::core::geometry::{Pose, SE3};
@@ -76,6 +80,38 @@ struct RefinementControlledLocalizer {
     refined: LocalizationResult,
 }
 
+#[derive(Debug, Clone)]
+struct IterativeRevisionLocalizer {
+    initial: LocalizationResult,
+    revised: Vec<LocalizationResult>,
+    revision_radii: Arc<Mutex<Vec<f64>>>,
+}
+
+impl FrameLocalizer for IterativeRevisionLocalizer {
+    fn localize_frame_with_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _descriptor_store: &LandmarkDescriptorStore,
+    ) -> LocalizationResult {
+        self.initial.clone()
+    }
+
+    fn revise_pose_with_local_map_and_descriptor_store(
+        &self,
+        _frame: &Frame,
+        _map: &VisualMap,
+        _local_map_descriptor_store: &LandmarkDescriptorStore,
+        _estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        let mut radii = self.revision_radii.lock().unwrap();
+        let index = radii.len();
+        radii.push(refinement_search_radius_px);
+        self.revised.get(index).cloned()
+    }
+}
+
 impl FrameLocalizer for RefinementControlledLocalizer {
     fn localize_frame_with_descriptor_store(
         &self,
@@ -142,6 +178,7 @@ fn successful_tracking_result(frame_id: u64, pose: Pose) -> TrackingResult {
                 inliers: Vec::new(),
                 inlier_query_indices: Vec::new(),
                 inlier_landmark_ids: Vec::new(),
+                inlier_confidences: Vec::new(),
                 inlier_reprojection_errors: Vec::new(),
                 mean_reprojection_error: 0.0,
                 median_reprojection_error: 0.0,
@@ -188,6 +225,7 @@ fn successful_localization_result(
         inliers: (0..inlier_count).collect(),
         inlier_query_indices: (0..inlier_count).collect(),
         inlier_landmark_ids: (1..=inlier_count as u64).collect(),
+        inlier_confidences: vec![None; inlier_count],
         inlier_reprojection_errors: vec![mean_reprojection_error; inlier_count],
         mean_reprojection_error,
         median_reprojection_error: mean_reprojection_error,
@@ -1903,6 +1941,12 @@ fn projection_guided_tracking_widen_retry_triggers_when_prior_is_slightly_off() 
                 max_query_landmark_distance_ratio: Some(0.9),
                 local_map_refinement: false,
                 refinement_search_radius_px: 8.0,
+                refinement_iterations: 1,
+                refinement_radius_shrink_factor: 1.0,
+                refinement_reassign_correspondences: false,
+                refinement_min_inlier_pair_retention_ratio: 0.0,
+                refinement_max_pose_translation_correction_m: None,
+                refinement_max_pose_rotation_correction_rad: None,
             }),
             ..TrackingConfig::default()
         },
@@ -1937,6 +1981,12 @@ fn projection_guided_tracking_falls_back_to_appearance_global_when_all_widen_att
                 max_query_landmark_distance_ratio: Some(0.9),
                 local_map_refinement: false,
                 refinement_search_radius_px: 8.0,
+                refinement_iterations: 1,
+                refinement_radius_shrink_factor: 1.0,
+                refinement_reassign_correspondences: false,
+                refinement_min_inlier_pair_retention_ratio: 0.0,
+                refinement_max_pose_translation_correction_m: None,
+                refinement_max_pose_rotation_correction_rad: None,
             }),
             ..TrackingConfig::default()
         },
@@ -1986,6 +2036,12 @@ fn projection_guided_local_map_refinement_accepts_only_when_inliers_do_not_decre
             max_query_landmark_distance_ratio: Some(0.9),
             local_map_refinement: true,
             refinement_search_radius_px: 8.0,
+            refinement_iterations: 1,
+            refinement_radius_shrink_factor: 1.0,
+            refinement_reassign_correspondences: false,
+            refinement_min_inlier_pair_retention_ratio: 0.0,
+            refinement_max_pose_translation_correction_m: None,
+            refinement_max_pose_rotation_correction_rad: None,
         }),
         ..TrackingConfig::default()
     };
@@ -2045,6 +2101,138 @@ fn projection_guided_local_map_refinement_accepts_only_when_inliers_do_not_decre
             .local_map_refinement_rejected_count,
         1
     );
+}
+
+#[test]
+fn projection_guided_revision_iterates_with_shrinking_radius_and_monotonic_acceptance() {
+    let (mut map, frame_a) = build_map_and_frame(10, 1);
+    let landmark_ids: Vec<u64> = map.landmarks.keys().copied().collect();
+    map.keyframes.insert(
+        frame_a.id,
+        Keyframe {
+            frame: Frame::new(frame_a.id, frame_a.camera_id),
+            observations: landmark_ids
+                .iter()
+                .map(|&landmark_id| Observation {
+                    frame_id: frame_a.id,
+                    landmark_id,
+                    keypoint_index: 0,
+                    xy: Point2::origin(),
+                })
+                .collect(),
+        },
+    );
+    let mut frame_b = frame_a.clone();
+    frame_b.id = 11;
+    let radii = Arc::new(Mutex::new(Vec::new()));
+    let localizer = IterativeRevisionLocalizer {
+        initial: successful_localization_result(4, 6, 2.0),
+        revised: vec![
+            successful_localization_result(5, 7, 1.0),
+            // Same inliers but worse reprojection error: rejected.
+            successful_localization_result(5, 7, 1.5),
+            successful_localization_result(6, 8, 0.5),
+        ],
+        revision_radii: radii.clone(),
+    };
+    let mut tracker = Tracker::new(
+        localizer,
+        TrackingConfig {
+            covisibility_local_map: Some(CovisibilityLocalMapConfig {
+                max_keyframes: Some(5),
+                min_shared_landmarks: 1,
+                min_local_map_landmarks: 1,
+            }),
+            projection_guided_tracking: Some(ProjectionGuidedTrackingConfig {
+                search_radius_px: 15.0,
+                widen_factor: 2.0,
+                max_widen_retries: 2,
+                max_query_landmark_distance_ratio: None,
+                local_map_refinement: true,
+                refinement_search_radius_px: 8.0,
+                refinement_iterations: 3,
+                refinement_radius_shrink_factor: 0.5,
+                refinement_reassign_correspondences: true,
+                refinement_min_inlier_pair_retention_ratio: 0.0,
+                refinement_max_pose_translation_correction_m: None,
+                refinement_max_pose_rotation_correction_rad: None,
+            }),
+            ..TrackingConfig::default()
+        },
+    );
+
+    tracker.track_frame(&frame_a, &map);
+    let result = tracker.track_frame(&frame_b, &map);
+
+    assert_eq!(result.localization.inlier_count, 6);
+    assert_eq!(*radii.lock().unwrap(), vec![8.0, 4.0, 2.0]);
+    assert_eq!(tracker.stats().local_map_refinement_accepted_count, 1);
+    assert_eq!(tracker.stats().local_map_refinement_rejected_count, 0);
+}
+
+#[test]
+fn projection_guided_revision_rejects_pose_outside_trust_region() {
+    let (mut map, frame_a) = build_map_and_frame(10, 1);
+    let landmark_ids: Vec<u64> = map.landmarks.keys().copied().collect();
+    map.keyframes.insert(
+        frame_a.id,
+        Keyframe {
+            frame: Frame::new(frame_a.id, frame_a.camera_id),
+            observations: landmark_ids
+                .iter()
+                .map(|&landmark_id| Observation {
+                    frame_id: frame_a.id,
+                    landmark_id,
+                    keypoint_index: 0,
+                    xy: Point2::origin(),
+                })
+                .collect(),
+        },
+    );
+    let mut frame_b = frame_a.clone();
+    frame_b.id = 11;
+    let mut unsafe_revision = successful_localization_result(6, 8, 0.5);
+    unsafe_revision.pose = Some(pose_with_identity_rotation_at_center(Vector3::new(
+        1.0, 0.0, 0.0,
+    )));
+    let radii = Arc::new(Mutex::new(Vec::new()));
+    let mut tracker = Tracker::new(
+        IterativeRevisionLocalizer {
+            initial: successful_localization_result(4, 6, 1.0),
+            revised: vec![unsafe_revision],
+            revision_radii: radii.clone(),
+        },
+        TrackingConfig {
+            covisibility_local_map: Some(CovisibilityLocalMapConfig {
+                max_keyframes: Some(5),
+                min_shared_landmarks: 1,
+                min_local_map_landmarks: 1,
+            }),
+            projection_guided_tracking: Some(ProjectionGuidedTrackingConfig {
+                search_radius_px: 15.0,
+                widen_factor: 2.0,
+                max_widen_retries: 2,
+                max_query_landmark_distance_ratio: None,
+                local_map_refinement: true,
+                refinement_search_radius_px: 8.0,
+                refinement_iterations: 1,
+                refinement_radius_shrink_factor: 1.0,
+                refinement_reassign_correspondences: true,
+                refinement_min_inlier_pair_retention_ratio: 0.0,
+                refinement_max_pose_translation_correction_m: Some(0.05),
+                refinement_max_pose_rotation_correction_rad: Some(2.0_f64.to_radians()),
+            }),
+            ..TrackingConfig::default()
+        },
+    );
+
+    tracker.track_frame(&frame_a, &map);
+    let result = tracker.track_frame(&frame_b, &map);
+
+    assert_eq!(result.localization.inlier_count, 4);
+    assert_eq!(*radii.lock().unwrap(), vec![8.0]);
+    assert_eq!(tracker.stats().local_map_refinement_accepted_count, 0);
+    assert_eq!(tracker.stats().local_map_refinement_rejected_count, 1);
 }
 
 #[test]

@@ -13,10 +13,9 @@
 //! * **This demo** decodes the cam0 PNG for every frame, runs
 //!   [`CornerFeatureExtractor`] on it, and feeds the real corner keypoints +
 //!   patch descriptors into [`OnlineSlamPipeline::process_frame`]. The
-//!   initial visual map is bootstrapped by back-projecting the first frame's
-//!   real corners through the first GT camera pose at a fixed depth — so the
-//!   landmarks live in the **metric** EuRoC world frame even though their
-//!   depth is approximate. From that point on, both the corner detection and
+//!   initial visual map uses the first camera frame as its world origin. Stereo
+//!   triangulation supplies metric depth without reading the EuRoC ground-truth
+//!   stream. From that point on, both the corner detection and
 //!   the descriptor matching the pipeline does inside its tracker are
 //!   driven by genuine pixel intensities.
 //!
@@ -49,12 +48,10 @@
 //!   resulting metric-scale 3D point replaces the fixed-`bootstrap_depth`
 //!   back-projection for that corner. Corners that fail to match a cam1
 //!   descriptor (or whose triangulation falls outside the configured
-//!   depth / reprojection-error gates) still fall back to the depth-only
-//!   seed, so the matcher's input always has the same keypoint count as
-//!   the cam0 extractor produced. Pass `--no-stereo-bootstrap` to skip
-//!   the stereo pass entirely and reproduce the pre-stereo behaviour for
-//!   A/B comparison. `--bootstrap-depth` is still honoured for the
-//!   fall-back corners.
+//!   depth / reprojection-error gates) are dropped by default, so every seed
+//!   landmark has measured stereo depth. `--allow-fixed-depth-bootstrap`
+//!   restores the historical fixed-depth fallback strictly for diagnostic A/B
+//!   runs; it must not be used for ORB-SLAM3 parity claims.
 //!
 //! Requires the `image-io` feature.
 //!
@@ -66,6 +63,8 @@
 //!     --out-dir target/euroc_online_slam_vi_image_demo \
 //!     --max-frames 400
 //! ```
+//! Add `--observation-confidence-ba` to run the same local-BA windows with
+//! relative learned visual weights for a uniform-vs-weighted A/B comparison.
 //!
 //! Output is the same four files as the synthetic variant — `slam_trajectory.csv`,
 //! `slam_errors.csv`, `vi_init_log.txt`, `summary.txt` — so the two demos
@@ -121,15 +120,20 @@ use visloc_rs::vision::stereo_bootstrap::{
 use visloc_rs::{
     build_stereo_replenish_candidates, read_external_deep_features_txt,
     umeyama_similarity_transform, AdaptiveImuPoseMotionModel, AdaptiveImuPoseMotionModelConfig,
-    AdaptiveMotionMode, AdaptiveVelocityGateConfig, BaConfig, BruteForceMatcher,
-    ConstantPoseMotionModel, ConstantVelocityMotionModel, CovisibilityLocalBaConfig,
-    CovisibilityLocalBaError, CovisibilityLocalMapConfig, CrossCheckMatcher, DescriptorMatch,
-    ImuPredictiveMotionModel, ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy,
-    KeyframeDecisionReason, KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline,
-    LocalMappingResult, LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
-    LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig, LoopRefinementSolver,
-    LoopRefinementVerifier, MapProviderStats, Matcher, MotionBasedViInitializerConfig, MotionModel,
-    MotionViInitializationEvent, MotionViRawResidualActivationConfig, MutualSoftmaxConfig,
+    AdaptiveMotionMode, AdaptiveVelocityGateConfig, BaConfig, BiasReleaseSchedule,
+    BruteForceMatcher, ConstantPoseMotionModel, ConstantVelocityMotionModel,
+    CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalMapConfig,
+    CrossCheckMatcher,
+    CrossSubmapAlignmentConfig, CrossSubmapAlignmentResult, CrossSubmapBoundaryFactorResult,
+    DescriptorMatch, GravityVelocityAlignment, GyroBiasAlignment, ImuPredictiveMotionModel,
+    ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
+    KeyframePolicyConfig, LandmarkCandidate,
+    LocalMappingPipeline, LocalMappingResult, LocalizationConfig, LocalizationPipeline,
+    LoopAppearanceCandidateConfig, LoopClosureCandidateSource, LoopClosureConfig,
+    LoopClosureVerifierConfig, LoopRefinementSolver, LoopRefinementVerifier, MapAtlas,
+    MapProviderStats, Matcher, MotionBasedViInitializerConfig, MotionModel,
+    MotionViInitializationEvent, MotionViInitializationStatus, MotionViRawResidualActivationConfig,
+    MutualSoftmaxConfig,
     MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
     OnlineSlamLocalBaConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig,
     OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
@@ -658,10 +662,8 @@ struct CliArgs {
     /// When `true` (the default) the seed frame's cam0 corners are
     /// stereo-matched against cam1 and triangulated via DLT using the
     /// published `T_BS` extrinsics. Each surviving match becomes a
-    /// metric-scale landmark, replacing the fixed-`bootstrap_depth`
-    /// back-projection for that corner. Set to `false` via
-    /// `--no-stereo-bootstrap` to fall back to depth-only seeding for
-    /// A/B comparison.
+    /// metric-scale landmark. Seed keypoints without stereo depth are dropped
+    /// by default; fixed-depth fallback is an explicit diagnostic opt-in.
     stereo_bootstrap: bool,
     /// Enable the motion-based VI init stage (VIBA1 / optional VIBA2).
     /// Off by default so the demo stays backwards compatible with the
@@ -671,6 +673,9 @@ struct CliArgs {
     /// configured running IMU biases. Intended for sequences that start in
     /// motion and therefore have no valid stationary window.
     motion_vi_init_after_static_give_up: bool,
+    /// Start motion VI immediately from configured IMU biases. Explicit
+    /// moving-start opt-in; does not wait for stationary init to terminate.
+    motion_vi_init_from_configured_bias: bool,
     /// Minimum keyframes after static success or the opted-in give-up fallback
     /// before the motion-VI trigger is allowed to fire. Mirrors
     /// `MotionBasedViInitializerConfig::min_keyframes`.
@@ -690,6 +695,10 @@ struct CliArgs {
     /// baseline behaviour. Mirrors `OnlineSlamLocalBaConfig::default()`
     /// with `gravity_world` rebased onto `--gravity`.
     local_vi_ba_enabled: bool,
+    /// Global A/B lever shared by local VI-BA and covisibility local BA.
+    /// Experimental and off by default until a multi-sequence tracking-cliff
+    /// A/B demonstrates a net win.
+    observation_confidence_ba_enabled: bool,
     /// Schur-marginalize the outgoing navigation state into a dense FEJ prior
     /// on the next window anchor.
     local_vi_ba_marginalization: bool,
@@ -750,6 +759,41 @@ struct CliArgs {
     motion_vi_init_max_rotation_residual_rms_rad: Option<f64>,
     motion_vi_init_max_velocity_residual_rms_mps: Option<f64>,
     motion_vi_init_max_position_residual_rms_meters: Option<f64>,
+    /// Optional staged bias-release schedule
+    /// ([`visloc_rs::BiasReleaseSchedule`]): `Some` when either
+    /// `--vi-bias-release-min-keyframes` or
+    /// `--vi-bias-release-min-translation` is passed. The other knob falls
+    /// back to the schedule's documented default (10 keyframes / 2.0 m)
+    /// when only one flag is given.
+    vi_bias_release_min_keyframes: Option<usize>,
+    vi_bias_release_min_translation_meters: Option<f64>,
+    /// Enable gravity-direction recovery
+    /// ([`visloc_rs::MotionBasedViInitializerConfig::estimate_gravity`]):
+    /// estimate the world-frame gravity vector from this window's IMU
+    /// preintegration factors + fixed visual poses instead of trusting
+    /// `--gravity` as ground truth. Off by default. See
+    /// `docs/motion_based_vi_alignment.md`'s "Gravity-direction recovery"
+    /// section for the motivating real-data diagnosis (a ~90-degree
+    /// misalignment on a moving-start sequence where the static VI
+    /// initializer never fires).
+    motion_vi_init_estimate_gravity: bool,
+    /// Override
+    /// [`visloc_rs::MotionBasedViInitializerConfig::max_gravity_norm_deviation_ratio`]
+    /// (default `0.3`). Ignored unless `motion_vi_init_estimate_gravity` is
+    /// set.
+    motion_vi_init_max_gravity_norm_deviation: Option<f64>,
+    /// Enable gyro-bias recovery
+    /// ([`visloc_rs::MotionBasedViInitializerConfig::estimate_gyro_bias`]):
+    /// estimate the shared gyro bias from rotation-only alignment against
+    /// this window's fixed visual poses, BEFORE gravity/velocity alignment
+    /// and before the staged solve — the classical first inertial-init step
+    /// ORB-SLAM3 / VINS-Mono run before gravity alignment. Off by default.
+    /// See `docs/motion_based_vi_alignment.md`'s "Gyro-bias recovery"
+    /// section for the motivating diagnosis: the final fitted IMU rotation
+    /// residual RMS sat at 0.014-0.022 rad against the 0.01 gate,
+    /// bit-identical with/without gravity estimation (the rotation residual
+    /// is gravity-independent).
+    motion_vi_init_estimate_gyro_bias: bool,
     /// When `Some(n)`, restricts descriptor matching during tracking to
     /// landmarks observed by the reference keyframe and up to `n`
     /// co-visible neighbour keyframes (ranked by shared-landmark count).
@@ -766,6 +810,8 @@ struct CliArgs {
     /// keyframes from the accumulated `VisualMap`. Off by default so
     /// baseline runs stay unchanged.
     covisibility_local_ba_enabled: bool,
+    /// Enable sparse DROID-style temporal/proximity/stereo factor lifecycle.
+    sparse_factor_graph_enabled: bool,
     /// Minimum map keyframe count before online covisibility local BA
     /// can run. Skips startup windows that cannot anchor a useful local
     /// solve.
@@ -951,6 +997,18 @@ struct CliArgs {
     /// Per-landmark projection-window radius, in pixels, used by the
     /// local-map refinement stage.
     projection_refinement_search_radius_px: f64,
+    /// Alternating fresh-correspondence / pose-update rounds in stage 3.
+    projection_refinement_iterations: u32,
+    /// Projection radius multiplier after every refinement round.
+    projection_refinement_radius_shrink_factor: f64,
+    /// Permit fresh rounds to reassign a query keypoint to another landmark.
+    projection_refinement_reassign_correspondences: bool,
+    /// Minimum retained fraction of current inlier query/landmark pairs.
+    projection_refinement_min_inlier_pair_retention_ratio: f64,
+    /// Optional per-round camera-centre correction trust region.
+    projection_refinement_max_translation_correction_m: Option<f64>,
+    /// Optional per-round rotation correction trust region, in degrees.
+    projection_refinement_max_rotation_correction_deg: Option<f64>,
     /// Motion model fed to the tracker. `pose` (default) returns the
     /// last successful pose as the prior (`ConstantPoseMotionModel`);
     /// `velocity` extrapolates the last 2 successful poses to predict
@@ -1306,12 +1364,25 @@ struct CliArgs {
     /// Optional max translation per frame between consecutive recovery
     /// hypotheses inside the confirmation window.
     relocalization_confirmation_max_translation_per_frame_meters: Option<f64>,
-    /// When `Some(n)`, re-seed tracking with a GT-pose stereo bootstrap
-    /// after `n` consecutive lost frames once relocalization (if enabled)
-    /// has not recovered. Default `None` preserves legacy behaviour.
+    /// When `Some(n)`, re-seed tracking from the last accepted pose and the
+    /// current calibrated stereo pair after `n` consecutive lost frames once
+    /// relocalization (if enabled) has not recovered. This is causal and
+    /// GT-free. By default it continues in the existing gauge;
+    /// `rebootstrap_independent_submap` starts a fresh Atlas submap instead.
     rebootstrap_after_lost_frames: Option<usize>,
     /// Minimum frame gap between accepted re-bootstraps. Default `60`.
     rebootstrap_cooldown_frames: usize,
+    /// Start every accepted stereo re-bootstrap in a fresh local gauge and
+    /// retain the previous map in a [`MapAtlas`]. Until a verified cross-map
+    /// SE(3) bridge is available, local poses are exported only to
+    /// `submap_trajectory.csv` and never mixed into the global trajectory.
+    rebootstrap_independent_submap: bool,
+    /// Retained current/boundary source keyframes tried per Atlas-level
+    /// broader recovery cycle.
+    atlas_broader_recovery_max_source_keyframes: usize,
+    /// Run the more expensive retained-keyframe Atlas search every N logical
+    /// bridge attempts. Other attempts use only the current keyframe.
+    atlas_broader_recovery_interval_attempts: usize,
     /// Opt into the online loop-closure + pose-graph refinement stage
     /// (`OnlineSlamConfig::pose_graph_refinement`). When `true`, the
     /// pipeline mirrors registered keyframe poses into a running pose
@@ -1472,17 +1543,19 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut corner_descriptor_radius: usize = 5;
     let mut undistort: bool = true;
     let mut stereo_bootstrap: bool = true;
-    let mut stereo_bootstrap_strict: bool = false;
+    let mut stereo_bootstrap_strict: bool = true;
     let mut adaptive_motion_failures_to_switch_to_pose: usize = 2;
     let mut adaptive_motion_successes_to_switch_to_imu: usize = 5;
     let mut adaptive_motion_imu_velocity_refresh_policy: ImuVelocityRefreshPolicy =
         ImuVelocityRefreshPolicy::default();
     let mut motion_vi_init_enabled: bool = false;
     let mut motion_vi_init_after_static_give_up: bool = false;
+    let mut motion_vi_init_from_configured_bias: bool = false;
     let mut motion_vi_init_min_keyframes: usize = 10;
     let mut motion_vi_init_min_translation_meters: f64 = 2.0;
     let mut motion_vi_init_recover_scale: bool = false;
     let mut local_vi_ba_enabled: bool = false;
+    let mut observation_confidence_ba_enabled: bool = false;
     let mut local_vi_ba_marginalization: bool = false;
     let mut local_vi_ba_initial_prior_std_devs: Option<(f64, f64, f64)> = None;
     let mut local_vi_ba_freeze_biases_above: Option<f64> = None;
@@ -1512,9 +1585,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut motion_vi_init_max_rotation_residual_rms_rad: Option<f64> = None;
     let mut motion_vi_init_max_velocity_residual_rms_mps: Option<f64> = None;
     let mut motion_vi_init_max_position_residual_rms_meters: Option<f64> = None;
+    let mut vi_bias_release_min_keyframes: Option<usize> = None;
+    let mut vi_bias_release_min_translation_meters: Option<f64> = None;
+    let mut motion_vi_init_estimate_gravity: bool = false;
+    let mut motion_vi_init_max_gravity_norm_deviation: Option<f64> = None;
+    let mut motion_vi_init_estimate_gyro_bias: bool = false;
     let mut covisibility_local_map_max_keyframes: Option<usize> = None;
     let mut covisibility_local_map_min_shared: usize = 15;
     let mut covisibility_local_ba_enabled: bool = false;
+    let mut sparse_factor_graph_enabled: bool = false;
     let mut covisibility_local_ba_min_keyframes: usize = 3;
     let mut covisibility_local_ba_max_keyframes: Option<usize> = None;
     let mut covisibility_local_ba_motion_vi_raw_activation: Option<(f64, f64, f64)> = None;
@@ -1562,6 +1641,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut projection_query_landmark_distance_ratio: Option<f32> = None;
     let mut projection_no_local_map_refinement: bool = false;
     let mut projection_refinement_search_radius_px: f64 = 8.0;
+    let mut projection_refinement_iterations: u32 = 1;
+    let mut projection_refinement_radius_shrink_factor: f64 = 1.0;
+    let mut projection_refinement_reassign_correspondences: bool = false;
+    let mut projection_refinement_min_inlier_pair_retention_ratio: f64 = 0.0;
+    let mut projection_refinement_max_translation_correction_m: Option<f64> = None;
+    let mut projection_refinement_max_rotation_correction_deg: Option<f64> = None;
     let mut pnp_reprojection_threshold_px: Option<f64> = None;
     let mut motion_model: MotionModelKind = MotionModelKind::Pose;
     let mut imu_extrinsic_from_cam0: bool = false;
@@ -1619,6 +1704,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut relocalization_confirmation_max_translation_per_frame_meters: Option<f64> = None;
     let mut rebootstrap_after_lost_frames: Option<usize> = None;
     let mut rebootstrap_cooldown_frames: usize = 60;
+    let mut rebootstrap_independent_submap: bool = false;
+    let mut atlas_broader_recovery_max_source_keyframes: usize = 1;
+    let mut atlas_broader_recovery_interval_attempts: usize = 5;
     let mut pose_graph_refinement_enabled: bool = false;
     let mut pose_graph_refinement_trigger_every: usize = 1;
     let mut pose_graph_refinement_fixed_loop_edge_weight: Option<f64> = None;
@@ -1720,6 +1808,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 stereo_bootstrap_strict = true;
                 args.remove(i);
             }
+            "--allow-fixed-depth-bootstrap" => {
+                stereo_bootstrap_strict = false;
+                args.remove(i);
+            }
             "--adaptive-motion-failures-to-switch-to-pose" => {
                 adaptive_motion_failures_to_switch_to_pose = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1761,6 +1853,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_vi_init_after_static_give_up = true;
                 args.remove(i);
             }
+            "--motion-vi-init-from-configured-bias" => {
+                motion_vi_init_from_configured_bias = true;
+                args.remove(i);
+            }
             "--motion-vi-init-min-keyframes" => {
                 motion_vi_init_min_keyframes = args.remove(i + 1).parse()?;
                 args.remove(i);
@@ -1775,6 +1871,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--local-vi-ba" => {
                 local_vi_ba_enabled = true;
+                args.remove(i);
+            }
+            "--observation-confidence-ba" => {
+                observation_confidence_ba_enabled = true;
                 args.remove(i);
             }
             "--local-vi-ba-marginalization" => {
@@ -1921,6 +2021,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 motion_vi_init_max_position_residual_rms_meters = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
+            "--vi-bias-release-min-keyframes" => {
+                vi_bias_release_min_keyframes = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--vi-bias-release-min-translation" => {
+                vi_bias_release_min_translation_meters = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-estimate-gravity" => {
+                motion_vi_init_estimate_gravity = true;
+                args.remove(i);
+            }
+            "--motion-vi-init-max-gravity-norm-deviation" => {
+                motion_vi_init_max_gravity_norm_deviation = Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--motion-vi-init-estimate-gyro-bias" => {
+                motion_vi_init_estimate_gyro_bias = true;
+                args.remove(i);
+            }
             "--covisibility-local-map-max-keyframes" => {
                 covisibility_local_map_max_keyframes = Some(args.remove(i + 1).parse()?);
                 args.remove(i);
@@ -1931,6 +2051,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--covisibility-local-ba" => {
                 covisibility_local_ba_enabled = true;
+                args.remove(i);
+            }
+            "--sparse-factor-graph" => {
+                sparse_factor_graph_enabled = true;
                 args.remove(i);
             }
             "--covisibility-local-ba-min-keyframes" => {
@@ -2199,6 +2323,33 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--projection-refinement-search-radius-px" => {
                 projection_refinement_search_radius_px = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-refinement-iterations" => {
+                projection_refinement_iterations = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-refinement-radius-shrink-factor" => {
+                projection_refinement_radius_shrink_factor = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-refinement-reassign-correspondences" => {
+                projection_refinement_reassign_correspondences = true;
+                args.remove(i);
+            }
+            "--projection-refinement-min-inlier-pair-retention-ratio" => {
+                projection_refinement_min_inlier_pair_retention_ratio =
+                    args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--projection-refinement-max-translation-correction-m" => {
+                projection_refinement_max_translation_correction_m =
+                    Some(args.remove(i + 1).parse()?);
+                args.remove(i);
+            }
+            "--projection-refinement-max-rotation-correction-deg" => {
+                projection_refinement_max_rotation_correction_deg =
+                    Some(args.remove(i + 1).parse()?);
                 args.remove(i);
             }
             "--pnp-reprojection-threshold-px" => {
@@ -2480,6 +2631,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 rebootstrap_cooldown_frames = args.remove(i + 1).parse()?;
                 args.remove(i);
             }
+            "--rebootstrap-independent-submap" => {
+                rebootstrap_independent_submap = true;
+                args.remove(i);
+            }
+            "--atlas-broader-recovery-max-source-keyframes" => {
+                atlas_broader_recovery_max_source_keyframes = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
+            "--atlas-broader-recovery-interval-attempts" => {
+                atlas_broader_recovery_interval_attempts = args.remove(i + 1).parse()?;
+                args.remove(i);
+            }
             "--pose-graph-refinement" => {
                 pose_graph_refinement_enabled = true;
                 args.remove(i);
@@ -2606,6 +2769,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if bootstrap_depth_meters <= 0.0 {
         return Err("--bootstrap-depth must be positive".into());
     }
+    if !stereo_bootstrap && stereo_bootstrap_strict {
+        return Err(
+            "--no-stereo-bootstrap requires --allow-fixed-depth-bootstrap; fixed-depth seeding is diagnostic-only"
+                .into(),
+        );
+    }
     if let Some(ratio) = keyframe_tracked_landmark_ratio {
         if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
             return Err("--keyframe-tracked-landmark-ratio must be in [0, 1]".into());
@@ -2658,6 +2827,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         || projection_refinement_search_radius_px <= 0.0
     {
         return Err("--projection-refinement-search-radius-px must be positive".into());
+    }
+    if projection_refinement_iterations == 0 {
+        return Err("--projection-refinement-iterations must be >= 1".into());
+    }
+    if !projection_refinement_radius_shrink_factor.is_finite()
+        || projection_refinement_radius_shrink_factor <= 0.0
+        || projection_refinement_radius_shrink_factor > 1.0
+    {
+        return Err("--projection-refinement-radius-shrink-factor must be in (0, 1]".into());
     }
     if relocalization_attempt_interval_frames == 0 {
         return Err("--relocalization-attempt-interval-frames must be >= 1".into());
@@ -2712,6 +2890,23 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--relocalization-covisibility-broader-fallback-interval-frames must be >= 1".into(),
         );
     }
+    if !projection_refinement_min_inlier_pair_retention_ratio.is_finite()
+        || !(0.0..=1.0).contains(&projection_refinement_min_inlier_pair_retention_ratio)
+    {
+        return Err(
+            "--projection-refinement-min-inlier-pair-retention-ratio must be in [0, 1]".into(),
+        );
+    }
+    if projection_refinement_max_translation_correction_m
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err("--projection-refinement-max-translation-correction-m must be positive".into());
+    }
+    if projection_refinement_max_rotation_correction_deg
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err("--projection-refinement-max-rotation-correction-deg must be positive".into());
+    }
     if let Some(max_keyframes) = relocalization_appearance_max_keyframes {
         if max_keyframes == 0 {
             return Err("--relocalization-appearance-max-keyframes must be >= 1".into());
@@ -2757,8 +2952,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     if rebootstrap_cooldown_frames == 0 {
         return Err("--rebootstrap-cooldown-frames must be >= 1".into());
     }
+    if rebootstrap_independent_submap && rebootstrap_after_lost_frames.is_none() {
+        return Err(
+            "--rebootstrap-independent-submap requires --rebootstrap-after-lost-frames".into(),
+        );
+    }
+    if atlas_broader_recovery_max_source_keyframes == 0 {
+        return Err("--atlas-broader-recovery-max-source-keyframes must be >= 1".into());
+    }
+    if atlas_broader_recovery_interval_attempts == 0 {
+        return Err("--atlas-broader-recovery-interval-attempts must be >= 1".into());
+    }
     if motion_vi_init_after_static_give_up && !motion_vi_init_enabled {
         return Err("--motion-vi-init-after-static-give-up requires --motion-vi-init".into());
+    }
+    if motion_vi_init_from_configured_bias && !motion_vi_init_enabled {
+        return Err("--motion-vi-init-from-configured-bias requires --motion-vi-init".into());
     }
     if !pose_graph_refinement_pcm_require_individual && !pose_graph_refinement_pcm {
         return Err(
@@ -2775,6 +2984,32 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             || motion_vi_init_max_position_residual_rms_meters.is_some())
     {
         return Err("motion-VI sanity limits require --motion-vi-init".into());
+    }
+    if !motion_vi_init_enabled
+        && (vi_bias_release_min_keyframes.is_some()
+            || vi_bias_release_min_translation_meters.is_some())
+    {
+        return Err(
+            "--vi-bias-release-min-keyframes / --vi-bias-release-min-translation require --motion-vi-init"
+                .into(),
+        );
+    }
+    if !motion_vi_init_enabled
+        && (motion_vi_init_estimate_gravity || motion_vi_init_max_gravity_norm_deviation.is_some())
+    {
+        return Err(
+            "--motion-vi-init-estimate-gravity / --motion-vi-init-max-gravity-norm-deviation require --motion-vi-init"
+                .into(),
+        );
+    }
+    if !motion_vi_init_estimate_gravity && motion_vi_init_max_gravity_norm_deviation.is_some() {
+        return Err(
+            "--motion-vi-init-max-gravity-norm-deviation requires --motion-vi-init-estimate-gravity"
+                .into(),
+        );
+    }
+    if !motion_vi_init_enabled && motion_vi_init_estimate_gyro_bias {
+        return Err("--motion-vi-init-estimate-gyro-bias requires --motion-vi-init".into());
     }
     for (value, flag) in [
         (
@@ -3059,10 +3294,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         adaptive_motion_imu_velocity_refresh_policy,
         motion_vi_init_enabled,
         motion_vi_init_after_static_give_up,
+        motion_vi_init_from_configured_bias,
         motion_vi_init_min_keyframes,
         motion_vi_init_min_translation_meters,
         motion_vi_init_recover_scale,
         local_vi_ba_enabled,
+        observation_confidence_ba_enabled,
         local_vi_ba_marginalization,
         local_vi_ba_initial_prior_std_devs,
         local_vi_ba_freeze_biases_above,
@@ -3085,9 +3322,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         motion_vi_init_max_rotation_residual_rms_rad,
         motion_vi_init_max_velocity_residual_rms_mps,
         motion_vi_init_max_position_residual_rms_meters,
+        vi_bias_release_min_keyframes,
+        vi_bias_release_min_translation_meters,
+        motion_vi_init_estimate_gravity,
+        motion_vi_init_max_gravity_norm_deviation,
+        motion_vi_init_estimate_gyro_bias,
         covisibility_local_map_max_keyframes,
         covisibility_local_map_min_shared,
         covisibility_local_ba_enabled,
+        sparse_factor_graph_enabled,
         covisibility_local_ba_min_keyframes,
         covisibility_local_ba_max_keyframes,
         covisibility_local_ba_motion_vi_raw_activation,
@@ -3135,6 +3378,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         projection_query_landmark_distance_ratio,
         projection_no_local_map_refinement,
         projection_refinement_search_radius_px,
+        projection_refinement_iterations,
+        projection_refinement_radius_shrink_factor,
+        projection_refinement_reassign_correspondences,
+        projection_refinement_min_inlier_pair_retention_ratio,
+        projection_refinement_max_translation_correction_m,
+        projection_refinement_max_rotation_correction_deg,
         pnp_reprojection_threshold_px,
         motion_model,
         imu_extrinsic_from_cam0,
@@ -3192,6 +3441,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         relocalization_confirmation_max_translation_per_frame_meters,
         rebootstrap_after_lost_frames,
         rebootstrap_cooldown_frames,
+        rebootstrap_independent_submap,
+        atlas_broader_recovery_max_source_keyframes,
+        atlas_broader_recovery_interval_attempts,
         pose_graph_refinement_enabled,
         pose_graph_refinement_trigger_every,
         pose_graph_refinement_fixed_loop_edge_weight,
@@ -3225,22 +3477,6 @@ fn se3_from_t_bs(t_bs: &Matrix4<f64>) -> SE3 {
     let translation = Vector3::new(t_bs[(0, 3)], t_bs[(1, 3)], t_bs[(2, 3)]);
     let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
     SE3::new(rotation, translation)
-}
-
-/// Build the world-to-camera [`Pose`] implied by a GT body pose and the
-/// body-to-camera rig calibration.
-#[cfg(feature = "image-io")]
-fn world_to_camera_pose(
-    body_rotation_world: &UnitQuaternion<f64>,
-    body_position_world: &Vector3<f64>,
-    body_to_camera: &SE3,
-) -> Pose {
-    let r_wc = body_rotation_world * body_to_camera.rotation;
-    let camera_center_world =
-        body_position_world + body_rotation_world.transform_vector(&body_to_camera.translation);
-    let r_cw = r_wc.inverse();
-    let t_cw = -(r_cw.transform_vector(&camera_center_world));
-    Pose::from_world_to_camera(r_cw, t_cw)
 }
 
 /// Build a [`Camera`] from EuRoC's pinhole `(fu, fv, cu, cv)` intrinsics.
@@ -3395,6 +3631,39 @@ fn keyframe_from_tracking_result(frame: &Frame, tracking: &TrackingResult) -> Ke
     }
 }
 
+/// Preserve the last successfully tracked frame at an Atlas boundary even
+/// when the online keyframe policy did not promote it. DROID-style frame
+/// graphs retain this overlap; dropping it can leave the next independent
+/// submap with only a much older target keyframe.
+#[cfg(feature = "image-io")]
+fn insert_atlas_boundary_keyframe_snapshot(map: &mut VisualMap, keyframe: &Keyframe) -> bool {
+    if map.keyframes.contains_key(&keyframe.frame.id) || keyframe.observations.is_empty() {
+        return false;
+    }
+
+    let mut snapshot = keyframe.clone();
+    snapshot
+        .observations
+        .retain(|observation| map.landmarks.contains_key(&observation.landmark_id));
+    if snapshot.observations.is_empty() {
+        return false;
+    }
+    for observation in &snapshot.observations {
+        let landmark = map
+            .landmarks
+            .get_mut(&observation.landmark_id)
+            .expect("snapshot observations were filtered against this map");
+        if !landmark.observations.iter().any(|existing| {
+            existing.frame_id == observation.frame_id
+                && existing.landmark_id == observation.landmark_id
+        }) {
+            landmark.observations.push(observation.clone());
+        }
+    }
+    map.keyframes.insert(snapshot.frame.id, snapshot);
+    true
+}
+
 /// Append stereo-triangulated landmarks to an existing map. Returns the
 /// new landmark ids in `matches` order.
 #[cfg(feature = "image-io")]
@@ -3429,9 +3698,9 @@ fn append_stereo_bootstrap_landmarks_to_map(
     landmark_ids
 }
 
-/// Build a successful [`TrackingResult`] for a GT-seeded stereo re-bootstrap.
+/// Build a successful [`TrackingResult`] for a stereo segment restart.
 #[cfg(feature = "image-io")]
-fn build_gt_seeded_rebootstrap_tracking_result(
+fn build_stereo_segment_restart_tracking_result(
     frame_id: u64,
     seed_pose: Pose,
     matches: &[StereoBootstrapLandmark],
@@ -3458,6 +3727,7 @@ fn build_gt_seeded_rebootstrap_tracking_result(
         inliers: (0..inlier_count).collect(),
         inlier_query_indices,
         inlier_landmark_ids,
+        inlier_confidences: vec![None; inlier_count],
         estimator_diagnostics: None,
         pose_failure_diagnostics: None,
     };
@@ -3577,7 +3847,10 @@ fn normalized_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> {
 fn nearest_ground_truth(
     samples: &[EurocGroundTruthSample],
     target_ts: i128,
-) -> &EurocGroundTruthSample {
+) -> Option<&EurocGroundTruthSample> {
+    if samples.is_empty() {
+        return None;
+    }
     let idx = samples
         .binary_search_by_key(&target_ts, |sample| sample.timestamp_nanoseconds)
         .unwrap_or_else(|insert| {
@@ -3595,7 +3868,7 @@ fn nearest_ground_truth(
                 }
             }
         });
-    &samples[idx]
+    samples.get(idx)
 }
 
 #[cfg(feature = "image-io")]
@@ -3626,19 +3899,69 @@ fn format_vi_init_event(event: &ViInitializationEvent) -> String {
     }
 }
 
+/// `last_gravity_alignment` is the initializer's most recent
+/// `estimate_gravity_and_velocities` attempt (see
+/// `MotionBasedViInitializer::last_gravity_alignment`), sampled at the same
+/// frame as `event`. It is `None` when `--motion-vi-init-estimate-gravity`
+/// is off. Threading it through separately from `event` is deliberate: on
+/// real data most attempts are rejected by a downstream residual gate
+/// (`ImuRawResidualOutOfRange` etc.), which carries no gravity vector of its
+/// own, so without this the recovered estimate would be invisible on every
+/// `StillWaiting` line — see `docs/motion_based_vi_alignment.md`'s
+/// "Gravity-direction recovery" section.
+/// `last_gyro_bias_alignment` is the initializer's most recent
+/// `estimate_gyro_bias` attempt (see
+/// `MotionBasedViInitializer::last_gyro_bias_alignment`), sampled at the
+/// same frame as `event`, threaded through for the same reason as
+/// `last_gravity_alignment` (see that parameter's doc comment): most
+/// real-data attempts are rejected by a downstream gate that carries no
+/// gyro-bias vector of its own.
 #[cfg(feature = "image-io")]
-fn format_motion_vi_init_event(event: &MotionViInitializationEvent) -> String {
+fn format_motion_vi_init_event(
+    event: &MotionViInitializationEvent,
+    last_gravity_alignment: Option<&GravityVelocityAlignment>,
+    last_gyro_bias_alignment: Option<&GyroBiasAlignment>,
+) -> String {
     match event {
         MotionViInitializationEvent::StillWaiting { reason } => {
-            format!("StillWaiting reason={reason:?}")
+            let alignment = last_gravity_alignment
+                .map(|a| {
+                    format!(
+                        " gravity_alignment_gravity_world=[{:.6},{:.6},{:.6}] gravity_alignment_raw_norm={:.6} gravity_alignment_mean_residual_after={:.6} gravity_alignment_window_keyframes={}",
+                        a.gravity_world.x,
+                        a.gravity_world.y,
+                        a.gravity_world.z,
+                        a.raw_gravity_norm,
+                        a.mean_residual_after,
+                        a.window_keyframes,
+                    )
+                })
+                .unwrap_or_default();
+            let gyro_bias_alignment = last_gyro_bias_alignment
+                .map(|a| {
+                    format!(
+                        " gyro_bias_alignment_bias_gyro=[{:.6},{:.6},{:.6}] gyro_bias_alignment_iterations={} gyro_bias_alignment_rms_before={:.6} gyro_bias_alignment_rms_after={:.6}",
+                        a.bias_gyro.x,
+                        a.bias_gyro.y,
+                        a.bias_gyro.z,
+                        a.iterations,
+                        a.rotation_residual_rms_before,
+                        a.rotation_residual_rms_after,
+                    )
+                })
+                .unwrap_or_default();
+            format!("StillWaiting reason={reason:?}{alignment}{gyro_bias_alignment}")
         }
         MotionViInitializationEvent::Succeeded { result } => format!(
-            "Succeeded keyframes={} imu_factors={} scale={:.6} viba2_iters={} trigger_translation_m={:.3}",
+            "Succeeded keyframes={} imu_factors={} scale={:.6} viba2_iters={} trigger_translation_m={:.3} bias_released={} estimated_gravity_world={:?} estimated_gyro_bias={:?}",
             result.keyframe_ids.len(),
             result.imu_factors_used,
             result.scale,
             result.viba2_iterations_run,
             result.trigger_translation_meters,
+            result.bias_released,
+            result.estimated_gravity_world.as_ref().map(|g| g.as_slice().to_vec()),
+            result.estimated_gyro_bias.as_ref().map(|b| b.as_slice().to_vec()),
         ),
     }
 }
@@ -3674,6 +3997,126 @@ fn quote_csv_field(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+#[cfg(feature = "image-io")]
+fn append_atlas_alignment_attempt(
+    csv: &mut String,
+    attempt_idx: usize,
+    frame_idx: usize,
+    timestamp_ns: i128,
+    alignment: &CrossSubmapAlignmentResult,
+) {
+    if alignment.diagnostics.is_empty() {
+        csv.push_str(&format!(
+            "{attempt_idx},{frame_idx},{timestamp_ns},{},{},,,,,,,,,,,,,,,0,no_ranked_candidate\n",
+            alignment.source_submap_id, alignment.source_frame_id,
+        ));
+        return;
+    }
+    for diagnostic in &alignment.diagnostics {
+        let scale = diagnostic.scale_estimate;
+        let failure = diagnostic
+            .failure_reason
+            .as_ref()
+            .map(|reason| quote_csv_field(&format!("{reason:?}")))
+            .unwrap_or_default();
+        let verified = alignment.verified_merge.as_ref().is_some_and(|merge| {
+            merge.evidence.target_submap_id == diagnostic.target_submap_id
+                && diagnostic.failure_reason.is_none()
+        });
+        let weldable_landmark_matches = alignment
+            .verified_merge
+            .as_ref()
+            .filter(|merge| {
+                merge.evidence.target_submap_id == diagnostic.target_submap_id
+                    && diagnostic.failure_reason.is_none()
+            })
+            .map(|merge| merge.landmark_matches.len().to_string())
+            .unwrap_or_default();
+        csv.push_str(&format!(
+            "{attempt_idx},{frame_idx},{timestamp_ns},{},{},{},{},{:.6},{},{},{},{},{:.6},{},{},{},{},{},{},{},{}\n",
+            alignment.source_submap_id,
+            alignment.source_frame_id,
+            diagnostic.target_submap_id,
+            diagnostic.target_frame_id,
+            diagnostic.appearance_similarity,
+            diagnostic.candidate_landmark_count,
+            u8::from(diagnostic.used_projection_prior),
+            diagnostic.localization_correspondence_count,
+            diagnostic.localization_inlier_count,
+            diagnostic.localization_inlier_ratio,
+            diagnostic
+                .mean_reprojection_error_px
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_default(),
+            scale
+                .map(|estimate| format!("{:.9}", estimate.estimated_scale))
+                .unwrap_or_default(),
+            scale
+                .map(|estimate| estimate.pair_count.to_string())
+                .unwrap_or_default(),
+            scale
+                .map(|estimate| format!("{:.6}", estimate.inlier_ratio))
+                .unwrap_or_default(),
+            scale
+                .map(|estimate| format!("{:.9}", estimate.median_absolute_deviation))
+                .unwrap_or_default(),
+            weldable_landmark_matches,
+            u8::from(verified),
+            failure,
+        ));
+    }
+}
+
+#[cfg(feature = "image-io")]
+fn append_atlas_boundary_factor(
+    csv: &mut String,
+    frame_idx: usize,
+    timestamp_ns: i128,
+    factor: &CrossSubmapBoundaryFactorResult,
+) {
+    let failure = factor
+        .failure_reason
+        .as_ref()
+        .map(|reason| quote_csv_field(&format!("{reason:?}")))
+        .unwrap_or_default();
+    let scale = factor.scale_estimate;
+    csv.push_str(&format!(
+        "{frame_idx},{timestamp_ns},{},{},{},{},{},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{}\n",
+        factor.source_submap_id,
+        factor.source_frame_id,
+        factor.target_submap_id,
+        factor.target_frame_id,
+        factor.descriptor_match_count,
+        factor.spatial_mutual_match_count,
+        factor.metric_correspondence_count,
+        factor.projection_refined_correspondence_count,
+        factor.projection_refinement_iterations,
+        bool_as_u8(factor.used_transform_prior),
+        factor.rigid_inlier_count,
+        factor.rigid_inlier_ratio,
+        factor
+            .mean_target_reprojection_error_px
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_default(),
+        scale
+            .map(|estimate| format!("{:.9}", estimate.estimated_scale))
+            .unwrap_or_default(),
+        scale
+            .map(|estimate| estimate.pair_count.to_string())
+            .unwrap_or_default(),
+        scale
+            .map(|estimate| format!("{:.6}", estimate.inlier_ratio))
+            .unwrap_or_default(),
+        factor
+            .verified_merge
+            .as_ref()
+            .map(|merge| merge.landmark_matches.len().to_string())
+            .unwrap_or_default(),
+        bool_as_u8(factor.verified_merge.is_some()),
+        failure,
+    ));
 }
 
 #[cfg(feature = "image-io")]
@@ -3912,12 +4355,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dataset.cam0_calibration.rate_hz,
         dataset.imu_calibration.rate_hz,
     );
-    if dataset.ground_truth.is_empty() {
-        return Err(format!(
-            "ground truth missing under {}/mav0/state_groundtruth_estimate0/data.csv",
-            args.euroc_dir.display()
-        )
-        .into());
+    let evaluation_ground_truth_available = !dataset.ground_truth.is_empty();
+    if !evaluation_ground_truth_available {
+        println!(
+            "ground truth absent: running estimation-only; ATE/RPE and loop correctness fields will be unavailable"
+        );
     }
     if dataset.imu_samples.len() < 100 {
         return Err(format!(
@@ -3961,22 +4403,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let imu_first_ts = dataset.imu_samples.first().unwrap().timestamp_nanoseconds;
     let imu_last_ts = dataset.imu_samples.last().unwrap().timestamp_nanoseconds;
-    let seed_gt = dataset
-        .ground_truth
-        .iter()
-        .find(|gt| {
-            gt.timestamp_nanoseconds >= imu_first_ts && gt.timestamp_nanoseconds <= imu_last_ts
-        })
-        .ok_or("ground truth and IMU streams do not overlap")?
-        .clone();
-
-    // Locate the first cam0 frame whose timestamp is on or after `seed_gt`.
-    // That frame is decoded and feature-extracted to seed the map.
+    // Establish an arbitrary SLAM gauge at the first camera frame covered by
+    // the IMU stream. Stereo depth makes the gauge metric; GT is never needed.
     let seed_frame_idx = dataset
         .cam0_images
         .iter()
-        .position(|entry| entry.timestamp_nanoseconds >= seed_gt.timestamp_nanoseconds)
-        .ok_or("no cam0 frame at or after the GT seed timestamp")?;
+        .position(|entry| {
+            entry.timestamp_nanoseconds >= imu_first_ts
+                && entry.timestamp_nanoseconds <= imu_last_ts
+        })
+        .ok_or("camera and IMU streams do not overlap")?;
     let seed_image_entry = &dataset.cam0_images[seed_frame_idx];
     let seed_image_path = dataset.cam0_image_dir.join(&seed_image_entry.filename);
     let seed_image: GrayscaleImage = read_common_image(&seed_image_path).map_err(|err| {
@@ -4090,11 +4526,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "seed-frame extractor returned 0 corners after undistort — try reducing --corner-min-score or passing --no-undistort".into(),
         );
     }
-    let seed_pose = world_to_camera_pose(
-        &seed_gt.orientation_world,
-        &seed_gt.position_world,
-        &body_to_camera,
-    );
+    let seed_pose = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
 
     // Optional stereo bootstrap: pair the seed cam0 frame with the nearest
     // cam1 frame, match descriptors, and triangulate each surviving pair
@@ -4249,14 +4681,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bootstrap_landmark_count = map.landmarks.len();
     println!(
-        "bootstrap landmarks={} bootstrap_depth={:.2}m stereo_overrides={} gt_seed_t_ns={} body_position=[{:.3},{:.3},{:.3}]",
+        "bootstrap landmarks={} bootstrap_depth={:.2}m stereo_overrides={} seed_t_ns={} seed_pose_source=identity_first_camera",
         map.landmarks.len(),
         args.bootstrap_depth_meters,
         stereo_bootstrap_matches.len(),
-        seed_gt.timestamp_nanoseconds,
-        seed_gt.position_world.x,
-        seed_gt.position_world.y,
-        seed_gt.position_world.z,
+        seed_image_entry.timestamp_nanoseconds,
     );
 
     let mut initializer_config = VisualInertialInitializerConfig {
@@ -4304,6 +4733,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
+        let bias_release = if args.vi_bias_release_min_keyframes.is_some()
+            || args.vi_bias_release_min_translation_meters.is_some()
+        {
+            Some(BiasReleaseSchedule {
+                min_keyframes: args.vi_bias_release_min_keyframes.unwrap_or(10),
+                min_translation_meters: args
+                    .vi_bias_release_min_translation_meters
+                    .unwrap_or(2.0),
+            })
+        } else {
+            None
+        };
         Some(OnlineSlamMotionViInitConfig {
             initializer: MotionBasedViInitializerConfig {
                 min_keyframes: args.motion_vi_init_min_keyframes,
@@ -4321,9 +4762,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .motion_vi_init_max_velocity_residual_rms_mps,
                 max_final_imu_position_residual_rms_meters: args
                     .motion_vi_init_max_position_residual_rms_meters,
+                bias_release,
+                estimate_gravity: args.motion_vi_init_estimate_gravity,
+                max_gravity_norm_deviation_ratio: args
+                    .motion_vi_init_max_gravity_norm_deviation
+                    .unwrap_or(0.3),
+                estimate_gyro_bias: args.motion_vi_init_estimate_gyro_bias,
                 ..MotionBasedViInitializerConfig::default()
             },
             allow_after_static_give_up: args.motion_vi_init_after_static_give_up,
+            allow_from_configured_bias_before_static: args.motion_vi_init_from_configured_bias,
             ..OnlineSlamMotionViInitConfig::default()
         })
     } else {
@@ -4362,6 +4810,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_at_vi_init_promotion: args.run_local_vi_ba_at_vi_init_promotion,
             marginalize_navigation_state: args.local_vi_ba_marginalization,
             initial_navigation_prior_std_devs: args.local_vi_ba_initial_prior_std_devs,
+            use_observation_confidence_weights: args.observation_confidence_ba_enabled,
             ..OnlineSlamLocalBaConfig::default()
         })
     } else {
@@ -4409,6 +4858,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 use_general_stereo_observations: args.covisibility_local_ba_general_stereo,
                 general_stereo_max_initial_right_reprojection_error_px: args
                     .covisibility_local_ba_general_stereo_max_right_reprojection_px,
+                use_observation_confidence_weights: args.observation_confidence_ba_enabled,
                 pose_anchor_prior_weight: args.covisibility_local_ba_anchor_weight,
                 ..CovisibilityLocalBaConfig::default()
             },
@@ -4566,6 +5016,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_query_landmark_distance_ratio: args.projection_query_landmark_distance_ratio,
             local_map_refinement: !args.projection_no_local_map_refinement,
             refinement_search_radius_px: args.projection_refinement_search_radius_px,
+            refinement_iterations: args.projection_refinement_iterations,
+            refinement_radius_shrink_factor: args.projection_refinement_radius_shrink_factor,
+            refinement_reassign_correspondences: args
+                .projection_refinement_reassign_correspondences,
+            refinement_min_inlier_pair_retention_ratio: args
+                .projection_refinement_min_inlier_pair_retention_ratio,
+            refinement_max_pose_translation_correction_m: args
+                .projection_refinement_max_translation_correction_m,
+            refinement_max_pose_rotation_correction_rad: args
+                .projection_refinement_max_rotation_correction_deg
+                .map(f64::to_radians),
         })
     } else {
         None
@@ -4648,6 +5109,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ratio: localization_config.ratio,
         })
     };
+    let atlas_bridge_localizer = LocalizationPipeline::new(
+        CrossCheckMatcher::new(demo_matcher.clone()),
+        localization_config.clone(),
+    );
+    let atlas_bridge_config = CrossSubmapAlignmentConfig::default();
     let localization_pipeline = LocalizationPipeline::new(demo_matcher, localization_config);
     let keyframe_policy_config = {
         let mut cfg = KeyframePolicyConfig::default();
@@ -4692,6 +5158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             imu: Some(imu_config),
             local_vi_ba: local_vi_ba_config,
             covisibility_local_ba: covisibility_local_ba_config,
+            sparse_factor_graph: args
+                .sparse_factor_graph_enabled
+                .then(visloc_rs::SparseFactorGraphConfig::default),
             vi_init: Some(vi_init_config),
             vi_motion_init: vi_motion_init_config,
             keep_pre_promotion_imu_factors: args.keep_pre_promotion_imu_factors,
@@ -4728,8 +5197,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    // Atlas mode is deliberately opt-in. The root owns a snapshot of the
+    // initial online map and is aligned to the Atlas identity. Each later
+    // stereo restart gets its own local gauge and remains unaligned until a
+    // verified cross-submap bridge is admitted.
+    let mut map_atlas = args
+        .rebootstrap_independent_submap
+        .then(|| MapAtlas::new(slam.map().clone()));
+    let mut active_submap_id = map_atlas
+        .as_ref()
+        .and_then(MapAtlas::root_submap_id)
+        .unwrap_or(0);
+    // Unverified causal placement used only to project bridge candidates.
+    // It never marks a submap aligned and is discarded after verified merge.
+    let mut active_submap_atlas_prior: Option<SE3> = None;
+
     fs::create_dir_all(&args.out_dir)?;
     let traj_path = args.out_dir.join("slam_trajectory.csv");
+    let submap_trajectory_path = args.out_dir.join("submap_trajectory.csv");
+    let atlas_submaps_path = args.out_dir.join("atlas_submaps.csv");
+    let atlas_submap_landmarks_path = args.out_dir.join("atlas_submap_landmarks.csv");
+    let atlas_merge_attempts_path = args.out_dir.join("atlas_merge_attempts.csv");
+    let atlas_boundary_factors_path = args.out_dir.join("atlas_boundary_factors.csv");
     let err_path = args.out_dir.join("slam_errors.csv");
     let frame_groundtruth_path = args.out_dir.join("frame_groundtruth.csv");
     let frame_appearance_descriptors_path = args.out_dir.join("frame_appearance_descriptors.csv");
@@ -4759,6 +5248,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut traj_csv =
         String::from("timestamp_ns,frame_idx,px,py,pz,qw,qx,qy,qz,tracking_success\n");
+    let mut submap_trajectory_csv = String::from(
+        "timestamp_ns,frame_idx,submap_id,local_px,local_py,local_pz,local_qw,local_qx,local_qy,local_qz,local_tracking_success,atlas_aligned\n",
+    );
+    let mut atlas_merge_attempts_csv = String::from(
+        "attempt_idx,frame_idx,timestamp_ns,source_submap_id,source_frame_id,target_submap_id,target_frame_id,appearance_similarity,candidate_landmarks,used_projection_prior,localization_correspondences,localization_inliers,localization_inlier_ratio,mean_reprojection_error_px,estimated_scale,scale_pair_count,scale_inlier_ratio,scale_mad,weldable_landmark_matches,verified,failure_reason\n",
+    );
+    let mut atlas_boundary_factors_csv = String::from(
+        "frame_idx,timestamp_ns,source_submap_id,source_frame_id,target_submap_id,target_frame_id,descriptor_matches,spatial_mutual_matches,metric_correspondences,projection_refined_correspondences,projection_refinement_iterations,used_transform_prior,rigid_inliers,rigid_inlier_ratio,mean_target_reprojection_error_px,estimated_scale,scale_pair_count,scale_inlier_ratio,weldable_landmark_matches,verified,failure_reason\n",
+    );
     let mut err_csv = String::from(
         "timestamp_ns,frame_idx,segment_id,gt_px,gt_py,gt_pz,est_px,est_py,est_pz,position_error_m,orientation_error_deg\n",
     );
@@ -4769,7 +5267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vi_init_log = String::new();
     let mut motion_vi_init_log = String::new();
     let mut covisibility_local_ba_log = String::from(
-        "frame_idx,timestamp_ns,success,error,elapsed_ms,optimized_keyframes,fixed_keyframes,landmarks,observations,boundary_fallback_used,mean_reprojection_before_px,mean_reprojection_after_px,max_pose_translation_correction_m,max_pose_rotation_correction_rad,updated_keyframes,updated_landmarks,outlier_observations,outlier_observation_ratio,quality_gate_rejected,pose_correction_gate_rejected,removed_observations\n",
+        "frame_idx,timestamp_ns,success,error,elapsed_ms,factor_graph_neighbors,optimized_keyframes,fixed_keyframes,landmarks,observations,boundary_fallback_used,mean_reprojection_before_px,mean_reprojection_after_px,max_pose_translation_correction_m,max_pose_rotation_correction_rad,updated_keyframes,updated_landmarks,outlier_observations,outlier_observation_ratio,quality_gate_rejected,pose_correction_gate_rejected,removed_observations\n",
     );
     let mut keyframe_decision_log = String::from(
         "frame_idx,timestamp_ns,tracking_success,selected,reason,last_keyframe_frame_id,selected_keyframe_count,localization_inliers,localization_inlier_ratio,frame_id_gap,translation_m,min_translation_m,tracked_landmarks,last_keyframe_tracked_landmarks,min_tracked_landmark_ratio,tracking_failure_reason\n",
@@ -4821,7 +5319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_imu_ts = imu_first_ts;
     let mut vi_init_preseed_samples = 0usize;
     while imu_idx < dataset.imu_samples.len()
-        && dataset.imu_samples[imu_idx].timestamp_nanoseconds < seed_gt.timestamp_nanoseconds
+        && dataset.imu_samples[imu_idx].timestamp_nanoseconds
+            < seed_image_entry.timestamp_nanoseconds
     {
         let sample = &dataset.imu_samples[imu_idx];
         let dt_ns = sample.timestamp_nanoseconds - prev_imu_ts;
@@ -4840,6 +5339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frames_recorded = 0usize;
     let mut frame_processing_times_ms: Vec<f64> = Vec::new();
     let mut tracking_successes = 0usize;
+    let mut globally_aligned_tracking_successes = 0usize;
     let mut keyframe_insufficient_tracking_quality_rejections = 0usize;
     let mut relocalization_attempts = 0u64;
     let mut relocalization_successes = 0u64;
@@ -4890,6 +5390,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut motion_vi_init_succeeded_at_frame: Option<usize> = None;
     let mut motion_vi_init_recovered_scale: Option<f64> = None;
     let mut motion_vi_init_viba2_iterations: Option<usize> = None;
+    let mut motion_vi_init_estimated_gravity: Option<Vector3<f64>> = None;
+    let mut motion_vi_init_estimated_gyro_bias: Option<Vector3<f64>> = None;
 
     let rebootstrap_enabled = args.rebootstrap_after_lost_frames.is_some();
     let mut segment_id: usize = 0;
@@ -4897,6 +5399,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_rebootstrap_frame_idx: Option<usize> = None;
     let mut rebootstrap_events: usize = 0;
     let mut rebootstrap_event_idx: usize = 0;
+    let mut atlas_merge_attempts: usize = 0;
+    let mut atlas_merge_source_keyframe_attempts: usize = 0;
+    let mut atlas_broader_recovery_cycles: usize = 0;
+    let mut atlas_merge_successes: usize = 0;
+    let mut atlas_boundary_keyframe_snapshots: usize = 0;
+    let mut atlas_boundary_factor_attempts: usize = 0;
+    let mut atlas_boundary_factor_successes: usize = 0;
+    let mut last_successful_atlas_boundary_keyframe: Option<Keyframe> = None;
     let mut next_rebootstrap_landmark_id: u64 = 10_000_000_000;
 
     let mut estimated_positions: Vec<Point3<f64>> = Vec::new();
@@ -4938,6 +5448,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_mirrored_bias_gyro: Option<Vector3<f64>> = None;
     let mut last_mirrored_bias_acc: Option<Vector3<f64>> = None;
     let mut covisibility_local_ba_triggers: usize = 0;
+    let mut sparse_factor_graph_updates: usize = 0;
+    let mut sparse_factor_graph_added: usize = 0;
+    let mut sparse_factor_graph_reactivated: usize = 0;
+    let mut sparse_factor_graph_inactivated_low_confidence: usize = 0;
+    let mut sparse_factor_graph_inactivated_window_age: usize = 0;
+    let mut sparse_factor_graph_inactivated_budget: usize = 0;
+    let mut sparse_factor_graph_pruned: usize = 0;
+    let mut sparse_factor_graph_active_temporal: usize = 0;
+    let mut sparse_factor_graph_active_proximity: usize = 0;
+    let mut sparse_factor_graph_active_stereo: usize = 0;
+    let mut sparse_factor_graph_inactive: usize = 0;
     let mut covisibility_local_ba_successes: usize = 0;
     let mut covisibility_local_ba_failures: usize = 0;
     let mut covisibility_local_ba_updated_keyframes_total: usize = 0;
@@ -5214,6 +5735,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let tracking_stats_before = slam.tracker.stats().clone();
         let mut result = slam.process_frame(&frame, candidates_to_submit);
+        if result.tracking_succeeded() {
+            last_successful_atlas_boundary_keyframe =
+                Some(keyframe_from_tracking_result(&frame, &result.tracking));
+        }
         let tracking_stats_after = slam.tracker.stats();
         let projection_attempt_count = tracking_stats_after
             .projection_guided_attempt_count
@@ -5368,6 +5893,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slam.map_mut()
                 .stereo_observations
                 .append(&mut seed_stereo_observations);
+            result.sparse_factor_graph = slam.sync_sparse_factor_graph_keyframe(frame_idx as u64);
         }
         let mut success = result.tracking_succeeded();
         if args.stereo_landmark_replenish
@@ -5388,6 +5914,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         };
         let mut rebootstrap_mapping_override: Option<LocalMappingResult> = None;
+        let mut atlas_bridge_attempted_this_frame = false;
         if rebootstrap_enabled {
             if success {
                 consecutive_lost_frames = 0;
@@ -5418,15 +5945,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &StereoBootstrapConfig::default(),
                         );
                         if stereo_matches.len() >= min_stereo_matches {
-                            let gt = nearest_ground_truth(
-                                &dataset.ground_truth,
-                                image_entry.timestamp_nanoseconds,
-                            );
-                            let seed_pose = world_to_camera_pose(
-                                &gt.orientation_world,
-                                &gt.position_world,
-                                &body_to_camera,
-                            );
+                            let independent_restart = args.rebootstrap_independent_submap;
+                            let adjacent_boundary_target = independent_restart.then(|| {
+                                last_successful_atlas_boundary_keyframe
+                                    .as_ref()
+                                    .map(|keyframe| (active_submap_id, keyframe.frame.id))
+                            });
+                            let adjacent_boundary_target = adjacent_boundary_target.flatten();
+                            let restart_atlas_pose_prior = independent_restart
+                                .then(|| {
+                                    let last_pose = slam.tracker.last_successful_pose()?.clone();
+                                    let atlas_from_old = map_atlas
+                                        .as_ref()?
+                                        .submap(active_submap_id)?
+                                        .atlas_from_local
+                                        .as_ref()?;
+                                    Some(Pose {
+                                        world_to_camera: last_pose
+                                            .world_to_camera
+                                            .compose(&atlas_from_old.inverse()),
+                                    })
+                                })
+                                .flatten();
+                            let seed_pose = if independent_restart {
+                                Pose::from_world_to_camera(
+                                    UnitQuaternion::identity(),
+                                    Vector3::zeros(),
+                                )
+                            } else {
+                                // Legacy same-gauge continuation is causal and
+                                // GT-free, but can silently inherit a damaged
+                                // scale/pose branch. Atlas mode below avoids
+                                // that coupling by starting at identity.
+                                slam.tracker
+                                    .last_successful_pose()
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        Pose::from_world_to_camera(
+                                            UnitQuaternion::identity(),
+                                            Vector3::zeros(),
+                                        )
+                                    })
+                            };
+
+                            if independent_restart {
+                                let atlas = map_atlas
+                                    .as_mut()
+                                    .expect("independent re-bootstrap requires an Atlas");
+                                let mut atlas_snapshot = slam.map().clone();
+                                if let Some(boundary_keyframe) =
+                                    last_successful_atlas_boundary_keyframe.as_ref()
+                                {
+                                    if insert_atlas_boundary_keyframe_snapshot(
+                                        &mut atlas_snapshot,
+                                        boundary_keyframe,
+                                    ) {
+                                        atlas_boundary_keyframe_snapshots += 1;
+                                    }
+                                }
+                                atlas.replace_submap_map(active_submap_id, atlas_snapshot)?;
+
+                                let mut independent_map = VisualMap::new();
+                                independent_map.cameras = slam.map().cameras.clone();
+                                active_submap_id =
+                                    atlas.try_insert_independent(independent_map.clone())?;
+                                active_submap_atlas_prior =
+                                    restart_atlas_pose_prior.as_ref().map(|atlas_pose| {
+                                        atlas_pose
+                                            .world_to_camera
+                                            .inverse()
+                                            .compose(&seed_pose.world_to_camera)
+                                    });
+
+                                // Reset every per-map continuation state. In
+                                // particular, no old motion prior, keyframe
+                                // policy, VI linearization, relocalization
+                                // cache, or pose graph may cross the gauge
+                                // boundary. Raw IMU processing resumes on the
+                                // next frame in the new segment.
+                                let mut restart_tracker = slam.tracker.clone();
+                                restart_tracker.reset();
+                                let mut restart_mapper = slam.mapper.clone();
+                                restart_mapper.reset();
+                                slam = OnlineSlamPipeline::new(
+                                    independent_map,
+                                    restart_tracker,
+                                    restart_mapper,
+                                    slam.config.clone(),
+                                );
+                            }
                             let landmark_ids = append_stereo_bootstrap_landmarks_to_map(
                                 slam.map_mut(),
                                 &seed_pose,
@@ -5435,7 +6042,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &mut next_rebootstrap_landmark_id,
                             );
                             let map_stats = map_provider_stats_from_map(slam.map());
-                            let restart_tracking = build_gt_seeded_rebootstrap_tracking_result(
+                            let restart_tracking = build_stereo_segment_restart_tracking_result(
                                 frame_idx as u64,
                                 seed_pose,
                                 &stereo_matches,
@@ -5465,6 +6072,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .clone()
                                     .apply_to(slam.map_mut());
                             }
+                            last_successful_atlas_boundary_keyframe =
+                                slam.map().keyframes.get(&(frame_idx as u64)).cloned();
                             let observed_landmarks = slam
                                 .map()
                                 .keyframes
@@ -5491,12 +6100,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     });
                                 }
                             }
+                            result.sparse_factor_graph =
+                                slam.sync_sparse_factor_graph_keyframe(frame_idx as u64);
+                            if independent_restart {
+                                let atlas = map_atlas
+                                    .as_mut()
+                                    .expect("independent re-bootstrap requires an Atlas");
+                                atlas.replace_submap_map(active_submap_id, slam.map().clone())?;
+                                atlas_merge_attempts += 1;
+                                let mut boundary_verified = false;
+                                if let Some((target_submap_id, target_frame_id)) =
+                                    adjacent_boundary_target
+                                {
+                                    atlas_boundary_factor_attempts += 1;
+                                    let target_from_source_prior = active_submap_atlas_prior
+                                        .as_ref()
+                                        .zip(
+                                            atlas.submap(target_submap_id).and_then(|submap| {
+                                                submap.atlas_from_local.as_ref()
+                                            }),
+                                        )
+                                        .map(|(atlas_from_source, atlas_from_target)| {
+                                            atlas_from_target.inverse().compose(atlas_from_source)
+                                        });
+                                    let factor = atlas.align_adjacent_boundary_factor(
+                                        active_submap_id,
+                                        frame_idx as u64,
+                                        target_submap_id,
+                                        target_frame_id,
+                                        target_from_source_prior.as_ref(),
+                                        &atlas_bridge_localizer.matcher,
+                                        &atlas_bridge_config,
+                                    )?;
+                                    append_atlas_boundary_factor(
+                                        &mut atlas_boundary_factors_csv,
+                                        frame_idx,
+                                        image_entry.timestamp_nanoseconds,
+                                        &factor,
+                                    );
+                                    if factor.verified_merge.is_some() {
+                                        atlas_boundary_factor_successes += 1;
+                                        atlas_merge_successes += 1;
+                                        active_submap_atlas_prior = None;
+                                        boundary_verified = true;
+                                    }
+                                    println!(
+                                        "atlas boundary factor source_submap={} target_submap={} frame_idx={} descriptor_matches={} spatial_matches={} metric={} refined_metric={} refinement_iterations={} used_prior={} rigid_inliers={} verified={}",
+                                        active_submap_id,
+                                        target_submap_id,
+                                        frame_idx,
+                                        factor.descriptor_match_count,
+                                        factor.spatial_mutual_match_count,
+                                        factor.metric_correspondence_count,
+                                        factor.projection_refined_correspondence_count,
+                                        factor.projection_refinement_iterations,
+                                        factor.used_transform_prior,
+                                        factor.rigid_inlier_count,
+                                        boundary_verified,
+                                    );
+                                }
+                                if !boundary_verified {
+                                    let source_window = atlas.source_keyframe_recovery_window(
+                                        active_submap_id,
+                                        frame_idx as u64,
+                                        args.atlas_broader_recovery_max_source_keyframes,
+                                    )?;
+                                    let window_alignment = atlas.align_submap_keyframe_window(
+                                        active_submap_id,
+                                        &source_window,
+                                        &camera,
+                                        active_submap_atlas_prior.as_ref(),
+                                        &atlas_bridge_localizer,
+                                        &atlas_bridge_config,
+                                    )?;
+                                    atlas_merge_source_keyframe_attempts +=
+                                        window_alignment.attempted_source_frame_ids.len();
+                                    if window_alignment.verified_merge.is_some() {
+                                        atlas_merge_successes += 1;
+                                        active_submap_atlas_prior = None;
+                                    }
+                                    for alignment in &window_alignment.alignments {
+                                        append_atlas_alignment_attempt(
+                                            &mut atlas_merge_attempts_csv,
+                                            atlas_merge_attempts,
+                                            frame_idx,
+                                            image_entry.timestamp_nanoseconds,
+                                            alignment,
+                                        );
+                                    }
+                                    println!(
+                                        "atlas bridge source_submap={} frame_idx={} source_views={} target_attempts={} verified={}",
+                                        active_submap_id,
+                                        frame_idx,
+                                        window_alignment.attempted_source_frame_ids.len(),
+                                        window_alignment
+                                            .alignments
+                                            .iter()
+                                            .map(|alignment| alignment.diagnostics.len())
+                                            .sum::<usize>(),
+                                        window_alignment.verified_merge.is_some(),
+                                    );
+                                }
+                                atlas_bridge_attempted_this_frame = true;
+                            }
                             rebootstrap_mapping_override = Some(mapping_result);
-                            segment_id += 1;
+                            segment_id = if independent_restart {
+                                active_submap_id as usize
+                            } else {
+                                segment_id + 1
+                            };
                             rebootstrap_events += 1;
                             rebootstrap_event_idx += 1;
+                            let seed_source = if independent_restart {
+                                "independent_identity"
+                            } else {
+                                "last_successful_pose"
+                            };
                             rebootstrap_log_csv.push_str(&format!(
-                                        "{rebootstrap_event_idx},{segment_id},{frame_idx},{},gt_pose,{},{},{},{}\n",
+                                        "{rebootstrap_event_idx},{segment_id},{frame_idx},{},{seed_source},{},{},{},{}\n",
                                         image_entry.timestamp_nanoseconds,
                                         stereo_matches.len(),
                                         landmark_ids.len(),
@@ -5772,6 +6493,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        let atlas_retry_keyframe_selected = result
+            .mapping
+            .as_ref()
+            .or(rebootstrap_mapping_override.as_ref())
+            .is_some_and(|mapping| mapping.keyframe_decision.selected);
+        if !atlas_bridge_attempted_this_frame
+            && success
+            && atlas_retry_keyframe_selected
+            && map_atlas.as_ref().is_some_and(|atlas| {
+                atlas
+                    .submap(active_submap_id)
+                    .is_some_and(|submap| submap.atlas_from_local.is_none())
+            })
+            && slam.map().keyframes.contains_key(&(frame_idx as u64))
+        {
+            let atlas = map_atlas
+                .as_mut()
+                .expect("Atlas retry requires independent-submap mode");
+            atlas.replace_submap_map(active_submap_id, slam.map().clone())?;
+            atlas_merge_attempts += 1;
+            let max_source_keyframes = if args.atlas_broader_recovery_max_source_keyframes > 1
+                && atlas_merge_attempts % args.atlas_broader_recovery_interval_attempts == 0
+            {
+                atlas_broader_recovery_cycles += 1;
+                args.atlas_broader_recovery_max_source_keyframes
+            } else {
+                1
+            };
+            let source_window = atlas.source_keyframe_recovery_window(
+                active_submap_id,
+                frame_idx as u64,
+                max_source_keyframes,
+            )?;
+            let window_alignment = atlas.align_submap_keyframe_window(
+                active_submap_id,
+                &source_window,
+                &camera,
+                active_submap_atlas_prior.as_ref(),
+                &atlas_bridge_localizer,
+                &atlas_bridge_config,
+            )?;
+            atlas_merge_source_keyframe_attempts +=
+                window_alignment.attempted_source_frame_ids.len();
+            if window_alignment.verified_merge.is_some() {
+                atlas_merge_successes += 1;
+                active_submap_atlas_prior = None;
+            }
+            for alignment in &window_alignment.alignments {
+                append_atlas_alignment_attempt(
+                    &mut atlas_merge_attempts_csv,
+                    atlas_merge_attempts,
+                    frame_idx,
+                    image_entry.timestamp_nanoseconds,
+                    alignment,
+                );
+            }
+            println!(
+                "atlas bridge retry source_submap={} frame_idx={} source_views={} target_attempts={} verified={}",
+                active_submap_id,
+                frame_idx,
+                window_alignment.attempted_source_frame_ids.len(),
+                window_alignment
+                    .alignments
+                    .iter()
+                    .map(|alignment| alignment.diagnostics.len())
+                    .sum::<usize>(),
+                window_alignment.verified_merge.is_some(),
+            );
+        }
         if let Some(mapping) = result
             .mapping
             .as_ref()
@@ -5981,6 +6771,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        if let Some(stats) = result.sparse_factor_graph.as_ref() {
+            sparse_factor_graph_updates += 1;
+            sparse_factor_graph_added += stats.added;
+            sparse_factor_graph_reactivated += stats.reactivated;
+            sparse_factor_graph_inactivated_low_confidence += stats.inactivated_low_confidence;
+            sparse_factor_graph_inactivated_window_age += stats.inactivated_window_age;
+            sparse_factor_graph_inactivated_budget += stats.inactivated_budget;
+            sparse_factor_graph_pruned += stats.pruned;
+            sparse_factor_graph_active_temporal = stats.active_temporal;
+            sparse_factor_graph_active_proximity = stats.active_proximity;
+            sparse_factor_graph_active_stereo = stats.active_stereo;
+            sparse_factor_graph_inactive = stats.inactive;
+        }
         if let Some(stats) = result.covisibility_local_ba.as_ref() {
             covisibility_local_ba_triggers += 1;
             covisibility_local_ba_elapsed_ms_total += stats.elapsed_ms;
@@ -6085,11 +6888,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (0, 0, 0, 0, false)
             };
             covisibility_local_ba_log.push_str(&format!(
-                "{frame_idx},{},{},{},{:.6},{optimized_keyframes},{fixed_keyframes},{landmarks},{observations},{boundary_fallback_used},{:?},{:?},{:?},{:?},{},{},{},{:?},{},{},{}\n",
+                "{frame_idx},{},{},{},{:.6},{:?},{optimized_keyframes},{fixed_keyframes},{landmarks},{observations},{boundary_fallback_used},{:?},{:?},{:?},{:?},{},{},{},{:?},{},{},{}\n",
                 image_entry.timestamp_nanoseconds,
                 stats.success,
                 error.replace(',', ";"),
                 stats.elapsed_ms,
+                stats.factor_graph_neighbor_count,
                 stats.mean_reprojection_before_px,
                 stats.mean_reprojection_after_px,
                 stats.max_pose_translation_correction_m,
@@ -6334,15 +7138,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .cam0_images
                     .get(admitted.from_keyframe_id as usize)
                     .zip(dataset.cam0_images.get(admitted.to_keyframe_id as usize))
-                    .map(|(from_image, to_image)| {
+                    .and_then(|(from_image, to_image)| {
                         let from_gt = nearest_ground_truth(
                             &dataset.ground_truth,
                             from_image.timestamp_nanoseconds,
-                        );
+                        )?;
                         let to_gt = nearest_ground_truth(
                             &dataset.ground_truth,
                             to_image.timestamp_nanoseconds,
-                        );
+                        )?;
                         let camera_to_world = |gt: &EurocGroundTruthSample| {
                             let center = gt.position_world
                                 + gt.orientation_world
@@ -6359,7 +7163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let translation_error = residual.translation.norm();
                         let rotation_error_deg = residual.rotation.angle().to_degrees();
                         let correct = translation_error <= 0.5 && rotation_error_deg <= 10.0;
-                        (translation_error, rotation_error_deg, correct)
+                        Some((translation_error, rotation_error_deg, correct))
                     });
                 if let Some((_, _, correct)) = gt_error {
                     pose_graph_refinement_gt_evaluated += 1;
@@ -6407,15 +7211,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .cam0_images
                     .get(rejected.from_keyframe_id as usize)
                     .zip(dataset.cam0_images.get(rejected.to_keyframe_id as usize))
-                    .map(|(from_image, to_image)| {
+                    .and_then(|(from_image, to_image)| {
                         let from_gt = nearest_ground_truth(
                             &dataset.ground_truth,
                             from_image.timestamp_nanoseconds,
-                        );
+                        )?;
                         let to_gt = nearest_ground_truth(
                             &dataset.ground_truth,
                             to_image.timestamp_nanoseconds,
-                        );
+                        )?;
                         let camera_to_world = |gt: &EurocGroundTruthSample| {
                             let center = gt.position_world
                                 + gt.orientation_world
@@ -6432,7 +7236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let translation_error = residual.translation.norm();
                         let rotation_error_deg = residual.rotation.angle().to_degrees();
                         let correct = translation_error <= 0.5 && rotation_error_deg <= 10.0;
-                        (translation_error, rotation_error_deg, correct)
+                        Some((translation_error, rotation_error_deg, correct))
                     });
                 if let Some((_, _, correct)) = gt_error {
                     pose_graph_refinement_rejected_gt_evaluated += 1;
@@ -6494,10 +7298,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(event) = &result.vi_motion_init {
+            let (last_gravity_alignment, last_gyro_bias_alignment) =
+                match slam.motion_vi_initialization_status() {
+                    MotionViInitializationStatus::Waiting {
+                        last_gravity_alignment,
+                        last_gyro_bias_alignment,
+                        ..
+                    } => (last_gravity_alignment, last_gyro_bias_alignment),
+                    _ => (None, None),
+                };
             let entry = format!(
                 "frame_idx={frame_idx} timestamp_ns={} {}\n",
                 image_entry.timestamp_nanoseconds,
-                format_motion_vi_init_event(event),
+                format_motion_vi_init_event(
+                    event,
+                    last_gravity_alignment.as_ref(),
+                    last_gyro_bias_alignment.as_ref(),
+                ),
             );
             print!("vi_motion_init {entry}");
             motion_vi_init_log.push_str(&entry);
@@ -6509,33 +7326,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     motion_vi_init_succeeded_at_frame = Some(frame_idx);
                     motion_vi_init_recovered_scale = Some(result.scale);
                     motion_vi_init_viba2_iterations = Some(result.viba2_iterations_run);
+                    motion_vi_init_estimated_gravity = result.estimated_gravity_world;
+                    motion_vi_init_estimated_gyro_bias = result.estimated_gyro_bias;
                 }
             }
         }
 
-        let (estimated_center, estimated_rotation_wc) = if let Some(pose) = tracked.as_ref() {
-            let center = pose.camera_center_world();
-            let rotation_wc = pose.world_to_camera.rotation.inverse();
-            (Some(center), Some(rotation_wc))
+        let atlas_from_local = map_atlas.as_ref().and_then(|atlas| {
+            atlas
+                .submap(active_submap_id)
+                .and_then(|submap| submap.atlas_from_local.clone())
+        });
+        let globally_tracked = if map_atlas.is_some() {
+            tracked.as_ref().and_then(|pose| {
+                atlas_from_local.as_ref().map(|atlas_from_local| Pose {
+                    world_to_camera: pose.world_to_camera.compose(&atlas_from_local.inverse()),
+                })
+            })
         } else {
-            (None, None)
+            tracked.clone()
         };
+        let global_success = success && globally_tracked.is_some();
+        if global_success {
+            globally_aligned_tracking_successes += 1;
+        }
+
+        if let Some(local_pose) = tracked.as_ref() {
+            let local_center = local_pose.camera_center_world();
+            let local_rotation_wc = local_pose.world_to_camera.rotation.inverse();
+            submap_trajectory_csv.push_str(&format!(
+                "{},{frame_idx},{active_submap_id},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}\n",
+                image_entry.timestamp_nanoseconds,
+                local_center.x,
+                local_center.y,
+                local_center.z,
+                local_rotation_wc.w,
+                local_rotation_wc.i,
+                local_rotation_wc.j,
+                local_rotation_wc.k,
+                u8::from(success),
+                u8::from(atlas_from_local.is_some() || map_atlas.is_none()),
+            ));
+        } else {
+            submap_trajectory_csv.push_str(&format!(
+                "{},{frame_idx},{active_submap_id},,,,,,,,{},{}\n",
+                image_entry.timestamp_nanoseconds,
+                u8::from(success),
+                u8::from(atlas_from_local.is_some() || map_atlas.is_none()),
+            ));
+        }
+
+        let (estimated_center, estimated_rotation_wc) =
+            if let Some(pose) = globally_tracked.as_ref() {
+                let center = pose.camera_center_world();
+                let rotation_wc = pose.world_to_camera.rotation.inverse();
+                (Some(center), Some(rotation_wc))
+            } else {
+                (None, None)
+            };
 
         let gt = nearest_ground_truth(&dataset.ground_truth, image_entry.timestamp_nanoseconds);
-        let (gt_center_x, gt_center_y, gt_center_z) = {
-            let camera_center_world = gt.position_world
-                + gt.orientation_world
+        let gt_camera_pose = gt.map(|sample| {
+            let center = sample.position_world
+                + sample
+                    .orientation_world
                     .transform_vector(&body_to_camera.translation);
-            (
-                camera_center_world.x,
-                camera_center_world.y,
-                camera_center_world.z,
-            )
-        };
-        frame_groundtruth_csv.push_str(&format!(
-            "{},{frame_idx},{:.6},{:.6},{:.6}\n",
-            image_entry.timestamp_nanoseconds, gt_center_x, gt_center_y, gt_center_z,
-        ));
+            let rotation = sample.orientation_world * body_to_camera.rotation;
+            (center, rotation)
+        });
+        if let Some((gt_center, _)) = gt_camera_pose.as_ref() {
+            frame_groundtruth_csv.push_str(&format!(
+                "{},{frame_idx},{:.6},{:.6},{:.6}\n",
+                image_entry.timestamp_nanoseconds, gt_center.x, gt_center.y, gt_center.z,
+            ));
+        }
 
         if let (Some(center), Some(rot_wc)) = (estimated_center, estimated_rotation_wc) {
             let q = rot_wc;
@@ -6549,41 +7413,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 q.i,
                 q.j,
                 q.k,
-                if success { 1 } else { 0 },
+                if global_success { 1 } else { 0 },
             ));
 
-            let gt_center = Vector3::new(gt_center_x, gt_center_y, gt_center_z);
-            let position_error = (Vector3::new(center.x, center.y, center.z) - gt_center).norm();
-            let gt_rotation_wc = gt.orientation_world * body_to_camera.rotation;
-            let orientation_error_deg = q.rotation_to(&gt_rotation_wc).angle().to_degrees();
-            err_csv.push_str(&format!(
-                "{},{frame_idx},{segment_id},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
-                image_entry.timestamp_nanoseconds,
-                gt_center_x,
-                gt_center_y,
-                gt_center_z,
-                center.x,
-                center.y,
-                center.z,
-                position_error,
-                orientation_error_deg,
-            ));
-            sum_position_sq += position_error * position_error;
-            sum_orientation_sq_deg += orientation_error_deg * orientation_error_deg;
-            if position_error > max_position_err {
-                max_position_err = position_error;
+            if let Some((gt_center, gt_rotation_wc)) = gt_camera_pose.as_ref() {
+                let position_error =
+                    (Vector3::new(center.x, center.y, center.z) - gt_center).norm();
+                let orientation_error_deg = q.rotation_to(gt_rotation_wc).angle().to_degrees();
+                err_csv.push_str(&format!(
+                    "{},{frame_idx},{segment_id},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                    image_entry.timestamp_nanoseconds,
+                    gt_center.x,
+                    gt_center.y,
+                    gt_center.z,
+                    center.x,
+                    center.y,
+                    center.z,
+                    position_error,
+                    orientation_error_deg,
+                ));
+                sum_position_sq += position_error * position_error;
+                sum_orientation_sq_deg += orientation_error_deg * orientation_error_deg;
+                if position_error > max_position_err {
+                    max_position_err = position_error;
+                }
+                if orientation_error_deg > max_orientation_err_deg {
+                    max_orientation_err_deg = orientation_error_deg;
+                }
+                estimated_positions.push(Point3::new(center.x, center.y, center.z));
+                reference_positions.push(Point3::from(*gt_center));
+                error_samples += 1;
             }
-            if orientation_error_deg > max_orientation_err_deg {
-                max_orientation_err_deg = orientation_error_deg;
-            }
-            estimated_positions.push(Point3::new(center.x, center.y, center.z));
-            reference_positions.push(Point3::new(gt_center_x, gt_center_y, gt_center_z));
-            error_samples += 1;
         } else {
             traj_csv.push_str(&format!(
                 "{},{frame_idx},,,,,,,,{}\n",
                 image_entry.timestamp_nanoseconds,
-                if success { 1 } else { 0 },
+                if global_success { 1 } else { 0 },
             ));
         }
 
@@ -6591,7 +7456,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frames_recorded += 1;
     }
 
+    if let Some(atlas) = map_atlas.as_mut() {
+        atlas.replace_submap_map(active_submap_id, slam.map().clone())?;
+    }
+    let materialized_atlas = map_atlas
+        .as_ref()
+        .map(MapAtlas::materialize_aligned)
+        .transpose()?;
+    let final_output_map = materialized_atlas
+        .as_ref()
+        .map(|materialized| &materialized.map)
+        .unwrap_or_else(|| slam.map());
+    let materialized_frame_source_ids: std::collections::HashMap<u64, u64> = materialized_atlas
+        .as_ref()
+        .map(|materialized| {
+            materialized
+                .id_remaps
+                .values()
+                .flat_map(|remap| {
+                    remap
+                        .frame_ids
+                        .iter()
+                        .map(|(source_id, output_id)| (*output_id, *source_id))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     fs::write(&traj_path, traj_csv)?;
+    if map_atlas.is_some() {
+        fs::write(&submap_trajectory_path, submap_trajectory_csv)?;
+        fs::write(&atlas_merge_attempts_path, atlas_merge_attempts_csv)?;
+        fs::write(&atlas_boundary_factors_path, atlas_boundary_factors_csv)?;
+    }
+    if let Some(atlas) = map_atlas.as_ref() {
+        let mut submaps_csv = String::from(
+            "submap_id,aligned,atlas_tx,atlas_ty,atlas_tz,atlas_qw,atlas_qx,atlas_qy,atlas_qz,cameras,keyframes,landmarks,stereo_observations,observation_confidences\n",
+        );
+        let mut submap_landmarks_csv = String::from(
+            "submap_id,landmark_id,local_x,local_y,local_z,atlas_x,atlas_y,atlas_z,observations,aligned\n",
+        );
+        for submap in atlas.active_submaps() {
+            let transform = submap.atlas_from_local.as_ref();
+            let transform_fields = transform
+                .map(|transform| {
+                    format!(
+                        "{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9}",
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                        transform.rotation.w,
+                        transform.rotation.i,
+                        transform.rotation.j,
+                        transform.rotation.k,
+                    )
+                })
+                .unwrap_or_else(|| ",,,,,,".to_string());
+            submaps_csv.push_str(&format!(
+                "{},{},{transform_fields},{},{},{},{},{}\n",
+                submap.id,
+                u8::from(transform.is_some()),
+                submap.map.cameras.len(),
+                submap.map.keyframes.len(),
+                submap.map.landmarks.len(),
+                submap.map.stereo_observations.len(),
+                submap.map.observation_confidence_count(),
+            ));
+            for landmark in submap.map.landmarks.values() {
+                let atlas_point =
+                    transform.map(|transform| transform.transform_point(&landmark.position));
+                let atlas_fields = atlas_point
+                    .map(|point| format!("{:.9},{:.9},{:.9}", point.x, point.y, point.z))
+                    .unwrap_or_else(|| ",,".to_string());
+                submap_landmarks_csv.push_str(&format!(
+                    "{},{},{:.9},{:.9},{:.9},{atlas_fields},{},{}\n",
+                    submap.id,
+                    landmark.id,
+                    landmark.position.x,
+                    landmark.position.y,
+                    landmark.position.z,
+                    landmark.observations.len(),
+                    u8::from(transform.is_some()),
+                ));
+            }
+        }
+        fs::write(&atlas_submaps_path, submaps_csv)?;
+        fs::write(&atlas_submap_landmarks_path, submap_landmarks_csv)?;
+    }
     fs::write(&err_path, err_csv)?;
     fs::write(&frame_groundtruth_path, frame_groundtruth_csv)?;
     if args.export_frame_appearance_descriptors {
@@ -6641,7 +7592,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a 3D Gaussian Splat from real on-surface SLAM points instead of random
     // volumetric init (which gives gsplat a huge kNN init-scale -> fog).
     let mut lm_csv = String::from("id,x,y,z,observations\n");
-    for lm in slam.map().landmarks.values() {
+    for lm in final_output_map.landmarks.values() {
         lm_csv.push_str(&format!(
             "{},{:.6},{:.6},{:.6},{}\n",
             lm.id,
@@ -6696,7 +7647,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // causal, per-frame *live* estimates logged as each frame was processed,
     // so a loop-closure PGO correction applied to `map.keyframes` later in
     // the run (`--pose-graph-refinement-propagate`) can never retroactively
-    // fix an already-logged row. `slam.map().keyframes` reflects every
+    // fix an already-logged row. `final_output_map.keyframes` reflects every
     // correction folded in by the time the frame loop finished, so re-running
     // the same per-frame-error machinery over the final keyframe poses gives
     // the "final optimized trajectory" ATE that published SLAM numbers
@@ -6706,7 +7657,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is indexable directly by keyframe id to recover the frame timestamp —
     // the same association `keyframe_decisions.csv` relies on implicitly via
     // `frame_idx`.
-    let mut keyframe_ids: Vec<u64> = slam.map().keyframes.keys().copied().collect();
+    let mut keyframe_ids: Vec<u64> = final_output_map.keyframes.keys().copied().collect();
     keyframe_ids.sort_unstable();
 
     let mut keyframe_trajectory_csv =
@@ -6717,13 +7668,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut final_keyframe_ids: Vec<u64> = Vec::new();
     let mut final_keyframe_estimated_tum = String::new();
     let mut final_keyframe_reference_tum = String::new();
+    let mut final_keyframe_trajectory_count = 0usize;
 
     for &keyframe_id in &keyframe_ids {
-        let keyframe = &slam.map().keyframes[&keyframe_id];
+        let keyframe = &final_output_map.keyframes[&keyframe_id];
         let Some(pose) = keyframe.frame.pose.as_ref() else {
             continue;
         };
-        let Some(image_entry) = dataset.cam0_images.get(keyframe_id as usize) else {
+        let source_frame_id = materialized_frame_source_ids
+            .get(&keyframe_id)
+            .copied()
+            .unwrap_or(keyframe_id);
+        let Some(image_entry) = dataset.cam0_images.get(source_frame_id as usize) else {
             continue;
         };
         let timestamp_ns = image_entry.timestamp_nanoseconds;
@@ -6733,26 +7689,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{keyframe_id},{timestamp_ns},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
             center.x, center.y, center.z, q.w, q.i, q.j, q.k,
         ));
+        final_keyframe_trajectory_count += 1;
 
-        let gt = nearest_ground_truth(&dataset.ground_truth, timestamp_ns);
-        let gt_center = gt.position_world
-            + gt.orientation_world
-                .transform_vector(&body_to_camera.translation);
-        let gt_camera_to_world_rotation = gt.orientation_world * body_to_camera.rotation;
-        let gt_q = gt_camera_to_world_rotation.quaternion();
-        final_keyframe_estimated_tum.push_str(&format!(
-            "{keyframe_id} {} {} {} {} {} {} {}\n",
-            center.x, center.y, center.z, q.i, q.j, q.k, q.w,
-        ));
-        final_keyframe_reference_tum.push_str(&format!(
-            "{keyframe_id} {} {} {} {} {} {} {}\n",
-            gt_center.x, gt_center.y, gt_center.z, gt_q.i, gt_q.j, gt_q.k, gt_q.w,
-        ));
+        if let Some(gt) = nearest_ground_truth(&dataset.ground_truth, timestamp_ns) {
+            let gt_center = gt.position_world
+                + gt.orientation_world
+                    .transform_vector(&body_to_camera.translation);
+            let gt_camera_to_world_rotation = gt.orientation_world * body_to_camera.rotation;
+            let gt_q = gt_camera_to_world_rotation.quaternion();
+            final_keyframe_estimated_tum.push_str(&format!(
+                "{keyframe_id} {} {} {} {} {} {} {}\n",
+                center.x, center.y, center.z, q.i, q.j, q.k, q.w,
+            ));
+            final_keyframe_reference_tum.push_str(&format!(
+                "{keyframe_id} {} {} {} {} {} {} {}\n",
+                gt_center.x, gt_center.y, gt_center.z, gt_q.i, gt_q.j, gt_q.k, gt_q.w,
+            ));
 
-        final_keyframe_estimated_positions.push(Point3::new(center.x, center.y, center.z));
-        final_keyframe_reference_positions.push(Point3::new(gt_center.x, gt_center.y, gt_center.z));
-        final_keyframe_timestamps.push(timestamp_ns);
-        final_keyframe_ids.push(keyframe_id);
+            final_keyframe_estimated_positions.push(Point3::new(center.x, center.y, center.z));
+            final_keyframe_reference_positions.push(Point3::new(
+                gt_center.x,
+                gt_center.y,
+                gt_center.z,
+            ));
+            final_keyframe_timestamps.push(timestamp_ns);
+            final_keyframe_ids.push(keyframe_id);
+        }
     }
     fs::write(&keyframe_trajectory_path, keyframe_trajectory_csv)?;
 
@@ -6833,10 +7795,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let final_vi_status = slam.vi_initialization_status();
     let final_motion_vi_status = slam.motion_vi_initialization_status();
-    let map_keyframes = slam.map().keyframes.len();
-    let map_landmarks = slam.map().landmarks.len();
-    let map_landmark_covariances = slam.map().landmark_position_covariances.len();
-    let map_stereo_observations = slam.map().stereo_observations.len();
+    let map_keyframes = final_output_map.keyframes.len();
+    let map_landmarks = final_output_map.landmarks.len();
+    let map_landmark_covariances = final_output_map.landmark_position_covariances.len();
+    let map_stereo_observations = final_output_map.stereo_observations.len();
+    let map_observation_confidences = final_output_map.observation_confidence_count();
+    let map_observation_confidence_stats = final_output_map.observation_confidence_stats();
+    let atlas_submap_count = map_atlas
+        .as_ref()
+        .map(|atlas| atlas.active_submaps().count())
+        .unwrap_or(1);
+    let atlas_aligned_submap_count = map_atlas
+        .as_ref()
+        .map(MapAtlas::aligned_submap_count)
+        .unwrap_or(1);
+    let atlas_independent_submap_count = map_atlas
+        .as_ref()
+        .map(MapAtlas::independent_submap_count)
+        .unwrap_or(0);
+    let atlas_verified_merge_count = map_atlas
+        .as_ref()
+        .map(|atlas| atlas.verified_merges().len())
+        .unwrap_or(0);
+    let atlas_verified_landmark_match_count = map_atlas
+        .as_ref()
+        .map(|atlas| {
+            atlas
+                .verified_merges()
+                .iter()
+                .map(|merge| merge.landmark_matches.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    let atlas_aligned_owned_landmark_count = map_atlas
+        .as_ref()
+        .map(|atlas| {
+            atlas
+                .active_submaps()
+                .filter(|submap| submap.atlas_from_local.is_some())
+                .map(|submap| submap.map.landmarks.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(map_landmarks);
+    let atlas_welded_landmark_reduction =
+        atlas_aligned_owned_landmark_count.saturating_sub(map_landmarks);
+    let global_tracking_success_rate = if frames_recorded > 0 {
+        globally_aligned_tracking_successes as f64 / frames_recorded as f64
+    } else {
+        0.0
+    };
     let mean_features = if frames_recorded > 0 {
         feature_count_sum as f64 / frames_recorded as f64
     } else {
@@ -6887,6 +7894,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame_processing_ms_p50 = frame_time_percentile_ms(0.50);
     let frame_processing_ms_p95 = frame_time_percentile_ms(0.95);
     let frame_processing_ms_p99 = frame_time_percentile_ms(0.99);
+    let evaluation_metric = |value: f64, precision: usize| {
+        if evaluation_ground_truth_available {
+            format!("{value:.precision$}")
+        } else {
+            "None".to_string()
+        }
+    };
+    let rmse_pos_summary = evaluation_metric(rmse_pos, 4);
+    let max_position_err_summary = evaluation_metric(max_position_err, 4);
+    let rmse_rot_deg_summary = evaluation_metric(rmse_rot_deg, 4);
+    let max_orientation_err_deg_summary = evaluation_metric(max_orientation_err_deg, 4);
+    let ate_rmse_rigid_summary = evaluation_metric(ate_rmse_rigid, 4);
+    let max_rigid_summary = evaluation_metric(max_rigid, 4);
+    let ate_rmse_sim_summary = evaluation_metric(ate_rmse_sim, 4);
+    let max_sim_summary = evaluation_metric(max_sim, 4);
+    let scale_summary = evaluation_metric(aligned_similarity.scale, 6);
+    let final_keyframe_ate_rigid_summary = evaluation_metric(final_keyframe_ate_rigid_rmse_m, 4);
+    let final_keyframe_ate_similarity_summary =
+        evaluation_metric(final_keyframe_ate_similarity_rmse_m, 4);
+    let final_keyframe_ate_similarity_scale_summary =
+        evaluation_metric(final_keyframe_ate_similarity_scale, 6);
     let summary = format!(
         "euroc_dir={}\n\
          frames_recorded={frames_recorded}\n\
@@ -6896,7 +7924,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          frame_processing_ms_p50={frame_processing_ms_p50:?}\n\
          frame_processing_ms_p95={frame_processing_ms_p95:?}\n\
          frame_processing_ms_p99={frame_processing_ms_p99:?}\n\
+         evaluation_ground_truth_available={evaluation_ground_truth_available}\n\
+         seed_pose_source=identity_first_camera\n\
          tracking_success_rate={success_rate:.3}\n\
+         globally_aligned_tracking_success_rate={global_tracking_success_rate:.3}\n\
+         globally_aligned_tracking_successes={globally_aligned_tracking_successes}\n\
+         atlas_enabled={rebootstrap_independent_submap}\n\
+         atlas_submap_count={atlas_submap_count}\n\
+         atlas_aligned_submap_count={atlas_aligned_submap_count}\n\
+         atlas_independent_submap_count={atlas_independent_submap_count}\n\
+         atlas_active_submap_id={active_submap_id}\n\
+         atlas_merge_attempts={atlas_merge_attempts}\n\
+         atlas_merge_source_keyframe_attempts={atlas_merge_source_keyframe_attempts}\n\
+         atlas_merge_successes={atlas_merge_successes}\n\
+         atlas_verified_merge_count={atlas_verified_merge_count}\n\
+         atlas_verified_landmark_match_count={atlas_verified_landmark_match_count}\n\
+         atlas_aligned_owned_landmark_count={atlas_aligned_owned_landmark_count}\n\
+         atlas_welded_landmark_reduction={atlas_welded_landmark_reduction}\n\
          pose_prior_visual_override_count={pose_prior_visual_override_count}\n\
          imu_samples_consumed={imu_idx}\n\
          vi_init_preseed_samples={vi_init_preseed_samples}\n\
@@ -6921,15 +7965,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          map_landmarks={map_landmarks}\n\
          map_landmark_position_covariances={map_landmark_covariances}\n\
          map_stereo_observations={map_stereo_observations}\n\
+         map_observation_confidences={map_observation_confidences}\n\
+         map_observation_confidence_stats_min_mean_max={map_observation_confidence_stats:?}\n\
+         observation_confidence_ba_enabled={observation_confidence_ba_enabled}\n\
          vi_init_first_event_frame={vi_first:?}\n\
          vi_init_succeeded_frame={vi_succeeded:?}\n\
          vi_init_status_final={final_vi_status:?}\n\
          motion_vi_init_enabled={motion_enabled}\n\
          motion_vi_init_after_static_give_up={motion_after_static_give_up}\n\
+         motion_vi_init_from_configured_bias={motion_from_configured_bias}\n\
          motion_vi_init_first_event_frame={motion_first:?}\n\
          motion_vi_init_succeeded_frame={motion_succeeded:?}\n\
          motion_vi_init_recovered_scale={motion_scale:?}\n\
          motion_vi_init_viba2_iterations={motion_iters:?}\n\
+         motion_vi_init_estimate_gravity={motion_estimate_gravity}\n\
+         motion_vi_init_max_gravity_norm_deviation={motion_max_gravity_deviation:?}\n\
+         motion_vi_init_estimated_gravity={motion_estimated_gravity:?}\n\
+         motion_vi_init_estimate_gyro_bias={motion_estimate_gyro_bias}\n\
+         motion_vi_init_estimated_gyro_bias={motion_estimated_gyro_bias:?}\n\
          motion_vi_init_status_final={final_motion_vi_status:?}\n\
          local_vi_ba_enabled={local_vi_ba_enabled}\n\
          local_vi_ba_marginalization={local_vi_ba_marginalization}\n\
@@ -6955,10 +8008,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          motion_vi_init_max_rotation_residual_rms_rad={motion_vi_max_rotation_residual_rms_rad:?}\n\
          motion_vi_init_max_velocity_residual_rms_mps={motion_vi_max_velocity_residual_rms_mps:?}\n\
          motion_vi_init_max_position_residual_rms_m={motion_vi_max_position_residual_rms_m:?}\n\
+         vi_bias_release_min_keyframes={bias_release_min_kf:?}\n\
+         vi_bias_release_min_translation_meters={bias_release_min_translation:?}\n\
          covisibility_local_map_max_keyframes={covisibility_max_kf:?}\n\
          covisibility_local_map_min_shared={covisibility_min_shared}\n\
          covisibility_local_map_used_frames={covisibility_used_frames}\n\
          covisibility_local_map_mean_size={covisibility_mean_size:.2}\n\
+         sparse_factor_graph_enabled={sparse_factor_graph_enabled}\n\
+         sparse_factor_graph_updates={sparse_factor_graph_updates}\n\
+         sparse_factor_graph_added={sparse_factor_graph_added}\n\
+         sparse_factor_graph_reactivated={sparse_factor_graph_reactivated}\n\
+         sparse_factor_graph_inactivated_low_confidence={sparse_factor_graph_inactivated_low_confidence}\n\
+         sparse_factor_graph_inactivated_window_age={sparse_factor_graph_inactivated_window_age}\n\
+         sparse_factor_graph_inactivated_budget={sparse_factor_graph_inactivated_budget}\n\
+         sparse_factor_graph_pruned={sparse_factor_graph_pruned}\n\
+         sparse_factor_graph_active_temporal={sparse_factor_graph_active_temporal}\n\
+         sparse_factor_graph_active_proximity={sparse_factor_graph_active_proximity}\n\
+         sparse_factor_graph_active_stereo={sparse_factor_graph_active_stereo}\n\
+         sparse_factor_graph_inactive={sparse_factor_graph_inactive}\n\
          covisibility_local_ba_enabled={covis_ba_enabled}\n\
          covisibility_local_ba_min_keyframes={covis_ba_min_keyframes}\n\
          covisibility_local_ba_max_keyframes={covis_ba_max_keyframes:?}\n\
@@ -7116,6 +8183,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          projection_max_widen_retries={projection_max_widen_retries}\n\
          projection_local_map_refinement={projection_local_map_refinement}\n\
          projection_refinement_search_radius_px={projection_refinement_search_radius_px:.3}\n\
+         projection_refinement_iterations={projection_refinement_iterations}\n\
+         projection_refinement_radius_shrink_factor={projection_refinement_radius_shrink_factor:.3}\n\
+         projection_refinement_reassign_correspondences={projection_refinement_reassign_correspondences}\n\
+         projection_refinement_min_inlier_pair_retention_ratio={projection_refinement_min_inlier_pair_retention_ratio:.3}\n\
+         projection_refinement_max_translation_correction_m={projection_refinement_max_translation_correction_m:?}\n\
+         projection_refinement_max_rotation_correction_deg={projection_refinement_max_rotation_correction_deg:?}\n\
          projection_guided_attempt_count={projection_guided_attempt_count}\n\
          projection_guided_widen_retry_count={projection_guided_widen_retry_count}\n\
          projection_guided_success_count={projection_guided_success_count}\n\
@@ -7184,6 +8257,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          relocalization_successes={reloc_successes}\n\
          rebootstrap_after_lost_frames={rebootstrap_after_lost_frames:?}\n\
          rebootstrap_cooldown_frames={rebootstrap_cooldown_frames}\n\
+         rebootstrap_independent_submap={rebootstrap_independent_submap}\n\
+         atlas_broader_recovery_max_source_keyframes={atlas_broader_recovery_max_source_keyframes}\n\
+         atlas_broader_recovery_interval_attempts={atlas_broader_recovery_interval_attempts}\n\
+         atlas_broader_recovery_cycles={atlas_broader_recovery_cycles}\n\
+         atlas_boundary_keyframe_snapshots={atlas_boundary_keyframe_snapshots}\n\
+         atlas_boundary_factor_attempts={atlas_boundary_factor_attempts}\n\
+         atlas_boundary_factor_successes={atlas_boundary_factor_successes}\n\
          rebootstrap_events={rebootstrap_events}\n\
          rebootstrap_final_segment_id={segment_id}\n\
          relocalization_gate_passes={reloc_gate_passes}\n\
@@ -7244,25 +8324,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          last_mirrored_bias_gyro={last_mirrored_bg:?}\n\
          last_mirrored_bias_acc={last_mirrored_ba:?}\n\
          tracking_quality_gate_failures={quality_gate_failures}\n\
-         ate_position_rmse_m={rmse_pos:.4}\n\
-         ate_position_max_m={max_position_err:.4}\n\
-         ate_orientation_rmse_deg={rmse_rot_deg:.4}\n\
-         ate_orientation_max_deg={max_orientation_err_deg:.4}\n\
-         ate_rigid_rmse_m={ate_rmse_rigid:.4}\n\
-         ate_rigid_max_m={max_rigid:.4}\n\
-         ate_similarity_rmse_m={ate_rmse_sim:.4}\n\
-         ate_similarity_max_m={max_sim:.4}\n\
-         ate_similarity_scale={scale:.6}\n\
-         final_keyframe_ate_rigid_rmse_m={final_keyframe_ate_rigid_rmse_m:.4}\n\
-         final_keyframe_ate_similarity_rmse_m={final_keyframe_ate_similarity_rmse_m:.4}\n\
-         final_keyframe_ate_similarity_scale={final_keyframe_ate_similarity_scale:.6}\n\
+         ate_position_rmse_m={rmse_pos_summary}\n\
+         ate_position_max_m={max_position_err_summary}\n\
+         ate_orientation_rmse_deg={rmse_rot_deg_summary}\n\
+         ate_orientation_max_deg={max_orientation_err_deg_summary}\n\
+         ate_rigid_rmse_m={ate_rmse_rigid_summary}\n\
+         ate_rigid_max_m={max_rigid_summary}\n\
+         ate_similarity_rmse_m={ate_rmse_sim_summary}\n\
+         ate_similarity_max_m={max_sim_summary}\n\
+         ate_similarity_scale={scale_summary}\n\
+         final_keyframe_ate_rigid_rmse_m={final_keyframe_ate_rigid_summary}\n\
+         final_keyframe_ate_similarity_rmse_m={final_keyframe_ate_similarity_summary}\n\
+         final_keyframe_ate_similarity_scale={final_keyframe_ate_similarity_scale_summary}\n\
          final_keyframe_rpe_delta1_pairs={}\n\
          final_keyframe_rpe_delta1_translation_rmse_m={final_keyframe_rpe_delta1_translation_rmse_m:?}\n\
          final_keyframe_rpe_delta1_rotation_rmse_deg={final_keyframe_rpe_delta1_rotation_rmse_deg:?}\n\
          final_keyframe_rpe_delta10_pairs={}\n\
          final_keyframe_rpe_delta10_translation_rmse_m={final_keyframe_rpe_delta10_translation_rmse_m:?}\n\
          final_keyframe_rpe_delta10_rotation_rmse_deg={final_keyframe_rpe_delta10_rotation_rmse_deg:?}\n\
-         final_keyframe_count={final_keyframe_count}\n",
+         final_keyframe_count={final_keyframe_trajectory_count}\n\
+         final_keyframe_evaluation_count={final_keyframe_count}\n",
         args.euroc_dir.display(),
         final_keyframe_rpe_delta1.pair_count,
         final_keyframe_rpe_delta10.pair_count,
@@ -7289,11 +8370,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vi_succeeded = vi_init_succeeded_at_frame,
         motion_enabled = args.motion_vi_init_enabled,
         motion_after_static_give_up = args.motion_vi_init_after_static_give_up,
+        motion_from_configured_bias = args.motion_vi_init_from_configured_bias,
         motion_first = motion_vi_init_first_event_at_frame,
         motion_succeeded = motion_vi_init_succeeded_at_frame,
         motion_scale = motion_vi_init_recovered_scale,
         motion_iters = motion_vi_init_viba2_iterations,
+        motion_estimate_gravity = args.motion_vi_init_estimate_gravity,
+        motion_max_gravity_deviation = args.motion_vi_init_max_gravity_norm_deviation,
+        motion_estimated_gravity = motion_vi_init_estimated_gravity.map(|g| g.as_slice().to_vec()),
+        motion_estimate_gyro_bias = args.motion_vi_init_estimate_gyro_bias,
+        motion_estimated_gyro_bias = motion_vi_init_estimated_gyro_bias.map(|b| b.as_slice().to_vec()),
         local_vi_ba_enabled = args.local_vi_ba_enabled,
+        observation_confidence_ba_enabled = args.observation_confidence_ba_enabled,
         local_vi_ba_marginalization = args.local_vi_ba_marginalization,
         local_vi_ba_initial_prior_std_devs = args.local_vi_ba_initial_prior_std_devs,
         local_vi_ba_freeze = args.local_vi_ba_freeze_biases_above,
@@ -7323,6 +8411,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.motion_vi_init_max_velocity_residual_rms_mps,
         motion_vi_max_position_residual_rms_m =
             args.motion_vi_init_max_position_residual_rms_meters,
+        bias_release_min_kf = args.vi_bias_release_min_keyframes,
+        bias_release_min_translation = args.vi_bias_release_min_translation_meters,
         covisibility_max_kf = args.covisibility_local_map_max_keyframes,
         covisibility_min_shared = args.covisibility_local_map_min_shared,
         covisibility_used_frames = covisibility_local_map_frames,
@@ -7331,6 +8421,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         },
+        sparse_factor_graph_enabled = args.sparse_factor_graph_enabled,
+        sparse_factor_graph_updates = sparse_factor_graph_updates,
+        sparse_factor_graph_added = sparse_factor_graph_added,
+        sparse_factor_graph_reactivated = sparse_factor_graph_reactivated,
+        sparse_factor_graph_inactivated_low_confidence =
+            sparse_factor_graph_inactivated_low_confidence,
+        sparse_factor_graph_inactivated_window_age =
+            sparse_factor_graph_inactivated_window_age,
+        sparse_factor_graph_inactivated_budget = sparse_factor_graph_inactivated_budget,
+        sparse_factor_graph_pruned = sparse_factor_graph_pruned,
+        sparse_factor_graph_active_temporal = sparse_factor_graph_active_temporal,
+        sparse_factor_graph_active_proximity = sparse_factor_graph_active_proximity,
+        sparse_factor_graph_active_stereo = sparse_factor_graph_active_stereo,
+        sparse_factor_graph_inactive = sparse_factor_graph_inactive,
         covis_ba_enabled = args.covisibility_local_ba_enabled,
         covis_ba_min_keyframes = args.covisibility_local_ba_min_keyframes,
         covis_ba_max_keyframes = args.covisibility_local_ba_max_keyframes,
@@ -7562,6 +8666,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         projection_max_widen_retries = args.projection_max_widen_retries,
         projection_local_map_refinement = !args.projection_no_local_map_refinement,
         projection_refinement_search_radius_px = args.projection_refinement_search_radius_px,
+        projection_refinement_iterations = args.projection_refinement_iterations,
+        projection_refinement_radius_shrink_factor = args
+            .projection_refinement_radius_shrink_factor,
+        projection_refinement_reassign_correspondences = args
+            .projection_refinement_reassign_correspondences,
+        projection_refinement_min_inlier_pair_retention_ratio = args
+            .projection_refinement_min_inlier_pair_retention_ratio,
+        projection_refinement_max_translation_correction_m = args
+            .projection_refinement_max_translation_correction_m,
+        projection_refinement_max_rotation_correction_deg = args
+            .projection_refinement_max_rotation_correction_deg,
         projection_guided_attempt_count = slam.tracker.stats().projection_guided_attempt_count,
         projection_guided_widen_retry_count =
             slam.tracker.stats().projection_guided_widen_retry_count,
@@ -7681,6 +8796,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reloc_successes = relocalization_successes,
         rebootstrap_after_lost_frames = args.rebootstrap_after_lost_frames,
         rebootstrap_cooldown_frames = args.rebootstrap_cooldown_frames,
+        rebootstrap_independent_submap = args.rebootstrap_independent_submap,
+        atlas_broader_recovery_max_source_keyframes =
+            args.atlas_broader_recovery_max_source_keyframes,
+        atlas_broader_recovery_interval_attempts =
+            args.atlas_broader_recovery_interval_attempts,
+        atlas_broader_recovery_cycles = atlas_broader_recovery_cycles,
+        atlas_boundary_keyframe_snapshots = atlas_boundary_keyframe_snapshots,
+        atlas_boundary_factor_attempts = atlas_boundary_factor_attempts,
+        atlas_boundary_factor_successes = atlas_boundary_factor_successes,
         rebootstrap_events = rebootstrap_events,
         segment_id = segment_id,
         reloc_gate_passes = relocalization_gate_passes,
@@ -7819,7 +8943,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_mirrored_bg = last_mirrored_bias_gyro.map(|v| [v.x, v.y, v.z]),
         last_mirrored_ba = last_mirrored_bias_acc.map(|v| [v.x, v.y, v.z]),
         quality_gate_failures = slam.tracker.stats().tracking_quality_gate_failure_count,
-        scale = aligned_similarity.scale,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
@@ -7877,19 +9000,6 @@ mod tests {
         let se3 = se3_from_t_bs(&Matrix4::identity());
         assert!((se3.rotation.angle()).abs() < 1.0e-12);
         assert!(se3.translation.norm() < 1.0e-12);
-    }
-
-    #[test]
-    fn world_to_camera_pose_round_trip_identity_rig() {
-        let body_rot = UnitQuaternion::identity();
-        let body_pos = Vector3::new(1.0, 2.0, 3.0);
-        let rig = SE3::identity();
-        let pose = world_to_camera_pose(&body_rot, &body_pos, &rig);
-        let camera_center = pose.camera_center_world();
-        assert!(
-            (Vector3::new(camera_center.x, camera_center.y, camera_center.z) - body_pos).norm()
-                < 1.0e-9
-        );
     }
 
     #[test]
@@ -7952,6 +9062,39 @@ mod tests {
         assert_eq!(frame.camera_id, 1);
         assert_eq!(frame.keypoints, features.keypoints);
         assert_eq!(frame.descriptors, features.descriptors);
+    }
+
+    #[test]
+    fn atlas_boundary_snapshot_preserves_unpromoted_tracking_overlap() {
+        let mut map = VisualMap::new();
+        map.landmarks
+            .insert(7, Landmark::new(7, Point3::new(0.0, 0.0, 4.0)));
+        let mut frame = Frame::new(42, 1);
+        frame.keypoints.push(Point2::new(320.0, 240.0));
+        frame.descriptors.push(vec![1.0, 0.0]);
+        frame.pose = Some(Pose::from_world_to_camera(
+            UnitQuaternion::identity(),
+            Vector3::zeros(),
+        ));
+        let snapshot = Keyframe {
+            frame,
+            observations: vec![Observation {
+                frame_id: 42,
+                landmark_id: 7,
+                keypoint_index: 0,
+                xy: Point2::new(320.0, 240.0),
+            }],
+        };
+
+        assert!(insert_atlas_boundary_keyframe_snapshot(&mut map, &snapshot));
+        assert!(map.keyframes.contains_key(&42));
+        assert!(map.landmarks[&7]
+            .observations
+            .iter()
+            .any(|observation| observation.frame_id == 42));
+        assert!(!insert_atlas_boundary_keyframe_snapshot(
+            &mut map, &snapshot
+        ));
     }
 
     #[test]
@@ -8144,7 +9287,7 @@ mod tests {
     }
 
     #[test]
-    fn gt_seeded_rebootstrap_tracking_result_marks_all_stereo_matches_inliers() {
+    fn stereo_segment_restart_tracking_result_marks_all_stereo_matches_inliers() {
         let camera = camera_from_cam0(&fake_cam0(), 1);
         let pose = Pose::identity();
         let features = FeatureSet::new(
@@ -8182,7 +9325,7 @@ mod tests {
         );
         let stats = map_provider_stats_from_map(&map);
         let tracking =
-            build_gt_seeded_rebootstrap_tracking_result(42, pose, &matches, &landmark_ids, stats);
+            build_stereo_segment_restart_tracking_result(42, pose, &matches, &landmark_ids, stats);
         assert!(tracking.localization.success);
         assert_eq!(tracking.localization.inlier_count, 2);
         assert_eq!(tracking.localization.inlier_landmark_ids, landmark_ids);

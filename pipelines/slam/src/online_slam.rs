@@ -41,6 +41,12 @@ pub struct OnlineSlamConfig {
     /// [`crate::refine_visual_map_with_covisibility_ba`]. `None`
     /// (default) preserves the existing online pipeline behavior.
     pub covisibility_local_ba: Option<OnlineSlamCovisibilityLocalBaConfig>,
+    /// Optional DROID-style sparse keyframe factor lifecycle. The stage
+    /// proposes temporal, proximity, and stereo edges on each committed
+    /// keyframe, retains inactive edges for broader recovery, and exposes
+    /// optimizer-facing correction/information/damping records. `None`
+    /// preserves the existing pipeline path without graph bookkeeping.
+    pub sparse_factor_graph: Option<SparseFactorGraphConfig>,
     /// Optional auto-bootstrap stage that runs a
     /// [`crate::VisualInertialInitializer`] over the pipeline's incoming
     /// IMU stream and atomically promotes the recovered
@@ -131,7 +137,8 @@ impl OnlineSlamConfig {
             if self.vi_init.is_none() {
                 return Err(OnlineSlamConfigError::MotionViInitRequiresStaticViInit);
             }
-            if motion.allow_after_static_give_up
+            if (motion.allow_after_static_give_up
+                || motion.allow_from_configured_bias_before_static)
                 && self.vi_init.as_ref().is_some_and(|static_config| {
                     static_config.on_persistent_rejection != ViInitFallback::KeepExistingSeed
                 })
@@ -168,6 +175,13 @@ impl OnlineSlamConfig {
         }) {
             return Err(OnlineSlamConfigError::InvalidLocalViBaBiasRandomWalkWeights);
         }
+        if self
+            .sparse_factor_graph
+            .as_ref()
+            .is_some_and(|config| !config.is_valid())
+        {
+            return Err(OnlineSlamConfigError::InvalidSparseFactorGraphConfig);
+        }
         Ok(())
     }
 }
@@ -180,6 +194,7 @@ impl Default for OnlineSlamConfig {
             imu: None,
             local_vi_ba: None,
             covisibility_local_ba: None,
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -281,6 +296,9 @@ impl Default for OnlineSlamCovisibilityLocalBaConfig {
 pub struct OnlineSlamCovisibilityLocalBaStats {
     pub active_keyframe_id: u64,
     pub map_keyframe_count: usize,
+    /// Active sparse-factor neighbors admitted as variable BA candidates.
+    /// `None` means the sparse graph stage was disabled.
+    pub factor_graph_neighbor_count: Option<usize>,
     pub elapsed_ms: f64,
     pub success: bool,
     pub error: Option<CovisibilityLocalBaError>,
@@ -854,7 +872,7 @@ enum RelocalizationDescriptorStoreKind {
     AppearanceRetrieval,
 }
 
-fn relocalization_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> {
+pub(crate) fn relocalization_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> {
     let first = descriptors.first()?;
     if first.is_empty()
         || descriptors
@@ -885,7 +903,7 @@ fn relocalization_mean_descriptor(descriptors: &[Vec<f32>]) -> Option<Vec<f32>> 
     Some(mean)
 }
 
-fn relocalization_descriptor_cosine(left: &[f32], right: &[f32]) -> f32 {
+pub(crate) fn relocalization_descriptor_cosine(left: &[f32], right: &[f32]) -> f32 {
     if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
@@ -2667,6 +2685,9 @@ pub struct OnlineSlamPipeline<T, M> {
     /// `config.local_vi_ba.is_some()` (initialised by [`Self::new`]);
     /// `None` otherwise so non-VI-BA flows do no extra book-keeping.
     pub local_vi_ba_state: Option<OnlineSlamLocalBaState>,
+    /// Sparse visual factor lifecycle state. Present exactly when
+    /// `config.sparse_factor_graph` is configured.
+    pub sparse_factor_graph_state: Option<SparseFactorGraph>,
     /// Running auto-bootstrap state. `Some` exactly when
     /// `config.vi_init.is_some() && config.imu.is_some()` (initialised
     /// by [`Self::new`]); deliberately private because writes to
@@ -2708,6 +2729,7 @@ impl Default
             config: OnlineSlamConfig::default(),
             imu_state: None,
             local_vi_ba_state: None,
+            sparse_factor_graph_state: None,
             vi_init_state: None,
             vi_motion_init_state: None,
             pose_graph_state: None,
@@ -2729,6 +2751,17 @@ impl<T, M> OnlineSlamPipeline<T, M> {
         }
         let imu_state = config.imu.clone().map(OnlineSlamImuState::new);
         let local_vi_ba_state = config.local_vi_ba.clone().map(OnlineSlamLocalBaState::new);
+        let mut sparse_factor_graph_state = config
+            .sparse_factor_graph
+            .clone()
+            .map(SparseFactorGraph::new);
+        if let Some(graph) = sparse_factor_graph_state.as_mut() {
+            let mut existing_keyframe_ids = map.keyframes.keys().copied().collect::<Vec<_>>();
+            existing_keyframe_ids.sort_unstable();
+            for keyframe_id in existing_keyframe_ids {
+                graph.update_from_map(&map, keyframe_id);
+            }
+        }
         let vi_init_state = config.vi_init.clone().map(OnlineSlamViInitState::new);
         let vi_motion_init_state = config
             .vi_motion_init
@@ -2749,6 +2782,7 @@ impl<T, M> OnlineSlamPipeline<T, M> {
             config,
             imu_state,
             local_vi_ba_state,
+            sparse_factor_graph_state,
             vi_init_state,
             vi_motion_init_state,
             pose_graph_state,
@@ -2846,6 +2880,22 @@ impl<T, M> OnlineSlamPipeline<T, M> {
 
     pub fn map_mut(&mut self) -> &mut VisualMap {
         &mut self.map
+    }
+
+    /// Synchronize the sparse factor lifecycle after a caller commits a
+    /// keyframe outside [`Self::process_frame`], such as a calibrated-stereo
+    /// segment restart. Returns `None` when the graph is disabled or the
+    /// keyframe is not present in the map.
+    pub fn sync_sparse_factor_graph_keyframe(
+        &mut self,
+        keyframe_id: u64,
+    ) -> Option<SparseFactorGraphUpdateStats> {
+        if !self.map.keyframes.contains_key(&keyframe_id) {
+            return None;
+        }
+        self.sparse_factor_graph_state
+            .as_mut()
+            .map(|graph| graph.update_from_map(&self.map, keyframe_id))
     }
 
     /// Run the appearance-based pairwise loop scanner over every keyframe
@@ -2970,6 +3020,9 @@ where
                 .process_keyframe(&self.map, &tracking, keyframe, candidates);
             if self.config.apply_map_updates && mapping_result.staged_update_validation.is_valid() {
                 if let Ok(applied) = mapping_result.staged_update.clone().apply_to(&mut self.map) {
+                    if applied.keyframe_count > 0 {
+                        record_tracking_observation_confidences(&mut self.map, frame.id, &tracking);
+                    }
                     applied_update = Some(applied);
                 }
             }
@@ -3018,6 +3071,8 @@ where
                 local_vi_ba = crate::online_slam_vi_ba::run_local_vi_ba(&mut self.map, state);
             }
         }
+        let sparse_factor_graph =
+            self.maybe_update_sparse_factor_graph(frame.id, applied_update.as_ref());
         // Visual-only covisibility local BA runs after the per-keyframe
         // visual/VI stages so the map reflects the just-finalised active
         // keyframe, and before pose-graph refinement so PGO mirrors the
@@ -3044,6 +3099,7 @@ where
             loop_closure_candidates,
             imu_factor,
             local_vi_ba,
+            sparse_factor_graph,
             map_keyframe_count: self.map.keyframes.len(),
             map_landmark_count: self.map.landmarks.len(),
             vi_init,
@@ -3052,6 +3108,15 @@ where
             pose_graph_refinement,
             relocalization: relocalization_stats,
         }
+    }
+
+    fn maybe_update_sparse_factor_graph(
+        &mut self,
+        frame_id: u64,
+        applied_update: Option<&AppliedMapUpdate>,
+    ) -> Option<SparseFactorGraphUpdateStats> {
+        applied_update.filter(|update| update.keyframe_count > 0)?;
+        self.sync_sparse_factor_graph_keyframe(frame_id)
     }
 
     /// Relocalization-on-tracker-death. Runs only when (a) the
@@ -4588,26 +4653,54 @@ where
     /// sliding-window VI-BA pass that refines the trailing window's
     /// poses + landmarks + velocities + biases. No-op when local VI-BA
     /// is disabled OR when no IMU factor was staged this frame.
+    /// `true` while local VI-BA must stay gated because no stage has yet
+    /// replaced the placeholder-zero bias linearisation with a real
+    /// estimate.
+    ///
+    /// When `keep_pre_promotion_imu_factors` lets factors flow before
+    /// VI-init promotes, the factors must still be banked for the
+    /// post-promotion BA replay, but the BA itself cannot run yet while
+    /// its bias linearisation is the placeholder zero seed — a
+    /// pre-promotion solve corrupts the map's keyframe poses
+    /// (empirically: tracking-success collapses from 9.8 % to 1.8 %
+    /// on MH_01 because the next-frame matcher sees BA-shifted
+    /// keyframe descriptors).
+    ///
+    /// The zero-placeholder rationale stops applying the moment EITHER:
+    /// * the static stage completes (`vi_init_state.completed.is_some()`),
+    ///   or
+    /// * the motion-based stage reaches its terminal state
+    ///   (`vi_motion_init_state.completed.is_some()`), or
+    /// * the motion-based stage has fired a [`crate::BiasReleaseSchedule`]
+    ///   Stage A ("velocity stage") solve
+    ///   (`vi_motion_init_state.velocity_stage_fired()`).
+    ///
+    /// Stage A is a non-terminal success: `bias_released` stays `false`
+    /// and `vi_motion_init_state.completed` stays `None` so the stage keeps
+    /// registering keyframes/translation toward the Stage B release gate,
+    /// but its promotion has already mirrored the refined per-keyframe
+    /// `(velocity, bias)` into `local_vi_ba_state.keyframe_state` and the
+    /// estimated/refined biases into `imu_state`/configs (see
+    /// `promote_motion_vi_init_result`). From that point on local VI-BA's
+    /// linearisation point is the estimated seed, not the placeholder
+    /// zero — ORB-SLAM3 itself runs local VI-BA after VIBA1, which Stage A
+    /// mirrors. A later Stage B firing re-mirrors on top harmlessly (same
+    /// sinks, refined values), so there is no double-counting risk in
+    /// treating Stage A as "no longer pending" here.
+    fn vi_initialization_pending(&self) -> bool {
+        self.vi_init_state.as_ref().is_some_and(|static_state| {
+            static_state.completed.is_none()
+                && self.vi_motion_init_state.as_ref().is_none_or(|motion_state| {
+                    motion_state.completed.is_none() && !motion_state.velocity_stage_fired()
+                })
+        })
+    }
+
     fn maybe_run_local_vi_ba(
         &mut self,
         new_factor: Option<ImuPreintegrationFactor>,
     ) -> Option<OnlineSlamLocalBaStats> {
-        // When `keep_pre_promotion_imu_factors` lets factors flow before
-        // VI-init promotes, the factors must still be banked for the
-        // post-promotion BA replay, but the BA itself cannot run yet —
-        // its bias linearisation is the placeholder zero seed and a
-        // pre-promotion solve corrupts the map's keyframe poses
-        // (empirically: tracking-success collapses from 9.8 % to 1.8 %
-        // on MH_01 because the next-frame matcher sees BA-shifted
-        // keyframe descriptors). Gate the trigger here so the
-        // `factor_history` accumulates but the solver waits.
-        let vi_initialization_pending = self.vi_init_state.as_ref().is_some_and(|static_state| {
-            static_state.completed.is_none()
-                && self
-                    .vi_motion_init_state
-                    .as_ref()
-                    .is_none_or(|motion_state| motion_state.completed.is_none())
-        });
+        let vi_initialization_pending = self.vi_initialization_pending();
         let state = self.local_vi_ba_state.as_mut()?;
         let factor = new_factor?;
         let should_trigger = state.register_new_factor(factor);
@@ -4685,10 +4778,18 @@ where
             || config.min_fixed_to_optimized_ratio.is_some()
             || config.max_pose_translation_correction_m.is_some()
             || config.max_pose_rotation_correction_rad.is_some();
+        let factor_neighbor_allowlist = self
+            .sparse_factor_graph_state
+            .as_ref()
+            .map(|graph| graph.active_neighbor_keyframe_ids(frame.id));
         let result = if conditioning_gate_active {
             let mut candidate_map = self.map.clone();
-            let result =
-                refine_visual_map_with_covisibility_ba(&mut candidate_map, frame.id, &config.ba);
+            let result = refine_visual_map_with_covisibility_ba_and_neighbor_allowlist(
+                &mut candidate_map,
+                frame.id,
+                &config.ba,
+                factor_neighbor_allowlist.as_ref(),
+            );
             if let Ok(ref result) = result {
                 let outlier_ratio = outlier_observation_ratio(
                     result.outlier_observation_count,
@@ -4703,6 +4804,9 @@ where
                         OnlineSlamCovisibilityLocalBaStats {
                             active_keyframe_id: frame.id,
                             map_keyframe_count,
+                            factor_graph_neighbor_count: factor_neighbor_allowlist
+                                .as_ref()
+                                .map(|neighbors| neighbors.len()),
                             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                             success: false,
                             error: Some(error),
@@ -4804,7 +4908,12 @@ where
             }
             result
         } else {
-            refine_visual_map_with_covisibility_ba(&mut self.map, frame.id, &config.ba)
+            refine_visual_map_with_covisibility_ba_and_neighbor_allowlist(
+                &mut self.map,
+                frame.id,
+                &config.ba,
+                factor_neighbor_allowlist.as_ref(),
+            )
         };
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
@@ -4814,6 +4923,9 @@ where
                 Some(OnlineSlamCovisibilityLocalBaStats {
                     active_keyframe_id: frame.id,
                     map_keyframe_count,
+                    factor_graph_neighbor_count: factor_neighbor_allowlist
+                        .as_ref()
+                        .map(|neighbors| neighbors.len()),
                     elapsed_ms,
                     success: true,
                     error: None,
@@ -4841,6 +4953,9 @@ where
             Err(error) => Some(OnlineSlamCovisibilityLocalBaStats {
                 active_keyframe_id: frame.id,
                 map_keyframe_count,
+                factor_graph_neighbor_count: factor_neighbor_allowlist
+                    .as_ref()
+                    .map(|neighbors| neighbors.len()),
                 elapsed_ms,
                 success: false,
                 error: Some(error),
@@ -5181,13 +5296,20 @@ where
             .as_ref()
             .map(|state| state.config.allow_after_static_give_up)
             .unwrap_or(false);
+        let allow_from_configured_bias_before_static = self
+            .vi_motion_init_state
+            .as_ref()
+            .map(|state| state.config.allow_from_configured_bias_before_static)
+            .unwrap_or(false);
         let static_gave_up = self
             .vi_init_state
             .as_ref()
             .is_some_and(|state| state.gave_up.is_some());
         let (bias_gyro_seed, bias_acc_seed) = if let Some(seed) = static_bias_seed {
             seed
-        } else if allow_after_give_up && static_gave_up {
+        } else if allow_from_configured_bias_before_static
+            || (allow_after_give_up && static_gave_up)
+        {
             let imu = self.imu_state.as_ref()?;
             (imu.config.bias_gyro, imu.config.bias_acc)
         } else {
@@ -5241,6 +5363,17 @@ where
 
     /// Mirror a successful motion-VI init result into the pipeline's
     /// running state.
+    ///
+    /// `result.bias_released` distinguishes a terminal firing (the legacy
+    /// single-stage path, or a [`crate::BiasReleaseSchedule`] Stage B) from a
+    /// non-terminal [`crate::BiasReleaseSchedule`] Stage A ("velocity
+    /// stage") firing: the velocity + IMU-bias mirroring below (steps 1-2)
+    /// always runs — Stage A's biases equal the seed, so mirroring them is
+    /// value-neutral, while mirroring its refined velocities is the entire
+    /// point of running Stage A — but step 3 only marks the stage
+    /// `completed` (terminal) when `bias_released` is `true`. On a `false`
+    /// result the stage stays active so [`Self::run_motion_vi_init_step`]
+    /// keeps registering keyframes / translation and can later fire Stage B.
     fn promote_motion_vi_init_result(
         &mut self,
         result: MotionBasedViInitializationResult,
@@ -5291,11 +5424,79 @@ where
             }
         }
 
-        // Step 3: mark the stage completed. (`initializer.try_initialize`
-        // already cached the result in its `completed` slot; mirror onto
-        // the state's own `completed` so `is_active()` flips false.)
+        // Step 3: mirror `estimate_gravity`'s recovered gravity vector (if
+        // any) into every sink that reads gravity for FUTURE factor
+        // staging / VI solves. The map itself is NEVER rotated to match —
+        // only the gravity ASSUMPTION used by future solves moves. See
+        // `docs/motion_based_vi_alignment.md`'s "Gravity-direction
+        // recovery" section. Mirrored sinks:
+        // (1) `imu_state.config.gravity_world` — the running IMU stage
+        //     that stamps `gravity_world` onto every newly-staged
+        //     `ImuPreintegrationFactor` (`stage_imu_factor_on_new_keyframe`);
+        // (2) `config.imu.gravity_world` — the persisted config mirror of (1);
+        // (3) `local_vi_ba_state.config.gravity_world` and (4)
+        //     `config.local_vi_ba.gravity_world` — the local VI-BA stage's
+        //     own gravity copy (seeds bias slot initial values);
+        // (5) `vi_motion_init_state.initializer`'s own config, via
+        //     [`MotionBasedViInitializer::set_gravity_world`], so a LATER
+        //     motion-VI window (a subsequent `BiasReleaseSchedule` Stage B,
+        //     or a fresh sequence after `reset_sequence_state`) starts from
+        //     the corrected assumption instead of the original config
+        //     value;
+        // (6) `config.vi_motion_init.initializer.gravity_world`, the
+        //     persisted mirror of (5); and
+        // (7) `config.vi_init.initializer.gravity_world` — the STATIC
+        //     stage's persisted config. [`OnlineSlamConfig::validate`]
+        //     requires this to agree with `config.imu.gravity_world`
+        //     (`GravityMismatch`), so leaving it stale would make a
+        //     later `OnlineSlamPipeline::new(_, _, _, config.clone())`
+        //     panic (this is exactly how a real rebootstrap that
+        //     reconstructs the pipeline from `slam.config.clone()`
+        //     surfaced the bug). The live `vi_init_state.initializer` is
+        //     deliberately left untouched: by the time motion-VI can
+        //     fire the static stage has already reached a terminal
+        //     `completed`/`gave_up` snapshot (see
+        //     [`OnlineSlamConfigError::MotionViInitRequiresStaticViInit`]
+        //     and its sibling checks), so it never runs `try_initialize`
+        //     again in THIS pipeline instance; restarting it with the
+        //     estimated gravity on a fresh submap (a NEW pipeline built
+        //     from this config) is semantically fine — it will
+        //     re-estimate/reject as usual.
+        if let Some(g) = result.estimated_gravity_world {
+            if let Some(imu) = self.imu_state.as_mut() {
+                imu.config.gravity_world = g;
+            }
+            if let Some(imu_cfg) = self.config.imu.as_mut() {
+                imu_cfg.gravity_world = g;
+            }
+            if let Some(local) = self.local_vi_ba_state.as_mut() {
+                local.config.gravity_world = g;
+            }
+            if let Some(local_cfg) = self.config.local_vi_ba.as_mut() {
+                local_cfg.gravity_world = g;
+            }
+            if let Some(state) = self.vi_motion_init_state.as_mut() {
+                state.initializer.set_gravity_world(g);
+            }
+            if let Some(motion_cfg) = self.config.vi_motion_init.as_mut() {
+                motion_cfg.initializer.gravity_world = g;
+            }
+            if let Some(vi_init_cfg) = self.config.vi_init.as_mut() {
+                vi_init_cfg.initializer.gravity_world = g;
+            }
+        }
+
+        // Step 4: mark the stage completed — but ONLY on a terminal firing
+        // (`result.bias_released`). A `BiasReleaseSchedule` Stage A result
+        // leaves `state.completed` at `None` so `is_active()` stays `true`
+        // and the next `run_motion_vi_init_step` call keeps feeding this
+        // stage new keyframes/factors toward the eventual Stage B release.
+        // (`initializer.try_initialize` mirrors the same non-terminal
+        // behaviour on its own `completed` slot for a Stage A result.)
         if let Some(state) = self.vi_motion_init_state.as_mut() {
-            state.completed = Some(result.clone());
+            if result.bias_released {
+                state.completed = Some(result.clone());
+            }
             state.last_rejection = None;
         }
 
@@ -5390,6 +5591,447 @@ mod motion_vi_raw_residual_activation_tests {
     }
 }
 
+/// Unit tests for [`OnlineSlamPipeline::promote_motion_vi_init_result`]'s
+/// `bias_released`-conditional Step 3, exercised directly (rather than via
+/// `process_frame`) so a synthetic
+/// [`crate::MotionBasedViInitializationResult`] can pin the Stage A / Stage B
+/// contract without standing up a full tracker + IMU + static-VI fixture.
+/// See `docs/motion_based_vi_alignment.md`'s "Staged bias release" section.
+#[cfg(test)]
+mod bias_release_promotion_tests {
+    use super::*;
+
+    fn zero_cost_breakdown() -> crate::bundle::BaCostBreakdown {
+        crate::bundle::BaCostBreakdown {
+            total: 0.0,
+            visual: 0.0,
+            imu: 0.0,
+            bias_random_walk: 0.0,
+            navigation_prior: 0.0,
+            other_structural: 0.0,
+            imu_normalized_squared_residual_per_dof: None,
+            imu_rotation_residual_rms_rad: None,
+            imu_velocity_residual_rms_mps: None,
+            imu_position_residual_rms_meters: None,
+        }
+    }
+
+    /// Build a synthetic single-keyframe motion-VI result. Biases are
+    /// always zero here (Stage A never moves them off the seed, and this
+    /// helper reuses the same shape for both stages) — only `velocity` and
+    /// `bias_released` vary between calls.
+    fn fake_result(
+        kf_id: u64,
+        velocity: Vector3<f64>,
+        bias_released: bool,
+    ) -> MotionBasedViInitializationResult {
+        let mut keyframe_states = BTreeMap::new();
+        keyframe_states.insert(
+            kf_id,
+            KeyframeImuState {
+                velocity_world: velocity,
+                bias_gyro: Vector3::zeros(),
+                bias_acc: Vector3::zeros(),
+            },
+        );
+        MotionBasedViInitializationResult {
+            keyframe_states,
+            keyframe_ids: vec![kf_id],
+            imu_factors_used: 1,
+            scale: 1.0,
+            scale_history: Vec::new(),
+            viba2_iterations_run: 0,
+            trigger_translation_meters: 2.0,
+            ba_result: BaResult {
+                initial_cost: 1.0,
+                final_cost: 0.5,
+                iterations: Vec::new(),
+                converged: true,
+            },
+            initial_cost_breakdown: zero_cost_breakdown(),
+            final_cost_breakdown: zero_cost_breakdown(),
+            bias_released,
+            estimated_gravity_world: None,
+            estimated_gyro_bias: None,
+        }
+    }
+
+    fn minimal_pipeline_with_motion_vi_state(
+    ) -> OnlineSlamPipeline<Tracker<LocalizationPipeline>, LocalMappingPipeline> {
+        let mut slam = OnlineSlamPipeline::new(
+            VisualMap::new(),
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig::default(),
+        );
+        slam.local_vi_ba_state = Some(OnlineSlamLocalBaState::new(
+            OnlineSlamLocalBaConfig::default(),
+        ));
+        slam.vi_motion_init_state = Some(OnlineSlamMotionViInitState::new(
+            OnlineSlamMotionViInitConfig::default(),
+        ));
+        slam
+    }
+
+    #[test]
+    fn stage_a_mirrors_velocity_but_leaves_stage_active_then_stage_b_completes_it() {
+        let mut slam = minimal_pipeline_with_motion_vi_state();
+
+        // Stage A ("velocity stage"): `bias_released = false`.
+        let stage_a = fake_result(1, Vector3::new(1.0, 0.0, 0.0), false);
+        match slam.promote_motion_vi_init_result(stage_a) {
+            MotionViInitializationEvent::Succeeded { result } => assert!(!result.bias_released),
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+        let mirrored_after_stage_a = slam
+            .local_vi_ba_state
+            .as_ref()
+            .expect("configured above")
+            .keyframe_state
+            .get(&1)
+            .expect("Stage A must mirror velocity into local_vi_ba_state")
+            .velocity_world;
+        assert!((mirrored_after_stage_a - Vector3::new(1.0, 0.0, 0.0)).norm() < 1.0e-12);
+        let motion_state = slam
+            .vi_motion_init_state
+            .as_ref()
+            .expect("configured above");
+        assert!(
+            motion_state.completed.is_none(),
+            "Stage A must NOT mark the motion-VI stage completed"
+        );
+        assert!(
+            motion_state.is_active(),
+            "Stage A must leave the motion-VI stage active"
+        );
+
+        // Stage B ("bias release"): `bias_released = true`, a different
+        // velocity so the mirror can be told apart from Stage A's.
+        let stage_b = fake_result(1, Vector3::new(2.0, 0.0, 0.0), true);
+        match slam.promote_motion_vi_init_result(stage_b) {
+            MotionViInitializationEvent::Succeeded { result } => assert!(result.bias_released),
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+        let mirrored_after_stage_b = slam
+            .local_vi_ba_state
+            .as_ref()
+            .expect("configured above")
+            .keyframe_state
+            .get(&1)
+            .expect("Stage B must mirror velocity into local_vi_ba_state")
+            .velocity_world;
+        assert!((mirrored_after_stage_b - Vector3::new(2.0, 0.0, 0.0)).norm() < 1.0e-12);
+        let motion_state = slam
+            .vi_motion_init_state
+            .as_ref()
+            .expect("configured above");
+        assert!(
+            motion_state.completed.is_some(),
+            "Stage B must mark the motion-VI stage completed (terminal)"
+        );
+        assert!(
+            !motion_state.is_active(),
+            "Stage B must leave the motion-VI stage inactive (terminal)"
+        );
+    }
+
+    /// [`OnlineSlamPipeline::promote_motion_vi_init_result`]'s Step 3
+    /// (gravity-sink mirroring, see that method's doc comment for the full
+    /// enumerated list). Populates every sink the doc comment names —
+    /// `imu_state`, `config.imu`, `local_vi_ba_state`, `config.local_vi_ba`,
+    /// the motion initializer's own config, `config.vi_motion_init`, and
+    /// `config.vi_init` — then asserts a `Some(estimated_gravity_world)`
+    /// result moves every one of them, and the map/keyframe poses are
+    /// untouched (gauge is never rotated). See
+    /// `docs/motion_based_vi_alignment.md`'s "Gravity-direction recovery"
+    /// section.
+    #[test]
+    fn estimated_gravity_mirrors_into_every_documented_sink() {
+        let mut slam = minimal_pipeline_with_motion_vi_state();
+        slam.imu_state = Some(OnlineSlamImuState::new(OnlineSlamImuConfig::default()));
+        slam.config.imu = Some(OnlineSlamImuConfig::default());
+        slam.config.local_vi_ba = Some(OnlineSlamLocalBaConfig::default());
+        slam.config.vi_motion_init = Some(OnlineSlamMotionViInitConfig::default());
+        slam.config.vi_init = Some(OnlineSlamViInitConfig::default());
+
+        let original_gravity = OnlineSlamImuConfig::default().gravity_world;
+        let new_gravity = Vector3::new(0.0, 0.0, 9.81);
+        assert!(
+            (original_gravity - new_gravity).norm() > 1.0,
+            "fixture must actually move the gravity assumption"
+        );
+
+        let mut result = fake_result(1, Vector3::zeros(), true);
+        result.estimated_gravity_world = Some(new_gravity);
+        match slam.promote_motion_vi_init_result(result) {
+            MotionViInitializationEvent::Succeeded { result } => {
+                assert_eq!(result.estimated_gravity_world, Some(new_gravity));
+            }
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+
+        assert!(
+            (slam.imu_state.as_ref().unwrap().config.gravity_world - new_gravity).norm() < 1.0e-12,
+            "sink (1): imu_state.config.gravity_world must mirror the estimate"
+        );
+        assert!(
+            (slam.config.imu.as_ref().unwrap().gravity_world - new_gravity).norm() < 1.0e-12,
+            "sink (2): config.imu.gravity_world must mirror the estimate"
+        );
+        assert!(
+            (slam.local_vi_ba_state.as_ref().unwrap().config.gravity_world - new_gravity).norm()
+                < 1.0e-12,
+            "sink (3): local_vi_ba_state.config.gravity_world must mirror the estimate"
+        );
+        assert!(
+            (slam.config.local_vi_ba.as_ref().unwrap().gravity_world - new_gravity).norm()
+                < 1.0e-12,
+            "sink (4): config.local_vi_ba.gravity_world must mirror the estimate"
+        );
+        assert!(
+            (slam
+                .vi_motion_init_state
+                .as_ref()
+                .unwrap()
+                .initializer
+                .config()
+                .gravity_world
+                - new_gravity)
+                .norm()
+                < 1.0e-12,
+            "sink (5): the motion initializer's own config must mirror the estimate"
+        );
+        assert!(
+            (slam
+                .config
+                .vi_motion_init
+                .as_ref()
+                .unwrap()
+                .initializer
+                .gravity_world
+                - new_gravity)
+                .norm()
+                < 1.0e-12,
+            "sink (6): config.vi_motion_init.initializer.gravity_world must mirror the estimate"
+        );
+        assert!(
+            (slam
+                .config
+                .vi_init
+                .as_ref()
+                .unwrap()
+                .initializer
+                .gravity_world
+                - new_gravity)
+                .norm()
+                < 1.0e-12,
+            "sink (7): config.vi_init.initializer.gravity_world must mirror the estimate"
+        );
+    }
+
+    /// Real-data regression (see the `sp_full75` moving-start bench run):
+    /// the motion-VI initializer promoted a Stage A result with a non-
+    /// default `estimated_gravity_world` on frame 4. `promote_motion_vi_init_result`
+    /// mirrored the estimate into `config.imu.gravity_world` and
+    /// `config.vi_motion_init.initializer.gravity_world` but NOT
+    /// `config.vi_init.initializer.gravity_world`. A later rebootstrap that
+    /// reconstructs the pipeline via
+    /// `OnlineSlamPipeline::new(map, tracker, mapper, slam.config.clone())`
+    /// (the independent-submap path in
+    /// `examples/euroc_online_slam_vi_image_demo.rs`) then hit
+    /// `OnlineSlamConfig::validate`'s `GravityMismatch` panic, because
+    /// `config.vi_init.initializer.gravity_world` still held the original
+    /// seed while `config.imu.gravity_world` held the estimate. This test
+    /// builds a real (non-default) config via the public constructor,
+    /// drives a synthetic Stage-B result with a non-default estimated
+    /// gravity through `promote_motion_vi_init_result`, then reconstructs
+    /// the pipeline from the mutated config's clone — this must NOT panic,
+    /// and every gravity-agreement invariant `validate` checks must hold.
+    #[test]
+    fn gravity_mirror_keeps_config_reconstructible_after_rebootstrap() {
+        // `OnlineSlamImuConfig::default().gravity_world` is `(0, 9.81, 0)`,
+        // not the `(0, 0, -9.81)` that `VisualInertialInitializerConfig`
+        // and `MotionBasedViInitializerConfig` default to — so build a
+        // config where every gravity-bearing field starts in agreement
+        // (required for `OnlineSlamPipeline::new` to succeed at all).
+        let seed_gravity = OnlineSlamImuConfig::default().gravity_world;
+
+        let mut vi_init_config = OnlineSlamViInitConfig::default();
+        vi_init_config.initializer.gravity_world = seed_gravity;
+
+        let mut motion_config = OnlineSlamMotionViInitConfig::default();
+        motion_config.initializer.gravity_world = seed_gravity;
+
+        let mut config = OnlineSlamConfig::default();
+        config.imu = Some(OnlineSlamImuConfig::default());
+        config.local_vi_ba = Some(OnlineSlamLocalBaConfig::default());
+        config.vi_init = Some(vi_init_config);
+        config.vi_motion_init = Some(motion_config);
+
+        // Sanity check: the seed config must actually be constructible
+        // before we exercise the mutation under test.
+        let mut slam = OnlineSlamPipeline::new(
+            VisualMap::new(),
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            config,
+        );
+
+        let estimated_gravity = Vector3::new(0.1678, 9.3632, 2.9222);
+        assert!(
+            (estimated_gravity - seed_gravity).norm() > 1.0,
+            "fixture must actually move the gravity assumption"
+        );
+        let mut result = fake_result(1, Vector3::zeros(), true);
+        result.estimated_gravity_world = Some(estimated_gravity);
+        match slam.promote_motion_vi_init_result(result) {
+            MotionViInitializationEvent::Succeeded { result } => {
+                assert_eq!(result.estimated_gravity_world, Some(estimated_gravity));
+            }
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+
+        // Every gravity-agreement invariant `OnlineSlamConfig::validate`
+        // checks must hold on the mutated config.
+        assert_eq!(
+            slam.config.imu.as_ref().unwrap().gravity_world,
+            estimated_gravity
+        );
+        assert_eq!(
+            slam.config.vi_init.as_ref().unwrap().initializer.gravity_world,
+            estimated_gravity
+        );
+        assert_eq!(
+            slam.config
+                .vi_motion_init
+                .as_ref()
+                .unwrap()
+                .initializer
+                .gravity_world,
+            estimated_gravity
+        );
+        assert!(slam.config.validate().is_ok());
+
+        // The real crash: a rebootstrap reconstructs the pipeline from
+        // `slam.config.clone()`. This must not panic.
+        let _rebuilt = OnlineSlamPipeline::new(
+            VisualMap::new(),
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            slam.config.clone(),
+        );
+    }
+
+    /// A result with `estimated_gravity_world: None` (the
+    /// `estimate_gravity = false` legacy path) must leave every gravity
+    /// sink untouched — the mirroring in Step 3 is entirely gated on the
+    /// `Some(...)` case.
+    #[test]
+    fn no_estimated_gravity_leaves_every_sink_untouched() {
+        let mut slam = minimal_pipeline_with_motion_vi_state();
+        slam.imu_state = Some(OnlineSlamImuState::new(OnlineSlamImuConfig::default()));
+        slam.config.imu = Some(OnlineSlamImuConfig::default());
+        let original_gravity = OnlineSlamImuConfig::default().gravity_world;
+
+        let result = fake_result(1, Vector3::zeros(), true);
+        assert!(result.estimated_gravity_world.is_none());
+        slam.promote_motion_vi_init_result(result);
+
+        assert_eq!(
+            slam.imu_state.as_ref().unwrap().config.gravity_world,
+            original_gravity
+        );
+        assert_eq!(
+            slam.config.imu.as_ref().unwrap().gravity_world,
+            original_gravity
+        );
+    }
+
+    /// A [`crate::BiasReleaseSchedule`] Stage A ("velocity stage")
+    /// promotion (`bias_released = false`) must unblock
+    /// [`OnlineSlamPipeline::vi_initialization_pending`] even though the
+    /// motion-VI stage stays non-terminal (`vi_motion_init_state.completed`
+    /// stays `None`) — see that method's doc comment for the full
+    /// rationale. Regression for the bug where local VI-BA never fired
+    /// after a Stage A promotion on the real bench (3 Stage A promotions,
+    /// `local_vi_ba_triggers = 0`).
+    #[test]
+    fn stage_a_promotion_unblocks_vi_initialization_pending() {
+        let mut slam = minimal_pipeline_with_motion_vi_state();
+        slam.vi_init_state = Some(OnlineSlamViInitState::new(OnlineSlamViInitConfig::default()));
+
+        // Static init incomplete + motion-VI stage never fired: pending.
+        assert!(
+            slam.vi_initialization_pending(),
+            "with no Stage A fired and static init incomplete, local VI-BA must stay gated"
+        );
+
+        // Drive a synthetic Stage A promotion. `promote_motion_vi_init_result`
+        // alone only exercises the pipeline-side mirroring (as the other
+        // tests in this module do); the inner initializer's own
+        // `velocity_stage` cache — what `velocity_stage_fired()` actually
+        // reads — is populated by `MotionBasedViInitializer::try_initialize_with_bias_seed`
+        // itself as a side effect of the real numeric solve (see
+        // `run_motion_vi_init_step`). Use the test-only seam to inject the
+        // same result there without replaying that solve; the solve path
+        // is covered separately by `vi_motion_initializer`'s own
+        // `bias_release_schedule_stage_a_fires_then_awaits_release_gate`.
+        let stage_a = fake_result(1, Vector3::new(1.0, 0.0, 0.0), false);
+        slam.vi_motion_init_state
+            .as_mut()
+            .expect("configured above")
+            .initializer
+            .set_velocity_stage_result_for_test(stage_a.clone());
+        match slam.promote_motion_vi_init_result(stage_a) {
+            MotionViInitializationEvent::Succeeded { result } => assert!(!result.bias_released),
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+        let motion_state = slam
+            .vi_motion_init_state
+            .as_ref()
+            .expect("configured above");
+        assert!(
+            motion_state.completed.is_none(),
+            "Stage A must NOT mark the motion-VI stage completed"
+        );
+        assert!(
+            motion_state.velocity_stage_fired(),
+            "Stage A must be visible via velocity_stage_fired()"
+        );
+
+        assert!(
+            !slam.vi_initialization_pending(),
+            "a Stage A promotion must unblock vi_initialization_pending even though the \
+             motion-VI stage remains non-terminal"
+        );
+    }
+
+    /// Regression: with no Stage A fired and static init incomplete,
+    /// local VI-BA must remain gated. Guards against a future change
+    /// accidentally loosening `vi_initialization_pending` beyond the
+    /// documented Stage-A carve-out.
+    #[test]
+    fn no_stage_a_and_incomplete_static_init_keeps_vi_initialization_pending() {
+        let mut slam = minimal_pipeline_with_motion_vi_state();
+        slam.vi_init_state = Some(OnlineSlamViInitState::new(OnlineSlamViInitConfig::default()));
+
+        assert!(
+            slam.vi_initialization_pending(),
+            "static init incomplete + motion-VI stage never fired must stay pending"
+        );
+
+        // Even a `StillWaiting` rejection (no promotion at all) must leave
+        // the gate engaged.
+        assert!(slam.vi_motion_init_state.as_ref().unwrap().completed.is_none());
+        assert!(!slam
+            .vi_motion_init_state
+            .as_ref()
+            .unwrap()
+            .velocity_stage_fired());
+        assert!(slam.vi_initialization_pending());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnlineSlamResult {
     pub tracking: TrackingResult,
@@ -5409,6 +6051,9 @@ pub struct OnlineSlamResult {
     /// otherwise (disabled, no new factor, or the window was too short
     /// to refine).
     pub local_vi_ba: Option<OnlineSlamLocalBaStats>,
+    /// Sparse visual factor lifecycle update for the newly committed
+    /// keyframe. `None` when disabled or no keyframe was added.
+    pub sparse_factor_graph: Option<SparseFactorGraphUpdateStats>,
     /// Visual-only covisibility local BA outcome when
     /// [`OnlineSlamConfig::covisibility_local_ba`] is enabled and the
     /// current `process_frame` call triggered the solve. `None`
@@ -6760,6 +7405,10 @@ fn fuse_loop_observations(
 
         if let Some(previous) = existing {
             if previous.landmark_id != loop_landmark_id {
+                // The stored score described the original descriptor match.
+                // A loop-verification reassignment is a different geometric
+                // edge and must not inherit that frontend confidence.
+                map.remove_observation_confidence(&previous);
                 if let Some(previous_landmark) = map.landmarks.get_mut(&previous.landmark_id) {
                     previous_landmark.observations.retain(|candidate| {
                         !(candidate.frame_id == query_keyframe_id
@@ -6818,5 +7467,98 @@ fn keyframe_from_tracking_result(frame: &Frame, tracking: &TrackingResult) -> Ke
     Keyframe {
         frame,
         observations,
+    }
+}
+
+/// Preserve learned matcher confidence after the mapper has accepted a
+/// tracking-produced keyframe. The geometric observation remains the source of
+/// truth; missing/invalid confidence simply leaves the observation uniformly
+/// weighted in downstream BA.
+fn record_tracking_observation_confidences(
+    map: &mut VisualMap,
+    frame_id: u64,
+    tracking: &TrackingResult,
+) -> usize {
+    let accepted = tracking
+        .localization
+        .inlier_query_indices
+        .iter()
+        .copied()
+        .zip(tracking.localization.inlier_landmark_ids.iter().copied())
+        .zip(tracking.localization.inlier_confidences.iter().copied())
+        .filter_map(|((keypoint_index, landmark_id), confidence)| {
+            confidence.map(|confidence| (keypoint_index, landmark_id, confidence))
+        })
+        .collect::<Vec<_>>();
+
+    let Some(keyframe) = map.keyframes.get(&frame_id) else {
+        return 0;
+    };
+    let observations = keyframe.observations.clone();
+    let mut recorded = 0usize;
+    for (keypoint_index, landmark_id, confidence) in accepted {
+        let Some(observation) = observations.iter().find(|observation| {
+            observation.keypoint_index == keypoint_index && observation.landmark_id == landmark_id
+        }) else {
+            continue;
+        };
+        if map.set_observation_confidence(observation, confidence) {
+            recorded += 1;
+        }
+    }
+    recorded
+}
+
+#[cfg(test)]
+mod observation_confidence_transfer_tests {
+    use super::*;
+    use nalgebra::Point2;
+    use visloc_core::types::{LocalizationResult, LocalizationSuccess};
+    use visloc_localization::MapProviderStats;
+    use visloc_tracking::{TrackingEvent, TrackingState};
+
+    #[test]
+    fn accepted_keyframe_keeps_frontend_inlier_confidence() {
+        let mut frame = Frame::new(7, 1);
+        frame.keypoints.push(Point2::new(12.0, 34.0));
+        let localization = LocalizationResult::success(LocalizationSuccess {
+            pose: Pose::identity(),
+            candidate_landmark_count: 1,
+            match_count: 1,
+            correspondence_count: 1,
+            inliers: vec![0],
+            inlier_query_indices: vec![0],
+            inlier_landmark_ids: vec![42],
+            inlier_confidences: vec![Some(0.3)],
+            inlier_reprojection_errors: vec![0.0],
+            mean_reprojection_error: 0.0,
+            median_reprojection_error: 0.0,
+            max_reprojection_error: 0.0,
+        });
+        let tracking = TrackingResult {
+            frame_id: frame.id,
+            state: TrackingState::Tracking,
+            event: TrackingEvent::Tracked,
+            successive_failures: 0,
+            pose_prior: None,
+            used_pose_prior: false,
+            used_external_localization_prior: false,
+            external_localization_prior_radius: None,
+            tracking_failure_reason: None,
+            map_landmark_count: 1,
+            map_stats: MapProviderStats::default(),
+            localization,
+            covisibility_local_map_size: None,
+        };
+        let keyframe = keyframe_from_tracking_result(&frame, &tracking);
+        let observation = keyframe.observations[0].clone();
+        let mut map = VisualMap::new();
+        map.keyframes.insert(frame.id, keyframe);
+
+        assert_eq!(
+            record_tracking_observation_confidences(&mut map, frame.id, &tracking),
+            1
+        );
+        assert_eq!(map.observation_confidence(&observation), Some(0.3));
     }
 }

@@ -140,6 +140,8 @@ pub enum OnlineSlamConfigError {
     /// Local VI-BA random-walk information weights must both be finite and
     /// strictly positive when configured.
     InvalidLocalViBaBiasRandomWalkWeights,
+    /// Sparse keyframe factor lifecycle thresholds are internally invalid.
+    InvalidSparseFactorGraphConfig,
 }
 
 impl std::fmt::Display for OnlineSlamConfigError {
@@ -172,7 +174,7 @@ impl std::fmt::Display for OnlineSlamConfigError {
             ),
             Self::MotionViInitAfterGiveUpRequiresKeepExistingSeed => write!(
                 f,
-                "OnlineSlamConfig.vi_motion_init.allow_after_static_give_up requires \
+                "motion VI init from configured biases requires \
                  OnlineSlamConfig.vi_init.on_persistent_rejection=KeepExistingSeed"
             ),
             Self::MotionGravityMismatch {
@@ -198,6 +200,11 @@ impl std::fmt::Display for OnlineSlamConfigError {
                 f,
                 "OnlineSlamConfig.local_vi_ba.bias_random_walk_weights must contain \
                  finite, strictly positive gyro and accelerometer weights"
+            ),
+            Self::InvalidSparseFactorGraphConfig => write!(
+                f,
+                "OnlineSlamConfig.sparse_factor_graph contains invalid window, confidence, \
+                 proximity, budget, age, or damping thresholds"
             ),
         }
     }

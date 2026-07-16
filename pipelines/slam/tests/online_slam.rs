@@ -1,6 +1,6 @@
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{Point2, Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::{Pose, Sim3, SE3};
-use visloc_core::types::{Camera, Frame, Landmark, Observation, VisualMap};
+use visloc_core::types::{Camera, Frame, Landmark, Observation, StereoObservation, VisualMap};
 use visloc_localization::LocalizationPipeline;
 use visloc_mapping::LocalMappingPipeline;
 use visloc_slam::{
@@ -19,7 +19,7 @@ use visloc_slam::{
     OnlineSlamRelocalizationCovisibilityConfig, PairwiseKeyframeView,
     PairwiseLoopClosureScannerConfig, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig,
     PoseGraph, PoseGraphError, PoseGraphSe3Config, RobustKernel, Sim3PoseGraph,
-    Sim3PoseGraphConfig,
+    Sim3PoseGraphConfig, SparseFactorGraphConfig, SparseFactorKind,
 };
 use visloc_tracking::{Tracker, TrackingConfig};
 
@@ -94,6 +94,85 @@ fn online_slam_tracks_and_applies_keyframe_update() {
 }
 
 #[test]
+fn online_slam_updates_sparse_factor_lifecycle_on_committed_keyframes() {
+    let (map, first_frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+    let (_, second_frame) = map_and_frame_with_extra_landmarks(30, 1, Vector3::new(1.5, 0.0, 0.0));
+    let mut slam = OnlineSlamPipeline::new(
+        map,
+        Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+        LocalMappingPipeline::default(),
+        OnlineSlamConfig {
+            sparse_factor_graph: Some(SparseFactorGraphConfig {
+                temporal_radius: 1,
+                support_saturation_count: 4,
+                ..SparseFactorGraphConfig::default()
+            }),
+            ..OnlineSlamConfig::default()
+        },
+    );
+
+    let first = slam.process_frame(&first_frame, []);
+    let first_stats = first
+        .sparse_factor_graph
+        .expect("first committed keyframe should update lifecycle state");
+    assert_eq!(first_stats.generation, 1);
+    assert_eq!(first_stats.active_temporal, 0);
+
+    let second = slam.process_frame(&second_frame, []);
+    let second_stats = second
+        .sparse_factor_graph
+        .expect("second committed keyframe should close temporal edges");
+    assert_eq!(second_stats.generation, 2);
+    assert_eq!(second_stats.active_temporal, 2);
+    let state = slam.sparse_factor_graph_state.as_ref().unwrap();
+    assert_eq!(
+        state
+            .active_factors()
+            .filter(|factor| factor.key.kind == SparseFactorKind::Temporal)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn sparse_factor_graph_initializes_from_preexisting_bootstrap_keyframe() {
+    let (map, frame) = map_and_frame(10, 1);
+    let mut seed_pipeline = slam_pipeline(map, true);
+    assert!(seed_pipeline.process_frame(&frame, []).map_was_updated());
+    let mut bootstrapped_map = seed_pipeline.map;
+    bootstrapped_map
+        .stereo_observations
+        .push(StereoObservation {
+            frame_id: 10,
+            landmark_id: 1,
+            right_camera_id: 1,
+            xy_right: Point2::new(300.0, 240.0),
+            left_to_right: SE3::identity(),
+        });
+
+    let pipeline = OnlineSlamPipeline::new(
+        bootstrapped_map,
+        Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+        LocalMappingPipeline::default(),
+        OnlineSlamConfig {
+            sparse_factor_graph: Some(SparseFactorGraphConfig {
+                support_saturation_count: 1,
+                ..SparseFactorGraphConfig::default()
+            }),
+            ..OnlineSlamConfig::default()
+        },
+    );
+    let graph = pipeline.sparse_factor_graph_state.as_ref().unwrap();
+    assert_eq!(
+        graph
+            .active_factors()
+            .filter(|factor| factor.key.kind == SparseFactorKind::Stereo)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn online_slam_can_return_staged_update_without_applying_it() {
     let (map, frame) = map_and_frame(10, 1);
     let mut slam = slam_pipeline(map, false);
@@ -154,6 +233,7 @@ fn slam_pipeline_with_imu(
             imu: Some(OnlineSlamImuConfig::default()),
             local_vi_ba: None,
             covisibility_local_ba: None,
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -437,6 +517,7 @@ fn online_slam_imu_factor_propagates_gravity_weights_and_bias_linearisation() {
             imu: Some(custom_imu_config.clone()),
             local_vi_ba: None,
             covisibility_local_ba: None,
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -625,6 +706,7 @@ fn online_slam_runs_local_vi_ba_when_factor_emitted() {
                 ..OnlineSlamLocalBaConfig::default()
             }),
             covisibility_local_ba: None,
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -710,6 +792,7 @@ fn online_slam_runs_covisibility_local_ba_on_new_keyframe_trigger() {
                     ..CovisibilityLocalBaConfig::default()
                 },
             }),
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -799,6 +882,7 @@ fn online_covisibility_local_ba_quality_gate_rejects_writeback() {
                     ..CovisibilityLocalBaConfig::default()
                 },
             }),
+            sparse_factor_graph: None,
             vi_init: None,
             vi_motion_init: None,
             keep_pre_promotion_imu_factors: false,
@@ -940,6 +1024,7 @@ fn online_covisibility_local_ba_fixed_ratio_gate_rejects_writeback() {
                 imu: None,
                 local_vi_ba: None,
                 covisibility_local_ba: covisibility,
+                sparse_factor_graph: None,
                 vi_init: None,
                 vi_motion_init: None,
                 keep_pre_promotion_imu_factors: false,
@@ -3301,6 +3386,7 @@ mod vi_init_integration {
                 imu: Some(imu_config_z_up()),
                 local_vi_ba,
                 covisibility_local_ba: None,
+                sparse_factor_graph: None,
                 vi_init: Some(config),
                 vi_motion_init: None,
                 keep_pre_promotion_imu_factors: false,
@@ -4002,6 +4088,8 @@ mod vi_motion_init_integration {
                 cumulative_translation_meters,
                 buffered_factor_count: 0,
                 last_rejection: None,
+                velocity_stage_completed: false,
+                ..
             } => {
                 assert!(cumulative_translation_meters.abs() < 1e-12);
             }
@@ -4063,6 +4151,7 @@ mod vi_motion_init_integration {
                 }),
                 local_vi_ba: None,
                 covisibility_local_ba: None,
+                sparse_factor_graph: None,
                 vi_init: Some(OnlineSlamViInitConfig {
                     initializer: VisualInertialInitializerConfig {
                         // Make the static stage hard to fire: jacked-up
@@ -4254,6 +4343,68 @@ mod vi_motion_init_integration {
         }
     }
 
+    #[test]
+    fn motion_vi_init_can_start_from_configured_bias_before_static_finishes() {
+        let gravity = Vector3::new(0.0, 0.0, -9.81);
+        let (map, frame) = map_and_frame_with_extra_landmarks(10, 1, Vector3::zeros());
+        let mut slam = OnlineSlamPipeline::new(
+            map,
+            Tracker::new(LocalizationPipeline::default(), TrackingConfig::default()),
+            LocalMappingPipeline::default(),
+            OnlineSlamConfig {
+                imu: Some(OnlineSlamImuConfig {
+                    gravity_world: gravity,
+                    ..OnlineSlamImuConfig::default()
+                }),
+                vi_init: Some(OnlineSlamViInitConfig {
+                    initializer: VisualInertialInitializerConfig {
+                        gravity_world: gravity,
+                        max_gyro_std: 1.0e-6,
+                        max_accel_std: 1.0e-6,
+                        ..VisualInertialInitializerConfig::default()
+                    },
+                    max_wait_duration_seconds: 5.0,
+                    ..OnlineSlamViInitConfig::default()
+                }),
+                vi_motion_init: Some(OnlineSlamMotionViInitConfig {
+                    initializer: MotionBasedViInitializerConfig {
+                        min_keyframes: 10,
+                        min_translation_meters: 0.1,
+                        gravity_world: gravity,
+                        ..MotionBasedViInitializerConfig::default()
+                    },
+                    allow_from_configured_bias_before_static: true,
+                    ..OnlineSlamMotionViInitConfig::default()
+                }),
+                ..OnlineSlamConfig::default()
+            },
+        );
+        for i in 0..100 {
+            let jitter = (i as f64 * 0.1).sin();
+            slam.push_imu_measurement(
+                Vector3::new(jitter, 0.0, 0.0),
+                Vector3::new(jitter * 0.5, 0.0, 9.81),
+                0.005,
+            );
+        }
+
+        let result = slam.process_frame(&frame, []);
+        assert!(!matches!(
+            result.vi_init,
+            Some(ViInitializationEvent::Succeeded { .. })
+        ));
+        assert!(matches!(
+            result.vi_motion_init,
+            Some(MotionViInitializationEvent::StillWaiting { .. })
+        ));
+        match slam.motion_vi_initialization_status() {
+            MotionViInitializationStatus::Waiting {
+                keyframes_observed, ..
+            } => assert_eq!(keyframes_observed, 1),
+            other => panic!("configured-bias moving start must be active, got {other:?}"),
+        }
+    }
+
     /// Regression: pins that the
     /// `tracking.localization.pose == map.keyframes[id].frame.pose`
     /// invariant holds even when the full IMU + static-VI-init +
@@ -4286,6 +4437,7 @@ mod vi_motion_init_integration {
                 }),
                 local_vi_ba: None,
                 covisibility_local_ba: None,
+                sparse_factor_graph: None,
                 vi_init: Some(OnlineSlamViInitConfig {
                     initializer: VisualInertialInitializerConfig {
                         gravity_world: z_up_gravity,

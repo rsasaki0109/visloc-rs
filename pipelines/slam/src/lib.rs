@@ -19,7 +19,9 @@ pub mod covisibility_ba;
 pub use covisibility_ba::{
     behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,
     mean_selected_reprojection_px, refine_visual_map_with_covisibility_ba,
-    required_fixed_keyframes, select_covisibility_local_ba_window, CovisibilityKeyframeScore,
+    refine_visual_map_with_covisibility_ba_and_neighbor_allowlist, required_fixed_keyframes,
+    select_covisibility_local_ba_window,
+    select_covisibility_local_ba_window_with_neighbor_allowlist, CovisibilityKeyframeScore,
     CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalBaResult,
     CovisibilityLocalBaSelection,
 };
@@ -43,9 +45,11 @@ pub mod covariance;
 mod finite_difference;
 pub mod gnc;
 pub mod incremental_pose_graph;
+pub mod map_atlas;
 pub mod marginalization;
 pub mod pcm;
 mod reordering;
+pub mod sparse_factor_graph;
 pub mod sparsification;
 
 pub(crate) use finite_difference::central_difference_projection_jacobian;
@@ -95,8 +99,10 @@ pub use vi_initializer::{
 
 pub mod vi_motion_initializer;
 pub use vi_motion_initializer::{
-    MotionBasedViInitializationResult, MotionBasedViInitializationStatus, MotionBasedViInitializer,
-    MotionBasedViInitializerConfig, MotionBasedViRejectionReason,
+    estimate_gravity_and_velocities, estimate_gyro_bias, BiasReleaseSchedule,
+    GravityVelocityAlignment, GyroBiasAlignment, MotionBasedViInitializationResult,
+    MotionBasedViInitializationStatus, MotionBasedViInitializer, MotionBasedViInitializerConfig,
+    MotionBasedViRejectionReason,
 };
 
 pub mod online_slam_vi_init;
@@ -151,6 +157,21 @@ pub use online_slam::*;
 
 pub mod pose_graph;
 pub use pose_graph::*;
+
+pub use map_atlas::{
+    AtlasSubmap, CrossSubmapAlignmentConfig, CrossSubmapAlignmentResult,
+    CrossSubmapBoundaryFactorResult, CrossSubmapCandidateDiagnostic,
+    CrossSubmapCandidateFailureReason, CrossSubmapLandmarkMatch, CrossSubmapScaleEstimate,
+    CrossSubmapWindowAlignmentResult, MapAtlas, MapAtlasError, MaterializedAtlas, SubmapId,
+    SubmapIdRemap, SubmapMergeEvidence, SubmapMergeQuality, SubmapMergeVerificationConfig,
+    VerifiedSubmapMerge,
+};
+
+pub use sparse_factor_graph::{
+    SparseFactorGraph, SparseFactorGraphConfig, SparseFactorGraphUpdateStats,
+    SparseFactorInactiveReason, SparseFactorKey, SparseFactorKind, SparseFactorMeasurement,
+    SparseFactorState, SparseKeyframeFactor,
+};
 
 pub mod report;
 pub use report::*;

@@ -49,11 +49,81 @@ pub struct VisualMap {
     /// ordinary left observations in `keyframes` / `landmarks`.
     pub stereo_observations: Vec<StereoObservation>,
     pub keyframes: HashMap<u64, Keyframe>,
+    /// Optional learned/matcher confidence keyed by the canonical observation
+    /// identity `(frame_id, landmark_id, keypoint_index)`. Classical
+    /// observations are absent and therefore retain uniform weight. Kept
+    /// separate from [`Observation`] so map geometry and feature-index formats
+    /// remain backward compatible with existing importers.
+    observation_confidences: HashMap<(FrameId, LandmarkId, usize), f32>,
 }
 
 impl VisualMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a normalized confidence to an observation. Returns false and
+    /// leaves the map unchanged for NaN, infinity, or values outside `[0, 1]`.
+    pub fn set_observation_confidence(
+        &mut self,
+        observation: &Observation,
+        confidence: f32,
+    ) -> bool {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return false;
+        }
+        self.observation_confidences.insert(
+            (
+                observation.frame_id,
+                observation.landmark_id,
+                observation.keypoint_index,
+            ),
+            confidence,
+        );
+        true
+    }
+
+    pub fn observation_confidence(&self, observation: &Observation) -> Option<f32> {
+        self.observation_confidences
+            .get(&(
+                observation.frame_id,
+                observation.landmark_id,
+                observation.keypoint_index,
+            ))
+            .copied()
+    }
+
+    pub fn remove_observation_confidence(&mut self, observation: &Observation) -> Option<f32> {
+        self.observation_confidences.remove(&(
+            observation.frame_id,
+            observation.landmark_id,
+            observation.keypoint_index,
+        ))
+    }
+
+    pub fn observation_confidence_count(&self) -> usize {
+        self.observation_confidences.len()
+    }
+
+    /// `(min, mean, max)` over stored finite confidence values.
+    pub fn observation_confidence_stats(&self) -> Option<(f32, f32, f32)> {
+        let mut values = self
+            .observation_confidences
+            .values()
+            .copied()
+            .filter(|value| value.is_finite());
+        let first = values.next()?;
+        let mut min = first;
+        let mut max = first;
+        let mut sum = first as f64;
+        let mut count = 1usize;
+        for value in values {
+            min = min.min(value);
+            max = max.max(value);
+            sum += value as f64;
+            count += 1;
+        }
+        Some((min, (sum / count as f64) as f32, max))
     }
 
     pub fn validate(&self) -> VisualMapValidationReport {

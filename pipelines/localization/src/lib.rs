@@ -1022,14 +1022,16 @@ where
             .ok();
 
         let mut seen_landmarks: HashSet<LandmarkId> = HashSet::new();
+        let mut seen_query_indices: HashSet<usize> = HashSet::new();
         let mut correspondences = Vec::new();
         let mut query_indices = Vec::new();
         let mut landmark_ids = Vec::new();
 
-        for (&query_index, &landmark_id) in estimated
+        for ((&query_index, &landmark_id), confidence) in estimated
             .inlier_query_indices
             .iter()
             .zip(estimated.inlier_landmark_ids.iter())
+            .zip(estimated.inlier_confidences.iter().copied())
         {
             let Some(point2d) = frame.keypoints.get(query_index).copied() else {
                 continue;
@@ -1037,13 +1039,13 @@ where
             let Some(landmark) = map.landmarks.get(&landmark_id) else {
                 continue;
             };
-            if !seen_landmarks.insert(landmark_id) {
+            if !seen_landmarks.insert(landmark_id) || !seen_query_indices.insert(query_index) {
                 continue;
             }
             correspondences.push(Correspondence2D3D {
                 point2d,
                 point3d: landmark.position,
-                confidence: None,
+                confidence,
             });
             query_indices.push(query_index);
             landmark_ids.push(landmark_id);
@@ -1056,13 +1058,17 @@ where
                 .zip(harvested.query_indices.iter())
                 .zip(harvested.landmark_ids.iter())
             {
-                if !seen_landmarks.insert(landmark_id) {
+                if !seen_landmarks.insert(landmark_id) || !seen_query_indices.insert(query_index) {
                     continue;
                 }
                 correspondences.push(correspondence.clone());
                 query_indices.push(query_index);
                 landmark_ids.push(landmark_id);
             }
+        }
+
+        if same_inlier_assignment(&query_indices, &landmark_ids, estimated) {
+            return None;
         }
 
         let correspondence_count = correspondences.len();
@@ -1084,6 +1090,11 @@ where
             .iter()
             .filter_map(|inlier| landmark_ids.get(*inlier).copied())
             .collect::<Vec<_>>();
+        let inlier_confidences = report
+            .inliers
+            .iter()
+            .filter_map(|inlier| correspondences.get(*inlier).map(|corr| corr.confidence))
+            .collect::<Vec<_>>();
 
         let result = LocalizationResult::success(LocalizationSuccess {
             pose: report.pose,
@@ -1093,6 +1104,7 @@ where
             inliers: report.inliers,
             inlier_query_indices,
             inlier_landmark_ids,
+            inlier_confidences,
             inlier_reprojection_errors: report.inlier_reprojection_errors,
             mean_reprojection_error: report.mean_reprojection_error,
             median_reprojection_error: report.median_reprojection_error,
@@ -1105,6 +1117,43 @@ where
         } else {
             result.rejected_by_quality_gate()
         })
+    }
+
+    /// DROID-style correspondence-revision primitive for the sparse tracker:
+    /// discard the previous 2D-3D assignment, project the local map with the
+    /// latest pose, rebuild a fresh one-to-one correspondence set, and solve
+    /// PnP again. Repeating this operation alternates correspondence and pose
+    /// updates while preserving the existing robust estimator and quality
+    /// gate. Unlike [`Self::refine_frame_pose_with_local_map_and_descriptor_store`],
+    /// query keypoints may switch to a different landmark between iterations.
+    pub fn revise_frame_pose_with_local_map_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        local_map_descriptor_store: &LandmarkDescriptorStore,
+        estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        let estimated_pose = estimated.pose.as_ref()?;
+        let camera = map.cameras.get(&frame.camera_id)?.clone();
+        let query = QueryImage::from_frame(frame, camera);
+        let correspondence_set = ProjectionCorrespondenceBuilder::new(self.matcher.clone())
+            .build_with_pose_prior(
+                &query,
+                map,
+                local_map_descriptor_store,
+                estimated_pose,
+                refinement_search_radius_px,
+            )
+            .ok()?;
+        if same_inlier_assignment(
+            &correspondence_set.query_indices,
+            &correspondence_set.landmark_ids,
+            estimated,
+        ) {
+            return None;
+        }
+        Some(self.estimate_and_gate(&query, correspondence_set, Some(estimated_pose)))
     }
 
     fn run_localization<S2>(
@@ -1196,6 +1245,16 @@ where
             .iter()
             .filter_map(|inlier| correspondence_set.landmark_ids.get(*inlier).copied())
             .collect::<Vec<_>>();
+        let inlier_confidences = report
+            .inliers
+            .iter()
+            .filter_map(|inlier| {
+                correspondence_set
+                    .correspondences
+                    .get(*inlier)
+                    .map(|corr| corr.confidence)
+            })
+            .collect::<Vec<_>>();
 
         let result = LocalizationResult::success(LocalizationSuccess {
             pose: report.pose,
@@ -1205,6 +1264,7 @@ where
             inliers: report.inliers,
             inlier_query_indices,
             inlier_landmark_ids,
+            inlier_confidences,
             inlier_reprojection_errors: report.inlier_reprojection_errors,
             mean_reprojection_error: report.mean_reprojection_error,
             median_reprojection_error: report.median_reprojection_error,
@@ -1229,13 +1289,54 @@ fn correspondence_confidence_weights(
             correspondence
                 .confidence
                 .filter(|confidence| confidence.is_finite() && *confidence > 0.0)
-                .unwrap_or(0.0)
+                // A missing signal is uniform evidence, per
+                // `Correspondence2D3D`'s contract. In a mixed classical /
+                // learned set it must not be turned into a zero-weight
+                // correspondence merely because another match has a score.
+                .unwrap_or(1.0)
         })
         .collect::<Vec<_>>();
     weights
         .iter()
-        .any(|weight| *weight > 0.0)
+        .zip(correspondences.iter())
+        .any(|(weight, correspondence)| *weight > 0.0 && correspondence.confidence.is_some())
         .then_some(weights)
+}
+
+/// Returns true when rebuilding correspondences produced exactly the same
+/// one-to-one query/landmark assignment as the current PnP inliers. Re-solving
+/// an unchanged set is not a correspondence update; it only exposes the
+/// tracker to another RANSAC/order-dependent pose sample and can accumulate
+/// drift when repeated every frame.
+fn same_inlier_assignment(
+    query_indices: &[usize],
+    landmark_ids: &[LandmarkId],
+    estimated: &LocalizationResult,
+) -> bool {
+    let new_count = query_indices.len().min(landmark_ids.len());
+    let old_count = estimated
+        .inlier_query_indices
+        .len()
+        .min(estimated.inlier_landmark_ids.len());
+    if new_count != old_count {
+        return false;
+    }
+    let mut new_pairs = query_indices
+        .iter()
+        .copied()
+        .zip(landmark_ids.iter().copied())
+        .take(new_count)
+        .collect::<Vec<_>>();
+    let mut old_pairs = estimated
+        .inlier_query_indices
+        .iter()
+        .copied()
+        .zip(estimated.inlier_landmark_ids.iter().copied())
+        .take(old_count)
+        .collect::<Vec<_>>();
+    new_pairs.sort_unstable();
+    old_pairs.sort_unstable();
+    new_pairs == old_pairs
 }
 
 impl<X, M, S, E> ImageLocalizer<X, LocalizationPipeline<M, S, E>>
@@ -1460,4 +1561,34 @@ fn passes_quality_gate(result: &LocalizationResult, config: &LocalizationConfig)
         }
     }
     true
+}
+
+#[cfg(test)]
+mod confidence_weight_tests {
+    use super::*;
+    use nalgebra::{Point2, Point3};
+    use visloc_vision::pnp::Correspondence2D3D;
+
+    fn correspondence(confidence: Option<f32>) -> Correspondence2D3D {
+        Correspondence2D3D {
+            point2d: Point2::origin(),
+            point3d: Point3::new(0.0, 0.0, 1.0),
+            confidence,
+        }
+    }
+
+    #[test]
+    fn mixed_confidence_keeps_classical_correspondences_uniform() {
+        let correspondences = vec![correspondence(None), correspondence(Some(0.25))];
+        assert_eq!(
+            correspondence_confidence_weights(&correspondences),
+            Some(vec![1.0, 0.25])
+        );
+    }
+
+    #[test]
+    fn all_classical_correspondences_keep_unweighted_path() {
+        let correspondences = vec![correspondence(None), correspondence(None)];
+        assert_eq!(correspondence_confidence_weights(&correspondences), None);
+    }
 }

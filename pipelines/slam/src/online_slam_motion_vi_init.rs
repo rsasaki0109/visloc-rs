@@ -34,8 +34,8 @@ use std::collections::VecDeque;
 
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::vi_motion_initializer::{
-    MotionBasedViInitializationResult, MotionBasedViInitializer, MotionBasedViInitializerConfig,
-    MotionBasedViRejectionReason,
+    GravityVelocityAlignment, GyroBiasAlignment, MotionBasedViInitializationResult,
+    MotionBasedViInitializer, MotionBasedViInitializerConfig, MotionBasedViRejectionReason,
 };
 
 /// Pipeline-level configuration for the motion-based VI init stage.
@@ -64,6 +64,11 @@ pub struct OnlineSlamMotionViInitConfig {
     /// that their sequence may begin in motion and that no stationary bias
     /// estimate is available.
     pub allow_after_static_give_up: bool,
+    /// Permit a moving-start sequence to begin VIBA1 immediately from the
+    /// configured running IMU biases, without waiting for the stationary
+    /// initializer to succeed or reach its give-up horizon. This is an
+    /// explicit opt-in because the configured biases may be inaccurate.
+    pub allow_from_configured_bias_before_static: bool,
     /// Cap on the number of IMU factors banked in
     /// `OnlineSlamMotionViInitState::factor_history`. Bounds memory on
     /// long sequences where the trigger never fires. `0` disables the
@@ -78,6 +83,7 @@ impl Default for OnlineSlamMotionViInitConfig {
             mirror_into_local_vi_ba: true,
             mirror_into_imu_state: true,
             allow_after_static_give_up: false,
+            allow_from_configured_bias_before_static: false,
             max_buffered_factors: 64,
         }
     }
@@ -96,6 +102,23 @@ pub enum MotionViInitializationStatus {
         cumulative_translation_meters: f64,
         buffered_factor_count: usize,
         last_rejection: Option<MotionBasedViRejectionReason>,
+        /// `true` once a [`crate::BiasReleaseSchedule`] Stage A ("velocity
+        /// stage") solve has fired and is cached on the inner
+        /// [`MotionBasedViInitializer`] (see
+        /// [`MotionBasedViInitializer::velocity_stage_result`]). Always
+        /// `false` when no bias-release schedule is configured.
+        velocity_stage_completed: bool,
+        /// Mirrors [`MotionBasedViInitializer::last_gravity_alignment`]:
+        /// the most recent gravity/velocity alignment attempt, kept even
+        /// when `last_rejection` reports a later gate rejected it. `None`
+        /// when `estimate_gravity` is off or no attempt has run yet.
+        last_gravity_alignment: Option<GravityVelocityAlignment>,
+        /// Mirrors [`MotionBasedViInitializer::last_gyro_bias_alignment`]:
+        /// the most recent gyro-bias rotation-only alignment attempt, kept
+        /// even when `last_rejection` reports a later gate rejected it.
+        /// `None` when `estimate_gyro_bias` is off or no attempt has run
+        /// yet.
+        last_gyro_bias_alignment: Option<GyroBiasAlignment>,
     },
     /// VIBA1 has fired and succeeded; the result is the recovered
     /// refinement.
@@ -112,6 +135,15 @@ pub enum MotionViInitializationEvent {
     /// VIBA1 fired and succeeded this frame. The pipeline has atomically
     /// mirrored refined `(velocity, bias)` into the local-VI-BA state
     /// table and reset the IMU pre-integrator if so configured.
+    ///
+    /// Consumers MUST check `result.bias_released` before treating this as
+    /// the terminal motion-VI-init outcome: when a
+    /// [`crate::BiasReleaseSchedule`] is configured, this event may instead
+    /// report a non-terminal Stage A ("velocity stage") firing
+    /// (`bias_released == false`) — velocities were refined and mirrored,
+    /// but biases still sit at the seed, and the stage remains active
+    /// awaiting a later Stage B firing (`bias_released == true`). `true`
+    /// on both the legacy single-stage path and Stage B.
     Succeeded {
         result: MotionBasedViInitializationResult,
     },
@@ -161,6 +193,23 @@ impl OnlineSlamMotionViInitState {
         self.completed.is_none()
     }
 
+    /// `true` once a [`crate::BiasReleaseSchedule`] Stage A ("velocity
+    /// stage") solve has fired on the inner [`MotionBasedViInitializer`],
+    /// regardless of whether the stage has since gone on to reach the
+    /// terminal Stage B `completed` state. Always `false` when no
+    /// `bias_release` schedule is configured (the legacy path never parks
+    /// in a non-terminal success, so it either has `completed.is_some()`
+    /// or has not fired at all).
+    ///
+    /// Used by [`crate::OnlineSlamPipeline::vi_initialization_pending`] to
+    /// decide whether local VI-BA may run: a Stage A firing has already
+    /// replaced the placeholder-zero bias linearisation with the
+    /// refined/estimated seed (see that method's doc comment), so it
+    /// counts as "no longer pending" exactly like a terminal `completed`.
+    pub(crate) fn velocity_stage_fired(&self) -> bool {
+        self.initializer.velocity_stage_result().is_some()
+    }
+
     pub(crate) fn snapshot(&self) -> MotionViInitializationStatus {
         if let Some(result) = &self.completed {
             MotionViInitializationStatus::Initialised {
@@ -172,6 +221,9 @@ impl OnlineSlamMotionViInitState {
                 cumulative_translation_meters: self.initializer.cumulative_translation_meters(),
                 buffered_factor_count: self.factor_history.len(),
                 last_rejection: self.last_rejection.clone(),
+                velocity_stage_completed: self.initializer.velocity_stage_result().is_some(),
+                last_gravity_alignment: self.initializer.last_gravity_alignment().cloned(),
+                last_gyro_bias_alignment: self.initializer.last_gyro_bias_alignment().cloned(),
             }
         }
     }
@@ -264,11 +316,17 @@ mod tests {
                 cumulative_translation_meters,
                 buffered_factor_count,
                 last_rejection,
+                velocity_stage_completed,
+                last_gravity_alignment,
+                last_gyro_bias_alignment,
             } => {
                 assert_eq!(keyframes_observed, 0);
                 assert!(cumulative_translation_meters.abs() < 1e-12);
                 assert_eq!(buffered_factor_count, 0);
                 assert!(last_rejection.is_none());
+                assert!(!velocity_stage_completed);
+                assert!(last_gravity_alignment.is_none());
+                assert!(last_gyro_bias_alignment.is_none());
             }
             other => panic!("expected Waiting, got {other:?}"),
         }

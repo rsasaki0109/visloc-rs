@@ -640,30 +640,117 @@ where
             return;
         };
 
-        let pre_refinement_inlier_count = localization.inlier_count;
-        let pre_refinement_correspondence_count = localization.correspondence_count;
-        let Some(refined) = self
-            .localization_pipeline
-            .refine_pose_with_local_map_and_descriptor_store(
-                frame,
-                map,
-                local_store,
-                localization,
-                projection_config.refinement_search_radius_px,
-            )
-        else {
-            return;
-        };
-
-        let gain = refined
-            .correspondence_count
-            .saturating_sub(pre_refinement_correspondence_count);
-        self.stats.local_map_refinement_correspondence_gain_total += gain;
-
-        if refined.success && refined.inlier_count >= pre_refinement_inlier_count {
-            *localization = refined;
-            self.stats.local_map_refinement_accepted_count += 1;
+        let iterations = projection_config.refinement_iterations.max(1);
+        let shrink = if projection_config
+            .refinement_radius_shrink_factor
+            .is_finite()
+            && projection_config.refinement_radius_shrink_factor > 0.0
+            && projection_config.refinement_radius_shrink_factor <= 1.0
+        {
+            projection_config.refinement_radius_shrink_factor
         } else {
+            1.0
+        };
+        let strict_monotonic =
+            iterations > 1 || projection_config.refinement_reassign_correspondences;
+        let mut radius = projection_config.refinement_search_radius_px;
+        let mut attempted_any = false;
+        let mut accepted_any = false;
+
+        for _ in 0..iterations {
+            let refined = if projection_config.refinement_reassign_correspondences {
+                self.localization_pipeline
+                    .revise_pose_with_local_map_and_descriptor_store(
+                        frame,
+                        map,
+                        local_store,
+                        localization,
+                        radius,
+                    )
+            } else {
+                self.localization_pipeline
+                    .refine_pose_with_local_map_and_descriptor_store(
+                        frame,
+                        map,
+                        local_store,
+                        localization,
+                        radius,
+                    )
+            };
+            radius *= shrink;
+
+            let Some(refined) = refined else {
+                continue;
+            };
+            attempted_any = true;
+            self.stats.local_map_refinement_correspondence_gain_total += refined
+                .correspondence_count
+                .saturating_sub(localization.correspondence_count);
+
+            let inliers_improved = refined.inlier_count > localization.inlier_count;
+            let inliers_preserved = refined.inlier_count == localization.inlier_count;
+            let error_not_worse =
+                match (refined.reprojection_error, localization.reprojection_error) {
+                    (Some(refined_error), Some(current_error)) => {
+                        refined_error.is_finite() && refined_error <= current_error + 1.0e-9
+                    }
+                    (Some(refined_error), None) => refined_error.is_finite(),
+                    (None, None) => true,
+                    (None, Some(_)) => false,
+                };
+            let current_pairs = localization
+                .inlier_query_indices
+                .iter()
+                .copied()
+                .zip(localization.inlier_landmark_ids.iter().copied())
+                .collect::<HashSet<_>>();
+            let refined_pairs = refined
+                .inlier_query_indices
+                .iter()
+                .copied()
+                .zip(refined.inlier_landmark_ids.iter().copied())
+                .collect::<HashSet<_>>();
+            let retained_pair_ratio = if current_pairs.is_empty() {
+                1.0
+            } else {
+                current_pairs.intersection(&refined_pairs).count() as f64
+                    / current_pairs.len() as f64
+            };
+            let pair_retention_passes =
+                retained_pair_ratio >= projection_config.refinement_min_inlier_pair_retention_ratio;
+            let (translation_correction_m, rotation_correction_rad) =
+                match (localization.pose.as_ref(), refined.pose.as_ref()) {
+                    (Some(current_pose), Some(refined_pose)) => {
+                        let translation = (refined_pose.camera_center_world()
+                            - current_pose.camera_center_world())
+                        .norm();
+                        let rotation_delta = refined_pose.world_to_camera.rotation
+                            * current_pose.world_to_camera.rotation.inverse();
+                        (translation, rotation_delta.angle())
+                    }
+                    _ => (f64::INFINITY, f64::INFINITY),
+                };
+            let translation_correction_passes = projection_config
+                .refinement_max_pose_translation_correction_m
+                .is_none_or(|max| translation_correction_m <= max);
+            let rotation_correction_passes = projection_config
+                .refinement_max_pose_rotation_correction_rad
+                .is_none_or(|max| rotation_correction_rad <= max);
+            let accept = refined.success
+                && (inliers_improved
+                    || (inliers_preserved && (!strict_monotonic || error_not_worse)))
+                && pair_retention_passes
+                && translation_correction_passes
+                && rotation_correction_passes;
+            if accept {
+                *localization = refined;
+                accepted_any = true;
+            }
+        }
+
+        if accepted_any {
+            self.stats.local_map_refinement_accepted_count += 1;
+        } else if attempted_any {
             self.stats.local_map_refinement_rejected_count += 1;
         }
     }
@@ -1415,6 +1502,27 @@ pub trait FrameLocalizer {
     ) -> Option<LocalizationResult> {
         None
     }
+
+    /// Rebuild projection-guided correspondences from scratch around the
+    /// latest pose so 2D keypoints can change landmark assignment between
+    /// rounds. Implementors without a specialized revision path retain the
+    /// conservative refinement behavior.
+    fn revise_pose_with_local_map_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        local_map_descriptor_store: &LandmarkDescriptorStore,
+        estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        self.refine_pose_with_local_map_and_descriptor_store(
+            frame,
+            map,
+            local_map_descriptor_store,
+            estimated,
+            refinement_search_radius_px,
+        )
+    }
 }
 
 impl<M, S, E> FrameLocalizer for LocalizationPipeline<M, S, E>
@@ -1563,6 +1671,24 @@ where
         refinement_search_radius_px: f64,
     ) -> Option<LocalizationResult> {
         LocalizationPipeline::refine_frame_pose_with_local_map_and_descriptor_store(
+            self,
+            frame,
+            map,
+            local_map_descriptor_store,
+            estimated,
+            refinement_search_radius_px,
+        )
+    }
+
+    fn revise_pose_with_local_map_and_descriptor_store(
+        &self,
+        frame: &Frame,
+        map: &VisualMap,
+        local_map_descriptor_store: &LandmarkDescriptorStore,
+        estimated: &LocalizationResult,
+        refinement_search_radius_px: f64,
+    ) -> Option<LocalizationResult> {
+        LocalizationPipeline::revise_frame_pose_with_local_map_and_descriptor_store(
             self,
             frame,
             map,

@@ -36,6 +36,39 @@ use crate::gnc::{GncConfig, GncState};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
 
+/// Convert optional normalized matcher confidences into relative BA
+/// information weights without changing the visual factor group's mean scale.
+///
+/// Learned match probabilities are not calibrated inverse variances. Feeding
+/// them directly into tight VI-BA would weaken the entire visual block against
+/// the physically whitened IMU block. Explicit scores are therefore divided
+/// by their own finite mean; observations without a score stay at `1`.
+/// Returns `None` when no valid confidence signal is present.
+pub(crate) fn relative_observation_confidence_weights(
+    confidences: impl IntoIterator<Item = Option<f32>>,
+) -> Option<Vec<f64>> {
+    let confidences = confidences
+        .into_iter()
+        .map(|confidence| {
+            confidence.filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        })
+        .collect::<Vec<_>>();
+    let explicit = confidences.iter().flatten().copied().collect::<Vec<_>>();
+    if explicit.is_empty() {
+        return None;
+    }
+    let mean = explicit.iter().map(|value| *value as f64).sum::<f64>() / explicit.len() as f64;
+    if !mean.is_finite() || mean <= 0.0 {
+        return None;
+    }
+    Some(
+        confidences
+            .into_iter()
+            .map(|confidence| confidence.map_or(1.0, |value| value as f64 / mean))
+            .collect(),
+    )
+}
+
 /// FEJ-style dense Gaussian prior over one or more navigation states.
 ///
 /// Each keyframe contributes `[pose(6), velocity(3), bias(6)]` in that order.
@@ -780,7 +813,28 @@ impl BundleAdjustment {
     /// useful for detecting a visual/inertial consistency failure that a
     /// single aggregate BA cost would otherwise hide.
     pub fn cost_breakdown(&self, kernel: &RobustKernel) -> BaCostBreakdown {
-        let total = self.robust_cost(kernel);
+        self.cost_breakdown_weighted(kernel, None)
+    }
+
+    /// Confidence-weighted counterpart of [`Self::cost_breakdown`]. Visual
+    /// terms use the same flattened weight vector as
+    /// [`Self::optimize_with_observation_weights`]; IMU, navigation and other
+    /// structural terms retain their physical information matrices.
+    pub fn cost_breakdown_with_observation_weights(
+        &self,
+        kernel: &RobustKernel,
+        observation_weights: &[f64],
+    ) -> Result<BaCostBreakdown, BaError> {
+        self.validate_observation_weights(observation_weights)?;
+        Ok(self.cost_breakdown_weighted(kernel, Some(observation_weights)))
+    }
+
+    fn cost_breakdown_weighted(
+        &self,
+        kernel: &RobustKernel,
+        observation_weights: Option<&[f64]>,
+    ) -> BaCostBreakdown {
+        let total = self.robust_cost_weighted(kernel, observation_weights);
 
         let mut visual_problem = self.clone();
         visual_problem.gravity_prior = None;
@@ -790,7 +844,7 @@ impl BundleAdjustment {
         visual_problem.bias_random_walk_factors.clear();
         visual_problem.imu_factors.clear();
         visual_problem.navigation_state_prior = None;
-        let visual = visual_problem.robust_cost(kernel);
+        let visual = visual_problem.robust_cost_weighted(kernel, observation_weights);
 
         let mut imu_problem = self.clone();
         clear_visual_and_structural_costs(&mut imu_problem);
@@ -1186,6 +1240,51 @@ impl BundleAdjustment {
             return self.optimize_weighted(config, None);
         }
         self.optimize_joint_intrinsics(config)
+    }
+
+    /// Run pose/structure bundle adjustment with one external confidence
+    /// weight per visual observation.
+    ///
+    /// The flattened order is monocular observations first, followed by
+    /// rectified stereo and then calibrated general stereo. A weight of `1`
+    /// preserves the ordinary BA contribution and `0` disables that visual
+    /// residual. Intermediate values provide the confidence-weighted least
+    /// squares used by learned correspondence update operators such as
+    /// DROID-SLAM. The external weight multiplies the configured robust-kernel
+    /// weight; inertial and structural priors are never reweighted.
+    ///
+    /// Joint intrinsics refinement is deliberately rejected because its
+    /// separate normal-equation builder does not yet consume these weights.
+    pub fn optimize_with_observation_weights(
+        &mut self,
+        config: &BaConfig,
+        observation_weights: &[f64],
+    ) -> Result<BaResult, BaError> {
+        self.validate_observation_weights(observation_weights)?;
+        if config.refine_intrinsics {
+            return Err(BaError::ObservationWeightsWithIntrinsicsRefinement);
+        }
+        self.optimize_weighted(config, Some(observation_weights))
+    }
+
+    fn validate_observation_weights(&self, observation_weights: &[f64]) -> Result<(), BaError> {
+        let expected = self.observations.len()
+            + self.stereo_observations.len()
+            + self.general_stereo_observations.len();
+        if observation_weights.len() != expected {
+            return Err(BaError::ObservationWeightCount {
+                expected,
+                actual: observation_weights.len(),
+            });
+        }
+        if let Some((index, _)) = observation_weights
+            .iter()
+            .enumerate()
+            .find(|(_, weight)| !weight.is_finite() || **weight < 0.0)
+        {
+            return Err(BaError::InvalidObservationWeight(index));
+        }
+        Ok(())
     }
 
     /// Bundle adjustment that carries the shared pinhole intrinsics
@@ -2313,6 +2412,16 @@ pub enum BaError {
     /// One or more [`BaStereoObservation`]s were added but
     /// [`BundleAdjustment::stereo_baseline`] is missing or non-positive.
     MissingStereoBaseline,
+    /// The external visual-weight vector does not match the flattened visual
+    /// observation count (mono, rectified stereo, general stereo).
+    ObservationWeightCount {
+        expected: usize,
+        actual: usize,
+    },
+    /// An external visual weight is negative, NaN, or infinite.
+    InvalidObservationWeight(usize),
+    /// Confidence-weighted joint intrinsics refinement is not implemented.
+    ObservationWeightsWithIntrinsicsRefinement,
     /// Reduced camera system was singular even after λ damping. Usually
     /// means the gauge is under-fixed (e.g., monocular without enough
     /// fixed poses or landmarks to remove scale).
@@ -2336,6 +2445,18 @@ impl std::fmt::Display for BaError {
             BaError::MissingStereoBaseline => {
                 write!(f, "stereo observations require a positive stereo_baseline")
             }
+            BaError::ObservationWeightCount { expected, actual } => write!(
+                f,
+                "observation weight count mismatch: expected {expected}, got {actual}"
+            ),
+            BaError::InvalidObservationWeight(index) => write!(
+                f,
+                "observation weight at index {index} must be finite and non-negative"
+            ),
+            BaError::ObservationWeightsWithIntrinsicsRefinement => write!(
+                f,
+                "observation weights are not supported with joint intrinsics refinement"
+            ),
             BaError::SingularSystem => write!(f, "reduced camera system is singular"),
         }
     }

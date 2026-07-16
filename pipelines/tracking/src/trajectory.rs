@@ -2223,6 +2223,7 @@ mod umeyama_alignment_tests {
             inliers: vec![0, 1, 2, 3],
             inlier_query_indices: vec![0, 1, 2, 3],
             inlier_landmark_ids: vec![1, 2, 3, 4],
+            inlier_confidences: vec![None; 4],
             inlier_reprojection_errors: vec![0.0; 4],
             mean_reprojection_error: 0.0,
             median_reprojection_error: 0.0,

@@ -42,6 +42,7 @@ fn success_result_with_inliers(
             inliers: inliers.clone(),
             inlier_query_indices: inliers,
             inlier_landmark_ids,
+            inlier_confidences: vec![None; inlier_count],
             inlier_reprojection_errors: vec![0.0; inlier_count],
             mean_reprojection_error: 0.0,
             median_reprojection_error: 0.0,
