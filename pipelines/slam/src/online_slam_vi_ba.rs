@@ -209,6 +209,42 @@ pub struct OnlineSlamLocalBaConfig {
     /// Reject the whole local solve when any keyframe rotation changes by
     /// more than this many radians relative to the pre-solve map.
     pub reject_writeback_when_pose_rotation_above_radians: Option<f64>,
+    /// Physical bias-magnitude writeback gate: reject the whole local solve
+    /// when any in-window keyframe's refined `||bias_gyro||` exceeds this
+    /// bound (rad/s).
+    ///
+    /// Real-data motivation (`gt_full1500`, full MH_01, 1500 frames, SP
+    /// frontend, local-VI-BA NIS gate 50): local VI-BA ran 440 triggers
+    /// with 135 writebacks mirrored into the IMU motion model, and the
+    /// mirrored accel bias diverged to `[1.047, -8.401, 1.298]`
+    /// (`‖·‖ ≈ 8.6 m/s²` — near gravity magnitude). Every one of those
+    /// writebacks passed the NIS / velocity / pose-correction gates; none
+    /// of them checks whether the solution is a physically plausible IMU
+    /// bias versus the visual residuals being absorbed into the bias
+    /// slots. This mirrors the physical gate the motion-VI init stage
+    /// already applies during bootstrap
+    /// (`MotionBasedViInitializerConfig::max_gyro_bias_magnitude_rad_s`,
+    /// bench value `0.2`) — local VI-BA had no equivalent for its own
+    /// per-trigger bias updates.
+    ///
+    /// `None` (default) preserves legacy behaviour (no physical bias cap).
+    /// A reasonable starting bench value is `Some(0.2)`, mirroring the
+    /// motion-VI init bootstrap gate.
+    pub reject_gyro_bias_above_rad_s: Option<f64>,
+    /// Physical bias-magnitude writeback gate: reject the whole local solve
+    /// when any in-window keyframe's refined `||bias_acc||` exceeds this
+    /// bound (m/s²).
+    ///
+    /// See [`Self::reject_gyro_bias_above_rad_s`] for the `gt_full1500`
+    /// evidence motivating this gate (mirrored accel bias diverged to
+    /// `‖·‖ ≈ 8.6 m/s²`). Mirrors
+    /// `MotionBasedViInitializerConfig::max_accel_bias_magnitude_mps2`,
+    /// bench value `1.0`.
+    ///
+    /// `None` (default) preserves legacy behaviour (no physical bias cap).
+    /// A reasonable starting bench value is `Some(1.0)`, mirroring the
+    /// motion-VI init bootstrap gate.
+    pub reject_accel_bias_above_mps2: Option<f64>,
     /// Adaptive writeback velocity gate. Unlike
     /// [`Self::reject_writeback_when_velocity_norm_above_mps`], this is
     /// not a raw scene-scale `m/s` threshold. It derives a per-trigger
@@ -299,6 +335,8 @@ impl Default for OnlineSlamLocalBaConfig {
             reject_writeback_when_velocity_norm_above_mps: None,
             reject_writeback_when_pose_translation_above_meters: None,
             reject_writeback_when_pose_rotation_above_radians: None,
+            reject_gyro_bias_above_rad_s: None,
+            reject_accel_bias_above_mps2: None,
             adaptive_velocity_gate: None,
             relinearise_imu_factor_bias_thresholds: None,
             run_at_vi_init_promotion: false,
@@ -408,6 +446,16 @@ pub struct OnlineSlamLocalBaStats {
     pub max_refined_velocity_norm_mps: f64,
     pub max_pose_translation_correction_meters: f64,
     pub max_pose_rotation_correction_radians: f64,
+    /// Maximum refined in-window `||bias_gyro||` in rad/s from the selected
+    /// BA result. Reported even when writeback is rejected, mirroring
+    /// [`Self::max_refined_velocity_norm_mps`].
+    pub max_refined_gyro_bias_norm_rad_s: f64,
+    /// Maximum refined in-window `||bias_acc||` in m/s² from the selected
+    /// BA result. Reported even when writeback is rejected. See the
+    /// `gt_full1500` evidence on
+    /// [`OnlineSlamLocalBaConfig::reject_accel_bias_above_mps2`]: the
+    /// unfiltered mirrored value reached `‖·‖ ≈ 8.6`.
+    pub max_refined_accel_bias_norm_mps2: f64,
     /// Adaptive velocity threshold used for this trigger, if the
     /// adaptive gate was enabled and enough finite local reference
     /// velocities were available.
@@ -432,6 +480,12 @@ pub struct OnlineSlamLocalBaStats {
     /// gate rejected this trigger.
     pub velocity_gate_rejected: bool,
     pub pose_correction_gate_rejected: bool,
+    /// `true` when either
+    /// [`OnlineSlamLocalBaConfig::reject_gyro_bias_above_rad_s`] or
+    /// [`OnlineSlamLocalBaConfig::reject_accel_bias_above_mps2`] rejected
+    /// this trigger because a refined in-window bias magnitude exceeded
+    /// its configured bound.
+    pub bias_magnitude_gate_rejected: bool,
     /// `true` when the adaptive refined-velocity gate rejected this
     /// trigger.
     pub adaptive_velocity_gate_rejected: bool,
@@ -463,6 +517,29 @@ fn compute_max_refined_velocity_norm_mps(ba: &BundleAdjustment, window_ids: &[u6
         .filter_map(|kf_id| ba.velocities.get(kf_id))
         .map(|velocity| velocity.norm())
         .fold(0.0_f64, f64::max)
+}
+
+/// Maximum in-window refined `(||bias_gyro||, ||bias_acc||)` from the
+/// selected BA result. Used both for diagnostics and by
+/// [`OnlineSlamLocalBaConfig::reject_gyro_bias_above_rad_s`] /
+/// [`OnlineSlamLocalBaConfig::reject_accel_bias_above_mps2`].
+fn compute_max_refined_bias_norms(ba: &BundleAdjustment, window_ids: &[u64]) -> (f64, f64) {
+    let mut max_gyro = 0.0_f64;
+    let mut max_accel = 0.0_f64;
+    for kf_id in window_ids {
+        let Some(bias) = ba.biases.get(kf_id) else {
+            continue;
+        };
+        let gyro_norm = Vector3::new(bias[0], bias[1], bias[2]).norm();
+        let accel_norm = Vector3::new(bias[3], bias[4], bias[5]).norm();
+        if gyro_norm.is_finite() {
+            max_gyro = max_gyro.max(gyro_norm);
+        }
+        if accel_norm.is_finite() {
+            max_accel = max_accel.max(accel_norm);
+        }
+    }
+    (max_gyro, max_accel)
 }
 
 fn max_pose_correction(map: &VisualMap, ba: &BundleAdjustment, window_ids: &[u64]) -> (f64, f64) {
@@ -1153,6 +1230,8 @@ pub fn run_local_vi_ba(
     let max_refined_velocity_norm_mps = compute_max_refined_velocity_norm_mps(&ba, &window_ids);
     let (max_pose_translation_correction_meters, max_pose_rotation_correction_radians) =
         max_pose_correction(map, &ba, &window_ids);
+    let (max_refined_gyro_bias_norm_rad_s, max_refined_accel_bias_norm_mps2) =
+        compute_max_refined_bias_norms(&ba, &window_ids);
     let adaptive_velocity_gate_threshold_mps = state
         .config
         .adaptive_velocity_gate
@@ -1190,12 +1269,21 @@ pub fn run_local_vi_ba(
             .config
             .reject_writeback_when_pose_rotation_above_radians
             .is_some_and(|threshold| max_pose_rotation_correction_radians > threshold);
+    let bias_magnitude_gate_rejected = state
+        .config
+        .reject_gyro_bias_above_rad_s
+        .is_some_and(|threshold| max_refined_gyro_bias_norm_rad_s > threshold)
+        || state
+            .config
+            .reject_accel_bias_above_mps2
+            .is_some_and(|threshold| max_refined_accel_bias_norm_mps2 > threshold);
     let adaptive_velocity_gate_rejected = adaptive_velocity_gate_threshold_mps
         .is_some_and(|threshold| max_refined_velocity_norm_mps > threshold);
     let quality_gate_rejected = cost_ratio_gate_rejected
         || imu_nis_gate_rejected
         || velocity_gate_rejected
         || pose_correction_gate_rejected
+        || bias_magnitude_gate_rejected
         || adaptive_velocity_gate_rejected;
     if quality_gate_rejected {
         return Some(OnlineSlamLocalBaStats {
@@ -1211,6 +1299,8 @@ pub fn run_local_vi_ba(
             max_refined_velocity_norm_mps,
             max_pose_translation_correction_meters,
             max_pose_rotation_correction_radians,
+            max_refined_gyro_bias_norm_rad_s,
+            max_refined_accel_bias_norm_mps2,
             adaptive_velocity_gate_threshold_mps,
             bias_frozen,
             quality_gate_rejected,
@@ -1218,6 +1308,7 @@ pub fn run_local_vi_ba(
             imu_nis_gate_rejected,
             velocity_gate_rejected,
             pose_correction_gate_rejected,
+            bias_magnitude_gate_rejected,
             adaptive_velocity_gate_rejected,
             relinearised_factor_count,
             marginalization_prior_applied,
@@ -1280,6 +1371,8 @@ pub fn run_local_vi_ba(
         max_refined_velocity_norm_mps,
         max_pose_translation_correction_meters,
         max_pose_rotation_correction_radians,
+        max_refined_gyro_bias_norm_rad_s,
+        max_refined_accel_bias_norm_mps2,
         adaptive_velocity_gate_threshold_mps,
         bias_frozen,
         quality_gate_rejected,
@@ -1287,6 +1380,7 @@ pub fn run_local_vi_ba(
         imu_nis_gate_rejected,
         velocity_gate_rejected,
         pose_correction_gate_rejected,
+        bias_magnitude_gate_rejected,
         adaptive_velocity_gate_rejected,
         relinearised_factor_count,
         marginalization_prior_applied,
@@ -2435,6 +2529,191 @@ mod tests {
         assert_eq!(map.keyframes[&20].frame.pose, Some(original_pose_20));
         assert_eq!(map.landmarks[&1].position, original_landmark);
         assert!(state.navigation_prior.is_none());
+    }
+
+    /// Regression for the `gt_full1500` real-data failure mode: local
+    /// VI-BA writeback mirrored an accel bias that diverged to
+    /// `‖·‖ ≈ 8.6 m/s²` because no gate checked the physical plausibility
+    /// of the optimized bias itself. `reject_gyro_bias_above_rad_s` must
+    /// reject the whole trigger transactionally — map poses, landmarks,
+    /// and the mirrored `state.keyframe_state` all stay untouched — the
+    /// same pattern as the other writeback quality gates.
+    #[test]
+    fn local_vi_ba_gyro_bias_magnitude_gate_rejects_transactionally() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map.keyframes[&20].frame.pose.clone().unwrap();
+        let original_landmark = map.landmarks[&1].position;
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            // Force the branch deterministically for the unit test. Normal
+            // callers should use a non-negative physical bias cap (bench
+            // value 0.2 rad/s, mirroring the motion-VI init bootstrap gate).
+            reject_gyro_bias_above_rad_s: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        // Pre-seed the per-keyframe IMU state table so
+        // `state.keyframe_state` already has entries for every in-window
+        // keyframe. Otherwise `run_local_vi_ba`'s auto-seeding of NEW
+        // keyframe state slots (which runs unconditionally, before any
+        // quality gate is evaluated) would mutate the table even on a
+        // rejected trigger, defeating this test's transactional check —
+        // mirrors `local_vi_ba_imu_nis_gate_rejects_writeback`.
+        for kf_id in [10u64, 20, 30] {
+            state.keyframe_state.insert(
+                kf_id,
+                KeyframeImuState {
+                    velocity_world: Vector3::new(kf_id as f64, 0.5, -0.25),
+                    bias_gyro: Vector3::new(0.01, -0.02, 0.03),
+                    bias_acc: Vector3::new(0.1, -0.2, 0.3),
+                },
+            );
+        }
+        let original_keyframe_state = state.keyframe_state.clone();
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(result.bias_magnitude_gate_rejected);
+        assert!(!result.cost_ratio_gate_rejected);
+        assert!(!result.velocity_gate_rejected);
+        assert!(!result.pose_correction_gate_rejected);
+        assert!(result.max_refined_gyro_bias_norm_rad_s.is_finite());
+        assert_eq!(
+            map.keyframes[&20].frame.pose,
+            Some(original_pose_20),
+            "gyro-bias-gated VI-BA must not write poses back"
+        );
+        assert_eq!(
+            map.landmarks[&1].position, original_landmark,
+            "gyro-bias-gated VI-BA must not write landmarks back"
+        );
+        assert_eq!(
+            state.keyframe_state, original_keyframe_state,
+            "gyro-bias-gated VI-BA must not write velocity/bias slots back"
+        );
+    }
+
+    /// Same transactional contract as
+    /// `local_vi_ba_gyro_bias_magnitude_gate_rejects_transactionally`, but
+    /// exercising `reject_accel_bias_above_mps2` — the field whose
+    /// `gt_full1500` mirrored value (`‖·‖ ≈ 8.6`) directly motivated this
+    /// gate (bench value 1.0, mirroring the motion-VI init bootstrap gate).
+    #[test]
+    fn local_vi_ba_accel_bias_magnitude_gate_rejects_transactionally() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map.keyframes[&20].frame.pose.clone().unwrap();
+        let original_landmark = map.landmarks[&1].position;
+        let mut state = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            reject_accel_bias_above_mps2: Some(f64::NEG_INFINITY),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        // See the matching comment in
+        // `local_vi_ba_gyro_bias_magnitude_gate_rejects_transactionally`:
+        // pre-seed every in-window keyframe's state so the auto-seed path
+        // cannot mutate `state.keyframe_state` ahead of the gate check.
+        for kf_id in [10u64, 20, 30] {
+            state.keyframe_state.insert(
+                kf_id,
+                KeyframeImuState {
+                    velocity_world: Vector3::new(kf_id as f64, 0.5, -0.25),
+                    bias_gyro: Vector3::new(0.01, -0.02, 0.03),
+                    bias_acc: Vector3::new(0.1, -0.2, 0.3),
+                },
+            );
+        }
+        let original_keyframe_state = state.keyframe_state.clone();
+        state
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+
+        let result = run_local_vi_ba(&mut map, &mut state).expect("BA should run");
+
+        assert!(result.quality_gate_rejected);
+        assert!(result.bias_magnitude_gate_rejected);
+        assert!(!result.cost_ratio_gate_rejected);
+        assert!(!result.velocity_gate_rejected);
+        assert!(!result.pose_correction_gate_rejected);
+        assert!(result.max_refined_accel_bias_norm_mps2.is_finite());
+        assert_eq!(
+            map.keyframes[&20].frame.pose,
+            Some(original_pose_20),
+            "accel-bias-gated VI-BA must not write poses back"
+        );
+        assert_eq!(
+            map.landmarks[&1].position, original_landmark,
+            "accel-bias-gated VI-BA must not write landmarks back"
+        );
+        assert_eq!(
+            state.keyframe_state, original_keyframe_state,
+            "accel-bias-gated VI-BA must not write velocity/bias slots back"
+        );
+    }
+
+    /// The bias-magnitude gate must stay dormant (and writeback must
+    /// proceed) with the default `None` config, and with a generous
+    /// bound that the synthetic solve never approaches. Regression guard
+    /// against the new gate accidentally becoming stricter than intended
+    /// for existing callers that don't set it.
+    #[test]
+    fn local_vi_ba_bias_magnitude_gate_permits_writeback_when_within_bound() {
+        let mut map = build_three_keyframe_map();
+        let original_pose_20 = map.keyframes[&20].frame.pose.clone().unwrap();
+
+        // Case 1: gate left at the legacy default (`None`).
+        let mut state_default = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state_default
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state_default
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+        let result_default =
+            run_local_vi_ba(&mut map, &mut state_default).expect("BA should run");
+        assert!(!result_default.quality_gate_rejected);
+        assert!(!result_default.bias_magnitude_gate_rejected);
+        assert_ne!(
+            map.keyframes[&20].frame.pose,
+            Some(original_pose_20.clone()),
+            "default-gate VI-BA must write the refined pose back"
+        );
+
+        // Case 2: gate enabled but with a bound far above anything the
+        // synthetic window's solve can produce.
+        let mut map_generous = build_three_keyframe_map();
+        let mut state_generous = OnlineSlamLocalBaState::new(OnlineSlamLocalBaConfig {
+            gravity_world: Vector3::zeros(),
+            reject_gyro_bias_above_rad_s: Some(1.0e6),
+            reject_accel_bias_above_mps2: Some(1.0e6),
+            ..OnlineSlamLocalBaConfig::default()
+        });
+        state_generous
+            .factor_history
+            .push(constant_velocity_factor(10, 20, 0.1));
+        state_generous
+            .factor_history
+            .push(constant_velocity_factor(20, 30, 0.1));
+        let result_generous = run_local_vi_ba(&mut map_generous, &mut state_generous)
+            .expect("BA should run");
+        assert!(!result_generous.quality_gate_rejected);
+        assert!(!result_generous.bias_magnitude_gate_rejected);
+        assert_ne!(
+            map_generous.keyframes[&20].frame.pose,
+            Some(original_pose_20),
+            "generously-bounded VI-BA must write the refined pose back"
+        );
     }
 
     #[test]

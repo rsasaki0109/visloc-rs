@@ -725,6 +725,16 @@ struct CliArgs {
     local_vi_ba_reject_velocity_above_mps: Option<f64>,
     local_vi_ba_reject_pose_translation_above_meters: Option<f64>,
     local_vi_ba_reject_pose_rotation_above_degrees: Option<f64>,
+    /// When `Some(v)`, rejects the entire local VI-BA writeback when any
+    /// refined in-window `||bias_gyro|| > v` rad/s. Real-data motivation:
+    /// see `docs/motion_based_vi_alignment.md`'s "Local VI-BA
+    /// bias-magnitude gate" section — an unfiltered local VI-BA writeback
+    /// mirrored an accel bias diverging to `‖·‖ ≈ 8.6 m/s²` on full MH_01.
+    local_vi_ba_reject_gyro_bias_above_rad_s: Option<f64>,
+    /// When `Some(v)`, rejects the entire local VI-BA writeback when any
+    /// refined in-window `||bias_acc|| > v` m/s². See
+    /// [`Self::local_vi_ba_reject_gyro_bias_above_rad_s`].
+    local_vi_ba_reject_accel_bias_above_mps2: Option<f64>,
     /// Enable the adaptive local VI-BA refined-velocity writeback gate.
     /// The gate derives a per-trigger velocity threshold from the local
     /// window's existing velocity state, pose-delta / IMU-`dt` finite
@@ -1564,6 +1574,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut local_vi_ba_reject_velocity_above_mps: Option<f64> = None;
     let mut local_vi_ba_reject_pose_translation_above_meters: Option<f64> = None;
     let mut local_vi_ba_reject_pose_rotation_above_degrees: Option<f64> = None;
+    let mut local_vi_ba_reject_gyro_bias_above_rad_s: Option<f64> = None;
+    let mut local_vi_ba_reject_accel_bias_above_mps2: Option<f64> = None;
     let mut local_vi_ba_adaptive_velocity_gate: bool = false;
     let default_adaptive_velocity_gate = AdaptiveVelocityGateConfig::default();
     let mut local_vi_ba_adaptive_velocity_quantile: f64 =
@@ -1943,6 +1955,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     );
                 }
                 local_vi_ba_reject_pose_rotation_above_degrees = Some(threshold);
+                args.remove(i);
+            }
+            "--local-vi-ba-reject-gyro-bias-above" => {
+                let threshold: f64 = args.remove(i + 1).parse()?;
+                if !threshold.is_finite() || threshold < 0.0 {
+                    return Err(
+                        "--local-vi-ba-reject-gyro-bias-above must be finite and >= 0".into(),
+                    );
+                }
+                local_vi_ba_reject_gyro_bias_above_rad_s = Some(threshold);
+                args.remove(i);
+            }
+            "--local-vi-ba-reject-accel-bias-above" => {
+                let threshold: f64 = args.remove(i + 1).parse()?;
+                if !threshold.is_finite() || threshold < 0.0 {
+                    return Err(
+                        "--local-vi-ba-reject-accel-bias-above must be finite and >= 0".into(),
+                    );
+                }
+                local_vi_ba_reject_accel_bias_above_mps2 = Some(threshold);
                 args.remove(i);
             }
             "--local-vi-ba-adaptive-velocity-gate" => {
@@ -3308,6 +3340,8 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         local_vi_ba_reject_velocity_above_mps,
         local_vi_ba_reject_pose_translation_above_meters,
         local_vi_ba_reject_pose_rotation_above_degrees,
+        local_vi_ba_reject_gyro_bias_above_rad_s,
+        local_vi_ba_reject_accel_bias_above_mps2,
         local_vi_ba_adaptive_velocity_gate,
         local_vi_ba_adaptive_velocity_quantile,
         local_vi_ba_adaptive_velocity_multiplier,
@@ -4796,6 +4830,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             reject_writeback_when_pose_rotation_above_radians: args
                 .local_vi_ba_reject_pose_rotation_above_degrees
                 .map(f64::to_radians),
+            reject_gyro_bias_above_rad_s: args.local_vi_ba_reject_gyro_bias_above_rad_s,
+            reject_accel_bias_above_mps2: args.local_vi_ba_reject_accel_bias_above_mps2,
             adaptive_velocity_gate: args.local_vi_ba_adaptive_velocity_gate.then_some(
                 AdaptiveVelocityGateConfig {
                     reference_quantile: args.local_vi_ba_adaptive_velocity_quantile,
@@ -5439,6 +5475,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut local_vi_ba_pose_correction_gate_rejections: usize = 0;
     let mut local_vi_ba_max_pose_translation_correction_meters: f64 = 0.0;
     let mut local_vi_ba_max_pose_rotation_correction_degrees: f64 = 0.0;
+    let mut local_vi_ba_bias_magnitude_gate_rejections: usize = 0;
+    let mut local_vi_ba_max_gyro_bias_norm_rad_s: f64 = 0.0;
+    let mut local_vi_ba_max_accel_bias_norm_mps2: f64 = 0.0;
     let mut local_vi_ba_adaptive_velocity_gate_rejections: usize = 0;
     let mut local_vi_ba_last_adaptive_velocity_threshold_mps: Option<f64> = None;
     let mut local_vi_ba_diagnostic_rows = vec![
@@ -6706,6 +6745,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local_vi_ba_max_pose_rotation_correction_degrees =
                 local_vi_ba_max_pose_rotation_correction_degrees
                     .max(stats.max_pose_rotation_correction_radians.to_degrees());
+            if stats.bias_magnitude_gate_rejected {
+                local_vi_ba_bias_magnitude_gate_rejections += 1;
+            }
+            local_vi_ba_max_gyro_bias_norm_rad_s = local_vi_ba_max_gyro_bias_norm_rad_s
+                .max(stats.max_refined_gyro_bias_norm_rad_s);
+            local_vi_ba_max_accel_bias_norm_mps2 = local_vi_ba_max_accel_bias_norm_mps2
+                .max(stats.max_refined_accel_bias_norm_mps2);
             if stats.adaptive_velocity_gate_rejected {
                 local_vi_ba_adaptive_velocity_gate_rejections += 1;
             }
@@ -7994,6 +8040,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          local_vi_ba_reject_velocity_above_mps={local_vi_ba_reject_velocity:?}\n\
          local_vi_ba_reject_pose_translation_above_meters={local_vi_ba_reject_pose_translation:?}\n\
          local_vi_ba_reject_pose_rotation_above_degrees={local_vi_ba_reject_pose_rotation:?}\n\
+         local_vi_ba_reject_gyro_bias_above_rad_s={local_vi_ba_reject_gyro_bias:?}\n\
+         local_vi_ba_reject_accel_bias_above_mps2={local_vi_ba_reject_accel_bias:?}\n\
          local_vi_ba_adaptive_velocity_gate={local_vi_ba_adaptive_velocity_gate}\n\
          local_vi_ba_adaptive_velocity_quantile={local_vi_ba_adaptive_velocity_quantile:.3}\n\
          local_vi_ba_adaptive_velocity_multiplier={local_vi_ba_adaptive_velocity_multiplier:.3}\n\
@@ -8317,6 +8365,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          local_vi_ba_pose_correction_gate_rejections={local_vi_ba_pose_correction_gate_rejections}\n\
          local_vi_ba_max_pose_translation_correction_meters={local_vi_ba_max_pose_translation_correction_meters:.9}\n\
          local_vi_ba_max_pose_rotation_correction_degrees={local_vi_ba_max_pose_rotation_correction_degrees:.9}\n\
+         local_vi_ba_bias_magnitude_gate_rejections={local_vi_ba_bias_magnitude_gate_rejections}\n\
+         local_vi_ba_max_gyro_bias_norm_rad_s={local_vi_ba_max_gyro_bias_norm_rad_s:.9}\n\
+         local_vi_ba_max_accel_bias_norm_mps2={local_vi_ba_max_accel_bias_norm_mps2:.9}\n\
          local_vi_ba_adaptive_velocity_gate_rejections={local_vi_ba_adaptive_velocity_gate_rejections}\n\
          local_vi_ba_last_adaptive_velocity_threshold_mps={local_vi_ba_last_adaptive_velocity_threshold_mps:?}\n\
          local_vi_ba_mirrors_into_imu_motion_model={local_vi_ba_mirrors}\n\
@@ -8392,6 +8443,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_vi_ba_reject_pose_translation =
             args.local_vi_ba_reject_pose_translation_above_meters,
         local_vi_ba_reject_pose_rotation = args.local_vi_ba_reject_pose_rotation_above_degrees,
+        local_vi_ba_reject_gyro_bias = args.local_vi_ba_reject_gyro_bias_above_rad_s,
+        local_vi_ba_reject_accel_bias = args.local_vi_ba_reject_accel_bias_above_mps2,
         local_vi_ba_adaptive_velocity_gate = args.local_vi_ba_adaptive_velocity_gate,
         local_vi_ba_adaptive_velocity_quantile = args.local_vi_ba_adaptive_velocity_quantile,
         local_vi_ba_adaptive_velocity_multiplier = args.local_vi_ba_adaptive_velocity_multiplier,
@@ -8934,6 +8987,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local_vi_ba_max_pose_translation_correction_meters,
         local_vi_ba_max_pose_rotation_correction_degrees =
             local_vi_ba_max_pose_rotation_correction_degrees,
+        local_vi_ba_bias_magnitude_gate_rejections = local_vi_ba_bias_magnitude_gate_rejections,
+        local_vi_ba_max_gyro_bias_norm_rad_s = local_vi_ba_max_gyro_bias_norm_rad_s,
+        local_vi_ba_max_accel_bias_norm_mps2 = local_vi_ba_max_accel_bias_norm_mps2,
         local_vi_ba_adaptive_velocity_gate_rejections =
             local_vi_ba_adaptive_velocity_gate_rejections,
         local_vi_ba_last_adaptive_velocity_threshold_mps =

@@ -3602,3 +3602,46 @@ any of these numbers, only tracking/coverage rates.
    step is repeating the `nis50`-style config on GT-enabled MH_01/V1 EuRoC sequences (real
    ATE) and on true moving-start datasets (not a moving-start VIEW of a stationary-start
    recording), to confirm the tracking/coverage win survives contact with ground truth.
+
+## Local VI-BA bias-magnitude gate (2026-07-16)
+
+Open item 2 above (§6) called this out as a candidate gate from the GT-free fixture, where
+accepted `nis50` writebacks already exceeded `1 m/s²` on the mirrored accel bias. GT-enabled
+validation (`E:/visloc_archive/gt_ate_moving_start_20260716/gt_full1500/summary.txt`, full
+MH_01, 1500 frames, SP frontend, full moving-start estimate chain, local-VI-BA NIS gate
+`50.0`) confirms the failure mode directly: local VI-BA ran `440` triggers with `135`
+writebacks mirrored into the IMU motion model, and the mirrored accel bias diverged to
+`[1.047, -8.401, 1.298]` (`‖·‖ ≈ 8.6 m/s²` — near gravity magnitude). Every one of those
+135 writebacks passed the NIS / velocity / pose-correction gates; none of the existing
+gates checks whether the *solution itself* is a physically plausible IMU bias, as opposed
+to a reprojection-cost-reducing fit that dumps the visual/inertial misfit into the bias
+slots. This is the exact same absorb-the-misfit-into-bias failure mode the motion-VI init
+stage already guards against at bootstrap
+(`MotionBasedViInitializerConfig::max_gyro_bias_magnitude_rad_s`, bench `0.2`;
+`max_accel_bias_magnitude_mps2`, bench `1.0`) — local VI-BA had no equivalent for its own
+per-trigger bias updates.
+
+**Gate semantics.** `OnlineSlamLocalBaConfig` gains two fields,
+`reject_gyro_bias_above_rad_s: Option<f64>` and `reject_accel_bias_above_mps2: Option<f64>`
+(both `None` by default — legacy behaviour, no physical bias cap). After each solve, the
+stage computes the maximum in-window refined `||bias_gyro||` / `||bias_acc||` across the
+selected BA result's keyframes. If either configured bound is exceeded, the whole trigger
+is rejected the same way the other writeback quality gates are: no map pose, landmark,
+velocity, or bias state is mutated (transactional), the trigger's diagnostics still report
+the offending magnitude, and `OnlineSlamLocalBaStats::bias_magnitude_gate_rejected` is set.
+The new gate slots into the existing OR-combined `quality_gate_rejected` alongside
+`cost_ratio_gate_rejected`, `imu_nis_gate_rejected`, `velocity_gate_rejected`, and
+`pose_correction_gate_rejected` — it is evaluated every trigger, immediately after the pose
+correction gate and before the adaptive velocity gate, using the post-bias-freeze-fallback
+`ba` result (so a bias-frozen re-solve is graded on the frozen, unchanged bias values, not
+the discarded first-pass ones).
+
+Exposed on the `euroc_online_slam_vi_image_demo` CLI (the demo that actually wires
+`OnlineSlamLocalBaConfig`) as `--local-vi-ba-reject-gyro-bias-above <rad_s>` and
+`--local-vi-ba-reject-accel-bias-above <mps2>`, echoed in `summary.txt` alongside the other
+local-VI-BA config knobs, with matching `local_vi_ba_bias_magnitude_gate_rejections` /
+`local_vi_ba_max_gyro_bias_norm_rad_s` / `local_vi_ba_max_accel_bias_norm_mps2` counters
+following the existing `local_vi_ba_*_gate_rejections` reporting pattern. The lighter
+`euroc_online_slam_vi_demo` smoke-test CLI never constructs a `local_vi_ba` config at all
+(hardcodes `None`), so no flags were added there — a CLI switch for a stage the demo can't
+enable would be dead, misleading surface.
