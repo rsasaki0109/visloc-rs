@@ -48,7 +48,9 @@ device="${COLMAP_SFM_DEVICE:-cuda}"
 max_keypoints="${COLMAP_SFM_MAX_KEYPOINTS:-2048}"
 retrieval_topk="${COLMAP_SFM_TOPK:-12}"
 min_matches="${COLMAP_SFM_MIN_MATCHES:-30}"
-base_url="${COLMAP_SFM_BASE_URL:-https://demuc.de/colmap/datasets}"
+# The historical demuc.de direct ZIP URLs now return 404. The official dataset
+# page points to the assets attached to COLMAP release 3.11.1.
+base_url="${COLMAP_SFM_BASE_URL:-https://github.com/colmap/colmap/releases/download/3.11.1}"
 extra_args="${COLMAP_SFM_EXTRA_ARGS:-}"
 
 usage() {
