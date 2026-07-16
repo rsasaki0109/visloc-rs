@@ -42,6 +42,11 @@ pub use g2o::{read_g2o, write_g2o, G2oError};
 
 mod block_cholesky;
 pub mod covariance;
+pub mod dpvo_patch_ba;
+pub use dpvo_patch_ba::{
+    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, se3_from_dpvo_pose, DpvoBaConfig, DpvoBaError,
+    DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
+};
 mod finite_difference;
 pub mod gnc;
 pub mod incremental_pose_graph;

@@ -738,3 +738,210 @@ nothing measured here contradicts that.
    reasonable next step alongside M3/M4's first real integration pass,
    once real image data is flowing through `run_fnet`/`run_inet` rather
    than a synthetic 64×96 fixture.
+
+## M3 results (2026-07-17)
+
+### Placement
+
+New module `pipelines/slam/src/dpvo_patch_ba.rs` (registered from
+`pipelines/slam/src/lib.rs` as `pub mod dpvo_patch_ba;`, re-exporting
+`dpvo_ba`/`dpvo_ba_step`/`DpvoBaProblem`/`DpvoBaConfig`/`DpvoBaError`/
+`DpvoPatch`/`DpvoEdge`/`DpvoIntrinsics`/`se3_from_dpvo_pose`/
+`dpvo_pose_from_se3`) — a sibling of `bundle.rs`, not an extension of it.
+Rereading `ba.py` line by line (rather than the plan doc's earlier,
+pre-M1/M2 §4 speculation) showed the two solvers are structurally
+incompatible for a clean merge: `BundleAdjustment` runs an open-ended
+Levenberg-Marquardt loop with adaptive `λ`/cost-based accept-reject over
+`Point3<f64>` landmarks under a **right**-perturbation pose convention
+(`T ← T · Exp(ξ)`); `fastba.BA` is a **fixed two-call** Gauss-Newton with no
+line search, a scalar (not 3-DoF) patch inverse-depth variable, its own
+three-part damping scheme, hard (non-Huber) validity gating, and a
+**left**-perturbation convention (`T ← Exp(ξ) · T`, matching `lietorch`).
+Splicing the two would either silently change `ba.py`'s semantics to fit
+the host loop or bolt two incompatible retraction conventions onto one
+struct. The new module instead reuses `bundle.rs`'s Schur-complement
+*spirit* and `visloc_core::geometry::SE3` directly (no core changes needed
+— see "Convention mapping" below) while keeping `ba.py`'s own damping/
+iteration/gating logic byte-for-byte diffable against upstream. It lives in
+`pipelines/slam/src`, not a `dpvo`-prefixed module under `crates/vision`,
+because it is pure `nalgebra` math with **no** `ort`/ONNX dependency — the
+task's constraint ("must NOT be gated behind `onnx-inference`") and
+`visloc-slam`'s `Cargo.toml` (no such feature anywhere in the crate) make
+that the natural home. `crates/vision/src/dpvo` (M2) is untouched; the two
+modules share only the upstream repo, not any Rust code. No pipeline
+wiring, sliding window, or patch lifecycle was added — that stays M4.
+
+### Ported line ranges
+
+| Piece | Upstream source | Lines |
+| --- | --- | --- |
+| `BA()` (Gauss-Newton + Schur, damping, gating, retraction) | `E:/tools/DPVO/dpvo/ba.py` | 86–182 |
+| `block_matmul`/`block_solve` (block reshape + the `ep`/`lm` damping formula) | same | 58–76 |
+| `safe_scatter_add_mat`/`safe_scatter_add_vec` (fixed-pose-index masking) | same | 40–46 |
+| `transform` (projective transform + analytic Jacobians `Ji`/`Jj`/`Jz`) | `E:/tools/DPVO/dpvo/projective_ops.py` | 53–113 |
+| `iproj`/`proj` (unnormalized-homogeneous backproject/project) | same | 19–50 |
+| `MiniSE3` (from-scratch SE3 stand-in for `lietorch.SE3`, self-validated) | `scripts/export_dpvo_onnx.py` | 352–481 |
+| `pops_transform`/`mini_ba` (CUDA/`torch_scatter`-free re-hosting of the two files above) | same | 483–667 |
+| `dump_ba_fixture` (the two chained `mini_ba` calls that produced `ba_fixture.npz`) | same | 670–757 |
+| `dpvo.py`'s real call sites (confirms `BA()` is one GN step; `iterations=2`/`t0` live only on the CUDA entry point) | `E:/tools/DPVO/dpvo/dpvo.py` | 312–356 |
+
+### Convention mapping summary
+
+* **Pose semantics**: each DPVO pose is `T_world_to_camera` for its frame
+  (from `MiniSE3`'s own docstring and from how `Gij = poses[jj]·poses[ii]⁻¹`
+  type-checks) — identical to `visloc_core::geometry::Pose::world_to_camera`,
+  so `DpvoBaProblem::poses: Vec<SE3>` needs no semantic translation.
+* **Numeric layout**: DPVO pose rows are `[tx, ty, tz, qx, qy, qz, qw]`
+  (translation + xyzw quaternion). `se3_from_dpvo_pose`/`dpvo_pose_from_se3`
+  convert at the boundary using this codebase's own established
+  `Quaternion::new(qw, qx, qy, qz)` idiom (already used in `g2o.rs`,
+  `crates/io/src/euroc.rs`, `colmap/mod.rs`, `pose_graph.rs`) — no new
+  reordering bug introduced.
+* **Composition**: `MiniSE3.mul(self, other) = self ∘ other` is bit-for-bit
+  `SE3::compose`'s own formula; `Gij = poses[jj]·poses[ii]⁻¹` ports directly
+  as `poses[jj].compose(&poses[ii].inverse())`.
+* **Retraction**: DPVO/lietorch use **left** perturbation,
+  `retr(a) = Exp(a) · X` (`MiniSE3`'s own docstring, confirmed by
+  `mini_ba`'s pose-update loop) — the opposite of `bundle.rs`'s right
+  perturbation. Ported as `SE3::exp(&dx).compose(&pose)`, a deliberate,
+  documented difference from `bundle.rs`, not an inconsistency.
+* **Tangent layout**: DPVO's `xi = (ρ, φ)` (translation-first) matches
+  `SE3::exp`/`SE3::log`'s own `Vector6` layout exactly — no permutation.
+* **Adjoint**: `MiniSE3.adjoint()`'s `[[R, [t]×R], [0, R]]` is bit-for-bit
+  `SE3::adjoint`'s own formula, so `Gij.adjT(a) = a·Ad(Gij)` ports as
+  `a * g_ij.adjoint()` with **no new core method** — confirms the plan
+  doc's §5 note that M3 would need no new SE3/SO3 API.
+* **Homogeneous point action**: DPVO's four-vector `(X, Y, Z, W)` carries
+  the patch's inverse depth as the invariant trailing component `W`
+  (`(X,Y,Z,W) ↦ (R·(X,Y,Z) + t·W, W)`); implemented directly with
+  `SE3::rotation`/`SE3::translation`, no new abstraction needed.
+* **Damping (three distinct constants)**: `lmbda` (depth-channel Tikhonov,
+  `Q = 1/(C+lmbda)`, always `1e-4` at real call sites) ≠ `ep` (`BA()`'s own
+  default `100.0`, flat additive pose-diagonal term) ≠ `lm = 1e-4`
+  (`block_solve`'s hardcoded multiplicative pose-diagonal scale, never a
+  `BA()` parameter at all). All three ported as separate constants/fields;
+  see `dpvo_patch_ba.rs`'s module doc for the exact per-scalar-diagonal
+  formula (`S[d,d] ← S[d,d]·(1+lm) + ep`, off-diagonals untouched).
+* **Robustness**: `ba.py` has **no Huber/robust kernel** — only three hard
+  `0`/`1` gates (`Z > 0.2` at the center pixel, `‖residual‖ < 250` px,
+  predicted-pixel-in-`bounds`) zero the residual and weight together before
+  any product forms. Ported as literal boolean masks, per the task's
+  "only if the reference has it" instruction — nothing invented.
+* **`t0`/`fixedp`**: the first `fixedp` poses (`dpvo.py`'s `t0`, `ba.py`'s
+  `fixedp`, default `1`) are excluded from the pose Hessian/gradient/cross
+  term entirely, but edges anchored at them **still** contribute to their
+  patch's depth Hessian/gradient (`C`/`w`, keyed only on `kk`, never
+  `ii`/`jj`) — ported as two independently-gated accumulation paths, not
+  one shared mask.
+* **Iteration count**: `ba.py`'s `BA()` is **one** Gauss-Newton step; "2
+  iterations" is `dpvo.py`'s own caller-side loop around the compiled CUDA
+  entry point (`iterations=2` is a CUDA-only argument, absent from the
+  pure-Python `BA()` signature). `dpvo_ba_step` is one `BA()` call;
+  `dpvo_ba` is the `config.iterations`-call outer loop, matching
+  `dump_ba_fixture`'s own two chained `mini_ba` calls.
+* **Inverse-depth clamp**: `disps.clamp(min=1e-3, max=10.0)` applied to
+  every patch (not just updated ones) after retraction — ported as-is
+  (`DISP_MIN`/`DISP_MAX`).
+
+### Parity numbers
+
+Fixture: `E:/visloc_archive/dpvo_onnx_m1/fixtures/ba_fixture.npz` (3 frames,
+2 patches, 4 edges, `fixedp=1`, `ep=100.0`, `lmbda=1e-4`, 2 chained GN
+iterations — inspected directly via
+`E:/tools/venvs/dpvo_export/Scripts/python.exe -c "numpy.load(...)"`, all
+expected keys present, no fixture extension needed this milestone — unlike
+M1/M2, which each found and closed a genuine fixture gap).
+
+`cargo test -p visloc-slam --test dpvo_patch_ba_fixture -- --ignored --nocapture`:
+
+| Test | Max abs pose diff (translation m / rotation-matrix entries) | Max abs inverse-depth diff | Threshold | Result |
+| --- | --- | --- | --- | --- |
+| `ba_fixture_one_iteration_matches_reference_within_1e_4` | 1.086e-6 | 8.288e-7 | 1e-4 | PASS |
+| `ba_fixture_two_iterations_matches_reference_within_1e_4` | 1.007e-6 | 1.932e-6 | 1e-4 | PASS |
+
+Both pass **two orders of magnitude** inside the 1e-4 threshold — not a
+marginal pass, consistent with M1/M2's own headroom. The `1e-4` threshold
+itself is justified in the test's own doc comment: `ba_fixture.npz`'s
+inputs and reference outputs were produced by fp32 `torch` arithmetic
+throughout (`mini_ba` never upconverts), while this Rust port computes
+entirely in `f64` — the two differ only by accumulated fp32-vs-f64 rounding
+over two Gauss-Newton iterations of a small, well-conditioned
+(`ep=100`-damped) dense solve, and the measured diffs (~1e-6) confirm that
+gap is far smaller than the 1e-4 bar.
+
+### Always-on unit tests (`cargo test -p visloc-slam --lib dpvo_patch_ba`)
+
+6 tests, all passing, covering the four required hand-built scenarios plus
+two extras:
+
+| Test | Requirement |
+| --- | --- |
+| `zero_residual_is_a_fixed_point` | Zero-residual fixed point (perfect data unchanged) |
+| `known_one_step_gauss_newton_matches_hand_solved_6x6_system` | Known 1-step GN reduction, checked against an independently hand-solved 6×6 system |
+| `all_poses_fixed_leaves_every_pose_untouched` | Fixed-pose invariance |
+| `depth_only_updates_when_all_poses_fixed` | Depth-only update when all poses fixed (the `n2==0` / `structure_only`-equivalent branch, cross-checked against the direct `dZ = Q·w` formula) |
+| `dpvo_pose_round_trips_through_dpvo_layout` | Boundary-conversion sanity (not one of the four required, but cheap insurance on the convention mapping) |
+| `two_iterations_reduces_residual_further_than_one` | Sanity check that `dpvo_ba`'s outer loop actually re-linearizes (not required, but catches an easy "loop doesn't do anything" bug) |
+
+### Timings on the fixture problem
+
+`--release`, `Instant`-based, 2000 repeats of the full 2-iteration
+`dpvo_ba` call on the fixture's own tiny (3 frames / 2 patches / 4 edges)
+problem size: **0.0072 ms/call** (7.2 µs). This is a dense `12×12` Schur
+solve plus a handful of `2×6`/`6×6` matrix products per edge — negligible
+next to M2's measured encoder-stage cost (`fnet`+`inet` ≈7 ms at 64×96,
+extrapolated to ≈410 ms at full EuRoC resolution) and consistent with the
+plan doc's own §3 estimate ("sub-to-few-ms via `nalgebra`"). Not yet
+measured at DPVO's real per-frame scale (≤80 patches × `OPTIMIZATION_WINDOW=12`
+poses, an order of magnitude larger `n2`/`m` than this fixture) — a natural
+M4 follow-up once real patch-graph sizes are flowing through this solver.
+
+### Verification
+
+* `cargo test -p visloc-slam --lib dpvo_patch_ba`: 6 passed, 0 failed.
+* `cargo test -p visloc-slam --test dpvo_patch_ba_fixture -- --ignored --nocapture`:
+  2 passed, 0 failed (numbers above).
+* `cargo test -p visloc-slam` (whole crate): 284 lib tests (278 pre-existing
+  + 6 new) + 54+2(new, ignored)+6+6+132+10+9+4 across integration test
+  binaries, 0 failed, 0 regressions.
+* `cargo check --workspace --all-targets --features image-io,onnx-inference`:
+  clean.
+* `cargo clippy -p visloc-slam --all-targets`: 6 pre-existing warnings, all
+  in files this milestone did not touch (`map_atlas.rs`,
+  `online_slam_vi_ba.rs` ×2, `online_slam.rs`, `online_slam_motion_vi_init.rs`,
+  `vi_motion_initializer.rs`); **zero** warnings in `dpvo_patch_ba.rs` or
+  `tests/dpvo_patch_ba_fixture.rs` (confirmed by grepping the clippy output
+  for `dpvo`).
+
+### Blockers / open items for M4
+
+1. **No pipeline wiring exists yet**, as instructed — `dpvo_patch_ba.rs` has
+   zero callers today. M4 needs to decide how `sparse_factor_graph.rs`'s
+   `SparseFactorMeasurement` (target correction + information + damping)
+   maps onto `DpvoBaProblem`'s `targets`/`weights`/`config.lmbda` — the plan
+   doc's §4 port-surface table already sketches this, but the concrete glue
+   (patch id ↔ `SparseFactorKey`, edge lifecycle ↔ `SparseFactorState`) is
+   unwritten.
+2. **`n = poses.len()` simplification**: this module derives the active
+   frame count from the caller's pose array length rather than
+   `max(ii,jj)+1` as `ba.py` does. True whenever every declared pose is
+   referenced by at least one edge (true of every fixture/test here); M4's
+   real sliding-window caller must ensure that invariant or this module
+   needs a small follow-up to derive `n` from the edges instead.
+3. **Only scalar `lmbda` is implemented**, not `ba.py`'s generic per-patch
+   tensor broadcast — an honest, documented narrowing since no real DPVO
+   call site exercises the tensor form either.
+4. **Timing is only measured at the fixture's tiny scale** (3 frames/2
+   patches/4 edges); DPVO's real per-frame scale is ≤80 patches ×
+   `OPTIMIZATION_WINDOW=12` poses, an order of magnitude larger — M4 should
+   re-measure once real patch-graph sizes exist, the same "measure, don't
+   extrapolate" discipline M2's own blockers list called out for the
+   encoder stage.
+5. **The `3×3` patch-grid replica** (`patches_in`'s full `(1, n_patches, 3,
+   P, P)` shape) is discarded at the fixture-loading boundary (verified
+   uniform, then collapsed to one `(x, y, d)` triple) because only the
+   center pixel ever enters `BA()`'s math — but M4's real patch lifecycle
+   (M2's `patchify`/`corr_cpu`) does need the full grid for correlation
+   lookups. `DpvoPatch` as defined here is BA-only; M4 will need a richer
+   per-patch type (or a clear boundary conversion) once the two modules are
+   wired together.
