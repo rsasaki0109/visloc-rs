@@ -572,3 +572,169 @@ wasn't cross-checked:
 4. No GPU/CUDA available on this machine for the whole M1-M6 arc — every
    subsequent milestone's parity/accuracy claims will be CPU-only, consistent
    with the risk register's existing "CPU latency" entry.
+
+## M2 results (2026-07-17)
+
+### Module layout
+
+New crate module `crates/vision/src/dpvo/` (registered from `crates/vision/
+src/lib.rs` as `pub mod dpvo;`), gated as a whole via `#![cfg(feature =
+"onnx-inference")]` at the top of `dpvo/mod.rs` — a deliberate deviation
+from `features::superpoint_onnx`/`lightglue_onnx`'s "always-visible stub,
+runtime `FeatureDisabled` error" pattern, made because nothing in this
+workspace calls into `dpvo` yet (M3+ wires it up); there is no existing
+call site whose compilation needs protecting the way SuperPoint's CLI
+plumbing did. Revisit if M3/M4 add a caller that needs the module name to
+exist under `cargo build` without the feature.
+
+| File | Contents |
+| --- | --- |
+| `dpvo/mod.rs` | Module doc (heavy — the SoftAgg-weights gap writeup lives here), `FNET_DIM`/`DIM`/`CORR_DIM`/`RES`/`PATCH`/`CORR_RADIUS`/`CORR_LEVELS` constants matching `manifest.json`. |
+| `dpvo/onnx_session.rs` | `DpvoOnnxSession` — `ort`-backed wrapper around the 4 exported graphs (`load_from_paths`/`load_from_paths_with_backend`, reusing `features::superpoint_onnx::OnnxBackend`); `run_fnet`/`run_inet`/`run_update_pre_agg`/`run_update_post_agg`; `update_iteration` (the full pre-agg → host-`SoftAgg` → post-agg call, i.e. "one full update iteration" from the M2 scope). |
+| `dpvo/patchify.rs` | `patchify_cpu` — native bilinear P×P patch extraction, ported from `export_dpvo_onnx.py`'s `patchify_cpu`. |
+| `dpvo/correlation.rs` | `corr_cpu` — native normalized-dot-product correlation lookup with `grid_sample`-equivalent zero-padded bilinear sampling, ported from `export_dpvo_onnx.py`'s `corr_cpu`. Scoped to one shared target frame per call (see its module doc for the multi-`jj` batching left to M3/M4). |
+| `dpvo/softagg.rs` | `SoftAgg` (grouped softmax-aggregation, `expand=True` path only) + `neighbors_cpu` (edge-neighbour bookkeeping), both pure Rust/`ndarray`, ported from `SoftAggReference`/`neighbors_cpu` in `export_dpvo_onnx.py`. `LinearWeights` helper for the `f`/`g`/`h` `Linear(384,384)` layers. |
+| `dpvo/npz.rs` | Minimal `.npz` (uncompressed-ZIP-of-`.npy`) reader, written because no such reader exists anywhere in this workspace's `Cargo.lock` (checked directly: `grep -n '^name = ' Cargo.lock | grep -iE 'npy\|zip\|npz'` returns nothing) and the task forbids adding one. Not test-only — `SoftAgg::load_from_npz` uses it in production code. Only implements `ZIP_STORED` (uncompressed) entries, which is all `numpy.savez` ever produces and all these fixtures use (verified per-file via Python's `zipfile.ZipFile(...).infolist()[*].compress_type == 0` before writing this). |
+| `crates/vision/tests/dpvo_onnx_parity.rs` | The 5 fixture-based integration tests (all `#[ignore]`-gated), plus a small `time_repeated` timing helper. |
+
+Genuine gap found and closed during M2, not anticipated by M1: **`SoftAgg`'s
+trained `f`/`g`/`h` `Linear(384,384)` weights (`update.agg_kk.*`/
+`update.agg_ij.*`) never made it into any M1 artifact** — they live entirely
+outside the ONNX boundary (SoftAgg stayed host-side by construction, see M1
+results above), and M1's own fixture dump never captured them either. This
+would have silently blocked the "SoftAgg fixture parity" test the task asked
+for. Closed by extending `scripts/export_dpvo_onnx.py` with a
+`dump_softagg_weights_fixture` step (writes `fixtures/
+softagg_weights_fixture.npz`) rather than a throwaway one-off script, so
+regenerating fixtures from scratch is self-sufficient again. Extraction
+correctness was self-checked by recomputing `update_cell_fixture.npz`'s own
+`net_post_agg` from the freshly-dumped weights: **max abs diff `0.0`**
+(exact — same checkpoint, same modules, deterministic float ops). All four
+`.onnx` graphs and all five fixtures were regenerated from the (now-updated)
+tracked script and re-verified against `check_dpvo_onnx_parity.py` — same
+PASS numbers as the M1 table above (`fmap`/`imap`/`net_pre_agg`/`net_out`/
+`delta`/`weight`, 1.28e-06 to 2.48e-05 max abs diff, all `PASS` at the 1e-4
+threshold — see that unchanged table).
+
+### Parity table (Rust, `cargo test -p visloc-vision --features onnx-inference --test dpvo_onnx_parity -- --ignored`)
+
+| Test | What it checks | Max abs diff | Threshold | Result |
+| --- | --- | --- | --- | --- |
+| `patchify_parity_against_fixture` | `patchify_cpu` vs `patchify_fixture.npz` | **0.000e0** (exact) | 1e-4 | PASS |
+| `correlation_parity_against_fixture` | `corr_cpu` vs `correlation_fixture.npz` | 2.515e-7 | 1e-4 | PASS |
+| `softagg_parity_against_fixture` | `net_pre_agg + agg_kk(...) + agg_ij(...)` vs `update_cell_fixture.npz`'s `net_post_agg`, weights from `softagg_weights_fixture.npz` | 3.815e-6 | 1e-4 | PASS |
+| `update_cell_end_to_end_parity_against_fixture` | full `update_iteration` (`neighbors_cpu` → `ort` pre-agg → host `SoftAgg` → `ort` post-agg) vs fixture | net_out 1.049e-5, delta 5.531e-5, weight 5.661e-8 | 1e-4 | PASS (all three) |
+| `fnet_inet_sessions_load_and_produce_finite_output_of_the_documented_shape` | `ort` loads/runs `fnet.onnx`/`inet.onnx`, output shape `(1,128,H/4,W/4)`/`(1,384,H/4,W/4)`, all-finite | — (shape/finiteness only; exact PyTorch-vs-ONNXRuntime numeric agreement already established in Python by M1, see above) | — | PASS |
+
+All four numeric parity tests pass 2-5 orders of magnitude inside the 1e-4
+threshold — not a marginal pass, consistent with M1's own headroom. The
+`neighbors_cpu` output (`ix`/`jx`) is also checked bit-exactly (`assert_eq!`,
+integer bookkeeping, no tolerance needed) inside the end-to-end test before
+the ONNX/SoftAgg stages run, so a mismatch there is localized rather than
+only surfacing as a downstream numeric drift.
+
+Also unaffected and re-confirmed: `cargo test -p visloc-vision --features
+onnx-inference` (148 passed, 0 failed — 128 pre-existing + 20 new always-on
+unit tests for `neighbors_cpu`/`SoftAgg` math, `patchify_cpu` bilinear
+cases, `corr_cpu` border/normalization cases, and the `npz` reader's
+hand-built-archive round trip); `cargo test -p visloc-slam` (278+54+6+6+132+
+10+9+4 = unaffected, all passing, 0 regressions — this milestone touched no
+`visloc-slam` file); `cargo check --workspace --all-targets --features
+image-io,onnx-inference` (clean); `cargo clippy -p visloc-vision
+--all-targets --features onnx-inference` (clean, 0 warnings, after fixing a
+type-complexity lint via a `UpdateCellOutput` type alias, a doc-list
+indentation lint, and two `repeat().take()` → `repeat_n()` lints raised
+during development).
+
+### Per-stage CPU timings (rough, `Instant`-based, `--release`, this fixture's shapes)
+
+Measured via the `time_repeated` helper in `dpvo_onnx_parity.rs`
+(`--test-threads=1`, `--release`; **debug-build numbers are 10-100x slower
+and not representative** — the first pass at these numbers was taken in a
+debug build and was wildly misleading, e.g. `corr_cpu` at 224 ms instead of
+0.5 ms, purely from unoptimized bounds-checked `ndarray` indexing; re-run in
+`--release` before trusting any number here). Shapes are the fixtures' own
+(small: 5 patches / 64 edges / 64×96 images), **not** representative of a
+real EuRoC frame (752×480, ~80 patches) — treat these as a rough
+per-primitive cost floor, not a per-frame budget; the encoder-cost
+extrapolation below is the closest this gives to the latter.
+
+| Stage | Shape | Time |
+| --- | --- | --- |
+| `patchify_cpu` | 5 patches × 128 ch × 3×3 | 0.044 ms/call |
+| `corr_cpu` | 5 edges × 3×3 patch × 49 taps × 128 ch | 0.509 ms/call |
+| `run_fnet` (ONNX, `ort` CPU EP) | 64×96 input → `(1,128,16,24)` | 4.755 ms/call |
+| `run_inet` (ONNX, `ort` CPU EP) | 64×96 input → `(1,384,16,24)` | 2.227 ms/call |
+| `SoftAgg` host step (`agg_kk`+`agg_ij`) | 64 edges × 384 dim | 2.213 ms/call |
+| `update_iteration` (end-to-end: `neighbors_cpu` + `ort` pre-agg + host `SoftAgg` + `ort` post-agg) | 64 edges | 5.780 ms/call |
+
+Two sanity checks against the plan doc's §3 CPU-feasibility estimate (a
+reasoning chain, explicitly not a measurement, made before any DPVO ONNX
+artifact existed):
+
+* **One GRU update iteration**: §3 guessed "plausibly tens of ms via `ort`
+  CPU EP". Measured: **5.78 ms** at 64 edges — better than the guess, and
+  DPVO's real per-frame edge count (~80 patches × a handful of temporal
+  neighbours each) is the same order of magnitude, so this stage is very
+  unlikely to be the per-frame bottleneck.
+* **Encoder stage** (`fnet`+`inet`): §3 guessed "~250-450 ms/frame" at full
+  EuRoC resolution (752×480), by analogy by to SuperPoint's measured 165 ms
+  at that resolution. Measured here at 64×96: `fnet` 4.76 ms + `inet`
+  2.23 ms ≈ 7 ms combined. Convolutional cost scales roughly with pixel
+  count (~58.75× more pixels at 752×480 vs 64×96), which would put full-res
+  cost in the ballpark of **~410 ms combined** — landing inside §3's
+  original estimated range, though this is an extrapolation from one small
+  shape, not a direct measurement at full resolution (that is a natural M3
+  follow-up: re-run `fnet_inet_sessions_load_and_produce_finite_output_of_
+  the_documented_shape`-style timing at 752×480 once a real EuRoC frame is
+  wired through, rather than trusting the scaling argument alone).
+
+`patchify_cpu`/`corr_cpu` are negligible at this fixture's scale (5 patches)
+and were already expected to stay negligible at DPVO's real ~80-patch scale
+per §3 ("a few thousand small dot products... negligible (<5 ms)");
+nothing measured here contradicts that.
+
+### Blockers / open items for M3
+
+1. **DBA / patch inverse-depth solver** (the plan doc's actual M3 scope) is
+   entirely unstarted, as instructed — nothing in this milestone touched
+   `bundle.rs` or `sparse_factor_graph.rs`.
+2. **Production SoftAgg weight sourcing is still fixture-shaped, not a real
+   deployment path.** `SoftAgg::load_from_npz` reads the `.npz` fixture
+   format M2 had to invent (`{prefix}f_weight`/`{prefix}f_bias`/...); M3/M4
+   need a real decision on how a production caller obtains these 12 tensors
+   outside of a test fixture — likely folding
+   `dump_softagg_weights_fixture` into whatever M4's actual model-loading
+   entry point looks like (a sibling artifact next to the 4 `.onnx` files,
+   not a 5th ONNX graph, since the op itself cannot be an ONNX graph — see
+   M1 results). Low risk (the extraction is already proven exact), but
+   undecided.
+3. **`corr_cpu`'s single-shared-target-frame scope is real, not just a
+   fixture simplification.** Assembling the full `(E, 882)` = 2-pyramid-
+   level × 49-tap × 3×3-patch correlation tensor the update cell's ONNX
+   graphs expect requires: (a) building a 2-level average-pooled pyramid
+   per destination frame, (b) grouping edges by their `jj` (each edge can
+   target a different frame), (c) calling `corr_cpu` once per distinct
+   target frame (or batching it — not yet done either way), and (d)
+   concatenating/flattening the two levels' taps in whatever byte order
+   DPVO's own code expects. None of this is covered by any M1 fixture
+   (`correlation_fixture.npz` only exercises one frame, one level), so it
+   is unverified even against the "own reference" bar the rest of this
+   milestone cleared. This is the single largest actual unknown standing
+   between M2's primitives and a real per-frame DPVO forward pass — budget
+   it explicitly in M3/M4 rather than assuming `corr_cpu` alone is
+   sufficient.
+4. **Patchify/correlation border-handling honesty caveat still applies
+   unchanged** (M1's own caveat, reconfirmed, not newly discovered): these
+   two ops are validated against `export_dpvo_onnx.py`'s own reference, not
+   upstream's CUDA kernel. Nothing in M2 closes this gap; M4's downstream
+   ATE/tracking metrics remain the intended arbiter per the risk register.
+5. **No wiring into any pipeline** (`OnlineSlamPipeline`,
+   `sparse_factor_graph.rs`, etc.) exists yet, as instructed — this module
+   has zero callers today. `dpvo/mod.rs`'s whole-module feature gate should
+   be revisited once M3/M4 add one (see that module's doc comment).
+6. **Full-resolution (752×480), real-EuRoC-frame timing is still
+   extrapolated, not measured** (see the timings section above) — a
+   reasonable next step alongside M3/M4's first real integration pass,
+   once real image data is flowing through `run_fnet`/`run_inet` rather
+   than a synthetic 64×96 fixture.

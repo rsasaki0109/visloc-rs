@@ -757,6 +757,41 @@ def dump_ba_fixture(out_path: str):
     print(f"  wrote {out_path}")
 
 
+def dump_softagg_weights_fixture(agg_kk: "SoftAggReference", agg_ij: "SoftAggReference", out_path: str):
+    """Dump `update.agg_kk.{f,g,h}` / `update.agg_ij.{f,g,h}` (each
+    `Linear(384,384)`) as their own small fixture.
+
+    M2 gap this closes: the SoftAgg step never appears in any exported ONNX
+    graph (see module docstring, "(B) SoftAgg... resists export") -- it is
+    reimplemented natively in Rust and run host-side, sandwiched between the
+    pre-agg and post-agg graphs. That reimplementation still needs SoftAgg's
+    *trained* `f`/`g`/`h` projection weights to reproduce
+    `update_cell_fixture.npz`'s real-weight `net_post_agg` (its
+    `have_real_weights` flag is true, i.e. `agg_kk`/`agg_ij` used the real
+    checkpoint when that fixture was generated) -- but M1's original output
+    (4 ONNX graphs + manifest) never captured those 12 tensors anywhere,
+    since they live entirely outside the ONNX boundary. Added during M2 so
+    regenerating fixtures from scratch (`--checkpoint ... --fixtures-dir
+    ...`) is sufficient on its own again, without a separate one-off script.
+    """
+    weights = {
+        "agg_kk_f_weight": agg_kk.f.weight.detach().numpy(),
+        "agg_kk_f_bias": agg_kk.f.bias.detach().numpy(),
+        "agg_kk_g_weight": agg_kk.g.weight.detach().numpy(),
+        "agg_kk_g_bias": agg_kk.g.bias.detach().numpy(),
+        "agg_kk_h_weight": agg_kk.h.weight.detach().numpy(),
+        "agg_kk_h_bias": agg_kk.h.bias.detach().numpy(),
+        "agg_ij_f_weight": agg_ij.f.weight.detach().numpy(),
+        "agg_ij_f_bias": agg_ij.f.bias.detach().numpy(),
+        "agg_ij_g_weight": agg_ij.g.weight.detach().numpy(),
+        "agg_ij_g_bias": agg_ij.g.bias.detach().numpy(),
+        "agg_ij_h_weight": agg_ij.h.weight.detach().numpy(),
+        "agg_ij_h_bias": agg_ij.h.bias.detach().numpy(),
+    }
+    np.savez(out_path, **weights)
+    print(f"  wrote {out_path}")
+
+
 # --------------------------------------------------------------------------
 # Patch extraction + correlation lookup fixtures (own reimplementation --
 # no pure-Python reference exists upstream for either op; both are CUDA-only
@@ -1079,6 +1114,8 @@ def main():
             seed=args.seed,
         )
         dump_ba_fixture(os.path.join(args.fixtures_dir, "ba_fixture.npz"))
+        dump_softagg_weights_fixture(
+            agg_kk, agg_ij, os.path.join(args.fixtures_dir, "softagg_weights_fixture.npz"))
 
     print("done.")
 
