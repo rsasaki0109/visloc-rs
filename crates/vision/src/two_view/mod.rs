@@ -15,6 +15,17 @@
 //! `VisualOdometryFrontend` implementation. The
 //! `EssentialMatrixVisualOdometryFrontend` in the top-level `visloc-rs` crate
 //! wires this module into the existing tracking layer.
+//!
+//! [`colmap_verification`] adds a second, opt-in tier on top of the essential-
+//! matrix-only pipeline above: COLMAP-style multi-model (essential /
+//! fundamental / homography) two-view verification with
+//! [`colmap_verification::ConfigurationType`] classification
+//! (`CALIBRATED`/`UNCALIBRATED`/`PLANAR`/`PANORAMIC`/`WATERMARK`/`DEGENERATE`/
+//! `MULTIPLE`). It is a drop-in alternative — every existing caller of
+//! `EssentialRansac`/`RelativePoseEstimator` is unchanged; see
+//! `examples/unordered_sfm_demo.rs`'s `--colmap-verification` flag for the
+//! A/B wiring. [`homography`] and [`fundamental`] hold the estimators the
+//! classifier composes.
 
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Point2, UnitQuaternion, Vector3};
 use rand::rngs::SmallRng;
@@ -22,6 +33,23 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use visloc_core::geometry::SE3;
 use visloc_core::types::Camera;
+
+pub mod colmap_verification;
+pub mod fundamental;
+pub mod homography;
+
+pub use colmap_verification::{
+    ConfigurationType, TwoViewGeometryOptions, TwoViewGeometryReport, TwoViewGeometryVerifier,
+};
+pub use fundamental::{
+    estimate_fundamental_dlt, fundamental_ransac, fundamental_squared_sampson_error,
+    FundamentalRansacConfig, FundamentalReport,
+};
+pub use homography::{
+    decompose_homography_matrix, estimate_homography_dlt, homography_ransac,
+    homography_squared_error, pose_from_homography_matrix, HomographyMotion,
+    HomographyRansacConfig, HomographyReport,
+};
 
 /// One pixel-space correspondence between a previous and a current frame.
 #[derive(Debug, Clone, Copy, PartialEq)]

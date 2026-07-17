@@ -12,7 +12,18 @@
 //!    candidate pairs (or `--exhaustive` for all pairs).
 //! 2. **Verified matches.** Each candidate pair is matched (cross-checked
 //!    brute-force + Lowe ratio) and geometrically verified by an
-//!    essential-matrix RANSAC; the inliers become `PairwiseMatches`.
+//!    essential-matrix RANSAC; the inliers become `PairwiseMatches`. Passing
+//!    `--colmap-verification` swaps in COLMAP-style multi-model (essential /
+//!    fundamental / homography) verification with `ConfigurationType`
+//!    classification (`visloc_rs::vision::two_view::colmap_verification`,
+//!    ported from `src/colmap/estimators/two_view_geometry.cc`): pairs
+//!    classified `DEGENERATE`, `WATERMARK`, `PANORAMIC` (no triangulatable
+//!    baseline), or unresolved `PLANAR_OR_PANORAMIC` are dropped entirely
+//!    instead of being fed to `incremental_sfm`, and the pair's own model
+//!    inliers (not the essential matrix's) become its `PairwiseMatches`. A
+//!    per-configuration count is printed either way, so the two verification
+//!    modes can be A/B'd on the same view graph — this is the M1 acceptance
+//!    experiment's ON/OFF switch (see `docs/colmap_port_plan.md`).
 //! 3. **Incremental SfM.** [`visloc_rs::slam::incremental_sfm`] seeds from the
 //!    strongest pair, registers images by PnP, triangulates tracks, and bundle-
 //!    adjusts.
@@ -36,6 +47,11 @@
 //!     --retrieval-topk 12 --min-matches 30 \
 //!     --out-colmap /tmp/photos_sfm_colmap
 //! ```
+//!
+//! Add `--colmap-verification` to run COLMAP-style multi-model two-view
+//! verification (essential + fundamental + homography, `ConfigurationType`
+//! classification) instead of the legacy essential-matrix-only path; see
+//! `verify_pairs`'s doc comment and `docs/colmap_port_plan.md`'s M1 section.
 
 use std::collections::HashMap;
 use std::env;
@@ -44,7 +60,10 @@ use std::path::{Path, PathBuf};
 use nalgebra::{Point2, Point3};
 use rayon::prelude::*;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
-use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
+use visloc_rs::vision::two_view::{
+    ConfigurationType, RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions,
+    TwoViewGeometryVerifier,
+};
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
     BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig,
@@ -73,6 +92,7 @@ struct Args {
     refine_distortion: bool,
     colmap_style: bool,
     filter_images: bool,
+    colmap_verification: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -95,6 +115,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_distortion = false;
     let mut colmap_style = false;
     let mut filter_images = false;
+    let mut colmap_verification = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -127,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--filter-images" => filter_images = true,
+            "--colmap-verification" => colmap_verification = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -163,6 +185,7 @@ fn parse_args() -> Result<Args, String> {
         refine_distortion,
         colmap_style,
         filter_images,
+        colmap_verification,
     })
 }
 
@@ -248,26 +271,83 @@ fn candidate_pairs(
     set.into_iter().collect()
 }
 
+/// Per-`ConfigurationType` pair counts from the COLMAP-style verifier, for
+/// the M1 acceptance experiment's pair-rejection report (how many VLAD
+/// candidate pairs got reclassified away from a naive essential-matrix
+/// accept). Unused (stays all-zero) when `--colmap-verification` is off.
+#[derive(Debug, Default, Clone, Copy)]
+struct VerificationStats {
+    calibrated: usize,
+    uncalibrated: usize,
+    planar: usize,
+    panoramic: usize,
+    planar_or_panoramic: usize,
+    watermark: usize,
+    degenerate: usize,
+    multiple: usize,
+}
+
+impl VerificationStats {
+    fn record(&mut self, config: ConfigurationType) {
+        match config {
+            ConfigurationType::Calibrated => self.calibrated += 1,
+            ConfigurationType::Uncalibrated => self.uncalibrated += 1,
+            ConfigurationType::Planar => self.planar += 1,
+            ConfigurationType::Panoramic => self.panoramic += 1,
+            ConfigurationType::PlanarOrPanoramic => self.planar_or_panoramic += 1,
+            ConfigurationType::Watermark => self.watermark += 1,
+            ConfigurationType::Degenerate => self.degenerate += 1,
+            ConfigurationType::Multiple => self.multiple += 1,
+            ConfigurationType::Undefined => {}
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.calibrated
+            + self.uncalibrated
+            + self.planar
+            + self.panoramic
+            + self.planar_or_panoramic
+            + self.watermark
+            + self.degenerate
+            + self.multiple
+    }
+}
+
 /// Match and geometrically verify each candidate pair into `PairwiseMatches`.
 /// Candidate pairs are independent, so the (descriptor-matching dominated) loop
 /// is run across cores with rayon.
+///
+/// `colmap_verification` is the M1 A/B switch: off (default) reproduces the
+/// exact legacy essential-matrix-only path byte-for-byte (same estimator,
+/// same call, same acceptance test) — the "flag off means unchanged
+/// behaviour" guarantee `docs/colmap_port_plan.md` asks for. On, each pair
+/// goes through [`TwoViewGeometryVerifier`] instead: `DEGENERATE`,
+/// `WATERMARK`, `PANORAMIC` (pure rotation — no baseline to seed or
+/// triangulate from), and unresolved `PLANAR_OR_PANORAMIC` pairs are dropped
+/// entirely rather than handed to `incremental_sfm`; `CALIBRATED` /
+/// `UNCALIBRATED` / `PLANAR` / `MULTIPLE` pairs keep their winning model's own
+/// inliers (which need not be the essential matrix's).
 fn verify_pairs(
     features: &[FeatureSet],
     camera: &Camera,
     candidates: &[(usize, usize)],
     match_ratio: f32,
     min_matches: usize,
-) -> Vec<PairwiseMatches> {
-    candidates
+    colmap_verification: bool,
+) -> (Vec<PairwiseMatches>, VerificationStats) {
+    let verifier = colmap_verification
+        .then(|| TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0)));
+
+    let results: Vec<(Option<PairwiseMatches>, Option<ConfigurationType>)> = candidates
         .par_iter()
-        .filter_map(|&(i, j)| {
+        .map(|&(i, j)| {
             let matcher = CrossCheckMatcher::new(BruteForceMatcher {
                 ratio: Some(match_ratio),
             });
-            let estimator = RelativePoseEstimator::default();
             let dm = matcher.match_descriptors(&features[i].descriptors, &features[j].descriptors);
             if dm.len() < min_matches {
-                return None;
+                return (None, None);
             }
             let corrs: Vec<TwoViewCorrespondence> = dm
                 .iter()
@@ -278,22 +358,68 @@ fn verify_pairs(
                     )
                 })
                 .collect();
-            let rel = estimator.estimate(&corrs, camera)?;
-            if rel.inliers.len() < min_matches {
-                return None;
+
+            if let Some(verifier) = &verifier {
+                let report = verifier.classify(&corrs, camera);
+                let keep = matches!(
+                    report.config,
+                    ConfigurationType::Calibrated
+                        | ConfigurationType::Uncalibrated
+                        | ConfigurationType::Planar
+                        | ConfigurationType::Multiple
+                );
+                if !keep || report.inliers.len() < min_matches {
+                    return (None, Some(report.config));
+                }
+                let matches: Vec<(usize, usize)> = report
+                    .inliers
+                    .iter()
+                    .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
+                    .collect();
+                (
+                    Some(PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                    }),
+                    Some(report.config),
+                )
+            } else {
+                let estimator = RelativePoseEstimator::default();
+                let Some(rel) = estimator.estimate(&corrs, camera) else {
+                    return (None, None);
+                };
+                if rel.inliers.len() < min_matches {
+                    return (None, None);
+                }
+                let matches: Vec<(usize, usize)> = rel
+                    .inliers
+                    .iter()
+                    .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
+                    .collect();
+                (
+                    Some(PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                    }),
+                    None,
+                )
             }
-            let matches: Vec<(usize, usize)> = rel
-                .inliers
-                .iter()
-                .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
-                .collect();
-            Some(PairwiseMatches {
-                image_i: i,
-                image_j: j,
-                matches,
-            })
         })
-        .collect()
+        .collect();
+
+    let mut stats = VerificationStats::default();
+    let mut pairwise = Vec::with_capacity(results.len());
+    for (pair, config) in results {
+        if let Some(config) = config {
+            stats.record(config);
+        }
+        if let Some(pair) = pair {
+            pairwise.push(pair);
+        }
+    }
+    (pairwise, stats)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -335,12 +461,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    let pairwise = verify_pairs(
+    let (pairwise, verification_stats) = verify_pairs(
         &features,
         &args.camera,
         &candidates,
         args.match_ratio,
         args.min_matches,
+        args.colmap_verification,
     );
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
     println!(
@@ -349,6 +476,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidates.len(),
         verified_matches,
     );
+    if args.colmap_verification {
+        println!(
+            "colmap-style verification: {} pairs classified (CALIBRATED={} UNCALIBRATED={} \
+             PLANAR={} PANORAMIC={} PLANAR_OR_PANORAMIC={} WATERMARK={} DEGENERATE={} MULTIPLE={})",
+            verification_stats.total(),
+            verification_stats.calibrated,
+            verification_stats.uncalibrated,
+            verification_stats.planar,
+            verification_stats.panoramic,
+            verification_stats.planar_or_panoramic,
+            verification_stats.watermark,
+            verification_stats.degenerate,
+            verification_stats.multiple,
+        );
+    }
     if pairwise.is_empty() {
         return Err("no pair survived geometric verification — lower --min-matches?".into());
     }
