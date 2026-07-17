@@ -1701,3 +1701,383 @@ python scripts/compare_sfm_sim3.py \
   leaves likely see well under the `min_he_entries=5` Hamming-embedding
   floor) is a natural next step before drawing conclusions about vocab-tree
   quality independent of this specific sizing choice.
+
+## M4 results (mapper path dependence, implemented 2026-07-17)
+
+**Note on numbering.** Per this task's own brief this milestone is "M4," and
+it is the direct follow-up to the previous milestone's own honest open
+question. That previous milestone was reported under the heading "M3 results"
+(itself flagged there as really corresponding to §3's M4 row, "vocab-tree-style
+retrieval") — M2.1 was the last milestone landed before it. This section
+continues that same "report under the requested label, cross-reference §3 for
+the original scoping language" convention; no row in §3's table corresponds to
+this milestone (it is a diagnosis-and-hardening pass over the *already-ported*
+mapper schedule, not a new §3 line item).
+
+### Question
+
+The prior milestone's own acceptance experiment (see "M3 results" above)
+surfaced a sharp, previously-undiagnosed finding: on ETH3D `courtyard`,
+registration plateaus at 13-14/38 **even when the candidate-pair source is
+made functionally exhaustive** (`vocab-tree` at `num_images=100`, 703/703 =
+every possible pair, byte-identical to the 12-pair-budget result). Since
+two-view verification is a deterministic function of a given image pair's
+correspondences independent of which pair generator proposed it, that
+milestone concluded the missing image's fate "cannot be a pair-coverage
+problem … the more likely explanation is the incremental mapper's well-known
+path-dependence: a different edge-set composition … changes seed-pair
+selection and next-best-view growth order." This milestone's brief was to
+instrument the mapper and find out, concretely, whether that is true — and,
+if COLMAP behaviors are missing that the evidence indicts, port them.
+
+### Diagnosis
+
+Instrumented `pipelines/slam/src/incremental_sfm.rs` with three debug-gated
+(`VISLOC_SFM_DEBUG=1`) `eprintln!` sites (no behavior change when unset —
+verified byte-identical registered counts/RMSE with and without the env var
+in every acceptance run below): per-seed-trial reach (`incremental_sfm`'s
+seed loop), a per-image classification of *why* [`select_next_image`] will
+not offer a still-unregistered image (`diagnose_unregistered_images`,
+new — insufficient correspondences vs. exhausted registration trials), and
+per-PnP-attempt inlier counts. Also added a one-off, env-gated raw-pairwise
+dump to `examples/unordered_sfm_demo.rs` (`VISLOC_SFM_DEBUG_DUMP_PAIRS=1`)
+to inspect the verified-pair graph's connectivity directly. All runs below
+used the identical cached SuperPoint features and per-scene pinhole
+intrinsics M1–M3 used
+(`E:\datasets\eth3d\battle\<scene>\visloc_run\features`), `--verification-mode
+full --pair-source vlad --retrieval-topk 12 --min-matches 30 --colmap-style`.
+
+**1. Does seed-pair choice matter?** Forced the seed search (temporarily, for
+this probe only — reverted, not shipped) to exhaust all `seed_trials=12`
+candidates instead of committing early once a seed reaches half the raw
+view-graph's largest connected component. Result — **seed choice barely
+matters**: all 12 distinct seed pairs tried (spanning essentially every
+adjacent-frame pair in the sequence) plateau at reach ∈ {9, 13, 14}, with 14
+(the seed the un-probed code already commits to) the **best** of all twelve,
+not a lucky-but-suboptimal early exit:
+
+```
+seed trial 59 pair=(8, 9)   matches=862 -> reach=14   (the seed the shipped code commits to)
+seed trial 23 pair=(2, 3)   matches=798 -> reach=13
+seed trial 44 pair=(5, 6)   matches=791 -> reach=13
+seed trial 13 pair=(1, 2)   matches=749 -> reach=13
+seed trial 0  pair=(0, 1)   matches=737 -> reach=13
+seed trial 38 pair=(4, 5)   matches=709 -> reach=13
+seed trial 31 pair=(3, 4)   matches=697 -> reach=13
+seed trial 50 pair=(6, 7)   matches=692 -> reach=13
+seed trial 102 pair=(26,27) matches=534 -> reach=13
+seed trial 14 pair=(1, 3)   matches=497 -> reach=13
+seed trial 89 pair=(18,19)  matches=490 -> reach=9
+seed trial 32 pair=(3, 5)   matches=486 -> reach=13
+```
+
+Full log: `E:/visloc_archive/colmap_m4_20260717/diagnosis/courtyard_force_all_seeds.log`.
+This directly **refutes** the "different seed order reaches a different final
+count" reading of the prior milestone's finding, at least on this scene.
+
+**2. Is the view graph genuinely two disconnected components?** Dumped every
+verified pair (`VISLOC_SFM_DEBUG_DUMP_PAIRS=1`,
+`E:/visloc_archive/colmap_m4_20260717/diagnosis/courtyard_pairs.log`, 135
+edges) and ran a union-find over the 38 image indices in Python. Result:
+**yes, literally two components, zero bridging edges**:
+
+```
+component root=22 size=25 members=[0..24]    (25 images)
+component root=36 size=13 members=[25..37]   (13 images)
+```
+
+Image indices are lexical-sort order = capture order (`DSC_0286.JPG` = image
+0 … `DSC_0323.JPG` = image 37, confirmed via the exported `images.txt`), i.e.
+images 25-37 (`DSC_0311`-`DSC_0323`) never verify a single ≥30-inlier
+two-view pair against *any* of images 0-24, at any of the three pair-source/
+budget configurations the prior milestone tried (`vlad` top-12, `vocab-tree`
+top-12, `vocab-tree` at literally every possible pair) — this is the direct
+mechanism behind that milestone's "byte-identical under exhaustive pairing"
+result: there is no pair left to propose. This is a **frontend
+detection/matching coverage gap** (the repo's own long-standing diagnosis,
+`docs/colmap_port_plan.md`'s TL;DR: "a frontend detection-coverage and
+view-graph problem"), not a mapper-schedule defect — no registration policy
+can place an image with zero verified correspondences into the reconstruction.
+
+**3. Within the reachable 25-image component, why do only 13-14 register?**
+Of the 11-12 members of the 25-image component that never register: **10-11
+have literally zero correspondences to any triangulated 3D point** (a
+chicken-and-egg deadlock — their raw pairwise matches connect only to *other*
+never-registered images in the same dead pocket, so no track they belong to
+ever gets 2 registered views to triangulate from, so nothing about them ever
+becomes an eligible PnP candidate, so they never register to unblock anyone
+else). **One image (index 12) is a genuinely different, and more interesting,
+case**: it has 32-34 real correspondences to already-triangulated points
+(comfortably above the 6-correspondence PnP floor) yet its P3P RANSAC
+consistently finds only 8-9 inliers — below `min_pnp_inliers=12` — on *every*
+attempt, including after the new stall-recovery refinement adds two more
+raw correspondences (32→34) without changing the inlier count in proportion:
+
+```
+PnP attempt #1 on image 12 failed (32 corrs -> 8 inliers, need >=12)
+PnP attempt #2 on image 12 failed (32 corrs -> 8 inliers, need >=12)
+PnP attempt #3 on image 12 failed (32 corrs -> 8 inliers, need >=12)
+PnP attempt #1 on image 12 failed (34 corrs -> 9 inliers, need >=12)   <- after stall-recovery retriangulation
+PnP attempt #2 on image 12 failed (34 corrs -> 9 inliers, need >=12)
+PnP attempt #3 on image 12 failed (34 corrs -> 9 inliers, need >=12)
+```
+
+This is a genuine **correspondence-quality** problem (roughly 3/4 of image
+12's matches are geometrically inconsistent with the current, weak local
+structure), not a scheduling one — and it is *not* fixable by further
+loosening `min_pnp_inliers` toward "port COLMAP's real default," because
+COLMAP's own `abs_pose_min_num_inliers` default is **30**
+(`sfm/incremental_mapper.h:89`), stricter than this repo's already-relaxed
+12, so a literal COLMAP-default port would make image 12 *harder* to
+register, not easier.
+
+**Conclusion: the courtyard ceiling is a genuine, evidenced ceiling, not a
+mapper path-dependence bug** — seed choice is confirmed (not just
+speculated) to be a non-factor, the 13 largest of the unregistered images are
+in a wholly disconnected component (a matching/frontend-coverage gap, the
+plan's own oldest diagnosis, now nailed down to an exact edge count: 0 of the
+325 possible cross-component pairs verify), and the sole borderline case
+within the reachable component fails on RANSAC inlier ratio, not on anything
+a registration-retry policy can address. This is exactly the honest-negative
+branch this milestone's acceptance criteria anticipated.
+
+### What was ported
+
+Despite the diagnosis showing courtyard's specific ceiling is not a
+scheduling bug, the investigation surfaced a real, missing COLMAP behavior —
+independently worth porting on its own evidence, and confirmed harmless
+(no regression) on all three scenes:
+
+| COLMAP behavior | Source | This port |
+|---|---|---|
+| `ReconstructSubModel`'s do-while loop never gives up the first time a full round finds no registrable image: it runs one more `IterativeGlobalRefinement`, then retries, only stopping once **two consecutive** rounds both fail (`while (reg_next_success \|\| prev_reg_next_success)`) | `controllers/incremental_pipeline.cc:517-629`, specifically the `!reg_next_success && prev_reg_next_success` branch at `:626-628` calling `IterativeGlobalRefinement` before the loop's next iteration | `grow_from_seed`'s `stalled_once`-gated recovery in `pipelines/slam/src/incremental_sfm.rs`: on the first `select_next_image` `None`, force one `growth_global_refinement` (+ `filter_images` if enabled) and retry; give up only on a second consecutive `None` |
+| `num_reg_trials[image_id] += 1` is unconditional on *every* `RegisterNextImage` call (success or failure) and **never resets** for the reconstruction's lifetime | `sfm/incremental_mapper.cc:229` (also `:161-164` for the initial pair) | **Deliberately not reset** on the stall recovery either (see "Honest, cited deviations" below) |
+
+Before this milestone, `growth_global_refinement` (BA + retriangulate +
+optional `filter_images`) only ever fired on the growth-*ratio* trigger
+(`global_ba_images_ratio`, requires the registered count to keep growing) —
+once growth genuinely stalled (nothing left registers), the ratio can never
+fire again, so `grow_from_seed`'s loop broke immediately and nothing further
+was ever attempted, even though a refinement pass might complete a
+previously-hopeless track. Now, on the first such stall, one more refinement
++ retry round runs unconditionally, matching COLMAP's own "always give the
+stall one more chance" behavior.
+
+### Honest, cited deviations
+
+- **Trial counters are not reset on the stall recovery**, even though a
+  reset would let an already-exhausted image be re-offered immediately (which
+  the first draft of this fix did, and which is closer to "undo the
+  exhaustion" in spirit). This was changed after finding a genuine **livelock
+  risk**: with `filter_images` enabled, a weakly-supported image can be
+  registered by the retry, immediately de-registered again by
+  `filter_images` in the *same* refinement call, then re-offered by a reset —
+  repeating forever, since each cycle's registration looks like "progress"
+  and re-arms the recovery. COLMAP's own design has no such risk because
+  `num_reg_trials` never resets (cited above) — a demoted-then-retried image
+  consumes one of its `max_reg_trials` lifetime attempts every cycle,
+  bounding the oscillation. This port keeps that same persistence rather than
+  inventing a reset COLMAP's source doesn't have, for the same safety
+  property. `colmap_style_mapper_retries_a_filtered_image_up_to_its_trial_budget_then_gives_up`
+  (new unit test, see below) is a direct regression pin for this: it
+  constructs a permanently-under-supported image and confirms the mapper
+  cycles it exactly `max_registration_trials` times before cleanly excluding
+  it, rather than hanging.
+- **Filtering granularity**: COLMAP's do-while operates over `FindNextImages`'s
+  full ranked candidate list per round (trying each once before declaring the
+  round failed); this repo's `select_next_image` always returns the single
+  best candidate and the growth loop calls it in a tight loop, so a
+  repeatedly-top-ranked image can exhaust several trials in immediate,
+  structure-unchanged succession before the next-best candidate is ever
+  tried. This pre-existing structural difference (not new to this milestone)
+  is why the diagnosis's seed-order/inlier findings above, not a "our loop
+  never retries" story, turned out to be the real explanation for
+  courtyard — flagged as a follow-up, not fixed here (see below).
+
+### Files changed
+
+- `pipelines/slam/src/incremental_sfm.rs`: `sfm_debug_enabled` (new,
+  env-gated diagnostic switch), `diagnose_unregistered_images` (new,
+  debug-only per-image classification), the `stalled_once` stall-recovery in
+  `grow_from_seed`'s growth loop (new behavior, gated by
+  `config.colmap_style_mapper`, default `false` so this is opt-in exactly
+  like the rest of the COLMAP schedule), two new unit tests (below). No
+  config field was added — the new behavior activates automatically whenever
+  `colmap_style_mapper: true` is already set, matching how the rest of that
+  schedule (local BA, growth-ratio refinement, registration retries) is
+  already bundled under that one flag.
+- `examples/unordered_sfm_demo.rs`: one new env-gated diagnostic
+  (`VISLOC_SFM_DEBUG_DUMP_PAIRS`) dumping the verified-pair graph; no
+  behavior change to the shipped CLI surface.
+
+No new dependencies. `crates/vision` untouched (no gap in verification or
+retrieval was indicted by this diagnosis). `pipelines/slam/src/dpvo_*.rs`,
+`dpvo_vi_ba.rs`, `map_atlas.rs`, `examples/euroc_dpvo_vo_demo.rs` not touched
+(concurrent DPVO work per this doc's Risks section) — and, per the full
+`cargo test -p visloc-slam --lib` run below, that work's own test suite is
+green on this branch as of this session (unlike M1/M1.1's contemporaneous
+note about a failing `dpvo_vi_ba` test, since resolved by that concurrent
+work).
+
+### Unit tests (new)
+
+- `colmap_style_mapper_retries_a_filtered_image_up_to_its_trial_budget_then_gives_up`:
+  a hand-built 4-camera scene (40-point cloud; camera 2 constructed to see
+  only 15 of the 40 points, below `filter_min_image_observations=16`, while
+  cameras 0/1/3 see all 40) with `global_ba_images_ratio` set absurdly high
+  so `filter_images` can *only* ever run via the new stall path, isolating
+  the mechanism this milestone added. Confirms the demote→retry cycle fires
+  exactly `max_registration_trials` (3) times, then gives up cleanly, leaving
+  `registered_images == 3` (the seed pair + the well-supported 4th camera;
+  camera 2 excluded) — this is a direct regression pin against the livelock
+  the "Honest, cited deviations" section above describes, and against a
+  silent revert to pre-M4 "filter once, never retry" behavior.
+- `colmap_style_mapper_is_deterministic_across_repeated_runs`: runs the
+  existing `build_two_component_scene` fixture (multi-seed trap + main
+  component, already used by `multi_seed_escapes_strongest_isolated_cluster`)
+  through `incremental_sfm` twice with `colmap_style_mapper: true` (exercising
+  both the multi-seed sweep and the new stall-recovery path) and asserts
+  bit-identical `mean_reprojection_px`, equal `registered_images`/track
+  counts, and identical per-image registration outcomes — a determinism
+  regression pin (fixed PnP RANSAC seed throughout; no `HashMap`/`HashSet`
+  iteration-order-dependent behavior was introduced).
+
+Both new tests pass; all 20 pre-existing `incremental_sfm` tests are
+unmodified and green (22 total, see Verify below).
+
+### Acceptance experiment (ETH3D, stall-recovery on vs. off)
+
+Ran `terrace`/`courtyard`/`office` at `--verification-mode full --colmap-style
+--pair-source vlad --retrieval-topk 12 --min-matches 30`, the identical
+cached SuperPoint features and per-scene pinhole intrinsics every prior
+milestone used, comparing the shipped (`stalled_once` recovery **on**, the
+only way to run `colmap_style_mapper` now) against a temporarily-disabled
+build of the exact same commit (`if false && config.colmap_style_mapper` at
+the recovery's gate, reverted immediately after this run — not a shipped
+flag) representing "before this milestone." Outputs, logs, and Sim(3)-scorer
+output for all 12 runs: `E:/visloc_archive/colmap_m4_20260717/`.
+
+**Registered images / total (unchanged — this milestone's fix never had a
+new image to offer on any of the three scenes, per the diagnosis above):**
+
+| scene | before | after |
+|---|---:|---:|
+| terrace (23) | 23 | 23 |
+| courtyard (38) | 14 | 14 |
+| office (26) | 18 | 18 |
+
+**Full registered-set Sim(3) RMSE vs. ETH3D laser-scan GT:**
+
+| scene | before | after |
+|---|---:|---:|
+| terrace | 1.39 cm | 1.38 cm |
+| courtyard | 3.75 cm | 3.93 cm |
+| office | 0.50 cm | 0.50 cm |
+
+**Common-subset Sim(3) RMSE** (same common-8 GT files M1/M1.1/M2/M2.1/M3
+built and reused verbatim):
+
+| scene (common N=8) | before | after |
+|---|---:|---:|
+| terrace | 0.93 cm | 0.94 cm |
+| courtyard | 0.25 cm | 0.26 cm |
+
+Every delta above is at the second-decimal, run-to-run noise level already
+characterized in M1's "Honesty note on the baseline number" — consistent with
+the diagnosis's own prediction that this fix would be a confirmed-harmless
+null on these three scenes specifically (courtyard's ceiling is a graph/
+inlier-ratio problem the fix cannot touch; terrace/office were already fully
+registered before and after). The guardrail this milestone's brief required
+— terrace/office within noise of the M1.1 full baselines at pair-budget
+parity — is met by construction, since registered counts are byte-identical
+and RMSE moves by ≤0.01-0.18 cm, the same magnitude M1 already documented as
+ordinary run-to-run drift on this branch.
+
+### Verdict
+
+**Courtyard's 13-14/38 ceiling is reported honestly as a diagnosed ceiling,
+not closed.** The acceptance criterion's alternate branch applies: this
+milestone's own instrumentation shows the 24 unregistered images split into
+(a) 13 images in a wholly disconnected component of the verified-pair graph
+— zero bridging pairs at any pair budget tried across this and the prior
+milestone, a frontend detection/matching-coverage gap this doc's Risks
+section already named as the plan's oldest open item, not a mapper defect —
+and (b) roughly 10 images in a track-triangulation deadlock plus one
+(image 12) with a genuine PnP inlier-ratio shortfall, neither fixable by a
+registration-retry policy. The COLMAP behavior this diagnosis's evidence did
+indict — the do-while loop's unconditional one-shot stall recovery — was
+ported, is unit-tested, and is confirmed harmless (registered counts
+byte-identical, RMSE within existing run-to-run noise) on all three
+acceptance scenes; it simply had nothing to fix on *this* data, which the
+diagnosis now demonstrates rather than assumes. The seed-order hypothesis the
+prior milestone's own follow-ups flagged as untested is now directly
+falsified (§"Diagnosis" #1): trying all 12 seed candidates finds the shipped
+seed is already the *best* of them, not a lucky early exit from a better
+alternative.
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-slam --lib incremental_sfm::`: **22 passed, 0
+  failed** (2 new tests — see "Unit tests (new)" above — all 20 pre-existing
+  tests unmodified and green).
+- `cargo test -p visloc-slam --lib` (full crate): **327 passed, 0 failed, 6
+  ignored** — unlike M1/M1.1's contemporaneous note about one failing
+  `dpvo_vi_ba` test on this branch (concurrent, out-of-scope work), the full
+  suite is green this session.
+- `cargo test -p visloc-vision`: **157 passed, 0 failed** — unchanged from
+  M3 (no `crates/vision` file was touched).
+- `cargo clippy -p visloc-slam --lib -- -D warnings`: 7 pre-existing errors,
+  all in `pipelines/slam/src/{dpvo_vi_ba,map_atlas,online_slam_vi_ba,
+  vi_motion_initializer,online_slam_motion_vi_init}.rs` — confirmed via
+  `-A2 "^error" | grep "\-\->"` that **zero** fire in `incremental_sfm.rs`,
+  the only file in this crate this milestone touched. Same pre-existing set
+  M1.1/M3 already documented (out-of-scope, concurrent DPVO/online-SLAM
+  development on this branch).
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings (crate untouched).
+- `cargo clippy --example unordered_sfm_demo --features image-io,onnx-inference
+  -- -D warnings`: same 6 pre-existing `pipelines/slam` errors as above (one
+  fewer than the crate-level run — `dpvo_vi_ba`'s dead-code warning isn't
+  reached by this build's feature set); **zero** in `unordered_sfm_demo.rs`
+  or `incremental_sfm.rs`.
+- Release build: `cargo build --release --example unordered_sfm_demo
+  --features image-io,onnx-inference` — clean. Used directly for every
+  acceptance run above.
+
+### Follow-ups
+
+- **The frontend detection/matching-coverage gap between courtyard's two
+  disconnected image clusters is the concrete, now-precisely-quantified
+  version of this doc's oldest, top-level diagnosis** ("a frontend
+  detection-coverage and view-graph problem, not a mapper-schedule
+  problem"). This milestone's contribution is turning that into an exact,
+  falsifiable claim (0 of 325 possible cross-cluster pairs verify) rather
+  than an inference from RMSE deltas — the natural next step is checking
+  whether a denser SuperPoint keypoint budget (this doc's Risks section
+  already measured 2048→4096 keypoints as "3.5× ATE improvement on
+  courtyard, no change on office, worse on terrace") or a wider match-ratio
+  specifically rescues *this* pair set, rather than re-running the whole
+  ETH3D battle blind.
+- **Image 12's specific 8-9/32-34 inlier ratio** is a concrete, reproducible
+  single-image case study for whatever frontend change is tried next — a
+  cheap regression check ("does image 12 now clear 12 inliers") without
+  needing a full battle rerun.
+- **The pre-existing structural difference** between COLMAP's per-round
+  `FindNextImages` (tries every eligible candidate once before declaring a
+  round failed) and this repo's single-best-candidate `select_next_image`
+  (can exhaust several trials on one repeatedly-top-ranked image before ever
+  trying the next-best) is flagged, not fixed, by this milestone — the
+  diagnosis shows it isn't the courtyard bottleneck, but it is still a
+  faithfulness gap worth closing (porting a genuine per-round candidate list)
+  if a future scene's diagnosis ever does indict it.
+- **`init_num_trials`-style multiple full-reconstruction attempts with
+  independent seed pairs** (COLMAP's outer `Reconstruct()` loop,
+  `controllers/incremental_pipeline.cc:644-751`) was investigated as a
+  candidate port per this milestone's brief, but the diagnosis shows this
+  repo's own `seed_trials` multi-seed search (already ported, pre-existing)
+  is **more thorough** than COLMAP's own default on this scene: COLMAP's
+  `multiple_models=false` default commits to the *first* successful initial
+  pair's growth and stops (`Reconstruct`'s `Status::SUCCESS` handling,
+  `:708-743`), never comparing against alternate seeds' reach the way this
+  repo's `grow_from_seed` sweep already does. No further porting is
+  indicated here.

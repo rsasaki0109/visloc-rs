@@ -766,6 +766,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidates.len(),
         verified_matches,
     );
+    // M4 diagnosis probe (docs/colmap_port_plan.md): dump the raw verified-pair
+    // image-index graph so the connected-component structure can be inspected
+    // directly (temporary, env-gated; not part of the milestone's shipped
+    // behaviour).
+    if std::env::var_os("VISLOC_SFM_DEBUG_DUMP_PAIRS").is_some() {
+        for p in &pairwise {
+            eprintln!(
+                "sfm-debug-pairs: {} {} matches={}",
+                p.image_i,
+                p.image_j,
+                p.matches.len()
+            );
+        }
+    }
     if args.verification_mode == VerificationMode::Full {
         println!(
             "colmap-style verification: {} pairs classified (CALIBRATED={} UNCALIBRATED={} \

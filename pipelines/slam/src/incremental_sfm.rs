@@ -58,6 +58,17 @@ use visloc_vision::two_view::{
 
 use crate::{BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, RobustKernel};
 
+/// Gate for the mapper's diagnostic `eprintln!`s (seed-sweep reach, growth
+/// stalls/recoveries). Off by default (checking an env var per print site is
+/// cheap; this is not a hot inner loop). Added for the M4 path-dependence
+/// diagnosis in `docs/colmap_port_plan.md` — set `VISLOC_SFM_DEBUG=1` to see,
+/// per seed trial, how far it grew, and, per growth stall, whether it was a
+/// genuine correspondence shortfall or a trial-budget exhaustion, and whether
+/// the stall-recovery refinement ([`grow_from_seed`]'s `stalled_once`) helped.
+fn sfm_debug_enabled() -> bool {
+    std::env::var_os("VISLOC_SFM_DEBUG").is_some()
+}
+
 /// Geometrically verified matches between two images of the set. The match
 /// indices are keypoint indices into `features[image_i]` / `features[image_j]`,
 /// and are assumed to have already survived an essential-matrix RANSAC (i.e.
@@ -423,6 +434,14 @@ pub fn incremental_sfm(
             config,
             &pairwise[pi],
         )?;
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: seed trial {pi} pair=({}, {}) matches={} -> reach={reach}",
+                pairwise[pi].image_i,
+                pairwise[pi].image_j,
+                pairwise[pi].matches.len(),
+            );
+        }
         if reach == 0 {
             continue; // pair failed the seed gate — nothing placed, no grow ran
         }
@@ -924,6 +943,44 @@ fn grow_from_seed(
     // COLMAP triggers a global refinement once the registered-image count has
     // grown by `global_ba_images_ratio` since the last one.
     let mut reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
+    // COLMAP `IncrementalPipeline::ReconstructSubModel`'s do-while loop
+    // (`controllers/incremental_pipeline.cc:519-629`) never gives up the first
+    // time no image can be registered: when a full round finds nothing
+    // (`!reg_next_success`), it runs one more `IterativeGlobalRefinement` and
+    // tries again, only stopping once *two consecutive* rounds both find
+    // nothing (`while (reg_next_success || prev_reg_next_success)`, line 629).
+    // `stalled_once` is that same one-shot recovery. It matters because
+    // `select_next_image` returning `None` is not always "structurally done" —
+    // a track that lacked the 6th correspondence [`select_next_image`] needs
+    // can gain one once [`growth_global_refinement`]'s retriangulation
+    // completes a track that had ≥2 registered observers all along, just not
+    // at a pair the on-the-fly [`triangulate_pending`] happened to accept
+    // (BA can tighten those same views' poses enough, between one
+    // registration and the next stall, to flip a marginal parallax/
+    // reprojection gate that failed moments before). This is the M4 fix for
+    // the path-dependence diagnosed in `docs/colmap_port_plan.md`'s "M3
+    // results" (courtyard stuck at 13-14/38 even under exhaustive pair
+    // coverage): the growth-ratio-triggered refinement above only fires while
+    // registrations keep succeeding, so once growth truly stalls the ratio
+    // can never trigger again and this loop broke immediately, leaving
+    // whatever a completing refinement might have unlocked untried.
+    //
+    // Deliberately **not** ported: resetting `trials` on the stall, even
+    // though it would let an already-trial-exhausted image be re-offered.
+    // COLMAP's own `num_reg_trials` never resets either
+    // (`incremental_mapper.cc:229`, incremented unconditionally on *every*
+    // `RegisterNextImage` call, success or failure, for the reconstruction's
+    // whole lifetime) — and here that persistence is load-bearing, not just
+    // an unported nicety: with `filter_images` on, a resetting version can
+    // livelock (register a weakly-supported image → `filter_images` demotes
+    // it next stall → the reset makes it eligible again → it re-registers
+    // identically → demoted again → …, forever, since each re-registration
+    // looks like "progress" and would keep re-arming the recovery). Never
+    // resetting bounds every image, demoted or not, to
+    // `max_registration_trials` total lifetime attempts, so this cannot
+    // cycle more than that many times before the image is excluded for good
+    // — the same guarantee COLMAP's design gets from never resetting.
+    let mut stalled_once = false;
     loop {
         let Some((next_image, corrs)) = select_next_image(
             &cam,
@@ -934,6 +991,47 @@ fn grow_from_seed(
             max_trials,
             &track_point,
         ) else {
+            if config.colmap_style_mapper && !stalled_once {
+                if sfm_debug_enabled() {
+                    let n_reg = poses.iter().filter(|p| p.is_some()).count();
+                    eprintln!(
+                        "sfm-debug: growth stalled at {n_reg}/{n_images} registered — \
+                         forcing one stall-recovery refinement and retrying",
+                    );
+                }
+                growth_global_refinement(
+                    &mut cam,
+                    features,
+                    tracks,
+                    config,
+                    &mut poses,
+                    &mut track_point,
+                )
+                .map_err(IncrementalSfmError::Ba)?;
+                reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
+                if config.filter_images {
+                    filter_images(&cam, features, tracks, config, &mut poses, &track_point);
+                }
+                stalled_once = true;
+                continue;
+            }
+            if sfm_debug_enabled() {
+                let n_reg = poses.iter().filter(|p| p.is_some()).count();
+                eprintln!(
+                    "sfm-debug: growth exhausted at {n_reg}/{n_images} registered \
+                     (colmap_style_mapper={}, stalled_once={stalled_once})",
+                    config.colmap_style_mapper,
+                );
+                for line in diagnose_unregistered_images(
+                    obs_by_image,
+                    &poses,
+                    &trials,
+                    max_trials,
+                    &track_point,
+                ) {
+                    eprintln!("sfm-debug: {line}");
+                }
+            }
             break;
         };
         trials[next_image] += 1;
@@ -958,9 +1056,23 @@ fn grow_from_seed(
             }
             .estimate(&corrs, &cam),
         };
+        let attempt_inliers = report.as_ref().map(|r| r.inliers.len());
         let Some(report) = report.filter(|r| r.inliers.len() >= config.min_pnp_inliers) else {
+            if sfm_debug_enabled() {
+                eprintln!(
+                    "sfm-debug: PnP attempt #{} on image {next_image} failed \
+                     ({} corrs -> {} inliers, need >={})",
+                    trials[next_image],
+                    corrs.len(),
+                    attempt_inliers.map_or("none".to_string(), |n| n.to_string()),
+                    config.min_pnp_inliers,
+                );
+            }
             continue; // registration failed this attempt (may be retried)
         };
+        // Genuine progress — a future stall earns its own one-shot recovery
+        // (see `stalled_once`'s module-level doc above).
+        stalled_once = false;
         poses[next_image] = Some(report.pose);
         triangulate_pending(&cam, features, tracks, &poses, config, &mut track_point);
 
@@ -1193,6 +1305,42 @@ fn select_next_image(
         }
     }
     best.map(|(image, _, corrs)| (image, corrs))
+}
+
+/// M4 diagnosis helper (`docs/colmap_port_plan.md`'s "M4 results"): classify,
+/// for every still-unregistered image, *why* [`select_next_image`] will not
+/// offer it — genuinely insufficient 2D-3D correspondences to a triangulated
+/// track (`< 6`, the DLT/P3P minimal-sample floor), or a sufficient count but
+/// an exhausted `max_registration_trials` budget. Debug-only (gated by
+/// [`sfm_debug_enabled`] at the call site); this does no RANSAC of its own —
+/// it only counts correspondences, so it is cheap enough to call at every
+/// growth stall without affecting the release path's behaviour or perf.
+fn diagnose_unregistered_images(
+    obs_by_image: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    trials: &[usize],
+    max_trials: usize,
+    track_point: &[Option<Point3<f64>>],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (image, observations) in obs_by_image.iter().enumerate() {
+        if poses[image].is_some() {
+            continue;
+        }
+        let corr_count = observations
+            .iter()
+            .filter(|&&(_, track_id)| track_point[track_id].is_some())
+            .count();
+        let reason = if corr_count < 6 {
+            format!("insufficient correspondences ({corr_count} < 6)")
+        } else if trials[image] >= max_trials {
+            format!("trials exhausted ({}/{max_trials}, {corr_count} corrs available)", trials[image])
+        } else {
+            format!("eligible but not selected this round ({corr_count} corrs, {}/{max_trials} trials)", trials[image])
+        };
+        lines.push(format!("  image {image}: {reason}"));
+    }
+    lines
 }
 
 /// COLMAP visibility-pyramid score (`Image::Point3DVisibilityScore`): occupancy of
@@ -2849,6 +2997,159 @@ mod tests {
         // cx co-adjusts with fx within the look-at arc's focal/centre ambiguity, but
         // must stay sane (no blow-up).
         assert!((cx - 320.0).abs() < 20.0, "cx {cx} blew up from 320");
+    }
+
+    #[test]
+    fn colmap_style_mapper_retries_a_filtered_image_up_to_its_trial_budget_then_gives_up() {
+        // M4 (`docs/colmap_port_plan.md`'s "M4 results"): the growth loop's
+        // stall-triggered recovery must give a `filter_images`-demoted image
+        // genuine retry attempts across multiple growth stalls — not filter it
+        // once and abandon it, the pre-M4 behaviour, since pre-M4
+        // `growth_global_refinement` (and the `filter_images` call inside it)
+        // only ever ran on the growth-*ratio* trigger, never on a stall — while
+        // still terminating cleanly once `max_registration_trials` is spent,
+        // rather than cycling forever. `global_ba_images_ratio` is set absurdly
+        // high so the *only* thing that can ever invoke `growth_global_refinement`
+        // / `filter_images` in this test is the stall path, isolating exactly
+        // the mechanism this milestone added.
+        //
+        // Scene: 4 cameras looking at the same 40-point cloud (two z-layers so
+        // the essential-matrix seed estimator sees a non-degenerate, non-planar
+        // point set). The seed pair (0, 1) and camera 3 all see all 40 points;
+        // camera 2 is built (by construction, not by frustum geometry) to see
+        // only the first 15 — enough to clear `min_pnp_inliers` and register,
+        // but below `filter_min_image_observations` (16), so every time
+        // `filter_images` runs it demotes camera 2 and nothing else (the seed
+        // pair is exempt from filtering by construction, and camera 3 is
+        // well-supported). A 4th, well-supported camera is needed because
+        // `filter_images` refuses to drop *anyone* once the registered count
+        // is already at its floor of 3 (`incremental_sfm.rs`'s
+        // `filter_images`: `if remaining <= 3 { continue; }`) — with only 3
+        // total cameras, camera 2 could never be filtered no matter how weak
+        // its support, which would make this test vacuous. Since camera 2's
+        // supporting-observation count can never improve (it structurally
+        // only ever sees 15 points), this is a fixed point: register, demote,
+        // retry, register, demote, … — bounded only by
+        // `max_registration_trials`. Never resetting `trials` on the stall
+        // (see `grow_from_seed`'s module-level doc on `stalled_once`) is what
+        // makes this terminate at all instead of cycling indefinitely.
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut points = Vec::new();
+        for xi in -2..=2 {
+            for yi in -1..=2 {
+                for zi in 0..=1 {
+                    points.push(Point3::new(xi as f64 * 0.25, yi as f64 * 0.25, 1.0 + zi as f64 * 0.3));
+                }
+            }
+        }
+        assert_eq!(points.len(), 40, "test fixture must have exactly 40 points");
+        let poses = arc_cameras(4, Point3::origin(), 3.0, 0.6);
+
+        // Camera 2 ("the weak straggler") only ever observes the first 15 of
+        // the 40 points; cameras 0, 1 (the seed pair) and 3 observe all 40.
+        let mut features = Vec::new();
+        let mut visible: Vec<HashMap<usize, usize>> = Vec::new();
+        for (cam_idx, pose) in poses.iter().enumerate() {
+            let n_visible = if cam_idx == 2 { 15 } else { points.len() };
+            let mut kps = Vec::new();
+            let mut descs = Vec::new();
+            let mut vis = HashMap::new();
+            for (pidx, p) in points.iter().enumerate().take(n_visible) {
+                let px = project(&camera, pose, p)
+                    .expect("fixture point must project in front of every camera");
+                vis.insert(pidx, kps.len());
+                kps.push(px);
+                descs.push(vec![pidx as f32, 1.0, 0.0, 0.0]);
+            }
+            features.push(FeatureSet::new(kps, descs).unwrap());
+            visible.push(vis);
+        }
+
+        let n_cams = poses.len();
+        let mut pairwise = Vec::new();
+        for i in 0..n_cams {
+            for j in (i + 1)..n_cams {
+                let mut matches = Vec::new();
+                for (pidx, &ki) in &visible[i] {
+                    if let Some(&kj) = visible[j].get(pidx) {
+                        matches.push((ki, kj));
+                    }
+                }
+                if matches.len() >= 8 {
+                    pairwise.push(PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                    });
+                }
+            }
+        }
+
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 8,
+            colmap_style_mapper: true,
+            filter_images: true,
+            filter_min_image_observations: 16,
+            global_ba_images_ratio: 1000.0,
+            ..IncrementalSfmConfig::default()
+        };
+        let result = incremental_sfm(&camera, &features, &pairwise, &config).unwrap();
+
+        assert_eq!(
+            result.registered_images, 3,
+            "camera 2 can never clear filter_min_image_observations=16 with its \
+             fixed 15 supporting observations, so it must end up excluded, not \
+             stuck mid-retry or wrongly kept, leaving the other 3 cameras registered"
+        );
+        assert!(
+            result.poses[0].is_some() && result.poses[1].is_some(),
+            "the seed pair stays registered (protected from filter_images)"
+        );
+        assert!(
+            result.poses[2].is_none(),
+            "the weakly-supported straggler ends up filtered, not registered"
+        );
+        assert!(
+            result.poses[3].is_some(),
+            "the well-supported 4th camera stays registered"
+        );
+    }
+
+    #[test]
+    fn colmap_style_mapper_is_deterministic_across_repeated_runs() {
+        // M4 regression pin: multi-seed search (`seed_trials`) and the new
+        // stall-triggered recovery must stay fully deterministic (fixed PnP
+        // RANSAC seed, no reset-driven or iteration-order-driven nondeterminism)
+        // — running the identical config against the identical view graph twice
+        // must produce byte-identical registered counts, track counts, and mean
+        // reprojection error. Uses `build_two_component_scene` (multiple seed
+        // candidates, one of them a trap) with `colmap_style_mapper` on so both
+        // the multi-seed sweep and the stall-recovery path are exercised.
+        let scene = build_two_component_scene();
+        let (features, pairwise) = render(&scene);
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            colmap_style_mapper: true,
+            ..IncrementalSfmConfig::default()
+        };
+        let a = incremental_sfm(&scene.camera, &features, &pairwise, &config).unwrap();
+        let b = incremental_sfm(&scene.camera, &features, &pairwise, &config).unwrap();
+        assert_eq!(a.registered_images, b.registered_images);
+        assert_eq!(a.tracks.len(), b.tracks.len());
+        assert_eq!(
+            a.mean_reprojection_px.to_bits(),
+            b.mean_reprojection_px.to_bits(),
+            "mean reprojection error must be bit-identical across repeated runs"
+        );
+        for i in 0..scene.poses.len() {
+            assert_eq!(
+                a.poses[i].is_some(),
+                b.poses[i].is_some(),
+                "image {i}'s registration outcome must be identical across runs"
+            );
+        }
     }
 
     #[test]
