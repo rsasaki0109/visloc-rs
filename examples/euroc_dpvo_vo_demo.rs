@@ -83,8 +83,10 @@ use visloc_rs::core::geometry::SE3;
 use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, EurocImuSample};
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::DpvoVoConfig;
-use visloc_rs::slam::dpvo_vo::{DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig};
-use visloc_rs::slam::{DpvoIntrinsics, DpvoLoopClosureConfig, ImuNoiseModel};
+use visloc_rs::slam::dpvo_vo::{
+    DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
+};
+use visloc_rs::slam::{DpvoIntrinsics, DpvoLoopClosureConfig, ImuNoiseModel, ScaleCouplingConfig};
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
@@ -131,6 +133,20 @@ struct CliArgs {
     imu_max_mono_alignment_condition_number: f64,
     imu_rollback_mean_nis_bound: f64,
     imu_rollback_consecutive_frames: usize,
+    /// Milestone M7 (`docs/dpvo_droid_port_plan.md`): enable
+    /// `crate::dpvo_scale_coupling`'s continuous, uncertainty-weighted scale
+    /// coupling — REPLACES the M5b one-shot bootstrap above when set
+    /// (requires `--imu`). Default off — reproduces M5b's own behavior
+    /// exactly (`DpvoImuConfig::scale_coupling: None`).
+    scale_coupling: bool,
+    sc_huber_delta: f64,
+    sc_convergence_std: f64,
+    sc_convergence_window: usize,
+    sc_convergence_band: f64,
+    sc_anneal_frames: f64,
+    sc_decay_frames: f64,
+    sc_max_log_step: f64,
+    sc_min_window_factors: usize,
     /// Milestone M6 (`docs/dpvo_droid_port_plan.md`): enable
     /// `crate::dpvo_loop_closure`'s mid-term proximity backend. Default off
     /// — visual-graph behavior identical to every prior milestone.
@@ -179,6 +195,17 @@ impl Default for CliArgs {
             imu_max_mono_alignment_condition_number: 1.0e8,
             imu_rollback_mean_nis_bound: 500.0,
             imu_rollback_consecutive_frames: 5,
+            scale_coupling: false,
+            // Mirror `ScaleCouplingConfig::default()`/`DpvoScaleCouplingConfig::default()`
+            // exactly so omitting these flags reproduces those defaults.
+            sc_huber_delta: ScaleCouplingConfig::default().huber_delta,
+            sc_convergence_std: ScaleCouplingConfig::default().convergence_std,
+            sc_convergence_window: ScaleCouplingConfig::default().convergence_window,
+            sc_convergence_band: ScaleCouplingConfig::default().convergence_band,
+            sc_anneal_frames: ScaleCouplingConfig::default().anneal_frames,
+            sc_decay_frames: ScaleCouplingConfig::default().decay_frames,
+            sc_max_log_step: ScaleCouplingConfig::default().max_log_step,
+            sc_min_window_factors: DpvoScaleCouplingConfig::default().min_window_factors,
             loop_closure: false,
             // Mirror `DpvoLoopClosureConfig::default()` exactly so omitting
             // these flags reproduces that struct's own defaults.
@@ -244,6 +271,19 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--imu-rollback-consecutive-frames" => {
                 args.imu_rollback_consecutive_frames = raw.remove(i + 1).parse()?
             }
+            "--scale-coupling" => {
+                args.scale_coupling = true;
+                raw.remove(i);
+                continue;
+            }
+            "--sc-huber-delta" => args.sc_huber_delta = raw.remove(i + 1).parse()?,
+            "--sc-convergence-std" => args.sc_convergence_std = raw.remove(i + 1).parse()?,
+            "--sc-convergence-window" => args.sc_convergence_window = raw.remove(i + 1).parse()?,
+            "--sc-convergence-band" => args.sc_convergence_band = raw.remove(i + 1).parse()?,
+            "--sc-anneal-frames" => args.sc_anneal_frames = raw.remove(i + 1).parse()?,
+            "--sc-decay-frames" => args.sc_decay_frames = raw.remove(i + 1).parse()?,
+            "--sc-max-log-step" => args.sc_max_log_step = raw.remove(i + 1).parse()?,
+            "--sc-min-window-factors" => args.sc_min_window_factors = raw.remove(i + 1).parse()?,
             "--loop-closure" => {
                 args.loop_closure = true;
                 raw.remove(i);
@@ -411,6 +451,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_mono_alignment_condition_number: args.imu_max_mono_alignment_condition_number,
             rollback_mean_nis_bound: args.imu_rollback_mean_nis_bound,
             rollback_consecutive_frames: args.imu_rollback_consecutive_frames,
+            // Milestone M7 (`docs/dpvo_droid_port_plan.md`): `--scale-coupling`
+            // replaces the M5b one-shot bootstrap above with
+            // `crate::dpvo_scale_coupling`'s continuous mechanism; omitting
+            // it reproduces M5b's exact behavior (`scale_coupling: None`).
+            scale_coupling: args.scale_coupling.then_some(DpvoScaleCouplingConfig {
+                scale: ScaleCouplingConfig {
+                    huber_delta: args.sc_huber_delta,
+                    convergence_std: args.sc_convergence_std,
+                    convergence_window: args.sc_convergence_window,
+                    convergence_band: args.sc_convergence_band,
+                    anneal_frames: args.sc_anneal_frames,
+                    decay_frames: args.sc_decay_frames,
+                    max_log_step: args.sc_max_log_step,
+                    ..ScaleCouplingConfig::default()
+                },
+                min_window_factors: args.sc_min_window_factors,
+            }),
         }),
         // Milestone M6 (`docs/dpvo_droid_port_plan.md`): `--loop-closure`
         // enables the mid-term proximity backend; omitting it reproduces
@@ -450,6 +507,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             odometry_config.imu.as_ref().unwrap().body_to_camera.translation.x,
             odometry_config.imu.as_ref().unwrap().body_to_camera.translation.y,
             odometry_config.imu.as_ref().unwrap().body_to_camera.translation.z,
+        );
+    }
+
+    if args.scale_coupling {
+        println!(
+            "scale coupling enabled (Milestone M7): huber_delta={:.2} convergence_std={:.4} \
+             convergence_window={} convergence_band={:.4} anneal_frames={:.1} decay_frames={:.1} \
+             max_log_step={:.4} min_window_factors={}",
+            args.sc_huber_delta,
+            args.sc_convergence_std,
+            args.sc_convergence_window,
+            args.sc_convergence_band,
+            args.sc_anneal_frames,
+            args.sc_decay_frames,
+            args.sc_max_log_step,
+            args.sc_min_window_factors,
         );
     }
 
@@ -495,6 +568,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Milestone M6: track the cumulative accepted-loop count so a console
     // log line only fires the frame a NEW batch is found, not every frame.
     let mut prev_loop_accepted_total = 0usize;
+    // Milestone M7: track weight/convergence/rollback TRANSITIONS (same
+    // "log only on change" philosophy as M5b/M6 above).
+    let mut prev_sc_converged = false;
+    let mut prev_sc_rollback_count = 0usize;
 
     let run_start = Instant::now();
     for (idx, entry) in frames.iter().enumerate() {
@@ -554,6 +631,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             prev_bootstrapped = imu_diag.bootstrapped;
             prev_rollback_count = imu_diag.rollback_count;
+        }
+
+        if args.scale_coupling {
+            let sc_diag = odometry.scale_coupling_diagnostics();
+            if sc_diag.converged && !prev_sc_converged {
+                println!(
+                    "*** frame {idx}: SCALE COUPLING CONVERGED — recovered_scale={:.6} \
+                     posterior_log_std={:.5} bias_gyro=[{:.6},{:.6},{:.6}] weight={:.3}",
+                    sc_diag.recovered_scale.unwrap_or(f64::NAN),
+                    sc_diag.posterior_log_std.unwrap_or(f64::NAN),
+                    sc_diag.bias_gyro.x,
+                    sc_diag.bias_gyro.y,
+                    sc_diag.bias_gyro.z,
+                    sc_diag.weight,
+                );
+            }
+            if sc_diag.soft_rollback_count > prev_sc_rollback_count {
+                println!(
+                    "*** frame {idx}: SCALE COUPLING SOFT ROLLBACK #{} (weight now {:.3}, \
+                     measurements_taken={} measurements_rejected={})",
+                    sc_diag.soft_rollback_count, sc_diag.weight, sc_diag.measurements_taken,
+                    sc_diag.measurements_rejected,
+                );
+            }
+            prev_sc_converged = sc_diag.converged;
+            prev_sc_rollback_count = sc_diag.soft_rollback_count;
         }
 
         if args.loop_closure {
@@ -624,6 +727,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     imu_diag.rejection_counts, imu_diag.last_rejection,
                 );
             }
+            if args.scale_coupling {
+                let sc_diag = odometry.scale_coupling_diagnostics();
+                println!(
+                    "  sc_weight={:.3} sc_converged={} sc_recovered_scale={:.4} sc_posterior_log_std={:.5} \
+                     sc_measurements_taken={} sc_measurements_rejected={} sc_soft_rollbacks={}",
+                    sc_diag.weight,
+                    sc_diag.converged,
+                    sc_diag.recovered_scale.unwrap_or(f64::NAN),
+                    sc_diag.posterior_log_std.unwrap_or(f64::NAN),
+                    sc_diag.measurements_taken,
+                    sc_diag.measurements_rejected,
+                    sc_diag.soft_rollback_count,
+                );
+                println!(
+                    "  sc_rejection_counts={:?} sc_last_rejection={:?}",
+                    sc_diag.rejection_counts, sc_diag.last_rejection,
+                );
+            }
             if args.loop_closure {
                 let lc_diag = odometry.loop_closure_diagnostics();
                 println!(
@@ -683,6 +804,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|g| (g.x, g.y, g.z))
         .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
     let lc_diag = odometry.loop_closure_diagnostics();
+    let sc_diag = odometry.scale_coupling_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -730,6 +852,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          imu_reject_mono_gravity_norm={rc_mono_grav}\n\
          imu_reject_mono_scale_range={rc_mono_scale}\n\
          imu_last_rejection={last_rejection}\n\
+         scale_coupling_enabled={sc_enabled}\n\
+         scale_coupling_weight={sc_weight:.4}\n\
+         scale_coupling_converged={sc_converged}\n\
+         scale_coupling_recovered_scale={sc_recovered_scale:.6}\n\
+         scale_coupling_posterior_log_std={sc_posterior_log_std:.6}\n\
+         scale_coupling_bias_gyro_x={sc_bias_gyro_x:.6}\n\
+         scale_coupling_bias_gyro_y={sc_bias_gyro_y:.6}\n\
+         scale_coupling_bias_gyro_z={sc_bias_gyro_z:.6}\n\
+         scale_coupling_measurements_taken={sc_measurements_taken}\n\
+         scale_coupling_measurements_rejected={sc_measurements_rejected}\n\
+         scale_coupling_soft_rollback_count={sc_soft_rollback_count}\n\
+         scale_coupling_reject_not_enough_factors={sc_rc_few}\n\
+         scale_coupling_reject_underdetermined={sc_rc_underdet}\n\
+         scale_coupling_reject_ill_conditioned={sc_rc_illcond}\n\
+         scale_coupling_reject_degenerate_solve={sc_rc_degen}\n\
+         scale_coupling_reject_gravity_norm={sc_rc_grav}\n\
+         scale_coupling_reject_scale_range={sc_rc_scale}\n\
+         scale_coupling_last_rejection={sc_last_rejection}\n\
          loop_closure_enabled={lc_enabled}\n\
          loop_batches_attempted={lc_batches}\n\
          loop_candidates_evaluated={lc_candidates}\n\
@@ -771,6 +911,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rc_mono_grav = imu_diag.rejection_counts.mono_gravity_norm,
         rc_mono_scale = imu_diag.rejection_counts.mono_scale_range,
         last_rejection = imu_diag
+            .last_rejection
+            .map(|r| format!("{r:?}"))
+            .unwrap_or_else(|| "none".to_string()),
+        sc_enabled = sc_diag.enabled,
+        sc_weight = sc_diag.weight,
+        sc_converged = sc_diag.converged,
+        sc_recovered_scale = sc_diag.recovered_scale.unwrap_or(f64::NAN),
+        sc_posterior_log_std = sc_diag.posterior_log_std.unwrap_or(f64::NAN),
+        sc_bias_gyro_x = sc_diag.bias_gyro.x,
+        sc_bias_gyro_y = sc_diag.bias_gyro.y,
+        sc_bias_gyro_z = sc_diag.bias_gyro.z,
+        sc_measurements_taken = sc_diag.measurements_taken,
+        sc_measurements_rejected = sc_diag.measurements_rejected,
+        sc_soft_rollback_count = sc_diag.soft_rollback_count,
+        sc_rc_few = sc_diag.rejection_counts.not_enough_factors,
+        sc_rc_underdet = sc_diag.rejection_counts.underdetermined,
+        sc_rc_illcond = sc_diag.rejection_counts.ill_conditioned,
+        sc_rc_degen = sc_diag.rejection_counts.degenerate_solve,
+        sc_rc_grav = sc_diag.rejection_counts.gravity_norm,
+        sc_rc_scale = sc_diag.rejection_counts.scale_range,
+        sc_last_rejection = sc_diag
             .last_rejection
             .map(|r| format!("{r:?}"))
             .unwrap_or_else(|| "none".to_string()),

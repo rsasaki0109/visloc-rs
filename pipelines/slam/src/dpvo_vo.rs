@@ -221,6 +221,10 @@ use crate::dpvo_vi_ba::{
     dpvo_vi_ba, estimate_mono_vi_alignment, imu_factor_nis, DpvoImuFactor, DpvoMonoViAlignmentGates,
     DpvoMonoViAlignmentRejection, DpvoViWindow,
 };
+use crate::dpvo_scale_coupling::{
+    apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment, AnnealingWeight,
+    RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCouplingConfig,
+};
 use crate::imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator,
 };
@@ -468,6 +472,15 @@ pub struct DpvoImuConfig {
     /// still reacting within roughly half a second of real EuRoC-rate
     /// (`~10` Hz post-stride) frames once a bootstrap is genuinely bad.
     pub rollback_consecutive_frames: usize,
+    /// Milestone M7 (`docs/dpvo_droid_port_plan.md`): continuous,
+    /// uncertainty-weighted scale coupling — REPLACES the one-shot
+    /// `Self::try_imu_bootstrap`-then-trust mechanism above when `Some`
+    /// (every field above this one is then ignored except
+    /// `body_to_camera`/`noise`/`gravity_magnitude`, still needed by the
+    /// continuous re-estimation itself — see
+    /// [`DpvoOdometry::scale_coupling_step`]'s own doc). `None` (default)
+    /// preserves M5/M5b's exact one-shot behavior byte-for-byte.
+    pub scale_coupling: Option<DpvoScaleCouplingConfig>,
 }
 
 impl Default for DpvoImuConfig {
@@ -497,8 +510,92 @@ impl Default for DpvoImuConfig {
             max_mono_alignment_condition_number: 1.0e8,
             rollback_mean_nis_bound: 500.0,
             rollback_consecutive_frames: 5,
+            scale_coupling: None,
         }
     }
+}
+
+/// Milestone M7: configuration for the continuous scale-coupling mechanism —
+/// see `crate::dpvo_scale_coupling`'s module doc for the full design this
+/// gates into. `min_window_factors` is this module's own gate (mirrors
+/// [`DpvoImuConfig::min_bootstrap_factors`]'s role for M5b); every other
+/// numeric knob lives on the reusable [`ScaleCouplingConfig`] itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoScaleCouplingConfig {
+    /// Reused verbatim from `crate::dpvo_scale_coupling` — see that module's
+    /// doc for every field's default and rationale.
+    pub scale: ScaleCouplingConfig,
+    /// Minimum number of usable in-window IMU factors before even
+    /// ATTEMPTING a re-estimation this frame (a coarser gate than
+    /// `estimate_gyro_bias`/`estimate_mono_vi_alignment`'s own internal
+    /// `< 2` checks, avoiding a wasted SVD solve on a still-tiny window —
+    /// same role as [`DpvoImuConfig::min_bootstrap_factors`]). Default `4`:
+    /// deliberately smaller than M5b's `10`, because a rejected/degenerate
+    /// measurement here costs nothing (no state is committed on a single
+    /// bad attempt — see the module doc) whereas M5b's one-shot bootstrap
+    /// needed a bigger, more conservative window before its single
+    /// irreversible attempt.
+    pub min_window_factors: usize,
+}
+
+impl Default for DpvoScaleCouplingConfig {
+    fn default() -> Self {
+        Self { scale: ScaleCouplingConfig::default(), min_window_factors: 4 }
+    }
+}
+
+/// Milestone M7 snapshot of [`DpvoOdometry`]'s continuous scale-coupling
+/// state — see [`DpvoOdometry::scale_coupling_diagnostics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoScaleCouplingDiagnostics {
+    pub enabled: bool,
+    /// Current annealing weight in `[0, 1]` — `0.0` means "behaving exactly
+    /// like visual-only DPVO this frame", `1.0` means "fully trusting the
+    /// IMU-coupled + gentle-scale-corrected solve".
+    pub weight: f64,
+    /// Whether the recursive scale estimator currently satisfies BOTH
+    /// convergence gates (see `crate::dpvo_scale_coupling`'s module doc).
+    pub converged: bool,
+    /// `exp(posterior_mean)` — the current best estimate of the residual
+    /// monocular-to-metric scale correction, once at least one measurement
+    /// has been fused. `None` before the first measurement.
+    pub recovered_scale: Option<f64>,
+    /// Posterior standard deviation, in LOG-scale units (so `0.05` means
+    /// "roughly 5% linear-scale uncertainty").
+    pub posterior_log_std: Option<f64>,
+    /// Current continuously-re-estimated gyro bias (never hard-fixed — see
+    /// the module doc's "never-trusted-all-at-once" framing).
+    pub bias_gyro: Vector3<f64>,
+    pub measurements_taken: usize,
+    pub measurements_rejected: usize,
+    pub soft_rollback_count: usize,
+    /// Diagnostic instrumentation added while investigating why real MH_01
+    /// runs plateaued at a handful of accepted measurements (see this
+    /// struct's own `last_rejection` doc and the plan doc's "M7 results"
+    /// section, "Diagnosis" subsection) — per-reason breakdown of every
+    /// `estimate_mono_vi_alignment` call this method's window was rejected
+    /// by, mirroring `DpvoImuBootstrapRejectionCounts`'s own "isolate which
+    /// gate" precedent from M5b.
+    pub rejection_counts: DpvoScaleCouplingRejectionCounts,
+    /// The MOST RECENT rejection's own full detail (carries the actual
+    /// numeric value(s) that tripped it, e.g. the out-of-range scale itself,
+    /// or the condition number vs. its bound) — `None` if no attempt has
+    /// ever been rejected.
+    pub last_rejection: Option<DpvoMonoViAlignmentRejection>,
+}
+
+/// Milestone M7 diagnostic addition: per-reason breakdown of
+/// `estimate_mono_vi_alignment` rejections inside
+/// [`DpvoOdometry::scale_coupling_step`] — see
+/// [`DpvoScaleCouplingDiagnostics::rejection_counts`]'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DpvoScaleCouplingRejectionCounts {
+    pub not_enough_factors: usize,
+    pub underdetermined: usize,
+    pub ill_conditioned: usize,
+    pub degenerate_solve: usize,
+    pub gravity_norm: usize,
+    pub scale_range: usize,
 }
 
 /// Snapshot of [`DpvoOdometry`]'s IMU bootstrap state, for a caller (e.g.
@@ -703,6 +800,12 @@ struct FramePyramid {
     level1: ChannelLastImage,
 }
 
+/// Milestone M7: `(poses, patches, velocities)` in a window's own local
+/// indexing — [`DpvoOdometry::scale_coupling_step`]'s return type, named
+/// here only to satisfy `clippy::type_complexity` (no semantic meaning
+/// beyond "one of these three per window-local index").
+type ScaleCouplingSolution = (Vec<SE3>, Vec<DpvoPatch>, Option<Vec<Vector3<f64>>>);
+
 /// The full DPVO visual-odometry loop: ONNX sessions + the [`DpvoPatchGraph`]
 /// they drive. See the module doc for scope and the windowing derivation.
 pub struct DpvoOdometry {
@@ -822,6 +925,25 @@ pub struct DpvoOdometry {
     loop_correction_events: usize,
     loop_correction_sum_m: f64,
     loop_correction_max_m: f64,
+
+    // ---- Milestone M7 (continuous scale coupling) state — see
+    // `crate::dpvo_scale_coupling`'s module doc and
+    // [`Self::scale_coupling_step`]'s own doc. Inert (never read/updated
+    // meaningfully) whenever `config.imu.scale_coupling` is `None`. ----
+    scale_estimator: RecursiveScaleEstimator,
+    gyro_bias_estimator: RecursiveGyroBiasEstimator,
+    scale_coupling_weight: AnnealingWeight,
+    /// Most recently ACCEPTED alignment's own recovered gravity — see
+    /// `crate::dpvo_scale_coupling`'s module doc for why gravity itself is
+    /// not put through its own recursive filter this milestone.
+    scale_coupling_gravity: Option<Vector3<f64>>,
+    scale_coupling_consecutive_bad: usize,
+    scale_coupling_measurements: usize,
+    scale_coupling_measurement_rejections: usize,
+    scale_coupling_rollback_count: usize,
+    /// Diagnostic instrumentation (see [`DpvoScaleCouplingDiagnostics::rejection_counts`]).
+    scale_coupling_rejection_counts: DpvoScaleCouplingRejectionCounts,
+    scale_coupling_last_rejection: Option<DpvoMonoViAlignmentRejection>,
 }
 
 impl DpvoOdometry {
@@ -854,6 +976,17 @@ impl DpvoOdometry {
         let agg_ij = SoftAgg::load_from_npz(&archive, "agg_ij_")?;
         let graph = DpvoPatchGraph::new(config.vo);
         let seed = config.seed;
+        // Milestone M7: derive the scale-coupling sub-config once, up front
+        // (before `config` moves into `Self` below) — `Default` whenever
+        // `config.imu`/`config.imu.scale_coupling` is `None`, harmless since
+        // nothing reads these estimators unless that config is `Some` (see
+        // `Self::scale_coupling_step`'s own guard).
+        let sc_cfg = config
+            .imu
+            .as_ref()
+            .and_then(|imu| imu.scale_coupling)
+            .map(|sc| sc.scale)
+            .unwrap_or_default();
         Ok(Self {
             config,
             session,
@@ -890,6 +1023,16 @@ impl DpvoOdometry {
             loop_correction_events: 0,
             loop_correction_sum_m: 0.0,
             loop_correction_max_m: 0.0,
+            scale_estimator: RecursiveScaleEstimator::new(sc_cfg),
+            gyro_bias_estimator: RecursiveGyroBiasEstimator::new(sc_cfg),
+            scale_coupling_weight: AnnealingWeight::new(sc_cfg.anneal_frames, sc_cfg.decay_frames),
+            scale_coupling_gravity: None,
+            scale_coupling_consecutive_bad: 0,
+            scale_coupling_measurements: 0,
+            scale_coupling_measurement_rejections: 0,
+            scale_coupling_rollback_count: 0,
+            scale_coupling_rejection_counts: DpvoScaleCouplingRejectionCounts::default(),
+            scale_coupling_last_rejection: None,
         })
     }
 
@@ -936,6 +1079,25 @@ impl DpvoOdometry {
             correction_events: self.loop_correction_events,
             correction_magnitude_max_m: self.loop_correction_max_m,
             correction_magnitude_mean_m: correction_mean,
+        }
+    }
+
+    /// Snapshot of the Milestone M7 continuous scale-coupling state — see
+    /// [`DpvoScaleCouplingDiagnostics`].
+    pub fn scale_coupling_diagnostics(&self) -> DpvoScaleCouplingDiagnostics {
+        let posterior = self.scale_estimator.posterior();
+        DpvoScaleCouplingDiagnostics {
+            enabled: self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some()),
+            weight: self.scale_coupling_weight.value,
+            converged: self.scale_estimator.is_converged(),
+            recovered_scale: posterior.map(|p| p.mean.exp()),
+            posterior_log_std: posterior.map(|p| p.variance.sqrt()),
+            bias_gyro: self.gyro_bias_estimator.mean(),
+            measurements_taken: self.scale_coupling_measurements,
+            measurements_rejected: self.scale_coupling_measurement_rejections,
+            soft_rollback_count: self.scale_coupling_rollback_count,
+            rejection_counts: self.scale_coupling_rejection_counts,
+            last_rejection: self.scale_coupling_last_rejection,
         }
     }
 
@@ -1059,7 +1221,17 @@ impl DpvoOdometry {
                 self.update_step()?;
             }
         } else if self.graph.is_initialized() {
-            self.try_imu_bootstrap();
+            // Milestone M7: the continuous scale-coupling mechanism (see
+            // `Self::scale_coupling_step`, called from `update_step` below)
+            // REPLACES M5b's one-shot bootstrap entirely when enabled — it
+            // re-estimates gyro bias/scale itself, every window, so the
+            // one-shot `try_imu_bootstrap` must not also run (the two
+            // mechanisms would otherwise both try to own
+            // `self.imu_bias_gyro`/`self.imu_bootstrapped`).
+            let use_scale_coupling = self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some());
+            if !use_scale_coupling {
+                self.try_imu_bootstrap();
+            }
             self.try_loop_closure();
             self.update_step()?;
             if let Some(k) = self.keyframe_dispatch() {
@@ -1777,6 +1949,11 @@ impl DpvoOdometry {
         };
 
         let ba_start = Instant::now();
+        // Milestone M7 takes priority over M5/M5b's one-shot bootstrap when
+        // enabled (see `Self::scale_coupling_step`'s own doc) — checked
+        // FIRST so the M5/M5b branch below is completely unreachable, not
+        // merely unused, whenever `config.imu.scale_coupling` is `Some`.
+        let use_scale_coupling = self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some());
         // Milestone M5: once the IMU bootstrap chain has succeeded, couple
         // consecutive-window IMU factors into the SAME Gauss-Newton solve
         // (`crate::dpvo_vi_ba::dpvo_vi_ba`) instead of the plain visual-only
@@ -1785,7 +1962,9 @@ impl DpvoOdometry {
         // unmodified M4 path whenever `config.imu` is `None` or the
         // bootstrap has not (yet) succeeded — visual-only behavior is
         // therefore byte-for-byte unchanged from M4 in both of those cases.
-        let (new_poses, new_patches, new_velocities) = if self.imu_bootstrapped {
+        let (new_poses, new_patches, new_velocities) = if use_scale_coupling {
+            self.scale_coupling_step(&problem, frame_lo, n, local_fixedp, &ba_config)?
+        } else if self.imu_bootstrapped {
             let imu_cfg = self
                 .config
                 .imu
@@ -1876,13 +2055,304 @@ impl DpvoOdometry {
         // (`self.imu_bootstrapped` flipped back to `false` above),
         // `rollback_imu_bootstrap` already zeroed every velocity slot — do
         // NOT immediately overwrite that with the (possibly still-poisoned)
-        // solve's own velocities.
-        if let Some(velocities) = new_velocities.filter(|_| self.imu_bootstrapped) {
+        // solve's own velocities. Milestone M7's own path never sets
+        // `self.imu_bootstrapped` at all (see `Self::scale_coupling_step`'s
+        // doc), so it is included here explicitly rather than relying on
+        // that flag.
+        if let Some(velocities) = new_velocities.filter(|_| self.imu_bootstrapped || use_scale_coupling) {
             for (local, v) in velocities.into_iter().enumerate() {
                 self.velocities[frame_lo + local] = v;
             }
         }
         Ok(())
+    }
+
+    /// Milestone M7 (`docs/dpvo_droid_port_plan.md`): the continuous,
+    /// uncertainty-weighted scale-coupling per-frame step — see
+    /// `crate::dpvo_scale_coupling`'s module doc for the full design this
+    /// implements. Called from [`Self::update_step`] in place of the
+    /// M5/M5b branch whenever `config.imu.scale_coupling` is `Some`.
+    /// Returns `(poses, patches, velocities)` in the SAME window-local
+    /// indexing `problem`/`dpvo_ba`/`dpvo_vi_ba` already use.
+    ///
+    /// # Why this never touches `self.imu_bootstrapped`/`self.imu_bias_gyro`
+    /// as a COMMITTED, staged value
+    ///
+    /// Unlike M5b's `try_imu_bootstrap`, this method re-derives its own
+    /// gyro-bias/scale evidence EVERY call from the current window — nothing
+    /// here is a one-shot "compute once, fix forever" decision, so there is
+    /// no analogous boolean to flip. `self.imu_bias_gyro` is still updated
+    /// (purely for [`DpvoOdometry::imu_diagnostics`]'s own echo — a caller
+    /// inspecting that struct still wants to see SOME current bias value),
+    /// but nothing downstream treats it as authoritative the way M5b's
+    /// `dpvo_vi_ba` call site does.
+    fn scale_coupling_step(
+        &mut self,
+        problem: &DpvoBaProblem,
+        frame_lo: usize,
+        n: usize,
+        local_fixedp: usize,
+        ba_config: &DpvoBaConfig,
+    ) -> Result<ScaleCouplingSolution, DpvoOdometryError> {
+        let imu_cfg = self
+            .config
+            .imu
+            .clone()
+            .expect("scale_coupling_step is only called when config.imu.scale_coupling is Some");
+        let sc_cfg = imu_cfg
+            .scale_coupling
+            .expect("scale_coupling_step is only called when config.imu.scale_coupling is Some");
+
+        // The visual-only solve is ALWAYS computed — it is both the cheap
+        // fallback (weight == 0, or an under-evidenced window) and one of
+        // `blend_solutions`'s two endpoints even once coupling is active
+        // (module doc, "Why output-space blending").
+        let visual_solved = dpvo_ba(problem, ba_config)?;
+
+        // Build this window's usable IMU factors (window-local indexing,
+        // matching `problem.poses`) — the SAME construction M5/M5b's own
+        // branch above uses, reused here rather than shared as a helper
+        // because the two branches' surrounding bookkeeping (arrival-id
+        // mapping vs. plain local indices) differs enough that extracting a
+        // shared function would need its own new abstraction for a single
+        // ~10-line loop.
+        let window_arrivals: Vec<usize> =
+            self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+        let mut window_factors: Vec<DpvoImuFactor> = Vec::new();
+        for local in 0..window_arrivals.len().saturating_sub(1) {
+            let key = (window_arrivals[local], window_arrivals[local + 1]);
+            if let Some(banked) = self.imu_deltas_by_arrival.get(&key) {
+                window_factors.push(DpvoImuFactor { i: local, j: local + 1, factor: banked.clone() });
+            }
+        }
+
+        if window_factors.len() < sc_cfg.min_window_factors {
+            // Not enough evidence to even attempt a re-estimation this
+            // frame — visual-only, and the annealing weight does not move
+            // either direction (this is "no data yet", not "data
+            // disagrees" — see `crate::dpvo_scale_coupling`'s own
+            // "Convergence and annealing" section for why those two cases
+            // are treated differently).
+            return Ok((visual_solved.poses, visual_solved.patches, None));
+        }
+
+        // ---- Stage 1: continuous gyro-bias re-estimation (never
+        // hard-fixed — module doc's "gyro bias as a soft prior"
+        // requirement). Reuses `estimate_gyro_bias` UNCHANGED (rotation-only
+        // alignment is scale-invariant — same reasoning
+        // `crate::dpvo_vi_ba`'s own "Sequencing" section gives for M5b), but
+        // called EVERY frame against the CURRENT live window instead of
+        // once against a decoupled bootstrap history — the recursive
+        // estimator's own robustness (not a decoupled-history mechanism) is
+        // what protects this from M5's original "stationary opening
+        // segment" bug, since a degenerate/rejected window here just
+        // produces no measurement, not a wrong permanently-fixed bias. ----
+        let mut map = VisualMap::new();
+        let mut local_poses: Vec<SE3> = vec![SE3::identity(); window_arrivals.len()];
+        for (idx, &arrival) in window_arrivals.iter().enumerate() {
+            let pose = self.graph.frames()[frame_lo + idx].pose.clone();
+            let body = imu_cfg.body_to_camera.compose(&pose);
+            let mut frame = Frame::new(arrival as u64, 0);
+            frame.pose = Some(Pose { world_to_camera: body });
+            map.keyframes.insert(arrival as u64, Keyframe { frame, observations: Vec::new() });
+            local_poses[idx] = pose;
+        }
+        let arrival_ids: Vec<u64> = window_arrivals.iter().map(|&a| a as u64).collect();
+        let factors_for_gyro: Vec<ImuPreintegrationFactor> =
+            window_factors.iter().map(|f| f.factor.clone()).collect();
+
+        let seed_bias = self.gyro_bias_estimator.mean();
+        if let Some(alignment) = estimate_gyro_bias(&map, &arrival_ids, &factors_for_gyro, seed_bias) {
+            // Honest variance proxy (same "derive it from the LSQ's own
+            // fit quality" philosophy as the scale estimator — see
+            // `crate::dpvo_scale_coupling`'s module doc): the ROTATION
+            // alignment's own converged residual RMS is the direct
+            // empirical noise-level estimate for THIS measurement.
+            let variance = alignment.rotation_residual_rms_after.max(1.0e-9).powi(2);
+            self.gyro_bias_estimator.update(alignment.bias_gyro, variance);
+        }
+        let bias_gyro = self.gyro_bias_estimator.mean();
+        self.imu_bias_gyro = bias_gyro; // diagnostics echo only — see this method's own doc.
+
+        // ---- Stage 2: continuous mono-scale/gravity/velocity
+        // re-estimation. ----
+        let gates = DpvoMonoViAlignmentGates {
+            expected_gravity_magnitude: imu_cfg.gravity_magnitude,
+            gravity_norm_deviation_ratio: imu_cfg.gravity_norm_deviation_ratio,
+            min_scale: imu_cfg.min_mono_scale,
+            max_scale: imu_cfg.max_mono_scale,
+            max_condition_number: imu_cfg.max_mono_alignment_condition_number,
+        };
+        let mut window_velocities = vec![Vector3::zeros(); window_arrivals.len()];
+        for (idx, local) in window_velocities.iter_mut().enumerate() {
+            *local = self.velocities[frame_lo + idx];
+        }
+
+        // Diagnostic finding (see the plan doc's "M7 results", "Diagnosis"
+        // subsection): the live BA window `[frame_lo, n)` can contain
+        // frames whose `arrival_index` is NOT consecutive between adjacent
+        // window slots — `DpvoPatchGraph::keyframe`'s own motion-magnitude
+        // folding (the SAME mechanism M5's "why history snapshots, not the
+        // live graph" bug report already diagnosed for the one-shot
+        // bootstrap) can retain two temporally-adjacent LIVE frames whose
+        // banked `imu_deltas_by_arrival` delta only covers a since-folded
+        // intermediate frame, not the surviving pair directly. `window_factors`
+        // above already only includes a factor where a direct delta exists,
+        // so such a gap simply produces one fewer factor — but
+        // `estimate_mono_vi_alignment`'s own degrees-of-freedom requirement
+        // (`unknowns = 3·n_poses + 4`) grows with EVERY pose regardless,
+        // so a window with several such gaps can become UNDERDETERMINED for
+        // a reason that has nothing to do with real motion excitation. A
+        // live 300-frame diagnostic run (`E:/visloc_archive/dpvo_m7_20260717/diag_300`)
+        // measured this directly: `usable_factors` plateaued at exactly `8`
+        // while `n_poses` grew past `19` over ~120 consecutive frames, with
+        // `Underdetermined { usable_factors: 8, n_poses: 19 }` as the
+        // dominant (and, by the run's end, ONLY growing) rejection reason.
+        // Fix: restrict the mono-alignment call to the maximal TRAILING run
+        // of arrival-consecutive frames (ending at the newest frame in the
+        // window) — the sub-window where every pose actually participates
+        // in a factor, so `usable_factors == mono_poses.len() - 1` exactly,
+        // the best-conditioned DOF ratio reachable from this window's own
+        // data. This does not touch `window_factors`/`local_poses` used by
+        // Stage 1 (gyro bias) or the later `dpvo_vi_ba` coupled solve — only
+        // this call's own inputs are trimmed.
+        let mono_start = trailing_consecutive_run_start(&window_arrivals);
+        let mono_poses = &local_poses[mono_start..];
+        let mono_factors: Vec<DpvoImuFactor> = window_factors
+            .iter()
+            .filter(|f| f.i >= mono_start && f.j >= mono_start)
+            .map(|f| DpvoImuFactor { i: f.i - mono_start, j: f.j - mono_start, factor: f.factor.clone() })
+            .collect();
+
+        match estimate_mono_vi_alignment(
+            mono_poses, &mono_factors, &imu_cfg.body_to_camera, bias_gyro, self.imu_bias_accel, &gates,
+        ) {
+            Ok(alignment) => {
+                self.scale_coupling_measurements += 1;
+                let measurement = scale_measurement_from_alignment(&alignment, &sc_cfg.scale);
+                self.scale_estimator.update(measurement);
+                self.scale_coupling_gravity = Some(alignment.gravity_world);
+                for (idx, &v) in alignment.velocities.iter().enumerate() {
+                    window_velocities[mono_start + idx] = v;
+                }
+            }
+            Err(rejection) => {
+                self.scale_coupling_measurement_rejections += 1;
+                match rejection {
+                    DpvoMonoViAlignmentRejection::NotEnoughFactors => {
+                        self.scale_coupling_rejection_counts.not_enough_factors += 1
+                    }
+                    DpvoMonoViAlignmentRejection::Underdetermined { .. } => {
+                        self.scale_coupling_rejection_counts.underdetermined += 1
+                    }
+                    DpvoMonoViAlignmentRejection::IllConditioned { .. } => {
+                        self.scale_coupling_rejection_counts.ill_conditioned += 1
+                    }
+                    DpvoMonoViAlignmentRejection::DegenerateSolve => {
+                        self.scale_coupling_rejection_counts.degenerate_solve += 1
+                    }
+                    DpvoMonoViAlignmentRejection::GravityNormDeviation { .. } => {
+                        self.scale_coupling_rejection_counts.gravity_norm += 1
+                    }
+                    DpvoMonoViAlignmentRejection::ScaleOutOfRange { .. } => {
+                        self.scale_coupling_rejection_counts.scale_range += 1
+                    }
+                }
+                self.scale_coupling_last_rejection = Some(rejection);
+            }
+        }
+
+        let should_increase = self.scale_estimator.is_converged();
+        self.scale_coupling_weight.step(should_increase);
+        let weight = self.scale_coupling_weight.value;
+
+        if weight <= 0.0 {
+            // Module doc: "at weight == 0.0 this is byte-identical to the
+            // visual-only path" — no `dpvo_vi_ba` call at all, not merely a
+            // zero-effect one.
+            return Ok((visual_solved.poses, visual_solved.patches, None));
+        }
+
+        let gravity_world = self
+            .scale_coupling_gravity
+            .unwrap_or_else(|| Vector3::new(0.0, 0.0, -imu_cfg.gravity_magnitude));
+        let imu_factors: Vec<DpvoImuFactor> = window_factors
+            .iter()
+            .map(|f| {
+                let mut factor = f.factor.clone();
+                factor.gravity_world = gravity_world;
+                DpvoImuFactor { i: f.i, j: f.j, factor }
+            })
+            .collect();
+        let imu_window = DpvoViWindow {
+            velocities: window_velocities,
+            factors: imu_factors,
+            body_to_camera: imu_cfg.body_to_camera.clone(),
+            bias_gyro,
+            bias_accel: self.imu_bias_accel,
+        };
+        let coupled = dpvo_vi_ba(problem, &imu_window, ba_config)?;
+        let mut imu_poses = coupled.poses;
+        let mut imu_patches = coupled.patches;
+
+        // Gentle scale-prior correction (module doc, "Gentle scale-prior
+        // application") — a no-op unless the posterior already has at
+        // least one measurement.
+        if let Some(posterior) = self.scale_estimator.posterior() {
+            apply_gentle_scale_correction(
+                &mut imu_poses,
+                &mut imu_patches,
+                local_fixedp,
+                &imu_window.factors,
+                &coupled.velocities,
+                &imu_window.body_to_camera,
+                &bias_gyro,
+                &self.imu_bias_accel,
+                posterior,
+                weight,
+                &sc_cfg.scale,
+            );
+        }
+
+        // Continuous cross-check -> SOFT rollback (module doc, "Continuous
+        // cross-check and soft rollback"): decay the weight an extra step
+        // and widen both posteriors' variance, rather than M5b's hard
+        // un-bootstrap — no pose/depth/velocity state needs undoing, since
+        // `blend_solutions` below never let the live map get MORE than
+        // `weight`-far from the pure-visual solution.
+        let mut nis_sum = 0.0_f64;
+        let mut nis_count = 0usize;
+        for f in &imu_window.factors {
+            nis_sum += imu_factor_nis(
+                &imu_poses[f.i],
+                &imu_poses[f.j],
+                &coupled.velocities[f.i],
+                &coupled.velocities[f.j],
+                &imu_window.body_to_camera,
+                &f.factor,
+                &bias_gyro,
+                &self.imu_bias_accel,
+            );
+            nis_count += 1;
+        }
+        let mean_nis = if nis_count > 0 { nis_sum / nis_count as f64 } else { 0.0 };
+        let (next_bad, should_soft_rollback) = rollback_monitor_step(
+            mean_nis,
+            sc_cfg.scale.rollback_mean_nis_bound,
+            self.scale_coupling_consecutive_bad,
+            sc_cfg.scale.rollback_consecutive_frames,
+        );
+        self.scale_coupling_consecutive_bad = next_bad;
+        if should_soft_rollback {
+            self.scale_estimator.soft_reset();
+            self.gyro_bias_estimator.soft_reset();
+            self.scale_coupling_weight.force_decay();
+            self.scale_coupling_rollback_count += 1;
+        }
+
+        let (blended_poses, blended_patches) =
+            blend_solutions(&visual_solved.poses, &visual_solved.patches, &imu_poses, &imu_patches, weight);
+        Ok((blended_poses, blended_patches, Some(coupled.velocities)))
     }
 }
 
@@ -1940,9 +2410,80 @@ fn gyro_bootstrap_gate_check(alignment: &GyroBiasAlignment, cfg: &DpvoImuConfig)
 /// "inject inconsistent factors, confirm rollback fires" is exercised here
 /// directly on the NIS sequence a genuinely poisoned bootstrap would
 /// produce, without needing a live session to generate one.
-fn rollback_monitor_step(mean_nis: f64, bound: f64, consecutive_bad: usize, threshold: usize) -> (usize, bool) {
+///
+/// `pub(crate)`, not private: Milestone M7's `crate::dpvo_scale_coupling`
+/// reuses this exact counter/threshold logic for its own SOFT rollback
+/// (decay the annealing weight + reset the scale posterior's variance,
+/// rather than this module's hard un-bootstrap) — same reasoning as every
+/// other `pub(crate)` widening in this file's M5b/M6 history.
+pub(crate) fn rollback_monitor_step(
+    mean_nis: f64,
+    bound: f64,
+    consecutive_bad: usize,
+    threshold: usize,
+) -> (usize, bool) {
     let next = if mean_nis.is_finite() && mean_nis <= bound { 0 } else { consecutive_bad + 1 };
     (next, next >= threshold)
+}
+
+/// Milestone M7 diagnostic fix (see [`DpvoOdometry::scale_coupling_step`]'s
+/// own doc, "Stage 2" comment, for the real-run finding this addresses):
+/// given a WINDOW-ORDERED (oldest-to-newest) slice of `arrival_index`
+/// values, return the start index of the maximal TRAILING run in which
+/// every consecutive pair differs by exactly `1` — i.e. the largest
+/// suffix with no `DpvoPatchGraph::keyframe`-folding gap. Returns
+/// `arrivals.len()` for an empty slice (an empty trailing run — the only
+/// sane answer, and one every call site already treats as "nothing to
+/// use" via a zero-length resulting slice) and `0` for a slice with no gap
+/// at all (the whole window is already one consecutive run — the common
+/// case before enough folding has happened for a gap to appear, confirmed
+/// by every M4/M4-perf/M5/M5b/M6 run's own windowing never needing this
+/// concept at all).
+fn trailing_consecutive_run_start(arrivals: &[usize]) -> usize {
+    if arrivals.is_empty() {
+        return 0;
+    }
+    let mut start = arrivals.len() - 1;
+    while start > 0 && arrivals[start] - arrivals[start - 1] == 1 {
+        start -= 1;
+    }
+    start
+}
+
+#[cfg(test)]
+mod scale_coupling_windowing_tests {
+    use super::trailing_consecutive_run_start;
+
+    #[test]
+    fn whole_window_is_one_run_when_there_is_no_gap() {
+        assert_eq!(trailing_consecutive_run_start(&[10, 11, 12, 13, 14]), 0);
+    }
+
+    #[test]
+    fn trims_to_the_maximal_trailing_consecutive_run() {
+        // Arrivals 10 and 13 survive with 11/12 folded away (a gap of 3),
+        // then 13..17 are all consecutive — the trailing run starts at the
+        // first index whose PRECEDING pair is non-consecutive.
+        let arrivals = [5, 7, 10, 13, 14, 15, 16, 17];
+        // index of value 13 is 3; preceding pair (10,13) has a gap of 3.
+        assert_eq!(trailing_consecutive_run_start(&arrivals), 3);
+    }
+
+    #[test]
+    fn single_pose_window_returns_zero() {
+        assert_eq!(trailing_consecutive_run_start(&[42]), 0);
+    }
+
+    #[test]
+    fn empty_window_returns_zero() {
+        assert_eq!(trailing_consecutive_run_start(&[]), 0);
+    }
+
+    #[test]
+    fn a_gap_immediately_before_the_last_frame_leaves_only_that_frame() {
+        let arrivals = [1, 2, 3, 9];
+        assert_eq!(trailing_consecutive_run_start(&arrivals), 3);
+    }
 }
 
 /// Given per-item anchor features (`num_items, 128, 3, 3`) and per-item

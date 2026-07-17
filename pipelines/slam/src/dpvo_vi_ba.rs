@@ -812,7 +812,13 @@ pub(crate) fn imu_factor_jacobians(
 /// change) so [`imu_factor_nis`] (Milestone M5b's rollback monitor) can
 /// reuse the exact same fallback formula rather than re-deriving it a
 /// second time.
-fn imu_factor_whitener(factor: &ImuPreintegrationFactor) -> Matrix9 {
+///
+/// `pub(crate)`, not private: Milestone M7's `crate::dpvo_scale_coupling`
+/// reuses this exact whitening (same reasoning as [`imu_factor_jacobians`]'s
+/// own `pub(crate)` widening for M5b's rollback monitor) for its
+/// finite-difference gentle-scale-correction Jacobian — see that module's
+/// doc.
+pub(crate) fn imu_factor_whitener(factor: &ImuPreintegrationFactor) -> Matrix9 {
     factor.covariance_sqrt_information().unwrap_or_else(|| {
         let mut diagonal = SVector::<f64, 9>::zeros();
         diagonal.fixed_rows_mut::<3>(0).fill(factor.weight_rotation.max(0.0).sqrt());
@@ -936,6 +942,17 @@ pub struct DpvoMonoViAlignment {
     pub condition_number: f64,
     /// Number of poses (`= poses.len()`) this alignment was solved over.
     pub window_frames: usize,
+    /// Milestone M7 (`docs/dpvo_droid_port_plan.md`): the unconstrained
+    /// solve's smallest singular value (`svd.singular_values.min()`),
+    /// echoed alongside `condition_number` so a caller can derive an
+    /// honest per-window scale-measurement VARIANCE proxy without
+    /// re-running the SVD a second time. See
+    /// `crate::dpvo_scale_coupling::scale_measurement_from_alignment`'s
+    /// module doc for the exact formula
+    /// (`variance ≈ mean_residual_after² / min_singular_value²`, the
+    /// classical worst-case bound on a linear-least-squares parameter's
+    /// own marginal variance, `σ²·[(AᵀA)⁻¹]_{ss} ≤ σ²/σ_min²`).
+    pub min_singular_value: f64,
 }
 
 /// Recover monocular scale, gravity, and per-pose velocities from a window
@@ -1181,6 +1198,7 @@ pub fn estimate_mono_vi_alignment(
         mean_residual_after,
         condition_number,
         window_frames: n,
+        min_singular_value: min_sv,
     })
 }
 
