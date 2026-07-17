@@ -796,6 +796,7 @@ dependencies = [
  "ndarray",
  "ort",
  "rand",
+ "rayon",
  "visloc-core",
 ]
 

@@ -27,7 +27,7 @@ default = []
 # build-time cost. See docs/superpoint_onnx_runtime_plan.md for the
 # validation gate and crates/vision/src/features/superpoint_onnx.rs for
 # the implementation.
-onnx-inference = ["dep:ort", "dep:ndarray"]
+onnx-inference = ["dep:ort", "dep:ndarray", "dep:rayon"]
 # Adds the CUDA execution provider: pulls the CUDA-enabled ONNX Runtime
 # binaries so `OnnxBackend::CudaThenCpu` runs SuperPoint on the GPU. Requires a
 # CUDA 12 runtime + cuDNN 9 at run time (add cuDNN to `LD_LIBRARY_PATH` if it is
@@ -40,3 +40,11 @@ rand = { workspace = true }
 visloc-core = { path = "../core", version = "0.1.0" }
 ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "api-22", "ndarray", "std", "tls-rustls"] }
 ndarray = { version = "0.17", optional = true }
+# M4-perf (`docs/dpvo_droid_port_plan.md`): edge-level parallelism for
+# `dpvo::correlation::corr_cpu`'s hot loop. Not a new crate in the dependency
+# tree — `rayon` is already a hard (non-optional) dependency of
+# `pipelines/slam` and a dev-dependency of this workspace's root crate; this
+# only exposes the already-resolved workspace version to `visloc-vision`,
+# gated the same way `ort`/`ndarray` are (only pulled in under
+# `onnx-inference`, since that is the only feature that compiles `dpvo/`).
+rayon = { workspace = true, optional = true }

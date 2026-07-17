@@ -547,16 +547,83 @@ fn transform_edge(
     }
 }
 
+/// The part of `projective_ops.py::transform`'s `Gij` action that depends
+/// only on the edge's *pose pair* (`pose_i`, `pose_j`, `translation_only`),
+/// not on which pixel of the patch is being reprojected: `Gij = poses[jj] *
+/// poses[ii].inv()` (projective_ops.py:60), decomposed once into its
+/// rotation matrix and translation vector.
+///
+/// # Why this exists (M4-perf, `docs/dpvo_droid_port_plan.md`)
+///
+/// [`reproject_patch_grid`] originally called the (now-)[`project_with_invariant`]
+/// math nine times per edge — once per `3×3` grid pixel — and every one of
+/// those nine calls independently recomputed `pose_j.compose(&pose_i.inverse())`
+/// and the quaternion→rotation-matrix conversion, even though all nine share
+/// the same `pose_i`/`pose_j`/`translation_only`. Hoisting that computation
+/// here (called once per edge instead of nine times) is a pure algebraic
+/// factoring — the returned `(R, t)` is bit-identical to what each of the
+/// nine inlined calls used to compute — not a numerics change. This was a
+/// small win in isolation (a handful of matrix ops per edge against
+/// `corr_cpu`'s thousands of dot products dominating the same per-frame
+/// budget), but free and correct, so it stays hoisted rather than
+/// reverted after profiling showed `corr_cpu` was the real hotspot.
+struct ReprojectionInvariant {
+    r: nalgebra::Matrix3<f64>,
+    t: Vector3<f64>,
+}
+
+fn reprojection_invariant(pose_i: &SE3, pose_j: &SE3, translation_only: bool) -> ReprojectionInvariant {
+    // Optionally zero the rotation to the identity (projective_ops.py:62-63:
+    // `Gij[...,3:] = [0,0,0,1]` — DPVO's 7-vector layout is
+    // `[tx,ty,tz,qx,qy,qz,qw]`, so slicing `[3:]` zeroes the *quaternion*
+    // slots, i.e. `tonly` keeps translation and discards rotation, despite
+    // sounding like the opposite). Used by [`flow_mag`]'s `tonly=True` call.
+    let mut g_ij = pose_j.compose(&pose_i.inverse());
+    if translation_only {
+        g_ij = SE3::new(UnitQuaternion::identity(), g_ij.translation);
+    }
+    ReprojectionInvariant { r: g_ij.rotation.to_rotation_matrix().into_inner(), t: g_ij.translation }
+}
+
 /// Jacobian-free core of `projective_ops.py::transform` (lines 56-68: `iproj`,
 /// the `SE3`/`Gij` action, `proj`), evaluated at one arbitrary pixel
-/// `(x, y)` with shared inverse depth `d` — i.e. exactly [`transform_edge`]'s
-/// geometry computation minus the analytic Jacobians, generalized to any
-/// pixel of a patch's `3×3` grid rather than only its center. Added for
-/// Milestone M4 (`docs/dpvo_droid_port_plan.md`): the per-frame VO loop needs
-/// this for two things `dpvo_patch_ba`'s BA-only M3 scope never required —
-/// correlation-lookup coordinates for the *whole* patch grid
-/// ([`reproject_patch_grid`]) and the keyframe motion-magnitude gate
-/// ([`flow_mag`]), neither of which touches a Jacobian.
+/// `(x, y)` with shared inverse depth `d` given an already-computed
+/// [`ReprojectionInvariant`] — i.e. exactly [`transform_edge`]'s geometry
+/// computation minus the analytic Jacobians, generalized to any pixel of a
+/// patch's `3×3` grid rather than only its center. Added for Milestone M4
+/// (`docs/dpvo_droid_port_plan.md`): the per-frame VO loop needs this for two
+/// things `dpvo_patch_ba`'s BA-only M3 scope never required — correlation-
+/// lookup coordinates for the *whole* patch grid ([`reproject_patch_grid`])
+/// and the keyframe motion-magnitude gate ([`flow_mag`]), neither of which
+/// touches a Jacobian.
+fn project_with_invariant(
+    inv: &ReprojectionInvariant,
+    intr_i: &DpvoIntrinsics,
+    intr_j: &DpvoIntrinsics,
+    x: f64,
+    y: f64,
+    inverse_depth: f64,
+) -> Vector2<f64> {
+    let xn = (x - intr_i.cx) / intr_i.fx;
+    let yn = (y - intr_i.cy) / intr_i.fy;
+    let d = inverse_depth;
+
+    let xyz0 = Vector3::new(xn, yn, 1.0);
+    let xyz1 = inv.r * xyz0 + inv.t * d;
+    let z1 = xyz1.z;
+
+    // proj (projective_ops.py:32-50): perspective-divide by Z.
+    let depth_inv_proj = 1.0 / z1.max(PROJECT_MIN_Z);
+    Vector2::new(
+        intr_j.fx * (depth_inv_proj * xyz1.x) + intr_j.cx,
+        intr_j.fy * (depth_inv_proj * xyz1.y) + intr_j.cy,
+    )
+}
+
+/// Single-pixel convenience wrapper around [`reprojection_invariant`] +
+/// [`project_with_invariant`] for call sites (just [`transform_point`]) that
+/// only ever reproject one pixel per edge, where hoisting would have no
+/// benefit.
 #[allow(clippy::too_many_arguments)]
 fn project_no_jacobian(
     pose_i: &SE3,
@@ -568,33 +635,8 @@ fn project_no_jacobian(
     inverse_depth: f64,
     translation_only: bool,
 ) -> Vector2<f64> {
-    let xn = (x - intr_i.cx) / intr_i.fx;
-    let yn = (y - intr_i.cy) / intr_i.fy;
-    let d = inverse_depth;
-
-    // Gij = poses[jj] * poses[ii].inv() (projective_ops.py:60), optionally
-    // with its rotation zeroed to the identity (projective_ops.py:62-63:
-    // `Gij[...,3:] = [0,0,0,1]` — DPVO's 7-vector layout is
-    // `[tx,ty,tz,qx,qy,qz,qw]`, so slicing `[3:]` zeroes the *quaternion*
-    // slots, i.e. `tonly` keeps translation and discards rotation, despite
-    // sounding like the opposite). Used by [`flow_mag`]'s `tonly=True` call.
-    let mut g_ij = pose_j.compose(&pose_i.inverse());
-    if translation_only {
-        g_ij = SE3::new(UnitQuaternion::identity(), g_ij.translation);
-    }
-
-    let r = g_ij.rotation.to_rotation_matrix().into_inner();
-    let t = g_ij.translation;
-    let xyz0 = Vector3::new(xn, yn, 1.0);
-    let xyz1 = r * xyz0 + t * d;
-    let z1 = xyz1.z;
-
-    // proj (projective_ops.py:32-50): perspective-divide by Z.
-    let depth_inv_proj = 1.0 / z1.max(PROJECT_MIN_Z);
-    Vector2::new(
-        intr_j.fx * (depth_inv_proj * xyz1.x) + intr_j.cx,
-        intr_j.fy * (depth_inv_proj * xyz1.y) + intr_j.cy,
-    )
+    let inv = reprojection_invariant(pose_i, pose_j, translation_only);
+    project_with_invariant(&inv, intr_i, intr_j, x, y, inverse_depth)
 }
 
 /// Reproject a patch's anchor pixel `(x, y, d)` from frame `i` into frame
@@ -634,18 +676,21 @@ pub fn reproject_patch_grid(
     intr_j: &DpvoIntrinsics,
     patch: &DpvoPatch,
 ) -> [[Vector2<f64>; 3]; 3] {
+    // M4-perf (`docs/dpvo_droid_port_plan.md`): computed once and reused for
+    // all nine grid pixels below instead of once per pixel — see
+    // [`reprojection_invariant`]'s doc for why this is a pure hoist, not a
+    // numerics change.
+    let inv = reprojection_invariant(pose_i, pose_j, false);
     let mut out = [[Vector2::new(0.0, 0.0); 3]; 3];
     for (row_index, dy) in (-1..=1i32).enumerate() {
         for (col_index, dx) in (-1..=1i32).enumerate() {
-            out[row_index][col_index] = project_no_jacobian(
-                pose_i,
-                pose_j,
+            out[row_index][col_index] = project_with_invariant(
+                &inv,
                 intr_i,
                 intr_j,
                 patch.x + dx as f64,
                 patch.y + dy as f64,
                 patch.inverse_depth,
-                false,
             );
         }
     }

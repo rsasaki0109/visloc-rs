@@ -81,7 +81,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use visloc_core::geometry::SE3;
-use visloc_vision::dpvo::correlation::corr_cpu;
+use visloc_vision::dpvo::correlation::{corr_cpu_prebuilt_target, ChannelLastImage};
 use visloc_vision::dpvo::npz::{NpzArchive, NpzError};
 use visloc_vision::dpvo::onnx_session::{DpvoOnnxError, DpvoOnnxSession};
 use visloc_vision::dpvo::patchify::patchify_cpu;
@@ -206,10 +206,26 @@ pub struct DpvoOdometryStats {
 /// (`avg_pool2d(fmap, 1, 1)` — a no-op, kept only for naming symmetry with
 /// upstream), `level1` is a further ×4 average-pooled map
 /// (`avg_pool2d(fmap, 4, 4)`, `dpvo.py:438`).
+///
+/// # M4-perf: stored channel-last, not channel-first (`docs/dpvo_droid_port_plan.md`)
+///
+/// Both levels are stored as [`ChannelLastImage`] — already transposed into
+/// the layout [`corr_cpu_prebuilt_target`] needs — rather than the raw
+/// `(channels, height, width)` `ort`/`avg_pool_4x4` output. A frame's pyramid
+/// is built exactly once (`process_frame`, when the frame arrives) but read
+/// by [`corr_pyramid`] once per active edge group per `update_step`/
+/// `motion_probe` call for as long as the frame stays inside the active
+/// window (up to `REMOVAL_WINDOW`/`PATCH_LIFETIME` calls) — profiling
+/// (plan doc, "M4-perf results") showed re-transposing the same ~120x188x128
+/// feature map from scratch on every one of those reads was a real,
+/// avoidable cost, not just a theoretical one. Nothing outside this module
+/// reads `level0`/`level1` in channel-first form (checked directly — see the
+/// plan doc's writeup), so there is no other consumer to keep a duplicate
+/// channel-first copy for.
 #[derive(Debug, Clone)]
 struct FramePyramid {
-    level0: Array3<f32>,
-    level1: Array3<f32>,
+    level0: ChannelLastImage,
+    level1: ChannelLastImage,
 }
 
 /// The full DPVO visual-odometry loop: ONNX sessions + the [`DpvoPatchGraph`]
@@ -344,8 +360,16 @@ impl DpvoOdometry {
             cx: self.config.intrinsics.cx / RES as f64,
             cy: self.config.intrinsics.cy / RES as f64,
         };
-        let level1 = avg_pool_4x4(fmap.view());
-        let candidate_pyramid = FramePyramid { level0: fmap, level1 };
+        // M4-perf (`docs/dpvo_droid_port_plan.md`): transpose both pyramid
+        // levels to channel-last exactly once here, at the point the
+        // pyramid is built — see `FramePyramid`'s doc for why this replaces
+        // storing (and repeatedly re-transposing) the raw channel-first
+        // arrays.
+        let level1_chw = avg_pool_4x4(fmap.view());
+        let candidate_pyramid = FramePyramid {
+            level0: ChannelLastImage::from_chw(fmap.view()),
+            level1: ChannelLastImage::from_chw(level1_chw.view()),
+        };
 
         if self.graph.n_frames() > 0 && !self.graph.is_initialized() {
             let flow = self.motion_probe(&predicted_pose, &intr, &candidate_pyramid)?;
@@ -439,8 +463,8 @@ impl DpvoOdometry {
         let corr_flat = corr_pyramid(
             anchor_gmap.view(),
             coords_grid_px.view(),
-            candidate_pyramid.level0.view(),
-            candidate_pyramid.level1.view(),
+            &candidate_pyramid.level0,
+            &candidate_pyramid.level1,
         );
         self.stats.correlation_ms_total += corr_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -522,8 +546,8 @@ impl DpvoOdometry {
             let group_corr = corr_pyramid(
                 anchor_gmap.view(),
                 coords_grid_px.view(),
-                target_pyramid.level0.view(),
-                target_pyramid.level1.view(),
+                &target_pyramid.level0,
+                &target_pyramid.level1,
             );
             for (local, &idx) in idxs.iter().enumerate() {
                 corr_flat.row_mut(idx).assign(&group_corr.row(local));
@@ -636,8 +660,8 @@ impl DpvoOdometry {
 fn corr_pyramid(
     anchor_gmap: ArrayView4<'_, f32>,
     coords_grid_px: ArrayView4<'_, f32>,
-    target_level0: ArrayView3<'_, f32>,
-    target_level1: ArrayView3<'_, f32>,
+    target_level0: &ChannelLastImage,
+    target_level1: &ChannelLastImage,
 ) -> Array2<f32> {
     let num_items = anchor_gmap.dim().0;
     let mut coords_l1 = Array4::<f32>::zeros((num_items, PATCH, PATCH, 2));
@@ -649,8 +673,11 @@ fn corr_pyramid(
             }
         }
     }
-    let corr1 = corr_cpu(anchor_gmap, target_level0, coords_grid_px, CORR_RADIUS);
-    let corr2 = corr_cpu(anchor_gmap, target_level1, coords_l1.view(), CORR_RADIUS);
+    // M4-perf (`docs/dpvo_droid_port_plan.md`): `target_level0`/`target_level1`
+    // arrive pre-transposed (see `FramePyramid`'s doc) — `corr_cpu_prebuilt_target`
+    // skips the per-call target-side transpose `corr_cpu` would otherwise redo.
+    let corr1 = corr_cpu_prebuilt_target(anchor_gmap, target_level0, coords_grid_px, CORR_RADIUS);
+    let corr2 = corr_cpu_prebuilt_target(anchor_gmap, target_level1, coords_l1.view(), CORR_RADIUS);
     let taps = 2 * CORR_RADIUS + 1;
     let mut out = Array2::<f32>::zeros((num_items, CORR_DIM));
     for i in 0..num_items {
@@ -751,9 +778,110 @@ mod tests {
     fn corr_pyramid_shape_matches_corr_dim() {
         let anchor = Array4::<f32>::zeros((2, FNET_DIM, PATCH, PATCH));
         let coords = Array4::<f32>::zeros((2, PATCH, PATCH, 2));
-        let level0 = Array3::<f32>::zeros((FNET_DIM, 16, 16));
-        let level1 = Array3::<f32>::zeros((FNET_DIM, 4, 4));
-        let out = corr_pyramid(anchor.view(), coords.view(), level0.view(), level1.view());
+        let level0 = ChannelLastImage::from_chw(Array3::<f32>::zeros((FNET_DIM, 16, 16)).view());
+        let level1 = ChannelLastImage::from_chw(Array3::<f32>::zeros((FNET_DIM, 4, 4)).view());
+        let out = corr_pyramid(anchor.view(), coords.view(), &level0, &level1);
         assert_eq!(out.shape(), &[2, CORR_DIM]);
+    }
+
+    /// M4-perf micro-benchmark (`docs/dpvo_droid_port_plan.md`'s "M4-perf
+    /// results"): times the **full** per-group correlation-assembly path —
+    /// [`reproject_patch_grid`] (this crate's own M3/M4 addition) followed
+    /// by [`corr_pyramid`] (this file's 2-pyramid-level `corr_cpu`
+    /// assembly) — at a single target-frame group's worth of DPVO's real
+    /// working set (a "few thousand edges" one `by_target` group can hold
+    /// at `fast.yaml`/`default.yaml` scale; see `update_step`'s own
+    /// `by_target` grouping). This is the same call sequence
+    /// `update_step`/`motion_probe` run per group, just with a synthetic
+    /// pose/patch graph instead of a live EuRoC session, so this test needs
+    /// no ONNX runtime, fixtures, or `ORT_DYLIB_PATH` — only
+    /// `--release --features onnx-inference` (this whole module's gate) and
+    /// `--ignored` (it is a timing report, not a correctness check; shape/
+    /// numeric correctness of both pieces is already covered by their own
+    /// unit/fixture tests elsewhere).
+    ///
+    /// ```text
+    /// cargo test -p visloc-slam --release --features onnx-inference \
+    ///   --lib dpvo_vo::tests::correlation_assembly_perf_at_realistic_working_set \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "timing report, not a correctness check; run --release, see doc comment"]
+    fn correlation_assembly_perf_at_realistic_working_set() {
+        use nalgebra::{UnitQuaternion, Vector3};
+
+        let num_edges = 3000;
+        // EuRoC-shaped stride-4 (`RES`) feature map: 752x480 input -> 188x120.
+        let (level0_h, level0_w) = (120usize, 188usize);
+        let intr = DpvoIntrinsics { fx: 190.0, fy: 190.0, cx: 94.0, cy: 60.0 };
+        let pose_i = SE3::identity();
+        // A modest, non-degenerate baseline (small rotation + translation),
+        // shared by every synthetic edge below — realistic magnitude for a
+        // temporal-neighbour edge, not chosen to stress any particular
+        // reprojection edge case.
+        let pose_j = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.03),
+            Vector3::new(0.05, 0.0, 0.02),
+        );
+
+        // Deterministic, dependency-free pseudo-randomness (xorshift), same
+        // rationale as `crates/vision/src/dpvo/correlation.rs`'s own perf
+        // test: this is a timing report, not a statistical study, so a tiny
+        // in-file PRNG avoids pulling in `rand`'s distribution API just for
+        // this.
+        let mut state = 0x1234_5678_9abc_def1_u64;
+        let mut next_f64 = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let mut anchor_gmap = Array4::<f32>::zeros((num_edges, FNET_DIM, PATCH, PATCH));
+        for v in anchor_gmap.iter_mut() {
+            *v = next_f64() as f32;
+        }
+        let level0 = Array3::<f32>::from_shape_fn((FNET_DIM, level0_h, level0_w), |_| next_f64() as f32);
+        let level1 = avg_pool_4x4(level0.view());
+        // Built once, outside the timed section below — mirrors the real
+        // per-frame steady state after the M4-perf caching change
+        // (`FramePyramid` stores these pre-transposed; see its doc comment),
+        // not the one-time construction cost.
+        let level0_hwc = ChannelLastImage::from_chw(level0.view());
+        let level1_hwc = ChannelLastImage::from_chw(level1.view());
+
+        let patches: Vec<DpvoPatch> = (0..num_edges)
+            .map(|_| DpvoPatch {
+                x: next_f64() * level0_w as f64,
+                y: next_f64() * level0_h as f64,
+                inverse_depth: 0.1 + next_f64(),
+            })
+            .collect();
+
+        let reproject_start = std::time::Instant::now();
+        let mut coords_grid_px = Array4::<f32>::zeros((num_edges, PATCH, PATCH, 2));
+        for (edge, patch) in patches.iter().enumerate() {
+            let grid = reproject_patch_grid(&pose_i, &pose_j, &intr, &intr, patch);
+            for py in 0..PATCH {
+                for px in 0..PATCH {
+                    coords_grid_px[(edge, py, px, 0)] = grid[py][px].x as f32;
+                    coords_grid_px[(edge, py, px, 1)] = grid[py][px].y as f32;
+                }
+            }
+        }
+        let reproject_ms = reproject_start.elapsed().as_secs_f64() * 1000.0;
+        println!("  [perf] reproject_patch_grid x{num_edges} edges: {reproject_ms:.3} ms/call");
+
+        let corr_start = std::time::Instant::now();
+        let corr_flat =
+            corr_pyramid(anchor_gmap.view(), coords_grid_px.view(), &level0_hwc, &level1_hwc);
+        let corr_ms = corr_start.elapsed().as_secs_f64() * 1000.0;
+        println!("  [perf] corr_pyramid (2 levels) x{num_edges} edges: {corr_ms:.3} ms/call");
+        assert_eq!(corr_flat.shape(), &[num_edges, CORR_DIM]);
+
+        println!(
+            "  [perf] total correlation-assembly (reproject + corr_pyramid): {:.3} ms/call",
+            reproject_ms + corr_ms
+        );
     }
 }

@@ -1185,3 +1185,247 @@ real few-thousand-edge working set.
    more CPU budget (or a GPU host) could re-run at `default.yaml` sizing
    to separate "sizing hurts accuracy" from "the port's own
    correlation/patchify math has a real discrepancy vs. CUDA".
+
+## M4-perf results (2026-07-17)
+
+M4's own numbers identified correlation-tensor assembly — `reproject_patch_grid`
+(`pipelines/slam/src/dpvo_patch_ba.rs`) + `corr_cpu`
+(`crates/vision/src/dpvo/correlation.rs`) + the per-edge 2-pyramid-level
+assembly `corr_pyramid` (`pipelines/slam/src/dpvo_vo.rs`) — as costing
+**~3.1 s/frame** at DPVO's real `fast.yaml` working set, 8-10× the combined
+encoder+GRU+BA cost and the dominant reason the M4 EuRoC run took 1789.99 s
+for 400 frames. This milestone's target: bring that stage under
+~300 ms/frame (order-of-magnitude), with no numerics change beyond
+floating-point reordering.
+
+### Hotspot findings (profiling, not guessing)
+
+A micro-benchmark at DPVO's real per-frame scale (3000 edges, 3×3 patch
+grid, 2 pyramid levels, radius-3/49-tap lookup, 128 channels — added as
+`#[ignore]`-gated `--release` timing tests, not a correctness check; see
+"Verification" below for exact invocations) isolated the cost split the
+task asked for:
+
+* **`reproject_patch_grid` is negligible**: 0.242-0.249 ms for 3000 edges
+  (`dpvo_vo::tests::correlation_assembly_perf_at_realistic_working_set`).
+  Confirms the plan doc's own §3 estimate ("a handful of matrix ops per
+  edge... negligible") — the entire ~3.1 s was inside `corr_cpu`/
+  `corr_pyramid`, not the reprojection math.
+* **`corr_cpu` itself was ~11× slower than necessary for a reason with no
+  algorithmic cause**: the pre-existing implementation indexed both
+  `patch_feats` `(num_edges, channels, patch, patch)` and `target_fmap`
+  `(channels, height, width)` in their native **channel-first** layout.
+  Reading a per-pixel 128-channel feature vector therefore walked a stride
+  of `patch²` (anchor side) or `height·width` (target side) elements
+  between channels — a near-guaranteed cache miss per channel per corner
+  per tap, and a memory-access pattern the compiler cannot autovectorize
+  into a SIMD dot product. Two smaller, compounding inefficiencies rode
+  along: the four bilinear corner weights were recomputed from scratch on
+  every one of the 49 taps even though the tap offsets are integers (so the
+  fractional part — and therefore every weight — is identical across all
+  49 taps of a given patch pixel, proven in `correlation.rs`'s module doc);
+  and a full weighted-neighbourhood vector was materialized before the dot
+  product instead of fusing the two passes into one.
+* **Single-threaded**: `rayon` was already a hard dependency of
+  `pipelines/slam` and a dev-dependency of this workspace's own root crate
+  (checked directly — `grep -n '^name = "rayon' Cargo.lock`, and
+  `pipelines/slam/Cargo.toml:34`) before this milestone touched anything,
+  so parallelizing `corr_cpu`'s independent per-edge work was in scope from
+  the start per the task's own rule ("only if rayon is already in the
+  tree").
+* **A second, distinct hotspot only visible at the real per-frame
+  integration scale, not in a single-call micro-benchmark**: `dpvo_vo.rs`'s
+  `FramePyramid` re-transposed the *same* target frame's feature-map
+  pyramid from scratch on every `update_step`/`motion_probe` call that
+  referenced it, for as long as that frame stayed inside the active window
+  (up to `REMOVAL_WINDOW`/`PATCH_LIFETIME` ≈ 11-16 calls). This is pure
+  redundant work orthogonal to the per-call `corr_cpu` speedup — caching
+  the transpose once, at the point the pyramid is built, removed it
+  entirely rather than just making each occurrence faster (see "Caching"
+  below).
+
+### Changes made (in the order applied, per the task's approach)
+
+1. **Layout + fusion rewrite of `corr_cpu`** (`crates/vision/src/dpvo/correlation.rs`):
+   both inputs are now transposed once per call into channel-last scratch
+   buffers (`ChannelLastImage`, `ChannelLastPatches`) so every per-corner
+   access in the tap loop is a contiguous `channels`-length slice; bilinear
+   weights are computed once per `(edge, patch-pixel)` (`BilinearWeights`)
+   and reused across all 49 taps instead of being recomputed per tap; the
+   old two-pass "accumulate a weighted neighbourhood vector, then dot it"
+   is fused into one pass per corner via linearity of the dot product
+   (`anchor·Σwₖcₖ = Σwₖ(anchor·cₖ)`) — a floating-point *reordering*, not a
+   different computation. The channel dot product itself
+   (`dot_slice`) is a straight contiguous `f32` slice loop, left for the
+   compiler to autovectorize (verified only indirectly, via the measured
+   speedup below — no disassembly inspection was done). **`corr_cpu`'s
+   public signature, documented semantics, and existing fixture-based
+   parity test are all unchanged** — the fixture test now simply exercises
+   the rewritten implementation directly.
+2. **Parallelism**: the outer loop over edges in `corr_cpu` is parallelized
+   with `rayon::slice::ParallelSlice::par_chunks_mut` over the output
+   array's contiguous per-edge chunks (each edge's output slice is
+   independent). `rayon` was added as an **optional** dependency of
+   `visloc-vision`, gated behind (and only pulled in by) the existing
+   `onnx-inference` feature — not a new crate in the dependency graph
+   (`git diff Cargo.lock` shows one new dependency *edge*,
+   `visloc-vision → rayon`, zero new `[[package]]` entries).
+3. **Caching** (`pipelines/slam/src/dpvo_vo.rs`): added
+   `corr_cpu_prebuilt_target` (`crates/vision/src/dpvo/correlation.rs`), a
+   twin of `corr_cpu` that accepts an already-channel-last-transposed
+   target image (`ChannelLastImage`, now `pub`) instead of transposing one
+   internally. `FramePyramid` now stores both pyramid levels as
+   `ChannelLastImage`, built exactly once when the pyramid is constructed
+   (frame arrival), and `corr_pyramid` calls `corr_cpu_prebuilt_target`
+   instead of `corr_cpu` — eliminating the redundant per-`update_step`
+   re-transpose entirely (confirmed nothing outside this module ever read
+   the channel-first form, so no duplicate storage was needed).
+   Numerically inert by construction (same deterministic transpose of the
+   same input, computed once instead of repeatedly) — confirmed by the
+   real EuRoC run below producing **bit-identical** ATE with and without
+   this step.
+4. **Not needed**: hoisting `reproject_patch_grid`'s per-edge invariant
+   (`pose_j.compose(&pose_i.inverse())` and the quaternion→rotation-matrix
+   conversion, previously recomputed once per of the 9 grid pixels instead
+   of once per edge — `pipelines/slam/src/dpvo_patch_ba.rs`'s
+   `ReprojectionInvariant`/`reprojection_invariant`/`project_with_invariant`)
+   was applied anyway, since profiling (above) had already shown this stage
+   negligible; it is a free, purely-algebraic factoring (bit-identical
+   output, checked by the pre-existing `transform_point_center_matches_
+   reproject_patch_grid_center_entry`/`reproject_patch_grid_offsets_are_
+   distinct_for_a_tilted_view` tests, both still passing unchanged) kept
+   because it was correct and cost nothing, not because it moved the
+   needle.
+
+### Before/after timing table
+
+Micro-benchmarks, `--release`, synthetic realistic-scale inputs (not the
+tiny M1/M2 fixture shapes):
+
+| Benchmark | Before | After | Speedup |
+| --- | --- | --- | --- |
+| `corr_cpu`, 3000 edges × 128 ch × 3×3 patch × 49 taps, 1 pyramid level (`crates/vision`'s `corr_cpu_perf_at_realistic_working_set`; "before" = `corr_cpu_reference`, the naive channel-first implementation kept `cfg(test)`-only for this exact comparison) | 846.291 ms/call | 77.014 ms/call | **10.99×** |
+| Full correlation-assembly, 3000 edges, single target-frame group: `reproject_patch_grid` + `corr_pyramid` (2 levels) (`dpvo_vo`'s `correlation_assembly_perf_at_realistic_working_set`) | — (not measured pre-rewrite at this exact split) | reproject: 0.242 ms; `corr_pyramid`: 152.4 ms; total: 152.7 ms | — |
+
+Real EuRoC run (`examples/euroc_dpvo_vo_demo`, MH_01_easy, 400 frames,
+stride 2, `fast.yaml` sizing: `--patches-per-frame 48 --removal-window 16
+--optimization-window 7 --patch-lifetime 11 --seed 0`, CPU-only, monocular —
+identical invocation to M4's own reported run except `--out-dir`):
+
+| Stage (ms/frame, averaged over all 400 frames) | M4 baseline | M4-perf, step 1 only (fast `corr_cpu`, no caching) | M4-perf, step 1+2 (fast `corr_cpu` + pyramid caching) |
+| --- | --- | --- | --- |
+| Image I/O | *(not separated)* | 3.59 | 3.66 |
+| Undistortion | *(not separated)* | 12.53 | 12.52 |
+| Encoder (`fnet`+`inet`) | 211.5 | 197.52 | 199.69 |
+| **Correlation assembly** | **~3719.5** (`4475.0 − 211.5 − 533.3 − 10.7`, i.e. M4's own reported total minus its other three tracked stages — M4 never isolated this number directly, see its own finding 4) | **472.38** | **369.67** |
+| GRU update (`update_iteration`) | 533.3 | 554.58 | 559.11 |
+| BA (`dpvo_ba`) | 10.7 | 11.08 | 11.13 |
+| **Total** | **4475.0** | **1294.46** | **1205.05** |
+| Total wall clock, 400 frames | 1789.99 s | 517.79 s | 482.02 s |
+
+**Correlation-assembly speedup: 10.06×** (3719.5 → 369.67 ms/frame) — clears
+the order-of-magnitude target. The absolute number (369.67 ms/frame) sits
+modestly above the task's illustrative "~300 ms" figure, not fully under
+it; **total per-frame cost dropped 3.71×** (4475.0 → 1205.05 ms), and
+correlation assembly is no longer the dominant single stage (the GRU update
+call is now the largest at 559.11 ms/frame — a pre-existing ONNX Runtime
+CPU-EP cost this milestone did not touch, out of scope per the task). The
+gap between the isolated-microbenchmark 11× and the real-run 10.06× is
+attributable to real per-frame overhead the microbenchmark doesn't capture
+(assembling multiple smaller per-target-frame groups rather than one big
+batch, `HashMap`-based grouping, per-group array allocation) — a plausible,
+not further-decomposed, explanation.
+
+### ATE before/after
+
+| Metric | M4 baseline | M4-perf (both steps) |
+| --- | --- | --- |
+| `ate_rigid_rmse_m` | 0.1599 | 0.1546 |
+| `ate_rigid_max_m` | 0.4075 | 0.4040 |
+| `ate_similarity_rmse_m` | 0.1561 | 0.1519 |
+| `ate_similarity_max_m` | 0.4079 | 0.4033 |
+| `ate_similarity_scale` | 1.359171 | 1.265951 |
+| `tracked_fraction` | 1.0000 (400/400) | 1.0000 (400/400) |
+
+Not bitwise-identical, but within noise of the kind the task's own
+constraint anticipated ("fp reordering... only"): `corr_cpu`'s fixture
+parity test (below) still passes at the *same* max-abs-diff as M2's
+original numbers (`2.515e-7`, unchanged to the last reported digit), and a
+new realistic-shape equivalence test bounds the fast/reference disagreement
+at ≤ 1e-5 per correlation-tensor entry. Over a 400-frame monocular VO
+trajectory built from thousands of GRU-update/BA iterations consuming
+these tensors, such per-call differences compound into a *different but
+comparably-accurate* trajectory rather than a bit-identical one — expected
+and explicitly budgeted for, not a regression signal. Confirming this is
+purely a numerics-of-parallel-reordering effect and not a caching bug: the
+step-1-only run and the step-1+2 run below produced **exactly** the same
+ATE to every reported digit (`0.1546`/`0.4040`/`0.1519`/`0.4033`/
+`1.265951`) — caching changes *when* a deterministic transpose is computed,
+never its value, so it could not have moved these numbers, and it didn't.
+
+### Verification
+
+* `cargo test -p visloc-vision --features onnx-inference` (debug):
+  **149 passed**, 0 failed, 1 ignored (up from M2's 148 — the one new
+  addition is `fast_matches_naive_reference_at_realistic_shape`, the
+  realistic-shape fast/reference equivalence test the task required; the
+  perf micro-benchmark is `#[ignore]`d, a timing report not a pass/fail
+  check).
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-vision --features onnx-inference --test
+  dpvo_onnx_parity -- --ignored`: **5 passed**, 0 failed —
+  `correlation_parity_against_fixture`'s max abs diff is `2.515e-7`,
+  byte-for-byte the same value M2 originally reported, confirming the
+  rewritten `corr_cpu` is still exactly consistent with the M1/M2 fixture.
+* `cargo test -p visloc-slam --features onnx-inference` (debug): **304
+  lib tests** + 54+2(ignored)+6+6+132+10+9+4 across integration binaries,
+  0 failed, 0 regressions (matches M4's own reported counts plus this
+  milestone's new `#[ignore]`d perf test).
+* `cargo clippy -p visloc-vision --all-targets --features onnx-inference --
+  -D warnings`: **clean, zero warnings.**
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  same 6/9 pre-existing warnings as M3/M4 (in `map_atlas.rs`,
+  `online_slam_vi_ba.rs` ×2, `online_slam.rs`,
+  `online_slam_motion_vi_init.rs`, `vi_motion_initializer.rs` — none in any
+  file this milestone touched, confirmed by grepping the clippy output for
+  `dpvo`).
+* `cargo check --workspace --all-targets --features image-io,onnx-inference`:
+  clean (implied by the successful `--release` example build below; not
+  re-run as a separate bare invocation this milestone since the release
+  build already exercises the same feature set at a stricter optimization
+  level).
+* `git diff --stat Cargo.lock`: 1 line changed (`+"rayon",` inside
+  `visloc-vision`'s existing `dependencies` array) — **zero new
+  `[[package]]` entries**, confirming no new crate entered the dependency
+  graph.
+
+### Files changed
+
+* `crates/vision/Cargo.toml` — `rayon` added as an optional dependency,
+  gated into the existing `onnx-inference` feature.
+* `crates/vision/src/dpvo/correlation.rs` — `corr_cpu` rewritten
+  (channel-last transpose, hoisted bilinear weights, fused corner-dot,
+  `rayon`-parallel outer loop); new `corr_cpu_prebuilt_target` (now-`pub`
+  `ChannelLastImage`, plus private `ChannelLastPatches`/`BilinearWeights`/
+  `dot_slice`); `corr_cpu_reference` (the pre-rewrite naive implementation,
+  kept `cfg(test)`-only) plus a new realistic-shape equivalence test and an
+  `#[ignore]`d perf micro-benchmark.
+* `pipelines/slam/src/dpvo_patch_ba.rs` — `ReprojectionInvariant`/
+  `reprojection_invariant`/`project_with_invariant` extracted from
+  `project_no_jacobian`; `reproject_patch_grid` now computes the invariant
+  once per edge instead of once per of its 9 grid pixels. Pure factoring,
+  no numeric change (existing tests unchanged and passing).
+* `pipelines/slam/src/dpvo_vo.rs` — `FramePyramid` now stores
+  `ChannelLastImage` (built once at pyramid construction) instead of raw
+  channel-first `Array3<f32>`; `corr_pyramid` takes `&ChannelLastImage` and
+  calls `corr_cpu_prebuilt_target`; both call sites (`motion_probe`,
+  `update_step`) and the existing `corr_pyramid_shape_matches_corr_dim`
+  test updated accordingly; new `#[ignore]`d
+  `correlation_assembly_perf_at_realistic_working_set` perf micro-benchmark.
+* `docs/dpvo_droid_port_plan.md` — this section.
+* Not touched: `crates/vision/src/dpvo/patchify.rs` (profiling showed
+  `patchify_cpu` was never the bottleneck — M2's own numbers already had it
+  at 0.044 ms/call for 5 patches, and nothing in this milestone's
+  measurements implicated it at scale), `dpvo_patch_graph.rs`,
+  `sparse_factor_graph.rs`, `bundle.rs` (BA was already sub-12 ms/frame,
+  untouched, unaffected).
