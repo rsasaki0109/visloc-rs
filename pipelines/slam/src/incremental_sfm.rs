@@ -2088,6 +2088,85 @@ mod tests {
         );
     }
 
+    /// M2.1 acceptance: `docs/colmap_port_plan.md`'s M2.1 milestone widens
+    /// `examples/unordered_sfm_demo.rs`'s verified-pair keep-list so a
+    /// `PANORAMIC` (pure-rotation, zero-baseline) pair now reaches
+    /// `PairwiseMatches`/this mapper, matching COLMAP's own
+    /// `database_cache.cc` `UseInlierMatchesCheck` gate. This must not make
+    /// such a pair *seedable*: COLMAP's own
+    /// `IncrementalMapperImpl::EstimateInitialTwoViewGeometry` re-derives its
+    /// own relative pose and rejects init candidates whose triangulation
+    /// angle doesn't clear `init_min_tri_angle`, independent of any stored
+    /// `ConfigurationType` — this mapper's [`place_seed_pair`] already has
+    /// the same independent architecture (re-estimate the relative pose,
+    /// gate on how many inliers actually triangulate), so no new exclusion
+    /// mechanism is needed; this test pins that the existing gate covers the
+    /// newly-admitted pair type too.
+    #[test]
+    fn pure_rotation_pair_is_rejected_as_a_seed_even_though_it_now_reaches_pairwise() {
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        // A scattered point cloud with real depth variation (same shape as
+        // `colmap_verification.rs`'s `general_scene_points` fixture).
+        let mut points = Vec::new();
+        for i in 0..6 {
+            for j in 0..4 {
+                points.push(Point3::new(
+                    -1.5 + 0.6 * i as f64,
+                    -1.0 + 0.7 * j as f64,
+                    3.0 + 0.8 * ((i + j) % 5) as f64,
+                ));
+            }
+        }
+
+        // Camera 0 at the world origin; camera 1 at the SAME origin, only
+        // rotated — a pure-rotation pair, zero baseline, exactly the
+        // `PANORAMIC` configuration `TwoViewGeometryVerifier` would classify
+        // this as (see `colmap_verification.rs`'s
+        // `pure_rotation_classifies_panoramic`).
+        let pose0 = Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros());
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.12);
+        let pose1 = Pose::from_world_to_camera(yaw, Vector3::zeros());
+
+        let mut kp0 = Vec::new();
+        let mut kp1 = Vec::new();
+        let mut matches = Vec::new();
+        for p in &points {
+            if let (Some(px0), Some(px1)) = (
+                project(&camera, &pose0, p),
+                project(&camera, &pose1, p),
+            ) {
+                matches.push((kp0.len(), kp1.len()));
+                kp0.push(px0);
+                kp1.push(px1);
+            }
+        }
+        assert!(
+            matches.len() >= 15,
+            "fixture sanity: pure rotation should still leave most points in both views"
+        );
+
+        let features = vec![
+            FeatureSet::new(kp0, vec![vec![0.0f32; 4]; matches.len()]).unwrap(),
+            FeatureSet::new(kp1, vec![vec![0.0f32; 4]; matches.len()]).unwrap(),
+        ];
+        let pair = PairwiseMatches {
+            image_i: 0,
+            image_j: 1,
+            matches,
+        };
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            ..IncrementalSfmConfig::default()
+        };
+        let mut poses = vec![None, None];
+        assert!(
+            !place_seed_pair(&camera, &features, &pair, &config, &mut poses),
+            "a zero-baseline (panoramic) pair must never bootstrap a seed, \
+             even though M2.1 now lets its correspondences reach PairwiseMatches"
+        );
+        assert!(poses[0].is_none() && poses[1].is_none(), "rejected seed must leave poses untouched");
+    }
+
     #[test]
     fn build_tracks_merges_shared_observations() {
         // Two images both see point P (kp 0 in each) and image-2 sees it too.

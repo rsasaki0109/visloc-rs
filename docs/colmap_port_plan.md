@@ -1059,3 +1059,299 @@ python scripts/compare_sfm_sim3.py \
   that feature for SuperPoint I/O). The `git archive HEAD` snapshot approach
   used here is a reasonable one-off; a standing `worktree`-based or CI-gated
   build lane would remove the need to improvise it next time.
+
+## M2.1 results (implemented 2026-07-17)
+
+### Question
+
+M2's own "Blockers for M4" section flagged a real, unclaimed gap: real
+COLMAP's `database_cache.cc`'s `UseInlierMatchesCheck` admits
+`PLANAR`/`PANORAMIC`/`PLANAR_OR_PANORAMIC`-classified pairs' homography
+inliers into the correspondence graph, while this repo's
+`examples/unordered_sfm_demo.rs`'s `verify_pairs` keep-list dropped
+`PANORAMIC` and unresolved `PLANAR_OR_PANORAMIC` outright (M1's own,
+intentionally conservative choice, left unchanged by M2 to avoid confounding
+that milestone's track-source A/B). This milestone closes that gap.
+
+### Citations (re-verified against `github.com/colmap/colmap`, `main`, fetched 2026-07-17)
+
+- **`src/colmap/scene/database_cache.cc`, `UseInlierMatchesCheck`** (fetched
+  verbatim):
+  ```cpp
+  bool UseInlierMatchesCheck(const DatabaseCache::Options& options,
+                             int two_view_geometry_config,
+                             size_t num_matches) {
+    return num_matches >= options.min_num_matches &&
+           (!options.ignore_watermarks ||
+            two_view_geometry_config != TwoViewGeometry::WATERMARK);
+  };
+  ```
+  Called from `DatabaseCache::Load()` immediately before
+  `correspondence_graph_->AddTwoViewGeometry(image_id1, image_id2,
+  std::move(two_view_geometry))`. The gate is **not** a `ConfigurationType`
+  allow-list — it is a match-count floor plus a single `!= WATERMARK`
+  exclusion. Every other configuration, including `PLANAR`, `PANORAMIC`, and
+  `PLANAR_OR_PANORAMIC`, is admitted (confirms and re-verifies M2's own
+  finding, citing the identical lines independently this time).
+- **`src/colmap/sfm/incremental_mapper_impl.cc`,
+  `IncrementalMapperImpl::EstimateInitialTwoViewGeometry`** (fetched
+  verbatim, the function `FindInitialImagePair` — declared in
+  `incremental_mapper.cc`, implemented in `incremental_mapper_impl.cc` —
+  delegates to for each init-pair candidate): re-extracts raw matches via
+  `database_cache.CorrespondenceGraph()->ExtractMatchesBetweenImages` and
+  calls `EstimateCalibratedTwoViewGeometry` **fresh** — it does not read the
+  correspondence graph's *stored* `ConfigurationType` at all — then gates
+  admission as an init pair on:
+  ```cpp
+  if (static_cast<int>(two_view_geometry.inlier_matches.size()) <
+          options.init_min_num_inliers ||
+      std::abs(two_view_geometry.cam2_from_cam1->translation().z()) >=
+          options.init_max_forward_motion ||
+      two_view_geometry.tri_angle <=
+          DegToRad(options.init_min_tri_angle)) {
+    return false;
+  }
+  ```
+  **There is no explicit `ConfigurationType` check here** — no line reads
+  `if (config == PANORAMIC) reject`. A pure-rotation (`PANORAMIC`) pair is
+  excluded from init-pair candidacy *implicitly*, because its `tri_angle` is
+  pinned to (approximately) zero by construction (the same
+  `EstimateTwoViewGeometryPoseFromCamRays` decomposition path M1's own
+  `colmap_verification.rs` already ported and cited,
+  `two_view_geometry.cc:702-713`, "tri_angle pinned to 0"), which fails the
+  `tri_angle <= init_min_tri_angle` gate applied uniformly to *every*
+  candidate pair, not just ones classified `PANORAMIC`. In other words:
+  **COLMAP's mapper does not special-case `PANORAMIC` for initialization —
+  it re-verifies independently and lets the triangulation-angle gate reject
+  zero-baseline pairs as a side effect**, exactly the same gate that would
+  also reject a `CALIBRATED` pair with an accidentally tiny baseline.
+
+### Parity verdict
+
+1. **Track building / correspondence graph**: real COLMAP admits
+   `PLANAR`/`PANORAMIC`/`PLANAR_OR_PANORAMIC` inliers; this repo's demo did
+   not. **Fixed** (see "Files changed" below) — now matches.
+2. **Init-pair selection**: real COLMAP does **not** special-case
+   `PANORAMIC` by `ConfigurationType`; it re-verifies from raw matches and
+   gates on `tri_angle` uniformly. This repo's
+   `pipelines/slam/src/incremental_sfm.rs::place_seed_pair` **already** has
+   the architecturally-equivalent independent gate: it re-estimates its own
+   relative pose from the candidate pair's raw correspondences
+   (`RelativePoseEstimator::default()`, ignoring whatever `ConfigurationType`
+   `verify_pairs` assigned upstream) and only accepts the pair as a seed if
+   enough inliers *triangulate* under the parallax/cheirality/reprojection
+   gate (`well_triangulated >= config.min_seed_matches`) — a pure-rotation
+   pair's essential matrix is degenerate/near-zero-baseline, so its
+   triangulated points fail that gate and `place_seed_pair` returns `false`,
+   undoing any tentative placement. **No new mirroring code was needed**:
+   the existing, independently-designed gate already provides the same
+   protection COLMAP gets from `tri_angle`, and it now needs to (and does)
+   cover the newly-admitted `PANORAMIC`/`PLANAR_OR_PANORAMIC` pairs too,
+   verified by a new dedicated test (see below).
+
+### Files changed
+
+- `examples/unordered_sfm_demo.rs` — `verify_pairs`'s `full`-mode keep-list
+  (the `matches!(report.config, ...)` predicate deciding which classified
+  pairs contribute to `PairwiseMatches`) now also admits
+  `ConfigurationType::Panoramic` and `ConfigurationType::PlanarOrPanoramic`,
+  alongside the pre-existing `Calibrated | Uncalibrated | Planar | Multiple`.
+  Only `Degenerate`, `Watermark`, and the never-returned `Undefined` are
+  still dropped — matching COLMAP's real gate exactly (`Degenerate` needs no
+  explicit exclusion to behave correctly, since
+  `TwoViewGeometryVerifier::classify` already returns an empty inlier list
+  for it, but the explicit exclusion is kept for clarity/defense-in-depth).
+  Updated the file header doc comment and `verify_pairs`'s own doc comment to
+  describe the new behavior and cite this milestone. **No new flag**: per the
+  task's own instruction to justify skipping one, this is folded directly
+  into `--verification-mode full` (no separate `--verification-mode
+  full-with-panoramic` or similar) because (a) the change is a strict
+  widening of what COLMAP's own `full` semantics already promised — the M1/
+  M1.1 doc comments describing `full` as "COLMAP-style" were already
+  overclaiming before this fix, not accurately describing a deliberately
+  narrower alternative worth preserving as a separate mode — and (b) the
+  acceptance experiment below reruns the *same* `full` mode name against the
+  M1.1 "before" numbers already in this document, which is exactly the A/B
+  the task asked for without needing a third flag value.
+- `pipelines/slam/src/incremental_sfm.rs` — no functional change; added one
+  new test (`pure_rotation_pair_is_rejected_as_a_seed_even_though_it_now_
+  reaches_pairwise`) pinning that `place_seed_pair`'s pre-existing,
+  independent parallax/triangulation gate already covers the newly-admitted
+  `PANORAMIC` pair type, per the parity verdict above.
+- `crates/vision/src/two_view/correspondence_graph.rs` — no functional
+  change; added two new tests
+  (`panoramic_classified_pair_contributes_correspondences_to_graph`,
+  `degenerate_classified_pair_contributes_no_correspondences`) confirming
+  the graph itself was already gate-agnostic (as M2's own "Degenerate-pair
+  policy verification" section already found by reading
+  `correspondence_graph.cc` — `AddTwoViewGeometry` never inspected `config`
+  beyond storing it) and reproducing `verify_pairs`'s classify → filter →
+  ingest pipeline end-to-end for both a synthetic `PANORAMIC` pair (must
+  contribute non-empty correspondences) and a synthetic `DEGENERATE` pair
+  (must contribute none).
+- `crates/vision/src/two_view/{colmap_verification,fundamental,homography,
+  mod}.rs` — **not touched**; M1's estimators and `ConfigurationType`
+  classification are reused as-is, exactly as M1.1 and M2 also did.
+
+No new dependencies. `pipelines/slam/src/{dpvo_vo,dpvo_vi_ba}.rs`,
+`map_atlas.rs` not touched.
+
+### Unit tests (new)
+
+- `crates/vision/src/two_view/correspondence_graph.rs::tests::
+  panoramic_classified_pair_contributes_correspondences_to_graph` — builds a
+  synthetic pure-rotation two-view pair (same fixture shape as
+  `colmap_verification.rs`'s `pure_rotation_classifies_panoramic`),
+  classifies it (`ConfigurationType::Panoramic`, non-empty inliers),
+  confirms the widened keep-list predicate now keeps it, feeds its inliers
+  into a fresh `CorrespondenceGraph`, and asserts
+  `num_correspondences_for_image(0) > 0` and the stored edge's config is
+  `Panoramic`.
+- `crates/vision/src/two_view/correspondence_graph.rs::tests::
+  degenerate_classified_pair_contributes_no_correspondences` — the negative
+  control: a too-few-correspondences pair classifies `Degenerate` with empty
+  inliers, the keep-list predicate excludes it, and feeding its (empty)
+  inlier set into the graph yields zero correspondences for both images —
+  unaffected by this milestone's keep-list widening.
+- `pipelines/slam/src/incremental_sfm.rs::tests::
+  pure_rotation_pair_is_rejected_as_a_seed_even_though_it_now_reaches_
+  pairwise` — a synthetic zero-baseline (same-camera-center, rotation-only)
+  pair with ≥15 shared points is passed directly to `place_seed_pair`;
+  asserts it returns `false` and leaves both poses `None` — pinning that the
+  mapper's pre-existing, COLMAP-equivalent independent triangulation gate
+  (not a new mechanism) already excludes the newly-admitted pair type from
+  ever becoming a seed.
+
+### Acceptance experiment (ETH3D, `full` mode before vs. after)
+
+Ran the identical ETH3D acceptance matrix M1/M1.1 used —
+`terrace`/`courtyard`/`office`, `--verification-mode full`,
+`--retrieval-topk 12 --min-matches 30 --colmap-style`, the same cached
+SuperPoint features
+(`E:\datasets\eth3d\battle\<scene>\visloc_run\features`) and the same
+per-scene pinhole intrinsics M1/M1.1/M2 all used — on this task's own
+release build (`cargo build --release --example unordered_sfm_demo
+--features image-io,onnx-inference`, clean, no concurrent-DPVO build
+fragility encountered this session, so no git-archive-snapshot workaround
+was needed this time). Outputs, logs, and Sim(3)-scorer output for all 3
+runs: `E:/visloc_archive/colmap_m2_1_20260717/`. "Before" reuses M1.1's own
+recorded `full` numbers verbatim (same commit lineage, same invocation); the
+common-subset GT files are the same ones M1/M1.1/M2 built and reused,
+`E:/visloc_archive/colmap_m1_20260717/{terrace_gt_common8,
+courtyard_gt_common23}.txt`.
+
+**Pair-classification counts, before vs. after (from the `colmap-style
+verification: ...` log line):**
+
+| scene | classified | CALIBRATED | UNCALIBRATED | PLANAR | PANORAMIC | PLANAR_OR_PANORAMIC | WATERMARK | DEGENERATE | MULTIPLE |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| terrace (before = after) | 95 | 94 | 1 | 0 | **0** | **0** | 0 | 0 | 0 |
+| courtyard (before = after) | 164 | 155 | 2 | 0 | **0** | **0** | 0 | 7 | 0 |
+| office (before = after) | 79 | 77 | 1 | 0 | **0** | **0** | 0 | 1 | 0 |
+
+**Pairs newly contributing to `PairwiseMatches` because of this milestone:
+zero, on all three scenes** (`PANORAMIC + PLANAR_OR_PANORAMIC` was already
+`0` on every scene in M1's original classification run and is still `0`
+today, confirmed by rerunning rather than assumed from the old log). These
+ETH3D DSLR building-exterior/interior collections apparently never produce a
+pure-rotation or unresolved-homography pair among their VLAD-retrieved
+top-12 candidates at these thresholds — the H-based branch of COLMAP's
+decision tree (`PLANAR`/`PANORAMIC`/`PLANAR_OR_PANORAMIC` combined) is
+essentially never taken on this benchmark at all (`PLANAR` is also `0` on
+every scene, in every milestone's run to date).
+
+**Verified-pair counts and RMSE, before vs. after — byte-identical, as
+the zero-`PANORAMIC`/zero-`PLANAR_OR_PANORAMIC` classification counts above
+predict:**
+
+| scene | verified pairs (before) | verified pairs (after) | full-RMSE (before) | full-RMSE (after) | common-subset RMSE (before) | common-subset RMSE (after) |
+|---|---:|---:|---:|---:|---:|---:|
+| terrace | 89/147 | 89/147 | 1.39 cm | **1.39 cm** | 0.93 cm | **0.93 cm** |
+| courtyard | 135/256 | 135/256 | 3.75 cm | **3.75 cm** | 0.25 cm | **0.25 cm** |
+| office | 57/171 | 57/171 | 0.50 cm | **0.50 cm** | n/a (26/26 common) | n/a |
+
+Registered-image counts are also unchanged (terrace 23/23, courtyard 14/38,
+office 18/26 — identical to every prior milestone's run).
+
+**Result: an honest, complete null on this benchmark — not a regression, not
+an improvement, because the code path this milestone widened is never
+exercised by any of the three ETH3D scenes at the current retrieval/matching
+thresholds.** This is expected once the pair-classification counts are read
+first (all three scenes' full breakdowns, both in M1's original run and in
+this rerun, show `PANORAMIC=0` and `PLANAR_OR_PANORAMIC=0` everywhere), not
+a surprise discovered after the fact. The fix is still real and still
+correct — it closes a genuine, previously-documented (M2's "Blockers for M4")
+discrepancy between this repo's keep-list and COLMAP's actual gate — it is
+simply not the kind of fix ETH3D's building-facade/courtyard/office DSLR
+photo sets can exercise, since they contain essentially no near-pure-rotation
+image pairs among their strongest VLAD-retrieved candidates. A benchmark
+that *would* exercise it needs a photo collection with genuine
+panorama-style overlapping-rotation captures (e.g. a hand-held sweep of a
+single viewpoint) — out of scope to source for this milestone, flagged below
+as a follow-up.
+
+**Reproduce** (unchanged from M1/M1.1/M2's own reproduce blocks — this
+milestone changes `full` mode's *keep-list*, not its CLI surface):
+
+```sh
+./target/release/examples/unordered_sfm_demo.exe \
+    --features-dir E:/datasets/eth3d/battle/terrace/visloc_run/features \
+    --feature-suffix _features.txt --image-suffix .JPG \
+    --width 6205 --height 4136 --fx 3412.13 --fy 3409.71 --cx 3114.27 --cy 2060.02 \
+    --retrieval-topk 12 --min-matches 30 --colmap-style \
+    --verification-mode full \
+    --out-colmap /tmp/terrace_m2_1
+python scripts/compare_sfm_sim3.py \
+    E:/datasets/eth3d/terrace/dslr_calibration_undistorted/images.txt \
+    /tmp/terrace_m2_1/images.txt
+```
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision`: **147 passed, 0 failed** (2 new
+  `correspondence_graph` tests; all 145 pre-existing tests, including M1/
+  M1.1/M2's own suites, unmodified and green).
+- `cargo test -p visloc-slam --lib incremental_sfm::`: **20 passed, 0
+  failed** (1 new test — `pure_rotation_pair_is_rejected_as_a_seed_even_
+  though_it_now_reaches_pairwise` — plus all 19 pre-existing
+  `incremental_sfm` tests unmodified and green).
+- `cargo test -p visloc-slam --lib` (whole crate): **313 passed, 0 failed, 6
+  ignored** — up from M2's own recorded 312 passed by exactly this
+  milestone's one new test; no regressions anywhere else in the crate.
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings.
+- `cargo clippy -p visloc-slam --lib -- -D warnings`: 7 pre-existing warnings
+  (`dead_code`, `too_many_arguments`, `unnecessary closure used with
+  bool::then`, `contains_key` + `insert`, `manual_clamp`,
+  `neg_cmp_op_on_partial_ord`, `large_enum_variant`), confirmed all in
+  untouched `pipelines/slam/src/{dpvo_vi_ba,map_atlas,online_slam_vi_ba,
+  vi_motion_initializer,online_slam_motion_vi_init}.rs` — zero in
+  `incremental_sfm.rs`, the only `pipelines/slam` file this milestone
+  touched (grepped the clippy output directly for `incremental_sfm.rs`: no
+  matches). Same pre-existing-warning count M2 itself reported; no new
+  warnings introduced.
+- `cargo check --example unordered_sfm_demo --features image-io,onnx-inference`
+  and `cargo build --release --example unordered_sfm_demo --features
+  image-io,onnx-inference`: both clean. No concurrent-DPVO build fragility
+  encountered this session (unlike M2's session) — the release build
+  succeeded on the first attempt in the real working tree, no git-archive
+  workaround needed.
+
+### Follow-ups
+
+- **The `PANORAMIC`/`PLANAR_OR_PANORAMIC` fix is real but unexercised by
+  ETH3D.** A future milestone wanting to actually measure this fix's
+  accuracy effect needs a photo collection containing genuine near-pure-
+  rotation pairs (e.g. a panorama-style handheld sweep, or a scene with a
+  dominant foreground plane inducing `PLANAR`/`MULTIPLE` classifications
+  too, also `0` on all three ETH3D scenes to date) — out of scope to source
+  here.
+- **`Multiple`-model support remains unexercised** for the same underlying
+  reason (all three ETH3D scenes are single-dominant-geometry scenes; M1's
+  own "Blockers for M2" note already flagged this).
+- This milestone's parity verdict on init-pair selection (§"Parity verdict"
+  above) is a *design* confirmation, not a numerical one — no ETH3D scene in
+  this benchmark has ever selected (or attempted to select) a `PANORAMIC`
+  pair as its seed, before or after this change, so the new
+  `pure_rotation_pair_is_rejected_as_a_seed_...` test is a synthetic pin, not
+  something the ETH3D acceptance run itself could demonstrate.

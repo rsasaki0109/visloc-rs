@@ -24,11 +24,22 @@
 //!    - `full`: COLMAP-style multi-model (essential / fundamental /
 //!      homography) verification with `ConfigurationType` classification
 //!      (`visloc_rs::vision::two_view::colmap_verification`, ported from
-//!      `src/colmap/estimators/two_view_geometry.cc`): pairs classified
-//!      `DEGENERATE`, `WATERMARK`, `PANORAMIC` (no triangulatable baseline),
-//!      or unresolved `PLANAR_OR_PANORAMIC` are dropped entirely instead of
-//!      being fed to `incremental_sfm`, and the pair's own model inliers (not
-//!      necessarily the essential matrix's) become its `PairwiseMatches`.
+//!      `src/colmap/estimators/two_view_geometry.cc`): only `DEGENERATE` and
+//!      `WATERMARK` pairs are dropped before `incremental_sfm` ever sees
+//!      them, matching COLMAP's real admission gate
+//!      (`database_cache.cc`'s `UseInlierMatchesCheck`, M2.1 — see
+//!      `docs/colmap_port_plan.md`). `PANORAMIC` (pure rotation, no
+//!      triangulatable baseline) and unresolved `PLANAR_OR_PANORAMIC` pairs
+//!      *do* contribute their homography inliers to `PairwiseMatches`, same
+//!      as `PLANAR`; they just never become a *seed* pair, because
+//!      `pipelines/slam/src/incremental_sfm.rs`'s own parallax gate
+//!      (`place_seed_pair`) independently rejects near-zero-baseline pairs at
+//!      growth time — the same "recompute and gate on triangulation angle,
+//!      don't consult the stored classification" design COLMAP's own
+//!      `IncrementalMapperImpl::EstimateInitialTwoViewGeometry` uses. Every
+//!      other configuration (`CALIBRATED`/`UNCALIBRATED`/`PLANAR`/`MULTIPLE`)
+//!      keeps its winning model's own inliers (which need not be the
+//!      essential matrix's).
 //!
 //!    A per-`ConfigurationType` count is printed under `full`, so all three
 //!    modes can be A/B'd on the same view graph — this is the M1/M1.1
@@ -406,12 +417,22 @@ impl VerificationStats {
 ///   Sampson threshold — isolates the "tighter threshold" half of the M1
 ///   confound from the "E/F/H classification" half (M1.1).
 /// - [`VerificationMode::Full`] goes through [`TwoViewGeometryVerifier`]
-///   instead: `DEGENERATE`, `WATERMARK`, `PANORAMIC` (pure rotation — no
-///   baseline to seed or triangulate from), and unresolved
-///   `PLANAR_OR_PANORAMIC` pairs are dropped entirely rather than handed to
-///   `incremental_sfm`; `CALIBRATED` / `UNCALIBRATED` / `PLANAR` / `MULTIPLE`
-///   pairs keep their winning model's own inliers (which need not be the
-///   essential matrix's).
+///   instead: only `DEGENERATE` and `WATERMARK` pairs are dropped rather than
+///   handed to `incremental_sfm` — COLMAP's own admission gate
+///   (`database_cache.cc`'s `UseInlierMatchesCheck`) keeps everything else,
+///   including `PANORAMIC` (pure rotation — no baseline to triangulate from)
+///   and unresolved `PLANAR_OR_PANORAMIC` (M2.1 parity fix; see
+///   `docs/colmap_port_plan.md`'s "M2.1 results" — previously this demo
+///   dropped both, stricter than real COLMAP). `CALIBRATED` / `UNCALIBRATED`
+///   / `PLANAR` / `PANORAMIC` / `PLANAR_OR_PANORAMIC` / `MULTIPLE` pairs all
+///   keep their winning model's own inliers (which need not be the essential
+///   matrix's); a `PANORAMIC`/`PLANAR_OR_PANORAMIC` pair's correspondences
+///   can still help track connectivity and BA even though the pair itself
+///   can never become a seed (`incremental_sfm`'s parallax gate at growth
+///   time excludes near-zero-baseline pairs independently of this
+///   classification, mirroring how COLMAP's own init-pair search
+///   recomputes and gates on triangulation angle rather than consulting the
+///   stored `ConfigurationType`).
 fn verify_pairs(
     features: &[FeatureSet],
     camera: &Camera,
@@ -464,11 +485,24 @@ fn verify_pairs(
 
             if let Some(verifier) = &verifier {
                 let report = verifier.classify(&corrs, camera);
+                // M2.1: mirror COLMAP's real gate (`database_cache.cc`'s
+                // `UseInlierMatchesCheck`), which is `num_matches >=
+                // min_num_matches && (!ignore_watermarks || config !=
+                // WATERMARK)` — i.e. every non-`DEGENERATE`, non-`WATERMARK`
+                // configuration contributes its inlier matches, including
+                // `PLANAR_OR_PANORAMIC`/`PANORAMIC` (homography-only, no
+                // triangulatable baseline). `DEGENERATE` needs no explicit
+                // arm here because [`TwoViewGeometryVerifier`] already
+                // returns an empty inlier list for it (`degenerate_report()`
+                // in `colmap_verification.rs`), the same reason COLMAP's own
+                // degenerate branch never populates `inlier_matches`.
                 let keep = matches!(
                     report.config,
                     ConfigurationType::Calibrated
                         | ConfigurationType::Uncalibrated
                         | ConfigurationType::Planar
+                        | ConfigurationType::Panoramic
+                        | ConfigurationType::PlanarOrPanoramic
                         | ConfigurationType::Multiple
                 );
                 if !keep || report.inliers.len() < min_matches {

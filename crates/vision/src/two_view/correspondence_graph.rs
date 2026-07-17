@@ -908,4 +908,160 @@ mod tests {
         // The full closure is order-independent of which endpoint you start from.
         assert_eq!(graph.extract_transitive_correspondences(3, 0, usize::MAX).len(), 3);
     }
+
+    /// M2.1 acceptance (`docs/colmap_port_plan.md`): reproduces
+    /// `examples/unordered_sfm_demo.rs`'s `verify_pairs` end-to-end for a
+    /// pure-rotation pair — classify with [`TwoViewGeometryVerifier`], then
+    /// feed the winning model's inliers into this graph exactly as the demo
+    /// now does since M2.1 widened its keep-list to admit `PANORAMIC`
+    /// (previously dropped, stricter than COLMAP's own
+    /// `database_cache.cc` `UseInlierMatchesCheck`, which only excludes
+    /// `WATERMARK`/too-few-matches). Confirms the graph itself never gated on
+    /// `ConfigurationType` in the first place (`add_two_view_geometry`
+    /// doesn't inspect `config` beyond storing it), so a `PANORAMIC` pair's
+    /// correspondences reach the graph/track-building layer just like any
+    /// other non-degenerate configuration.
+    #[test]
+    fn panoramic_classified_pair_contributes_correspondences_to_graph() {
+        use super::super::colmap_verification::{TwoViewGeometryOptions, TwoViewGeometryVerifier};
+        use super::super::TwoViewCorrespondence;
+        use nalgebra::{Point3, UnitQuaternion, Vector3};
+        use visloc_core::geometry::Pose;
+        use visloc_core::types::Camera;
+
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        // Same scattered, real-depth-variation point cloud as
+        // `colmap_verification.rs`'s `general_scene_points` fixture.
+        let mut points = Vec::new();
+        for i in 0..6 {
+            for j in 0..4 {
+                points.push(Point3::new(
+                    -1.5 + 0.6 * i as f64,
+                    -1.0 + 0.7 * j as f64,
+                    3.0 + 0.8 * ((i + j) % 5) as f64,
+                ));
+            }
+        }
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.12);
+        // Pure rotation: same camera center as `previous`, only re-oriented.
+        let current = Pose::from_world_to_camera(yaw, Vector3::new(0.0, 0.0, 0.0));
+
+        let correspondences: Vec<TwoViewCorrespondence> = points
+            .iter()
+            .filter_map(|p| {
+                let p1 = camera.project(&previous.transform_world_point(p))?;
+                let p2 = camera.project(&current.transform_world_point(p))?;
+                Some(TwoViewCorrespondence::new(p1, p2))
+            })
+            .collect();
+        assert!(correspondences.len() >= 20, "fixture sanity");
+
+        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let report = verifier.classify(&correspondences, &camera);
+        assert_eq!(
+            report.config,
+            ConfigurationType::Panoramic,
+            "fixture sanity: pure rotation must classify PANORAMIC"
+        );
+        assert!(
+            !report.inliers.is_empty(),
+            "a PANORAMIC report must carry the winning homography's inliers, \
+             not an empty list like DEGENERATE"
+        );
+
+        // Mirror `verify_pairs`'s keep-list (M2.1): PANORAMIC is now kept.
+        let keep = matches!(
+            report.config,
+            ConfigurationType::Calibrated
+                | ConfigurationType::Uncalibrated
+                | ConfigurationType::Planar
+                | ConfigurationType::Panoramic
+                | ConfigurationType::PlanarOrPanoramic
+                | ConfigurationType::Multiple
+        );
+        assert!(keep, "M2.1: PANORAMIC must be kept by the demo's keep-list");
+
+        // Synthetic point2D indices: correspondence i <-> point2D i in both images.
+        let matches: Vec<(usize, usize)> = report.inliers.iter().map(|&i| (i, i)).collect();
+        let mut graph = CorrespondenceGraph::new();
+        graph.add_image(0, correspondences.len());
+        graph.add_image(1, correspondences.len());
+        let stats = graph
+            .add_two_view_geometry(0, 1, &matches, report.config)
+            .expect("PANORAMIC pair must be a valid graph edge, same as any other configuration");
+        assert_eq!(stats.added, matches.len());
+        assert!(
+            graph.num_correspondences_for_image(0) > 0,
+            "PANORAMIC pair's correspondences must reach the graph/track-building layer"
+        );
+        assert_eq!(graph.edge(0, 1).unwrap().config, ConfigurationType::Panoramic);
+    }
+
+    /// M2.1 acceptance, the negative case: a `DEGENERATE` classification
+    /// (too few raw correspondences, per `colmap_verification.rs`'s
+    /// `too_few_correspondences_is_degenerate`) must still contribute
+    /// nothing — unaffected by M2.1's keep-list widening. Not because the
+    /// graph gates on `ConfigurationType` (it never has), but because
+    /// [`TwoViewGeometryVerifier`] always returns an empty inlier list for
+    /// `DEGENERATE`, the same reason COLMAP's own degenerate branch never
+    /// populates `inlier_matches` (`two_view_geometry.cc`'s degenerate
+    /// returns).
+    #[test]
+    fn degenerate_classified_pair_contributes_no_correspondences() {
+        use super::super::colmap_verification::TwoViewGeometryVerifier;
+        use super::super::TwoViewCorrespondence;
+        use nalgebra::{Point3, UnitQuaternion, Vector3};
+        use visloc_core::geometry::Pose;
+        use visloc_core::types::Camera;
+
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        // Below the default `min_num_inliers = 15` gate.
+        let points: Vec<Point3<f64>> = (0..10)
+            .map(|i| Point3::new(-1.0 + 0.2 * i as f64, 0.0, 3.0))
+            .collect();
+        let correspondences: Vec<TwoViewCorrespondence> = points
+            .iter()
+            .filter_map(|p| {
+                let p1 = camera.project(&previous.transform_world_point(p))?;
+                let p2 = camera.project(&current.transform_world_point(p))?;
+                Some(TwoViewCorrespondence::new(p1, p2))
+            })
+            .collect();
+
+        let verifier = TwoViewGeometryVerifier::default();
+        let report = verifier.classify(&correspondences, &camera);
+        assert_eq!(report.config, ConfigurationType::Degenerate, "fixture sanity");
+        assert!(report.inliers.is_empty());
+
+        let keep = matches!(
+            report.config,
+            ConfigurationType::Calibrated
+                | ConfigurationType::Uncalibrated
+                | ConfigurationType::Planar
+                | ConfigurationType::Panoramic
+                | ConfigurationType::PlanarOrPanoramic
+                | ConfigurationType::Multiple
+        );
+        assert!(!keep, "DEGENERATE must never be kept by the demo's keep-list");
+
+        // Even if a caller ignored `keep` and tried to add the (empty)
+        // inlier set anyway, the graph would record zero correspondences.
+        let mut graph = CorrespondenceGraph::new();
+        graph.add_image(0, correspondences.len());
+        graph.add_image(1, correspondences.len());
+        let matches: Vec<(usize, usize)> = report.inliers.iter().map(|&i| (i, i)).collect();
+        assert!(matches.is_empty());
+        let stats = graph
+            .add_two_view_geometry(0, 1, &matches, report.config)
+            .expect("adding an empty match list is still a valid (if useless) edge");
+        assert_eq!(stats.added, 0);
+        assert_eq!(graph.num_correspondences_for_image(0), 0);
+        assert_eq!(graph.num_correspondences_for_image(1), 0);
+    }
 }
