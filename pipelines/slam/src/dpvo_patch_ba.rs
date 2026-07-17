@@ -747,6 +747,31 @@ pub fn flow_mag(
     beta * flow1 + (1.0 - beta) * flow2
 }
 
+/// Depth of a patch's anchor point after reprojection into frame `j` — `Z` in
+/// `projective_ops.py::transform`'s own notation, *before* the `0.1` floor
+/// `proj()` applies for the perspective divide (`project_with_invariant`'s
+/// `z1`, not exposed by [`transform_point`]/[`flow_mag`] today). Added for
+/// Milestone M6 (`docs/dpvo_droid_port_plan.md`): `crate::dpvo_loop_closure`'s
+/// port of `patchgraph.py::edges_loop` needs the exact same validity mask
+/// `projective_ops.py::transform(..., valid=True)` computes
+/// (`X1[...,2] > 0.2`, `projective_ops.py:113`) to decide whether a candidate
+/// loop edge's flow-magnitude sample is usable, and no existing function in
+/// this module exposes the un-clamped `Z` a caller needs for that comparison.
+/// Recomputes [`reprojection_invariant`] rather than threading a new output
+/// parameter through [`transform_point`]/[`flow_mag`] — this is called only
+/// from the `GLOBAL_OPT_FREQ`-throttled loop-candidate search (not
+/// `update_step`'s per-frame hot path), so the extra ~10 flops of duplicate
+/// work is immaterial (see `dpvo_loop_closure.rs`'s own module doc for the
+/// call site and its cost budget).
+pub fn reprojected_center_depth(pose_i: &SE3, pose_j: &SE3, intr_i: &DpvoIntrinsics, patch: &DpvoPatch) -> f64 {
+    let inv = reprojection_invariant(pose_i, pose_j, false);
+    let xn = (patch.x - intr_i.cx) / intr_i.fx;
+    let yn = (patch.y - intr_i.cy) / intr_i.fy;
+    let xyz0 = Vector3::new(xn, yn, 1.0);
+    let xyz1 = inv.r * xyz0 + inv.t * patch.inverse_depth;
+    xyz1.z
+}
+
 /// Run [`dpvo_ba_step`] `config.iterations` times, re-linearizing at the
 /// updated poses/patches each time and keeping `targets`/`weights`/`edges`
 /// fixed — the caller-side loop DPVO's real (CUDA) `fastba.BA(..., iterations=2)`
@@ -1300,5 +1325,32 @@ mod tests {
             flow_large > flow_small,
             "larger translation should produce larger flow magnitude: small={flow_small} large={flow_large}"
         );
+    }
+
+    #[test]
+    fn reprojected_center_depth_matches_the_i_equals_j_analytic_derivation() {
+        // Same algebraic fact `flow_mag`'s own doc comment already proves for
+        // i==j (any patch depth): xyz1 == (xn, yn, 1), so z1 == 1.0 exactly,
+        // independent of `inverse_depth`.
+        let pose = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)), Vector3::new(1.0, 2.0, 3.0));
+        let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.7 };
+        let z = reprojected_center_depth(&pose, &pose, &intrinsics, &patch);
+        assert!((z - 1.0).abs() < 1e-10, "expected z==1.0 for an i==j reprojection, got {z}");
+    }
+
+    #[test]
+    fn reprojected_center_depth_is_negative_when_the_point_lands_behind_camera_j() {
+        // pose_i == identity, patch anchored exactly at the principal point
+        // (xn=yn=0) so xyz0 == (0,0,1); pose_j rotates 180 degrees about the
+        // x-axis with zero translation, so Gij == pose_j and
+        // xyz1 = R_ij*(0,0,1) + t_ij*d = (0,0,-1) + 0 — behind camera j
+        // regardless of the patch's inverse depth (t_ij is zero here).
+        let pose_i = SE3::identity();
+        let pose_j = SE3::new(UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI), Vector3::zeros());
+        let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: intrinsics.cx, y: intrinsics.cy, inverse_depth: 0.5 };
+        let z = reprojected_center_depth(&pose_i, &pose_j, &intrinsics, &patch);
+        assert!(z < 0.2, "expected an invalid (behind-camera-j) depth below the 0.2 gate, got {z}");
     }
 }

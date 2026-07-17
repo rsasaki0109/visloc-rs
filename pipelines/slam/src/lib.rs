@@ -44,12 +44,18 @@ mod block_cholesky;
 pub mod covariance;
 pub mod dpvo_patch_ba;
 pub use dpvo_patch_ba::{
-    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, flow_mag, reproject_patch_grid, se3_from_dpvo_pose,
-    transform_point, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
+    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, flow_mag, reproject_patch_grid, reprojected_center_depth,
+    se3_from_dpvo_pose, transform_point, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge, DpvoIntrinsics,
+    DpvoPatch,
 };
 pub mod dpvo_patch_graph;
 pub use dpvo_patch_graph::{
     active_edge_triples, DpvoGraphError, DpvoGraphEdge, DpvoGraphFrame, DpvoPatchGraph, DpvoVoConfig,
+};
+pub mod dpvo_loop_closure;
+pub use dpvo_loop_closure::{
+    expand_frame_pairs_to_patch_edges, find_loop_edges, select_loop_edges, DpvoLoopClosureConfig,
+    LoopEdgeCandidate, UPSTREAM_MIN_LOOP_GAP,
 };
 pub mod dpvo_vi_ba;
 pub use dpvo_vi_ba::{dpvo_vi_ba, dpvo_vi_ba_step, DpvoImuFactor, DpvoViBaSolution, DpvoViWindow};

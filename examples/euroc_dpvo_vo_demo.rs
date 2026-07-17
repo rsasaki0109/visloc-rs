@@ -58,6 +58,18 @@
 //! numbers, so a run's recovered `ate_similarity_scale` can be compared
 //! directly against the M4-perf baseline (`1.266`) to see whether IMU
 //! coupling actually pulled scale back toward `1.0`.
+//!
+//! # `--loop-closure` (Milestone M6, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Enables `crate::dpvo_loop_closure`'s DPV-SLAM-style mid-term proximity
+//! backend (`DpvoOdometryConfig::loop_closure`). Off by default — omitting
+//! the flag reproduces M4/M4-perf/M5/M5b's visual-only-graph behavior
+//! exactly (`loop_closure: None`). The summary echoes
+//! `loop_closure_enabled`/`loop_batches_attempted`/`loop_candidates_evaluated`/
+//! `loop_accepted`/`loop_patch_edges_added`/`loop_correction_*` alongside the
+//! usual ATE numbers, and every periodic progress line reports a running
+//! `loop_accepted`/`loop_candidates` count so a long run's console log shows
+//! exactly when (if ever) a revisit was found.
 
 use std::env;
 use std::fs;
@@ -72,7 +84,7 @@ use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, Euroc
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::DpvoVoConfig;
 use visloc_rs::slam::dpvo_vo::{DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig};
-use visloc_rs::slam::{DpvoIntrinsics, ImuNoiseModel};
+use visloc_rs::slam::{DpvoIntrinsics, DpvoLoopClosureConfig, ImuNoiseModel};
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
@@ -119,6 +131,20 @@ struct CliArgs {
     imu_max_mono_alignment_condition_number: f64,
     imu_rollback_mean_nis_bound: f64,
     imu_rollback_consecutive_frames: usize,
+    /// Milestone M6 (`docs/dpvo_droid_port_plan.md`): enable
+    /// `crate::dpvo_loop_closure`'s mid-term proximity backend. Default off
+    /// — visual-graph behavior identical to every prior milestone.
+    loop_closure: bool,
+    /// Milestone M6: `DpvoLoopClosureConfig`'s own fields, mirrored 1:1 —
+    /// see that struct's own doc for what each guards/bounds and why its
+    /// default differs from `config.py` (`max_edges_per_batch` only).
+    lc_backend_thresh: f64,
+    lc_max_edge_age: usize,
+    lc_global_opt_freq: usize,
+    lc_min_loop_gap: usize,
+    lc_max_edges_per_batch: usize,
+    lc_nms_radius: usize,
+    lc_min_valid_fraction: f64,
 }
 
 impl Default for CliArgs {
@@ -153,6 +179,16 @@ impl Default for CliArgs {
             imu_max_mono_alignment_condition_number: 1.0e8,
             imu_rollback_mean_nis_bound: 500.0,
             imu_rollback_consecutive_frames: 5,
+            loop_closure: false,
+            // Mirror `DpvoLoopClosureConfig::default()` exactly so omitting
+            // these flags reproduces that struct's own defaults.
+            lc_backend_thresh: 64.0,
+            lc_max_edge_age: 1000,
+            lc_global_opt_freq: 15,
+            lc_min_loop_gap: 30,
+            lc_max_edges_per_batch: 8,
+            lc_nms_radius: 1,
+            lc_min_valid_fraction: 0.75,
         }
     }
 }
@@ -208,6 +244,18 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--imu-rollback-consecutive-frames" => {
                 args.imu_rollback_consecutive_frames = raw.remove(i + 1).parse()?
             }
+            "--loop-closure" => {
+                args.loop_closure = true;
+                raw.remove(i);
+                continue;
+            }
+            "--lc-backend-thresh" => args.lc_backend_thresh = raw.remove(i + 1).parse()?,
+            "--lc-max-edge-age" => args.lc_max_edge_age = raw.remove(i + 1).parse()?,
+            "--lc-global-opt-freq" => args.lc_global_opt_freq = raw.remove(i + 1).parse()?,
+            "--lc-min-loop-gap" => args.lc_min_loop_gap = raw.remove(i + 1).parse()?,
+            "--lc-max-edges-per-batch" => args.lc_max_edges_per_batch = raw.remove(i + 1).parse()?,
+            "--lc-nms-radius" => args.lc_nms_radius = raw.remove(i + 1).parse()?,
+            "--lc-min-valid-fraction" => args.lc_min_valid_fraction = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -364,7 +412,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rollback_mean_nis_bound: args.imu_rollback_mean_nis_bound,
             rollback_consecutive_frames: args.imu_rollback_consecutive_frames,
         }),
+        // Milestone M6 (`docs/dpvo_droid_port_plan.md`): `--loop-closure`
+        // enables the mid-term proximity backend; omitting it reproduces
+        // M4/M4-perf/M5/M5b's exact visual-graph behavior (`loop_closure: None`).
+        loop_closure: args.loop_closure.then_some(DpvoLoopClosureConfig {
+            backend_thresh: args.lc_backend_thresh,
+            max_edge_age: args.lc_max_edge_age,
+            global_opt_freq: args.lc_global_opt_freq,
+            min_loop_gap: args.lc_min_loop_gap,
+            max_edges_per_batch: args.lc_max_edges_per_batch,
+            nms_radius: args.lc_nms_radius,
+            min_valid_fraction: args.lc_min_valid_fraction,
+        }),
     };
+
+    if args.loop_closure {
+        println!(
+            "loop closure enabled: backend_thresh={:.1} max_edge_age={} global_opt_freq={} \
+             min_loop_gap={} max_edges_per_batch={} nms_radius={} min_valid_fraction={:.2}",
+            args.lc_backend_thresh,
+            args.lc_max_edge_age,
+            args.lc_global_opt_freq,
+            args.lc_min_loop_gap,
+            args.lc_max_edges_per_batch,
+            args.lc_nms_radius,
+            args.lc_min_valid_fraction,
+        );
+    }
 
     if args.imu {
         println!(
@@ -418,6 +492,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the task's own required "report bootstrap frame ... rollback count".
     let mut prev_bootstrapped = false;
     let mut prev_rollback_count = 0usize;
+    // Milestone M6: track the cumulative accepted-loop count so a console
+    // log line only fires the frame a NEW batch is found, not every frame.
+    let mut prev_loop_accepted_total = 0usize;
 
     let run_start = Instant::now();
     for (idx, entry) in frames.iter().enumerate() {
@@ -479,6 +556,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prev_rollback_count = imu_diag.rollback_count;
         }
 
+        if args.loop_closure {
+            let lc_diag = odometry.loop_closure_diagnostics();
+            if lc_diag.accepted_loops_total > prev_loop_accepted_total {
+                println!(
+                    "*** frame {idx}: LOOP CLOSURE — accepted {} new pair(s) this batch \
+                     (cumulative accepted={}, cumulative candidates={}, cumulative patch edges added={}, \
+                     correction_max_m={:.4})",
+                    lc_diag.last_batch_accepted_loops,
+                    lc_diag.accepted_loops_total,
+                    lc_diag.candidates_evaluated_total,
+                    lc_diag.patch_edges_added_total,
+                    lc_diag.correction_magnitude_max_m,
+                );
+            }
+            prev_loop_accepted_total = lc_diag.accepted_loops_total;
+        }
+
         if let Some(pose_world_to_camera) = pose {
             tracked_frames += 1;
             // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
@@ -530,6 +624,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     imu_diag.rejection_counts, imu_diag.last_rejection,
                 );
             }
+            if args.loop_closure {
+                let lc_diag = odometry.loop_closure_diagnostics();
+                println!(
+                    "  loop_batches={} loop_candidates={} loop_accepted={} loop_patch_edges_added={} \
+                     loop_correction_max_m={:.4} loop_correction_mean_m={:.4}",
+                    lc_diag.batches_attempted,
+                    lc_diag.candidates_evaluated_total,
+                    lc_diag.accepted_loops_total,
+                    lc_diag.patch_edges_added_total,
+                    lc_diag.correction_magnitude_max_m,
+                    lc_diag.correction_magnitude_mean_m,
+                );
+            }
         }
     }
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
@@ -575,6 +682,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .gravity_world
         .map(|g| (g.x, g.y, g.z))
         .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+    let lc_diag = odometry.loop_closure_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -621,7 +729,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          imu_reject_mono_degenerate_solve={rc_mono_degen}\n\
          imu_reject_mono_gravity_norm={rc_mono_grav}\n\
          imu_reject_mono_scale_range={rc_mono_scale}\n\
-         imu_last_rejection={last_rejection}\n",
+         imu_last_rejection={last_rejection}\n\
+         loop_closure_enabled={lc_enabled}\n\
+         loop_batches_attempted={lc_batches}\n\
+         loop_candidates_evaluated={lc_candidates}\n\
+         loop_accepted={lc_accepted}\n\
+         loop_patch_edges_added={lc_edges_added}\n\
+         loop_correction_events={lc_correction_events}\n\
+         loop_correction_magnitude_max_m={lc_correction_max:.6}\n\
+         loop_correction_magnitude_mean_m={lc_correction_mean:.6}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -658,6 +774,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .last_rejection
             .map(|r| format!("{r:?}"))
             .unwrap_or_else(|| "none".to_string()),
+        lc_enabled = lc_diag.enabled,
+        lc_batches = lc_diag.batches_attempted,
+        lc_candidates = lc_diag.candidates_evaluated_total,
+        lc_accepted = lc_diag.accepted_loops_total,
+        lc_edges_added = lc_diag.patch_edges_added_total,
+        lc_correction_events = lc_diag.correction_events,
+        lc_correction_max = lc_diag.correction_magnitude_max_m,
+        lc_correction_mean = lc_diag.correction_magnitude_mean_m,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

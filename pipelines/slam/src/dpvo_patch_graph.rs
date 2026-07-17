@@ -65,35 +65,52 @@
 //!
 //! # What M4 deliberately does not port (documented, not silent)
 //!
-//! * **DPV-SLAM loop closure** (`LOOP_CLOSURE`/`CLASSIC_LOOP_CLOSURE`,
-//!   `edges_loop`, `MAX_EDGE_AGE`, `GLOBAL_OPT_FREQ`) — explicitly Milestone
-//!   M6 in the plan doc, and `config.py`'s own defaults have both flags
-//!   `False`.
+//! * **DPV-SLAM mid-term ("proximity") loop closure** — implemented as of
+//!   Milestone M6 (`docs/dpvo_droid_port_plan.md`'s "M6 results"), not by
+//!   this module directly: `crate::dpvo_loop_closure::find_loop_edges` is
+//!   the `edges_loop` port (candidate generation, `MAX_EDGE_AGE`,
+//!   `BACKEND_THRESH`), `crate::dpvo_vo::DpvoOdometry::try_loop_closure`
+//!   applies `GLOBAL_OPT_FREQ`'s own throttle and feeds accepted edges
+//!   through this module's own [`Self::append_edges`] — the same entry
+//!   point ordinary temporal edges use, per DPV-SLAM's own "same patch-BA
+//!   machinery" design — and this module gained
+//!   [`Self::keyframe_with_loop_protection`], the one piece of `keyframe`'s
+//!   own removal-window logic (`dpvo.py:305-309`) M4 had deliberately left
+//!   out (see that method's own doc). **The long-term/classical backend**
+//!   (`CLASSIC_LOOP_CLOSURE`, dBoW2 retrieval) remains out of scope — see
+//!   `crate::dpvo_loop_closure`'s module doc for why this codebase's
+//!   existing `online_slam.rs`/`map_atlas.rs` appearance-loop pipeline
+//!   already exceeds it and needs no replacement.
 //! * **The "run global BA over active+inactive edges" fallback**
 //!   (`dpvo.py::__run_global_BA`, triggered when `(self.pg.ii < self.n -
-//!   REMOVAL_WINDOW - 1).any()`). This is reachable *only* when
-//!   `LOOP_CLOSURE` is on (`MAX_EDGE_AGE=1000`-scale patch retention feeding
-//!   very old proximity edges back in) or when the per-frame
-//!   `keyframe()` cleanup has fallen behind. With `LOOP_CLOSURE=False` and
-//!   `keyframe()` called exactly once per processed frame (this module's own
-//!   invariant), the newest edge added by [`edges_forw`]/[`edges_back`] is
-//!   never older than `PATCH_LIFETIME` (12, default) and the per-frame
-//!   cleanup always prunes anything older than `REMOVAL_WINDOW` (20,
-//!   default) *before* the next `update()` call can observe it — with
-//!   `PATCH_LIFETIME ≤ REMOVAL_WINDOW` (true of every shipped default), the
-//!   trigger condition `ii < n - REMOVAL_WINDOW - 1` can never fire. Because
-//!   this module does not implement `LOOP_CLOSURE` at all, the condition is
-//!   unreachable by construction here, not just by the default-config
-//!   argument alone — so this fallback is skipped as dead code for M4's
-//!   configuration, not silently dropped.
+//!   REMOVAL_WINDOW - 1).any()`) is not ported as a *separate* BA entry
+//!   point — M4's own reasoning below (why the trigger condition cannot
+//!   fire without loop closure) is unchanged and still explains M4's own
+//!   configuration; Milestone M6 instead reaches the same *effect* (a wider
+//!   BA window whenever a stale/proximity edge exists) by generalizing
+//!   `crate::dpvo_vo::DpvoOdometry::update_step`'s own windowing derivation
+//!   — see that module's doc, "Windowing the BA problem" — rather than
+//!   adding a second BA call site. The reasoning below for *why* M4 alone
+//!   could never trigger this condition is preserved verbatim as the
+//!   still-correct explanation for the non-loop-closure configuration:
+//!   with `LOOP_CLOSURE`-equivalent functionality off (`config.loop_closure
+//!   = None`) and `keyframe()` called exactly once per processed frame
+//!   (this module's own invariant), the newest edge added by
+//!   [`edges_forw`]/[`edges_back`] is never older than `PATCH_LIFETIME`
+//!   (12, default) and the per-frame cleanup always prunes anything older
+//!   than `REMOVAL_WINDOW` (20, default) *before* the next `update()` call
+//!   can observe it — with `PATCH_LIFETIME ≤ REMOVAL_WINDOW` (true of every
+//!   shipped default), the trigger condition `ii < n - REMOVAL_WINDOW - 1`
+//!   can never fire in that configuration.
 //! * **Inactive-edge retention** (`remove_factors(..., store=True)`'s
 //!   `ii_inac`/`jj_inac`/`kk_inac`/`weight_inac`/`target_inac` arrays).
 //!   Upstream keeps these forever so a future global-BA/loop-closure pass
-//!   can re-touch them; since neither consumer is implemented here, this
-//!   module discards edges falling outside the window instead of retaining
-//!   them (`store=False` in effect always) — an unbounded growing list with
-//!   no reader would be a pure memory leak, not a faithful port of live
-//!   behavior.
+//!   can re-touch them; this module still discards edges falling outside
+//!   the window instead of retaining them (`store=False` in effect
+//!   always) — M6's own widened-window BA (see above) reads only the
+//!   *currently active* edge set (never a separate inactive store), so an
+//!   unbounded growing list with no reader remains a pure memory leak, not
+//!   a faithful port of live behavior, even now that loop closure exists.
 //!
 //! # Ported line ranges
 //!
@@ -560,8 +577,51 @@ impl DpvoPatchGraph {
     /// After the fold check (whether or not it fired), every active edge
     /// whose source frame has aged past `removal_window` is unconditionally
     /// dropped (`dpvo.py:305-310`, minus the `LOOP_CLOSURE`-only exemption —
-    /// see the module doc's "What M4 deliberately does not port").
+    /// see [`Self::keyframe_with_loop_protection`] for that variant, added in
+    /// Milestone M6).
     pub fn keyframe(&mut self) -> Option<usize> {
+        self.keyframe_inner(None)
+    }
+
+    /// Milestone M6 (`docs/dpvo_droid_port_plan.md`) variant of
+    /// [`Self::keyframe`] that additionally exempts loop-closure edges from
+    /// the unconditional removal-window drop — the one piece of `keyframe`
+    /// (`dpvo.py:305-310`) M4's own module doc flagged as "the
+    /// `LOOP_CLOSURE`-only exemption" and deliberately left unported:
+    ///
+    /// ```python
+    /// to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
+    /// if self.cfg.LOOP_CLOSURE:
+    ///     lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (self.pg.jj > (self.n - self.cfg.OPTIMIZATION_WINDOW))
+    ///     to_remove = to_remove & ~lc_edges
+    /// self.remove_factors(to_remove, store=True)
+    /// ```
+    ///
+    /// (`dpvo.py:305-309`). A loop edge (defined here purely by its temporal
+    /// gap, `jj - ii > 30`, matching `crate::dpvo_loop_closure`'s own
+    /// `min_loop_gap` default and `optim_utils.py::reduce_edges`'s hardcoded
+    /// `(j - i) < 30` literal) survives the removal-window drop for as long
+    /// as its *target* frame `jj` is still within the last `optimization_window`
+    /// frames — this is upstream's own bound on how long a reactivated old
+    /// patch's edge stays alive: once `jj` itself ages past that window, the
+    /// exemption stops applying and the edge is dropped on a later call,
+    /// exactly like an ordinary temporal edge. Callers should use this
+    /// instead of [`Self::keyframe`] whenever loop closure is enabled (see
+    /// `crate::dpvo_vo::DpvoOdometry`'s own branch on
+    /// `config.loop_closure.is_some()`); using [`Self::keyframe`] with loop
+    /// edges present would silently prune them the very first time their
+    /// owner frame `ii` ages past `removal_window` — often within the same
+    /// call that added them.
+    pub fn keyframe_with_loop_protection(&mut self, optimization_window: usize) -> Option<usize> {
+        self.keyframe_inner(Some(optimization_window))
+    }
+
+    /// Shared implementation for [`Self::keyframe`]/
+    /// [`Self::keyframe_with_loop_protection`] — `loop_protection` is `None`
+    /// for the former (no exemption, M4's own behavior, confirmed unchanged
+    /// by the fact that [`Self::keyframe`] is a one-line wrapper around
+    /// this) and `Some(optimization_window)` for the latter.
+    fn keyframe_inner(&mut self, loop_protection: Option<usize>) -> Option<usize> {
         let n = self.frames.len();
         let ki = self.config.keyframe_index;
         let removed = if n > ki + 1 && ki >= 1 {
@@ -583,7 +643,21 @@ impl DpvoPatchGraph {
         let removal_window = self.config.removal_window;
         let threshold = n_after.saturating_sub(removal_window);
         let patches_per_frame = self.config.patches_per_frame;
-        self.edges.retain(|edge| edge.k / patches_per_frame >= threshold);
+        const MIN_LOOP_GAP: usize = 30; // `optim_utils.py::reduce_edges`'s own hardcoded `(j - i) < 30` literal.
+        self.edges.retain(|edge| {
+            let owner_frame = edge.k / patches_per_frame;
+            if owner_frame >= threshold {
+                return true; // Not stale — kept unconditionally, same as `keyframe()`.
+            }
+            match loop_protection {
+                Some(optimization_window) => {
+                    let is_loop_edge = edge.j.saturating_sub(edge.i) > MIN_LOOP_GAP;
+                    let target_still_in_window = edge.j + optimization_window > n_after;
+                    is_loop_edge && target_still_in_window
+                }
+                None => false,
+            }
+        });
 
         removed
     }
@@ -765,6 +839,88 @@ mod tests {
         for edge in graph.edges() {
             assert!(graph.owner_frame(edge.k) >= threshold, "a stale edge survived keyframe()'s cleanup");
         }
+    }
+
+    /// Milestone M6: a manually-injected loop edge whose owner frame is
+    /// already stale (well below the removal-window threshold) must survive
+    /// [`DpvoPatchGraph::keyframe_with_loop_protection`] as long as its
+    /// target frame is still within `optimization_window` of `n`, but must be
+    /// dropped by the *unprotected* [`DpvoPatchGraph::keyframe`] — confirming
+    /// the exemption is real, not a no-op, and that `keyframe()`'s own
+    /// behavior (M4's) is unchanged.
+    #[test]
+    fn keyframe_with_loop_protection_keeps_a_fresh_loop_edge_the_plain_keyframe_would_drop() {
+        // `MIN_LOOP_GAP` is a hardcoded 30 inside `keyframe_inner` (matching
+        // upstream's own hardcoded literal, not a config field), so a graph
+        // exercising the *real* exemption path needs `edge.j - edge.i > 30`.
+        // Build one directly at the patch-graph level rather than via
+        // `push_frames`' small test config (`patch_lifetime=3`), which would
+        // require an impractically long synthetic trajectory: append the
+        // loop edge by hand onto an already-small graph and drive `n` up
+        // with cheap frame commits (no forward/backward edges needed for
+        // this test, only the injected loop edge and the removal-window
+        // arithmetic).
+        let config = small_config();
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        for i in 0..40 {
+            let pose = graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+        }
+        graph.set_initialized(true);
+        // Inject a single loop edge: patch 0 (owner frame 0) -> frame 39.
+        // Gap = 39 - 0 = 39 > 30 (the hardcoded MIN_LOOP_GAP).
+        graph.append_edges(&[(0, 39)], 4);
+        assert_eq!(graph.edges().len(), 1);
+
+        let mut protected = graph.clone();
+        // Plain keyframe(): removal_window=6, n=40 => threshold=34; owner
+        // frame 0 is far below threshold and there is no exemption => the
+        // loop edge must be dropped.
+        graph.keyframe();
+        assert!(graph.edges().is_empty(), "plain keyframe() should drop a stale, unprotected loop edge");
+
+        // Protected keyframe: optimization_window=4 (small_config's own
+        // value) => target frame must satisfy `39 + 4 > 40`, i.e. `43 > 40`
+        // — true, so the edge survives.
+        protected.keyframe_with_loop_protection(config.optimization_window);
+        assert_eq!(
+            protected.edges().len(),
+            1,
+            "keyframe_with_loop_protection should keep a loop edge whose target is still within optimization_window"
+        );
+    }
+
+    /// Milestone M6: once `n` grows far enough that the loop edge's *target*
+    /// frame also falls outside `optimization_window`, the exemption stops
+    /// applying and a later `keyframe_with_loop_protection` call drops it —
+    /// confirming the protection is temporary (bounded window growth, not a
+    /// permanent retention mechanism), matching upstream's own
+    /// `jj > (n - OPTIMIZATION_WINDOW)` condition.
+    #[test]
+    fn keyframe_with_loop_protection_eventually_drops_a_loop_edge_once_its_target_ages_out() {
+        let config = small_config();
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        for i in 0..40 {
+            let pose = graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+        }
+        graph.set_initialized(true);
+        graph.append_edges(&[(0, 39)], 4);
+        // Advance several more frames without touching the loop edge, so its
+        // target (39) eventually falls outside `n - optimization_window`.
+        for i in 40..50 {
+            let pose = graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+        }
+        // n=50, optimization_window=4 => target must satisfy 39+4>50 i.e.
+        // 43>50 — false, so the exemption no longer applies.
+        graph.keyframe_with_loop_protection(config.optimization_window);
+        assert!(
+            graph.edges().is_empty(),
+            "a loop edge must eventually be dropped once its target frame ages past optimization_window"
+        );
     }
 
     #[test]

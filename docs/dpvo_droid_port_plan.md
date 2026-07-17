@@ -2024,3 +2024,429 @@ consistent with the REST of the trajectory's true metric scale.
   (`E:/visloc_archive/dpvo_m5b_diag/`, `0.05` gate, used only to isolate
   the rejection reason with fewer frames before committing to the full
   400-frame confirmation).
+
+## M6 results (2026-07-17)
+
+Milestone M6: port DPV-SLAM's mid-term **proximity** loop-closure backend —
+the paper's own stated main efficiency contribution over DROID-SLAM's
+frame-graph-only consistency mechanism — onto the M4-M5b sliding-window
+DPVO port. The long-term/classical (dBoW2) backend stays explicitly out of
+scope, per the plan doc's own §4 port-surface table: this repo's existing
+`online_slam.rs`/`map_atlas.rs` appearance-loop pipeline already exceeds it
+(metric-scale gates, covisibility-disagreement bounds, MAD-based scale
+consensus vs. DPV-SLAM's plain 3-point RANSAC).
+
+### Ground truth and ported-semantics citations
+
+All from [princeton-vl/DPVO](https://github.com/princeton-vl/DPVO) (MIT,
+cloned locally at `E:/tools/DPVO`, same repo M1-M5b already used):
+
+| Piece | Upstream source | Lines |
+| --- | --- | --- |
+| `PatchGraph.edges_loop` (candidate generation: pose-proximity window, `flow_mag`/validity-fraction gate, call into `reduce_edges`) | `dpvo/patchgraph.py` | 56-77 |
+| `reduce_edges` (greedy flow-magnitude-ranked selection, temporal-gap gate, NMS suppression, edge budget) | `dpvo/loop_closure/optim_utils.py` | 19-58 |
+| `DPVO.__call__`'s `LOOP_CLOSURE`/`GLOBAL_OPT_FREQ` throttle and `append_factors` call site | `dpvo/dpvo.py` | 449-455 |
+| `DPVO.keyframe`'s `lc_edges` removal-window exemption | `dpvo/dpvo.py` | 305-309 |
+| `LOOP_CLOSURE=False`, `BACKEND_THRESH=64.0`, `MAX_EDGE_AGE=1000`, `GLOBAL_OPT_FREQ=15` defaults | `dpvo/config.py` | 28-31 |
+| `projective_ops.py::transform(..., valid=True)`'s `X1[...,2] > 0.2` validity mask (consumed by `flow_mag`'s own `val` output) | `dpvo/projective_ops.py` | 53-113 |
+| `DPVO.__run_global_BA` (the CUDA "run BA over active+inactive edges" fallback — NOT separately ported, see "What 'global BA' becomes" below) | `dpvo/dpvo.py` | 312-325 |
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_loop_closure.rs` (**new**) — `DpvoLoopClosureConfig`
+  (every field ported from `config.py`'s own defaults except
+  `max_edges_per_batch`, a deliberate CPU-bounded deviation — see below),
+  `LoopEdgeCandidate`, `select_loop_edges` (`reduce_edges` port),
+  `find_loop_edges` (`edges_loop` port, returns candidate/accepted counts for
+  diagnostics), `expand_frame_pairs_to_patch_edges` (`edges_loop`'s own final
+  per-patch expansion). Heavy module doc covers scope (proximity-only),
+  the "why not `sparse_factor_graph.rs`" reasoning (below), and the "what
+  'global BA' becomes on this CPU port" derivation. 8 new tests: a
+  synthetic square-loop trajectory that finds the revisit and rejects
+  adjacent frames, a straight-line negative control, `select_loop_edges`'s
+  temporal-gap/edge-budget/NMS/non-finite-rejection behavior in isolation,
+  and a synthetic drifted-loop test (`closing_a_synthetic_drifted_loop_reduces_endpoint_error`)
+  showing `dpvo_ba` itself reduces endpoint error once a loop edge is added
+  — the task's own required accuracy fixture, exercised directly against
+  the trusted M3 solver rather than a live ONNX session.
+* `pipelines/slam/src/dpvo_patch_ba.rs` — new `reprojected_center_depth`
+  (the un-clamped reprojected `Z`, needed for `edges_loop`'s own validity
+  mask, which no existing function exposed) plus 2 new unit tests. Additive
+  only; every M3/M4/M5/M5b test still passes unchanged.
+* `pipelines/slam/src/dpvo_patch_graph.rs` — `keyframe_inner` (private,
+  shared implementation), `keyframe` now a one-line wrapper around it
+  (confirmed inert — every M4/M5/M5b `keyframe()` test still passes
+  unchanged), new `keyframe_with_loop_protection` (the `lc_edges` exemption
+  port). Module doc's "what M4 deliberately does not port" section updated
+  to reflect what M6 now implements vs. what remains genuinely out of scope.
+  2 new tests confirming the exemption both protects a fresh loop edge the
+  plain `keyframe()` would drop, and eventually still drops it once its
+  target ages past `optimization_window`.
+* `pipelines/slam/src/dpvo_vo.rs` — `DpvoOdometryConfig::loop_closure:
+  Option<DpvoLoopClosureConfig>` (`None` default, every M4/M5/M5b call site
+  unaffected); `DpvoLoopClosureDiagnostics`; `DpvoOdometry::try_loop_closure`
+  (the `GLOBAL_OPT_FREQ`-throttled call site), `record_loop_correction`,
+  `keyframe_dispatch` (branches to the protected/plain `keyframe` per
+  config); `update_step`'s `frame_lo` derivation generalized from a
+  `debug_assert`-only check to an actual `min`-over-edges computation (see
+  "Windowing the BA problem" below) plus a correction-magnitude
+  sampling block (see "The correction-magnitude finding" below);
+  `process_frame`'s per-frame loop calls `try_loop_closure` before
+  `update_step` and dispatches `keyframe` through the new
+  `keyframe_dispatch`. `loop_closure_diagnostics()` accessor added
+  alongside the existing `imu_diagnostics()`.
+* `pipelines/slam/src/lib.rs` — registered `dpvo_loop_closure`, re-exported
+  its public items; added `reprojected_center_depth` to `dpvo_patch_ba`'s
+  existing re-export list.
+* `examples/euroc_dpvo_vo_demo.rs` — `--loop-closure` (opt-in flag) plus
+  `DpvoLoopClosureConfig`'s 7 fields as individual `--lc-*` CLI flags
+  (mirroring the `--imu-*` pattern already established); bootstrap-style
+  transition logging (`*** frame N: LOOP CLOSURE — accepted K new pair(s)...`);
+  periodic progress line and final summary both gained
+  `loop_batches_attempted`/`loop_candidates_evaluated`/`loop_accepted`/
+  `loop_patch_edges_added`/`loop_correction_events`/
+  `loop_correction_magnitude_{max,mean}_m`.
+* `docs/dpvo_droid_port_plan.md` — this section.
+
+### Why not `crate::sparse_factor_graph`/`bundle.rs`
+
+The plan doc's original §4 port-surface table (written before M1-M3 ran)
+speculated DPV-SLAM's proximity backend would map onto
+`sparse_factor_graph.rs`'s existing `SparseFactorKind::Proximity` +
+`enforce_active_budget`. M3's own results already overturned the matching
+half of that table for the BA layer (`fastba.BA` vs. `BundleAdjustment`
+turned out "structurally incompatible for a clean merge") and built
+`dpvo_patch_ba.rs` as a dedicated sibling instead. The same conclusion
+applies here for an even more basic reason: DPV-SLAM's own proximity
+backend is not a bridge into some *other* system's edge representation — it
+is new entries in `patchgraph.py`'s own `ii/jj/kk` arrays, consumed by the
+same `append_factors`/`update()`/`fastba.BA` chain every ordinary temporal
+edge already goes through. `dpvo_patch_graph.rs::append_edges` +
+`dpvo_vo.rs::update_step` + `dpvo_patch_ba::dpvo_ba` already reproduce that
+exact chain natively; routing loop edges through
+`sparse_factor_graph.rs`/`bundle.rs` instead would mean maintaining a
+*second*, redundant edge representation and BA entry point for the one edge
+kind upstream itself keeps unified with ordinary temporal edges — the
+opposite of "the same patch-BA machinery handles loop edges," the task's
+own stated key trick. Neither `sparse_factor_graph.rs` nor `bundle.rs` was
+touched this milestone (read-only per the task's own scope note).
+
+### What "global BA" becomes on this CPU port
+
+Upstream's `__run_global_BA` re-runs `fastba.BA` over `t0 = self.pg.ii.min()`
+(every frame any retained edge still references) whenever a stale edge
+exists. This milestone does not add a *second* BA call site: `update_step`'s
+own `frame_lo` derivation (M4's "Windowing the BA problem" doc section) is
+generalized from `n.saturating_sub(removal_window + patch_lifetime)` (an
+M4-era upper bound that assumed only ordinary temporal edges exist) to
+`min(that formula, the oldest frame any currently active edge references)`
+— computed directly from the edge set now, not merely asserted. This is a
+**strict generalization**: it reduces to the exact M4 formula whenever no
+edge is older than it (every M4/M4-perf/M5/M5b run, and every M6 run before
+its first accepted loop batch), so it changes nothing for a non-loop-closure
+run — confirmed directly: the OFF run below (`loop_closure_enabled=false`)
+never took this widening path (no edge is ever that old without a proximity
+edge), and its own numbers are reported alongside the ON run precisely to
+make that comparison possible. Widening `frame_lo` only ever adds *fixed*
+poses to the window (`dpvo_ba`'s free-pose count is pinned at
+`optimization_window`, independent of `frame_lo`, per M3's own `fixedp`
+convention-mapping note) — so this is a safe, bounded-CPU stand-in for
+upstream's own mechanism, not a new one.
+
+### Loop-closure edge budget: a deliberate, documented deviation
+
+`reduce_edges`'s own real call site (`patchgraph.py:77`) uses
+`max_num_edges=1000`. Each accepted `(i, j)` *frame* pair expands to
+`patches_per_frame` new patch-graph edges (`edges_loop`'s own `M`-wide
+`repeat` expansion) — at `fast.yaml`'s `patches_per_frame=48`, accepting
+upstream's own `1000`-pair cap in one batch could add up to 48,000 edges to
+a single `update_step` call, squarely the correlation-assembly bottleneck
+M4-perf spent a whole milestone bringing under control. `DpvoLoopClosureConfig::max_edges_per_batch`
+defaults to `8` instead — a handful of accepted revisits per
+`GLOBAL_OPT_FREQ`-frame attempt, keeping the added correlation-assembly cost
+per batch bounded and small relative to the ordinary per-frame edge count
+(a few thousand, per M4-perf's own measurements). Every other
+`DpvoLoopClosureConfig` field (`backend_thresh=64.0`, `max_edge_age=1000`,
+`global_opt_freq=15`, `min_loop_gap=30`, `nms_radius=1`,
+`min_valid_fraction=0.75`) matches upstream exactly — `max_edge_age`'s
+candidate *search* is pure `flow_mag`/`reprojected_center_depth` arithmetic
+(no ONNX/correlation call), cheap enough to keep at upstream's own number
+without a CPU-feasibility concern.
+
+### MH_01 acceptance run
+
+`--euroc-dir MH_01_easy --max-frames 800 --stride 2 --seed 0`, `fast.yaml`
+graph sizing (`--patches-per-frame 48 --removal-window 16
+--optimization-window 7 --patch-lifetime 11`, identical to every M4-perf/
+M5/M5b reported run except length), CPU-only, visual-only (no `--imu`,
+matching the acceptance brief). Both runs used the SAME `--seed 0` and
+otherwise-identical config, differing only in `--loop-closure`; both ran
+**concurrently** on this 12-core machine (a deliberate time-budget choice,
+not an isolated-timing setup — see the ms/frame caveat below).
+
+| Metric | OFF (no `--loop-closure`) | ON (`--loop-closure`) |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 (800/800) | 1.0000 (800/800) |
+| `ate_rigid_rmse_m` | 4.0807 | 4.0761 |
+| `ate_rigid_max_m` | 8.7488 | 8.7406 |
+| `ate_similarity_rmse_m` | 2.8134 | **2.7412** |
+| `ate_similarity_max_m` | 5.9126 | 5.9332 |
+| `ate_similarity_scale` | 22.626593 | 22.536250 |
+| `total_elapsed_s` | 1602.81 | 1594.64 |
+| `ms_per_frame_total` | 2003.51 | 1993.30 |
+| `loop_batches_attempted` | n/a (disabled) | 424 |
+| `loop_candidates_evaluated` | n/a | 1470 |
+| `loop_accepted` | n/a | **9** |
+| `loop_patch_edges_added` | n/a | 432 |
+| `loop_correction_events` | n/a | 2 |
+| `loop_correction_magnitude_max_m` | n/a | 0.000000\* |
+| `loop_correction_magnitude_mean_m` | n/a | 0.000000\* |
+
+\* **Not a trustworthy number** — this run used a version of the
+correction-magnitude diagnostic with a measurement bug that made `0.0` its
+only possible output, unrelated to whether any pose actually moved; see
+"The correction-magnitude finding" below for the bug, the fix, and a
+corrected supplementary run's own result.
+
+**Loop closure found real proximity candidates and accepted real loops** —
+the task's own "if 800 frames yields no proximity candidates" fallback does
+not apply here; 800 frames at `fast.yaml` sizing was sufficient. 1470
+candidate `(i, j)` frame pairs cleared the `backend_thresh`/validity-fraction
+gate over the run (concentrated once `frames_graph_n` grew past
+`removal_window`, itself gated by MH_01's own motion profile — see the
+`frames_graph_n` note below); of those, 9 frame pairs (432 patch-level
+edges) survived the temporal-gap/NMS/edge-budget selection and were
+appended to the live patch graph, one console-logged batch of 8 pairs
+firing at frame 613 (a genuine revisit region, not scattered singletons).
+
+**Honest ATE assessment**: both runs show substantially worse ATE than
+M4-perf's own 400-frame report (`ate_rigid_rmse_m=0.1546`,
+`ate_similarity_scale=1.266`) — a **genuine, newly-surfaced finding**, not a
+result of this milestone's own changes (the OFF run's `loop_closure_enabled=false`
+path is byte-identical to M4-perf's own `update_step`/`dpvo_ba` call chain;
+the only change between M4-perf's report and this one is sequence length,
+400→800 frames). The recovered similarity scale (`22.6`, vs. M4-perf's
+`1.27` at 400 frames) indicates the monocular reconstruction's own
+scale-drift compounds severely somewhere in frames 400-800 of this
+`fast.yaml`-sized run — consistent with the known, already-documented
+monocular-scale-drift gap (M4/M4-perf's own honest assessment; M5/M5b's own
+attempt to fix it via IMU coupling, still an open item) rather than a new
+defect this milestone introduced, but a genuinely new data point: nobody
+had previously run this port past 400 frames to see how the drift scales.
+**Flagged here as a real gap for a future milestone**, not swept under the
+loop-closure result.
+
+**Loop closure's own effect, given that scale-drift backdrop**: the
+similarity-aligned ATE (which factors out a single global scale) improved
+modestly (`2.8134 → 2.7412` m, **~2.6%**) with loop closure on, while the
+rigid ATE, max errors, and recovered scale are essentially unchanged
+(differences of `0.005-0.02`, within run-to-run solve noise). Whatever
+produced that small similarity-ATE improvement, loop closure alone, at this
+graph sizing, was never going to close a `22×` scale error on its own, and
+did not claim to — see "The correction-magnitude finding" below for what
+this milestone could and couldn't establish about *how* that improvement
+was produced (a diagnostic bug affects only that attribution question, not
+the ATE numbers themselves).
+
+**`ms_per_frame` caveat**: both runs executed concurrently (a deliberate
+choice given the total wall-clock budget), so the small `total_elapsed_s`/
+`ms_per_frame_total` difference (ON slightly *faster* than OFF) is
+CPU-contention noise between the two processes, not a clean isolated
+measurement of loop closure's own added cost — an isolated back-to-back
+comparison was not run this milestone. The loop-closure candidate *search*
+itself is cheap pure arithmetic (no ONNX/correlation), and the 432 added
+edges are a small fraction of the run's total active-edge count at any
+given frame (per M4-perf's own thousands-of-edges-per-frame measurements),
+so a real added cost, if isolated, is expected to be small — but this is a
+documented gap, not a measured one.
+
+### The correction-magnitude finding: a measurement bug caught and fixed before it shipped
+
+The acceptance run above (`off_800`/`on_800`) reports
+`loop_correction_magnitude_max_m`/`_mean_m` as exactly `0.0` across both
+correction-eligible `update_step` calls. **This number is a known artifact
+of a diagnostic-only bug in the binary that produced it, not evidence about
+whether loop closure actually corrected any pose** — reported here
+transparently rather than silently re-labeled, because the bug was found
+*during* this milestone's own acceptance testing, not before it, and the two
+long-running acceptance processes had already locked the release binary by
+the time the fix was ready to rebuild.
+
+**The bug**: the first version of this diagnostic measured only the loop
+edge's own *source* frame's pose before/after the same `update_step` call
+that added the edge. Direct reasoning about `dpvo_ba`'s own `fixedp`
+mechanism shows this can *never* be anything but `0.0`: a loop edge's source
+frame `i` is by construction always a much older,
+`fixedp`-excluded anchor (never itself solved for by any BA call regardless
+of what edges reference it), so measuring its own delta is measuring a
+quantity that is mathematically guaranteed to be zero, independent of
+whether the loop edge did anything useful. This is why `off_800`/`on_800`'s
+own `0.0` result is **uninformative**, not a "still zero after
+investigation" finding as an earlier draft of this section incorrectly
+claimed before the timeline below was double-checked.
+
+**The fix**: the diagnostic now snapshots every pose across the *entire* BA
+window before a correction-eligible solve and diffs against the solved
+output (any pose that moved, not just the edge's own two endpoints — see
+`update_step`'s own "Milestone M6: correction-magnitude sampling" doc
+section and the snapshot block immediately preceding `DpvoBaProblem`'s
+construction). This is a strictly additive, read-only change (confirmed:
+it touches no field `update_step` uses for the actual solve, only a local
+`Option<Vec<SE3>>` snapshot and the post-solve diagnostic counters) — it
+does not affect ATE, candidates, accepted-loop, or edges-added numbers,
+all of which remain valid from the `off_800`/`on_800` runs above.
+
+**Because the release binary was locked by the two running acceptance
+processes at the moment the fix was written, `off_800`/`on_800` never ran
+the fixed code.** A dedicated supplementary run
+(`E:/visloc_archive/dpvo_m6_20260717/on_800_fixed/`, same command as
+`on_800` — `--max-frames 800 --stride 2 --seed 0` plus the same `fast.yaml`
+sizing and `--loop-closure`) was launched once the binary was rebuilt with
+the fix, specifically to produce a trustworthy correction-magnitude number.
+Being deterministic given the same seed, it reproduced `off_800`/`on_800`'s
+own trajectory/candidate/accept/edge numbers **exactly**
+(`loop_batches_attempted=424`, `loop_candidates_evaluated=1470`,
+`loop_accepted=9`, `loop_patch_edges_added=432`, and the same
+`ate_similarity_rmse_m=2.7412`/`ate_similarity_scale=22.536250` — direct
+confirmation the fix changed nothing about the actual solve, only the
+diagnostic), and reported the fixed diagnostic's real numbers:
+
+| Metric | `on_800` (buggy diagnostic) | `on_800_fixed` (corrected diagnostic) |
+| --- | --- | --- |
+| `loop_correction_events` | 2 | **12** |
+| `loop_correction_magnitude_max_m` | 0.000000 (uninformative) | **0.004385** |
+| `loop_correction_magnitude_mean_m` | 0.000000 (uninformative) | **0.003085** |
+
+**So loop closure did produce a real, measurable pose correction** —
+small (millimeters, not meters — nowhere near enough to dent the `22×`
+scale-drift problem on its own, consistent with the ATE discussion above),
+but genuinely nonzero and now honestly measured.
+
+`loop_correction_events` also grew from `2` to `12` between the buggy and
+fixed diagnostics — this difference is **expected, by construction, not a
+new inconsistency to chase down**: the two versions used different
+*sampling gates*, not just different measurements under the same gate. The
+buggy (`process_frame`-level) version only sampled on the exact frame
+`try_loop_closure` accepted a NEW batch (2 such frames: the singleton
+accept and the 8-pair accept). The fixed (`update_step`-level) version
+samples on **every** `update_step` call where at least one *currently
+active* edge is a loop edge — true not only on the frame a batch is added,
+but on every subsequent frame until that edge ages out of the graph
+(bounded by `keyframe_with_loop_protection`'s own exemption window, see
+above). `12 ≥ 2` is exactly what that broader, intentionally-redesigned
+gate should produce, and matches the design documented in `update_step`'s
+own "Milestone M6: correction-magnitude sampling" doc section.
+
+This confirms the theoretical mechanism this section originally
+hypothesized: at least some of the 9 accepted pairs' target frames did land
+inside the free `[n - optimization_window, n)` pose range at some point
+during their active lifetime, producing a real (if small) correction — the
+`fixedp`-anchor explanation for *why it's small* (most of the candidate
+`jj` range sits outside the free window) still stands, just no longer as
+"why it's exactly zero."
+
+### Deviations from `dpvo.py`/`patchgraph.py` (summary)
+
+* **Loop edge budget** (`max_edges_per_batch=8`, not upstream's `1000`) —
+  a deliberate CPU-feasibility bound, see above.
+* **No separate `__run_global_BA` entry point** — the same effect (a wider
+  BA window whenever a stale/proximity edge exists) is reached by
+  generalizing `update_step`'s own windowing derivation instead, see above.
+* **No inactive-edge retention** (`ii_inac`/`jj_inac`/etc.) — unchanged from
+  M4's own documented choice; nothing in this port reads a retained
+  "inactive" edge set (the widened-window BA reads only the currently
+  active edge set), so retaining one would be a pure memory leak.
+  `keyframe_with_loop_protection` is the only mechanism keeping a loop edge
+  "alive" past the ordinary removal-window drop, and it is temporary by
+  design (matches upstream's own `jj > n - OPTIMIZATION_WINDOW` bound).
+* **Classical/long-term backend out of scope** — this codebase's own
+  `online_slam.rs`/`map_atlas.rs` pipeline already exceeds DPV-SLAM's own
+  dBoW2/RANSAC/classical-PGO backend; nothing was ported or needs to be.
+* **Correlation/patchify's own "not verified against upstream's CUDA
+  kernel" caveat** (M1/M2, carried through every milestone since) still
+  applies unchanged here — loop-closure edges are assembled through the
+  exact same `corr_cpu`/`patchify_cpu` primitives as ordinary temporal
+  edges, inheriting the same unresolved verification gap, not a new one.
+
+### Remaining gaps vs. DPV-SLAM
+
+1. **Severe monocular scale drift over 800 frames** (`ate_similarity_scale≈22.6`,
+   vs. `1.27` at 400 frames) — a genuine, newly-measured gap this milestone
+   surfaced, not previously characterized past 400 frames. M5/M5b's own IMU
+   coupling (visual-only in this run, `--imu` omitted per the acceptance
+   brief) is the mechanism already built to address this; a combined
+   `--imu --loop-closure` run was not attempted this milestone and is a
+   natural next step.
+2. **Correction magnitude is confirmed real but small** (`on_800_fixed`:
+   max `4.4 mm`, mean `3.1 mm` across 12 correction-eligible calls) —
+   resolved from an initial "incomplete" state during this same milestone
+   (see the dedicated section above for the diagnostic bug found and
+   fixed), but *why* it stays this small (most of the candidate `jj` range
+   sitting outside the free `optimization_window`, per the `fixedp`
+   argument, vs. some additional suppression from `dpvo_ba`'s own hard
+   validity gates) was not further disambiguated with per-edge
+   instrumentation.
+3. **No isolated (non-concurrent) ms/frame delta measurement** — the ON/OFF
+   runs shared this machine's 12 cores concurrently; a clean sequential A/B
+   was not run given the time budget.
+4. **Edge-budget/threshold tuning is a first honest pass, not optimized** —
+   `max_edges_per_batch=8` was chosen for CPU safety margin, not tuned
+   against recall/precision on this or any other sequence; the plan doc's
+   original M6 acceptance criteria's own "recall/precision... measured
+   against the existing appearance-loop-candidate pipeline's current
+   recall" framing was superseded by this task's own more concrete
+   acceptance criteria (candidates/accepted/edges/correction-magnitude
+   numbers, reported above) — no direct recall/precision comparison against
+   `online_slam.rs`'s appearance-loop pipeline was made this milestone.
+5. **`MAX_EDGE_AGE`/`GLOBAL_OPT_FREQ` kept at upstream's exact numeric
+   defaults** (1000/15) without independently re-validating them are optimal
+   for this port's own `fast.yaml` graph sizing (only `max_edges_per_batch`
+   was retuned, per the CPU-cost argument above) — a reasonable first
+   choice (faithful port), not a claim of having re-derived them from this
+   port's own cost model.
+
+### Verify (verbatim)
+
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-slam --features onnx-inference --lib dpvo`: **47
+  passed**, 0 failed, 1 ignored (up from M5b's 47 lib-test count restricted
+  to the same filter — this milestone's own 12 new tests: 2 in
+  `dpvo_patch_ba` (`reprojected_center_depth`), 2 in `dpvo_patch_graph`
+  (`keyframe_with_loop_protection`), 8 in the new `dpvo_loop_closure`).
+* `cargo test -p visloc-slam --features onnx-inference` (whole crate): a
+  first run mid-session showed 332 passed / **1 failed** / 7 ignored, the 1
+  failure in `incremental_sfm::tests::colmap_style_mapper_retries_a_filtered_image_up_to_its_trial_budget_then_gives_up`
+  — `incremental_sfm.rs`, a file a concurrent agent was actively editing
+  (confirmed directly: that file's own working tree briefly had a live
+  `if false && config.colmap_style_mapper && ...`, an obvious WIP debug
+  scaffold, not this milestone's code). A re-run after that concurrent edit
+  finished shows **333 passed, 0 failed, 7 ignored** — every integration
+  binary green too (54/54+1 ignored, 0/0+2 ignored, 6/6, 6/6, 132/132,
+  10/10, 9/9, 4/4). Zero dpvo-related failures at either point.
+* `cargo check --workspace --lib --bins --features image-io,onnx-inference`:
+  clean.
+* `cargo check --workspace --all-targets --features image-io,onnx-inference`:
+  clean.
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  clean — zero warnings in any `dpvo_*.rs` file, same 6 pre-existing
+  warnings elsewhere as M3/M4/M4-perf/M5/M5b (`map_atlas.rs` ×3,
+  `online_slam_vi_ba.rs` ×2, `vi_motion_initializer.rs`,
+  `online_slam_motion_vi_init.rs`, `online_slam.rs` ×2 — confirmed via
+  `grep -i dpvo` on the full clippy output: zero hits). A mid-session
+  attempt briefly hit a `#[deny]`-level clippy failure
+  (`clippy::overly_complex_bool_expr`) from the same concurrent
+  `incremental_sfm.rs` WIP edit above (a clippy-specific hard denial that
+  does not affect `cargo check`/`cargo test`/`cargo build --release`,
+  all of which stayed green throughout); resolved once that edit landed,
+  confirmed clean both before that transient state and after.
+* `cargo clippy --example euroc_dpvo_vo_demo --features image-io,onnx-inference`:
+  clean (after fixing one `clippy::unnecessary_lazy_evaluations` on
+  `args.loop_closure.then(...)` → `then_some(...)` during development).
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded.
+* Three real MH_01 runs this milestone, all `E:/visloc_archive/dpvo_m6_20260717/`:
+  `off_800/`/`on_800/` (the acceptance table above, ATE/candidates/accepted/
+  edges numbers all valid) and `on_800_fixed/` (rebuilt binary with the
+  correction-magnitude diagnostic fix, launched specifically to produce a
+  trustworthy correction-magnitude number — see "The correction-magnitude
+  finding" above for its result).

@@ -64,11 +64,50 @@
 //! enough to hold every pose an active edge might reference, not wide
 //! enough to change which poses are actually free.
 //!
+//! **Milestone M6 generalizes this from an assertion to a derivation.** A
+//! proximity (loop-closure) edge's source frame can be far older than
+//! `REMOVAL_WINDOW + PATCH_LIFETIME` bounds (that derivation assumed only
+//! ordinary `edges_forw`/`edges_back` edges exist). `update_step` now widens
+//! `frame_lo` to `min(the formula above, the oldest frame any currently
+//! active edge references)` before building the window — a strict
+//! generalization that reduces to the exact M4 formula whenever no edge is
+//! older than it (i.e. whenever loop closure is disabled, or simply hasn't
+//! found anything yet), so this changes nothing for a non-loop-closure run.
+//! Growing `frame_lo` only ever adds *fixed* poses to the window (the free
+//! pose count stays pinned at `OPTIMIZATION_WINDOW` regardless — see
+//! `crate::dpvo_loop_closure`'s module doc, "What 'global BA' becomes on
+//! this CPU port", for why), so this is safe by the same `fixedp`/`t0`
+//! reasoning `dpvo_patch_ba.rs`'s own M3 convention-mapping notes already
+//! established, not a new risk this milestone introduces.
+//!
+//! # Loop closure (Milestone M6, `docs/dpvo_droid_port_plan.md`)
+//!
+//! [`DpvoOdometryConfig::loop_closure`] is `None` by default — every prior
+//! milestone's call site keeps compiling and behaving byte-for-byte as
+//! before. When `Some`, [`DpvoOdometry::try_loop_closure`] (see its own doc)
+//! runs `crate::dpvo_loop_closure::find_loop_edges` at the point upstream's
+//! `__call__` does (`dpvo.py:449-455`, right before `update()`/`keyframe()`),
+//! appends any accepted proximity edges via the same
+//! `DpvoPatchGraph::append_edges` ordinary temporal edges already use, and
+//! dispatches `keyframe()`'s cleanup through
+//! `DpvoPatchGraph::keyframe_with_loop_protection` instead of the plain
+//! `keyframe()` so a freshly-added loop edge is not immediately pruned by the
+//! removal-window rule. See `crate::dpvo_loop_closure`'s own module doc for
+//! the full port (candidate generation, edge-budget/NMS selection, and why
+//! this deliberately reuses DPVO's own patch-graph edge system rather than
+//! `crate::sparse_factor_graph`) and this module's own
+//! [`DpvoOdometry::update_step`] doc for how the windowed BA problem widens
+//! to cover a loop edge's (potentially much older) source frame with **no
+//! new BA entry point** — the CPU-bounded stand-in for upstream's own
+//! `__run_global_BA`.
+//!
 //! # What this module does not implement (see `crate::dpvo_patch_graph`'s
 //! module doc for the graph-level list)
 //!
-//! Loop closure (DPV-SLAM, Milestone M6) and the global-BA fallback are out
-//! of scope, matching `crate::dpvo_patch_graph`'s own documented omissions.
+//! The classical/long-term ("`CLASSIC_LOOP_CLOSURE`") backend is out of
+//! scope — `crate::dpvo_loop_closure`'s module doc explains why this
+//! codebase's existing `online_slam.rs`/`map_atlas.rs` appearance-loop
+//! pipeline already exceeds it and needs no replacement.
 //!
 //! # IMU coupling (Milestone M5, then M5b — `docs/dpvo_droid_port_plan.md`)
 //!
@@ -173,6 +212,9 @@ use visloc_vision::features::superpoint_onnx::OnnxBackend;
 use crate::dpvo_patch_ba::{
     dpvo_ba, reproject_patch_grid, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge,
     DpvoIntrinsics, DpvoPatch,
+};
+use crate::dpvo_loop_closure::{
+    expand_frame_pairs_to_patch_edges, find_loop_edges, DpvoLoopClosureConfig, UPSTREAM_MIN_LOOP_GAP,
 };
 use crate::dpvo_patch_graph::{DpvoGraphError, DpvoPatchGraph, DpvoVoConfig};
 use crate::dpvo_vi_ba::{
@@ -282,6 +324,12 @@ pub struct DpvoOdometryConfig {
     /// [`DpvoOdometry::push_imu`]/the bootstrap chain/`crate::dpvo_vi_ba`
     /// coupling described on [`DpvoOdometry`]'s own doc comment.
     pub imu: Option<DpvoImuConfig>,
+    /// DPV-SLAM mid-term proximity loop closure (Milestone M6,
+    /// `docs/dpvo_droid_port_plan.md`). `None` (every prior milestone's
+    /// default) preserves M4/M4-perf/M5/M5b's exact visual-only-graph
+    /// behavior — see [`DpvoOdometry`]'s own doc, "Loop closure", and
+    /// `crate::dpvo_loop_closure`'s module doc for the full port.
+    pub loop_closure: Option<DpvoLoopClosureConfig>,
 }
 
 /// IMU coupling configuration — Milestone M5. See [`DpvoOdometry`]'s module
@@ -505,6 +553,54 @@ pub struct DpvoImuDiagnostics {
     pub last_rejection: Option<DpvoImuRejectionDetail>,
 }
 
+/// Milestone M6 snapshot of [`DpvoOdometry`]'s loop-closure state - see
+/// [`DpvoOdometry::loop_closure_diagnostics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoLoopClosureDiagnostics {
+    /// Whether `config.loop_closure` is `Some` at all - `false` means every
+    /// other field here is a static zero (the feature was never engaged),
+    /// not a claim that closure was attempted and found nothing.
+    pub enabled: bool,
+    /// Number of times [`DpvoOdometry::try_loop_closure`] actually ran
+    /// `crate::dpvo_loop_closure::find_loop_edges` (i.e. was "due" per
+    /// `GLOBAL_OPT_FREQ`'s own throttle - see that method's doc for why this
+    /// can fire on consecutive frames before the first successful batch,
+    /// matching upstream's own `last_global_ba` bookkeeping exactly).
+    pub batches_attempted: usize,
+    /// Cumulative candidate `(i, j)` frame pairs that cleared
+    /// `find_loop_edges`'s own `backend_thresh`/validity-fraction gate,
+    /// across every attempted batch (before the edge-budget/NMS selection -
+    /// the task's own "candidates" diagnostic).
+    pub candidates_evaluated_total: usize,
+    /// Cumulative accepted `(i, j)` frame pairs (post edge-budget/NMS
+    /// selection) across every batch - the task's own "accepted loops"
+    /// diagnostic.
+    pub accepted_loops_total: usize,
+    /// Cumulative patch-level `(patch_id, target_frame)` edges actually
+    /// appended to the live patch graph (`accepted_loops_total *
+    /// patches_per_frame`, tracked directly rather than recomputed) - the
+    /// task's own "edges added" diagnostic.
+    pub patch_edges_added_total: usize,
+    /// Accepted frame-pair count from the MOST RECENT batch that found
+    /// anything (`0` if none ever did) - lets a caller's log line report
+    /// "just found N loops" without re-deriving it from the cumulative
+    /// totals.
+    pub last_batch_accepted_loops: usize,
+    /// Number of `update_step` calls whose BA solve incorporated at least
+    /// one freshly-added loop batch (i.e. the number of samples underlying
+    /// [`Self::correction_magnitude_max_m`]/`_mean_m`).
+    pub correction_events: usize,
+    /// Largest observed pose-translation correction (meters) at a loop
+    /// batch's own source frame(s), comparing that frame's pose immediately
+    /// before vs. immediately after the same `update_step` call that
+    /// incorporated the new loop edge(s) - the task's own "correction
+    /// magnitude" diagnostic. `0.0` if [`Self::correction_events`] is `0`.
+    pub correction_magnitude_max_m: f64,
+    /// Mean of the same per-event correction magnitude. `0.0` if
+    /// [`Self::correction_events`] is `0`.
+    pub correction_magnitude_mean_m: f64,
+}
+
 /// Milestone M5b: cumulative counters, one per DISTINCT rejection reason
 /// across both bootstrap gates (gyro-bias, then mono-alignment) — see
 /// [`DpvoOdometry::try_imu_bootstrap`]'s doc for exactly which check each
@@ -706,6 +802,26 @@ pub struct DpvoOdometry {
     /// The most recent rejection's own detail — see
     /// [`DpvoImuDiagnostics::last_rejection`].
     imu_last_rejection: Option<DpvoImuRejectionDetail>,
+
+    // ---- Milestone M6 (loop closure) state — see the module doc's own
+    // "Loop closure" section and `crate::dpvo_loop_closure`'s module doc for
+    // the math. All of this is inert when `config.loop_closure` is `None`.
+    // ----
+    /// Live-frame index `n` at the last batch that found and appended at
+    /// least one accepted loop edge, or `None` before any such batch (the
+    /// "always eligible on the very next frame" state — matches upstream's
+    /// own `self.last_global_ba = -1000` sentinel, see
+    /// [`Self::try_loop_closure`]'s own doc for why `None` behaves the same
+    /// way).
+    last_loop_batch_frame: Option<usize>,
+    loop_batches_attempted: usize,
+    loop_candidates_evaluated_total: usize,
+    loop_accepted_total: usize,
+    loop_patch_edges_added_total: usize,
+    loop_last_batch_accepted: usize,
+    loop_correction_events: usize,
+    loop_correction_sum_m: f64,
+    loop_correction_max_m: f64,
 }
 
 impl DpvoOdometry {
@@ -765,6 +881,15 @@ impl DpvoOdometry {
             recovered_mono_scale: None,
             imu_rejection_counts: DpvoImuBootstrapRejectionCounts::default(),
             imu_last_rejection: None,
+            last_loop_batch_frame: None,
+            loop_batches_attempted: 0,
+            loop_candidates_evaluated_total: 0,
+            loop_accepted_total: 0,
+            loop_patch_edges_added_total: 0,
+            loop_last_batch_accepted: 0,
+            loop_correction_events: 0,
+            loop_correction_sum_m: 0.0,
+            loop_correction_max_m: 0.0,
         })
     }
 
@@ -790,6 +915,27 @@ impl DpvoOdometry {
             rollback_count: self.imu_rollback_count,
             rejection_counts: self.imu_rejection_counts,
             last_rejection: self.imu_last_rejection,
+        }
+    }
+
+    /// Snapshot of the loop-closure chain's current state (Milestone M6).
+    /// See [`DpvoLoopClosureDiagnostics`].
+    pub fn loop_closure_diagnostics(&self) -> DpvoLoopClosureDiagnostics {
+        let correction_mean = if self.loop_correction_events > 0 {
+            self.loop_correction_sum_m / self.loop_correction_events as f64
+        } else {
+            0.0
+        };
+        DpvoLoopClosureDiagnostics {
+            enabled: self.config.loop_closure.is_some(),
+            batches_attempted: self.loop_batches_attempted,
+            candidates_evaluated_total: self.loop_candidates_evaluated_total,
+            accepted_loops_total: self.loop_accepted_total,
+            patch_edges_added_total: self.loop_patch_edges_added_total,
+            last_batch_accepted_loops: self.loop_last_batch_accepted,
+            correction_events: self.loop_correction_events,
+            correction_magnitude_max_m: self.loop_correction_max_m,
+            correction_magnitude_mean_m: correction_mean,
         }
     }
 
@@ -914,8 +1060,9 @@ impl DpvoOdometry {
             }
         } else if self.graph.is_initialized() {
             self.try_imu_bootstrap();
+            self.try_loop_closure();
             self.update_step()?;
-            if let Some(k) = self.graph.keyframe() {
+            if let Some(k) = self.keyframe_dispatch() {
                 self.frame_pyramids.remove(k);
                 let m = self.graph.config().patches_per_frame;
                 self.patch_gmap.drain(k * m..(k + 1) * m);
@@ -1357,6 +1504,88 @@ impl DpvoOdometry {
         self.imu_rollback_count += 1;
     }
 
+    /// Milestone M6: `dpvo.py:449-455`'s own loop-closure call site —
+    ///
+    /// ```python
+    /// if self.cfg.LOOP_CLOSURE:
+    ///     if self.n - self.last_global_ba >= self.cfg.GLOBAL_OPT_FREQ:
+    ///         lii, ljj = self.pg.edges_loop()
+    ///         if lii.numel() > 0:
+    ///             self.last_global_ba = self.n
+    ///             self.append_factors(lii, ljj)
+    /// ```
+    ///
+    /// ported exactly, including a subtlety easy to miss on a first read:
+    /// `last_global_ba` (this method's [`Self::last_loop_batch_frame`]) is
+    /// only updated on a batch that actually found something — a batch that
+    /// runs `find_loop_edges` and comes up empty does NOT push the next
+    /// eligible attempt out by `GLOBAL_OPT_FREQ` frames, so (matching
+    /// upstream) this can fire on every single subsequent committed frame
+    /// until the first successful batch, not just every `GLOBAL_OPT_FREQ`
+    /// frames from the start. This is cheap even at that cadence — the
+    /// candidate search is pure `flow_mag`/`reprojected_center_depth`
+    /// arithmetic over a bounded `(i, j)` grid, no ONNX/correlation call
+    /// (see `crate::dpvo_loop_closure`'s module doc).
+    ///
+    /// No-op if `config.loop_closure` is `None`. Any accepted edges are
+    /// appended directly onto the live patch graph (`DpvoPatchGraph::append_edges`)
+    /// — the *effect* of a new loop batch (whether it actually moves any
+    /// pose) only shows up later, inside [`Self::update_step`]'s own BA
+    /// solve, once the edge's target frame ages into the free
+    /// `optimization_window` (a loop edge's source frame is typically
+    /// `fixedp`-excluded — an anchor, never itself solved for — see
+    /// [`Self::update_step`]'s own "Milestone M6" correction-magnitude
+    /// tracking for where the observable effect is actually measured).
+    fn try_loop_closure(&mut self) {
+        let Some(lc_cfg) = self.config.loop_closure else { return };
+        let n = self.graph.n_frames();
+        let due = match self.last_loop_batch_frame {
+            None => true,
+            Some(last) => n.saturating_sub(last) >= lc_cfg.global_opt_freq,
+        };
+        if !due {
+            return;
+        }
+
+        let (candidates_evaluated, accepted) = find_loop_edges(&self.graph, &lc_cfg);
+        self.loop_batches_attempted += 1;
+        self.loop_candidates_evaluated_total += candidates_evaluated;
+        if accepted.is_empty() {
+            return;
+        }
+
+        self.last_loop_batch_frame = Some(n);
+        self.loop_accepted_total += accepted.len();
+        self.loop_last_batch_accepted = accepted.len();
+        let patch_edges = expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
+        self.loop_patch_edges_added_total += patch_edges.len();
+        self.graph.append_edges(&patch_edges, DIM);
+    }
+
+    /// Milestone M6: record one `update_step` call's own correction-magnitude
+    /// sample — see that method's own "Milestone M6" section for how
+    /// `magnitude_m` (the max pose-translation delta across the whole BA
+    /// window, before vs. after that one solve) is computed and why it is
+    /// only sampled on calls where at least one active edge is a loop edge.
+    fn record_loop_correction(&mut self, magnitude_m: f64) {
+        self.loop_correction_events += 1;
+        self.loop_correction_sum_m += magnitude_m;
+        self.loop_correction_max_m = self.loop_correction_max_m.max(magnitude_m);
+    }
+
+    /// Milestone M6: dispatch to `DpvoPatchGraph::keyframe_with_loop_protection`
+    /// (loop closure enabled — see that method's doc for the exemption it
+    /// applies) or the plain `DpvoPatchGraph::keyframe` (loop closure
+    /// disabled, byte-for-byte M4/M4-perf/M5/M5b behavior).
+    fn keyframe_dispatch(&mut self) -> Option<usize> {
+        if self.config.loop_closure.is_some() {
+            let optimization_window = self.graph.config().optimization_window;
+            self.graph.keyframe_with_loop_protection(optimization_window)
+        } else {
+            self.graph.keyframe()
+        }
+    }
+
     /// One `update()` call (`dpvo.py:328-360`): reproject every active
     /// edge's patch grid, assemble the 2-pyramid-level correlation tensor
     /// (grouped by target frame — see the module doc's windowing/`corr_cpu`
@@ -1364,19 +1593,43 @@ impl DpvoOdometry {
     /// (or, once Milestone M5's IMU bootstrap has succeeded, the
     /// IMU-coupled [`dpvo_vi_ba`] instead — see this module's doc, "IMU
     /// coupling").
+    ///
+    /// # Milestone M6: correction-magnitude sampling
+    ///
+    /// Whenever loop closure is enabled and at least one currently active
+    /// edge is itself a loop edge, this call snapshots every pose in the
+    /// window before the solve and diffs against the solve's own output,
+    /// recording the largest translation delta via
+    /// [`Self::record_loop_correction`] — see the snapshot block's own doc
+    /// (right before `DpvoBaProblem` is built) for why the whole window is
+    /// sampled rather than just the loop edge's two endpoints.
     fn update_step(&mut self) -> Result<(), DpvoOdometryError> {
         let n = self.graph.n_frames();
         let removal_window = self.graph.config().removal_window;
         let patch_lifetime = self.graph.config().patch_lifetime;
         let optimization_window = self.graph.config().optimization_window;
         let patches_per_frame = self.graph.config().patches_per_frame;
-        let frame_lo = n.saturating_sub(removal_window + patch_lifetime);
+        let mut frame_lo = n.saturating_sub(removal_window + patch_lifetime);
 
         let edges = self.graph.edges().to_vec();
         if edges.is_empty() {
             return Ok(());
         }
         let e_count = edges.len();
+
+        // Milestone M6: widen `frame_lo` to cover every currently active
+        // edge's endpoints exactly, generalizing the M4 derivation above
+        // (a `debug_assert`-only check back then) to tolerate a
+        // proximity/loop-closure edge whose source frame is older than the
+        // ordinary `removal_window + patch_lifetime` bound — see the module
+        // doc's "Windowing the BA problem" section for why widening only
+        // ever adds *fixed* poses to the window, never changes the free
+        // pose count. A strict no-op whenever no edge is older than the
+        // formula above already covers (i.e. every M4/M4-perf/M5/M5b run,
+        // and every M6 run before its first successful loop batch).
+        if let Some(min_edge_frame) = edges.iter().map(|e| e.i.min(e.j)).min() {
+            frame_lo = frame_lo.min(min_edge_frame);
+        }
 
         let mut by_target: HashMap<usize, Vec<usize>> = HashMap::new();
         for (idx, edge) in edges.iter().enumerate() {
@@ -1467,8 +1720,9 @@ impl DpvoOdometry {
 
         debug_assert!(
             edges.iter().all(|e| e.i >= frame_lo && e.j >= frame_lo && e.k >= patches_lo),
-            "update_step's window [frame_lo,n) did not cover every active edge — the windowing \
-             derivation in this module's doc comment is unsound for this config \
+            "update_step's window [frame_lo,n) did not cover every active edge — Milestone M6's \
+             own min-over-edges widening above should make this unconditionally true; a failure \
+             here means that widening itself has a bug, not just a loose bound \
              (removal_window={removal_window}, patch_lifetime={patch_lifetime})"
         );
 
@@ -1485,6 +1739,26 @@ impl DpvoOdometry {
         let ws = self.config.width as f64 / RES as f64;
         let hs = self.config.height as f64 / RES as f64;
         let bounds = [-64.0, -64.0, ws + 64.0, hs + 64.0];
+
+        // Milestone M6: snapshot the pre-solve window poses for the
+        // loop-correction-magnitude diagnostic, but ONLY when loop closure
+        // is enabled AND at least one currently active edge is itself a
+        // loop edge (temporal gap `j - i` exceeding `UPSTREAM_MIN_LOOP_GAP`
+        // — the same criterion `DpvoPatchGraph::keyframe_with_loop_protection`
+        // uses to recognize one). Sampling the WHOLE window rather than just
+        // the loop edge's own two endpoints is deliberate: its *source*
+        // frame `i` is very often `fixedp`-excluded (an anchor outside
+        // `optimization_window`, never itself solved for), so the
+        // observable correction — if any — shows up on whichever pose in
+        // the FREE `[global_fixedp, n)` range the edge's target `j` (or a
+        // frame chained to it through ordinary temporal edges) happens to
+        // pull on, not necessarily at the edge's own two endpoints.
+        let loop_correction_pre_solve: Option<Vec<SE3>> = self.config.loop_closure.as_ref().and_then(|_| {
+            edges
+                .iter()
+                .any(|e| e.j.saturating_sub(e.i) > UPSTREAM_MIN_LOOP_GAP)
+                .then(|| window_poses.clone())
+        });
 
         let problem = DpvoBaProblem {
             poses: window_poses,
@@ -1580,6 +1854,17 @@ impl DpvoOdometry {
             (solved.poses, solved.patches, None)
         };
         self.stats.ba_ms_total += ba_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Milestone M6: complete the loop-correction-magnitude sample this
+        // call started above (see that block's own doc for what/why).
+        if let Some(pre_solve) = loop_correction_pre_solve {
+            let magnitude = pre_solve
+                .iter()
+                .zip(new_poses.iter())
+                .map(|(before, after)| (after.translation - before.translation).norm())
+                .fold(0.0_f64, f64::max);
+            self.record_loop_correction(magnitude);
+        }
 
         for (local, pose) in new_poses.into_iter().enumerate() {
             self.graph.frames_mut()[frame_lo + local].pose = pose;
