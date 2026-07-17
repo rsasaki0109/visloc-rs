@@ -2466,3 +2466,383 @@ overlap case this milestone's diagnosis isolates.
 - `pipelines/slam/src/incremental_sfm.rs`, `bundle.rs`, and every other
   mapper file: **not touched** — this milestone is strictly a frontend
   pre-filter, per its own scope.
+
+## M6 results (implemented 2026-07-17)
+
+### Question
+
+M5's own escalation note names the lever directly: NN+ratio matching, even
+behind a real `ConfigurationType` classifier, cannot safely extract
+`courtyard`'s sparse cross-component correspondence signal — the "naive
+rescue" experiment showed a real, classifier-passing *false*-bridge failure
+mode (office: 0.50 → 34.78 cm) from over-relaxing a per-descriptor ratio
+test on a repeated-texture scene. A **learned, joint** matcher — one that
+attends over both images' descriptors together, rather than ranking each
+descriptor's nearest neighbour independently — is M5's own proposed next
+lever. This milestone ports LightGlue (SuperPoint variant) as an in-process
+ONNX matcher for the unordered-SfM pair-matching step and re-runs the exact
+ETH3D acceptance matrix M1–M5 already used.
+
+### License verdict: clean
+
+[cvg/LightGlue](https://github.com/cvg/LightGlue)'s own `LICENSE` file and
+its README's `## License` section (fetched directly, quoted verbatim):
+> "The pre-trained weights of LightGlue and the code provided in this
+> repository are released under the [Apache-2.0 license](./LICENSE). [DISK]
+> follows this license as well but SuperPoint follows [a different,
+> restrictive license](https://github.com/magicleap/SuperPointPretrainedNetwork/blob/master/LICENSE)
+> (this includes its pre-trained weights and its [inference file]) [...]"
+
+So: **LightGlue's own matcher weights and code are Apache-2.0** (ETH Zurich,
+2023) — clean, matching the SuperPoint-ONNX precedent this milestone was
+told to follow (user-run export script, no weights committed). The one real
+caveat in that same sentence — SuperPoint's *own* weights/inference file
+(bundled inside the `cvg/LightGlue` repo as `lightglue/superpoint.py`) carry
+a separate, restrictive (MagicLeap, non-commercial/research) license — is
+**not triggered by this milestone**: `scripts/export_lightglue_onnx.py` only
+ever imports `lightglue.LightGlue`/`lightglue.lightglue` (the matcher
+module), never `lightglue.superpoint`; this repo's SuperPoint *extractor*
+(`crates/vision/src/features/superpoint_onnx.rs`, `models/superpoint_1500.onnx`)
+is an independent, separately-sourced, pre-existing component from an
+earlier, unrelated milestone, out of scope here either way. The community
+reference project named in the task brief,
+[fabio-sim/LightGlue-ONNX](https://github.com/fabio-sim/LightGlue-ONNX) —
+now renamed `lightglue_dynamo` — is **also Apache-2.0** (confirmed via
+GitHub's own license API, `spdx_id: Apache-2.0`); its export *recipe* is
+cited below as independent confirmation of a real export obstacle this
+milestone hit on its own, but no code was copied from it — the ONNX graph
+here is exported from the official `cvg/LightGlue` checkpoint by this
+repo's own script, per the task's "export from the official weights
+yourself" instruction.
+
+### Export findings: what resisted export
+
+**The legacy (default) `torch.onnx.export` TorchScript-tracing exporter
+fails on this exact module, on every configuration tried.** Reproduced
+independently, not inferred from a changelog: `M=512,N=480`, `M=N=512`,
+opset 16 and 17, all raise the identical
+`torch.onnx.symbolic_opset9.transpose: IndexError: list index out of range`,
+inside LightGlue's rotary-positional-encoding/cross-attention code
+(`lightglue/lightglue.py`'s `transpose(-2,-1)` calls around line 221–223).
+The same module runs correctly in eager PyTorch (`model(...)` sanity-checks
+clean every time) — this is a legacy-exporter tracing bug (the symbolic
+per-op translator's shape-rank inference disagreeing with the traced
+graph's actual rank at that op), not a bug in LightGlue or in this script.
+Reproduced on the repo's existing `E:/tools/venv-cu` (torch 2.5.1+cu121, the
+same environment M5 used for its own SuperPoint/LightGlue Python
+experiments) — ruling out "wrong environment" as the cause before looking
+elsewhere.
+
+**Fix: the `dynamo=True` exporter (`torch.export`-based FX capture, not
+per-op symbolic translation).** This traces the identical module without
+incident. Corroborating evidence this is a known, real obstacle rather than
+a one-off: `fabio-sim/LightGlue-ONNX`'s current `main` branch has renamed
+itself `lightglue_dynamo` and pins `torch==2.9.1` for export — the community
+reference project independently arrived at the same fix. Practical wrinkles
+closing the gap between "works in principle" and "works in this repo":
+- `dynamo=True` needs `onnxscript` + `onnx` installed (not previously a
+  dependency of any venv in this repo); on torch 2.5.1 the dynamo path's
+  own `torch.onnx.export` call additionally needed a **newer torch**
+  (2.9.1) to succeed outright — 2.5.1 traces successfully via
+  `torch.export` but then fails during the onnx-version-downversion step
+  (a caught, non-fatal `RuntimeError` inside `onnxscript`'s version
+  converter — the export still completes, just at opset 18 instead of the
+  requested opset 16/17, with a warning). Requesting `--opset 18` directly
+  avoids the noise; still clears the milestone's "opset ≥ 16" bar.
+- **New venv, not the existing one**: `E:/tools/venvs/lightglue_export`
+  (torch 2.9.1+cpu, torchvision, `lightglue` from `pip install git+
+  https://github.com/cvg/LightGlue.git`, `onnx`, `onnxscript`,
+  `onnxruntime`; `PIP_CACHE_DIR=E:/tools/pip_cache`), kept separate from
+  `E:/tools/venv-cu` (torch 2.5.1+cu121) per the task's own disk/isolation
+  instructions — pinning a newer torch just for this export without
+  disturbing whatever other in-flight work already depends on `venv-cu`'s
+  existing pin.
+- Windows-only papercut: the dynamo exporter's own verbose progress
+  messages include a "✅" checkmark that crashes with `UnicodeEncodeError`
+  under Windows' default `cp932` console code page unless
+  `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8` is set — the same fix this repo's
+  own `HANDOFF_codex.md`-adjacent history already needed for
+  `export_superpoint_onnx.py`.
+- **Image size stays baked in at export time** (dynamic axes cover only the
+  per-image *keypoint count*, `M`/`N` — the actual, real requirement, since
+  ETH3D's own `courtyard`/`terrace`/`office` keypoint counts range from 413
+  to 2048 per image within a single scene, per the cached SuperPoint
+  features). This reuses this repo's own pre-existing `lightglue_onnx.rs`/
+  `export_lightglue_onnx.py` design (from the June 2026 "in-process deep
+  front-end" milestone, `docs/lightglue_onnx_benchmark.md`) rather than
+  changing it: one exported graph per camera resolution. Three graphs were
+  exported for this milestone's acceptance run —
+  `lightglue_{courtyard,office,terrace}_<W>x<H>.onnx`, matching each ETH3D
+  scene's own intrinsics used by every prior M1–M5 acceptance run.
+
+`scripts/export_lightglue_onnx.py` was refactored (not rewritten) to expose
+`build_model`/`dummy_inputs` as reusable functions (mirroring
+`scripts/export_dpvo_onnx.py`'s own "importable model-builder" pattern for
+the DPVO port), so `scripts/check_lightglue_onnx_parity.py` reconstructs the
+*exact* traced module rather than a hand-copied approximation of it.
+
+### Parity table
+
+**Python** (`scripts/check_lightglue_onnx_parity.py`, PyTorch CPU vs ONNX
+Runtime CPU, against `lightglue_terrace_6205x4136.onnx`):
+
+| fixture | M | N | matched (py / ort) | `matches0` index agreement | `mscores0` max-abs diff | verdict |
+|---|---:|---:|---|---:|---:|---|
+| seeded random | 512 | 480 | 0 / 0 | 100.00% | 1.10e-08 | PASS |
+| real (ETH3D `terrace` `DSC_0259`/`DSC_0260` SuperPoint descriptors) | 2048 | 2048 | 1064 / 1064 | 100.00% | 7.36e-05 | PASS |
+
+**Rust** (`cargo test -p visloc-vision --features onnx-inference --test
+lightglue_onnx_parity -- --ignored`, `ORT_DYLIB_PATH` set, via
+[`LightGlueOnnxMatcher::match_features`] against the same two `.npz`
+fixtures the Python run above dumped):
+
+| fixture | matched | index agreement | `mscores0` max-abs diff (matched subset) | verdict |
+|---|---:|---:|---:|---|
+| seeded random | 0 | 100.00% | 0.0 (no matches) | PASS |
+| real | 1064 | 100.00% | 6.26e-05 | PASS |
+
+Threshold: `1e-4` max-abs, matching `scripts/check_dpvo_onnx_parity.py`'s
+own convention. One methodology correction made *during* writing this Rust
+test, worth recording: `mscores0` is only meaningfully comparable at
+positions the fixture's own `matches0` actually matched (`>= 0`) —
+LightGlue's `filter_matches` (`lightglue/lightglue.py:302-318`) sets
+`mscores0` from mutual-nearest-neighbour agreement *before* the
+`filter_threshold` cut that decides `matches0`, so a "mutual but
+below-threshold" keypoint can carry a genuine nonzero `mscores0` in the
+fixture even though it was never returned as a match.
+[`LightGlueOnnxMatcher::match_features`]'s public contract, by design, only
+returns scores for matches it actually reports; the first version of this
+test compared the *full* dense array (reconstructing unreturned slots as
+zero) and manufactured a spurious "parity failure" (max-abs diff up to
+9e-2) purely from that API-boundary filtering choice, not from any real
+PyTorch-vs-`ort` numeric disagreement. Restricting the comparison to the
+matched subset is both the correct fix and the honest measure of what this
+matcher's actual contract delivers.
+
+### Files changed
+
+- `crates/vision/src/features/lightglue_onnx.rs` — **no behaviour change**
+  (this file already existed, from the June 2026 real-time deep-front-end
+  milestone, and already passed a from-scratch bit-identical-to-Python
+  parity check on EuRoC data — see `docs/lightglue_onnx_benchmark.md`).
+  Added: 10 new always-on unit tests (`tests::tensor_marshalling`) for the
+  Rust-side pre/post-processing math this milestone's brief asked for
+  (`build_keypoint_tensor`, `build_descriptor_tensor`, `squeeze_to_1d_i64`,
+  `squeeze_to_1d_f32`, and their `DimensionMismatch`/`OutputShapeMismatch`
+  error paths) — keypoint *normalisation* and match *extraction from the
+  assignment matrix* are deliberately left inside the exported ONNX graph
+  (the same "push it into the graph, keep the Rust wrapper thin" choice
+  `superpoint_onnx.rs` already made), so those always-on tests cover the
+  genuinely Rust-side tensor marshalling rather than re-testing graph
+  internals a fixture-parity test already exercises end-to-end.
+- `crates/vision/tests/lightglue_onnx_parity.rs` (new) — the ignore-gated
+  fixture-parity tests above; 2 tests.
+- `scripts/export_lightglue_onnx.py` — refactored to expose
+  `build_model`/`dummy_inputs`; switched to `dynamo=True` + opset 18 (see
+  "Export findings" above); docstring extended with the license/export
+  findings.
+- `scripts/check_lightglue_onnx_parity.py` (new) — PyTorch-vs-ORT parity
+  check + `.npz` fixture dump, seeded-random and real-descriptor fixtures.
+- `examples/unordered_sfm_demo.rs` — new `MatcherKind` (`nn` default /
+  `lightglue`) and `PairMatcher` (the dispatch enum + `match_pair`),
+  `build_matcher`, `--matcher`/`--lightglue-model` CLI flags. Wired into
+  **both** `verify_pairs` (main pass) and `rescue_bridging` (M5's rescue
+  pass) — the exact two call sites the milestone brief named — replacing
+  the inline `CrossCheckMatcher`/`BruteForceMatcher` construction at each.
+  `--matcher lightglue` without the `onnx-inference` feature compiled in is
+  a hard, immediate (`build_matcher`, before any pair is processed) runtime
+  error; default (`nn`) behaviour is byte-for-byte unchanged (same
+  estimator calls, same default ratio), matching every prior M1–M5 flag's
+  "off means unchanged" convention. `rescue_match_ratio`/`rescue_cross_check`
+  are `nn`-only knobs, explicitly documented as ignored under `lightglue`
+  (LightGlue has no equivalent per-pair tunable — its decision is the
+  learned assignment matrix + the graph's own baked-in `filter_threshold`,
+  LightGlue's own published default `0.1`).
+- `docs/colmap_port_plan.md` — this section.
+
+No new Rust dependencies (`ort` + existing infra only, `onnx-inference`
+feature-gated, exactly as scoped). `pipelines/slam/src/dpvo_*.rs`,
+`map_atlas.rs`, `examples/euroc_dpvo_vo_demo.rs` not touched (concurrent
+DPVO work, confirmed via `git status` at the start and end of this session).
+
+### Acceptance table
+
+Same cached SuperPoint features and per-scene intrinsics every M1–M5
+acceptance run used (`E:\datasets\eth3d\battle\<scene>\visloc_run\features`,
+`kp2048@max-dim-3200`), same `--retrieval-topk 12 --min-matches 30
+--colmap-style --verification-mode full` invocation, only `--matcher`
+(and, for the rescue rows, `--rescue-bridging --rescue-min-matches 15`)
+added. Full logs, per-run `images.txt`/`points3D.txt`, and the Sim(3)
+scorer's output for every row: `E:/visloc_archive/colmap_m6_20260717/`.
+
+**Courtyard** (M5 baseline: 14/38, 3.93 cm full, 0.26 cm common-8, 2
+disconnected view-graph components):
+
+| configuration | registered | full-RMSE | common-8 RMSE | verified/candidate pairs | inlier correspondences | view-graph components |
+|---|---:|---:|---:|---:|---:|---:|
+| `--matcher nn` (M5 baseline, reproduced) | 14/38 | 3.93 cm | 0.26 cm | 135/256 | 29,496 | 2 (per M5's own diagnosis) |
+| `--matcher lightglue` | **14/38 (identical image set)** | 3.44 cm | 0.98 cm | 241/256 | 98,083 | **1** |
+| `--matcher lightglue --rescue-bridging` | 14/38 (byte-identical `images.txt` to the row above) | 3.44 cm | 0.98 cm | (rescue: "graph is already connected, nothing to bridge") | — | 1 |
+
+**Terrace** (guardrail; M1/M5 baseline: 23/23):
+
+| configuration | registered | full-RMSE | common-8 RMSE | verified/candidate pairs |
+|---|---:|---:|---:|---:|
+| `--matcher nn` | 23/23 | 1.38 cm | 0.94 cm | 89/147 |
+| `--matcher lightglue` | 23/23 | **0.74 cm** | **0.60 cm** | 125/147 |
+
+**Office** (guardrail; M1/M5 baseline: 18/26):
+
+| configuration | registered | full-RMSE | verified/candidate pairs |
+|---|---:|---:|---:|
+| `--matcher nn` | 18/26 | 0.50 cm | 57/171 |
+| `--matcher lightglue` | **22/26** | **0.44 cm** | 112/171 |
+| `--matcher lightglue --rescue-bridging` | 22/26 (byte-identical to the row above; rescue again a true no-op) | 0.44 cm | — |
+
+**Matcher runtime per pair** (courtyard, the only pair uncontended by other
+concurrent runs on this machine during this measurement — terrace/office's
+LightGlue runs executed concurrently with each other and are therefore
+*not* used for this specific comparison, only for the registration/RMSE
+rows above, which are unaffected by CPU contention, only by wall-clock):
+
+| matcher | total wall time (256 candidate pairs, full pipeline: load+match+verify+BA) | per pair |
+|---|---:|---:|
+| `nn` | 76.7 s | 0.30 s/pair |
+| `lightglue` | 1449.2 s (24 m 9 s) | 5.66 s/pair |
+
+**~19× slower per pair on CPU**, entirely attributable to this milestone's
+implementation, not to LightGlue itself: `LightGlueOnnxMatcher` holds one
+`Arc<Mutex<ort::session::Session>>` shared across every rayon-parallel
+candidate-pair closure, so LightGlue inference is **serialized** across
+pairs (each pair's ~9-layer-transformer attention over up to 2048+2048
+keypoints runs to completion before the next can start), whereas `nn`
+matching is a plain per-pair function rayon parallelizes trivially across
+every CPU core. This is a real, identified, unaddressed-in-this-milestone
+cost — not an inherent property of the matcher itself: this same module
+already has a CUDA execution-provider path (`OnnxBackend::CudaThenCpu`,
+already exercised for the real-time SLAM front-end) measured elsewhere in
+this repo at ~35× faster than CPU for this exact op
+(`docs/lightglue_onnx_benchmark.md`), and even on CPU a small pool of
+sessions (rather than one shared, mutex-serialized session) would let
+independent candidate pairs actually run in parallel — flagged here as the
+concrete next lever for anyone who wants `--matcher lightglue` to be
+practical at larger candidate-pair counts than ETH3D's own 147–256, not
+attempted in this milestone (out of scope: the brief asked for the matcher
+and the measurement, not a throughput optimization pass).
+
+### Verdict on the courtyard plateau
+
+**Registration does not exceed 14/38 — the honest ceiling M5 already found
+survives a second, completely different lever.** But the *mechanism*
+changes in a way worth reporting precisely, because it is not simply "no
+change":
+
+- **LightGlue's main pass alone reconnects the view graph to one
+  component**, with no rescue-pass trickery, no relaxed-threshold tuning,
+  and no risk of M5's own documented false-bridge failure mode (LightGlue's
+  matching decision is a single, joint, threshold-consistent judgement
+  baked into the graph — evaluated identically, at the *same* strictness,
+  for every pair the main pass considers, unlike a rescue pass's
+  deliberately loosened ratio test). M5 needed a whole second, opt-in pass
+  with a corrected admission floor to get `courtyard` from 2 components to
+  1; M6's `--matcher lightglue --rescue-bridging` finds the rescue pass has
+  *nothing left to do* — the main pass already did the reconnecting.
+- **Verified pairs and inlier correspondences roughly double** (241/256 vs
+  135/256 pairs; 98,083 vs 29,496 inliers) — direct, measured evidence that
+  a joint matcher genuinely extracts more of the true correspondence signal
+  from the same wide-baseline images, exactly as M5's diagnosis predicted.
+- **Yet the same 14 images register** (confirmed by diffing the registered
+  image-name lists, not just the count: byte-identical `DSC_0286`–`0297` +
+  `0309`–`0310` either way), and the final reconstruction has *fewer*
+  tracks/observations than the `nn` baseline (1,346/3,162 vs 3,088/10,083).
+  This generalizes M5's own root-cause diagnosis rather than contradicting
+  it: the extra correspondences are real, but concentrated in
+  cross-component *bridge* pairs that connect the graph topologically
+  without giving any single previously-unregistered image (`25`–`37`) a
+  large enough, concentrated bundle of correspondences to already-
+  triangulated 3D points to clear the incremental mapper's PnP
+  correspondence-count/inlier-ratio gates. **Once a matcher already
+  achieves full pairwise connectivity, the courtyard boundary's bottleneck
+  is not pairwise correspondence extraction at all** — it is how thin the
+  *per-image* structure crossing that boundary is, a property of the scene
+  and the mapper's growth rule, not of which matcher proposed the pairs.
+- **Common-subset RMSE gets measurably worse even as full-set RMSE
+  improves** (0.26 → 0.98 cm common-8, vs 3.93 → 3.44 cm full) — an honest,
+  reportable side effect, not swept under "LightGlue is strictly better."
+  A much denser correspondence set changes *which* tracks/observations
+  survive track-building and BA on the same 14-image reconstruction,
+  trading away some of the tight geometric consistency the sparser `nn`
+  correspondence set happened to have on that specific 8-image common
+  subset. This is evidence that "more correspondences" is not a free
+  accuracy win even when the image set is unchanged — worth flagging for
+  anyone treating `--matcher lightglue` as a drop-in upgrade rather than a
+  genuine trade to evaluate per scene.
+- **Terrace and office are not just guardrails that hold — both improve
+  outright**, unprompted by the milestone's own framing (which only asked
+  for parity): terrace's full-RMSE nearly halves (1.38 → 0.74 cm) at the
+  same 23/23 registration; office's registration itself grows (18/26 →
+  22/26, +4 images) *and* full-RMSE improves on the larger set (0.50 → 0.44
+  cm). LightGlue is a genuine, unambiguous win on both scenes the milestone
+  only asked it not to break.
+- **Runtime cost is real, measured, and currently expensive**: ~19× slower
+  per pair on CPU in this milestone's implementation (see above), which
+  matters directly for whether `--matcher lightglue` is practical at
+  `courtyard`'s own 256-candidate-pair scale (24 minutes) versus a
+  thousands-of-images corpus.
+
+**What this implies for the next milestone.** `docs/colmap_port_plan.md`'s
+own M5 escalation path is now closed out: both proposed levers past
+"denser SuperPoint" and "disciplined rescue relaxation" — a learned joint
+matcher — have been tried, measured, and shown to genuinely fix the
+diagnosed problem (view-graph connectivity) without fixing the actual
+registration ceiling (per-image correspondence density against the
+incremental mapper's PnP gates). This is not evidence the frontend is out
+of levers in general — it is specific, measured evidence that **the
+remaining `courtyard` gap is no longer a two-view-matching problem at all**,
+once a joint matcher has already achieved full connectivity. A future
+milestone aimed at closing it should look *upstream* of pairwise matching:
+e.g. detecting the second component as a candidate for loop-closure-style
+relocalization against the already-built first component's map (posing the
+problem as "does image 25 belong somewhere in the map we already have",
+COLMAP's own structure-less registration path, rather than "which pixels in
+image 25 match which pixels in image 22") — or accepting `courtyard`'s
+14/38 as this scene's genuine ceiling for a from-scratch incremental
+pipeline and redirecting effort toward M4's original, still-unaddressed
+thousands-of-images retrieval-scale benchmark, where `courtyard`'s own
+23-image second component would simply be additional corpus rather than an
+unreachable island.
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision --lib` (default features): **167 passed, 0
+  failed** — unchanged from M5 (this milestone added no code compiled
+  outside `onnx-inference`).
+- `cargo test -p visloc-vision --lib --features onnx-inference`: **199
+  passed, 1 ignored, 0 failed** (10 new `lightglue_onnx::tests::
+  tensor_marshalling` tests; every pre-existing test unmodified and green).
+- `cargo test -p visloc-vision --features onnx-inference --test
+  lightglue_onnx_parity -- --ignored` (`ORT_DYLIB_PATH=E:/tools/
+  onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll`): **2 passed, 0 failed**
+  (the parity table above).
+- `cargo clippy -p visloc-vision --all-targets --features onnx-inference --
+  -D warnings`: clean, zero warnings.
+- `cargo clippy --example unordered_sfm_demo --features image-io,onnx-
+  inference -- -D warnings`: **zero** warnings/errors in
+  `unordered_sfm_demo.rs` or any `crates/vision` file this milestone
+  touched (grepped clippy's own `-->` lines to confirm); 6 pre-existing
+  errors remain in untouched, concurrently-edited
+  `pipelines/slam/src/{map_atlas,online_slam_vi_ba,vi_motion_initializer,
+  online_slam_motion_vi_init}.rs` — the same file set M1.1/M2/M2.1/M4/M5
+  documented as out-of-scope concurrent DPVO/online-SLAM development.
+- `cargo check --example unordered_sfm_demo` (default features, no
+  `onnx-inference`): clean — `--matcher lightglue` compiles out to a hard
+  runtime error path, `--matcher nn` (default) behaviour is untouched.
+- `cargo check --example unordered_sfm_demo --features image-io,onnx-
+  inference`: clean.
+- Release build: `cargo build --release --example unordered_sfm_demo
+  --features image-io,onnx-inference` — clean. Used directly for every
+  acceptance run above.
+- `pipelines/slam/src/incremental_sfm.rs`, `bundle.rs`, and every other
+  mapper file: **not touched** — this milestone, like M5, is strictly a
+  frontend pre-filter (candidate-pair *matching*, upstream of geometric
+  verification), per its own scope.

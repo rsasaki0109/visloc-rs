@@ -354,4 +354,127 @@ mod tests {
             }
         );
     }
+
+    // -----------------------------------------------------------------
+    // M6 (`docs/colmap_port_plan.md`): always-on unit tests for the
+    // Rust-side pre/post-processing math around the ONNX graph itself.
+    //
+    // Keypoint *normalisation* (dividing by the baked-in image size) and
+    // match *extraction* from the assignment matrix (the score-threshold
+    // cut implementing `filter_matches`) both live **inside the exported
+    // ONNX graph** (`scripts/export_lightglue_onnx.py`'s `normalize_keypoints`
+    // call and `filter_matches` call respectively) — not in this file — by
+    // deliberate design, the same "push it into the graph, keep the Rust
+    // wrapper thin" choice `superpoint_onnx.rs` already made, and reused
+    // rather than re-litigated here (see this file's module doc: the ONNX
+    // output is bit-identical to the Python reference on real pairs, which
+    // already exercises that logic end-to-end via the ignore-gated fixture
+    // tests in `crates/vision/tests/lightglue_onnx_parity.rs`).
+    //
+    // What genuinely *is* Rust-side pre/post-processing math, and therefore
+    // belongs here as an always-on (non-`#[ignore]`) unit test independent
+    // of any ONNX Runtime session or model file: the tensor-shape
+    // marshalling functions below (`build_keypoint_tensor`,
+    // `build_descriptor_tensor`, `squeeze_to_1d_i64`, `squeeze_to_1d_f32`)
+    // and their `DimensionMismatch`/`OutputShapeMismatch` error paths.
+    // -----------------------------------------------------------------
+    #[cfg(feature = "onnx-inference")]
+    mod tensor_marshalling {
+        use super::*;
+
+        #[test]
+        fn build_keypoint_tensor_places_pixel_xy_at_batch_zero() {
+            let kpts = vec![Point2::new(1.5, 2.5), Point2::new(100.0, 200.0)];
+            let array = build_keypoint_tensor(&kpts).expect("build_keypoint_tensor");
+            assert_eq!(array.shape(), &[1, 2, 2]);
+            assert_eq!(array[(0, 0, 0)], 1.5);
+            assert_eq!(array[(0, 0, 1)], 2.5);
+            assert_eq!(array[(0, 1, 0)], 100.0);
+            assert_eq!(array[(0, 1, 1)], 200.0);
+        }
+
+        #[test]
+        fn build_keypoint_tensor_handles_empty_input() {
+            let array = build_keypoint_tensor(&[]).expect("build_keypoint_tensor");
+            assert_eq!(array.shape(), &[1, 0, 2]);
+        }
+
+        #[test]
+        fn build_descriptor_tensor_round_trips_values() {
+            let mut d0 = vec![0.0f32; DESCRIPTOR_DIM];
+            d0[0] = 0.25;
+            d0[DESCRIPTOR_DIM - 1] = -0.75;
+            let descriptors = vec![d0.clone()];
+            let array =
+                build_descriptor_tensor(&descriptors, 1, "image 0").expect("build_descriptor_tensor");
+            assert_eq!(array.shape(), &[1, 1, DESCRIPTOR_DIM]);
+            assert_eq!(array[(0, 0, 0)], 0.25);
+            assert_eq!(array[(0, 0, DESCRIPTOR_DIM - 1)], -0.75);
+        }
+
+        #[test]
+        fn build_descriptor_tensor_rejects_keypoint_count_mismatch() {
+            let descriptors = vec![vec![0.0f32; DESCRIPTOR_DIM]];
+            let err = build_descriptor_tensor(&descriptors, 2, "image 0").unwrap_err();
+            match err {
+                LightGlueOnnxError::DimensionMismatch { message } => {
+                    assert!(message.contains("image 0"), "message: {message}");
+                    assert!(message.contains('1'), "message: {message}");
+                    assert!(message.contains('2'), "message: {message}");
+                }
+                other => panic!("expected DimensionMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn build_descriptor_tensor_rejects_wrong_descriptor_length() {
+            let descriptors = vec![vec![0.0f32; DESCRIPTOR_DIM - 1]];
+            let err = build_descriptor_tensor(&descriptors, 1, "image 1").unwrap_err();
+            match err {
+                LightGlueOnnxError::DimensionMismatch { message } => {
+                    assert!(message.contains("image 1"), "message: {message}");
+                    assert!(message.contains("descriptor 0"), "message: {message}");
+                }
+                other => panic!("expected DimensionMismatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn squeeze_to_1d_i64_accepts_bare_and_batched_shapes() {
+            let bare = ndarray::array![1i64, -1, 2].into_dyn();
+            assert_eq!(squeeze_to_1d_i64(bare.view()).unwrap(), vec![1, -1, 2]);
+
+            let batched = ndarray::array![[1i64, -1, 2]].into_dyn();
+            assert_eq!(squeeze_to_1d_i64(batched.view()).unwrap(), vec![1, -1, 2]);
+        }
+
+        #[test]
+        fn squeeze_to_1d_i64_rejects_unexpected_rank() {
+            let bad = ndarray::Array::<i64, _>::zeros((2, 3)).into_dyn();
+            let err = squeeze_to_1d_i64(bad.view()).unwrap_err();
+            assert!(matches!(
+                err,
+                LightGlueOnnxError::OutputShapeMismatch { expected: _, .. }
+            ));
+        }
+
+        #[test]
+        fn squeeze_to_1d_f32_accepts_bare_and_batched_shapes() {
+            let bare = ndarray::array![0.9f32, 0.5].into_dyn();
+            assert_eq!(squeeze_to_1d_f32(bare.view()).unwrap(), vec![0.9, 0.5]);
+
+            let batched = ndarray::array![[0.9f32, 0.5]].into_dyn();
+            assert_eq!(squeeze_to_1d_f32(batched.view()).unwrap(), vec![0.9, 0.5]);
+        }
+
+        #[test]
+        fn squeeze_to_1d_f32_rejects_unexpected_rank() {
+            let bad = ndarray::Array::<f32, _>::zeros((2, 3)).into_dyn();
+            let err = squeeze_to_1d_f32(bad.view()).unwrap_err();
+            assert!(matches!(
+                err,
+                LightGlueOnnxError::OutputShapeMismatch { expected: _, .. }
+            ));
+        }
+    }
 }

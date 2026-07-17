@@ -22,6 +22,26 @@ own `normalize_keypoints`), so the model is exported per image resolution
 positional encoding, the 9 self/cross attention layers, the log-assignment
 head, and `filter_matches`) is the reference implementation verbatim.
 
+Weights: `LightGlue(features="superpoint")` downloads cvg/LightGlue's own
+released checkpoint (Apache-2.0, see `docs/colmap_port_plan.md`'s "M6
+results" for the license verdict) on first use; nothing is committed to this
+repo (same "user-run export script, no weights in the repo" convention as
+`export_superpoint_onnx.py`).
+
+**Exporter: `dynamo=True` is required, not optional, on this graph.** The
+default (legacy TorchScript-tracing) exporter fails on every configuration
+tried (`torch.onnx.symbolic_opset9.transpose`: `IndexError: list index out of
+range`, inside LightGlue's rotary-positional-encoding/attention code — a
+legacy-exporter tracing bug, not a bug in LightGlue or in this script: the
+same module runs correctly in eager PyTorch and the *dynamo* exporter
+(`torch.export`-based FX capture, not per-op symbolic translation) traces the
+identical module without incident). This reproduces on both torch 2.5.1+cu121
+and (with `dynamo=True`) succeeds on torch 2.9.1 — see the plan doc for the
+full repro and why a **dedicated venv** (`E:/tools/venvs/lightglue_export`,
+not the repo's existing `E:/tools/venv-cu`) was used: pinning a newer torch
+just for this export without disturbing whatever other in-flight work already
+depends on `venv-cu`'s existing (older) torch pin.
+
 Usage:
   scripts/export_lightglue_onnx.py --out models/lightglue.onnx \
       --width 752 --height 480
@@ -59,28 +79,55 @@ class LightGlueOnnx(torch.nn.Module):
         return m0[0].to(torch.int64), mscores0[0]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--width", type=int, default=752)
-    ap.add_argument("--height", type=int, default=480)
-    ap.add_argument("--opset", type=int, default=17)
-    args = ap.parse_args()
-
+def build_model(width: int, height: int) -> "LightGlueOnnx":
+    """Build the (untraced) PyTorch reference module for a given baked-in
+    image size. Factored out of `main()` so `check_lightglue_onnx_parity.py`
+    can import the *exact* module that was (or would be) traced for export,
+    the same "import model-building code directly" pattern
+    `scripts/check_dpvo_onnx_parity.py` uses for the DPVO port (M1,
+    `docs/dpvo_droid_port_plan.md`) — the PyTorch reference is guaranteed to
+    be the same architecture/weights the export traces, not a
+    hand-reconstructed approximation of it.
+    """
     lg = LightGlue(
         features="superpoint",
         depth_confidence=-1,
         width_confidence=-1,
         flash=False,
     ).eval()
-    model = LightGlueOnnx(lg, args.width, args.height).eval()
+    return LightGlueOnnx(lg, width, height).eval()
 
-    # Dummy inputs with distinct M, N so the export does not bake M == N.
-    m, n = 512, 480
-    kpts0 = torch.rand(1, m, 2) * torch.tensor([args.width, args.height])
-    kpts1 = torch.rand(1, n, 2) * torch.tensor([args.width, args.height])
+
+def dummy_inputs(width: int, height: int, m: int = 512, n: int = 480):
+    """Seeded-shape (not seeded-*value*: caller controls RNG state) dummy
+    `(kpts0, desc0, kpts1, desc1)` tensors, distinct `M != N` so tracing does
+    not silently bake `M == N` into the graph. Shared by `main()`'s own
+    export-time sanity check and `check_lightglue_onnx_parity.py`'s
+    "seeded random" fixture.
+    """
+    kpts0 = torch.rand(1, m, 2) * torch.tensor([float(width), float(height)])
+    kpts1 = torch.rand(1, n, 2) * torch.tensor([float(width), float(height)])
     desc0 = torch.nn.functional.normalize(torch.rand(1, m, 256), dim=-1)
     desc1 = torch.nn.functional.normalize(torch.rand(1, n, 256), dim=-1)
+    return kpts0, desc0, kpts1, desc1
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--width", type=int, default=752)
+    ap.add_argument("--height", type=int, default=480)
+    # 18, not 16/17: the dynamo/`torch.export`-based exporter (see the
+    # `dynamo=True` call below) only ships opset-18 implementations for a
+    # couple of ops this graph touches; requesting 16 or 17 makes it emit a
+    # non-fatal warning and attempt (and fail) a version downversion before
+    # falling back to 18 anyway. Asking for 18 directly avoids the noise.
+    # Still satisfies M6's own "opset >= 16" requirement.
+    ap.add_argument("--opset", type=int, default=18)
+    args = ap.parse_args()
+
+    model = build_model(args.width, args.height)
+    kpts0, desc0, kpts1, desc1 = dummy_inputs(args.width, args.height)
     with torch.no_grad():
         mo, sc = model(kpts0, desc0, kpts1, desc1)
     print(f"sanity: matches0 {tuple(mo.shape)} {mo.dtype}, mscores0 {tuple(sc.shape)} {sc.dtype}")
@@ -96,6 +143,19 @@ def main():
             "matches0": {0: "m"}, "mscores0": {0: "m"},
         },
         opset_version=args.opset,
+        # PyTorch >= 2.5's FX/`torch.export`-based exporter ("dynamo=True").
+        # The legacy TorchScript-tracing exporter (the default) fails on this
+        # graph on torch 2.5.1: `torch.onnx.symbolic_opset9.transpose` raises
+        # `IndexError: list index out of range` inside LightGlue's rotary
+        # positional-encoding / attention code (a transpose on more axes than
+        # the legacy tracer's symbolic shape inference believes the tensor
+        # has -- a legacy-exporter tracing bug, not a LightGlue bug: the same
+        # module runs and produces correct output directly in eager PyTorch).
+        # The dynamo exporter traces via `torch.export` (a from-scratch FX
+        # capture, not per-op symbolic translation) and does not hit this
+        # code path. See `docs/colmap_port_plan.md`'s "M6 results" for the
+        # full repro.
+        dynamo=True,
     )
     print(f"wrote {args.out}")
 

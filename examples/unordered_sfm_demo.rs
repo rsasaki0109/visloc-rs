@@ -20,8 +20,31 @@
 //!      top-N retrieved per query image (COLMAP default 100).
 //!
 //!    `--exhaustive` overrides either source with all pairs.
-//! 2. **Verified matches.** Each candidate pair is matched (cross-checked
-//!    brute-force + Lowe ratio) and geometrically verified per
+//! 2. **Verified matches.** Each candidate pair is matched — `--matcher`
+//!    (default `nn`) selects the algorithm:
+//!    - `nn`: cross-checked brute-force nearest-neighbour + Lowe ratio
+//!      (pre-M6 behaviour, unchanged).
+//!    - `lightglue` (M6, `docs/colmap_port_plan.md`): the learned LightGlue
+//!      matcher (SuperPoint variant), run in-process via ONNX Runtime
+//!      (`visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher`,
+//!      `--lightglue-model PATH`, `onnx-inference` feature required). Unlike
+//!      NN+ratio's independent per-descriptor search, LightGlue attends over
+//!      *both* images' descriptors jointly — the lever M5's diagnosis
+//!      motivated: ETH3D `courtyard`'s cross-component bridge pairs carry
+//!      real but sparse correspondence signal that a per-descriptor ratio
+//!      test cannot safely extract on a repeated-texture scene (M5's "naive
+//!      rescue" experiment found classifier-passing *false* bridges from
+//!      over-relaxing the ratio test — evidence the matcher itself, not just
+//!      its threshold, was the bottleneck). `--matcher lightglue` replaces
+//!      the matching step in *both* the main pass below and the M5
+//!      rescue-bridging pass (step 4); `--rescue-match-ratio`/
+//!      `--rescue-cross-check` are `nn`-only knobs, ignored under
+//!      `lightglue` (see `PairMatcher::match_pair`'s doc comment). One ONNX
+//!      graph is exported per camera resolution
+//!      (`scripts/export_lightglue_onnx.py --width --height`); re-export for
+//!      a different scene's intrinsics.
+//!
+//!    Every matched pair is then geometrically verified per
 //!    `--verification-mode` (default `legacy`):
 //!    - `legacy`: essential-matrix-only RANSAC, COLMAP's legacy fixed
 //!      `5e-3`-normalized Sampson threshold (`RelativePoseEstimator`,
@@ -127,13 +150,15 @@ use visloc_rs::vision::two_view::{
     EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
     RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
+#[cfg(feature = "onnx-inference")]
+use visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher;
 use visloc_rs::vision::vocab_tree::{
     generate_pairs, HkmBuildOptions, VocabTree, VocabTreeOptions, VocabTreePairGeneratorOptions,
 };
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
-    BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig,
-    Matcher, PairwiseMatches, Pose, TrackSource,
+    BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, DescriptorMatch, FeatureSet,
+    IncrementalSfmConfig, Matcher, PairwiseMatches, Pose, TrackSource,
 };
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
@@ -195,6 +220,50 @@ impl std::str::FromStr for PairSource {
             "vlad" => Ok(Self::Vlad),
             "vocab-tree" => Ok(Self::VocabTree),
             other => Err(format!("unknown --pair-source {other:?} (expected vlad|vocab-tree)")),
+        }
+    }
+}
+
+/// The M6 pair-*matching* A/B switch (`docs/colmap_port_plan.md`'s "M6
+/// results"): which algorithm turns two images' descriptor sets into
+/// candidate correspondences, **before** two-view geometric verification
+/// ([`VerificationMode`]) ever runs. Orthogonal to [`VerificationMode`] and
+/// [`PairSource`] — this only changes how a *given* candidate pair's raw
+/// matches are produced, not which pairs are proposed or how they're
+/// classified afterwards.
+///
+/// [`MatcherKind::Nn`] (default) is the pre-M6 nearest-neighbour + Lowe-ratio
+/// path (`BruteForceMatcher`/`CrossCheckMatcher`), unchanged.
+/// [`MatcherKind::LightGlue`] routes through
+/// [`visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher`] — a
+/// learned, *joint* matcher that attends over both images' descriptors
+/// together (as opposed to NN+ratio's independent per-descriptor nearest-
+/// neighbour search) — motivated directly by M5's diagnosis
+/// (`docs/colmap_port_plan.md`'s "M5 results"): ETH3D `courtyard`'s
+/// cross-component bridge pairs carry real but very sparse correspondence
+/// signal that a per-descriptor ratio test cannot safely extract from a
+/// repeated-texture scene (M5's own "naive rescue" experiment showed a
+/// *classifier-passing* false-bridge failure mode from over-relaxing the
+/// NN+ratio matcher — the concrete evidence that the matcher itself, not
+/// just its threshold, needed to change). Requires the `onnx-inference`
+/// feature; `--matcher lightglue` without it is a hard runtime error (see
+/// `parse_args`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatcherKind {
+    /// Nearest-neighbour + Lowe-ratio test, optionally bidirectional
+    /// cross-checked. Pre-M6 behaviour, unchanged.
+    Nn,
+    /// LightGlue (SuperPoint variant), run in-process via ONNX Runtime.
+    LightGlue,
+}
+
+impl std::str::FromStr for MatcherKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "nn" => Ok(Self::Nn),
+            "lightglue" => Ok(Self::LightGlue),
+            other => Err(format!("unknown --matcher {other:?} (expected nn|lightglue)")),
         }
     }
 }
@@ -265,6 +334,19 @@ struct Args {
     /// running the reconstruction. Used to inspect the exact bridge
     /// candidates the M5 brief asks for (e.g. the boundary pair) by hand.
     diagnose_pairs: Vec<(usize, usize)>,
+    /// M6 (`docs/colmap_port_plan.md`): which algorithm produces raw
+    /// descriptor matches for a candidate pair, before two-view verification
+    /// — `nn` (default, pre-M6 NN+ratio behaviour) or `lightglue` (learned
+    /// joint matcher, `onnx-inference`-gated). See [`MatcherKind`].
+    matcher: MatcherKind,
+    /// Path to the exported LightGlue ONNX graph (`--matcher lightglue`
+    /// only; see `scripts/export_lightglue_onnx.py`). One graph per camera
+    /// resolution — re-export for a different `--width`/`--height`. Only
+    /// read from [`build_matcher`]'s `onnx-inference`-gated branch — the
+    /// `#[allow(dead_code)]` covers the default (feature-off) build, where
+    /// `--matcher lightglue` is rejected before this field would be read.
+    #[cfg_attr(not(feature = "onnx-inference"), allow(dead_code))]
+    lightglue_model: Option<PathBuf>,
 }
 
 /// Parse `--track-source`'s value into the M2 [`TrackSource`] A/B switch.
@@ -313,6 +395,8 @@ fn parse_args() -> Result<Args, String> {
     let mut rescue_max_candidates = 200usize;
     let mut rescue_cross_check = false;
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
+    let mut matcher = MatcherKind::Nn;
+    let mut lightglue_model: Option<PathBuf> = None;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -380,6 +464,8 @@ fn parse_args() -> Result<Args, String> {
                 let j_idx: usize = rhs.trim().parse().map_err(|e| format!("{e}"))?;
                 diagnose_pairs.push((i_idx, j_idx));
             }
+            "--matcher" => matcher = a.remove(i + 1).parse().map_err(|e: String| e)?,
+            "--lightglue-model" => lightglue_model = Some(PathBuf::from(a.remove(i + 1))),
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -428,6 +514,8 @@ fn parse_args() -> Result<Args, String> {
         rescue_max_candidates,
         rescue_cross_check,
         diagnose_pairs,
+        matcher,
+        lightglue_model,
     })
 }
 
@@ -634,6 +722,113 @@ impl VerificationStats {
     }
 }
 
+/// The M6 pair-matching backend, dispatched on [`MatcherKind`]. Holds the
+/// loaded LightGlue ONNX session (cheap to `Clone`: it wraps an
+/// `Arc<Mutex<ort::session::Session>>`, same as
+/// [`visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher`]'s
+/// own doc comment explains) so it can be shared across the rayon-parallel
+/// per-pair closures in [`verify_pairs`] and [`rescue_bridging`] without
+/// re-loading the model.
+enum PairMatcher {
+    /// Pre-M6 nearest-neighbour + Lowe-ratio matcher.
+    Nn,
+    /// LightGlue (SuperPoint variant), in-process via ONNX Runtime.
+    #[cfg(feature = "onnx-inference")]
+    LightGlue(LightGlueOnnxMatcher),
+}
+
+impl PairMatcher {
+    /// Raw descriptor matches for one candidate pair `(features_i,
+    /// features_j)`. `ratio`/`cross_check` are [`MatcherKind::Nn`]-only
+    /// knobs (Lowe ratio test / bidirectional mutual-NN confirmation); they
+    /// are silently ignored under [`MatcherKind::LightGlue`], which has no
+    /// equivalent parameters of its own — LightGlue's matching decision is
+    /// the learned assignment-matrix + `filter_threshold` cut baked into the
+    /// exported ONNX graph (see `scripts/export_lightglue_onnx.py`), not a
+    /// per-descriptor ratio the caller can tune. This is a deliberate M6
+    /// design choice (see the file header and `docs/colmap_port_plan.md`'s
+    /// "M6 results"): LightGlue *replaces* the NN+ratio matcher rather than
+    /// taking its knobs as a compatibility shim.
+    fn match_pair(
+        &self,
+        ratio: f32,
+        cross_check: bool,
+        features_i: &FeatureSet,
+        features_j: &FeatureSet,
+    ) -> Vec<DescriptorMatch> {
+        match self {
+            PairMatcher::Nn => {
+                if cross_check {
+                    CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(ratio) })
+                        .match_descriptors(&features_i.descriptors, &features_j.descriptors)
+                } else {
+                    BruteForceMatcher { ratio: Some(ratio) }
+                        .match_descriptors(&features_i.descriptors, &features_j.descriptors)
+                }
+            }
+            #[cfg(feature = "onnx-inference")]
+            PairMatcher::LightGlue(matcher) => match matcher.match_features(
+                &features_i.keypoints,
+                &features_i.descriptors,
+                &features_j.keypoints,
+                &features_j.descriptors,
+            ) {
+                Ok(matches) => matches
+                    .into_iter()
+                    .map(|m| DescriptorMatch {
+                        query_index: m.query_index,
+                        train_index: m.train_index,
+                        // LightGlue's assignment matrix has no notion of an
+                        // L2 descriptor "distance" the way NN+ratio does —
+                        // its own `score` (the assignment-matrix confidence)
+                        // is carried in `confidence` instead, which is what
+                        // every downstream consumer here actually reads.
+                        // `distance = 1.0 - score` keeps this field
+                        // orderable (lower = better) for any generic caller
+                        // that still sorts on it, without claiming a false
+                        // Euclidean-distance semantics.
+                        distance: 1.0 - m.score,
+                        second_best_distance: None,
+                        ratio: None,
+                        confidence: Some(m.score),
+                    })
+                    .collect(),
+                Err(error) => {
+                    eprintln!("lightglue match error (treated as zero matches for this pair): {error}");
+                    Vec::new()
+                }
+            },
+        }
+    }
+}
+
+/// Build the [`PairMatcher`] `--matcher` selects. Fails fast (before any
+/// pair is processed) if `--matcher lightglue` is requested without either
+/// the `onnx-inference` feature compiled in or a `--lightglue-model` path.
+fn build_matcher(args: &Args) -> Result<PairMatcher, Box<dyn std::error::Error>> {
+    match args.matcher {
+        MatcherKind::Nn => Ok(PairMatcher::Nn),
+        MatcherKind::LightGlue => {
+            #[cfg(feature = "onnx-inference")]
+            {
+                let path = args
+                    .lightglue_model
+                    .as_ref()
+                    .ok_or("--matcher lightglue requires --lightglue-model PATH")?;
+                let matcher = LightGlueOnnxMatcher::load_from_path(path)
+                    .map_err(|error| format!("failed to load LightGlue ONNX model {path:?}: {error}"))?;
+                Ok(PairMatcher::LightGlue(matcher))
+            }
+            #[cfg(not(feature = "onnx-inference"))]
+            {
+                Err("--matcher lightglue requires rebuilding with --features onnx-inference \
+                     (see docs/colmap_port_plan.md's M6 results)"
+                    .into())
+            }
+        }
+    }
+}
+
 /// Match and geometrically verify each candidate pair into `PairwiseMatches`.
 /// Candidate pairs are independent, so the (descriptor-matching dominated) loop
 /// is run across cores with rayon.
@@ -671,6 +866,7 @@ fn verify_pairs(
     match_ratio: f32,
     min_matches: usize,
     mode: VerificationMode,
+    matcher: &PairMatcher,
 ) -> (Vec<PairwiseMatches>, VerificationStats) {
     let verifier = (mode == VerificationMode::Full)
         .then(|| TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0)));
@@ -697,10 +893,11 @@ fn verify_pairs(
     let results: Vec<(Option<PairwiseMatches>, Option<ConfigurationType>)> = candidates
         .par_iter()
         .map(|&(i, j)| {
-            let matcher = CrossCheckMatcher::new(BruteForceMatcher {
-                ratio: Some(match_ratio),
-            });
-            let dm = matcher.match_descriptors(&features[i].descriptors, &features[j].descriptors);
+            // `cross_check = true`: the main pass has always used bidirectional
+            // mutual-NN confirmation (pre-M6 behaviour, unchanged for
+            // `MatcherKind::Nn`); ignored entirely under `MatcherKind::LightGlue`
+            // (see `PairMatcher::match_pair`'s doc comment).
+            let dm = matcher.match_pair(match_ratio, true, &features[i], &features[j]);
             if dm.len() < min_matches {
                 return (None, None);
             }
@@ -825,6 +1022,7 @@ fn rescue_bridging(
     camera: &Camera,
     pairwise: &[PairwiseMatches],
     args: &Args,
+    matcher: &PairMatcher,
 ) -> Vec<PairwiseMatches> {
     let n = features.len();
     let edges: Vec<(usize, usize)> = pairwise.iter().map(|p| (p.image_i, p.image_j)).collect();
@@ -879,17 +1077,12 @@ fn rescue_bridging(
     let results: Vec<(Option<PairwiseMatches>, RescueAttempt)> = candidates
         .par_iter()
         .map(|&(i, j)| {
-            let dm = if args.rescue_cross_check {
-                CrossCheckMatcher::new(BruteForceMatcher {
-                    ratio: Some(args.rescue_match_ratio),
-                })
-                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
-            } else {
-                BruteForceMatcher {
-                    ratio: Some(args.rescue_match_ratio),
-                }
-                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
-            };
+            let dm = matcher.match_pair(
+                args.rescue_match_ratio,
+                args.rescue_cross_check,
+                &features[i],
+                &features[j],
+            );
             let raw_matches = dm.len();
             if raw_matches < args.rescue_min_matches {
                 return (
@@ -1063,6 +1256,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // M6 (`docs/colmap_port_plan.md`): built once, up front, so a bad
+    // `--matcher lightglue` invocation (missing feature / missing model
+    // path) fails immediately rather than after the (potentially expensive)
+    // candidate-pair generation step below.
+    let pair_matcher = build_matcher(&args)?;
+    println!(
+        "pair matcher: {}",
+        match args.matcher {
+            MatcherKind::Nn => "nn (NN + Lowe ratio)",
+            MatcherKind::LightGlue => "lightglue (learned joint matcher, ONNX)",
+        },
+    );
+
     let candidates = candidate_pairs(&features, &args);
     println!(
         "view graph: {} candidate pairs ({})",
@@ -1084,6 +1290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.match_ratio,
         args.min_matches,
         args.verification_mode,
+        &pair_matcher,
     );
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
     println!(
@@ -1131,7 +1338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // consumes below, so a successful bridge participates in track building
     // exactly like any other verified pair.
     if args.rescue_bridging {
-        let bridges = rescue_bridging(&features, &args.camera, &pairwise, &args);
+        let bridges = rescue_bridging(&features, &args.camera, &pairwise, &args, &pair_matcher);
         pairwise.extend(bridges);
     }
 
