@@ -1738,3 +1738,289 @@ state ever mutated) or on `self.imu_bootstrapped` (which can only become
 6. **No loop closure, no global-BA fallback** — unchanged from M4's own
    documented scope; M6 remains the milestone for DPV-SLAM-style proximity
    loop closure per the plan doc's original schedule.
+
+## M5b results (2026-07-17)
+
+Milestone M5b: fix the bootstrap chain M5 left as an honest negative —
+DPVO's own monocular reconstruction is non-metric at bootstrap time, but
+M5 reused `estimate_gyro_bias`/`estimate_gravity_and_velocities` (designed
+for already-metric poses) and accepted their output unconditionally,
+freezing a bad bootstrap forever. This milestone adds (1) an
+explicit-scale monocular VI alignment replacing the metric gravity/velocity
+estimator, (2) real acceptance gates on both halves of the bootstrap, and
+(3) a post-bootstrap rollback so a bad bootstrap is no longer permanent.
+The math and the new gates are validated by synthetic tests; a real MH_01
+run then produced a second honest negative — this time isolated
+precisely, with numbers, to a single specific failure mode — which is
+reported in full below rather than papered over.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_vi_ba.rs` — new `estimate_mono_vi_alignment`
+  (the VINS-Mono-style `[v_1..v_N, g, s]` linear alignment, magnitude-
+  constrained refinement, and three-stage observability gate), its
+  `DpvoMonoViAlignmentGates`/`DpvoMonoViAlignment`/`DpvoMonoViAlignmentRejection`
+  types, `mono_vi_tangent_basis` (a duplicate of `vi_motion_initializer`'s
+  own private helper, same reasoning as `skew`/`right_jacobian_inverse_so3`),
+  `imu_factor_whitener` (extracted, no behavior change, from
+  `dpvo_vi_ba_step`'s inline block) and `imu_factor_nis` (the rollback
+  monitor's own per-factor diagnostic), plus `imu_factor_jacobians` widened
+  to `pub(crate)`. New tests:
+  `estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window`,
+  `estimate_mono_vi_alignment_rejects_constant_velocity_window`,
+  `imu_factor_nis_is_large_for_an_obviously_inconsistent_factor_and_small_for_a_consistent_one`.
+* `pipelines/slam/src/dpvo_vo.rs` — `DpvoImuConfig` gained
+  `max_gyro_bias_magnitude_rad_s`/`gyro_bias_max_rms_after`/
+  `gyro_bias_max_rms_fraction` (gyro-bias gates), `min_mono_scale`/
+  `max_mono_scale`/`max_mono_alignment_condition_number` (mono-alignment
+  gates), `rollback_mean_nis_bound`/`rollback_consecutive_frames` (rollback
+  monitor); `DpvoImuDiagnostics` gained `recovered_scale`/
+  `bootstrap_attempts`/`bootstrap_rejections`/`rollback_count`/
+  `rejection_counts`/`last_rejection` (the per-gate rejection breakdown
+  this section's own diagnosis relies on); `try_imu_bootstrap` rewritten to
+  sequence gyro-bias-then-mono-alignment with per-stage gating and to apply
+  the recovered scale to every live pose/patch on success;
+  `rollback_imu_bootstrap` (new); `update_step` extended with the
+  post-solve NIS rollback monitor; `gyro_bootstrap_gate_check`/
+  `GyroGateRejection`/`rollback_monitor_step`/
+  `DpvoImuBootstrapRejectionCounts`/`DpvoImuRejectionDetail` (new, pure,
+  ONNX-free-testable decision functions/types). New tests:
+  `gyro_bootstrap_gate_rejects_noisy_rotation_alignment_and_accepts_a_clean_one`,
+  `rollback_monitor_step_triggers_after_k_consecutive_bad_frames_and_resets_on_good`.
+* `examples/euroc_dpvo_vo_demo.rs` — CLI flags for every new
+  `DpvoImuConfig` field; bootstrap/rollback transition logging (prints the
+  frame index the bootstrap first succeeds or a rollback fires); summary
+  gained `imu_recovered_scale`/`imu_bootstrap_attempts`/
+  `imu_bootstrap_rejections`/`imu_rollback_count`/the full
+  `imu_reject_*` breakdown/`imu_last_rejection`.
+
+### Formulation: `estimate_mono_vi_alignment`
+
+Unknowns `x = [v_1..v_N (world), g (world), s]`. Per consecutive-pose IMU
+factor `i→j` (`R_bw_i` = DPVO's own pose rotation at `i`, `Δt` = the
+factor's `delta_time`, `Δv_ij`/`Δp_ij` = bias-corrected preintegrated
+deltas):
+
+```
+Δv_ij = R_bw_i · (v_j − v_i − g·Δt)                        (unchanged from the metric estimator)
+Δp_ij = R_bw_i · (s·(p_j − p_i) − v_i·Δt − ½·g·Δt²)         (the one term that changes: p scaled by s)
+```
+
+both linear in `(v_i, v_j, g, s)`; solved by dense SVD least-squares plus
+the same VINS-Mono tangent-space magnitude-constrained refinement
+`estimate_gravity_and_velocities` uses, with `s` carried as an extra free
+scalar through the refinement (no norm constraint — nothing pins its
+magnitude but the IMU evidence itself). Three gates, in order, any of
+which rejects with a specific
+[`DpvoMonoViAlignmentRejection`](../pipelines/slam/src/dpvo_vi_ba.rs)
+reason: (1) **degrees of freedom** (`6·usable_factors ≥ 3N+4`, a hard
+necessity, not tunable), (2) **excitation/conditioning**
+(`σ_max/σ_min` of the assembled system ≤ `max_condition_number`), (3)
+**gravity-norm deviation** and **scale range** (`[0.05, 20]`, task-specified).
+
+### Synthetic results
+
+* `estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window`:
+  a 5-frame window scaled `0.5×` from true metric (multi-directional
+  per-segment acceleration — a single constant-direction acceleration was
+  tried first and found to be its OWN degenerate case, `min_sv` exactly
+  `0.0`; see the test's own doc for why direction diversity, not just
+  nonzero acceleration, is what this alignment needs) recovers **scale
+  2.000000** (exact target) and gravity within `3×10⁻¹⁵` of `9.81`, at
+  condition number `≈361`.
+* `estimate_mono_vi_alignment_rejects_constant_velocity_window`: the
+  classic VINS-Mono degeneracy (zero acceleration) is rejected — `min_sv`
+  exactly `0.0`, condition number `∞` — confirming the excitation gate
+  fires exactly where theory says it must.
+  [`DpvoImuConfig::max_mono_alignment_condition_number`]'s default (`1e8`)
+  sits between these two measured values with a wide margin, not a
+  knife-edge tuning.
+* `imu_factor_nis_...`: a self-consistent factor measures NIS `≈0`; an
+  obviously inconsistent one (5 m / 50 m/s unexplained over 0.1 s) measures
+  NIS `≈2525` — confirming the rollback monitor's own signal is
+  meaningful, not an arbitrary number.
+* All existing M5 tests (Jacobian finite-difference, sign convention,
+  visual-assembly-matches-original, the coupled-BA scale-recovery test)
+  unchanged and still passing.
+
+### EuRoC MH_01 run — a second honest negative, now precisely isolated
+
+Same command as M5's own run (`--euroc-dir MH_01_easy --max-frames 400
+--stride 2 --seed 0`, `fast.yaml`-equivalent graph sizing
+`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11`, `--imu`), CPU-only, release build.
+
+| Metric | M4-perf (no IMU) | M5 (`--imu`) | M5b shipped (`0.05` gate) | M5b `0.3`-gate experiment |
+| --- | --- | --- | --- | --- |
+| `ate_rigid_rmse_m` | 0.155 | 24.47 | 0.1546 | **55.49** |
+| `ate_rigid_max_m` | — | 39.55 | 0.4040 | 117.39 |
+| `ate_similarity_rmse_m` | 0.152 | 0.1407 | 0.1519 | 0.1898 |
+| `ate_similarity_scale` | 1.27 | 0.006035 | 1.265951 | **0.001377** |
+| `tracked_fraction` | 1.0 | 1.0 | 1.0 | 1.0 |
+| `imu_bootstrapped` | n/a | true (once, bad) | **false** | true |
+| `bootstrap_attempts` | n/a | — | 390 | 194 |
+| `bootstrap_rejections` | n/a | — | 390 | 190 |
+| `rollback_count` | n/a | n/a (didn't exist) | 0 | **3** |
+| `recovered_scale` | n/a | — | NaN (never bootstrapped) | 18.66 |
+| `total_elapsed_s` | 482.0 | 809.5 | 495.2 | 671.3 |
+
+**Diagnosis, step by step (numbers, not guesses):**
+
+1. **First attempt, conservative default (`max_gyro_bias_magnitude_rad_s =
+   0.05`)**: the bootstrap NEVER fires in 400 frames.
+   `imu_reject_gyro_magnitude=390` out of `390` rejections — **100% of
+   every single attempt** failed at the SAME gate. The other nine
+   rejection-reason counters (`gyro_rms_absolute`, `gyro_rms_fraction`,
+   every `mono_*` reason) are all `0` — the mono-alignment gates were
+   never even exercised, because the gyro-bias gate blocked first every
+   time. Diagnostic runs at 150 and across the full 400 frames both show
+   the SAME pattern: `estimate_gyro_bias` (rotation-only, reused unchanged
+   from `vi_motion_initializer.rs`) recovers a bias whose ROTATION FIT is
+   excellent (`rotation_residual_rms_after` converges to `0.001`–`0.02`
+   over the run, an essentially perfect fit) but whose MAGNITUDE sits
+   stably around `0.09`–`0.51` rad/s — 10-50× EuRoC's real gyro bias
+   (`~1e-3`–`1e-2` rad/s). The stability (not jitter) across overlapping
+   10-keyframe windows rules out simple numerical noise: DPVO's own
+   monocular rotation reconstruction carries a small SYSTEMATIC error
+   during this window that the rotation-only least-squares fit partially
+   absorbs into the bias term, and the fit doesn't care whether the
+   "bias" it lands on is a real MEMS bias or a fictitious one compensating
+   for that visual error. The magnitude gate is the only thing standing
+   between that fictitious bias and the coupled solve.
+2. **Evidence-based experiment: is `0.05` actually mis-calibrated, or is
+   the window genuinely unobservable?** Reasoning that the new rollback
+   monitor made a false accept recoverable (unlike M5), the magnitude
+   bound was raised to `0.3` rad/s (still 30-300× EuRoC's real bias, but
+   comfortably above the `0.09`–`0.51` band observed) and the SAME run
+   repeated. Result: the bootstrap fired **4 times**. The rollback monitor
+   **correctly caught and undid 3 of them** — a real, working safety net,
+   not a theoretical one. But the **4th bootstrap's recovered scale
+   (`18.66`) never triggered a 4th rollback within the remaining frames**
+   and stuck: recovered gravity `(-7.76, -4.16, -4.33)` (correct MAGNITUDE
+   `9.81` — the refinement forces that regardless — but a direction with
+   no physical meaning), recovered gyro bias `(-0.0587, -0.1571, 0.0799)`
+   (norm `0.186`, inside the loosened `0.3` bound), and a similarity scale
+   that collapsed to `0.0014` with rigid ATE `55.49 m` — worse than M5's
+   own collapse. The rejection breakdown for this run
+   (`imu_reject_mono_scale_range=113` out of `190` rejections, the single
+   largest bucket, with the last rejected attempt's scale `30.14` sitting
+   just outside `[0.05, 20]`) shows the mono-alignment's own recovered
+   scale oscillating close to its plausibility boundary across attempts —
+   a symptom of an estimate that is not robustly identifying the true
+   scale, just landing somewhere the gates don't reject often enough.
+3. **Conclusion: the gates as designed cannot distinguish "passes every
+   observability check" from "numerically correct."** `18.66` cleared the
+   DOF gate, the conditioning gate, the gravity-norm gate (by
+   construction — the refinement forces the norm), and the task-specified
+   `[0.05, 20]` scale-range gate, and was still wrong enough to wreck the
+   run. This is not a bug in any one gate; it is a real, honestly-reported
+   limitation of one-shot "estimate once, check plausibility, commit"
+   bootstrapping against real (not synthetic) DPVO windows — the synthetic
+   tests above are not wrong, they just don't (and structurally cannot)
+   exercise "plausible-looking but numerically incorrect," since a
+   synthetic test's ground truth is known and used to construct the
+   window.
+
+**Decision — shipped state**: `max_gyro_bias_magnitude_rad_s` is reverted
+to the conservative `0.05` default (see that field's own doc comment in
+`dpvo_vo.rs` for the same story inline). This is the setting empirically
+confirmed, twice, to run the full 400-frame sequence with
+`imu_bootstrapped=false` throughout, `tracked_fraction=1.0`, and ATE
+numbers matching the M4-perf visual-only baseline to four decimal places
+— the safe, byte-reproducible default. `config.imu = None` (every M4 call
+site's own default) remains the library-level default regardless; a
+caller must opt in with `--imu`/`Some(DpvoImuConfig{..})` at all, and even
+then gets the conservative gate unless they override it explicitly having
+verified their own dataset's behavior.
+
+### Rollback monitor: a genuine partial success, reported honestly
+
+The rollback mechanism itself worked in **3 of 4** cases in the `0.3`-gate
+experiment — a real result, not a wash. `rollback_monitor_step`'s own
+unit test and `imu_factor_nis`'s own unit test independently confirm the
+underlying signal (mean whitened IMU-factor NIS) is meaningful (near-zero
+for a consistent state, `~2500` for an obviously inconsistent one) and the
+counter/threshold logic is correct. The gap is not "rollback doesn't
+work" — it is "a single bootstrap event's initial scale can be wrong in a
+way that doesn't immediately manifest as high NIS," i.e. the coupled
+solve can converge to a self-consistent (low-NIS) state built on a wrong
+absolute scale, at least for some number of frames, before or without ever
+tripping the consecutive-bad-frame threshold. This is consistent with the
+scale gauge-freedom discussion in `dpvo_vi_ba.rs`'s own module doc: the
+IMU factors alone pull scale toward SOME value consistent with the
+window's own (possibly wrong) `(v, g)` solution, not necessarily the one
+consistent with the REST of the trajectory's true metric scale.
+
+### Forward path (M6 or later, not attempted here)
+
+1. **Continuous in-window scale estimation instead of one-shot
+   bootstrap-then-trust.** Re-run (or incrementally update)
+   `estimate_mono_vi_alignment` periodically against the CURRENT window
+   even after "bootstrapping," and cross-check its own scale against the
+   coupled `dpvo_vi_ba` solve's own effective scale (recoverable from the
+   ratio of solved translations to un-rescaled patch depths) before ever
+   trusting either — a persistent disagreement between the two would be a
+   much stronger acceptance signal than either one's own internal gates.
+2. **Longer excitation windows.** `estimate_gyro_bias`'s own
+   `MAX_ALIGNMENT_WINDOW = 10` (unchanged, reused from
+   `vi_motion_initializer.rs`) caps the rotation alignment to the most
+   recent ~10 committed frames regardless of `min_bootstrap_factors`; a
+   monocular-aware gyro-bias estimator (mirroring this milestone's own
+   `estimate_mono_vi_alignment` treatment of the gravity/velocity half)
+   that can span a longer window — and itself gate on rotational
+   excitation, the same way this milestone's mono alignment gates on
+   translational/gravity excitation — is a natural next step, rather than
+   reusing the metric estimator's fixed 10-keyframe cap unmodified.
+3. **A genuine scale-consistency cross-check before acceptance** — e.g.
+   comparing the mono alignment's own recovered scale against a SECOND,
+   independent estimate (a different sub-window, or a different
+   estimator entirely) and requiring agreement within some tolerance
+   before ever applying `s` to the live graph, rather than trusting a
+   single alignment's own internal gates alone.
+4. **`imu_bias_accel` is still never estimated** (unchanged narrowing from
+   M5, carried forward).
+5. **No loop closure, no global-BA fallback** — unchanged from M4/M5's own
+   documented scope.
+
+### Verification (verbatim)
+
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-slam --features onnx-inference`: **319 lib tests**
+  passed at time of writing, 0 failed, 7 ignored. This milestone's OWN
+  contribution is 5 new test functions over M5's reported 308
+  (`estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window`,
+  `estimate_mono_vi_alignment_rejects_constant_velocity_window`,
+  `imu_factor_nis_is_large_for_an_obviously_inconsistent_factor_and_small_for_a_consistent_one`
+  in `dpvo_vi_ba.rs`;
+  `gyro_bootstrap_gate_rejects_noisy_rotation_alignment_and_accepts_a_clean_one`,
+  `rollback_monitor_step_triggers_after_k_consecutive_bad_frames_and_resets_on_good`
+  in `dpvo_vo.rs`) — the observed total (319, not 313) reflects other
+  concurrent work landing in this same crate (`pipelines/slam`) during
+  this session, not additional tests from this milestone; every
+  integration test binary green (54/54 + 1 ignored, 0/0 + 2 ignored, 6/6,
+  6/6, 132/132, 10/10, 9/9, 4/4) — unchanged counts from M5 elsewhere in
+  the crate.
+* `ORT_DYLIB_PATH=... cargo test -p visloc-slam --features onnx-inference
+  -- --ignored`: **10 ignored tests passed, 0 failed** — unchanged from
+  M5's own count.
+* `cargo check --workspace --lib --bins --features image-io,onnx-inference`:
+  clean.
+* `cargo check --workspace --all-targets --features image-io,onnx-inference`:
+  clean.
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  same 6 pre-existing warnings as every prior milestone (confirmed by
+  grepping clippy's own output for `dpvo`: **zero** hits); **zero**
+  warnings in `dpvo_vi_ba.rs`, `dpvo_vo.rs`.
+* `cargo clippy --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: clean, zero warnings.
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded.
+* Three real MH_01 runs total this milestone (all `--max-frames 400
+  --stride 2 --seed 0` unless noted): the shipped-default confirmation run
+  (`E:/visloc_archive/dpvo_m5b_20260717/`, `0.05` gate, the table's own
+  "M5b shipped" column), the `0.3`-gate experiment
+  (`E:/visloc_archive/dpvo_m5b_final_20260717/`, the table's own
+  "M5b `0.3`-gate experiment" column), and a 150-frame diagnostic run
+  (`E:/visloc_archive/dpvo_m5b_diag/`, `0.05` gate, used only to isolate
+  the rejection reason with fewer frames before committing to the full
+  400-frame confirmation).

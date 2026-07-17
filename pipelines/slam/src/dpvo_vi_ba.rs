@@ -238,6 +238,139 @@
 //! frame (an arbitrary anchor — typically frame 0's original pose) is
 //! whatever frame the bootstrap's fixed poses were expressed in, so gravity
 //! and the solved poses stay in the same frame by construction.
+//!
+//! # Milestone M5b: a monocular-aware bootstrap (`docs/dpvo_droid_port_plan.md`,
+//! "M5 results" / "M5b results")
+//!
+//! M5's own honest-negative finding: `vi_motion_initializer::estimate_gyro_bias`/
+//! `estimate_gravity_and_velocities` (the "Gravity" section above) were
+//! designed for, and everywhere else in this codebase are run against, an
+//! **already metric** set of visual poses. Run against DPVO's own
+//! reconstruction — which is in an arbitrary monocular scale (`0.5×`–`1.3×`
+//! per M4-perf's own measurement) whenever the bootstrap chain first has
+//! enough evidence to fire — `estimate_gravity_and_velocities`'s linear
+//! system silently absorbs that unmodeled scale error into its recovered
+//! gravity/velocity estimate, and the M5 "staged, fixed-forever" bias/
+//! gravity design then poisons the rest of the run on a single bad
+//! bootstrap. [`estimate_mono_vi_alignment`] below is the fix M5's own
+//! blockers list called for: option (a), an explicit scale unknown in the
+//! alignment itself, rather than reusing an estimator that assumes it away.
+//!
+//! ## Formulation: VINS-Mono monocular VI alignment, adapted
+//!
+//! Unknowns `x = [v_1 .. v_N (world), g (world), s]` — the same per-window
+//! world-frame velocities and gravity vector `estimate_gravity_and_velocities`
+//! solves for, plus one **scalar monocular scale** `s` such that
+//! `metric_position = s · visual_position` (DPVO's own non-metric camera/body
+//! center, read directly off its own poses — no `VisualMap` needed, unlike
+//! the metric estimators, since this function takes DPVO's poses directly).
+//! Per consecutive-pose factor `i → j` (`R_bw_i` = keyframe `i`'s
+//! world-to-body rotation, `Δt` = `factor.delta.delta_time`, `Δv_ij`/`Δp_ij`
+//! = the bias-corrected preintegrated deltas at the caller's `bias_gyro`/
+//! `bias_accel`):
+//!
+//! * Velocity (scale-free, identical to the metric estimator):
+//!   `Δv_ij = R_bw_i · (v_j − v_i − g·Δt)`
+//! * Position (the one line that changes — visual positions scaled by `s`
+//!   before differencing):
+//!   `Δp_ij = R_bw_i · (s·(p_j − p_i) − v_i·Δt − ½·g·Δt²)`
+//!
+//! Both are linear in `(v_i, v_j, g, s)` (rotations come from the fixed
+//! visual poses and are themselves scale-invariant — a rigid rotation
+//! doesn't care what units its own translation is in — so no scale unknown
+//! is needed there): moving every unknown to the left of `=` gives
+//!
+//! `v_i·Δt + ½g·Δt² − s·(p_j−p_i) = −R_bw_i·Δp_ij` (3 rows)
+//! `−v_i + v_j − g·Δt = R_bw_i·Δv_ij` (3 rows)
+//!
+//! solved by the same dense SVD least-squares + VINS-Mono tangent-space
+//! magnitude-constrained refinement `estimate_gravity_and_velocities` uses
+//! (Qin & Shen 2018, eq. 7-9) — [`mono_vi_tangent_basis`] is a verbatim
+//! duplicate of that module's private `tangent_basis` (same "duplicate a
+//! well-known formula rather than expose cross-module-privately" reasoning
+//! as [`skew`]/[`right_jacobian_inverse_so3`] below), extended with `s` as
+//! an additional free scalar the refinement re-solves for every iteration
+//! (unlike gravity, `s` needs no norm constraint — nothing pins its
+//! magnitude except the IMU evidence itself, exactly like every free
+//! velocity).
+//!
+//! ## Observability gates (see [`DpvoMonoViAlignmentGates`])
+//!
+//! Three checks, in order, any of which returns `Err(`[`DpvoMonoViAlignmentRejection`]`)`
+//! identifying exactly which one tripped:
+//!
+//! 1. **Degrees of freedom**: `6 · factors.len() ≥ 3 · N + 4` (the unknown
+//!    count) is a hard mathematical necessity, not a tunable gate — an
+//!    underdetermined system's SVD solve returns a minimum-norm solution
+//!    that satisfies the equations but is not the physically meaningful
+//!    answer (unconstrained directions get silently zeroed rather than
+//!    flagged), so this is checked unconditionally before the solve, not
+//!    exposed as a config knob to loosen.
+//! 2. **Excitation / conditioning**: the unconstrained solve's condition
+//!    number (`σ_max/σ_min` of the assembled system) gated by
+//!    [`DpvoMonoViAlignmentGates::max_condition_number`]. A window with
+//!    real, multi-directional acceleration is well-conditioned; a
+//!    constant-velocity (or near-stationary) window is close to
+//!    rank-deficient in exactly the `(v, s)` joint direction — the same
+//!    degeneracy [`tests::synthetic_window_recovers_metric_scale_within_two_percent`]'s
+//!    own doc comment already documents for the *coupled* solve, now
+//!    checked directly on the *bootstrap's own* linear system before any
+//!    bad scale ever reaches `dpvo_vi_ba`. Default (`1e8`, see
+//!    `crate::dpvo_vo::DpvoImuConfig::max_mono_alignment_condition_number`)
+//!    calibrated empirically against this file's own two tests' MEASURED
+//!    numbers:
+//!    [`tests::estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window`]'s
+//!    genuinely-3D-excited window measures `≈361` (comfortably below the
+//!    default), while
+//!    [`tests::estimate_mono_vi_alignment_rejects_constant_velocity_window`]'s
+//!    constant-velocity window measures a literal `min_sv = 0.0` (condition
+//!    number `∞`, rejected regardless of how loose the default is) — a wide
+//!    margin between "well-conditioned" and "structurally degenerate", not
+//!    a knife-edge tuning.
+//! 3. **Gravity-norm deviation** and **scale plausibility**
+//!    (`raw_gravity_norm` within [`DpvoMonoViAlignmentGates::gravity_norm_deviation_ratio`]
+//!    of the expected magnitude; recovered `s` within `[min_scale,
+//!    max_scale]`) — the same style of physically-motivated sanity bound
+//!    `crate::dpvo_vo::DpvoImuConfig::gravity_norm_deviation_ratio` already
+//!    uses, plus the task's own `[0.05, 20]` bound on a monocular scale
+//!    factor (a real rig's true scale error is never that extreme; a
+//!    solve landing outside that range is reporting numerical garbage, not
+//!    a plausible-if-large scale correction).
+//!
+//! ## Sequencing: gyro bias first, mono alignment second
+//!
+//! `crate::dpvo_vo::DpvoOdometry::try_imu_bootstrap` runs
+//! `vi_motion_initializer::estimate_gyro_bias` **before** this function,
+//! unchanged — gyro-bias recovery from ROTATION alignment alone is
+//! genuinely scale-invariant (a rotation doesn't know or care what units
+//! the translations around it are in), so reusing that metric-agnostic
+//! estimator as-is is correct, *not* an oversight this milestone needs to
+//! fix. What M5 got wrong there was not the estimator's math but its
+//! **gate**: accepting whatever bias came back unconditionally. See
+//! `crate::dpvo_vo::DpvoImuConfig`'s new `max_gyro_bias_magnitude_rad_s`/
+//! `gyro_bias_max_rms_after`/`gyro_bias_max_rms_fraction` fields and
+//! `try_imu_bootstrap`'s own doc for the added rms-based rejection this
+//! milestone layers on top — deliberately NOT fixing a bias until it
+//! passes, retrying with a growing window on every subsequent frame
+//! instead (mirroring this function's own "gated `None`, retry later"
+//! contract).
+//!
+//! ## Applying the recovered scale (`crate::dpvo_vo::DpvoOdometry::try_imu_bootstrap`)
+//!
+//! Once both gates pass, `s` must be applied to every LIVE frame/patch
+//! before IMU coupling turns on, or the newly-seeded metric velocities
+//! would be solving against still-non-metric positions. A uniform scaling
+//! of world coordinates (`X_world_new = s · X_world_old`, keeping every
+//! camera's orientation and every pixel's reprojection identical — a pure
+//! similarity transform, not a re-optimization) requires: pose translation
+//! `t_new = s · t_old` (since `t = −R·C` for camera center `C`, and
+//! `C_new = s·C_old` under a uniform world rescale, so `t_new = −R·(s·C_old)
+//! = s·t_old` — rotation is untouched), and patch `inverse_depth_new =
+//! inverse_depth_old / s` (depth is a translation-like length, so
+//! `depth_new = s · depth_old`, hence the reciprocal). Both are the
+//! textbook VINS-Mono/ORB-SLAM3 "apply the recovered scale" step, ported
+//! here rather than reused from anywhere (no prior milestone had a scale
+//! unknown to apply).
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, SVector, Vector3, Vector6};
 use visloc_core::geometry::{SE3, SO3};
 
@@ -459,13 +592,7 @@ pub fn dpvo_vi_ba_step(
             &imu.bias_accel,
         );
 
-        let whitener = factor.covariance_sqrt_information().unwrap_or_else(|| {
-            let mut diagonal = SVector::<f64, 9>::zeros();
-            diagonal.fixed_rows_mut::<3>(0).fill(factor.weight_rotation.max(0.0).sqrt());
-            diagonal.fixed_rows_mut::<3>(3).fill(factor.weight_velocity.max(0.0).sqrt());
-            diagonal.fixed_rows_mut::<3>(6).fill(factor.weight_position.max(0.0).sqrt());
-            Matrix9::from_diagonal(&diagonal)
-        });
+        let whitener = imu_factor_whitener(factor);
         let r_stack = whitener * residual;
         let j_pose_i = whitener * j_pose_i;
         let j_pose_j = whitener * j_pose_j;
@@ -602,8 +729,12 @@ fn right_jacobian_inverse_so3(phi: &Vector3<f64>) -> Matrix3<f64> {
 /// "jacobian convention conversion" section for the full derivation this
 /// function implements; [`tests::imu_factor_jacobian_matches_numeric_finite_difference`]
 /// is the non-negotiable numeric check on every one of these four blocks.
+// `pub(crate)`, not private: Milestone M5b's `crate::dpvo_vo` rollback
+// monitor needs this factor's residual too (via [`imu_factor_nis`] below) —
+// a pure visibility widening, same reasoning `dpvo_patch_ba.rs`'s own
+// `pub(crate)` items already used for M5's cross-module reuse.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-fn imu_factor_jacobians(
+pub(crate) fn imu_factor_jacobians(
     pose_i: &SE3,
     pose_j: &SE3,
     v_i: &Vector3<f64>,
@@ -671,6 +802,398 @@ fn imu_factor_jacobians(
     let j_pose_j = j_right_body_j * adj_j;
 
     (residual, j_pose_i, j_pose_j, j_vel_i, j_vel_j)
+}
+
+/// The whitened square-root-information matrix for one IMU factor —
+/// `covariance_sqrt_information()` when the delta carries a real propagated
+/// covariance, else a diagonal fallback from the factor's own scalar
+/// `weight_*` fields. Extracted out of [`dpvo_vi_ba_step`]'s inline block
+/// (same computation, same call site — a pure refactor, not a behavior
+/// change) so [`imu_factor_nis`] (Milestone M5b's rollback monitor) can
+/// reuse the exact same fallback formula rather than re-deriving it a
+/// second time.
+fn imu_factor_whitener(factor: &ImuPreintegrationFactor) -> Matrix9 {
+    factor.covariance_sqrt_information().unwrap_or_else(|| {
+        let mut diagonal = SVector::<f64, 9>::zeros();
+        diagonal.fixed_rows_mut::<3>(0).fill(factor.weight_rotation.max(0.0).sqrt());
+        diagonal.fixed_rows_mut::<3>(3).fill(factor.weight_velocity.max(0.0).sqrt());
+        diagonal.fixed_rows_mut::<3>(6).fill(factor.weight_position.max(0.0).sqrt());
+        Matrix9::from_diagonal(&diagonal)
+    })
+}
+
+/// Milestone M5b (see the module doc's own section): the whitened
+/// Normalized-Innovation-Squared (`‖whitener · residual‖²`, 9 scalar
+/// components) of one IMU factor at a given `(pose_i, pose_j, v_i, v_j)`
+/// solution. `crate::dpvo_vo`'s post-bootstrap rollback monitor calls this
+/// once per in-window IMU factor after every `dpvo_vi_ba` solve; a solve
+/// that keeps fighting its own IMU evidence because a bootstrap landed on a
+/// bad scale/gravity/bias shows up here as a persistently large NIS — the
+/// "after the fact" detector M5's own "poisoned forever" failure had no
+/// equivalent of (see `crate::dpvo_vo::DpvoOdometry::rollback_imu_bootstrap`'s
+/// doc for what happens once this trips).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn imu_factor_nis(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    v_i: &Vector3<f64>,
+    v_j: &Vector3<f64>,
+    body_to_camera: &SE3,
+    factor: &ImuPreintegrationFactor,
+    bias_gyro: &Vector3<f64>,
+    bias_accel: &Vector3<f64>,
+) -> f64 {
+    let (residual, ..) =
+        imu_factor_jacobians(pose_i, pose_j, v_i, v_j, body_to_camera, factor, bias_gyro, bias_accel);
+    let whitener = imu_factor_whitener(factor);
+    (whitener * residual).norm_squared()
+}
+
+/// Gates for [`estimate_mono_vi_alignment`] — Milestone M5b. See the module
+/// doc's "Observability gates" section for what each one guards against and
+/// how its default was chosen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoMonoViAlignmentGates {
+    /// Expected local gravity magnitude (m/s²) — same role as
+    /// `crate::dpvo_vo::DpvoImuConfig::gravity_magnitude`.
+    pub expected_gravity_magnitude: f64,
+    /// Same semantics as `crate::dpvo_vo::DpvoImuConfig::gravity_norm_deviation_ratio`,
+    /// applied to this function's own unconstrained-solve `raw_gravity_norm`.
+    pub gravity_norm_deviation_ratio: f64,
+    /// Lower bound on the recovered monocular scale `s` (task-specified
+    /// default `0.05`).
+    pub min_scale: f64,
+    /// Upper bound on the recovered monocular scale `s` (task-specified
+    /// default `20.0`).
+    pub max_scale: f64,
+    /// Upper bound on the unconstrained linear system's condition number
+    /// (`σ_max/σ_min`) — the excitation/degeneracy gate. See the module
+    /// doc's "Observability gates" section for how the default was
+    /// calibrated against this file's own synthetic well-conditioned vs.
+    /// degenerate tests.
+    pub max_condition_number: f64,
+}
+
+/// Why [`estimate_mono_vi_alignment`] rejected a window — Milestone M5b's
+/// answer to the task's own "if it still fails, isolate which gate" demand:
+/// every rejection carries the SPECIFIC gate that tripped and the value(s)
+/// that tripped it, so `crate::dpvo_vo::DpvoOdometry`'s bootstrap-rejection
+/// diagnostics can report a real breakdown (not just "rejected N times")
+/// against a live EuRoC run. Every variant is still a rejection — this
+/// enum changes nothing about acceptance behavior, only what a caller can
+/// observe about why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DpvoMonoViAlignmentRejection {
+    /// Fewer than 2 poses, or fewer than 2 usable in-window factors
+    /// (missing `delta_time > 0`, or an out-of-range index).
+    NotEnoughFactors,
+    /// Degrees-of-freedom gate (module doc, "Observability gates" #1):
+    /// `6 * usable_factors < 3 * n + 4`.
+    Underdetermined { usable_factors: usize, n_poses: usize },
+    /// Excitation/conditioning gate (module doc, "Observability gates" #2).
+    IllConditioned { condition_number: f64, max_condition_number: f64 },
+    /// The unconstrained SVD solve itself failed, or produced a
+    /// non-finite/near-zero gravity vector or non-finite scale — a
+    /// numerically degenerate system distinct from a merely
+    /// poorly-conditioned one.
+    DegenerateSolve,
+    /// Gravity-norm gate (module doc, "Observability gates" #3a).
+    GravityNormDeviation { raw_gravity_norm: f64, deviation_ratio: f64, max_deviation_ratio: f64 },
+    /// Scale-plausibility gate (module doc, "Observability gates" #3b).
+    ScaleOutOfRange { scale: f64, min_scale: f64, max_scale: f64 },
+}
+
+/// Outcome of [`estimate_mono_vi_alignment`]: everything
+/// `crate::dpvo_vo::DpvoOdometry::try_imu_bootstrap` needs to promote a
+/// non-metric DPVO window to metric in one step — see the module doc's
+/// "Milestone M5b" section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpvoMonoViAlignment {
+    /// Recovered monocular scale: `metric_position = scale · visual_position`.
+    pub scale: f64,
+    /// Recovered world-frame gravity, magnitude-constrained to the gate's
+    /// `expected_gravity_magnitude` (or the plain scale-to-norm fallback —
+    /// see the module doc's refinement description).
+    pub gravity_world: Vector3<f64>,
+    /// Norm of the UNCONSTRAINED solve's gravity estimate, before magnitude
+    /// refinement — the observability signal
+    /// [`DpvoMonoViAlignmentGates::gravity_norm_deviation_ratio`] gates on
+    /// (mirrors `vi_motion_initializer::GravityVelocityAlignment::raw_gravity_norm`
+    /// exactly).
+    pub raw_gravity_norm: f64,
+    /// Per-window-pose-index world-frame (metric) velocity, same
+    /// length/order as the `poses` slice passed in.
+    pub velocities: Vec<Vector3<f64>>,
+    /// RMS of the stacked (scale-substituted) position + velocity
+    /// preintegration residual at the final `(gravity_world, velocities,
+    /// scale)` estimate — a relative diagnostic, mirroring
+    /// `GravityVelocityAlignment::mean_residual_after`.
+    pub mean_residual_after: f64,
+    /// Condition number of the unconstrained solve's system matrix — the
+    /// excitation gate's own diagnostic value, echoed here so a caller can
+    /// log *how* well-conditioned an accepted alignment actually was, not
+    /// just that it cleared the gate.
+    pub condition_number: f64,
+    /// Number of poses (`= poses.len()`) this alignment was solved over.
+    pub window_frames: usize,
+}
+
+/// Recover monocular scale, gravity, and per-pose velocities from a window
+/// of DPVO's own (non-metric) poses and IMU pre-integration factors — the
+/// monocular-aware replacement for reusing
+/// `vi_motion_initializer::estimate_gravity_and_velocities` against
+/// still-non-metric visual poses (Milestone M5b; see the module doc's own
+/// section for the full derivation and the gates this applies, in order).
+///
+/// `poses`/`factors` use the SAME window-local indexing convention as
+/// [`DpvoViWindow`] (`factors[k].i`/`.j` index into `poses`) — the caller
+/// (`crate::dpvo_vo::DpvoOdometry::try_imu_bootstrap`) is responsible for
+/// translating its own arrival-index-keyed bootstrap history into this
+/// local indexing, exactly as `update_step` already does for `DpvoViWindow`
+/// itself. `bias_gyro` is expected to already be the caller's OWN
+/// accepted/gated estimate (this function does not estimate gyro bias —
+/// see the module doc's "Sequencing" section for why that stays a separate,
+/// prior step); `bias_accel` is typically `0.0` (M5's own documented
+/// narrowing, unchanged by this milestone).
+///
+/// Returns `Err(`[`DpvoMonoViAlignmentRejection`]`)` identifying the
+/// SPECIFIC gate (of the three in the module doc's "Observability gates"
+/// section) that rejected this window, or outright degeneracy (fewer than 2
+/// poses, fewer than 2 usable in-window factors, or a singular/non-finite
+/// unconstrained solve).
+pub fn estimate_mono_vi_alignment(
+    poses: &[SE3],
+    factors: &[DpvoImuFactor],
+    body_to_camera: &SE3,
+    bias_gyro: Vector3<f64>,
+    bias_accel: Vector3<f64>,
+    gates: &DpvoMonoViAlignmentGates,
+) -> Result<DpvoMonoViAlignment, DpvoMonoViAlignmentRejection> {
+    const REFINEMENT_ITERATIONS: usize = 4;
+
+    let n = poses.len();
+    if n < 2 {
+        return Err(DpvoMonoViAlignmentRejection::NotEnoughFactors);
+    }
+    if !gates.expected_gravity_magnitude.is_finite() || gates.expected_gravity_magnitude <= 0.0 {
+        return Err(DpvoMonoViAlignmentRejection::DegenerateSolve);
+    }
+
+    // Body-to-world rotation and non-metric (visual-scale) body/camera
+    // center in world, per window-local pose index — the module doc's
+    // `R_bw_i`/`p_i`, read directly off DPVO's own poses (no `VisualMap`
+    // needed here, unlike the metric estimators this replaces).
+    let world_from_body: Vec<SE3> = poses.iter().map(|p| body_to_camera.compose(p).inverse()).collect();
+
+    struct Row {
+        idx_from: usize,
+        idx_to: usize,
+        delta_time: f64,
+        rhs_velocity: Vector3<f64>,
+        rhs_position: Vector3<f64>,
+        position_vis_diff: Vector3<f64>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for imu_factor in factors {
+        let (i, j) = (imu_factor.i, imu_factor.j);
+        if i >= n || j >= n {
+            continue;
+        }
+        let delta_time = imu_factor.factor.delta.delta_time;
+        // Equivalent to `!(delta_time > 0.0)` (rejects non-positive AND
+        // NaN alike) without clippy's `neg_cmp_op_on_partial_ord` lint,
+        // which the equivalent negated-comparison form trips.
+        if !delta_time.is_finite() || delta_time <= 0.0 {
+            continue;
+        }
+        let r_i = world_from_body[i].rotation;
+        let p_i = world_from_body[i].translation;
+        let p_j = world_from_body[j].translation;
+        let (_, delta_velocity, delta_position) = imu_factor.factor.delta.corrected(&bias_gyro, &bias_accel);
+        rows.push(Row {
+            idx_from: i,
+            idx_to: j,
+            delta_time,
+            rhs_velocity: r_i.transform_vector(&delta_velocity),
+            rhs_position: r_i.transform_vector(&delta_position),
+            position_vis_diff: p_j - p_i,
+        });
+    }
+    if rows.len() < 2 {
+        return Err(DpvoMonoViAlignmentRejection::NotEnoughFactors);
+    }
+
+    let num_rows = 6 * rows.len();
+    let num_unknowns = 3 * n + 4; // v_1..v_n (3 each), g (3), s (1).
+    if num_rows < num_unknowns {
+        // Degrees-of-freedom gate (module doc, "Observability gates" #1):
+        // a hard mathematical necessity, not a tunable — see that section.
+        return Err(DpvoMonoViAlignmentRejection::Underdetermined {
+            usable_factors: rows.len(),
+            n_poses: n,
+        });
+    }
+    let g_off = 3 * n;
+    let s_off = 3 * n + 3;
+
+    let mut a = DMatrix::<f64>::zeros(num_rows, num_unknowns);
+    let mut b = DVector::<f64>::zeros(num_rows);
+    for (r, row) in rows.iter().enumerate() {
+        let base = 6 * r;
+        for k in 0..3 {
+            // Position row (module doc): v_i·Δt + ½g·Δt² − s·(p_j−p_i) = −R_bw_i·Δp_ij
+            a[(base + k, 3 * row.idx_from + k)] = row.delta_time;
+            a[(base + k, g_off + k)] = 0.5 * row.delta_time * row.delta_time;
+            a[(base + k, s_off)] = -row.position_vis_diff[k];
+            b[base + k] = -row.rhs_position[k];
+
+            // Velocity row (module doc, unchanged from the metric estimator):
+            // −v_i + v_j − g·Δt = R_bw_i·Δv_ij
+            a[(base + 3 + k, 3 * row.idx_from + k)] = -1.0;
+            a[(base + 3 + k, 3 * row.idx_to + k)] = 1.0;
+            a[(base + 3 + k, g_off + k)] = -row.delta_time;
+            b[base + 3 + k] = row.rhs_velocity[k];
+        }
+    }
+
+    let svd = a.svd(true, true);
+    let singular_values = svd.singular_values.clone();
+    let max_sv = singular_values.max();
+    let min_sv = singular_values.min();
+    let condition_number = if min_sv > 0.0 && max_sv.is_finite() { max_sv / min_sv } else { f64::INFINITY };
+    if !condition_number.is_finite() || condition_number > gates.max_condition_number {
+        // Excitation/conditioning gate (module doc, "Observability gates" #2).
+        return Err(DpvoMonoViAlignmentRejection::IllConditioned {
+            condition_number,
+            max_condition_number: gates.max_condition_number,
+        });
+    }
+    let Ok(solution) = svd.solve(&b, 1.0e-9) else {
+        return Err(DpvoMonoViAlignmentRejection::DegenerateSolve);
+    };
+
+    let raw_gravity = Vector3::new(solution[g_off], solution[g_off + 1], solution[g_off + 2]);
+    let raw_gravity_norm = raw_gravity.norm();
+    if !raw_gravity_norm.is_finite() || raw_gravity_norm < 1.0e-6 {
+        return Err(DpvoMonoViAlignmentRejection::DegenerateSolve);
+    }
+    let raw_scale = solution[s_off];
+    if !raw_scale.is_finite() {
+        return Err(DpvoMonoViAlignmentRejection::DegenerateSolve);
+    }
+    let deviation_ratio =
+        (raw_gravity_norm - gates.expected_gravity_magnitude).abs() / gates.expected_gravity_magnitude;
+    if !deviation_ratio.is_finite() || deviation_ratio > gates.gravity_norm_deviation_ratio {
+        // Gravity-norm gate (module doc, "Observability gates" #3a).
+        return Err(DpvoMonoViAlignmentRejection::GravityNormDeviation {
+            raw_gravity_norm,
+            deviation_ratio,
+            max_deviation_ratio: gates.gravity_norm_deviation_ratio,
+        });
+    }
+
+    // Magnitude-constrained refinement (module doc): the same VINS-Mono
+    // tangent-space iteration `estimate_gravity_and_velocities` uses,
+    // extended with the extra free scalar `s` (unlike gravity, `s` gets no
+    // norm constraint — nothing pins its magnitude but the IMU evidence
+    // itself, exactly like every free velocity).
+    let mag = gates.expected_gravity_magnitude;
+    let mut g_hat = raw_gravity / raw_gravity_norm;
+    let mut velocities_final: Vec<Vector3<f64>> =
+        (0..n).map(|k| Vector3::new(solution[3 * k], solution[3 * k + 1], solution[3 * k + 2])).collect();
+    let mut scale_final = raw_scale;
+    let mut refined = false;
+    for _ in 0..REFINEMENT_ITERATIONS {
+        let (b1, b2) = mono_vi_tangent_basis(&g_hat);
+        let g0 = mag * g_hat;
+        let w1_off = 3 * n;
+        let w2_off = 3 * n + 1;
+        let s2_off = 3 * n + 2;
+        let refine_unknowns = 3 * n + 3; // v_1..v_n, w1, w2, s.
+        let mut a2 = DMatrix::<f64>::zeros(num_rows, refine_unknowns);
+        let mut b2vec = DVector::<f64>::zeros(num_rows);
+        for (r, row) in rows.iter().enumerate() {
+            let base = 6 * r;
+            for k in 0..3 {
+                a2[(base + k, 3 * row.idx_from + k)] = row.delta_time;
+                a2[(base + k, w1_off)] = 0.5 * row.delta_time * row.delta_time * mag * b1[k];
+                a2[(base + k, w2_off)] = 0.5 * row.delta_time * row.delta_time * mag * b2[k];
+                a2[(base + k, s2_off)] = -row.position_vis_diff[k];
+                b2vec[base + k] = -row.rhs_position[k] - 0.5 * row.delta_time * row.delta_time * g0[k];
+
+                a2[(base + 3 + k, 3 * row.idx_from + k)] = -1.0;
+                a2[(base + 3 + k, 3 * row.idx_to + k)] = 1.0;
+                a2[(base + 3 + k, w1_off)] = -row.delta_time * mag * b1[k];
+                a2[(base + 3 + k, w2_off)] = -row.delta_time * mag * b2[k];
+                b2vec[base + 3 + k] = row.rhs_velocity[k] + row.delta_time * g0[k];
+            }
+        }
+        let Ok(solution2) = a2.svd(true, true).solve(&b2vec, 1.0e-9) else {
+            break;
+        };
+        let w1 = solution2[w1_off];
+        let w2 = solution2[w2_off];
+        let s_candidate = solution2[s2_off];
+        if !w1.is_finite() || !w2.is_finite() || !s_candidate.is_finite() {
+            break;
+        }
+        let candidate = g_hat + w1 * b1 + w2 * b2;
+        let candidate_norm = candidate.norm();
+        if !candidate_norm.is_finite() || candidate_norm < 1.0e-9 {
+            break;
+        }
+        g_hat = candidate / candidate_norm;
+        velocities_final = (0..n)
+            .map(|k| Vector3::new(solution2[3 * k], solution2[3 * k + 1], solution2[3 * k + 2]))
+            .collect();
+        scale_final = s_candidate;
+        refined = true;
+    }
+
+    let gravity_world = if refined { mag * g_hat } else { mag * (raw_gravity / raw_gravity_norm) };
+    let scale = if refined { scale_final } else { raw_scale };
+    if !scale.is_finite() || scale < gates.min_scale || scale > gates.max_scale {
+        // Scale-plausibility gate (module doc, "Observability gates" #3b).
+        return Err(DpvoMonoViAlignmentRejection::ScaleOutOfRange {
+            scale,
+            min_scale: gates.min_scale,
+            max_scale: gates.max_scale,
+        });
+    }
+
+    let mut residual_sum_sq = 0.0;
+    for row in &rows {
+        let v_i = velocities_final[row.idx_from];
+        let v_j = velocities_final[row.idx_to];
+        let r_pos = v_i * row.delta_time + 0.5 * row.delta_time * row.delta_time * gravity_world
+            - scale * row.position_vis_diff
+            + row.rhs_position;
+        let r_vel = (-v_i + v_j - row.delta_time * gravity_world) - row.rhs_velocity;
+        residual_sum_sq += r_pos.norm_squared() + r_vel.norm_squared();
+    }
+    let mean_residual_after = (residual_sum_sq / (6.0 * rows.len() as f64)).sqrt();
+
+    Ok(DpvoMonoViAlignment {
+        scale,
+        gravity_world,
+        raw_gravity_norm,
+        velocities: velocities_final,
+        mean_residual_after,
+        condition_number,
+        window_frames: n,
+    })
+}
+
+/// Orthonormal basis `(b1, b2)` tangent to the unit vector `g_hat` — a
+/// verbatim duplicate of `vi_motion_initializer.rs`'s own private
+/// `tangent_basis` (see the module doc's "Formulation" section for why this
+/// is a deliberate duplication, matching [`skew`]/[`right_jacobian_inverse_so3`]'s
+/// own precedent elsewhere in this file).
+fn mono_vi_tangent_basis(g_hat: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
+    let reference = if g_hat.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
+    let b1 = g_hat.cross(&reference).normalize();
+    let b2 = g_hat.cross(&b1).normalize();
+    (b1, b2)
 }
 
 #[cfg(test)]
@@ -884,6 +1407,59 @@ mod tests {
         );
     }
 
+    /// Milestone M5b: [`imu_factor_nis`] must report a large value for an
+    /// obviously inconsistent factor (a huge unexplained relative
+    /// translation with a tight, confident covariance) and a small value
+    /// for a factor whose state already satisfies it — the signal
+    /// `crate::dpvo_vo`'s rollback monitor's own
+    /// [`crate::dpvo_vo::rollback_monitor_step`] threshold ultimately acts
+    /// on, checked directly at the source rather than assumed meaningful.
+    #[test]
+    fn imu_factor_nis_is_large_for_an_obviously_inconsistent_factor_and_small_for_a_consistent_one() {
+        let pose0 = SE3::identity();
+        // A large, obviously-implausible relative displacement/velocity for
+        // a 0.1s IMU interval (50 m/s over 0.1s would be a 5m jump) — large
+        // enough that even the position row alone (`r_p`) dwarfs `100`.
+        let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0, 0.0, 0.0));
+        let v0 = Vector3::zeros();
+        let v1 = Vector3::new(50.0, 0.0, 0.0);
+
+        // A tight, confident (identity) covariance so the whitener doesn't
+        // wash out the residual magnitude.
+        let mut factor = synthetic_factor(0.1, Vector3::new(0.0, 0.0, -9.81));
+        factor.delta.covariance = Matrix9::identity();
+        factor.delta.delta_position = Vector3::zeros();
+        factor.delta.delta_velocity = Vector3::zeros();
+        factor.delta.delta_rotation = visloc_core::geometry::SO3::identity();
+
+        // Consistent: with pose_i=pose_j=identity and v_i=v_j=0, gravity
+        // still contributes to both r_v/r_p (Forster's residual is
+        // gravity-compensated, not gravity-free) — set the delta to
+        // exactly what a truly-at-rest body's preintegration would report
+        // over this dt, so the residual is genuinely (near) zero.
+        let gravity = factor.gravity_world;
+        let dt = factor.delta.delta_time;
+        factor.delta.delta_velocity = -gravity * dt;
+        factor.delta.delta_position = -0.5 * gravity * dt * dt;
+        let consistent_nis = imu_factor_nis(
+            &pose0, &pose0, &Vector3::zeros(), &Vector3::zeros(), &SE3::identity(), &factor,
+            &Vector3::zeros(), &Vector3::zeros(),
+        );
+
+        // Inconsistent: a large relative translation/velocity the (still
+        // zeroed) delta does not predict at all.
+        let inconsistent_nis = imu_factor_nis(
+            &pose0, &pose1, &v0, &v1, &SE3::identity(), &factor, &Vector3::zeros(), &Vector3::zeros(),
+        );
+
+        println!("[imu nis] consistent={consistent_nis:.6e} inconsistent={inconsistent_nis:.6e}");
+        assert!(consistent_nis < 1.0e-6, "expected a near-zero NIS for a self-consistent factor, got {consistent_nis}");
+        assert!(
+            inconsistent_nis > 100.0,
+            "expected a large NIS for an obviously inconsistent factor, got {inconsistent_nis}"
+        );
+    }
+
     /// Regression check for the module doc's "Visual assembly" tradeoff:
     /// with zero IMU factors, this module's own (duplicated) visual
     /// assembly must reproduce `dpvo_patch_ba::dpvo_ba_step`'s output on
@@ -1077,6 +1653,262 @@ mod tests {
             "expected recovered scale within 2% of {true_scale}, got {recovered_scale} \
              (recovered center {recovered_center_3:?}, true center {:?})",
             true_centers[3]
+        );
+    }
+
+    /// Shared synthetic-window builder for
+    /// `estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window`:
+    /// `n_frames` poses on a true metric trajectory built by integrating
+    /// `accel_per_segment` (one 3D acceleration vector per consecutive pair,
+    /// `n_frames - 1` of them, each held constant WITHIN its own segment —
+    /// see the note below on why this must vary in DIRECTION across
+    /// segments, not just be "constant acceleration" in the single-vector
+    /// sense `synthetic_window_recovers_metric_scale_within_two_percent`
+    /// above uses), identity rotation throughout (rotation does not appear
+    /// in this linear system's LEFT-hand-side coefficients at all — only in
+    /// the right-hand-side constant term — so, unlike a naive first guess,
+    /// rotation diversity cannot fix a genuine column-space degeneracy; see
+    /// below), with DPVO's own (non-metric) visual poses scaled by
+    /// `visual_scale` from that true trajectory (`p_vis = visual_scale ·
+    /// p_true`, so the correct recovered `s` is `1 / visual_scale`), and IMU
+    /// factors built from the exact per-segment kinematics.
+    ///
+    /// # Why acceleration must change DIRECTION across the window
+    ///
+    /// An earlier version of this helper used one constant `true_accel`
+    /// vector for the whole window (mirroring
+    /// `synthetic_window_recovers_metric_scale_within_two_percent`'s own
+    /// simplification above) and found — via this exact test failing with
+    /// `min_sv` EXACTLY `0.0` (a genuine structural rank deficiency, not a
+    /// numerical-precision artifact; confirmed by inspecting the SVD's own
+    /// null right-singular-vector, which was proportional to `true_accel`
+    /// across every `v_i`/`g`/`s` unknown) — that a single-direction
+    /// acceleration is ALSO degenerate for THIS alignment's explicit-scale
+    /// linear system specifically: every position row's `s` column
+    /// (`−(p_j−p_i)_vis`) is then always parallel to that one fixed
+    /// direction, so the component of gravity ALONG that same direction
+    /// becomes exactly interchangeable with a joint `(v, s)` rescale along
+    /// it — the IMU evidence alone cannot tell "gravity has a component
+    /// here" from "my scale/velocity drifts here" when the trajectory never
+    /// explores a second, independent direction. (A rotation-diversity fix
+    /// was tried first and found NOT to help — confirmed by re-running with
+    /// varying per-frame rotation and observing byte-identical singular
+    /// values — because rotation here only scales the right-hand-side
+    /// constant term, never the left-hand-side unknown coefficients that
+    /// determine rank.) This mirrors real VINS-Mono practice: mono-VI
+    /// initialization windows need genuinely 3D motion, not a single
+    /// accelerating direction — MH_01's own real trajectory (turns, height
+    /// change) satisfies this trivially; a synthetic single-vector
+    /// acceleration does not. Multiple DIFFERENT segment accelerations
+    /// break the tie completely (`min_sv` moves from exactly `0.0` to a
+    /// well-conditioned finite value — see the test's own logged
+    /// `condition_number`).
+    fn synthetic_mono_window(
+        dt: f64,
+        accel_per_segment: &[Vector3<f64>],
+        gravity: Vector3<f64>,
+        visual_scale: f64,
+    ) -> (Vec<SE3>, Vec<DpvoImuFactor>) {
+        let n_frames = accel_per_segment.len() + 1;
+        // Integrate the (per-segment-constant) accelerations into true
+        // metric velocity/position waypoints via exact constant-acceleration
+        // kinematics per segment (`v(i+1) = v(i) + a_i·Δt`, `p(i+1) = p(i) +
+        // v(i)·Δt + ½·a_i·Δt²`) — exact for ANY sequence of per-segment
+        // accelerations, unlike a single closed-form quadratic that only
+        // holds for one constant vector over the whole window.
+        let mut velocities = vec![Vector3::<f64>::zeros(); n_frames];
+        let mut positions = vec![Vector3::<f64>::zeros(); n_frames];
+        for (i, &a_i) in accel_per_segment.iter().enumerate() {
+            positions[i + 1] = positions[i] + velocities[i] * dt + 0.5 * a_i * dt * dt;
+            velocities[i + 1] = velocities[i] + a_i * dt;
+        }
+
+        let poses: Vec<SE3> = (0..n_frames)
+            .map(|i| SE3::new(UnitQuaternion::identity(), -(positions[i] * visual_scale)))
+            .collect();
+
+        let mut factors = Vec::new();
+        for i in 0..n_frames - 1 {
+            let v_i = velocities[i];
+            let v_j = velocities[i + 1];
+            let p_i = positions[i];
+            let p_j = positions[i + 1];
+            factors.push(DpvoImuFactor {
+                i,
+                j: i + 1,
+                factor: ImuPreintegrationFactor {
+                    keyframe_id_from: i as u64,
+                    keyframe_id_to: (i + 1) as u64,
+                    delta: ImuPreintegratedDelta {
+                        delta_rotation: visloc_core::geometry::SO3::identity(),
+                        delta_velocity: (v_j - v_i) - gravity * dt,
+                        delta_position: (p_j - p_i) - v_i * dt - 0.5 * gravity * dt * dt,
+                        delta_time: dt,
+                        ..ImuPreintegratedDelta::identity()
+                    },
+                    gravity_world: gravity,
+                    weight_position: 1.0,
+                    weight_velocity: 1.0,
+                    weight_rotation: 1.0,
+                },
+            });
+        }
+        (poses, factors)
+    }
+
+    /// The task's own required synthetic check: a non-metric window scaled
+    /// `0.5×` from true metric (so the correct recovered `s` is exactly
+    /// `2.0`) with genuine multi-DIRECTIONAL acceleration excitation (see
+    /// [`synthetic_mono_window`]'s own doc for why the acceleration
+    /// direction must change across the window, not just be nonzero)
+    /// recovers `s` and `g` within 1%. Also records the condition number
+    /// this well-conditioned case produces —
+    /// [`DpvoMonoViAlignmentGates::max_condition_number`]'s default
+    /// (`crate::dpvo_vo::DpvoImuConfig::max_mono_alignment_condition_number`)
+    /// is calibrated to sit comfortably above this test's own measured
+    /// value and comfortably below
+    /// [`estimate_mono_vi_alignment_rejects_constant_velocity_window`]'s.
+    #[test]
+    fn estimate_mono_vi_alignment_recovers_scale_from_constant_acceleration_window() {
+        let dt = 0.1;
+        let gravity = Vector3::new(0.0, 0.0, -9.81);
+        let visual_scale = 0.5;
+        // Four segments, each a DIFFERENT acceleration direction — see
+        // `synthetic_mono_window`'s own doc for why direction diversity
+        // (not just nonzero acceleration) is what this test needs.
+        let accel_per_segment = [
+            Vector3::new(2.0, 1.0, -0.5),
+            Vector3::new(-1.0, 2.0, 0.5),
+            Vector3::new(0.5, -1.5, 1.0),
+            Vector3::new(1.0, 0.5, -1.0),
+        ];
+
+        let (poses, factors) = synthetic_mono_window(dt, &accel_per_segment, gravity, visual_scale);
+        let gates = DpvoMonoViAlignmentGates {
+            expected_gravity_magnitude: 9.81,
+            gravity_norm_deviation_ratio: 0.3,
+            min_scale: 0.05,
+            max_scale: 20.0,
+            max_condition_number: 1.0e9,
+        };
+
+        let alignment = estimate_mono_vi_alignment(
+            &poses,
+            &factors,
+            &SE3::identity(),
+            Vector3::zeros(),
+            Vector3::zeros(),
+            &gates,
+        )
+        .expect("well-conditioned window must recover an alignment");
+
+        println!(
+            "[mono-vi recover] scale={:.6} gravity={:?} raw_gravity_norm={:.4} condition_number={:.3e} \
+             mean_residual_after={:.6e}",
+            alignment.scale,
+            alignment.gravity_world,
+            alignment.raw_gravity_norm,
+            alignment.condition_number,
+            alignment.mean_residual_after,
+        );
+
+        let expected_scale = 1.0 / visual_scale;
+        assert!(
+            (alignment.scale - expected_scale).abs() / expected_scale < 0.01,
+            "expected scale within 1% of {expected_scale}, got {}",
+            alignment.scale
+        );
+        let gravity_error = (alignment.gravity_world - gravity).norm() / gravity.norm();
+        assert!(gravity_error < 0.01, "expected gravity within 1%, got error {gravity_error} ({:?})", alignment.gravity_world);
+    }
+
+    /// Degenerate case (mirrors this file's own coupled-BA degeneracy note
+    /// on `synthetic_window_recovers_metric_scale_within_two_percent`, now
+    /// checked directly on the bootstrap's own linear system): a
+    /// constant-*velocity* window (zero acceleration) must be REJECTED by
+    /// the excitation/conditioning gate, not silently return a wrong scale.
+    #[test]
+    fn estimate_mono_vi_alignment_rejects_constant_velocity_window() {
+        let n_frames = 5;
+        let dt = 0.1;
+        // Zero acceleration: velocity is the same at every frame. This
+        // degenerate/no-excitation case is the whole point of the test.
+        let true_accel = Vector3::<f64>::zeros();
+        let gravity = Vector3::new(0.0, 0.0, -9.81);
+        let visual_scale = 0.5;
+
+        // Constant velocity (`(1,0,0) m/s`, not `true_accel`-derived since
+        // `synthetic_mono_window`'s own `true_velocity_at` would be
+        // identically zero with `true_accel=0` — a completely stationary
+        // window is a degenerate case too, but the classically-cited one is
+        // constant NONZERO velocity with zero acceleration).
+        let dt_local = dt;
+        let v_const = Vector3::new(1.0, 0.0, 0.0);
+        let poses: Vec<SE3> = (0..n_frames)
+            .map(|i| SE3::new(UnitQuaternion::identity(), -(v_const * (dt_local * i as f64) * visual_scale)))
+            .collect();
+        let mut factors = Vec::new();
+        for i in 0..n_frames - 1 {
+            factors.push(DpvoImuFactor {
+                i,
+                j: i + 1,
+                factor: ImuPreintegrationFactor {
+                    keyframe_id_from: i as u64,
+                    keyframe_id_to: (i + 1) as u64,
+                    delta: ImuPreintegratedDelta {
+                        delta_rotation: visloc_core::geometry::SO3::identity(),
+                        // Δv_ij = R_iᵀ(v_j−v_i−gΔt) = −gΔt (v_j=v_i=v_const).
+                        delta_velocity: -gravity * dt_local,
+                        // Δp_ij = R_iᵀ(p_j−p_i−v_iΔt−½gΔt²); with
+                        // p_j−p_i = v_const·Δt exactly (constant velocity),
+                        // the `v_const·Δt` terms cancel — this is the
+                        // textbook constant-velocity degeneracy, not a
+                        // typo: the position delta carries NO trace of
+                        // `v_const` at all.
+                        delta_position: -0.5 * gravity * dt_local * dt_local,
+                        delta_time: dt_local,
+                        ..ImuPreintegratedDelta::identity()
+                    },
+                    gravity_world: gravity,
+                    weight_position: 1.0,
+                    weight_velocity: 1.0,
+                    weight_rotation: 1.0,
+                },
+            });
+        }
+        let _ = true_accel;
+
+        let gates = DpvoMonoViAlignmentGates {
+            expected_gravity_magnitude: 9.81,
+            gravity_norm_deviation_ratio: 0.3,
+            min_scale: 0.05,
+            max_scale: 20.0,
+            max_condition_number: 1.0e9,
+        };
+
+        let result = estimate_mono_vi_alignment(
+            &poses,
+            &factors,
+            &SE3::identity(),
+            Vector3::zeros(),
+            Vector3::zeros(),
+            &gates,
+        );
+        match &result {
+            Ok(alignment) => println!(
+                "[mono-vi degenerate] UNEXPECTEDLY accepted: scale={:.6} condition_number={:.3e}",
+                alignment.scale, alignment.condition_number
+            ),
+            Err(reason) => println!("[mono-vi degenerate] rejected: {reason:?}"),
+        }
+        assert!(result.is_err(), "expected the constant-velocity window to be rejected by the excitation gate");
+        assert!(
+            matches!(
+                result,
+                Err(DpvoMonoViAlignmentRejection::IllConditioned { .. })
+                    | Err(DpvoMonoViAlignmentRejection::Underdetermined { .. })
+            ),
+            "expected rejection specifically from the DOF/conditioning gates, got {result:?}"
         );
     }
 }

@@ -107,6 +107,18 @@ struct CliArgs {
     /// knob added while investigating real-data joint-solve behavior — see
     /// the "M5 results" section of `docs/dpvo_droid_port_plan.md`.
     imu_noise_scale: f64,
+    /// Milestone M5b (`docs/dpvo_droid_port_plan.md`'s "M5b results"): the
+    /// monocular-aware bootstrap's own gates, mirroring
+    /// `DpvoImuConfig`'s new fields 1:1 — see that struct's own doc for what
+    /// each guards against and its chosen default.
+    imu_max_gyro_bias_magnitude_rad_s: f64,
+    imu_gyro_bias_max_rms_after: f64,
+    imu_gyro_bias_max_rms_fraction: f64,
+    imu_min_mono_scale: f64,
+    imu_max_mono_scale: f64,
+    imu_max_mono_alignment_condition_number: f64,
+    imu_rollback_mean_nis_bound: f64,
+    imu_rollback_consecutive_frames: usize,
 }
 
 impl Default for CliArgs {
@@ -131,6 +143,16 @@ impl Default for CliArgs {
             imu_gravity_norm_deviation_ratio: 0.3,
             imu_min_bootstrap_factors: 10,
             imu_noise_scale: 1.0,
+            // Milestone M5b: mirror `DpvoImuConfig::default()` exactly so
+            // omitting these flags reproduces that struct's own defaults.
+            imu_max_gyro_bias_magnitude_rad_s: 0.05,
+            imu_gyro_bias_max_rms_after: 0.03,
+            imu_gyro_bias_max_rms_fraction: 0.5,
+            imu_min_mono_scale: 0.05,
+            imu_max_mono_scale: 20.0,
+            imu_max_mono_alignment_condition_number: 1.0e8,
+            imu_rollback_mean_nis_bound: 500.0,
+            imu_rollback_consecutive_frames: 5,
         }
     }
 }
@@ -170,6 +192,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--imu-min-bootstrap-factors" => args.imu_min_bootstrap_factors = raw.remove(i + 1).parse()?,
             "--imu-noise-scale" => args.imu_noise_scale = raw.remove(i + 1).parse()?,
+            "--imu-max-gyro-bias-magnitude-rad-s" => {
+                args.imu_max_gyro_bias_magnitude_rad_s = raw.remove(i + 1).parse()?
+            }
+            "--imu-gyro-bias-max-rms-after" => args.imu_gyro_bias_max_rms_after = raw.remove(i + 1).parse()?,
+            "--imu-gyro-bias-max-rms-fraction" => {
+                args.imu_gyro_bias_max_rms_fraction = raw.remove(i + 1).parse()?
+            }
+            "--imu-min-mono-scale" => args.imu_min_mono_scale = raw.remove(i + 1).parse()?,
+            "--imu-max-mono-scale" => args.imu_max_mono_scale = raw.remove(i + 1).parse()?,
+            "--imu-max-mono-alignment-condition-number" => {
+                args.imu_max_mono_alignment_condition_number = raw.remove(i + 1).parse()?
+            }
+            "--imu-rollback-mean-nis-bound" => args.imu_rollback_mean_nis_bound = raw.remove(i + 1).parse()?,
+            "--imu-rollback-consecutive-frames" => {
+                args.imu_rollback_consecutive_frames = raw.remove(i + 1).parse()?
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -315,6 +353,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gravity_magnitude: 9.81,
             gravity_norm_deviation_ratio: args.imu_gravity_norm_deviation_ratio,
             min_bootstrap_factors: args.imu_min_bootstrap_factors,
+            // Milestone M5b (`docs/dpvo_droid_port_plan.md`'s "M5b
+            // results"): the monocular-aware bootstrap's own gates.
+            max_gyro_bias_magnitude_rad_s: args.imu_max_gyro_bias_magnitude_rad_s,
+            gyro_bias_max_rms_after: args.imu_gyro_bias_max_rms_after,
+            gyro_bias_max_rms_fraction: args.imu_gyro_bias_max_rms_fraction,
+            min_mono_scale: args.imu_min_mono_scale,
+            max_mono_scale: args.imu_max_mono_scale,
+            max_mono_alignment_condition_number: args.imu_max_mono_alignment_condition_number,
+            rollback_mean_nis_bound: args.imu_rollback_mean_nis_bound,
+            rollback_consecutive_frames: args.imu_rollback_consecutive_frames,
         }),
     };
 
@@ -364,6 +412,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // timestamp is pushed just before that frame is processed, mirroring
     // how a real-time streaming caller would interleave the two sensors.
     let mut imu_cursor = 0usize;
+    // Milestone M5b: track bootstrap/rollback TRANSITIONS (not just final
+    // state) so the acceptance run's own console log reports exactly which
+    // frame index the bootstrap first fired and any subsequent rollback —
+    // the task's own required "report bootstrap frame ... rollback count".
+    let mut prev_bootstrapped = false;
+    let mut prev_rollback_count = 0usize;
 
     let run_start = Instant::now();
     for (idx, entry) in frames.iter().enumerate() {
@@ -401,6 +455,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let pose = odometry.process_frame(undistorted.view(), timestamp_seconds)?;
 
+        if args.imu {
+            let imu_diag = odometry.imu_diagnostics();
+            if imu_diag.bootstrapped && !prev_bootstrapped {
+                println!(
+                    "*** frame {idx}: IMU BOOTSTRAP SUCCEEDED — recovered_scale={:.6} gravity_world=[{:.4},{:.4},{:.4}] bias_gyro=[{:.6},{:.6},{:.6}]",
+                    imu_diag.recovered_scale.unwrap_or(f64::NAN),
+                    imu_diag.gravity_world.map(|g| g.x).unwrap_or(f64::NAN),
+                    imu_diag.gravity_world.map(|g| g.y).unwrap_or(f64::NAN),
+                    imu_diag.gravity_world.map(|g| g.z).unwrap_or(f64::NAN),
+                    imu_diag.bias_gyro.x,
+                    imu_diag.bias_gyro.y,
+                    imu_diag.bias_gyro.z,
+                );
+            }
+            if imu_diag.rollback_count > prev_rollback_count {
+                println!(
+                    "*** frame {idx}: IMU ROLLBACK #{} (bootstrap_attempts={} bootstrap_rejections={})",
+                    imu_diag.rollback_count, imu_diag.bootstrap_attempts, imu_diag.bootstrap_rejections,
+                );
+            }
+            prev_bootstrapped = imu_diag.bootstrapped;
+            prev_rollback_count = imu_diag.rollback_count;
+        }
+
         if let Some(pose_world_to_camera) = pose {
             tracked_frames += 1;
             // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
@@ -430,7 +508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let n = stats.frames_processed.max(1) as f64;
             let imu_diag = odometry.imu_diagnostics();
             println!(
-                "frame {}/{} tracked={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2} imu_bootstrapped={}",
+                "frame {}/{} tracked={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2} imu_bootstrapped={} imu_attempts={} imu_rejections={} imu_rollbacks={}",
                 idx + 1,
                 frames.len(),
                 tracked_frames,
@@ -442,7 +520,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.update_ms_total / n,
                 stats.ba_ms_total / n,
                 imu_diag.bootstrapped,
+                imu_diag.bootstrap_attempts,
+                imu_diag.bootstrap_rejections,
+                imu_diag.rollback_count,
             );
+            if args.imu {
+                println!(
+                    "  imu_rejection_counts={:?} last_rejection={:?}",
+                    imu_diag.rejection_counts, imu_diag.last_rejection,
+                );
+            }
         }
     }
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
@@ -519,7 +606,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          imu_bias_gyro_z={bias_gyro_z:.6}\n\
          imu_bias_accel_x={bias_accel_x:.6}\n\
          imu_bias_accel_y={bias_accel_y:.6}\n\
-         imu_bias_accel_z={bias_accel_z:.6}\n",
+         imu_bias_accel_z={bias_accel_z:.6}\n\
+         imu_recovered_scale={recovered_scale:.6}\n\
+         imu_bootstrap_attempts={bootstrap_attempts}\n\
+         imu_bootstrap_rejections={bootstrap_rejections}\n\
+         imu_rollback_count={rollback_count}\n\
+         imu_reject_gyro_estimator_none={rc_gyro_none}\n\
+         imu_reject_gyro_magnitude={rc_gyro_mag}\n\
+         imu_reject_gyro_rms_absolute={rc_gyro_rms_abs}\n\
+         imu_reject_gyro_rms_fraction={rc_gyro_rms_frac}\n\
+         imu_reject_mono_not_enough_factors={rc_mono_few}\n\
+         imu_reject_mono_underdetermined={rc_mono_underdet}\n\
+         imu_reject_mono_ill_conditioned={rc_mono_illcond}\n\
+         imu_reject_mono_degenerate_solve={rc_mono_degen}\n\
+         imu_reject_mono_gravity_norm={rc_mono_grav}\n\
+         imu_reject_mono_scale_range={rc_mono_scale}\n\
+         imu_last_rejection={last_rejection}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -538,6 +640,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bias_accel_x = imu_diag.bias_accel.x,
         bias_accel_y = imu_diag.bias_accel.y,
         bias_accel_z = imu_diag.bias_accel.z,
+        recovered_scale = imu_diag.recovered_scale.unwrap_or(f64::NAN),
+        bootstrap_attempts = imu_diag.bootstrap_attempts,
+        bootstrap_rejections = imu_diag.bootstrap_rejections,
+        rollback_count = imu_diag.rollback_count,
+        rc_gyro_none = imu_diag.rejection_counts.gyro_estimator_none,
+        rc_gyro_mag = imu_diag.rejection_counts.gyro_magnitude,
+        rc_gyro_rms_abs = imu_diag.rejection_counts.gyro_rms_absolute,
+        rc_gyro_rms_frac = imu_diag.rejection_counts.gyro_rms_fraction,
+        rc_mono_few = imu_diag.rejection_counts.mono_not_enough_factors,
+        rc_mono_underdet = imu_diag.rejection_counts.mono_underdetermined,
+        rc_mono_illcond = imu_diag.rejection_counts.mono_ill_conditioned,
+        rc_mono_degen = imu_diag.rejection_counts.mono_degenerate_solve,
+        rc_mono_grav = imu_diag.rejection_counts.mono_gravity_norm,
+        rc_mono_scale = imu_diag.rejection_counts.mono_scale_range,
+        last_rejection = imu_diag
+            .last_rejection
+            .map(|r| format!("{r:?}"))
+            .unwrap_or_else(|| "none".to_string()),
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

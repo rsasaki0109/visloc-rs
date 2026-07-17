@@ -70,7 +70,7 @@
 //! Loop closure (DPV-SLAM, Milestone M6) and the global-BA fallback are out
 //! of scope, matching `crate::dpvo_patch_graph`'s own documented omissions.
 //!
-//! # IMU coupling (Milestone M5, `docs/dpvo_droid_port_plan.md`)
+//! # IMU coupling (Milestone M5, then M5b — `docs/dpvo_droid_port_plan.md`)
 //!
 //! [`DpvoOdometryConfig::imu`] is `None` by default — every M4 call site
 //! keeps compiling and running byte-for-byte as before. When `Some`, three
@@ -82,33 +82,73 @@
 //!    and banks the resulting delta, keyed by the two frames' stable
 //!    `arrival_index` (`integrate_imu_for_new_frame`).
 //! 2. Once enough evidence has accumulated, [`DpvoOdometry::try_imu_bootstrap`]
-//!    runs `vi_motion_initializer.rs`'s own `estimate_gyro_bias` then
-//!    `estimate_gravity_and_velocities` — exactly the motion-VI chain's own
-//!    bootstrap — against pose SNAPSHOTS decoupled from the live BA window
-//!    (see that method's own doc for why: the live window churns via
-//!    `DpvoPatchGraph::keyframe`'s motion-magnitude folding faster than the
-//!    estimators' own 10-keyframe window could otherwise fill). Gated on
-//!    [`DpvoImuConfig::gravity_norm_deviation_ratio`]; runs at most once
-//!    (staged-bias philosophy, `crate::dpvo_vi_ba`'s own module doc).
+//!    runs `vi_motion_initializer.rs`'s own `estimate_gyro_bias` (rotation-only,
+//!    genuinely scale-invariant — reused as-is, but now gated harder, see
+//!    below) followed by **`crate::dpvo_vi_ba::estimate_mono_vi_alignment`**
+//!    — Milestone M5b's monocular-aware replacement for reusing
+//!    `estimate_gravity_and_velocities` against still-non-metric poses, see
+//!    that function's own module-doc section for the full formulation —
+//!    against pose SNAPSHOTS decoupled from the live BA window (see that
+//!    method's own doc for why: the live window churns via
+//!    `DpvoPatchGraph::keyframe`'s motion-magnitude folding faster than a
+//!    handful-of-keyframes window could otherwise fill).
 //! 3. Once bootstrapped, `update_step` couples banked deltas into the
 //!    **same** windowed Gauss-Newton solve via `crate::dpvo_vi_ba::dpvo_vi_ba`
 //!    instead of the plain visual-only `crate::dpvo_patch_ba::dpvo_ba` — see
 //!    that module's own doc for the math (left-perturbation IMU Jacobian
-//!    derivation, sign convention, scale handling).
+//!    derivation, sign convention, scale handling) — and monitors the
+//!    coupled solve's own IMU-factor NIS for a **rollback** (Milestone M5b,
+//!    see [`DpvoOdometry::rollback_imu_bootstrap`]'s doc) back to
+//!    visual-only if it blows past a configured bound for too many
+//!    consecutive frames.
 //!
-//! **Honest, load-bearing caveat** (see `docs/dpvo_droid_port_plan.md`'s "M5
-//! results" for the full writeup): on a real EuRoC run, step 2's bootstrap
-//! quality is entangled with DPVO's own monocular reconstruction still
-//! being in its own arbitrary (non-metric) scale/rotation-noisy regime at
-//! whatever point enough factors have accumulated — `estimate_gyro_bias`/
-//! `estimate_gravity_and_velocities` were designed for (and, in the
-//! existing motion-VI pipeline, are always run against) already-reasonable
-//! visual poses, a precondition this early-DPVO-window bootstrap does not
-//! always satisfy. This module implements the reuse the task specifies
-//! faithfully and correctly (verified by `crate::dpvo_vi_ba`'s own
-//! synthetic tests); whether a *given* real run's bootstrap lands on a
-//! good estimate is a separate, harder question the plan doc reports on
-//! honestly rather than papering over.
+//! ## Milestone M5's honest negative, and what M5b changes
+//!
+//! M5's own real-EuRoC-run finding (`docs/dpvo_droid_port_plan.md`'s "M5
+//! results"): `estimate_gyro_bias`/`estimate_gravity_and_velocities` were
+//! designed for, and everywhere else in this codebase are run against,
+//! already-metric visual poses — a precondition DPVO's own non-metric
+//! reconstruction does not satisfy at bootstrap time. M5's design also
+//! accepted whatever the bootstrap chain returned unconditionally (gated
+//! only on gravity-norm deviation) and then froze it forever (the
+//! staged-bias philosophy), so a single bad-quality bootstrap poisoned the
+//! rest of the run — measured as a collapsed similarity scale (`0.006`) and
+//! a blown-up rigid ATE (`24.47 m`) against a `1.0` target.
+//!
+//! Milestone M5b (`docs/dpvo_droid_port_plan.md`'s "M5b results") replaces
+//! the gravity/velocity half of the bootstrap with an explicit-scale
+//! monocular alignment (`estimate_mono_vi_alignment`, described above), adds
+//! real acceptance gates to the gyro-bias half instead of accepting it
+//! unconditionally
+//! ([`DpvoImuConfig::max_gyro_bias_magnitude_rad_s`]/
+//! [`DpvoImuConfig::gyro_bias_max_rms_after`]/
+//! [`DpvoImuConfig::gyro_bias_max_rms_fraction`] — see
+//! [`DpvoOdometry::try_imu_bootstrap`]'s own doc), applies the recovered
+//! scale to the live window before enabling coupling (translations and
+//! patch inverse depths — see `crate::dpvo_vi_ba`'s module doc, "Applying
+//! the recovered scale"), and — because even a gated bootstrap can still be
+//! wrong — adds a **rollback**: if the post-bootstrap coupled solve's own
+//! IMU-factor NIS stays pathological for
+//! [`DpvoImuConfig::rollback_consecutive_frames`] frames in a row, the
+//! odometry un-bootstraps back to visual-only and allows a later
+//! re-attempt, rather than staying poisoned for the rest of the run by
+//! construction.
+//!
+//! **Honest outcome** (see `docs/dpvo_droid_port_plan.md`'s "M5b results"
+//! for the full numbers): at this module's SHIPPED conservative default
+//! (`max_gyro_bias_magnitude_rad_s = 0.05`), the bootstrap never fires on
+//! MH_01's first 400 frames — a safe, byte-identical-to-visual-only
+//! outcome, confirmed by running the full sequence. A real-data experiment
+//! that loosened that one gate (reasoning the rollback net made it safe
+//! to) DID let the bootstrap fire, and the rollback monitor correctly
+//! caught and undid 3 of the resulting 4 bootstrap events — but the 4th's
+//! recovered scale (`18.66`) passed every other observability gate this
+//! module has (gravity-norm, scale-range, conditioning) while still being
+//! numerically wrong, corrupting the rest of that run (rigid ATE `55.49
+//! m`). One-shot bootstrap-then-trust is therefore not yet safe on real
+//! DPVO windows even with a working rollback net; the conservative default
+//! is what ships until a stronger acceptance check exists (see the plan
+//! doc's own "forward path" note).
 #![cfg(feature = "onnx-inference")]
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -135,11 +175,14 @@ use crate::dpvo_patch_ba::{
     DpvoIntrinsics, DpvoPatch,
 };
 use crate::dpvo_patch_graph::{DpvoGraphError, DpvoPatchGraph, DpvoVoConfig};
-use crate::dpvo_vi_ba::{dpvo_vi_ba, DpvoImuFactor, DpvoViWindow};
+use crate::dpvo_vi_ba::{
+    dpvo_vi_ba, estimate_mono_vi_alignment, imu_factor_nis, DpvoImuFactor, DpvoMonoViAlignmentGates,
+    DpvoMonoViAlignmentRejection, DpvoViWindow,
+};
 use crate::imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator,
 };
-use crate::vi_motion_initializer::{estimate_gravity_and_velocities, estimate_gyro_bias};
+use crate::vi_motion_initializer::{estimate_gyro_bias, GyroBiasAlignment};
 
 /// Cap on [`DpvoOdometry`]'s `imu_bootstrap_history` — see that field's doc.
 const IMU_BOOTSTRAP_HISTORY_CAP: usize = 64;
@@ -256,11 +299,13 @@ pub struct DpvoImuConfig {
     /// (`ImuPreintegrationFactor::covariance_sqrt_information`).
     pub noise: ImuNoiseModel,
     /// Expected local gravity magnitude (m/s², EuRoC/Earth-surface default
-    /// `9.81`) fed to [`estimate_gravity_and_velocities`].
+    /// `9.81`) fed to `crate::dpvo_vi_ba::estimate_mono_vi_alignment`
+    /// (Milestone M5b; `estimate_gravity_and_velocities` used this same
+    /// field pre-M5b).
     pub gravity_magnitude: f64,
     /// Bootstrap acceptance gate on
-    /// `GravityVelocityAlignment::raw_gravity_norm`'s relative deviation
-    /// from `gravity_magnitude` — mirrors
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignment::raw_gravity_norm`'s relative
+    /// deviation from `gravity_magnitude` — mirrors
     /// `MotionBasedViInitializerConfig::max_gravity_norm_deviation_ratio`'s
     /// own default (`0.3`) exactly, for the same reason: an
     /// insufficiently-excited window's *unconstrained* gravity-norm
@@ -268,17 +313,113 @@ pub struct DpvoImuConfig {
     /// magnitude-constrained refinement papers over it.
     pub gravity_norm_deviation_ratio: f64,
     /// Minimum number of banked IMU deltas before a bootstrap attempt is
-    /// even tried (both `estimate_gyro_bias`/`estimate_gravity_and_velocities`
+    /// even tried (both `estimate_gyro_bias`/`estimate_mono_vi_alignment`
     /// already refuse below 2 internally; this is an additional, coarser
     /// gate so a bootstrap attempt is not retried every single frame from
     /// frame 2 onward during the initial burst). Default `10` (the
-    /// estimators' own `MAX_ALIGNMENT_WINDOW` cap) — chosen empirically
-    /// (see `docs/dpvo_droid_port_plan.md`'s "M5 results"): a smaller
-    /// value (e.g. `3`) lets the bootstrap fire almost immediately after
-    /// graph initialization, against a visual reconstruction that has had
-    /// essentially no time to stabilize; `10` is not a complete fix (see
-    /// the plan doc's own honest writeup) but is measurably less eager.
+    /// gyro-bias estimator's own `MAX_ALIGNMENT_WINDOW` cap) — chosen
+    /// empirically (see `docs/dpvo_droid_port_plan.md`'s "M5 results"): a
+    /// smaller value (e.g. `3`) lets the bootstrap fire almost immediately
+    /// after graph initialization, against a visual reconstruction that has
+    /// had essentially no time to stabilize.
     pub min_bootstrap_factors: usize,
+    /// Milestone M5b: gyro-bias bootstrap gate — reject a recovered
+    /// `GyroBiasAlignment` whose magnitude exceeds this (rad/s).
+    ///
+    /// # Default `0.05` — kept conservative after a real-data A/B, not a
+    /// guess (see `docs/dpvo_droid_port_plan.md`'s "M5b results" for the
+    /// full numbers)
+    ///
+    /// EuRoC's own real gyro bias sits around `1e-3`–`1e-2` rad/s. A first
+    /// MH_01 run at `0.05` found the bootstrap never fired in 400 frames
+    /// (`estimate_gyro_bias` recovers a STABLE — not noisy —
+    /// systematically-inflated bias around `0.09`–`0.51` rad/s throughout,
+    /// because DPVO's own monocular rotation reconstruction carries a
+    /// small systematic error this rotation-only fit partially absorbs
+    /// into the bias term). Reasoning that the downstream rollback monitor
+    /// ([`DpvoOdometry::rollback_imu_bootstrap`]) was now a real safety
+    /// net, this bound was raised to `0.3` and the SAME run repeated: the
+    /// bootstrap fired 4 times, the rollback monitor correctly caught and
+    /// undid 3 of them, but the 4th's recovered scale (`18.66`, inside the
+    /// nominally-plausible `[0.05, 20]` range) stuck for the rest of the
+    /// run and drove the rigid ATE to `55.49 m` (similarity scale
+    /// collapsed to `0.0014`) — i.e. a scale that passes every one of this
+    /// module's own observability gates can still be numerically wrong,
+    /// and the gates as designed do not catch that. This is an HONEST
+    /// NEGATIVE result on the `0.3` experiment, not a bug: it shows
+    /// one-shot bootstrap-then-trust is not yet safe on real DPVO windows,
+    /// even with a working rollback net (3-for-4 is a real result, not a
+    /// disqualifying one, but not "safe by default" either). The bound is
+    /// therefore reverted to `0.05` for the SHIPPED default: this is the
+    /// setting empirically confirmed (400/400 frames, both A/B runs) to
+    /// never admit a bad bootstrap, falling back to `dpvo_ba`'s unmodified
+    /// visual-only path with `tracked_fraction=1.0` and ATE identical to
+    /// the M4-perf baseline — the safe, byte-reproducible default until a
+    /// stronger acceptance check exists (see the plan doc's own "forward
+    /// path" for what such a check would need to look like: a
+    /// scale-consistency cross-check between the alignment and the BA's
+    /// own solve, or continuous in-window scale refinement instead of a
+    /// single admit-or-reject bootstrap event). A caller who has verified
+    /// their own dataset's bootstrap behavior may still override this
+    /// field explicitly.
+    pub max_gyro_bias_magnitude_rad_s: f64,
+    /// Milestone M5b: gyro-bias bootstrap gate — reject unless
+    /// `GyroBiasAlignment::rotation_residual_rms_after` (radians) drops
+    /// below this ABSOLUTE bound. Default `0.03` rad (~1.7°): no single M5
+    /// real-run number for this quantity exists to calibrate against (M5
+    /// never computed `rotation_residual_rms_after` at all — see
+    /// `try_imu_bootstrap`'s own doc), so this is a conservative,
+    /// physically-reasoned bound: EuRoC's own gyro noise density
+    /// (`~1.7e-4 rad/s/√Hz`) integrated over a sub-second alignment window
+    /// implies a pure-noise residual roughly two orders of magnitude below
+    /// this, so `0.03` rad comfortably separates "noise" from "genuinely
+    /// wrong rotation alignment" without being so tight normal EuRoC data
+    /// can never pass it.
+    pub gyro_bias_max_rms_after: f64,
+    /// Milestone M5b: gyro-bias bootstrap gate — reject unless
+    /// `rotation_residual_rms_after ≤ rotation_residual_rms_before ·` this
+    /// fraction. Default `0.5`: the alignment must have actually moved the
+    /// residual by at least half, not merely landed under the absolute
+    /// bound above by starting close to it already (a genuinely
+    /// rotation-noisy window can have a small `rms_before` too — this
+    /// fraction gate catches "barely moved the needle" bootstraps the
+    /// absolute bound alone would miss).
+    pub gyro_bias_max_rms_fraction: f64,
+    /// Milestone M5b: lower bound on `estimate_mono_vi_alignment`'s
+    /// recovered scale `s` — task-specified default `0.05`.
+    pub min_mono_scale: f64,
+    /// Milestone M5b: upper bound on `estimate_mono_vi_alignment`'s
+    /// recovered scale `s` — task-specified default `20.0`.
+    pub max_mono_scale: f64,
+    /// Milestone M5b: excitation/conditioning gate on
+    /// `estimate_mono_vi_alignment`'s unconstrained-solve condition number
+    /// — see that function's own module-doc section ("Observability
+    /// gates") for the derivation. Default `1e8`, calibrated against that
+    /// crate's own two synthetic measurements: a genuinely-3D-excited
+    /// window's condition number `≈361` (comfortably below) vs. a
+    /// constant-velocity window's `∞` (`min_sv` exactly `0.0`, rejected
+    /// regardless of how loose this bound is) — a wide margin, not a
+    /// knife-edge tuning.
+    pub max_mono_alignment_condition_number: f64,
+    /// Milestone M5b rollback monitor: mean whitened IMU-factor NIS bound
+    /// (`crate::dpvo_vi_ba::imu_factor_nis`) — a `dpvo_vi_ba` solve whose
+    /// in-window IMU factors average above this after re-linearizing is
+    /// treated as one "bad" frame toward [`Self::rollback_consecutive_frames`].
+    /// Default `500.0`: generously above a correctly-calibrated 9-dof
+    /// chi-square's own ~`27.9` (99.9th percentile) to tolerate ordinary
+    /// linearization/model-mismatch noise, while still catching a solve
+    /// that is genuinely fighting a badly-scaled bootstrap every iteration
+    /// — not empirically tuned against a specific M5b real-run NIS
+    /// distribution (that distribution is exactly what this milestone's
+    /// own acceptance run characterizes for the first time).
+    pub rollback_mean_nis_bound: f64,
+    /// Milestone M5b rollback monitor: number of CONSECUTIVE bad frames
+    /// (mean NIS above [`Self::rollback_mean_nis_bound`]) before rolling
+    /// back to visual-only. Default `5`: tolerates an isolated noisy
+    /// frame's transient spike without treating it as a diagnosis, while
+    /// still reacting within roughly half a second of real EuRoC-rate
+    /// (`~10` Hz post-stride) frames once a bootstrap is genuinely bad.
+    pub rollback_consecutive_frames: usize,
 }
 
 impl Default for DpvoImuConfig {
@@ -300,6 +441,14 @@ impl Default for DpvoImuConfig {
             gravity_magnitude: 9.81,
             gravity_norm_deviation_ratio: 0.3,
             min_bootstrap_factors: 10,
+            max_gyro_bias_magnitude_rad_s: 0.05,
+            gyro_bias_max_rms_after: 0.03,
+            gyro_bias_max_rms_fraction: 0.5,
+            min_mono_scale: 0.05,
+            max_mono_scale: 20.0,
+            max_mono_alignment_condition_number: 1.0e8,
+            rollback_mean_nis_bound: 500.0,
+            rollback_consecutive_frames: 5,
         }
     }
 }
@@ -309,18 +458,104 @@ impl Default for DpvoImuConfig {
 /// [`DpvoOdometry::imu_diagnostics`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DpvoImuDiagnostics {
-    /// Whether the bootstrap chain (gyro-bias estimate, then
-    /// gravity/velocity alignment, gated on
-    /// [`DpvoImuConfig::gravity_norm_deviation_ratio`]) has succeeded. While
-    /// `false`, [`DpvoOdometry::update_step`] runs the plain visual-only
-    /// `crate::dpvo_patch_ba::dpvo_ba` solve, identical to M4 — IMU coupling
-    /// only engages once this flips to `true`, and never reverts (staged,
-    /// fixed-at-seed philosophy — see `crate::dpvo_vi_ba`'s module doc).
+    /// Whether the bootstrap chain (gyro-bias estimate, gated, then
+    /// `crate::dpvo_vi_ba::estimate_mono_vi_alignment`, gated — Milestone
+    /// M5b) is currently active. While `false`, [`DpvoOdometry::update_step`]
+    /// runs the plain visual-only `crate::dpvo_patch_ba::dpvo_ba` solve,
+    /// identical to M4 — IMU coupling only engages once this is `true`.
+    /// Unlike M5, this CAN revert to `false` again: see
+    /// [`DpvoOdometry::rollback_imu_bootstrap`]'s doc for the M5b rollback
+    /// monitor that flips it back.
     pub bootstrapped: bool,
-    /// Recovered world-frame gravity vector, once bootstrapped.
+    /// Recovered world-frame gravity vector, while bootstrapped (cleared on
+    /// rollback).
     pub gravity_world: Option<Vector3<f64>>,
     pub bias_gyro: Vector3<f64>,
     pub bias_accel: Vector3<f64>,
+    /// Milestone M5b: the monocular scale recovered by the most recent
+    /// SUCCESSFUL bootstrap (`crate::dpvo_vi_ba::DpvoMonoViAlignment::scale`).
+    /// Not cleared by a later rollback — a caller inspecting a finished
+    /// run's diagnostics still wants to know what scale, if any, was ever
+    /// recovered, even if the run subsequently rolled back and (possibly)
+    /// never re-bootstrapped.
+    pub recovered_scale: Option<f64>,
+    /// Milestone M5b: total number of times [`DpvoOdometry::try_imu_bootstrap`]
+    /// got far enough to actually run the gyro-bias/mono-alignment gates
+    /// (i.e. [`DpvoImuConfig::min_bootstrap_factors`] was already met) —
+    /// includes both attempts that passed and attempts that were rejected.
+    pub bootstrap_attempts: usize,
+    /// Milestone M5b: number of those attempts rejected by ANY gate (gyro
+    /// magnitude/rms, mono-alignment DOF/conditioning/gravity-norm/scale).
+    pub bootstrap_rejections: usize,
+    /// Milestone M5b: number of times the post-bootstrap rollback monitor
+    /// actually tripped (see [`DpvoOdometry::rollback_imu_bootstrap`]).
+    pub rollback_count: usize,
+    /// Milestone M5b: per-reason breakdown of every rejected attempt — the
+    /// task's own "isolate which gate" acceptance requirement, answerable
+    /// from a live run's own diagnostics rather than guesswork. See
+    /// [`DpvoImuBootstrapRejectionCounts`].
+    pub rejection_counts: DpvoImuBootstrapRejectionCounts,
+    /// Milestone M5b: the MOST RECENT rejection's own reason plus the
+    /// specific value(s) that tripped it (e.g. the actual `rms_after` vs.
+    /// its bound, or the actual condition number vs. its bound) — lets a
+    /// caller report "how close" a real run's own gates are sitting to
+    /// their thresholds, not just a bare pass/fail count. `None` if no
+    /// attempt has ever been rejected (either none have been made yet, or
+    /// every attempt so far has succeeded).
+    pub last_rejection: Option<DpvoImuRejectionDetail>,
+}
+
+/// Milestone M5b: cumulative counters, one per DISTINCT rejection reason
+/// across both bootstrap gates (gyro-bias, then mono-alignment) — see
+/// [`DpvoOdometry::try_imu_bootstrap`]'s doc for exactly which check each
+/// one corresponds to. Every rejected attempt increments EXACTLY one of
+/// these (the gates are checked in a fixed order and the first failure
+/// short-circuits the rest), so `gyro_estimator_none + gyro_magnitude +
+/// gyro_rms_absolute + gyro_rms_fraction + mono_not_enough_factors +
+/// mono_underdetermined + mono_ill_conditioned + mono_degenerate_solve +
+/// mono_gravity_norm + mono_scale_range == bootstrap_rejections` always.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DpvoImuBootstrapRejectionCounts {
+    /// `vi_motion_initializer::estimate_gyro_bias` itself returned `None`
+    /// (degenerate window: too few usable rotation factors).
+    pub gyro_estimator_none: usize,
+    /// [`GyroGateRejection::MagnitudeTooLarge`].
+    pub gyro_magnitude: usize,
+    /// [`GyroGateRejection::RmsAboveAbsoluteBound`].
+    pub gyro_rms_absolute: usize,
+    /// [`GyroGateRejection::RmsNotEnoughImprovement`].
+    pub gyro_rms_fraction: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::NotEnoughFactors`.
+    pub mono_not_enough_factors: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::Underdetermined`.
+    pub mono_underdetermined: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::IllConditioned`
+    /// (the excitation/conditioning gate).
+    pub mono_ill_conditioned: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::DegenerateSolve`.
+    pub mono_degenerate_solve: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::GravityNormDeviation`.
+    pub mono_gravity_norm: usize,
+    /// `crate::dpvo_vi_ba::DpvoMonoViAlignmentRejection::ScaleOutOfRange`.
+    pub mono_scale_range: usize,
+}
+
+/// Milestone M5b: the most recent bootstrap-attempt rejection's reason plus
+/// the specific value(s) that tripped it — see
+/// [`DpvoImuDiagnostics::last_rejection`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DpvoImuRejectionDetail {
+    /// `vi_motion_initializer::estimate_gyro_bias` returned `None`.
+    GyroEstimatorNone,
+    /// The gyro-bias gate rejected — see [`gyro_bootstrap_gate_check`]'s
+    /// doc for `reason`'s meaning; `bias_norm`/`rms_before`/`rms_after` are
+    /// the actual recovered values (vs. `DpvoImuConfig`'s configured
+    /// bounds) at the time of rejection.
+    GyroGate { reason: GyroGateRejection, bias_norm: f64, rms_before: f64, rms_after: f64 },
+    /// `crate::dpvo_vi_ba::estimate_mono_vi_alignment` rejected — the
+    /// wrapped `DpvoMonoViAlignmentRejection` already carries its own
+    /// specific offending value(s).
+    MonoGate(DpvoMonoViAlignmentRejection),
 }
 
 /// Cumulative per-run timing/tracking counters, snapshotted after every
@@ -438,11 +673,39 @@ pub struct DpvoOdometry {
     /// (staged-bias philosophy — see `crate::dpvo_vi_ba`'s module doc).
     imu_bias_gyro: Vector3<f64>,
     imu_bias_accel: Vector3<f64>,
-    /// `Some` once the bootstrap chain has succeeded; stays fixed forever
-    /// after (never re-estimated — see [`DpvoImuDiagnostics::bootstrapped`]'s
-    /// doc).
+    /// `Some` while bootstrapped; cleared on [`Self::rollback_imu_bootstrap`]
+    /// (Milestone M5b — see [`DpvoImuDiagnostics::bootstrapped`]'s doc for
+    /// why this can now revert, unlike M5).
     imu_gravity_world: Option<Vector3<f64>>,
     imu_bootstrapped: bool,
+
+    // ---- Milestone M5b additions: bootstrap gating diagnostics + the
+    // rollback monitor. See the module doc's "Milestone M5's honest
+    // negative, and what M5b changes" section. ----
+    /// Total bootstrap attempts that got far enough to run the gates (see
+    /// [`DpvoImuDiagnostics::bootstrap_attempts`]).
+    imu_bootstrap_attempts: usize,
+    /// Attempts rejected by any gate (see
+    /// [`DpvoImuDiagnostics::bootstrap_rejections`]).
+    imu_bootstrap_rejections: usize,
+    /// Times [`Self::rollback_imu_bootstrap`] actually fired (see
+    /// [`DpvoImuDiagnostics::rollback_count`]).
+    imu_rollback_count: usize,
+    /// Running count of consecutive `update_step` calls (while bootstrapped)
+    /// whose mean IMU-factor NIS exceeded
+    /// [`DpvoImuConfig::rollback_mean_nis_bound`] — reset to `0` on any
+    /// frame back under the bound, or by [`Self::rollback_imu_bootstrap`]
+    /// itself (a fresh bootstrap starts this fresh too).
+    imu_consecutive_bad_frames: usize,
+    /// The most recently recovered mono scale — see
+    /// [`DpvoImuDiagnostics::recovered_scale`]'s doc for why this is NOT
+    /// cleared by a rollback.
+    recovered_mono_scale: Option<f64>,
+    /// Per-reason rejection tally — see [`DpvoImuDiagnostics::rejection_counts`].
+    imu_rejection_counts: DpvoImuBootstrapRejectionCounts,
+    /// The most recent rejection's own detail — see
+    /// [`DpvoImuDiagnostics::last_rejection`].
+    imu_last_rejection: Option<DpvoImuRejectionDetail>,
 }
 
 impl DpvoOdometry {
@@ -495,6 +758,13 @@ impl DpvoOdometry {
             imu_bias_accel: Vector3::zeros(),
             imu_gravity_world: None,
             imu_bootstrapped: false,
+            imu_bootstrap_attempts: 0,
+            imu_bootstrap_rejections: 0,
+            imu_rollback_count: 0,
+            imu_consecutive_bad_frames: 0,
+            recovered_mono_scale: None,
+            imu_rejection_counts: DpvoImuBootstrapRejectionCounts::default(),
+            imu_last_rejection: None,
         })
     }
 
@@ -506,14 +776,20 @@ impl DpvoOdometry {
         &self.graph
     }
 
-    /// Snapshot of the IMU bootstrap chain's current state (Milestone M5).
-    /// See [`DpvoImuDiagnostics`].
+    /// Snapshot of the IMU bootstrap chain's current state (Milestone M5,
+    /// extended M5b). See [`DpvoImuDiagnostics`].
     pub fn imu_diagnostics(&self) -> DpvoImuDiagnostics {
         DpvoImuDiagnostics {
             bootstrapped: self.imu_bootstrapped,
             gravity_world: self.imu_gravity_world,
             bias_gyro: self.imu_bias_gyro,
             bias_accel: self.imu_bias_accel,
+            recovered_scale: self.recovered_mono_scale,
+            bootstrap_attempts: self.imu_bootstrap_attempts,
+            bootstrap_rejections: self.imu_bootstrap_rejections,
+            rollback_count: self.imu_rollback_count,
+            rejection_counts: self.imu_rejection_counts,
+            last_rejection: self.imu_last_rejection,
         }
     }
 
@@ -831,36 +1107,47 @@ impl DpvoOdometry {
         self.imu_deltas_by_arrival.retain(|&(_, to), _| to >= oldest_live);
     }
 
-    /// Milestone M5's bootstrap chain: gyro-bias estimate, then
-    /// gravity/velocity alignment, run against
-    /// [`Self::imu_bootstrap_history`]'s pose SNAPSHOTS treated as fixed —
-    /// exactly `vi_motion_initializer.rs`'s own motion-VI bootstrap
-    /// (`estimate_gyro_bias`/`estimate_gravity_and_velocities`), reused
-    /// as-is via an ephemeral [`VisualMap`] built purely to satisfy their
-    /// signatures (no landmarks/observations — these two functions only
-    /// ever read `keyframes[..].frame.pose`). No-op once
-    /// [`Self::imu_bootstrapped`] is already `true`, or if `config.imu` is
-    /// `None`.
+    /// Milestone M5b's bootstrap chain: gyro-bias estimate (rotation-only,
+    /// gated — see below), then `crate::dpvo_vi_ba::estimate_mono_vi_alignment`
+    /// (gated on its own three-stage observability check — see that
+    /// function's module-doc section), run against
+    /// [`Self::imu_bootstrap_history`]'s pose SNAPSHOTS treated as fixed.
+    /// No-op once [`Self::imu_bootstrapped`] is already `true`, or if
+    /// `config.imu` is `None`. Unlike M5, a REJECTED attempt here does not
+    /// consume or corrupt any state — every gyro-bias/gravity/velocity/scale
+    /// candidate is discarded wholesale on any gate failure, and
+    /// [`Self::imu_bootstrap_history`] keeps growing (bounded by
+    /// [`IMU_BOOTSTRAP_HISTORY_CAP`]) for a later attempt with more evidence.
     ///
-    /// # Why history snapshots, not the live graph (a real bug this fixes)
+    /// # Why history snapshots, not the live graph (a real bug M5 fixed)
     ///
     /// An earlier version of this method built its `VisualMap`/factor list
     /// directly from `self.graph.frames()` — the graph's CURRENT live
     /// window. On a real EuRoC run this bootstrap never fired at all past
     /// the initial burst: `DpvoPatchGraph::keyframe`'s motion-magnitude
-    /// gate folds away low-motion frames (MH_01's opening seconds are
-    /// close to stationary) faster than 10
-    /// (`estimate_gyro_bias`/`estimate_gravity_and_velocities`'s own
-    /// `MAX_ALIGNMENT_WINDOW`) usable factors could ever accumulate against
-    /// a live-frames-only view — every fold silently invalidated one or two
-    /// already-banked deltas whose endpoint had just left the live set,
-    /// even though the delta itself was still perfectly good evidence.
-    /// [`Self::imu_bootstrap_history`] decouples bootstrap evidence
-    /// accumulation from the BA window's own churn entirely.
+    /// gate folds away low-motion frames (MH_01's opening seconds are close
+    /// to stationary) faster than a handful of usable factors could ever
+    /// accumulate against a live-frames-only view — every fold silently
+    /// invalidated one or two already-banked deltas whose endpoint had just
+    /// left the live set, even though the delta itself was still perfectly
+    /// good evidence. [`Self::imu_bootstrap_history`] decouples bootstrap
+    /// evidence accumulation from the BA window's own churn entirely.
     ///
-    /// See `crate::dpvo_vi_ba`'s module doc, "Gravity" section, and
-    /// [`DpvoImuDiagnostics::bootstrapped`]'s doc for why this never
-    /// re-attempts after success.
+    /// # Milestone M5b's gyro-bias gate (M5's own missing piece)
+    ///
+    /// `estimate_gyro_bias` is reused UNCHANGED (rotation-only alignment is
+    /// genuinely scale-invariant — see `crate::dpvo_vi_ba`'s module doc,
+    /// "Sequencing" section), but its result is no longer accepted
+    /// unconditionally: [`gyro_bootstrap_gate_check`] additionally requires
+    /// the recovered bias to be plausibly small
+    /// ([`DpvoImuConfig::max_gyro_bias_magnitude_rad_s`]) AND for the
+    /// rotation-residual RMS to have both dropped under an absolute bound
+    /// AND shrunk by a minimum fraction from its pre-alignment value
+    /// ([`DpvoImuConfig::gyro_bias_max_rms_after`]/`gyro_bias_max_rms_fraction`).
+    /// Failing either check means the window's rotation evidence is still
+    /// too noisy to trust — this method does NOT fix a bias in that case
+    /// (M5's own "poisoned forever" mechanism), it simply returns and tries
+    /// again on a later frame's bigger `imu_bootstrap_history`.
     fn try_imu_bootstrap(&mut self) {
         if self.imu_bootstrapped {
             return;
@@ -869,15 +1156,29 @@ impl DpvoOdometry {
         if self.imu_bootstrap_history.len() < imu_cfg.min_bootstrap_factors {
             return;
         }
+        self.imu_bootstrap_attempts += 1;
 
+        // Local (0..num_unique) index <-> arrival-id mapping, plus
+        // first-seen pose snapshots — the SAME frozen-per-arrival-id
+        // construction M5 already used for the (still-needed)
+        // `VisualMap`/`estimate_gyro_bias` call, reused here to ALSO build
+        // a plain window-local `Vec<SE3>`/`Vec<DpvoImuFactor>` for
+        // `estimate_mono_vi_alignment` (which — unlike the metric
+        // estimators — reads DPVO's own poses directly, no `VisualMap`
+        // needed; see that function's own doc).
         let mut arrival_id_set: HashSet<usize> = HashSet::new();
         for &(from, to, ..) in &self.imu_bootstrap_history {
             arrival_id_set.insert(from);
             arrival_id_set.insert(to);
         }
-        let arrival_ids: Vec<u64> = arrival_id_set.iter().map(|&id| id as u64).collect();
+        let mut arrival_ids_sorted: Vec<usize> = arrival_id_set.into_iter().collect();
+        arrival_ids_sorted.sort_unstable();
+        let local_index: HashMap<usize, usize> =
+            arrival_ids_sorted.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
+        let arrival_ids: Vec<u64> = arrival_ids_sorted.iter().map(|&id| id as u64).collect();
 
         let mut map = VisualMap::new();
+        let mut local_poses: Vec<SE3> = vec![SE3::identity(); arrival_ids_sorted.len()];
         for &(from, to, ref pose_from, ref pose_to, _) in &self.imu_bootstrap_history {
             for (id, pose) in [(from, pose_from), (to, pose_to)] {
                 if map.keyframes.contains_key(&(id as u64)) {
@@ -887,6 +1188,7 @@ impl DpvoOdometry {
                 let mut frame = Frame::new(id as u64, 0);
                 frame.pose = Some(Pose { world_to_camera: body });
                 map.keyframes.insert(id as u64, Keyframe { frame, observations: Vec::new() });
+                local_poses[local_index[&id]] = pose.clone();
             }
         }
 
@@ -903,45 +1205,156 @@ impl DpvoOdometry {
                 weight_position: 1.0,
             })
             .collect();
+        let local_factors: Vec<DpvoImuFactor> = self
+            .imu_bootstrap_history
+            .iter()
+            .map(|&(from, to, _, _, ref delta)| DpvoImuFactor {
+                i: local_index[&from],
+                j: local_index[&to],
+                factor: ImuPreintegrationFactor {
+                    keyframe_id_from: from as u64,
+                    keyframe_id_to: to as u64,
+                    delta: delta.clone(),
+                    gravity_world: Vector3::zeros(),
+                    weight_rotation: 1.0,
+                    weight_velocity: 1.0,
+                    weight_position: 1.0,
+                },
+            })
+            .collect();
 
+        // ---- Stage 1: gyro bias (rotation-only, scale-invariant) ----
         let Some(gyro_bias) = estimate_gyro_bias(&map, &arrival_ids, &factors, self.imu_bias_gyro) else {
+            self.imu_bootstrap_rejections += 1;
+            self.imu_rejection_counts.gyro_estimator_none += 1;
+            self.imu_last_rejection = Some(DpvoImuRejectionDetail::GyroEstimatorNone);
             return;
         };
-        self.imu_bias_gyro = gyro_bias.bias_gyro;
-
-        let Some(alignment) = estimate_gravity_and_velocities(
-            &map,
-            &arrival_ids,
-            &factors,
-            self.imu_bias_gyro,
-            self.imu_bias_accel,
-            imu_cfg.gravity_magnitude,
-        ) else {
-            return;
-        };
-
-        let deviation_ratio =
-            (alignment.raw_gravity_norm - imu_cfg.gravity_magnitude).abs() / imu_cfg.gravity_magnitude;
-        if !deviation_ratio.is_finite() || deviation_ratio > imu_cfg.gravity_norm_deviation_ratio {
-            // Gate rejects — stay visual-only; retried on a later frame
-            // once (if) the window accumulates more excitation.
-            return;
+        match gyro_bootstrap_gate_check(&gyro_bias, &imu_cfg) {
+            Ok(()) => {}
+            Err(reason) => {
+                // Do NOT fix a bias yet — see this method's own doc,
+                // "Milestone M5b's gyro-bias gate".
+                self.imu_bootstrap_rejections += 1;
+                match reason {
+                    GyroGateRejection::MagnitudeTooLarge => self.imu_rejection_counts.gyro_magnitude += 1,
+                    GyroGateRejection::RmsAboveAbsoluteBound => self.imu_rejection_counts.gyro_rms_absolute += 1,
+                    GyroGateRejection::RmsNotEnoughImprovement => {
+                        self.imu_rejection_counts.gyro_rms_fraction += 1
+                    }
+                }
+                self.imu_last_rejection = Some(DpvoImuRejectionDetail::GyroGate {
+                    reason,
+                    bias_norm: gyro_bias.bias_gyro.norm(),
+                    rms_before: gyro_bias.rotation_residual_rms_before,
+                    rms_after: gyro_bias.rotation_residual_rms_after,
+                });
+                return;
+            }
         }
 
+        // ---- Stage 2: monocular-aware scale/gravity/velocity alignment ----
+        let gates = DpvoMonoViAlignmentGates {
+            expected_gravity_magnitude: imu_cfg.gravity_magnitude,
+            gravity_norm_deviation_ratio: imu_cfg.gravity_norm_deviation_ratio,
+            min_scale: imu_cfg.min_mono_scale,
+            max_scale: imu_cfg.max_mono_scale,
+            max_condition_number: imu_cfg.max_mono_alignment_condition_number,
+        };
+        let alignment = match estimate_mono_vi_alignment(
+            &local_poses,
+            &local_factors,
+            &imu_cfg.body_to_camera,
+            gyro_bias.bias_gyro,
+            self.imu_bias_accel,
+            &gates,
+        ) {
+            Ok(alignment) => alignment,
+            Err(reason) => {
+                self.imu_bootstrap_rejections += 1;
+                match reason {
+                    DpvoMonoViAlignmentRejection::NotEnoughFactors => {
+                        self.imu_rejection_counts.mono_not_enough_factors += 1
+                    }
+                    DpvoMonoViAlignmentRejection::Underdetermined { .. } => {
+                        self.imu_rejection_counts.mono_underdetermined += 1
+                    }
+                    DpvoMonoViAlignmentRejection::IllConditioned { .. } => {
+                        self.imu_rejection_counts.mono_ill_conditioned += 1
+                    }
+                    DpvoMonoViAlignmentRejection::DegenerateSolve => {
+                        self.imu_rejection_counts.mono_degenerate_solve += 1
+                    }
+                    DpvoMonoViAlignmentRejection::GravityNormDeviation { .. } => {
+                        self.imu_rejection_counts.mono_gravity_norm += 1
+                    }
+                    DpvoMonoViAlignmentRejection::ScaleOutOfRange { .. } => {
+                        self.imu_rejection_counts.mono_scale_range += 1
+                    }
+                }
+                self.imu_last_rejection = Some(DpvoImuRejectionDetail::MonoGate(reason));
+                return;
+            }
+        };
+
+        // ---- Both gates passed: commit the gyro bias, apply the recovered
+        // scale to the LIVE window, seed gravity/velocities, enable coupling ----
+        self.imu_bias_gyro = gyro_bias.bias_gyro;
         self.imu_gravity_world = Some(alignment.gravity_world);
+        self.recovered_mono_scale = Some(alignment.scale);
+
+        // See `crate::dpvo_vi_ba`'s module doc, "Applying the recovered
+        // scale", for the translation/inverse-depth transformation derivation.
+        let s = alignment.scale;
+        for frame in self.graph.frames_mut() {
+            frame.pose.translation *= s;
+        }
+        for patch in self.graph.patches_mut() {
+            patch.inverse_depth /= s;
+        }
+
         // Seed velocities for every CURRENTLY LIVE frame the alignment
         // covers (frames the alignment used that have since aged out of
         // the live graph simply have no velocity slot left to seed).
         for (local, f) in self.graph.frames().iter().enumerate() {
-            if let Some(&v) = alignment.velocities.get(&(f.arrival_index as u64)) {
-                self.velocities[local] = v;
+            if let Some(&window_local) = local_index.get(&f.arrival_index) {
+                if let Some(&v) = alignment.velocities.get(window_local) {
+                    self.velocities[local] = v;
+                }
             }
         }
         self.imu_bootstrapped = true;
-        // No longer needed once bootstrapped (never re-attempted — see this
-        // method's own doc) — release the memory rather than let it sit.
+        self.imu_consecutive_bad_frames = 0;
+        // No longer needed once bootstrapped — release the memory rather
+        // than let it sit (a later rollback re-grows it from scratch).
         self.imu_bootstrap_history.clear();
         self.imu_bootstrap_history.shrink_to_fit();
+    }
+
+    /// Milestone M5b rollback: un-bootstrap back to visual-only. Does NOT
+    /// attempt to undo the scale already baked into every live pose/patch
+    /// translation/inverse-depth by [`Self::try_imu_bootstrap`] — harmless,
+    /// since visual-only reprojection residuals are scale-invariant (exactly
+    /// the gauge freedom `dpvo_ba` already tolerates on every M4/M4-perf
+    /// run; the run simply resumes accumulating its own ordinary monocular
+    /// scale drift from wherever it happened to be, rather than staying
+    /// frozen against a since-discredited bootstrap). Clears every piece of
+    /// bootstrap-only/coupling state so a later re-bootstrap starts from a
+    /// clean slate rather than replaying stale, possibly already-poisoned
+    /// evidence — see the module doc's "Milestone M5's honest negative, and
+    /// what M5b changes" section.
+    fn rollback_imu_bootstrap(&mut self) {
+        self.imu_bootstrapped = false;
+        self.imu_gravity_world = None;
+        self.imu_bias_gyro = Vector3::zeros();
+        self.imu_bias_accel = Vector3::zeros();
+        self.imu_deltas_by_arrival.clear();
+        self.imu_bootstrap_history.clear();
+        for v in &mut self.velocities {
+            *v = Vector3::zeros();
+        }
+        self.imu_consecutive_bad_frames = 0;
+        self.imu_rollback_count += 1;
     }
 
     /// One `update()` call (`dpvo.py:328-360`): reproject every active
@@ -1125,7 +1538,43 @@ impl DpvoOdometry {
                 bias_accel: self.imu_bias_accel,
             };
             let solved = dpvo_vi_ba(&problem, &imu_window, &ba_config)?;
-            (solved.poses, solved.patches, Some(solved.velocities))
+
+            // Milestone M5b rollback monitor (module doc, "Milestone M5's
+            // honest negative, and what M5b changes"): mean whitened
+            // IMU-factor NIS at the just-solved state. A persistently
+            // pathological value across `rollback_consecutive_frames`
+            // frames means this bootstrap's own scale/gravity/bias is
+            // fighting its own IMU evidence — exactly the "poisoned
+            // forever" failure M5 had no way to recover from.
+            let mut nis_sum = 0.0_f64;
+            let mut nis_count = 0usize;
+            for f in &imu_window.factors {
+                nis_sum += imu_factor_nis(
+                    &solved.poses[f.i],
+                    &solved.poses[f.j],
+                    &solved.velocities[f.i],
+                    &solved.velocities[f.j],
+                    &imu_window.body_to_camera,
+                    &f.factor,
+                    &self.imu_bias_gyro,
+                    &self.imu_bias_accel,
+                );
+                nis_count += 1;
+            }
+            let mean_nis = if nis_count > 0 { nis_sum / nis_count as f64 } else { 0.0 };
+            let (next_bad, should_rollback) = rollback_monitor_step(
+                mean_nis,
+                imu_cfg.rollback_mean_nis_bound,
+                self.imu_consecutive_bad_frames,
+                imu_cfg.rollback_consecutive_frames,
+            );
+            self.imu_consecutive_bad_frames = next_bad;
+
+            let out = (solved.poses, solved.patches, Some(solved.velocities));
+            if should_rollback {
+                self.rollback_imu_bootstrap();
+            }
+            out
         } else {
             let solved = dpvo_ba(&problem, &ba_config)?;
             (solved.poses, solved.patches, None)
@@ -1138,13 +1587,77 @@ impl DpvoOdometry {
         for (local, patch) in new_patches.into_iter().enumerate() {
             self.graph.patches_mut()[patches_lo + local] = patch;
         }
-        if let Some(velocities) = new_velocities {
+        // Milestone M5b: if this very frame's rollback monitor just fired
+        // (`self.imu_bootstrapped` flipped back to `false` above),
+        // `rollback_imu_bootstrap` already zeroed every velocity slot — do
+        // NOT immediately overwrite that with the (possibly still-poisoned)
+        // solve's own velocities.
+        if let Some(velocities) = new_velocities.filter(|_| self.imu_bootstrapped) {
             for (local, v) in velocities.into_iter().enumerate() {
                 self.velocities[frame_lo + local] = v;
             }
         }
         Ok(())
     }
+}
+
+/// Why [`gyro_bootstrap_gate_check`] rejected a [`GyroBiasAlignment`] —
+/// checked in this order (a magnitude failure is reported even if the rms
+/// checks would also have failed, so a caller tallying rejection reasons
+/// gets one bucket per attempt, not a double count). `pub`, not private —
+/// embedded in the `pub` [`DpvoImuRejectionDetail::GyroGate`] diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GyroGateRejection {
+    /// `bias_gyro.norm() > max_gyro_bias_magnitude_rad_s`.
+    MagnitudeTooLarge,
+    /// `rotation_residual_rms_after` is non-finite, or exceeds
+    /// `gyro_bias_max_rms_after`.
+    RmsAboveAbsoluteBound,
+    /// `rotation_residual_rms_after` didn't drop to at least
+    /// `gyro_bias_max_rms_fraction` of `rotation_residual_rms_before`.
+    RmsNotEnoughImprovement,
+}
+
+/// Milestone M5b: the gyro-bias bootstrap acceptance gate (see
+/// [`DpvoOdometry::try_imu_bootstrap`]'s doc, "Milestone M5b's gyro-bias
+/// gate"), factored out as a pure function of a
+/// [`GyroBiasAlignment`]/[`DpvoImuConfig`] pair so it can be unit-tested
+/// directly against synthetic alignment results — no ONNX session or live
+/// `DpvoOdometry` required (this crate's own DPVO unit tests already draw
+/// this line elsewhere, e.g. `corr_pyramid`'s standalone-function tests
+/// below vs. the module's one `--ignored` real-session benchmark). Returns
+/// the specific [`GyroGateRejection`] on failure, not just a bare `bool` —
+/// the task's own "isolate which gate" acceptance requirement needs to be
+/// answerable for THIS gate too, not only `estimate_mono_vi_alignment`'s.
+fn gyro_bootstrap_gate_check(alignment: &GyroBiasAlignment, cfg: &DpvoImuConfig) -> Result<(), GyroGateRejection> {
+    if alignment.bias_gyro.norm() > cfg.max_gyro_bias_magnitude_rad_s {
+        return Err(GyroGateRejection::MagnitudeTooLarge);
+    }
+    if !alignment.rotation_residual_rms_after.is_finite()
+        || alignment.rotation_residual_rms_after > cfg.gyro_bias_max_rms_after
+    {
+        return Err(GyroGateRejection::RmsAboveAbsoluteBound);
+    }
+    if alignment.rotation_residual_rms_after
+        > alignment.rotation_residual_rms_before * cfg.gyro_bias_max_rms_fraction
+    {
+        return Err(GyroGateRejection::RmsNotEnoughImprovement);
+    }
+    Ok(())
+}
+
+/// Milestone M5b: the rollback monitor's pure counter/threshold decision
+/// (see [`DpvoOdometry::rollback_imu_bootstrap`]'s doc) — given this
+/// frame's mean IMU-factor NIS and the running consecutive-bad-frame
+/// count, returns the counter's updated value and whether this frame trips
+/// the rollback. Factored out of [`DpvoOdometry::update_step`] for the same
+/// ONNX-free testability reason as [`gyro_bootstrap_gate_check`] above —
+/// "inject inconsistent factors, confirm rollback fires" is exercised here
+/// directly on the NIS sequence a genuinely poisoned bootstrap would
+/// produce, without needing a live session to generate one.
+fn rollback_monitor_step(mean_nis: f64, bound: f64, consecutive_bad: usize, threshold: usize) -> (usize, bool) {
+    let next = if mean_nis.is_finite() && mean_nis <= bound { 0 } else { consecutive_bad + 1 };
+    (next, next >= threshold)
 }
 
 /// Given per-item anchor features (`num_items, 128, 3, 3`) and per-item
@@ -1269,6 +1782,124 @@ mod tests {
     #[test]
     fn torch_quantile_50_empty_is_zero() {
         assert_eq!(torch_quantile_50(&[]), 0.0);
+    }
+
+    /// Milestone M5b: [`gyro_bootstrap_gate_check`] must reject a
+    /// noisy/implausible rotation alignment — this is the task's own
+    /// required "gyro gate rejects on noisy synthetic rotations" test,
+    /// exercised directly on the pure gate function (no ONNX/live
+    /// `DpvoOdometry` needed — see that function's own doc).
+    ///
+    /// The magnitude bound's SHIPPED default is `0.05`, kept conservative
+    /// after a real-data A/B on MH_01 — see
+    /// [`DpvoImuConfig::max_gyro_bias_magnitude_rad_s`]'s own doc for the
+    /// full story: a `0.3` experiment let a bootstrap through whose
+    /// recovered scale (`18.66`) passed every OTHER gate yet still
+    /// corrupted the run (rigid ATE `55.49 m`), so `0.05` is what ships.
+    /// Both M5's own collapsed-run bias and this milestone's own MH_01
+    /// run's worst observed magnitude are exercised below and must both
+    /// still be rejected at this conservative default.
+    #[test]
+    fn gyro_bootstrap_gate_rejects_noisy_rotation_alignment_and_accepts_a_clean_one() {
+        let cfg = DpvoImuConfig::default();
+
+        let m5_collapsed_run_bias = GyroBiasAlignment {
+            bias_gyro: Vector3::new(-0.081, -0.182, 0.077),
+            iterations: 5,
+            rotation_residual_rms_before: 0.20,
+            rotation_residual_rms_after: 0.19, // barely moved: fails both magnitude and fraction gates.
+        };
+        assert_eq!(
+            gyro_bootstrap_gate_check(&m5_collapsed_run_bias, &cfg),
+            Err(GyroGateRejection::MagnitudeTooLarge),
+            "M5's own collapsed-run bias must be rejected (on magnitude, checked first)"
+        );
+
+        let m5b_worst_observed_magnitude = GyroBiasAlignment {
+            // This milestone's own MH_01 `0.05`-bound run's worst observed
+            // magnitude (`docs/dpvo_droid_port_plan.md`'s "M5b results").
+            bias_gyro: Vector3::new(0.51, 0.0, 0.0),
+            iterations: 5,
+            rotation_residual_rms_before: 0.02,
+            rotation_residual_rms_after: 0.01, // rms gates alone would pass this — magnitude must still catch it.
+        };
+        assert_eq!(
+            gyro_bootstrap_gate_check(&m5b_worst_observed_magnitude, &cfg),
+            Err(GyroGateRejection::MagnitudeTooLarge),
+            "a magnitude far beyond any plausible MEMS gyro bias must still be rejected even with excellent rms"
+        );
+
+        let noisy_but_small_magnitude = GyroBiasAlignment {
+            bias_gyro: Vector3::new(0.01, -0.01, 0.005),
+            iterations: 5,
+            rotation_residual_rms_before: 0.20,
+            rotation_residual_rms_after: 0.19, // magnitude passes, but rms is nowhere near converged.
+        };
+        assert_eq!(
+            gyro_bootstrap_gate_check(&noisy_but_small_magnitude, &cfg),
+            Err(GyroGateRejection::RmsAboveAbsoluteBound),
+            "a small-magnitude bias whose rms alignment is still way above the absolute bound must be rejected"
+        );
+
+        let converged_but_not_enough = GyroBiasAlignment {
+            bias_gyro: Vector3::new(0.01, -0.01, 0.005),
+            iterations: 5,
+            // Both under the absolute bound (0.03) but rms barely moved
+            // from its starting point — the fraction gate's own reason to
+            // exist, distinct from the absolute-bound gate above.
+            rotation_residual_rms_before: 0.029,
+            rotation_residual_rms_after: 0.028,
+        };
+        assert_eq!(
+            gyro_bootstrap_gate_check(&converged_but_not_enough, &cfg),
+            Err(GyroGateRejection::RmsNotEnoughImprovement),
+            "an rms that clears the absolute bound but barely moved from its start must still be rejected"
+        );
+
+        let good = GyroBiasAlignment {
+            bias_gyro: Vector3::new(0.002, -0.001, 0.0015),
+            iterations: 3,
+            rotation_residual_rms_before: 0.10,
+            rotation_residual_rms_after: 0.01,
+        };
+        assert_eq!(
+            gyro_bootstrap_gate_check(&good, &cfg),
+            Ok(()),
+            "a plausible, well-converged bias must be accepted"
+        );
+    }
+
+    /// Milestone M5b: [`rollback_monitor_step`]'s pure counter logic — the
+    /// task's own required "rollback triggers on injected inconsistent
+    /// factors and restores visual-only behavior" check, at the level that
+    /// actually makes the decision. `imu_factor_nis_is_large_for_an_obviously_inconsistent_factor`
+    /// (in `crate::dpvo_vi_ba`) is the companion check that the NIS this
+    /// function consumes is itself a meaningful signal, not an arbitrary
+    /// number.
+    #[test]
+    fn rollback_monitor_step_triggers_after_k_consecutive_bad_frames_and_resets_on_good() {
+        let bound = 500.0;
+        let threshold = 5;
+
+        let mut consecutive = 0usize;
+        for expected_count in 1..=4 {
+            let (next, tripped) = rollback_monitor_step(10_000.0, bound, consecutive, threshold);
+            assert_eq!(next, expected_count);
+            assert!(!tripped, "must not roll back before {threshold} consecutive bad frames");
+            consecutive = next;
+        }
+        let (next, tripped) = rollback_monitor_step(10_000.0, bound, consecutive, threshold);
+        assert_eq!(next, 5);
+        assert!(tripped, "must roll back on the {threshold}th consecutive bad frame");
+
+        // A single good frame resets the counter to zero, not just decrements.
+        let (reset, tripped_after_good) = rollback_monitor_step(1.0, bound, next, threshold);
+        assert_eq!(reset, 0);
+        assert!(!tripped_after_good);
+
+        // Non-finite NIS (e.g. a solve that diverged to NaN) counts as bad.
+        let (next_nan, _) = rollback_monitor_step(f64::NAN, bound, 0, threshold);
+        assert_eq!(next_nan, 1);
     }
 
     #[test]
