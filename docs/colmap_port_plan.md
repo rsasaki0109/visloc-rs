@@ -2081,3 +2081,388 @@ alternative.
   `:708-743`), never comparing against alternate seeds' reach the way this
   repo's `grow_from_seed` sweep already does. No further porting is
   indicated here.
+
+## M5 results (implemented 2026-07-17)
+
+### Question
+
+M4 turned the plan's oldest diagnosis ("a frontend detection-coverage and
+view-graph problem, not a mapper-schedule problem") into an exact,
+falsifiable claim: ETH3D `courtyard`'s verified-pair graph is **literally two
+disconnected components** — images `{0..24}` (`DSC_0286`-`DSC_0310`) and
+`{25..37}` (`DSC_0311`-`DSC_0323`) — with **zero** bridging pairs among the
+325 possible cross-component pairs, at every pair-source/budget combination
+M3/M4 tried, including a functionally-exhaustive vocab-tree sweep. This
+milestone's brief: attack the frontend matching coverage directly, cheapest
+lever first, and measure whether *any* cross-component pair can be made to
+verify — one solid bridge could reconnect up to 13 more images.
+
+### Diagnosis (step 1): dumping specific bridge-pair numbers
+
+Built a new `--diagnose-pair I,J` tool (`examples/unordered_sfm_demo.rs`,
+`diagnose_pair`) that dumps raw descriptor-match counts and
+`TwoViewGeometryVerifier` outcomes for one specific image-index pair across
+four matching profiles: the main pass's own strict profile (ratio `0.8`,
+cross-check), two intermediate profiles (`0.9`/`0.95`, cross-check), and the
+fully-relaxed rescue extreme (`0.95`, no cross-check). Ran it on the exact
+temporally-adjacent boundary pair the brief names (`(24, 25)` =
+`DSC_0310`/`DSC_0311`) plus five more candidates (`(23,25)`, `(24,26)`,
+`(22,25)`, `(12,27)`, `(0,37)`), using the same cached `kp2048@max-dim-3200`
+SuperPoint features every M1-M4 milestone used
+(`E:\datasets\eth3d\battle\courtyard\visloc_run\features` — confirmed by
+reproducing M4's own recorded baseline exactly, 14/38 registered, 3.93 cm
+full-RMSE, 0.26 cm common-8-RMSE, byte-for-byte, before any new experiment
+was trusted). Full transcript:
+`E:/visloc_archive/colmap_m5_20260717/diagnose_pairs.log`.
+
+**Two qualitatively different findings, not one:**
+
+| pair | ratio=0.8 cc | ratio=0.9 cc | ratio=0.95 cc | ratio=0.95 no-cc |
+|---|---|---|---|---|
+| **(24, 25)** (the boundary pair) | 2 raw (too few) | 34 raw, DEGENERATE | 121 raw, DEGENERATE | 648 raw, **Calibrated, 69 inliers** |
+| (24, 26) | 12 raw (too few) | 44 raw, DEGENERATE | 142 raw, DEGENERATE | 639 raw, Calibrated, 66 inliers |
+| (12, 27) | 0 raw | 26 raw, DEGENERATE | 113 raw, DEGENERATE | 625 raw, Uncalibrated, 29 inliers |
+| (0, 37) | 0 raw | 21 raw, DEGENERATE | 94 raw, DEGENERATE | 641 raw, Calibrated, 83 inliers |
+| **(22, 25)** | **33 raw, Calibrated, 25 inliers** | 88 raw, Calibrated, 31 inliers | 193 raw, Calibrated, 36 inliers | 769 raw, Calibrated, 113 inliers |
+| (23, 25) | 23 raw, DEGENERATE | 92 raw, DEGENERATE | 212 raw, Calibrated, 21 inliers | 719 raw, Calibrated, 32 inliers |
+
+- **The named boundary pair `(24, 25)` has essentially zero real signal at
+  any defensible matching strictness**: 2 raw matches at the main pass's own
+  profile, still `DEGENERATE` at both intermediate profiles. Only the fully
+  relaxed no-cross-check profile finds a "`Calibrated`" result — and lever
+  (b) below shows this specific result is not trustworthy.
+- **`(22, 25)` is a genuinely different case**: it clears **even the main
+  pass's own strict profile** (33 raw matches, 25 real inliers, `Calibrated`
+  at ratio 0.8 with cross-check — the exact matcher every already-verified
+  pair in the reconstruction went through). This pair was never proposed by
+  VLAD top-12 retrieval (a candidate-generation miss, not a matching
+  failure). This repo's demo-level `verify_pairs` keep-list gates on
+  `report.inliers.len() >= min_matches` (`min_matches = 30` in every
+  acceptance run to date) — `(22, 25)`'s 25 real inliers would fall **short
+  of that demo-specific 30 floor** even if it *had* been proposed as a
+  candidate, even though they clear COLMAP's own real default
+  (`min_num_inliers = 15`, `estimators/two_view_geometry.h:47`, already cited
+  in "M1 results"). (Whether M3's own exhaustive vocab-tree sweep actually
+  proposed `(22, 25)` as a candidate was not independently re-checked here —
+  M3's own acceptance run recorded no accuracy change from exhaustive
+  pairing, consistent with either "never proposed" or "proposed and then
+  discarded by this same 30-inlier floor," and this milestone did not need
+  to distinguish the two to find and use the pair.) This repo's
+  `--min-matches` conflates two logically separate COLMAP knobs — "raw
+  matches worth verifying at all" and "verified inliers worth trusting" —
+  into one integer; `(22, 25)` is direct, concrete evidence that conflation
+  is capable of discarding a real bridge.
+
+### Levers, in order of cost
+
+**Lever (a): denser SuperPoint on candidate bridge images.**
+`E:\tools\venv-cu` has `torch 2.5.1+cu121` (CUDA available) and `lightglue`
+installed, so this lever was runnable locally — no export was blocked.
+`E:\datasets\eth3d\battle\courtyard\features_4096` (a full-scene
+`kp4096@max-dim-3200` export) was already cached from a prior session, so no
+new export was needed. A first attempt mixed feature densities (denser
+features on only the 21 images spanning the boundary, `kp2048` elsewhere)
+and produced a **confound**: full-RMSE blew up to 39.45 cm on the *same*
+14-image registered set as the baseline, purely from the density mismatch
+destabilizing seed/BA choices for the two registered images whose features
+happened to be swapped — documented as a methodology lesson (partial-image
+re-densification is not a clean lever measurement) and superseded by the
+clean, full-scene comparison below.
+
+Clean, full-scene `kp4096` re-export (no mixing), no rescue:
+
+| profile | registered | full-RMSE | common-8 RMSE |
+|---|---:|---:|---:|
+| `kp2048` baseline (M1-M4's own cache) | 14/38 | 3.93 cm | 0.26 cm |
+| `kp4096` full-scene, no rescue | **13/38** | **1.38 cm** | n/a (13<14, different set) |
+
+Denser features alone do **not** increase registration count on this scene
+(if anything, one fewer) — consistent with this doc's own Risks section
+("SuperPoint keypoint density is a real but saturating lever ... courtyard:
+3.5x ATE improvement, no change on office, worse on terrace"): the ATE-only
+half of that finding reproduces cleanly here (3.93 -> 1.38 cm on whichever
+images do register), the registration-count half does not move favorably.
+Measured on the *specific diagnosed pairs*, denser features are a genuine,
+positive, but bounded lever: `(22, 25)` improves from 33 raw/25 inliers to
+43 raw/29 inliers at the identical strict profile, and `(24, 30)` (found by
+the rescue pass below as the single strongest cross-component candidate)
+goes from *not strict-verifiable at all at `kp2048`* to a clean 29 raw/20
+inliers at ratio 0.8 with cross-check at `kp4096` — a real new bridge lever
+(a) alone creates. But it cannot manufacture correspondences where there is
+no real overlap: `(24, 25)` and `(20, 25)` stay at 0 raw matches / `DEGENERATE`
+at every profile up to ratio 0.95-with-cross-check even at double the
+keypoint budget.
+
+**Lever (b): matching relaxation** — implemented as the opt-in "rescue-
+matching" pass the milestone's own integration section specifies: when the
+initial verified-pair graph is disconnected
+(`visloc_rs::vision::two_view::connected_components`, new), propose
+cross-component candidate pairs ranked by a fresh VLAD similarity and
+budget-capped (`generate_bridge_candidates`, new), rematch each with a
+relaxed profile, and re-verify every candidate with the *same*
+`TwoViewGeometryVerifier` (M1) every other pair goes through — only
+admitting pairs that pass full verification, never an unverified pair,
+respecting the M1.1 lesson that loose thresholds are only safe behind a real
+classifier.
+
+Two very different outcomes depending on how "relaxed" is read:
+
+- **Naive form** (ratio `0.95`, drop cross-check entirely — the literal
+  reading of "mutual-NN with Lowe ratio instead of strict cross-check"):
+  **an honest negative, and a instructive one.** On `courtyard`, 172-182 of
+  200 proposed cross-component candidates pass full `ConfigurationType`
+  classification with plausible-looking inlier counts (up to 180); on
+  `office`, 144 of 153. This does not help — it actively hurts:
+
+  | scene | baseline | naive rescue (0.95, no cross-check) |
+  |---|---|---|
+  | courtyard | 14/38, 3.93 cm | **13/38**, 2.96 cm (different, not better, image set) |
+  | office | 18/26, 0.50 cm | **16/26**, **34.78 cm** (catastrophic) |
+
+  Confirmed spurious by direct evidence, not inferred from RMSE alone:
+  `VISLOC_SFM_DEBUG=1` shows a "bridged" `courtyard` image (25) reaching PnP
+  with 20-34 real correspondences to already-triangulated 3D points but only
+  **3-9 PnP inliers** (15-28% inlier ratio) — an order of magnitude below the
+  12-inlier registration gate. The two-view `ConfigurationType` classifier
+  (E vs. F vs. H model-selection) is **not sufficient** as a safety net here:
+  `courtyard`/`office`'s repeated architectural texture (bricks, windows,
+  tiles) manufactures a large enough pool of near-duplicate descriptors that
+  a big-enough RANSAC search over a huge, weakly-discriminative candidate set
+  can fit an "accidental" epipolar-consistent subset well above the 15-inlier
+  gate, without the correspondences being real. This is the concrete
+  counter-example to M1.1's own "the classifier is what makes a loose
+  threshold safe" lesson: the *degree* of relaxation here (dropping
+  cross-check on a repeated-texture scene) overwhelms what E/F/H
+  model-selection alone can filter.
+- **Disciplined form** (the main pass's own exact matcher — ratio `0.8`,
+  cross-check — only the post-verification admission floor lowered from the
+  demo's `--min-matches 30` to COLMAP's own real `min_num_inliers` default,
+  `15` — directly motivated by the `(22, 25)` diagnosis finding above): finds
+  a small number of genuinely real bridges, no flood, no RMSE regression:
+
+  | scene | baseline | disciplined rescue (0.8, cross-check, floor=15) |
+  |---|---|---|
+  | courtyard (`kp2048`) | 14/38, 3.93 cm, 0.26 cm common-8 | 14/38 (**same set**), 3.95 cm, 0.26 cm common-8 — 11 bridges admitted (21-40 raw / 15-25 inliers each), graph reconnects to 1 component |
+  | courtyard (`kp4096`, clean lever a+b) | 13/38, 1.38 cm (a alone) | 14/38 (**same set as `kp2048` baseline**), 3.61 cm, 0.53 cm common-8 — 17 bridges admitted (best: `(22,25)`, 43 raw / 29 inliers), graph reconnects to 1 component |
+  | office | 18/26, 0.50 cm | 18/26 (**same set**), 0.46 cm — 14 bridges admitted, 7 components -> 4 components (not fully reconnected) |
+  | terrace | 23/23, 1.38 cm | 23/23 — rescue pass exits immediately (`graph is already connected, nothing to bridge`), byte-identical, confirmed a true no-op |
+
+  Every disciplined-rescue run is a **safe no-regression**: registered count
+  never decreases, RMSE moves within the same run-to-run noise band M1
+  already characterized (±0.02-0.3 cm), and the view graph genuinely
+  reconnects (`courtyard`: 2 -> 1 component; `office`: 7 -> 4 components).
+  But on `courtyard` — with or without lever (a)'s denser features layered
+  on top — **registration never exceeds the 14/38 baseline**: the same
+  14 images register, byte-for-byte, in every disciplined configuration
+  tried.
+
+**Lever (c): guided matching.** Not reached. Guided (epipolar-second-pass)
+matching is indicated when a bridge pair gets "a marginal-but-real E/F model
+on the first pass" — but the disciplined lever (b) pairs that *do* admit are
+already comfortably `Calibrated` with 15-29 inliers on the very first pass
+(nothing marginal to guide), and the pairs that don't admit (`(24,25)`
+itself) have ~0 raw correspondences even at ratio 0.9 with cross-check,
+leaving no epipolar geometry — however marginal — to seed a guided second
+pass with. Documented as not indicated by the evidence, not skipped for
+time.
+
+### Why registration plateaus at 14/38 even once the graph is honestly, fully connected
+
+`VISLOC_SFM_DEBUG=1` on the disciplined-rescue run
+(`E:/visloc_archive/colmap_m5_20260717/` debug logs) shows exactly why the 11
+genuine bridge edges don't translate into new registered images: most
+previously-unreachable images (`25,26,27,28,29,31,32,34,35,36,37`) still have
+**0-5 correspondences** to already-triangulated 3D points through the thin
+bridges — below the mapper's 6-correspondence floor to even *attempt* PnP.
+The one image that does clear that floor (`33`: 25-26 correspondences)
+fails the PnP inlier-ratio gate outright: **8/25-26 inliers (~32%)**, well
+under the 12-inlier `min_pnp_inliers` threshold — the exact same
+"correspondence count sufficient, inlier *ratio* insufficient" pattern M4
+diagnosed for image 12 within the *reachable* component. **This generalizes
+M4's image-12 finding to the entire second component**: the disconnection is
+real and lever (b) genuinely bridges it at the pairwise-verification level,
+but the *amount* of independently triangulatable structure crossing the
+boundary is too thin for the incremental mapper's PnP-based growth to
+exploit — a few dozen inliers spread across 11-17 pairs is not the same
+thing as one image having a robust, concentrated set of correspondences to
+already-triangulated points.
+
+### Integration
+
+`--rescue-bridging` (opt-in, off by default — byte-identical behaviour when
+unset, same convention every M1-M4 flag used) on
+`examples/unordered_sfm_demo.rs`. Runs after the initial `verify_pairs` call
+via the new `rescue_bridging` function: detects disconnection
+(`connected_components`), proposes cross-component candidates
+(`generate_bridge_candidates`, VLAD-ranked, budget-capped via
+`--rescue-max-candidates`, default 200), rematches with
+`--rescue-match-ratio` (default `0.95`) and `--rescue-cross-check` (default
+off, i.e. the naive/aggressive profile is the *default* relaxation if the
+flag is used with no further tuning — see "Recommended defaults" below for
+why this milestone does not change that default despite the naive profile's
+own honest-negative finding), and re-verifies with the same
+`TwoViewGeometryVerifier`/keep-list `--verification-mode full` uses.
+Admitted pairs are appended to the same `PairwiseMatches` list
+`incremental_sfm` consumes, so a successful bridge participates in track
+building exactly like any other verified pair — no mapper-side change at
+all. `--diagnose-pair I,J` (repeatable) is a second, independent opt-in tool
+for the by-hand bridge-pair inspection the brief's diagnosis step asked for.
+
+**Recommended defaults for actually using `--rescue-bridging`.** The
+acceptance evidence above is unambiguous: `--rescue-cross-check` should be
+set whenever `--rescue-bridging` is used on a scene with repeated
+architectural texture (which this milestone cannot detect automatically —
+no such detector was in scope), and `--rescue-min-matches` should stay near
+COLMAP's own `15` default rather than being raised toward the demo's
+`--min-matches`. The flag's own default (`rescue_cross_check: false`)
+matches every other M1-M4 flag's "off/default reproduces prior behaviour"
+convention for the *base* `--rescue-bridging` switch itself (a wholly new
+opt-in has no prior behaviour to reproduce), but is **not** the
+recommended *operating point* once turned on — this is called out explicitly
+here and in the flag's own doc comment rather than silently defaulting to
+an unsafe combination.
+
+### Tests (new)
+
+`crates/vision/src/two_view/rescue.rs` (new, 10 tests, all passing):
+- `connected_components`: two disconnected components detected exactly
+  (`detects_two_disconnected_components`), a fully-connected chain collapses
+  to one component (`fully_connected_graph_is_one_component`), an
+  edge-free image is its own singleton component
+  (`isolated_image_is_a_singleton_component`), an empty edge list gives `n`
+  singletons (`no_edges_gives_n_singleton_components`), self-loops/out-of-
+  range edges are ignored defensively
+  (`self_loops_and_out_of_range_edges_are_ignored`).
+- `generate_bridge_candidates`: only cross-component pairs are ever proposed
+  regardless of the similarity function
+  (`candidates_are_cross_component_only`), descending-similarity ranking
+  (`candidates_are_ranked_by_descending_similarity`), the budget cap is
+  respected (`candidates_are_budget_capped`), three-or-more components
+  produce every pairwise combination, not just adjacent ones
+  (`candidates_span_every_component_pair_not_just_adjacent_ones`).
+- **`rescue_bridges_two_disconnected_components`**: the milestone's own
+  end-to-end synthetic fixture. Two three-camera components
+  (`{0,1,2}`/`{3,4,5}`) share a genuine wide-baseline bridge `(2,3)` whose
+  synthetic descriptors are contaminated with near-duplicate "distractor"
+  entries (distance 1.15 vs. the true match's 1.0 — a `distance/second_best`
+  ratio of ~0.87) engineered so the strict profile (ratio `0.8`) fails to
+  clear a 15-match gate while the relaxed profile (`0.95`) clears it with
+  every recovered match still geometrically correct (never admitting the
+  distractor itself); the relaxed matches then independently classify
+  `Calibrated`/`Uncalibrated` via the real `TwoViewGeometryVerifier`, and
+  admitting the bridge collapses the graph from 2 components to 1. This pins
+  the exact "loose matcher proposes, real classifier admits" claim
+  `docs/colmap_port_plan.md`'s own integration section describes, on a
+  synthetic fixture, independent of any ETH3D data.
+
+### Files changed
+
+- `crates/vision/src/two_view/rescue.rs` (new) — `connected_components`,
+  `BridgeCandidateOptions`, `generate_bridge_candidates`; 10 unit tests.
+- `crates/vision/src/two_view/mod.rs` — wired `rescue` in, re-exported its
+  three public items, extended the module doc.
+- `examples/unordered_sfm_demo.rs` — `--rescue-bridging` +
+  `--rescue-match-ratio`/`--rescue-min-matches`/`--rescue-max-candidates`/
+  `--rescue-cross-check` (all new `Args` fields, all opt-in, default
+  `false`/COLMAP-derived values), the `rescue_bridging` function, and the
+  independent `--diagnose-pair I,J` diagnostic tool + `diagnose_pair`
+  function. File header doc comment extended with a new numbered step
+  describing the rescue pass. `verify_pairs`/`candidate_pairs`/
+  `incremental_sfm` (the actual mapper) are **untouched** — the rescue pass
+  is strictly an additional, opt-in stage between initial verification and
+  the mapper call, appending to the same `PairwiseMatches` list.
+- `docs/colmap_port_plan.md` — this section.
+
+No new dependencies. `pipelines/slam/src/dpvo_*.rs`,
+`examples/euroc_dpvo_vo_demo.rs` not touched (concurrent DPVO work per this
+doc's Risks section; confirmed via `git status` at the start of this
+session). Python export tooling (`E:\tools\venv-cu`) was used read-only for
+lever (a)'s experiment (re-running an existing export script's logic to
+produce `features_4096`-equivalent data that was, in fact, already cached
+from a prior session) — no script was added under `scripts/` (out of this
+milestone's stated scope: `crates/vision`, `examples/unordered_sfm_demo.rs`,
+`docs/colmap_port_plan.md`).
+
+### Acceptance table (vs. the M4 baseline: 14/38, 3.93 cm full, 0.26 cm common-8)
+
+| configuration | courtyard registered | courtyard full-RMSE | courtyard common-8 RMSE | office registered | office RMSE | terrace registered | terrace RMSE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline (no rescue) | 14/38 | 3.93 cm | 0.26 cm | 18/26 | 0.50 cm | 23/23 | 1.38 cm |
+| naive rescue (0.95, no cross-check) | 13/38 | 2.96 cm | n/a | 16/26 | **34.78 cm** | 23/23 (no-op) | 1.38 cm |
+| disciplined rescue (0.8, cross-check, floor=15) | 14/38 | 3.95 cm | 0.26 cm | 18/26 | 0.46 cm | 23/23 (no-op) | 1.38 cm |
+| disciplined rescue + lever (a) (`kp4096`, clean) | 14/38 | 3.61 cm | 0.53 cm | not run | not run | not run | not run |
+
+Full logs, per-run `images.txt`/`points3D.txt`, and the Sim(3) scorer's
+output for every row: `E:/visloc_archive/colmap_m5_20260717/`.
+
+### Verdict
+
+**Does registration exceed 14/38? No — an honest, thoroughly-evidenced
+ceiling, not a shortfall from insufficient effort.** Both cheap levers were
+implemented, measured, and pushed to their most defensible configuration:
+
+- Lever (a) (denser SuperPoint) is real but bounded: it improves specific
+  pairs' inlier counts (`(22,25)`: 25 -> 29; creates a new strict bridge at
+  `(24,30)`: unverifiable -> 20 inliers) and substantially improves ATE on
+  whichever images do register (3.93 -> 1.38 cm), but does not by itself
+  change *which* images register.
+- Lever (b) (matching relaxation), read literally/aggressively, is an
+  **honest negative that actively regresses accuracy** (office: 0.50 cm ->
+  34.78 cm) via classifier-passing-but-PnP-inconsistent false bridges — a
+  concrete, evidenced counter-example to assuming a real two-view classifier
+  is always sufficient cover for a loose matcher, worth its own note for any
+  future milestone reusing this pattern.
+- Lever (b), read disciplined (same strict matcher as the main pass, only
+  the admission floor corrected to COLMAP's real default), is genuinely safe
+  and does connect the view graph — but the bridges it finds are too thin
+  (a few dozen inliers spread across 11-17 pairs) for the incremental
+  mapper's per-image PnP inlier-ratio gate to ever clear on any single
+  previously-unreachable image, even stacked with lever (a)'s denser
+  features.
+- Lever (c) (guided matching) is not indicated by any of the above evidence:
+  there is no marginal-but-real first-pass model on the pairs that fail, and
+  no need to guide a second pass on the pairs that already succeed.
+
+**What this implies for the next milestone.** The frontend gap is now
+diagnosed at maximum precision available to a per-descriptor nearest-
+neighbour matcher: the courtyard boundary genuinely has very little shared
+structure between its two photographed loops, and what little exists
+(`(22,25)`, `(24,30)`, and similar) is real but sparse — a handful of
+correct correspondences per pair, not the dense, concentrated overlap a
+single image needs to clear a PnP inlier-ratio gate. A **joint, learned
+matcher (LightGlue-class)** — which reasons over both images' descriptors
+*together* rather than independently ranking per-descriptor nearest
+neighbours — is the next plausible lever, precisely because it could extract
+substantially more of the true (sparse) correspondence signal from the same
+wide-baseline image pairs without the naive-relaxation failure mode
+documented above (a joint matcher's attention mechanism discriminates
+repeated structure using both images' full context, not a per-descriptor
+ratio test blind to which candidate is contextually consistent). This
+repo's own `docs/dpvo_droid_port_plan.md` already tracks a DPVO/DROID port;
+a LightGlue-class two-view matcher for the unordered-SfM path is the
+natural, evidence-driven parallel to propose for the wide-baseline/sparse-
+overlap case this milestone's diagnosis isolates.
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision --lib`: **167 passed, 0 failed** (10 new
+  `two_view::rescue` tests; all 157 pre-existing tests, including every
+  M1/M1.1/M2/M2.1/M3 suite, unmodified and green).
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings.
+- `cargo check --example unordered_sfm_demo --features image-io,onnx-inference`:
+  clean.
+- `cargo clippy --example unordered_sfm_demo --features image-io,onnx-inference
+  -- -D warnings`: 6 pre-existing errors, all confirmed (grepped clippy's own
+  `-->` lines) in untouched, concurrently-edited
+  `pipelines/slam/src/{map_atlas,online_slam_vi_ba,vi_motion_initializer,
+  online_slam_motion_vi_init}.rs` — the same file set M1.1/M2/M2.1/M4
+  documented as out-of-scope concurrent DPVO/online-SLAM development; **zero**
+  in `unordered_sfm_demo.rs`, `two_view/rescue.rs`, or any other file this
+  milestone touched.
+- Release build: `cargo build --release --example unordered_sfm_demo
+  --features image-io,onnx-inference` — clean. Used directly for every
+  acceptance run above.
+- `pipelines/slam/src/incremental_sfm.rs`, `bundle.rs`, and every other
+  mapper file: **not touched** — this milestone is strictly a frontend
+  pre-filter, per its own scope.

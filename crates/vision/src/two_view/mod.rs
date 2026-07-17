@@ -34,6 +34,12 @@
 //! track building and transitive-correspondence queries. It is consumed by
 //! `pipelines/slam/src/incremental_sfm.rs`'s `build_tracks_via_graph` as an
 //! opt-in alternative to the legacy ad hoc union-find.
+//!
+//! [`rescue`] adds a fourth, independent tier: M5's disconnection detector +
+//! cross-component candidate generator, used by `examples/unordered_sfm_demo
+//! .rs`'s `--rescue-bridging` pass to propose and (after re-verification)
+//! admit bridge pairs between components the standard pipeline left
+//! disconnected — see `docs/colmap_port_plan.md`'s "M5 results".
 
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Point2, UnitQuaternion, Vector3};
 use rand::rngs::SmallRng;
@@ -46,6 +52,7 @@ pub mod colmap_verification;
 pub mod correspondence_graph;
 pub mod fundamental;
 pub mod homography;
+pub mod rescue;
 
 pub use colmap_verification::{
     ConfigurationType, TwoViewGeometryOptions, TwoViewGeometryReport, TwoViewGeometryVerifier,
@@ -62,6 +69,7 @@ pub use homography::{
     homography_squared_error, pose_from_homography_matrix, HomographyMotion,
     HomographyRansacConfig, HomographyReport,
 };
+pub use rescue::{connected_components, generate_bridge_candidates, BridgeCandidateOptions};
 
 /// One pixel-space correspondence between a previous and a current frame.
 #[derive(Debug, Clone, Copy, PartialEq)]

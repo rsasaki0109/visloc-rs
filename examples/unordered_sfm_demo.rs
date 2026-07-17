@@ -68,7 +68,26 @@
 //!    incremental_sfm.rs`'s `graph_tracks_match_union_find_tracks_*` tests),
 //!    so this flag is the M2 acceptance experiment's switch, not a behaviour
 //!    change — see `docs/colmap_port_plan.md`'s "M2 results".
-//! 4. **Export.** The registered poses + merged multi-view tracks are written as
+//! 4. **Rescue-bridging (opt-in, `--rescue-bridging`, M5 in
+//!    `docs/colmap_port_plan.md`).** Runs after the initial verification pass
+//!    above. Detects whether the verified-pair graph is disconnected
+//!    (`visloc_rs::vision::two_view::connected_components`) — the diagnosed
+//!    ETH3D `courtyard` failure mode (images 0-24 vs 25-37 never verify a
+//!    single pair against each other at any pair budget M3/M4 tried). If so,
+//!    it proposes cross-component candidate pairs, ranked by a fresh VLAD
+//!    global-descriptor similarity and budget-capped
+//!    (`generate_bridge_candidates`), rematches each with a deliberately
+//!    relaxed profile (`--rescue-match-ratio`, default a looser Lowe ratio
+//!    than `--match-ratio`, and mutual-NN instead of strict cross-check
+//!    unless `--rescue-cross-check` is set), and re-verifies every candidate
+//!    with the *same* full [`TwoViewGeometryVerifier`] every other pair goes
+//!    through — a relaxed matcher only ever *proposes* a bridge, the
+//!    classifier still decides what's *admitted* (the M1.1 lesson: loose
+//!    thresholds are only safe when a real classifier gates the result).
+//!    Admitted pairs are appended to the same `PairwiseMatches` list that
+//!    feeds `incremental_sfm`, so a successful bridge participates in track
+//!    building exactly like any other verified pair.
+//! 5. **Export.** The registered poses + merged multi-view tracks are written as
 //!    a COLMAP text model (`cameras.txt` / `images.txt` / `points3D.txt`),
 //!    ready for 3DGS / NeRF training.
 //!
@@ -104,7 +123,8 @@ use nalgebra::{Point2, Point3};
 use rayon::prelude::*;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{
-    ConfigurationType, EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
+    connected_components, generate_bridge_candidates, BridgeCandidateOptions, ConfigurationType,
+    EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
     RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
 use visloc_rs::vision::vocab_tree::{
@@ -218,6 +238,33 @@ struct Args {
     /// (`VocabTreePairingOptions::num_images`). Ignored under
     /// `--pair-source vlad`.
     vocab_tree_num_images: usize,
+    /// M5 (`docs/colmap_port_plan.md`): run the opt-in rescue-bridging pass
+    /// after initial verification (see the file header's step 4).
+    rescue_bridging: bool,
+    /// Rescue pass's relaxed Lowe ratio (looser than `--match-ratio`) — the
+    /// M5 "matching relaxation" lever.
+    rescue_match_ratio: f32,
+    /// Rescue pass's minimum raw-match / verified-inlier floor. Deliberately
+    /// independent of `--min-matches`: rescue candidates are, by
+    /// construction, the pairs the main pass already couldn't reach, so this
+    /// is the floor the M5 brief's "cheapest lever first" default should use
+    /// (COLMAP's own `min_num_inliers` default, 15) rather than inheriting
+    /// whatever (possibly stricter) floor the main pass used.
+    rescue_min_matches: usize,
+    /// Maximum number of cross-component candidate pairs the rescue pass will
+    /// attempt (budget cap, `BridgeCandidateOptions::max_candidates`).
+    rescue_max_candidates: usize,
+    /// Whether the rescue pass's relaxed matcher also applies strict
+    /// bidirectional cross-check (default `false`: mutual-NN + ratio only,
+    /// per the M5 brief's "mutual-NN with Lowe ratio *instead of* ... strict
+    /// cross-check").
+    rescue_cross_check: bool,
+    /// M5 diagnosis tool (`--diagnose-pair I,J`, repeatable): dump raw match
+    /// counts and verification outcomes for specific `(i, j)` image-index
+    /// pairs across a battery of matching profiles, then exit without
+    /// running the reconstruction. Used to inspect the exact bridge
+    /// candidates the M5 brief asks for (e.g. the boundary pair) by hand.
+    diagnose_pairs: Vec<(usize, usize)>,
 }
 
 /// Parse `--track-source`'s value into the M2 [`TrackSource`] A/B switch.
@@ -260,6 +307,12 @@ fn parse_args() -> Result<Args, String> {
     let mut vocab_tree_branching = 10usize;
     let mut vocab_tree_depth = 3usize;
     let mut vocab_tree_num_images = 100usize;
+    let mut rescue_bridging = false;
+    let mut rescue_match_ratio = 0.95f32;
+    let mut rescue_min_matches = 15usize;
+    let mut rescue_max_candidates = 200usize;
+    let mut rescue_cross_check = false;
+    let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -307,6 +360,26 @@ fn parse_args() -> Result<Args, String> {
             "--vocab-tree-num-images" => {
                 vocab_tree_num_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
+            "--rescue-bridging" => rescue_bridging = true,
+            "--rescue-match-ratio" => {
+                rescue_match_ratio = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--rescue-min-matches" => {
+                rescue_min_matches = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--rescue-max-candidates" => {
+                rescue_max_candidates = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--rescue-cross-check" => rescue_cross_check = true,
+            "--diagnose-pair" => {
+                let raw = a.remove(i + 1);
+                let (lhs, rhs) = raw
+                    .split_once(',')
+                    .ok_or_else(|| format!("--diagnose-pair expects I,J, got {raw:?}"))?;
+                let i_idx: usize = lhs.trim().parse().map_err(|e| format!("{e}"))?;
+                let j_idx: usize = rhs.trim().parse().map_err(|e| format!("{e}"))?;
+                diagnose_pairs.push((i_idx, j_idx));
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -349,6 +422,12 @@ fn parse_args() -> Result<Args, String> {
         vocab_tree_branching,
         vocab_tree_depth,
         vocab_tree_num_images,
+        rescue_bridging,
+        rescue_match_ratio,
+        rescue_min_matches,
+        rescue_max_candidates,
+        rescue_cross_check,
+        diagnose_pairs,
     })
 }
 
@@ -714,6 +793,246 @@ fn verify_pairs(
     (pairwise, stats)
 }
 
+/// One rescue-pass candidate's outcome, kept for reporting regardless of
+/// whether it was admitted — `main`'s acceptance report (M5,
+/// `docs/colmap_port_plan.md`) needs both "which bridges were found" and,
+/// in the honest-negative case, "how close did the closest attempt get".
+#[derive(Debug, Clone, Copy)]
+struct RescueAttempt {
+    pair: (usize, usize),
+    raw_matches: usize,
+    config: ConfigurationType,
+    inliers: usize,
+}
+
+/// M5 (`docs/colmap_port_plan.md`): opt-in rescue-bridging pass, run after
+/// the initial [`verify_pairs`] call. Detects whether the resulting
+/// verified-pair graph (`pairwise`) is disconnected
+/// (`visloc_rs::vision::two_view::connected_components`); if so, proposes
+/// cross-component candidate pairs ranked by a fresh VLAD global-descriptor
+/// similarity and budget-capped (`generate_bridge_candidates`), rematches
+/// each with the relaxed `--rescue-*` profile, and re-verifies with the same
+/// [`TwoViewGeometryVerifier`] / keep-list [`verify_pairs`] itself uses under
+/// `--verification-mode full` — a looser matcher only ever *proposes* a
+/// bridge here, never *admits* one unverified (the M1.1 lesson).
+///
+/// Returns the admitted bridge pairs, already in `PairwiseMatches` form and
+/// ready to append to the caller's verified-pair list (every attempt's
+/// [`RescueAttempt`] outcome — admitted or not — is reported via `println!`
+/// as it's produced, per this milestone's acceptance-report requirement).
+fn rescue_bridging(
+    features: &[FeatureSet],
+    camera: &Camera,
+    pairwise: &[PairwiseMatches],
+    args: &Args,
+) -> Vec<PairwiseMatches> {
+    let n = features.len();
+    let edges: Vec<(usize, usize)> = pairwise.iter().map(|p| (p.image_i, p.image_j)).collect();
+    let components = connected_components(n, &edges);
+    println!(
+        "rescue-bridging: view graph has {} connected component(s) (sizes {})",
+        components.len(),
+        components
+            .iter()
+            .map(|c| c.len().to_string())
+            .collect::<Vec<_>>()
+            .join("+"),
+    );
+    if components.len() <= 1 {
+        println!("rescue-bridging: graph is already connected, nothing to bridge");
+        return Vec::new();
+    }
+
+    // Retrieval score for ranking cross-component candidates: a fresh VLAD
+    // vocabulary/global descriptor per image, independent of whichever
+    // `--pair-source` built the *initial* graph (so this still works under
+    // `--pair-source vocab-tree`). Falls back to a uniform (unranked) score
+    // if the vocabulary cannot be built — the candidate generator itself
+    // still enforces "cross-component only, budget-capped" either way.
+    let sample = sampled_training_descriptors(features);
+    let globals: Option<Vec<Vec<f32>>> = Vocabulary::build(&sample, args.vocab_size, 10, 0)
+        .map(|vocab| features.iter().map(|f| vlad(&f.descriptors, &vocab)).collect());
+    let similarity = |i: usize, j: usize| -> f32 {
+        match &globals {
+            Some(g) => cosine_similarity(&g[i], &g[j]),
+            None => 0.0,
+        }
+    };
+
+    let candidates = generate_bridge_candidates(
+        &components,
+        similarity,
+        &BridgeCandidateOptions {
+            max_candidates: args.rescue_max_candidates,
+        },
+    );
+    println!(
+        "rescue-bridging: {} cross-component candidate pair(s) proposed (ratio={}, cross_check={}, min_matches={})",
+        candidates.len(),
+        args.rescue_match_ratio,
+        args.rescue_cross_check,
+        args.rescue_min_matches,
+    );
+
+    let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0));
+
+    let results: Vec<(Option<PairwiseMatches>, RescueAttempt)> = candidates
+        .par_iter()
+        .map(|&(i, j)| {
+            let dm = if args.rescue_cross_check {
+                CrossCheckMatcher::new(BruteForceMatcher {
+                    ratio: Some(args.rescue_match_ratio),
+                })
+                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
+            } else {
+                BruteForceMatcher {
+                    ratio: Some(args.rescue_match_ratio),
+                }
+                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
+            };
+            let raw_matches = dm.len();
+            if raw_matches < args.rescue_min_matches {
+                return (
+                    None,
+                    RescueAttempt {
+                        pair: (i, j),
+                        raw_matches,
+                        config: ConfigurationType::Degenerate,
+                        inliers: 0,
+                    },
+                );
+            }
+
+            let corrs: Vec<TwoViewCorrespondence> = dm
+                .iter()
+                .map(|m| {
+                    TwoViewCorrespondence::new(
+                        features[i].keypoints[m.query_index],
+                        features[j].keypoints[m.train_index],
+                    )
+                })
+                .collect();
+            let report = verifier.classify(&corrs, camera);
+            let attempt = RescueAttempt {
+                pair: (i, j),
+                raw_matches,
+                config: report.config,
+                inliers: report.inliers.len(),
+            };
+            // Same keep-list `verify_pairs`'s `full` mode uses (M2.1): every
+            // non-DEGENERATE, non-WATERMARK configuration is admissible.
+            let keep = matches!(
+                report.config,
+                ConfigurationType::Calibrated
+                    | ConfigurationType::Uncalibrated
+                    | ConfigurationType::Planar
+                    | ConfigurationType::Panoramic
+                    | ConfigurationType::PlanarOrPanoramic
+                    | ConfigurationType::Multiple
+            );
+            if !keep || report.inliers.len() < args.rescue_min_matches {
+                return (None, attempt);
+            }
+            let matches: Vec<(usize, usize)> = report
+                .inliers
+                .iter()
+                .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
+                .collect();
+            (
+                Some(PairwiseMatches {
+                    image_i: i,
+                    image_j: j,
+                    matches,
+                }),
+                attempt,
+            )
+        })
+        .collect();
+
+    let mut admitted = Vec::new();
+    let mut attempts = Vec::with_capacity(results.len());
+    for (pair, attempt) in results {
+        if let Some(pair) = &pair {
+            println!(
+                "rescue-bridging: BRIDGE admitted ({}, {}) raw_matches={} inliers={} config={:?}",
+                attempt.pair.0, attempt.pair.1, attempt.raw_matches, attempt.inliers, attempt.config,
+            );
+            admitted.push(pair.clone());
+        }
+        attempts.push(attempt);
+    }
+
+    if let Some(best) = attempts.iter().max_by_key(|a| a.inliers) {
+        println!(
+            "rescue-bridging: best cross-component attempt ({}, {}) raw_matches={} inliers={} config={:?}",
+            best.pair.0, best.pair.1, best.raw_matches, best.inliers, best.config,
+        );
+    }
+    println!(
+        "rescue-bridging: {} bridge pair(s) admitted out of {} attempted",
+        admitted.len(),
+        candidates.len(),
+    );
+
+    if !admitted.is_empty() {
+        let mut all_edges = edges.clone();
+        all_edges.extend(admitted.iter().map(|p| (p.image_i, p.image_j)));
+        let components_after = connected_components(n, &all_edges);
+        println!(
+            "rescue-bridging: view graph now has {} connected component(s) after admission",
+            components_after.len(),
+        );
+    }
+
+    admitted
+}
+
+/// M5 diagnosis tool (`--diagnose-pair I,J`): dump raw match counts and
+/// [`TwoViewGeometryVerifier`] outcomes for one specific `(i, j)` image pair
+/// across a fixed battery of matching profiles — the strict main-pass
+/// profile (ratio 0.8, cross-check), a mid profile (0.9, cross-check), and
+/// the two rescue-pass extremes (0.95 with and without cross-check). Answers
+/// the M5 brief's "for a handful of such pairs, dump the current match
+/// counts and verification outcomes, and look at why they fail" directly,
+/// on demand, for any specific candidate (e.g. the exact temporally-adjacent
+/// boundary pair across a diagnosed component split).
+fn diagnose_pair(features: &[FeatureSet], camera: &Camera, i: usize, j: usize) {
+    println!("=== diagnose-pair ({i}, {j}) ===");
+    let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0));
+    for &(ratio, cross_check) in &[(0.8f32, true), (0.9, true), (0.95, true), (0.95, false)] {
+        let dm = if cross_check {
+            CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(ratio) })
+                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
+        } else {
+            BruteForceMatcher { ratio: Some(ratio) }
+                .match_descriptors(&features[i].descriptors, &features[j].descriptors)
+        };
+        if dm.len() < 8 {
+            println!(
+                "  ratio={ratio:.2} cross_check={cross_check:<5} raw_matches={:<5} (too few to classify)",
+                dm.len()
+            );
+            continue;
+        }
+        let corrs: Vec<TwoViewCorrespondence> = dm
+            .iter()
+            .map(|m| {
+                TwoViewCorrespondence::new(
+                    features[i].keypoints[m.query_index],
+                    features[j].keypoints[m.train_index],
+                )
+            })
+            .collect();
+        let report = verifier.classify(&corrs, camera);
+        println!(
+            "  ratio={ratio:.2} cross_check={cross_check:<5} raw_matches={:<5} config={:?} inliers={}",
+            dm.len(),
+            report.config,
+            report.inliers.len(),
+        );
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match parse_args() {
         Ok(a) => a,
@@ -737,6 +1056,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.camera.height,
     );
 
+    if !args.diagnose_pairs.is_empty() {
+        for &(i, j) in &args.diagnose_pairs {
+            diagnose_pair(&features, &args.camera, i, j);
+        }
+        return Ok(());
+    }
+
     let candidates = candidate_pairs(&features, &args);
     println!(
         "view graph: {} candidate pairs ({})",
@@ -751,7 +1077,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    let (pairwise, verification_stats) = verify_pairs(
+    let (mut pairwise, verification_stats) = verify_pairs(
         &features,
         &args.camera,
         &candidates,
@@ -797,6 +1123,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if pairwise.is_empty() {
         return Err("no pair survived geometric verification — lower --min-matches?".into());
+    }
+
+    // M5 (`docs/colmap_port_plan.md`): opt-in rescue-bridging pass. Runs
+    // after the standard verification above, strictly additive — admitted
+    // bridge pairs are appended to `pairwise`, the same list `incremental_sfm`
+    // consumes below, so a successful bridge participates in track building
+    // exactly like any other verified pair.
+    if args.rescue_bridging {
+        let bridges = rescue_bridging(&features, &args.camera, &pairwise, &args);
+        pairwise.extend(bridges);
     }
 
     let config = IncrementalSfmConfig {
