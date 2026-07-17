@@ -1355,3 +1355,349 @@ python scripts/compare_sfm_sim3.py \
   pair as its seed, before or after this change, so the new
   `pure_rotation_pair_is_rejected_as_a_seed_...` test is a synthetic pin, not
   something the ETH3D acceptance run itself could demonstrate.
+
+## M3 results (implemented 2026-07-17)
+
+**Note on numbering.** This milestone is titled "M3" in the task brief that
+commissioned it, but corresponds to the item labeled **M4** ("Vocab-tree-style
+retrieval (hierarchical + inverted file)") in this document's own §3
+milestone table — M2.1 was the last milestone actually landed before this
+one. Reported here under the requested "M3" heading per the brief; cross-
+reference §3's M4 row for the original scoping language.
+
+### Question
+
+§3's M4 row predicted flat VLAD top-K is "adequate" on ETH3D's 23-38-image
+scenes and that vocab-tree's real payoff is sub-linear retrieval at
+thousands-of-images scale — this milestone's own acceptance brief asked a
+second, independent, scale-*independent* question: does a qualitatively
+different retrieval scoring function (TF-IDF + Hamming-embedding voting vs.
+flat-VLAD cosine) change *which* pairs get proposed enough to move the
+diagnosed courtyard view-graph-connectivity gap (visloc-rs registers 14/38,
+the plan's TL;DR names this scene by number)?
+
+### Ported-semantics citations
+
+Ported from `github.com/colmap/colmap`, `main`, fetched 2026-07-17,
+BSD-3-Clause (ETH Zurich / UNC Chapel Hill):
+
+| COLMAP concept | Source | This port |
+|---|---|---|
+| `HammingDistWeightFunctor<N,kSigma>`: `weight(h)=exp(-h²/σ²)` for `h≤⌊1.5σ⌋` | `retrieval/utils.h:49-80` | `index.rs`'s `HammingWeightLut`, verbatim formula, unit-tested against the exact numbers |
+| `InvertedFile::ComputeIDFWeight`: `idf=ln(N/n_docs)`, squared, cached | `retrieval/inverted_file.h:256-269` | `InvertedFile::compute_idf_weight` |
+| `InvertedFile::ComputeHammingEmbedding`: per-dimension **median** threshold over training descriptors assigned to the word | `retrieval/inverted_file.h:276-293` | `InvertedFile::compute_hamming_embedding` |
+| `InvertedFile::ScoreFeature`: burstiness normalization (`score /= sqrt(num_image_votes)`, Arandjelović & Zisserman ACCV'14 Eqn. 2) then `× squared_idf_weight` | `retrieval/inverted_file.h:296-355` | `InvertedFile::score_feature` |
+| `InvertedFile::ComputeImageSelfSimilarities`: accumulates `squared_idf_weight` once **per entry**, not deduplicated per word | `retrieval/inverted_file.h:364-370` | `InvertedFile::accumulate_self_similarities` |
+| `InvertedIndex::Query`: per-descriptor per-word scoring accumulated across words, normalized by `1/sqrt(query_self_sim) × 1/sqrt(db_self_sim)` | `retrieval/inverted_index.h:248-298` | `VocabTree::query` |
+| `InvertedIndex::GenerateHammingEmbeddingProjection`: random matrix, `QR`, take `kEmbeddingDim` rows of `Q` as an orthonormal projection basis | `retrieval/inverted_index.h:176-185` | `generate_orthonormal_projection` — same *property* (orthonormal row set) via incremental Gram-Schmidt over Box-Muller Gaussian draws, not a new generic-QR dependency |
+| `VisualIndex::Create(desc_dim=128, embedding_dim=64)` default | `retrieval/visual_index.h:104-107` | `VocabTreeOptions::embedding_dim` default 64 (kept literal, not re-derived — COLMAP's own `kEmbeddingDim` is independent of `kDescDim`, see module doc) |
+| `IndexOptions::num_neighbors=1` / `QueryOptions::num_neighbors=5` | `retrieval/visual_index.h:56-72` | `VocabTreeOptions::{index,query}_num_neighbors` |
+| `inverted_index.h`'s `kMinEntries=5` (skip HE threshold learning for sparse words) | `retrieval/inverted_index.h:194-195` | `VocabTreeOptions::min_he_entries` |
+| `VocabTreePairingOptions::num_images=100` | `controllers/pairing.h` | `VocabTreePairGeneratorOptions::num_images` default |
+
+**Fetched-and-checked, not assumed** (per the task's explicit instruction):
+COLMAP's retrieval scoring genuinely depends on binary Hamming signatures —
+`InvertedFile::ScoreFeature` computes `(bin_descriptor ^ entry.descriptor).count()`
+directly; there is no float-descriptor-distance fallback path in the current
+source. This milestone ports that dependency rather than approximating
+around it.
+
+### Honest, cited deviations
+
+1. **Flat faiss + IVF/ITQ/SH (current COLMAP `main`, migrated May 2025) vs.
+   this port's genuine recursive hierarchical k-means.** Reading
+   `visual_index.cc` directly shows COLMAP's *current* "vocab tree" is no
+   longer a tree at build time — `Quantize()` runs one flat
+   `faiss::Clustering` call straight to `num_visual_words` (default 65536)
+   leaf centroids, then wraps them in a `faiss::IndexIVF` purely for
+   approximate word assignment. There is no branching/depth structure left
+   in current COLMAP to port literally. This milestone instead ports the
+   *historical* Nister & Stewenius hierarchical-k-means construction the
+   `VocabTree` name and this milestone's own brief describe ("branching
+   factor + depth"), reusing this crate's existing k-means++
+   (`place_recognition::Vocabulary::build`) recursively — see `hkm.rs`'s
+   module doc for the full citation trail.
+2. **Exact linear-scan word assignment vs. an approximate ANN index.**
+   Neither faiss nor FLANN is an allowed new dependency (no
+   HDF5/faiss/vocab-index binaries); at this milestone's scale (hundreds to
+   ~1000 leaf words, tens of images) an exact scan is fast enough and, being
+   exact rather than approximate, can only help ranking quality relative to
+   COLMAP's own approximate `IndexIVF::search`.
+3. **`vote_and_verify` (spatial re-ranking) not ported.** Gated behind
+   `QueryOptions::num_images_after_verification`, whose COLMAP default is `0`
+   (disabled) — nothing is lost relative to a default-configured COLMAP.
+4. **Descriptor dimension**: SuperPoint's 256-dim float descriptors vs.
+   COLMAP's 128-dim `uint8` SIFT. Nothing in this port is hard-coded to
+   either; the Hamming-embedding dimension is an independent knob in
+   COLMAP's own design (kept at COLMAP's literal default of 64 — see
+   `vocab_tree/mod.rs`'s module doc).
+5. **`num_visual_words` scaled down from COLMAP's 65536 default.** Sized via
+   `branching_factor.pow(depth)` (default `10^3 = 1000`) instead, because a
+   65536-word vocabulary trained on ETH3D's tens-of-thousands-of-descriptors
+   corpora would leave nearly every word with 0-1 training samples,
+   defeating both IDF weighting and Hamming-embedding threshold learning.
+
+### Files changed
+
+- `crates/vision/src/vocab_tree/mod.rs` (new), `hkm.rs` (new — hierarchical
+  vocabulary), `index.rs` (new — TF-IDF + Hamming-embedding inverted index,
+  `VocabTree`), `pair_generator.rs` (new — `VocabTreePairGenerator`-
+  equivalent). 10 unit tests: vocabulary-build determinism (seeded), cluster
+  recovery, nearest-word ordering, degenerate-input handling (`hkm.rs`);
+  Hamming-weight-formula pin, projection-matrix orthonormality, "an image
+  retrieves itself first", "near-duplicate ranks above unrelated" (`index.rs`);
+  pair-generator dedup/symmetry, `num_images` budget (`pair_generator.rs`).
+- `crates/vision/src/lib.rs` — added `pub mod vocab_tree;`.
+- `examples/unordered_sfm_demo.rs` — new opt-in `--pair-source vlad|vocab-tree`
+  flag (default `vlad`, byte-identical to pre-M3 behaviour), plus
+  `--vocab-tree-branching`/`--vocab-tree-depth`/`--vocab-tree-num-images`.
+  `candidate_pairs` (formerly VLAD-only) split into `candidate_pairs_vlad`
+  (unchanged logic) and the new `candidate_pairs_vocab_tree`, dispatched by a
+  small `candidate_pairs(features, args)` wrapper. `verify_pairs`/
+  `incremental_sfm` (the actual mapper) are **untouched** — the pair source
+  is strictly upstream of matching/verification, the same architecture M1/M2's
+  own opt-in flags used.
+
+No new dependencies (`rand`'s already-present `SmallRng` covers the
+Hamming-embedding projection's Gaussian sampling; the hierarchical k-means
+reuses `place_recognition::Vocabulary::build`). `pipelines/slam/src/{dpvo_vo,
+dpvo_vi_ba}.rs`, `map_atlas.rs`, `examples/euroc_dpvo_vo_demo.rs` not touched
+(concurrent DPVO work, confirmed still under active edit this session).
+
+### Acceptance experiment (ETH3D, VLAD baseline vs. vocab-tree at two pair budgets)
+
+Ran `terrace`/`courtyard`/`office` at `--verification-mode full
+--colmap-style --retrieval-topk 12 --min-matches 30`, the same cached
+SuperPoint features and per-scene pinhole intrinsics M1/M1.1/M2/M2.1 all
+used (`E:\datasets\eth3d\battle\<scene>\visloc_run\features`), on this
+task's own release build, three `--pair-source` configurations:
+
+- **`vlad_baseline`** — `--pair-source vlad` (M1.1/M2.1's own baseline,
+  rerun fresh on this session's working tree rather than reusing old
+  numbers, per this series' own "today's OFF is the correct baseline"
+  convention).
+- **`vocabtree_parity`** — `--pair-source vocab-tree --vocab-tree-num-images
+  12`, matching VLAD's own top-K pair *budget* for an apples-to-apples
+  comparison (not a COLMAP-cited default, an explicit control).
+- **`vocabtree_default`** — `--pair-source vocab-tree --vocab-tree-num-images
+  100`, COLMAP's own literal `VocabTreePairingOptions::num_images` default
+  (cited above) — on these 23-38-image scenes this exceeds `n-1` and is
+  therefore **functionally exhaustive** (courtyard: 703 candidates = `C(38,2)`
+  exactly).
+
+Outputs, per-run logs, and Sim(3)-scorer output for all 9 runs:
+`E:/visloc_archive/colmap_m3_20260717/`. Common-subset GT files reused
+verbatim from M1/M1.1/M2/M2.1's own archive
+(`E:/visloc_archive/colmap_m1_20260717/{terrace_gt_common8,
+courtyard_gt_common23}.txt`); office has no common-subset row, as in every
+prior milestone, since COLMAP registered its full 26/26 there historically.
+
+**Registered images / total:**
+
+| scene | vlad (baseline) | vocab-tree (parity, N=12) | vocab-tree (default, N=100 ≈ exhaustive) |
+|---|---:|---:|---:|
+| terrace (23) | 23 | 23 | 23 |
+| courtyard (38) | 14 | **13** | **13** |
+| office (26) | 18 | 18 | 18 |
+
+**Candidate / verified pairs, and the `full`-mode classification breakdown
+(CALIBRATED/UNCALIBRATED/DEGENERATE — PLANAR/PANORAMIC/PLANAR_OR_PANORAMIC/
+WATERMARK/MULTIPLE are 0 in every cell below, as in every prior milestone on
+these three scenes):**
+
+| scene | config | candidates | verified | CAL | UNCAL | DEGEN |
+|---|---|---:|---:|---:|---:|---:|
+| terrace | vlad | 147 | 89 | 94 | 1 | 0 |
+| terrace | vt-parity | 146 | 91 | 96 | 1 | 0 |
+| terrace | vt-default | 253 | 92 | 98 | 1 | 0 |
+| courtyard | vlad | 256 | 135 | 155 | 2 | 7 |
+| courtyard | vt-parity | 267 | 134 | 153 | 2 | 7 |
+| courtyard | vt-default | 703 | 136 | 163 | 2 | 7 |
+| office | vlad | 171 | 57 | 77 | 1 | 1 |
+| office | vt-parity | 198 | 59 | 83 | 1 | 1 |
+| office | vt-default | 325 | 60 | 85 | 1 | 1 |
+
+**Full registered-set Sim(3) RMSE vs. ETH3D laser-scan GT:**
+
+| scene | vlad | vt-parity | vt-default |
+|---|---:|---:|---:|
+| terrace | 1.39 cm | **1.24 cm** | **95.93 cm** |
+| courtyard | 3.75 cm | **2.86 cm** | **2.86 cm** |
+| office | 0.50 cm | 0.50 cm | 0.50 cm |
+
+**Common-subset Sim(3) RMSE** (same common-subset GT files M1/M1.1/M2/M2.1
+built; the actual image-set intersection is 8 for both terrace and
+courtyard, printed by the scorer as `common: 8` in both cases despite the
+courtyard GT file's own 23-frame nominal size — visloc-rs itself never
+registers more than 14/38 of courtyard, so the achievable intersection with
+any historical COLMAP registration is capped at what visloc-rs registers):
+
+| scene (common N=8) | vlad | vt-parity | vt-default |
+|---|---:|---:|---:|
+| terrace | 0.93 cm | **0.81 cm** | **154.87 cm** |
+| courtyard | 0.25 cm | 0.25 cm | 0.25 cm |
+
+**Retrieval + matching + verification + mapping wall time** (whole-process
+`unordered_sfm_demo` wall clock, single run each, this machine):
+
+| scene | vlad | vt-parity | vt-default |
+|---|---:|---:|---:|
+| terrace | 46 s | 72 s | 76 s |
+| courtyard | 75 s | 123 s | 145 s |
+| office | 33 s | 56 s | 57 s |
+
+Vocab-tree is consistently 1.5-2x slower than flat VLAD at this scale — the
+serial (non-`rayon`) per-descriptor linear scan over ~1000 leaf words for
+both `add_image` and `query` (see `hkm.rs`'s module doc, deviation 2) is the
+dominant added cost; the library exposes no `rayon` dependency of its own,
+so the demo would need to parallelize per-image `add_image`/`query` calls
+itself to close this gap (flagged as a follow-up below).
+
+### Verdict on the courtyard connectivity hypothesis: **not confirmed — the opposite, in one config**
+
+The plan's own diagnosed weakness names courtyard's under-registration
+(visloc-rs 14/38) as the concrete target this milestone's "more/better pairs
+should move it" language hoped vocab-tree retrieval would improve. It did
+not, at either pair budget tested:
+
+- **At parity (N=12, same pair budget as VLAD):** courtyard registers
+  **one fewer** image (13 vs. 14) despite a nearly identical candidate/
+  verified pair count (267/134 vs. 256/135) — a *different composition* of
+  pairs at essentially the same total, not more of them. RMSE among the
+  images that *do* register is better (2.86 cm vs. 3.75 cm full-set;
+  identical 0.25 cm common-subset), so this is not simply "worse" — but it
+  is not the registered-count win the hypothesis predicted.
+- **At COLMAP's own default (N=100, functionally exhaustive — 703/703
+  candidates, literally every possible pair on 38 images):** courtyard's
+  result is **byte-identical** to the N=12 run (13/38, 2.86 cm). This is the
+  sharpest evidence against the connectivity hypothesis: pushing pair
+  coverage all the way to *every possible pair* does not recover the 14th
+  image VLAD's own, much smaller candidate set (256 pairs) did manage to
+  register. Since two-view verification is a deterministic function of a
+  given `(image_i, image_j)` correspondence set (independent of which pair
+  generator proposed it), the missing image's fate cannot be a pair-
+  *coverage* problem under vocab-tree retrieval specifically — every pair
+  involving it was tested. The more likely explanation is the incremental
+  mapper's well-known path-dependence: a different edge-set composition
+  (even one of near-equal total size) changes seed-pair selection and
+  next-best-view growth order enough to flip which marginal, weakly-
+  connected image registers — an SfM-mapper property, not a retrieval-
+  quality one. This is a genuinely new, previously-undiagnosed finding this
+  milestone's A/B surfaces, not something M1/M1.1/M2/M2.1 could have shown
+  (they never varied the pair *source*, only verification and track-
+  building).
+- **Terrace (already 23/23 under VLAD, no connectivity gap to close) is the
+  clearest cautionary tale against "more pairs, unconditionally":** at
+  parity (N=12) vocab-tree is a modest, genuine improvement (1.39→1.24 cm
+  full-set, 0.93→0.81 cm common-subset, same 23/23 registered). At
+  COLMAP's own default (N=100 ≈ exhaustive, 253 candidates), terrace
+  **collapses** to 95.93 cm full-set / 154.87 cm common-subset — a
+  69-140x regression — while still registering all 23/23 images. The extra
+  ~107 candidate pairs (253 vs. 146) evidently admit enough additional
+  wide-baseline or otherwise weakly-supported edges into the graph to bend
+  the global bundle adjustment badly, even though every individual pair
+  still passes the same per-pair verification gate. This is the same
+  qualitative failure mode `docs/sfm_vs_colmap_benchmark.md` already
+  diagnosed for terrace under the *old*, pre-M1 verification path (COLMAP
+  itself is "categorically more conservative" there) — this milestone shows
+  the failure mode is not specific to weak verification, it recurs even
+  under M1's own tightened, classifying verifier once the candidate pair
+  *count* grows enough, regardless of which retrieval method proposed them.
+- **Office is a complete null across all three configs** (18/26 registered,
+  0.50 cm, in every cell) — consistent with M2.1's own finding that this
+  scene barely exercises pair-source-or-verification-level differences at
+  all at these thresholds.
+
+**Bottom line:** the milestone's own acceptance question — does a
+qualitatively different retrieval scoring function move courtyard's
+registered-count gap — is answered **no**, and the *mechanism* the plan
+hoped for (denser/better pair coverage) is directly falsified by the
+default-vs-parity courtyard comparison being byte-identical despite one
+configuration being literally exhaustive. The bottleneck this benchmark's
+three scenes exhibit is not pair-graph breadth (both retrieval methods
+already reach full coverage without closing it); it is downstream in
+verification/triangulation/registration behavior for specific marginal
+images, and — per terrace's default-config collapse — *more* pair coverage
+can actively hurt an already-fully-registered scene. This is consistent
+with, and sharpens, the running theme since M1: verification tightness and
+mapper path-dependence are the dominant levers on this benchmark, not
+view-graph breadth.
+
+**Reproduce** (courtyard, vocab-tree at parity):
+
+```sh
+./target/release/examples/unordered_sfm_demo.exe \
+    --features-dir E:/datasets/eth3d/battle/courtyard/visloc_run/features \
+    --feature-suffix _features.txt --image-suffix .JPG \
+    --width 6208 --height 4134 --fx 3408.35 --fy 3408.8 --cx 3114.7 --cy 2070.92 \
+    --retrieval-topk 12 --min-matches 30 --colmap-style \
+    --verification-mode full --pair-source vocab-tree --vocab-tree-num-images 12 \
+    --out-colmap /tmp/courtyard_vt_parity
+python scripts/compare_sfm_sim3.py \
+    E:/datasets/eth3d/courtyard/dslr_calibration_undistorted/images.txt \
+    /tmp/courtyard_vt_parity/images.txt
+```
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision --lib`: **157 passed, 0 failed** (10 new
+  `vocab_tree::{hkm,index,pair_generator}` tests; all 147 pre-existing tests
+  from M2.1 unmodified and green).
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings. `cargo clippy -p visloc-vision --all-targets --all-features --
+  -D warnings`: also clean (exercises the `onnx-inference`-feature build
+  path too).
+- `cargo check --workspace --lib --bins --features image-io,onnx-inference`:
+  clean.
+- `cargo clippy --example unordered_sfm_demo --features image-io,onnx-inference
+  -- -D warnings`: **not** run to a clean result — it pulls in `visloc-slam`,
+  which fails clippy on 6 pre-existing, out-of-scope lints in
+  `pipelines/slam/src/{map_atlas,online_slam_vi_ba,vi_motion_initializer,
+  online_slam_motion_vi_init}.rs` (`too_many_arguments`,
+  `unnecessary_lazy_evaluations`, `map_entry`, `manual_clamp`,
+  `neg_cmp_op_on_partial_ord`, `large_enum_variant`) — the same limitation
+  M1.1 documented; grepped the full clippy output for `unordered_sfm_demo.rs`
+  and `vocab_tree`: **zero** matches, confirming no lint fired in either of
+  this milestone's own touched/new files.
+- Release build: `cargo build --release --example unordered_sfm_demo
+  --features image-io,onnx-inference` — clean, no concurrent-DPVO build
+  fragility encountered this session. Used directly for the acceptance run.
+
+### Follow-ups
+
+- **Path-dependence hypothesis is untested.** The courtyard
+  default-vs-parity byte-identical result is strong circumstantial evidence
+  that the mapper's seed/growth order, not pair coverage, decides the
+  marginal 14th image's fate — but this milestone did not instrument
+  `incremental_sfm`'s seed selection to confirm it directly (e.g., logging
+  which pair was chosen as the seed under each `--pair-source`). A half-day
+  follow-up, not a new milestone.
+- **Terrace's default-config collapse deserves a targeted ablation**: which
+  of the ~107 extra candidate pairs (253 vs. 146) is responsible — a single
+  bad wide-baseline pair reaching the seed-selection stage, or a broader
+  effect of denser but individually-weaker connectivity feeding local BA.
+  `docs/sfm_vs_colmap_benchmark.md`'s own terrace diagnosis (COLMAP
+  "categorically more conservative" there) suggests this scene is
+  specifically sensitive to over-connection regardless of retrieval method
+  — worth cross-checking against a VLAD run at an equally widened topK
+  (e.g. `--retrieval-topk 22`) to see if the collapse is retrieval-method-
+  specific or a property of pair *count* alone on this scene.
+- **Vocab-tree wall time is not yet competitive at this scale** (1.5-2x
+  slower than VLAD, this milestone's own honest finding) — the
+  hierarchical-vocabulary/inverted-file *scoring* is not the milestone's
+  weak point (it is what actually improved terrace's and courtyard's
+  full-RMSE at parity), the un-parallelized per-descriptor word-assignment
+  scan is. Parallelizing `add_image`/`query` across images (the same
+  `rayon` pattern `verify_pairs` already uses) is a mechanical follow-up,
+  not an algorithmic one.
+- **The thousands-of-images sub-linear-retrieval case this milestone's own
+  §3 M4 row named as vocab-tree's real payoff remains untested** — ETH3D's
+  three scenes (23-38 images each) cannot exercise it; sourcing or
+  synthesizing a ≥2,000-image unordered collection is still open, per that
+  row's own acceptance criteria.
+- **`--vocab-tree-branching`/`--vocab-tree-depth` were not swept** — this
+  experiment used the default `10^3 = 1000`-word tree throughout; a
+  sensitivity sweep (e.g. smaller trees on these small corpora, where most
+  leaves likely see well under the `min_he_entries=5` Hamming-embedding
+  floor) is a natural next step before drawing conclusions about vocab-tree
+  quality independent of this specific sizing choice.

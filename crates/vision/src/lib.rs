@@ -22,3 +22,4 @@ pub mod stereo;
 pub mod stereo_bootstrap;
 pub mod stereo_vo;
 pub mod two_view;
+pub mod vocab_tree;

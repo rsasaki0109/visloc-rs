@@ -7,9 +7,19 @@
 //! with **no temporal order**, builds its own view graph, and grows one
 //! reconstruction:
 //!
-//! 1. **View graph.** A VLAD vocabulary over all descriptors gives each image a
-//!    global descriptor; the top-K most similar images per image become
-//!    candidate pairs (or `--exhaustive` for all pairs).
+//! 1. **View graph.** `--pair-source` (default `vlad`) selects how candidate
+//!    pairs are proposed:
+//!    - `vlad`: a VLAD vocabulary over all descriptors gives each image a
+//!      global descriptor; the top-K most similar images per image become
+//!      candidate pairs.
+//!    - `vocab-tree`: `visloc_rs::vision::vocab_tree`'s hierarchical-k-means
+//!      vocabulary + TF-IDF/Hamming-embedding inverted-file retrieval
+//!      (COLMAP's `VocabTreePairGenerator`-equivalent, M3 in
+//!      `docs/colmap_port_plan.md`) — `--vocab-tree-branching`/
+//!      `--vocab-tree-depth` size the tree, `--vocab-tree-num-images` is the
+//!      top-N retrieved per query image (COLMAP default 100).
+//!
+//!    `--exhaustive` overrides either source with all pairs.
 //! 2. **Verified matches.** Each candidate pair is matched (cross-checked
 //!    brute-force + Lowe ratio) and geometrically verified per
 //!    `--verification-mode` (default `legacy`):
@@ -97,6 +107,9 @@ use visloc_rs::vision::two_view::{
     ConfigurationType, EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
     RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
+use visloc_rs::vision::vocab_tree::{
+    generate_pairs, HkmBuildOptions, VocabTree, VocabTreeOptions, VocabTreePairGeneratorOptions,
+};
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
     BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig,
@@ -138,6 +151,34 @@ impl std::str::FromStr for VerificationMode {
     }
 }
 
+/// The M3 pair-generation A/B switch (`docs/colmap_port_plan.md`'s "M3
+/// results"): which candidate-pair source feeds two-view verification.
+/// [`PairSource::Vlad`] (default) is the pre-M3 flat-VLAD top-K path,
+/// unchanged (`candidate_pairs_vlad`, formerly this file's only
+/// `candidate_pairs`). [`PairSource::VocabTree`] routes through
+/// `visloc_rs::vision::vocab_tree`'s hierarchical-k-means +
+/// TF-IDF/Hamming-embedding retrieval instead (COLMAP's
+/// `VocabTreePairGenerator`-equivalent, `src/colmap/controllers/pairing.h`)
+/// — see `candidate_pairs_vocab_tree`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairSource {
+    /// Flat-VLAD top-K cosine retrieval (pre-M3 behaviour, unchanged).
+    Vlad,
+    /// Hierarchical-k-means vocab-tree retrieval (M3).
+    VocabTree,
+}
+
+impl std::str::FromStr for PairSource {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "vlad" => Ok(Self::Vlad),
+            "vocab-tree" => Ok(Self::VocabTree),
+            other => Err(format!("unknown --pair-source {other:?} (expected vlad|vocab-tree)")),
+        }
+    }
+}
+
 struct Args {
     features_dir: PathBuf,
     feature_suffix: String,
@@ -162,6 +203,21 @@ struct Args {
     /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
     /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
     track_source: TrackSource,
+    /// M3 A/B switch: which candidate-pair source feeds verification — flat
+    /// VLAD top-K (default) or the hierarchical vocab-tree
+    /// (`docs/colmap_port_plan.md`'s M3 milestone).
+    pair_source: PairSource,
+    /// Vocab-tree hierarchical-k-means branching factor (M3; ignored under
+    /// `--pair-source vlad`). See `vocab_tree::hkm::HkmBuildOptions`.
+    vocab_tree_branching: usize,
+    /// Vocab-tree hierarchical-k-means depth (M3; ignored under
+    /// `--pair-source vlad`).
+    vocab_tree_depth: usize,
+    /// Vocab-tree pair generator's `num_images` (top-N retrieved per query
+    /// image before dedup) — COLMAP default 100
+    /// (`VocabTreePairingOptions::num_images`). Ignored under
+    /// `--pair-source vlad`.
+    vocab_tree_num_images: usize,
 }
 
 /// Parse `--track-source`'s value into the M2 [`TrackSource`] A/B switch.
@@ -200,6 +256,10 @@ fn parse_args() -> Result<Args, String> {
     let mut filter_images = false;
     let mut verification_mode = VerificationMode::Legacy;
     let mut track_source = TrackSource::UnionFind;
+    let mut pair_source = PairSource::Vlad;
+    let mut vocab_tree_branching = 10usize;
+    let mut vocab_tree_depth = 3usize;
+    let mut vocab_tree_num_images = 100usize;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -237,6 +297,16 @@ fn parse_args() -> Result<Args, String> {
                 verification_mode = a.remove(i + 1).parse().map_err(|e: String| e)?
             }
             "--track-source" => track_source = parse_track_source(&a.remove(i + 1))?,
+            "--pair-source" => pair_source = a.remove(i + 1).parse().map_err(|e: String| e)?,
+            "--vocab-tree-branching" => {
+                vocab_tree_branching = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--vocab-tree-depth" => {
+                vocab_tree_depth = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--vocab-tree-num-images" => {
+                vocab_tree_num_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -275,6 +345,10 @@ fn parse_args() -> Result<Args, String> {
         filter_images,
         verification_mode,
         track_source,
+        pair_source,
+        vocab_tree_branching,
+        vocab_tree_depth,
+        vocab_tree_num_images,
     })
 }
 
@@ -307,39 +381,47 @@ fn load_images(
     Ok((features, names))
 }
 
-/// Candidate image pairs `(i, j)` with `i < j` from VLAD retrieval (or all
-/// pairs when `exhaustive`).
-fn candidate_pairs(
-    features: &[FeatureSet],
-    vocab_size: usize,
-    topk: usize,
-    exhaustive: bool,
-) -> Vec<(usize, usize)> {
-    let n = features.len();
-    if exhaustive || n <= topk + 1 {
-        let mut pairs = Vec::new();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                pairs.push((i, j));
-            }
-        }
-        return pairs;
-    }
-
-    // Build the vocabulary from a bounded, deterministic descriptor sample —
-    // k-means over *every* descriptor (262 k for 128×2048-kpt images) is the
-    // pipeline's bottleneck and unnecessary: a VLAD vocabulary only needs a
-    // representative sample. Stride the full descriptor list down to ~VOCAB_SAMPLE.
+/// Bounded, deterministic descriptor sample for training a retrieval
+/// vocabulary — k-means over *every* descriptor (262 k for 128×2048-kpt
+/// images) is the pipeline's bottleneck and unnecessary for either VLAD or
+/// the vocab-tree: both only need a representative sample. Strides the full
+/// descriptor list down to ~`VOCAB_SAMPLE`. Shared by
+/// [`candidate_pairs_vlad`] and [`candidate_pairs_vocab_tree`] (M3).
+fn sampled_training_descriptors(features: &[FeatureSet]) -> Vec<&[f32]> {
     const VOCAB_SAMPLE: usize = 40_000;
     let all_desc: Vec<&[f32]> = features
         .iter()
         .flat_map(|f| f.descriptors.iter().map(|d| d.as_slice()))
         .collect();
     let stride = (all_desc.len() / VOCAB_SAMPLE).max(1);
-    let sample: Vec<&[f32]> = all_desc.iter().step_by(stride).copied().collect();
+    all_desc.iter().step_by(stride).copied().collect()
+}
+
+/// All `(i, j)` pairs with `i < j` — the exhaustive fallback shared by both
+/// pair sources.
+fn all_pairs(n: usize) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            pairs.push((i, j));
+        }
+    }
+    pairs
+}
+
+/// Candidate image pairs `(i, j)` with `i < j` from flat-VLAD top-K cosine
+/// retrieval (or all pairs when `exhaustive`) — the pre-M3 pair source,
+/// unchanged.
+fn candidate_pairs_vlad(features: &[FeatureSet], vocab_size: usize, topk: usize, exhaustive: bool) -> Vec<(usize, usize)> {
+    let n = features.len();
+    if exhaustive || n <= topk + 1 {
+        return all_pairs(n);
+    }
+
+    let sample = sampled_training_descriptors(features);
     let Some(vocab) = Vocabulary::build(&sample, vocab_size, 10, 0) else {
         // Fall back to exhaustive if the vocabulary cannot be built.
-        return candidate_pairs(features, vocab_size, topk, true);
+        return all_pairs(n);
     };
     let globals: Vec<Vec<f32>> = features
         .iter()
@@ -358,6 +440,76 @@ fn candidate_pairs(
         }
     }
     set.into_iter().collect()
+}
+
+/// Candidate image pairs `(i, j)` with `i < j` from the M3 hierarchical
+/// vocab-tree (`visloc_rs::vision::vocab_tree`, COLMAP's
+/// `VocabTreePairGenerator`-equivalent, `docs/colmap_port_plan.md`'s M3
+/// milestone), or all pairs when `exhaustive`.
+///
+/// Trains the hierarchical vocabulary on the same bounded descriptor sample
+/// [`candidate_pairs_vlad`] uses, indexes every image's *full* descriptor
+/// set (unsampled — retrieval quality for images the tree has never seen
+/// depends on it having every one of their features, unlike the shared
+/// training sample which only needs to be representative), then queries each
+/// image against the finalized tree with its own descriptors, keeping the
+/// top `vocab_tree_num_images` other images per query
+/// ([`generate_pairs`]/[`VocabTreePairGeneratorOptions`]).
+fn candidate_pairs_vocab_tree(
+    features: &[FeatureSet],
+    branching_factor: usize,
+    depth: usize,
+    num_images: usize,
+    exhaustive: bool,
+) -> Vec<(usize, usize)> {
+    let n = features.len();
+    if exhaustive {
+        return all_pairs(n);
+    }
+
+    let sample = sampled_training_descriptors(features);
+    let hkm_options = HkmBuildOptions {
+        branching_factor,
+        depth,
+        ..HkmBuildOptions::default()
+    };
+    let vocab_tree_options = VocabTreeOptions::default();
+    let Some(mut tree) = VocabTree::build(&sample, &hkm_options, &vocab_tree_options) else {
+        // Fall back to exhaustive if the vocabulary cannot be built (mirrors
+        // candidate_pairs_vlad's own degenerate-input fallback).
+        return all_pairs(n);
+    };
+    for (i, f) in features.iter().enumerate() {
+        tree.add_image(i, &f.descriptors);
+    }
+    tree.finalize();
+    println!(
+        "vocab-tree: {} leaf words (requested {}^{}={}), {} images indexed",
+        tree.num_words(),
+        branching_factor,
+        depth,
+        branching_factor.pow(depth as u32),
+        tree.num_images(),
+    );
+
+    let image_descriptors: Vec<Vec<Vec<f32>>> = features.iter().map(|f| f.descriptors.clone()).collect();
+    generate_pairs(&tree, &image_descriptors, &VocabTreePairGeneratorOptions { num_images })
+}
+
+/// Candidate image pairs `(i, j)` with `i < j` — dispatches on
+/// [`PairSource`] (`docs/colmap_port_plan.md`'s M3 A/B switch); `exhaustive`
+/// overrides either source, matching pre-M3 behaviour.
+fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> {
+    match args.pair_source {
+        PairSource::Vlad => candidate_pairs_vlad(features, args.vocab_size, args.retrieval_topk, args.exhaustive),
+        PairSource::VocabTree => candidate_pairs_vocab_tree(
+            features,
+            args.vocab_tree_branching,
+            args.vocab_tree_depth,
+            args.vocab_tree_num_images,
+            args.exhaustive,
+        ),
+    }
 }
 
 /// Per-`ConfigurationType` pair counts from the COLMAP-style verifier, for
@@ -585,19 +737,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.camera.height,
     );
 
-    let candidates = candidate_pairs(
-        &features,
-        args.vocab_size,
-        args.retrieval_topk,
-        args.exhaustive,
-    );
+    let candidates = candidate_pairs(&features, &args);
     println!(
         "view graph: {} candidate pairs ({})",
         candidates.len(),
         if args.exhaustive {
             "exhaustive"
         } else {
-            "VLAD top-k"
+            match args.pair_source {
+                PairSource::Vlad => "VLAD top-k",
+                PairSource::VocabTree => "vocab-tree",
+            }
         },
     );
 
