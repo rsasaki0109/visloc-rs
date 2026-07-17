@@ -11,19 +11,30 @@
 //!    global descriptor; the top-K most similar images per image become
 //!    candidate pairs (or `--exhaustive` for all pairs).
 //! 2. **Verified matches.** Each candidate pair is matched (cross-checked
-//!    brute-force + Lowe ratio) and geometrically verified by an
-//!    essential-matrix RANSAC; the inliers become `PairwiseMatches`. Passing
-//!    `--colmap-verification` swaps in COLMAP-style multi-model (essential /
-//!    fundamental / homography) verification with `ConfigurationType`
-//!    classification (`visloc_rs::vision::two_view::colmap_verification`,
-//!    ported from `src/colmap/estimators/two_view_geometry.cc`): pairs
-//!    classified `DEGENERATE`, `WATERMARK`, `PANORAMIC` (no triangulatable
-//!    baseline), or unresolved `PLANAR_OR_PANORAMIC` are dropped entirely
-//!    instead of being fed to `incremental_sfm`, and the pair's own model
-//!    inliers (not the essential matrix's) become its `PairwiseMatches`. A
-//!    per-configuration count is printed either way, so the two verification
-//!    modes can be A/B'd on the same view graph — this is the M1 acceptance
-//!    experiment's ON/OFF switch (see `docs/colmap_port_plan.md`).
+//!    brute-force + Lowe ratio) and geometrically verified per
+//!    `--verification-mode` (default `legacy`):
+//!    - `legacy`: essential-matrix-only RANSAC, COLMAP's legacy fixed
+//!      `5e-3`-normalized Sampson threshold (`RelativePoseEstimator`,
+//!      unchanged since before M1).
+//!    - `threshold-only`: the same single-model essential-matrix-only RANSAC
+//!      as `legacy`, but with the per-camera pixel-derived Sampson threshold
+//!      (`TwoViewGeometryOptions::for_camera`'s ≈4px-equivalent bound) instead
+//!      of the fixed `5e-3` default — isolates the threshold half of the M1
+//!      confound (see `docs/colmap_port_plan.md`'s "M1.1 results").
+//!    - `full`: COLMAP-style multi-model (essential / fundamental /
+//!      homography) verification with `ConfigurationType` classification
+//!      (`visloc_rs::vision::two_view::colmap_verification`, ported from
+//!      `src/colmap/estimators/two_view_geometry.cc`): pairs classified
+//!      `DEGENERATE`, `WATERMARK`, `PANORAMIC` (no triangulatable baseline),
+//!      or unresolved `PLANAR_OR_PANORAMIC` are dropped entirely instead of
+//!      being fed to `incremental_sfm`, and the pair's own model inliers (not
+//!      necessarily the essential matrix's) become its `PairwiseMatches`.
+//!
+//!    A per-`ConfigurationType` count is printed under `full`, so all three
+//!    modes can be A/B'd on the same view graph — this is the M1/M1.1
+//!    acceptance experiments' switch (see `docs/colmap_port_plan.md`). The
+//!    legacy `--colmap-verification` boolean flag still works as a shorthand
+//!    for `--verification-mode full`.
 //! 3. **Incremental SfM.** [`visloc_rs::slam::incremental_sfm`] seeds from the
 //!    strongest pair, registers images by PnP, triangulates tracks, and bundle-
 //!    adjusts.
@@ -48,10 +59,12 @@
 //!     --out-colmap /tmp/photos_sfm_colmap
 //! ```
 //!
-//! Add `--colmap-verification` to run COLMAP-style multi-model two-view
-//! verification (essential + fundamental + homography, `ConfigurationType`
-//! classification) instead of the legacy essential-matrix-only path; see
-//! `verify_pairs`'s doc comment and `docs/colmap_port_plan.md`'s M1 section.
+//! Add `--verification-mode threshold-only` or `--verification-mode full`
+//! (or the legacy `--colmap-verification` boolean, equivalent to `full`) to
+//! swap in the COLMAP-style two-view verification paths described above
+//! instead of the default legacy essential-matrix-only path; see
+//! `verify_pairs`'s doc comment and `docs/colmap_port_plan.md`'s M1/M1.1
+//! sections.
 
 use std::collections::HashMap;
 use std::env;
@@ -61,8 +74,8 @@ use nalgebra::{Point2, Point3};
 use rayon::prelude::*;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{
-    ConfigurationType, RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions,
-    TwoViewGeometryVerifier,
+    ConfigurationType, EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
+    RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
@@ -72,6 +85,38 @@ use visloc_rs::{
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
 type ExportLandmark = (Point3<f64>, Vec<(usize, usize, Point2<f64>)>);
+
+/// The M1/M1.1 two-view verification A/B switch — see the file header and
+/// `verify_pairs`'s doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationMode {
+    /// Essential-matrix-only RANSAC, legacy fixed `5e-3`-normalized Sampson
+    /// threshold. The M1 "OFF" path, byte-identical to pre-M1 behaviour.
+    Legacy,
+    /// Essential-matrix-only RANSAC (same single-model estimator as
+    /// `Legacy`), but with the per-camera pixel-derived Sampson threshold
+    /// (`TwoViewGeometryOptions::for_camera`) instead of the fixed default.
+    /// No fundamental/homography models, no `ConfigurationType`
+    /// classification, no watermark detection. The M1.1 ablation mode.
+    ThresholdOnly,
+    /// Full COLMAP-style `TwoViewGeometryVerifier` (E/F/H + classification).
+    /// The M1 "ON" path, byte-identical to pre-M1.1 `--colmap-verification`.
+    Full,
+}
+
+impl std::str::FromStr for VerificationMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "legacy" => Ok(Self::Legacy),
+            "threshold-only" => Ok(Self::ThresholdOnly),
+            "full" => Ok(Self::Full),
+            other => Err(format!(
+                "unknown --verification-mode {other:?} (expected legacy|threshold-only|full)"
+            )),
+        }
+    }
+}
 
 struct Args {
     features_dir: PathBuf,
@@ -92,7 +137,7 @@ struct Args {
     refine_distortion: bool,
     colmap_style: bool,
     filter_images: bool,
-    colmap_verification: bool,
+    verification_mode: VerificationMode,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -115,7 +160,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_distortion = false;
     let mut colmap_style = false;
     let mut filter_images = false;
-    let mut colmap_verification = false;
+    let mut verification_mode = VerificationMode::Legacy;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -148,7 +193,10 @@ fn parse_args() -> Result<Args, String> {
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--filter-images" => filter_images = true,
-            "--colmap-verification" => colmap_verification = true,
+            "--colmap-verification" => verification_mode = VerificationMode::Full,
+            "--verification-mode" => {
+                verification_mode = a.remove(i + 1).parse().map_err(|e: String| e)?
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -185,7 +233,7 @@ fn parse_args() -> Result<Args, String> {
         refine_distortion,
         colmap_style,
         filter_images,
-        colmap_verification,
+        verification_mode,
     })
 }
 
@@ -318,26 +366,51 @@ impl VerificationStats {
 /// Candidate pairs are independent, so the (descriptor-matching dominated) loop
 /// is run across cores with rayon.
 ///
-/// `colmap_verification` is the M1 A/B switch: off (default) reproduces the
-/// exact legacy essential-matrix-only path byte-for-byte (same estimator,
-/// same call, same acceptance test) — the "flag off means unchanged
-/// behaviour" guarantee `docs/colmap_port_plan.md` asks for. On, each pair
-/// goes through [`TwoViewGeometryVerifier`] instead: `DEGENERATE`,
-/// `WATERMARK`, `PANORAMIC` (pure rotation — no baseline to seed or
-/// triangulate from), and unresolved `PLANAR_OR_PANORAMIC` pairs are dropped
-/// entirely rather than handed to `incremental_sfm`; `CALIBRATED` /
-/// `UNCALIBRATED` / `PLANAR` / `MULTIPLE` pairs keep their winning model's own
-/// inliers (which need not be the essential matrix's).
+/// `mode` is the M1/M1.1 A/B switch:
+/// - [`VerificationMode::Legacy`] (default) reproduces the exact pre-M1
+///   essential-matrix-only path byte-for-byte (same estimator, same fixed
+///   `5e-3` threshold, same call, same acceptance test) — the "flag off means
+///   unchanged behaviour" guarantee `docs/colmap_port_plan.md` asks for.
+/// - [`VerificationMode::ThresholdOnly`] runs the *same* single-model
+///   essential-matrix-only estimator, but with the per-camera pixel-derived
+///   Sampson threshold — isolates the "tighter threshold" half of the M1
+///   confound from the "E/F/H classification" half (M1.1).
+/// - [`VerificationMode::Full`] goes through [`TwoViewGeometryVerifier`]
+///   instead: `DEGENERATE`, `WATERMARK`, `PANORAMIC` (pure rotation — no
+///   baseline to seed or triangulate from), and unresolved
+///   `PLANAR_OR_PANORAMIC` pairs are dropped entirely rather than handed to
+///   `incremental_sfm`; `CALIBRATED` / `UNCALIBRATED` / `PLANAR` / `MULTIPLE`
+///   pairs keep their winning model's own inliers (which need not be the
+///   essential matrix's).
 fn verify_pairs(
     features: &[FeatureSet],
     camera: &Camera,
     candidates: &[(usize, usize)],
     match_ratio: f32,
     min_matches: usize,
-    colmap_verification: bool,
+    mode: VerificationMode,
 ) -> (Vec<PairwiseMatches>, VerificationStats) {
-    let verifier = colmap_verification
+    let verifier = (mode == VerificationMode::Full)
         .then(|| TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0)));
+    // Same single-model essential-only estimator as the legacy path, just
+    // with `for_camera`'s per-camera pixel-derived Sampson threshold swapped
+    // in for the fixed `5e-3` default — everything else (iterations, seed,
+    // translation scale) stays at `EssentialRansacConfig`/`RelativePoseEstimator`
+    // defaults, matching the legacy path field-for-field.
+    let threshold_only_estimator = (mode == VerificationMode::ThresholdOnly).then(|| {
+        let sampson_threshold =
+            TwoViewGeometryOptions::for_camera(camera, 4.0).essential_sampson_threshold;
+        RelativePoseEstimator {
+            ransac: EssentialRansac {
+                estimator: EightPointEssentialMatrixEstimator::default(),
+                config: EssentialRansacConfig {
+                    sampson_threshold,
+                    ..EssentialRansacConfig::default()
+                },
+            },
+            default_translation_scale: 1.0,
+        }
+    });
 
     let results: Vec<(Option<PairwiseMatches>, Option<ConfigurationType>)> = candidates
         .par_iter()
@@ -385,7 +458,10 @@ fn verify_pairs(
                     Some(report.config),
                 )
             } else {
-                let estimator = RelativePoseEstimator::default();
+                let estimator = match &threshold_only_estimator {
+                    Some(e) => *e,
+                    None => RelativePoseEstimator::default(),
+                };
                 let Some(rel) = estimator.estimate(&corrs, camera) else {
                     return (None, None);
                 };
@@ -467,7 +543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &candidates,
         args.match_ratio,
         args.min_matches,
-        args.colmap_verification,
+        args.verification_mode,
     );
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
     println!(
@@ -476,7 +552,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         candidates.len(),
         verified_matches,
     );
-    if args.colmap_verification {
+    if args.verification_mode == VerificationMode::Full {
         println!(
             "colmap-style verification: {} pairs classified (CALIBRATED={} UNCALIBRATED={} \
              PLANAR={} PANORAMIC={} PLANAR_OR_PANORAMIC={} WATERMARK={} DEGENERATE={} MULTIPLE={})",

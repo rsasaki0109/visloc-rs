@@ -559,3 +559,191 @@ python scripts/compare_sfm_sim3.py \
   `cargo test` invocations); any M2 work should re-check
   `pipelines/slam/src/lib.rs` module-list conflicts before landing, per this
   doc's existing Risks section.
+
+## M1.1 results (implemented 2026-07-17)
+
+### Question
+
+M1's honest confound note (above) flagged that the ETH3D terrace win
+(full-RMSE 25.36 → 1.39 cm) bundles two simultaneous changes: (a) a tighter
+per-camera pixel-derived essential-matrix threshold
+(`TwoViewGeometryOptions::for_camera`, ≈4 px ≈ 1.2×10⁻³ normalized at
+terrace's focal length) replacing the legacy fixed `5×10⁻³` normalized
+(≈17-px-equivalent) Sampson threshold, and (b) the E/F/H multi-model
+`ConfigurationType` classification and decision tree. This milestone isolates
+which one carries the win.
+
+### Method
+
+Added a third mode to `examples/unordered_sfm_demo.rs`'s two-view
+verification switch: `--verification-mode legacy|threshold-only|full` (a new
+`VerificationMode` enum; the old boolean `--colmap-verification` flag still
+works, as a shorthand for `--verification-mode full`).
+
+- `legacy` — unchanged: `RelativePoseEstimator` (single-model
+  essential-matrix-only RANSAC), fixed `5e-3`-normalized Sampson threshold.
+  Byte-identical to M1's OFF path.
+- `full` — unchanged: `TwoViewGeometryVerifier` (E/F/H + `ConfigurationType`
+  classification, watermark detection). Byte-identical to M1's ON path.
+- **`threshold-only` (new)** — the same single-model essential-matrix-only
+  `RelativePoseEstimator`/`EssentialRansac` as `legacy`, with only
+  `EssentialRansacConfig::sampson_threshold` swapped for the value
+  `TwoViewGeometryOptions::for_camera(camera, 4.0).essential_sampson_threshold`
+  computes (identical derivation `full` uses for its own E model). No
+  fundamental or homography estimation, no `ConfigurationType`, no watermark
+  detection, no inlier-count cross-checks — purely the threshold half of the
+  M1 confound, isolated.
+
+No changes to `crates/vision/src/two_view/{colmap_verification,fundamental,
+homography}.rs` or `mod.rs` — the M1 estimators and `TwoViewGeometryOptions`
+are reused as-is; `verify_pairs` in the demo just picks a different
+already-existing estimator/config combination per mode. No new unit tests
+were needed (no new estimator or classification logic was introduced, only
+new plumbing to an existing code path); the pre-existing 133
+`cargo test -p visloc-vision` tests are unaffected and still pass.
+
+Ran the same ETH3D acceptance matrix as M1 — `terrace`/`courtyard`/`office` ×
+{`legacy`, `threshold-only`, `full`} — reusing the identical cached
+SuperPoint features and camera-intrinsics priors from
+`E:\datasets\eth3d\battle\<scene>\visloc_run\features` and the exact
+per-scene invocation recorded in that battle's `visloc.log` (`--retrieval-topk
+12 --min-matches 30 --colmap-style`), on the same commit/working tree as the
+M1 run (this task touched nothing outside its stated scope, and no
+`pipelines/slam/src/dpvo_*` file was touched, though those remain under
+concurrent unrelated edits per this doc's Risks section). Outputs, logs, and
+Sim(3)-scorer output for all 9 runs: `E:/visloc_archive/colmap_m1_1_20260717/`.
+The `legacy` and `full` cells reproduce M1's own OFF/ON numbers exactly
+(same registered counts, same RMSE to 2 decimal places), confirming this is
+an apples-to-apples rerun rather than a different codebase state.
+
+### Results
+
+**Registered images / total:**
+
+| scene | legacy | threshold-only | full |
+|---|---:|---:|---:|
+| terrace (23) | 23 | 22 | 23 |
+| courtyard (38) | 14 | 13 | 14 |
+| office (26) | 18 | 9 | 18 |
+
+**Full registered-set Sim(3) RMSE vs ETH3D laser-scan GT:**
+
+| scene | legacy | threshold-only | full |
+|---|---:|---:|---:|
+| terrace | 25.36 cm | 8.43 cm | **1.39 cm** |
+| courtyard | 13.10 cm | 11.82 cm | **3.75 cm** |
+| office | **0.37 cm** | 0.82 cm | 0.50 cm |
+
+**Common-subset Sim(3) RMSE** (terrace vs the 8 frames COLMAP registered
+historically, courtyard vs the same 8-frame common intersection M1 used —
+reusing `E:/visloc_archive/colmap_m1_20260717/{terrace_gt_common8,
+courtyard_gt_common23}.txt` verbatim; office has no separate common-subset
+row, same as M1, since COLMAP registered its full 26/26 there):
+
+| scene (common N) | legacy | threshold-only | full |
+|---|---:|---:|---:|
+| terrace (8) | 31.83 cm | 5.08 cm | **0.93 cm** |
+| courtyard (8) | 0.36 cm | 0.41 cm | **0.25 cm** |
+
+**Pair-verification counts** (from the `verified X / Y pairs` log line; `full`'s
+own `ConfigurationType` breakdown is reproduced from M1 for reference —
+`threshold-only` performs no classification, so it has no per-type
+breakdown, only a single accept/reject count per pair):
+
+| scene | candidates | legacy verified | threshold-only verified | full verified | full: CALIBRATED / UNCALIBRATED / DEGENERATE |
+|---|---:|---:|---:|---:|---|
+| terrace | 147 | 93 | 68 | 89 | 94 / 1 / 0 |
+| courtyard | 256 | 138 | 102 | 135 | 155 / 2 / 7 |
+| office | 171 | 70 | 36 | 57 | 77 / 1 / 1 |
+
+### Pair-classification delta: threshold-only vs full
+
+Because `threshold-only` and `full` share the *identical* per-camera E-model
+Sampson threshold, the gap between their verified-pair counts isolates what
+the E/F/H decision tree adds on top of the shared tighter threshold alone:
+
+| scene | full − threshold-only verified pairs | relative |
+|---|---:|---:|
+| terrace | +21 | +31% |
+| courtyard | +33 | +32% |
+| office | +21 | +58% |
+
+On all three scenes `full` verifies substantially more pairs than
+`threshold-only`, despite using the same tight E threshold — this is
+classification's F/H fallback rescuing pairs whose correspondences don't
+clear the tight essential-matrix-only bar but do clear the looser (4 px)
+fundamental- or homography-matrix bar, exactly the `tvg.cc:899-919` fallback
+paths described in the M1 classification-rule table. Office shows the
+largest relative rescue (+58%) and also the largest single-model failure
+mode: `threshold-only` alone collapses office's verified-pair count enough to
+lose half its registered images (18 → 9); `full`'s fallback recovers it back
+to legacy's own 18. Courtyard is the only scene where `full` also throws pairs
+away outright (`DEGENERATE=7`) that `threshold-only` cannot classify at all
+(it has no degeneracy check) — those 7 pairs are not counted in the "rescued"
++33, they're a separate, purely-subtractive effect of classification.
+
+### Verdict: which component carries the win
+
+**The two confounded changes are not redundant, and their relative
+contribution is scene-dependent — no single "X% threshold, Y% classification"
+number generalizes across all three scenes:**
+
+- **Terrace** (the milestone's named scene): threshold alone recovers most of
+  the raw-cm improvement (full-RMSE 25.36 → 8.43 cm, a 3× reduction; 71% of
+  the total 25.36→1.39 cm gap measured in cm) but classification is not
+  noise on top of that — it cuts the *remaining* error by another 6× (8.43 →
+  1.39 cm full-RMSE; 5.08 → 0.93 cm common-subset-RMSE), while also
+  recovering the one image (`22→23`) that `threshold-only`'s tighter bar
+  drops from registration. On the common-subset metric specifically
+  (apples-to-apples image sets), the split is threshold ≈87% / classification
+  ≈13% of the cm-gap closed — threshold-only is the majority contributor here,
+  but classification is a real, second, independent improvement, not just
+  measurement noise.
+- **Courtyard**: the opposite story. `threshold-only` is flat-to-negative —
+  full-RMSE barely moves (13.10 → 11.82 cm) and registers one *fewer* image
+  (14 → 13) than legacy; common-subset RMSE is noise-level worse (0.36 → 0.41
+  cm). Essentially all of courtyard's M1 win (13.10 → 3.75 cm full-RMSE;
+  0.36 → 0.25 cm common-subset) is attributable to classification — concretely
+  its explicit `DEGENERATE=7` pair rejection plus the E/F/H fallback that
+  keeps the 14th image registered.
+- **Office**: `threshold-only` alone is an outright regression — it registers
+  barely half as many images as legacy (9 vs 18) and full-RMSE more than
+  doubles (0.37 → 0.82 cm) purely from an over-tight single-model threshold
+  discarding correspondences the scene needed. Classification's F/H fallback
+  is what prevents this from being M1.1's headline result: `full` recovers
+  office back to legacy's own 18/26 registered images and a 0.50 cm RMSE —
+  still 0.13 cm worse than legacy (the same "noise-level, not regression-grade"
+  give-back M1 already reported), but nowhere near `threshold-only`'s 0.82 cm.
+
+**Bottom line:** the per-camera pixel-derived threshold is the dominant single
+lever on the milestone's own named scene (terrace), but it is not safe to use
+in isolation — on courtyard it is neutral and on office it is actively
+harmful (halves registered coverage). The E/F/H classification and decision
+tree is what makes the tighter threshold safe to ship broadly: it is the
+majority driver of courtyard's win, a materially non-trivial secondary
+contributor on terrace (13% of the common-subset gap, or a further 6×
+error reduction beyond threshold-only), and the safety net that recovers
+office's coverage after the tight threshold alone would have thrown half the
+scene's images away. This resolves M1's open confound: COLMAP's classifying
+verifier earns its complexity — it is not merely a wrapper around a better
+threshold, since the threshold alone is harmful on 1 of the 3 scenes tested.
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision`: **133 passed, 0 failed** — unchanged from
+  M1 (no new estimator/classification code was added, only new demo-side
+  plumbing selecting between existing estimator configurations).
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings (this task did not touch this crate).
+- `cargo check --example unordered_sfm_demo --features image-io,onnx-inference`
+  and `cargo build --release --example unordered_sfm_demo --features
+  image-io,onnx-inference`: both clean.
+- `cargo clippy --example unordered_sfm_demo --features image-io,onnx-inference
+  -- -D warnings` was **not** run to a clean result: it pulls in
+  `visloc-slam`, which currently fails clippy on pre-existing, out-of-scope
+  `pipelines/slam/src/{online_slam_vi_ba,vi_motion_initializer,
+  online_slam_motion_vi_init}.rs` lints (`manual_clamp`, `neg_cmp_op_on_
+  partial_ord`, `large_enum_variant`) under concurrent unrelated development
+  on this branch, consistent with M1's own note about `dpvo_*`/`pipelines/
+  slam` files being mid-edit throughout this session. None of the reported
+  lints are in this task's touched files.
