@@ -272,7 +272,12 @@ use visloc_core::geometry::SE3;
 /// `block_solve`'s hardcoded multiplicative diagonal damping (`ba.py:66`'s
 /// default `lm=1e-4`), **never** exposed as a `BA()` parameter — see the
 /// module doc's "Damping" section, constant 3.
-const POSE_DIAG_LM: f64 = 1e-4;
+///
+/// `pub(crate)`: reused by [`crate::dpvo_vi_ba`] (Milestone M5), which applies
+/// the *same* pose-diagonal damping formula to the visual+IMU combined pose
+/// Hessian block rather than inventing a second damping constant — see that
+/// module's doc for why sharing this constant (not just the formula) matters.
+pub(crate) const POSE_DIAG_LM: f64 = 1e-4;
 
 /// Outlier-rejection residual-norm gate, `ba.py:98`: `r.norm(dim=-1) < 250`.
 const RESIDUAL_NORM_GATE_PX: f64 = 250.0;
@@ -292,8 +297,11 @@ const VALID_Z_THRESH: f64 = 0.2;
 
 /// Inverse-depth clamp after retraction (`ba.py:176`:
 /// `disps.clamp(min=1e-3, max=10.0)`).
-const DISP_MIN: f64 = 1e-3;
-const DISP_MAX: f64 = 10.0;
+///
+/// `pub(crate)`: [`crate::dpvo_vi_ba`] (Milestone M5) re-clamps patches with
+/// the identical bounds after its own (visual+IMU) retraction step.
+pub(crate) const DISP_MIN: f64 = 1e-3;
+pub(crate) const DISP_MAX: f64 = 10.0;
 
 /// Per-frame pinhole intrinsics, matching `projective_ops.py`'s
 /// `extract_intrinsics` unpacking order `(fx, fy, cx, cy)`.
@@ -456,23 +464,30 @@ pub fn dpvo_pose_from_se3(pose: &SE3) -> [f64; 7] {
 /// because (a) only the patch center pixel ever feeds `BA()`'s residual or
 /// Jacobians, and (b) this module solves one edge at a time in a plain Rust
 /// loop rather than a batched tensor op.
-struct EdgeGeometry {
-    coords_center: Vector2<f64>,
+///
+/// `pub(crate)`: reused verbatim by [`crate::dpvo_vi_ba`] (Milestone M5),
+/// which assembles the *same* per-edge visual normal-equation contributions
+/// this module's own [`dpvo_ba_step`] does (see that module's doc, "Visual
+/// assembly is a deliberate, tested duplication, not a refactor" for why it
+/// re-derives its own accumulation loop from these primitives instead of
+/// calling into `dpvo_ba_step` directly).
+pub(crate) struct EdgeGeometry {
+    pub(crate) coords_center: Vector2<f64>,
     /// `(Z > 0.2)` at the transformed center pixel — `projective_ops.py:108`.
-    valid_depth: bool,
+    pub(crate) valid_depth: bool,
     /// `∂coords/∂ξ_i`, `2×6`, tangent order `[ρ; ω]`.
-    ji: SMatrix<f64, 2, 6>,
+    pub(crate) ji: SMatrix<f64, 2, 6>,
     /// `∂coords/∂ξ_j`, `2×6`.
-    jj: SMatrix<f64, 2, 6>,
+    pub(crate) jj: SMatrix<f64, 2, 6>,
     /// `∂coords/∂d_k`, `2×1` (stored as a 2-vector).
-    jz: Vector2<f64>,
+    pub(crate) jz: Vector2<f64>,
 }
 
 /// Port of `projective_ops.py::transform(..., jacobian=True)` (lines 53-113)
 /// plus `iproj`/`proj` (lines 19-50), for one edge. `pose_i`/`pose_j` are
 /// `T_world_to_camera` for the edge's `i`/`j` frames; `intr_i`/`intr_j` their
 /// intrinsics; `patch` the `(x, y, d)` state of the edge's patch `k`.
-fn transform_edge(
+pub(crate) fn transform_edge(
     pose_i: &SE3,
     pose_j: &SE3,
     intr_i: &DpvoIntrinsics,

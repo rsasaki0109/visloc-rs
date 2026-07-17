@@ -42,20 +42,37 @@
 //!
 //! Set `ORT_DYLIB_PATH` to the onnxruntime shared library, as with every
 //! other ONNX-backed example in this repo.
+//!
+//! # `--imu` (Milestone M5, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Feeds `mav0/imu0/data.csv` into `DpvoOdometry::push_imu`, interleaved by
+//! timestamp with the camera frames (see the main loop's `imu_cursor`), and
+//! builds `DpvoImuConfig::body_to_camera` directly from `cam0/sensor.yaml`'s
+//! own `T_BS` via [`se3_from_t_bs`] (a verbatim copy of
+//! `examples/euroc_online_slam_vi_demo.rs`'s own helper of the same name —
+//! see `pipelines/slam/src/dpvo_vi_ba.rs`'s module doc for exactly which
+//! direction this extrinsic must map). Off by default — omitting `--imu`
+//! reproduces M4/M4-perf's visual-only behavior exactly. The summary echoes
+//! the bootstrap chain's own diagnostics (`imu_bootstrapped`,
+//! `imu_gravity_world_*`, `imu_bias_*`) alongside the usual ATE/scale
+//! numbers, so a run's recovered `ate_similarity_scale` can be compared
+//! directly against the M4-perf baseline (`1.266`) to see whether IMU
+//! coupling actually pulled scale back toward `1.0`.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nalgebra::{Point2, Point3};
+use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
 use ndarray::Array2;
 
-use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample};
+use visloc_rs::core::geometry::SE3;
+use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, EurocImuSample};
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::DpvoVoConfig;
-use visloc_rs::slam::dpvo_vo::{DpvoOdometry, DpvoOdometryConfig};
-use visloc_rs::slam::DpvoIntrinsics;
+use visloc_rs::slam::dpvo_vo::{DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig};
+use visloc_rs::slam::{DpvoIntrinsics, ImuNoiseModel};
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
@@ -78,6 +95,18 @@ struct CliArgs {
     keyframe_thresh: f64,
     motion_damping: f64,
     onnx_cpu: bool,
+    /// Milestone M5 (`docs/dpvo_droid_port_plan.md`): feed `mav0/imu0/data.csv`
+    /// into `DpvoOdometry::push_imu` and enable the IMU-coupled joint solve
+    /// once its bootstrap chain succeeds. Default off — visual-only, exactly
+    /// M4/M4-perf's own behavior.
+    imu: bool,
+    imu_gravity_norm_deviation_ratio: f64,
+    imu_min_bootstrap_factors: usize,
+    /// Multiplier on `mav0/imu0/sensor.yaml`'s own noise densities (default
+    /// `1.0`, i.e. the real sensor numbers, unmodified). A diagnostic/tuning
+    /// knob added while investigating real-data joint-solve behavior — see
+    /// the "M5 results" section of `docs/dpvo_droid_port_plan.md`.
+    imu_noise_scale: f64,
 }
 
 impl Default for CliArgs {
@@ -98,6 +127,10 @@ impl Default for CliArgs {
             keyframe_thresh: 15.0,
             motion_damping: 0.5,
             onnx_cpu: false,
+            imu: false,
+            imu_gravity_norm_deviation_ratio: 0.3,
+            imu_min_bootstrap_factors: 10,
+            imu_noise_scale: 1.0,
         }
     }
 }
@@ -127,12 +160,37 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 raw.remove(i);
                 continue;
             }
+            "--imu" => {
+                args.imu = true;
+                raw.remove(i);
+                continue;
+            }
+            "--imu-gravity-norm-deviation-ratio" => {
+                args.imu_gravity_norm_deviation_ratio = raw.remove(i + 1).parse()?
+            }
+            "--imu-min-bootstrap-factors" => args.imu_min_bootstrap_factors = raw.remove(i + 1).parse()?,
+            "--imu-noise-scale" => args.imu_noise_scale = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
     }
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
     Ok(args)
+}
+
+/// Decompose an EuRoC `T_BS` 4×4 matrix into an [`SE3`]. EuRoC's own
+/// convention (confirmed by cross-referencing this repo's existing
+/// `examples/euroc_online_slam_vi_demo.rs::se3_from_t_bs`, which this is a
+/// verbatim copy of — see `pipelines/slam/src/dpvo_vi_ba.rs`'s module doc,
+/// "jacobian convention conversion" section, for exactly which direction
+/// this must map): the rotation block is a proper rotation matrix, the last
+/// column is the translation, and the last row is `(0, 0, 0, 1)` — exactly
+/// the SE(3) layout this codebase uses, taken literally with no inversion.
+fn se3_from_t_bs(t_bs: &Matrix4<f64>) -> SE3 {
+    let rotation_matrix = t_bs.fixed_view::<3, 3>(0, 0).into_owned();
+    let translation = Vector3::new(t_bs[(0, 3)], t_bs[(1, 3)], t_bs[(2, 3)]);
+    let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
+    SE3::new(rotation, translation)
 }
 
 /// Undistort a full grayscale image at the *same* intrinsics (matching
@@ -244,7 +302,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ba_ep: 100.0,
         motion_probe_min_flow: 2.0,
         seed: args.seed,
+        // Milestone M5 (`docs/dpvo_droid_port_plan.md`): `--imu` couples
+        // `mav0/imu0/data.csv` into the joint solve via
+        // `crate::dpvo_vi_ba`; omitting the flag reproduces M4/M4-perf's
+        // visual-only behavior exactly (`imu: None`).
+        imu: args.imu.then(|| DpvoImuConfig {
+            body_to_camera: se3_from_t_bs(&dataset.cam0_calibration.t_body_sensor),
+            noise: ImuNoiseModel {
+                gyroscope_noise_density: dataset.imu_calibration.gyroscope_noise_density * args.imu_noise_scale,
+                accelerometer_noise_density: dataset.imu_calibration.accelerometer_noise_density * args.imu_noise_scale,
+            },
+            gravity_magnitude: 9.81,
+            gravity_norm_deviation_ratio: args.imu_gravity_norm_deviation_ratio,
+            min_bootstrap_factors: args.imu_min_bootstrap_factors,
+        }),
     };
+
+    if args.imu {
+        println!(
+            "imu enabled: samples={} gyro_noise_density={:.6e} accel_noise_density={:.6e} \
+             body_to_camera_t=[{:.4},{:.4},{:.4}]",
+            dataset.imu_samples.len(),
+            dataset.imu_calibration.gyroscope_noise_density,
+            dataset.imu_calibration.accelerometer_noise_density,
+            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.x,
+            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.y,
+            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.z,
+        );
+    }
 
     let mut odometry = DpvoOdometry::new(
         odometry_config,
@@ -273,6 +358,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // timed here rather than silently folded into "everything else").
     let mut io_ms_total = 0.0_f64;
     let mut undistort_ms_total = 0.0_f64;
+    // Milestone M5: running cursor into `dataset.imu_samples` (file-order,
+    // i.e. already timestamp-sorted per `read_euroc_imu_csv`'s own doc
+    // comment) — every sample up to and including each camera frame's own
+    // timestamp is pushed just before that frame is processed, mirroring
+    // how a real-time streaming caller would interleave the two sensors.
+    let mut imu_cursor = 0usize;
 
     let run_start = Instant::now();
     for (idx, entry) in frames.iter().enumerate() {
@@ -297,6 +388,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         undistort_ms_total += undistort_start.elapsed().as_secs_f64() * 1000.0;
 
         let timestamp_seconds = entry.timestamp_nanoseconds as f64 * 1.0e-9;
+
+        if args.imu {
+            while imu_cursor < dataset.imu_samples.len()
+                && dataset.imu_samples[imu_cursor].timestamp_nanoseconds <= entry.timestamp_nanoseconds
+            {
+                let sample: &EurocImuSample = &dataset.imu_samples[imu_cursor];
+                odometry.push_imu(sample.timestamp_nanoseconds as f64 * 1.0e-9, sample.gyro, sample.accel);
+                imu_cursor += 1;
+            }
+        }
+
         let pose = odometry.process_frame(undistorted.view(), timestamp_seconds)?;
 
         if let Some(pose_world_to_camera) = pose {
@@ -326,8 +428,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if idx % 10 == 0 || idx + 1 == frames.len() {
             let stats = odometry.stats();
             let n = stats.frames_processed.max(1) as f64;
+            let imu_diag = odometry.imu_diagnostics();
             println!(
-                "frame {}/{} tracked={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2}",
+                "frame {}/{} tracked={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2} imu_bootstrapped={}",
                 idx + 1,
                 frames.len(),
                 tracked_frames,
@@ -338,6 +441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.correlation_ms_total / n,
                 stats.update_ms_total / n,
                 stats.ba_ms_total / n,
+                imu_diag.bootstrapped,
             );
         }
     }
@@ -379,6 +483,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let tracked_fraction = if !frames.is_empty() { tracked_frames as f64 / frames.len() as f64 } else { 0.0 };
+    let imu_diag = odometry.imu_diagnostics();
+    let (gravity_x, gravity_y, gravity_z) = imu_diag
+        .gravity_world
+        .map(|g| (g.x, g.y, g.z))
+        .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -399,7 +508,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          ate_similarity_rmse_m={ate_sim_rmse:.4}\n\
          ate_similarity_max_m={ate_sim_max:.4}\n\
          ate_similarity_scale={ate_sim_scale:.6}\n\
-         gt_matched_samples={matched}\n",
+         gt_matched_samples={matched}\n\
+         imu_enabled={imu_enabled}\n\
+         imu_bootstrapped={imu_bootstrapped}\n\
+         imu_gravity_world_x={gravity_x:.4}\n\
+         imu_gravity_world_y={gravity_y:.4}\n\
+         imu_gravity_world_z={gravity_z:.4}\n\
+         imu_bias_gyro_x={bias_gyro_x:.6}\n\
+         imu_bias_gyro_y={bias_gyro_y:.6}\n\
+         imu_bias_gyro_z={bias_gyro_z:.6}\n\
+         imu_bias_accel_x={bias_accel_x:.6}\n\
+         imu_bias_accel_y={bias_accel_y:.6}\n\
+         imu_bias_accel_z={bias_accel_z:.6}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -410,6 +530,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         update_ms = stats.update_ms_total / stats.frames_processed.max(1) as f64,
         ba_ms = stats.ba_ms_total / stats.frames_processed.max(1) as f64,
         matched = aligned_estimated.len(),
+        imu_enabled = args.imu,
+        imu_bootstrapped = imu_diag.bootstrapped,
+        bias_gyro_x = imu_diag.bias_gyro.x,
+        bias_gyro_y = imu_diag.bias_gyro.y,
+        bias_gyro_z = imu_diag.bias_gyro.z,
+        bias_accel_x = imu_diag.bias_accel.x,
+        bias_accel_y = imu_diag.bias_accel.y,
+        bias_accel_z = imu_diag.bias_accel.z,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

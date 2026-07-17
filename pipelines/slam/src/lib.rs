@@ -51,6 +51,8 @@ pub mod dpvo_patch_graph;
 pub use dpvo_patch_graph::{
     active_edge_triples, DpvoGraphError, DpvoGraphEdge, DpvoGraphFrame, DpvoPatchGraph, DpvoVoConfig,
 };
+pub mod dpvo_vi_ba;
+pub use dpvo_vi_ba::{dpvo_vi_ba, dpvo_vi_ba_step, DpvoImuFactor, DpvoViBaSolution, DpvoViWindow};
 pub mod dpvo_vo;
 mod finite_difference;
 pub mod gnc;

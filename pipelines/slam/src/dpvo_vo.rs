@@ -69,18 +69,59 @@
 //!
 //! Loop closure (DPV-SLAM, Milestone M6) and the global-BA fallback are out
 //! of scope, matching `crate::dpvo_patch_graph`'s own documented omissions.
+//!
+//! # IMU coupling (Milestone M5, `docs/dpvo_droid_port_plan.md`)
+//!
+//! [`DpvoOdometryConfig::imu`] is `None` by default — every M4 call site
+//! keeps compiling and running byte-for-byte as before. When `Some`, three
+//! pieces layer on top of the M4 loop above without changing it:
+//!
+//! 1. [`DpvoOdometry::push_imu`] buffers raw samples; every
+//!    [`DpvoOdometry::process_frame`] call folds whatever arrived since the
+//!    previous frame into an [`crate::imu_preintegration::ImuPreintegrator`]
+//!    and banks the resulting delta, keyed by the two frames' stable
+//!    `arrival_index` (`integrate_imu_for_new_frame`).
+//! 2. Once enough evidence has accumulated, [`DpvoOdometry::try_imu_bootstrap`]
+//!    runs `vi_motion_initializer.rs`'s own `estimate_gyro_bias` then
+//!    `estimate_gravity_and_velocities` — exactly the motion-VI chain's own
+//!    bootstrap — against pose SNAPSHOTS decoupled from the live BA window
+//!    (see that method's own doc for why: the live window churns via
+//!    `DpvoPatchGraph::keyframe`'s motion-magnitude folding faster than the
+//!    estimators' own 10-keyframe window could otherwise fill). Gated on
+//!    [`DpvoImuConfig::gravity_norm_deviation_ratio`]; runs at most once
+//!    (staged-bias philosophy, `crate::dpvo_vi_ba`'s own module doc).
+//! 3. Once bootstrapped, `update_step` couples banked deltas into the
+//!    **same** windowed Gauss-Newton solve via `crate::dpvo_vi_ba::dpvo_vi_ba`
+//!    instead of the plain visual-only `crate::dpvo_patch_ba::dpvo_ba` — see
+//!    that module's own doc for the math (left-perturbation IMU Jacobian
+//!    derivation, sign convention, scale handling).
+//!
+//! **Honest, load-bearing caveat** (see `docs/dpvo_droid_port_plan.md`'s "M5
+//! results" for the full writeup): on a real EuRoC run, step 2's bootstrap
+//! quality is entangled with DPVO's own monocular reconstruction still
+//! being in its own arbitrary (non-metric) scale/rotation-noisy regime at
+//! whatever point enough factors have accumulated — `estimate_gyro_bias`/
+//! `estimate_gravity_and_velocities` were designed for (and, in the
+//! existing motion-VI pipeline, are always run against) already-reasonable
+//! visual poses, a precondition this early-DPVO-window bootstrap does not
+//! always satisfy. This module implements the reuse the task specifies
+//! faithfully and correctly (verified by `crate::dpvo_vi_ba`'s own
+//! synthetic tests); whether a *given* real run's bootstrap lands on a
+//! good estimate is a separate, harder question the plan doc reports on
+//! honestly rather than papering over.
 #![cfg(feature = "onnx-inference")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::Instant;
 
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3};
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use visloc_core::geometry::SE3;
+use visloc_core::geometry::{Pose, SE3};
+use visloc_core::types::{Frame, Keyframe, VisualMap};
 use visloc_vision::dpvo::correlation::{corr_cpu_prebuilt_target, ChannelLastImage};
 use visloc_vision::dpvo::npz::{NpzArchive, NpzError};
 use visloc_vision::dpvo::onnx_session::{DpvoOnnxError, DpvoOnnxSession};
@@ -94,6 +135,14 @@ use crate::dpvo_patch_ba::{
     DpvoIntrinsics, DpvoPatch,
 };
 use crate::dpvo_patch_graph::{DpvoGraphError, DpvoPatchGraph, DpvoVoConfig};
+use crate::dpvo_vi_ba::{dpvo_vi_ba, DpvoImuFactor, DpvoViWindow};
+use crate::imu_preintegration::{
+    ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator,
+};
+use crate::vi_motion_initializer::{estimate_gravity_and_velocities, estimate_gyro_bias};
+
+/// Cap on [`DpvoOdometry`]'s `imu_bootstrap_history` — see that field's doc.
+const IMU_BOOTSTRAP_HISTORY_CAP: usize = 64;
 
 /// Errors from [`DpvoOdometry`].
 #[derive(Debug)]
@@ -151,7 +200,14 @@ impl From<DpvoBaError> for DpvoOdometryError {
 }
 
 /// Construction-time configuration for [`DpvoOdometry`].
-#[derive(Debug, Clone, Copy)]
+///
+/// `Clone`, not `Copy` — [`DpvoImuConfig::body_to_camera`] is an [`SE3`],
+/// which is not `Copy` (`crates/core/src/geometry/se3.rs`); this is the one
+/// change Milestone M5 (`docs/dpvo_droid_port_plan.md`) made to this struct's
+/// derive list. Nothing in this module relied on `Copy` (every use is a
+/// field read through `&self`, never an implicit bitwise copy), so this is
+/// non-breaking.
+#[derive(Debug, Clone)]
 pub struct DpvoOdometryConfig {
     pub vo: DpvoVoConfig,
     /// Input image width/height in pixels (every frame passed to
@@ -177,6 +233,94 @@ pub struct DpvoOdometryConfig {
     /// seed, matching how this codebase already threads RNG seeds through
     /// other ONNX-adjacent demos.
     pub seed: u64,
+    /// IMU coupling (Milestone M5, `docs/dpvo_droid_port_plan.md`). `None`
+    /// (the default constructed by every M4 call site) preserves the
+    /// exact visual-only behavior of M4/M4-perf; `Some` enables
+    /// [`DpvoOdometry::push_imu`]/the bootstrap chain/`crate::dpvo_vi_ba`
+    /// coupling described on [`DpvoOdometry`]'s own doc comment.
+    pub imu: Option<DpvoImuConfig>,
+}
+
+/// IMU coupling configuration — Milestone M5. See [`DpvoOdometry`]'s module
+/// doc for the bootstrap chain this feeds and `crate::dpvo_vi_ba`'s module
+/// doc for the math it ultimately drives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpvoImuConfig {
+    /// EuRoC-style `T_BS` extrinsic, taken literally (maps a CAMERA-frame
+    /// coordinate to its BODY-frame coordinate) — see `crate::dpvo_vi_ba`'s
+    /// module doc, "jacobian convention conversion" section, for the exact
+    /// convention this must satisfy.
+    pub body_to_camera: SE3,
+    /// Continuous-time IMU noise densities, used for both this module's own
+    /// [`ImuPreintegrator`] calls and the resulting factors' whitening
+    /// (`ImuPreintegrationFactor::covariance_sqrt_information`).
+    pub noise: ImuNoiseModel,
+    /// Expected local gravity magnitude (m/s², EuRoC/Earth-surface default
+    /// `9.81`) fed to [`estimate_gravity_and_velocities`].
+    pub gravity_magnitude: f64,
+    /// Bootstrap acceptance gate on
+    /// `GravityVelocityAlignment::raw_gravity_norm`'s relative deviation
+    /// from `gravity_magnitude` — mirrors
+    /// `MotionBasedViInitializerConfig::max_gravity_norm_deviation_ratio`'s
+    /// own default (`0.3`) exactly, for the same reason: an
+    /// insufficiently-excited window's *unconstrained* gravity-norm
+    /// solve is the direct observability signal, before any
+    /// magnitude-constrained refinement papers over it.
+    pub gravity_norm_deviation_ratio: f64,
+    /// Minimum number of banked IMU deltas before a bootstrap attempt is
+    /// even tried (both `estimate_gyro_bias`/`estimate_gravity_and_velocities`
+    /// already refuse below 2 internally; this is an additional, coarser
+    /// gate so a bootstrap attempt is not retried every single frame from
+    /// frame 2 onward during the initial burst). Default `10` (the
+    /// estimators' own `MAX_ALIGNMENT_WINDOW` cap) — chosen empirically
+    /// (see `docs/dpvo_droid_port_plan.md`'s "M5 results"): a smaller
+    /// value (e.g. `3`) lets the bootstrap fire almost immediately after
+    /// graph initialization, against a visual reconstruction that has had
+    /// essentially no time to stabilize; `10` is not a complete fix (see
+    /// the plan doc's own honest writeup) but is measurably less eager.
+    pub min_bootstrap_factors: usize,
+}
+
+impl Default for DpvoImuConfig {
+    /// `body_to_camera = identity` is almost certainly wrong for a real rig
+    /// — every real caller (see `examples/euroc_dpvo_vo_demo.rs`) must
+    /// override it from the dataset's own `T_BS`. `noise` mirrors EuRoC's
+    /// own MPU-9250-class sensor.yaml order-of-magnitude values (this
+    /// codebase's own `examples/euroc_imu_dead_reckon_demo.rs` and
+    /// `crates/io/src/euroc.rs` use the same real numbers when available —
+    /// this default is a documented placeholder, not a claim about any
+    /// specific sensor).
+    fn default() -> Self {
+        Self {
+            body_to_camera: SE3::identity(),
+            noise: ImuNoiseModel {
+                gyroscope_noise_density: 1.6968e-4,
+                accelerometer_noise_density: 2.0e-3,
+            },
+            gravity_magnitude: 9.81,
+            gravity_norm_deviation_ratio: 0.3,
+            min_bootstrap_factors: 10,
+        }
+    }
+}
+
+/// Snapshot of [`DpvoOdometry`]'s IMU bootstrap state, for a caller (e.g.
+/// `examples/euroc_dpvo_vo_demo.rs`) to echo in a run summary. See
+/// [`DpvoOdometry::imu_diagnostics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoImuDiagnostics {
+    /// Whether the bootstrap chain (gyro-bias estimate, then
+    /// gravity/velocity alignment, gated on
+    /// [`DpvoImuConfig::gravity_norm_deviation_ratio`]) has succeeded. While
+    /// `false`, [`DpvoOdometry::update_step`] runs the plain visual-only
+    /// `crate::dpvo_patch_ba::dpvo_ba` solve, identical to M4 — IMU coupling
+    /// only engages once this flips to `true`, and never reverts (staged,
+    /// fixed-at-seed philosophy — see `crate::dpvo_vi_ba`'s module doc).
+    pub bootstrapped: bool,
+    /// Recovered world-frame gravity vector, once bootstrapped.
+    pub gravity_world: Option<Vector3<f64>>,
+    pub bias_gyro: Vector3<f64>,
+    pub bias_accel: Vector3<f64>,
 }
 
 /// Cumulative per-run timing/tracking counters, snapshotted after every
@@ -243,6 +387,62 @@ pub struct DpvoOdometry {
     patch_imap: Vec<Array1<f32>>,
     rng: StdRng,
     stats: DpvoOdometryStats,
+
+    // ---- Milestone M5 (IMU coupling) state — see the module doc's own
+    // "IMU coupling" section and `crate::dpvo_vi_ba`'s module doc for the
+    // math. All of this is inert (never read, harmlessly accumulates
+    // nothing of consequence) when `config.imu` is `None`. ----
+    /// Raw `(timestamp, gyro, accel)` samples from [`Self::push_imu`], not
+    /// yet folded into a preintegrated delta. Drained (never re-read) by
+    /// [`Self::integrate_imu_for_new_frame`] every time a new frame commits.
+    pending_imu: VecDeque<(f64, Vector3<f64>, Vector3<f64>)>,
+    /// The timestamp boundary the next integration window starts from —
+    /// either the previous committed frame's timestamp, or `None` before
+    /// any frame has committed. See [`Self::integrate_imu_for_new_frame`]'s
+    /// doc for why the sub-sample fragment right at a frame boundary is
+    /// deliberately left un-integrated (negligible at IMU rates ≫ camera
+    /// rate).
+    last_imu_boundary_timestamp: Option<f64>,
+    /// Preintegrated deltas between CONSECUTIVE COMMITTED frames, keyed by
+    /// `(arrival_index_from, arrival_index_to)` — stable across
+    /// `DpvoPatchGraph::keyframe`'s frame-compaction (which renumbers live
+    /// frame *indices*, but never touches `arrival_index`, see that
+    /// module's own doc). A missing key for an otherwise-consecutive pair
+    /// means no IMU samples were available for that gap (no factor is
+    /// banked; the IMU chain simply has a gap there — a documented,
+    /// graceful degradation, not an error).
+    imu_deltas_by_arrival: HashMap<(usize, usize), ImuPreintegrationFactor>,
+    /// Bootstrap-only evidence, decoupled from `DpvoPatchGraph::keyframe`'s
+    /// live-window churn: `(arrival_from, arrival_to, pose_from_snapshot,
+    /// pose_to_snapshot, delta)`, one entry per banked
+    /// [`Self::imu_deltas_by_arrival`] insertion, with the two frames'
+    /// **poses as they were at bank time** (right after that frame's own
+    /// `update_step`, so already visually-BA-refined at least once — see
+    /// [`Self::try_imu_bootstrap`]'s doc for why using the live graph's
+    /// *current* frame set instead was a genuine bug, not a design choice:
+    /// EuRoC MH_01's slow opening segment folds frames away via
+    /// `DpvoPatchGraph::keyframe`'s motion-magnitude gate faster than 10
+    /// (`estimate_gyro_bias`/`estimate_gravity_and_velocities`'s own
+    /// `MAX_ALIGNMENT_WINDOW`) usable factors could ever accumulate against
+    /// a live-frames-only view, so bootstrap simply never fired). Capped at
+    /// [`IMU_BOOTSTRAP_HISTORY_CAP`] entries (pruned oldest-first) — far
+    /// more than the estimators' own 10-keyframe window ever uses, just
+    /// enough headroom that a slow-motion opening stretch doesn't force a
+    /// bootstrap attempt before real excitation shows up.
+    imu_bootstrap_history: Vec<(usize, usize, SE3, SE3, ImuPreintegratedDelta)>,
+    /// Per-live-frame world-frame velocity estimate, parallel to
+    /// `graph.frames()` (grown on commit, removed on fold — mirrors
+    /// `frame_pyramids`'s own lifecycle exactly).
+    velocities: Vec<Vector3<f64>>,
+    /// Shared gyro bias, fixed once [`Self::try_imu_bootstrap`] succeeds
+    /// (staged-bias philosophy — see `crate::dpvo_vi_ba`'s module doc).
+    imu_bias_gyro: Vector3<f64>,
+    imu_bias_accel: Vector3<f64>,
+    /// `Some` once the bootstrap chain has succeeded; stays fixed forever
+    /// after (never re-estimated — see [`DpvoImuDiagnostics::bootstrapped`]'s
+    /// doc).
+    imu_gravity_world: Option<Vector3<f64>>,
+    imu_bootstrapped: bool,
 }
 
 impl DpvoOdometry {
@@ -274,6 +474,7 @@ impl DpvoOdometry {
         let agg_kk = SoftAgg::load_from_npz(&archive, "agg_kk_")?;
         let agg_ij = SoftAgg::load_from_npz(&archive, "agg_ij_")?;
         let graph = DpvoPatchGraph::new(config.vo);
+        let seed = config.seed;
         Ok(Self {
             config,
             session,
@@ -283,8 +484,17 @@ impl DpvoOdometry {
             frame_pyramids: Vec::new(),
             patch_gmap: Vec::new(),
             patch_imap: Vec::new(),
-            rng: StdRng::seed_from_u64(config.seed),
+            rng: StdRng::seed_from_u64(seed),
             stats: DpvoOdometryStats::default(),
+            pending_imu: VecDeque::new(),
+            last_imu_boundary_timestamp: None,
+            imu_deltas_by_arrival: HashMap::new(),
+            imu_bootstrap_history: Vec::new(),
+            velocities: Vec::new(),
+            imu_bias_gyro: Vector3::zeros(),
+            imu_bias_accel: Vector3::zeros(),
+            imu_gravity_world: None,
+            imu_bootstrapped: false,
         })
     }
 
@@ -294,6 +504,30 @@ impl DpvoOdometry {
 
     pub fn graph(&self) -> &DpvoPatchGraph {
         &self.graph
+    }
+
+    /// Snapshot of the IMU bootstrap chain's current state (Milestone M5).
+    /// See [`DpvoImuDiagnostics`].
+    pub fn imu_diagnostics(&self) -> DpvoImuDiagnostics {
+        DpvoImuDiagnostics {
+            bootstrapped: self.imu_bootstrapped,
+            gravity_world: self.imu_gravity_world,
+            bias_gyro: self.imu_bias_gyro,
+            bias_accel: self.imu_bias_accel,
+        }
+    }
+
+    /// Buffer one raw body-frame IMU sample (Milestone M5). No-op (samples
+    /// are simply discarded on the next [`Self::process_frame`]'s drain if
+    /// `config.imu` is `None` — accepted, not rejected with an error, since
+    /// a caller streaming both cam0 and imu0 in real time from a dataset
+    /// like EuRoC has no natural place to gate this on config without
+    /// threading it back out again). Samples must arrive in non-decreasing
+    /// `timestamp` order (seconds) — the same precondition
+    /// `crate::imu_preintegration::ImuPreintegrator::integrate_sample`
+    /// already has for `dt > 0`.
+    pub fn push_imu(&mut self, timestamp: f64, gyro: Vector3<f64>, accel: Vector3<f64>) {
+        self.pending_imu.push_back((timestamp, gyro, accel));
     }
 
     /// Process one incoming grayscale frame (`(height, width)`, `RES`- and
@@ -385,6 +619,12 @@ impl DpvoOdometry {
             self.patch_gmap.push(gmap.index_axis(Axis(0), i).to_owned());
             self.patch_imap.push(squeeze_patch_vector(&imap_patch4, i));
         }
+        // Milestone M5: one velocity slot per live frame, parallel to
+        // `frame_pyramids` — see this struct's own field doc. Seeded at
+        // zero; `try_imu_bootstrap`/`update_step` overwrite it once IMU
+        // coupling is active.
+        self.velocities.push(Vector3::zeros());
+        self.integrate_imu_for_new_frame(timestamp);
 
         let forw = self.graph.edges_forw();
         let back = self.graph.edges_back();
@@ -397,12 +637,15 @@ impl DpvoOdometry {
                 self.update_step()?;
             }
         } else if self.graph.is_initialized() {
+            self.try_imu_bootstrap();
             self.update_step()?;
             if let Some(k) = self.graph.keyframe() {
                 self.frame_pyramids.remove(k);
                 let m = self.graph.config().patches_per_frame;
                 self.patch_gmap.drain(k * m..(k + 1) * m);
                 self.patch_imap.drain(k * m..(k + 1) * m);
+                self.velocities.remove(k);
+                self.prune_stale_imu_deltas();
             }
         }
 
@@ -494,10 +737,220 @@ impl DpvoOdometry {
         Ok(torch_quantile_50(&norms))
     }
 
+    /// Milestone M5: fold every buffered [`Self::push_imu`] sample with
+    /// `timestamp <= frame_timestamp` into a fresh
+    /// [`ImuPreintegrator`], and — if the graph already has a previous
+    /// committed frame and at least one sample was actually integrated —
+    /// bank the result into [`Self::imu_deltas_by_arrival`], keyed by the
+    /// two frames' stable `arrival_index` pair. No-op if `config.imu` is
+    /// `None`.
+    ///
+    /// # The sub-sample boundary fragment is deliberately dropped
+    ///
+    /// This integrates every consecutive *sample* pair up to and including
+    /// the last sample at or before `frame_timestamp`, then advances
+    /// [`Self::last_imu_boundary_timestamp`] to `frame_timestamp` itself —
+    /// meaning the tiny interval between that last sample and the actual
+    /// frame timestamp (at most one IMU sample period, e.g. ~5 ms at
+    /// EuRoC's 200 Hz IMU rate against a ~50-100 ms camera frame gap) is
+    /// never integrated. This is a deliberate, bounded simplification
+    /// (not a bug): its own worst-case error is a small fraction of one
+    /// sample period's contribution to a multi-sample window, well inside
+    /// the noise this factor's own covariance already accounts for.
+    fn integrate_imu_for_new_frame(&mut self, frame_timestamp: f64) {
+        let Some(imu_cfg) = self.config.imu.clone() else { return };
+        let mut integrator =
+            ImuPreintegrator::new_with_bias_and_noise(self.imu_bias_gyro, self.imu_bias_accel, imu_cfg.noise)
+                .unwrap_or_else(|| ImuPreintegrator::new_with_bias(self.imu_bias_gyro, self.imu_bias_accel));
+
+        let mut last_ts = self.last_imu_boundary_timestamp;
+        let mut integrated_any = false;
+        while let Some(&(ts, _, _)) = self.pending_imu.front() {
+            if ts > frame_timestamp {
+                break;
+            }
+            let (ts, gyro, accel) = self.pending_imu.pop_front().expect("front() just matched Some");
+            if let Some(prev) = last_ts {
+                let dt = ts - prev;
+                if dt > 0.0 {
+                    integrator.integrate_sample(gyro, accel, dt);
+                    integrated_any = true;
+                }
+            }
+            last_ts = Some(ts);
+        }
+        self.last_imu_boundary_timestamp = Some(frame_timestamp);
+
+        if !integrated_any {
+            return;
+        }
+        let n = self.graph.n_frames();
+        if n < 2 {
+            return;
+        }
+        let from_arrival = self.graph.frames()[n - 2].arrival_index;
+        let to_arrival = self.graph.frames()[n - 1].arrival_index;
+        let delta = integrator.delta();
+        self.imu_deltas_by_arrival.insert(
+            (from_arrival, to_arrival),
+            ImuPreintegrationFactor {
+                keyframe_id_from: from_arrival as u64,
+                keyframe_id_to: to_arrival as u64,
+                delta: delta.clone(),
+                // Placeholder — overwritten from `self.imu_gravity_world`
+                // by every reader (`try_imu_bootstrap`'s own factor list
+                // doesn't read this field at all; `update_step`'s
+                // `DpvoViWindow` construction fills in the real value).
+                gravity_world: Vector3::zeros(),
+                weight_rotation: 1.0,
+                weight_velocity: 1.0,
+                weight_position: 1.0,
+            },
+        );
+
+        // Bootstrap-only snapshot — see `imu_bootstrap_history`'s field doc
+        // for why this must NOT be re-derived from the live graph later.
+        if !self.imu_bootstrapped {
+            let pose_from = self.graph.frames()[n - 2].pose.clone();
+            let pose_to = self.graph.frames()[n - 1].pose.clone();
+            self.imu_bootstrap_history.push((from_arrival, to_arrival, pose_from, pose_to, delta));
+            if self.imu_bootstrap_history.len() > IMU_BOOTSTRAP_HISTORY_CAP {
+                let overflow = self.imu_bootstrap_history.len() - IMU_BOOTSTRAP_HISTORY_CAP;
+                self.imu_bootstrap_history.drain(0..overflow);
+            }
+        }
+    }
+
+    /// Milestone M5: drop banked IMU deltas that can no longer be reached
+    /// by any live frame (memory hygiene only — a stale entry is otherwise
+    /// harmless, just never looked up again once its frames have aged out
+    /// of the graph). Cheap: `arrival_index` is monotonically increasing,
+    /// so a single comparison against the oldest live frame suffices.
+    fn prune_stale_imu_deltas(&mut self) {
+        let Some(oldest_live) = self.graph.frames().first().map(|f| f.arrival_index) else { return };
+        self.imu_deltas_by_arrival.retain(|&(_, to), _| to >= oldest_live);
+    }
+
+    /// Milestone M5's bootstrap chain: gyro-bias estimate, then
+    /// gravity/velocity alignment, run against
+    /// [`Self::imu_bootstrap_history`]'s pose SNAPSHOTS treated as fixed —
+    /// exactly `vi_motion_initializer.rs`'s own motion-VI bootstrap
+    /// (`estimate_gyro_bias`/`estimate_gravity_and_velocities`), reused
+    /// as-is via an ephemeral [`VisualMap`] built purely to satisfy their
+    /// signatures (no landmarks/observations — these two functions only
+    /// ever read `keyframes[..].frame.pose`). No-op once
+    /// [`Self::imu_bootstrapped`] is already `true`, or if `config.imu` is
+    /// `None`.
+    ///
+    /// # Why history snapshots, not the live graph (a real bug this fixes)
+    ///
+    /// An earlier version of this method built its `VisualMap`/factor list
+    /// directly from `self.graph.frames()` — the graph's CURRENT live
+    /// window. On a real EuRoC run this bootstrap never fired at all past
+    /// the initial burst: `DpvoPatchGraph::keyframe`'s motion-magnitude
+    /// gate folds away low-motion frames (MH_01's opening seconds are
+    /// close to stationary) faster than 10
+    /// (`estimate_gyro_bias`/`estimate_gravity_and_velocities`'s own
+    /// `MAX_ALIGNMENT_WINDOW`) usable factors could ever accumulate against
+    /// a live-frames-only view — every fold silently invalidated one or two
+    /// already-banked deltas whose endpoint had just left the live set,
+    /// even though the delta itself was still perfectly good evidence.
+    /// [`Self::imu_bootstrap_history`] decouples bootstrap evidence
+    /// accumulation from the BA window's own churn entirely.
+    ///
+    /// See `crate::dpvo_vi_ba`'s module doc, "Gravity" section, and
+    /// [`DpvoImuDiagnostics::bootstrapped`]'s doc for why this never
+    /// re-attempts after success.
+    fn try_imu_bootstrap(&mut self) {
+        if self.imu_bootstrapped {
+            return;
+        }
+        let Some(imu_cfg) = self.config.imu.clone() else { return };
+        if self.imu_bootstrap_history.len() < imu_cfg.min_bootstrap_factors {
+            return;
+        }
+
+        let mut arrival_id_set: HashSet<usize> = HashSet::new();
+        for &(from, to, ..) in &self.imu_bootstrap_history {
+            arrival_id_set.insert(from);
+            arrival_id_set.insert(to);
+        }
+        let arrival_ids: Vec<u64> = arrival_id_set.iter().map(|&id| id as u64).collect();
+
+        let mut map = VisualMap::new();
+        for &(from, to, ref pose_from, ref pose_to, _) in &self.imu_bootstrap_history {
+            for (id, pose) in [(from, pose_from), (to, pose_to)] {
+                if map.keyframes.contains_key(&(id as u64)) {
+                    continue;
+                }
+                let body = imu_cfg.body_to_camera.compose(pose);
+                let mut frame = Frame::new(id as u64, 0);
+                frame.pose = Some(Pose { world_to_camera: body });
+                map.keyframes.insert(id as u64, Keyframe { frame, observations: Vec::new() });
+            }
+        }
+
+        let factors: Vec<ImuPreintegrationFactor> = self
+            .imu_bootstrap_history
+            .iter()
+            .map(|&(from, to, _, _, ref delta)| ImuPreintegrationFactor {
+                keyframe_id_from: from as u64,
+                keyframe_id_to: to as u64,
+                delta: delta.clone(),
+                gravity_world: Vector3::zeros(), // unused by either estimator below.
+                weight_rotation: 1.0,
+                weight_velocity: 1.0,
+                weight_position: 1.0,
+            })
+            .collect();
+
+        let Some(gyro_bias) = estimate_gyro_bias(&map, &arrival_ids, &factors, self.imu_bias_gyro) else {
+            return;
+        };
+        self.imu_bias_gyro = gyro_bias.bias_gyro;
+
+        let Some(alignment) = estimate_gravity_and_velocities(
+            &map,
+            &arrival_ids,
+            &factors,
+            self.imu_bias_gyro,
+            self.imu_bias_accel,
+            imu_cfg.gravity_magnitude,
+        ) else {
+            return;
+        };
+
+        let deviation_ratio =
+            (alignment.raw_gravity_norm - imu_cfg.gravity_magnitude).abs() / imu_cfg.gravity_magnitude;
+        if !deviation_ratio.is_finite() || deviation_ratio > imu_cfg.gravity_norm_deviation_ratio {
+            // Gate rejects — stay visual-only; retried on a later frame
+            // once (if) the window accumulates more excitation.
+            return;
+        }
+
+        self.imu_gravity_world = Some(alignment.gravity_world);
+        // Seed velocities for every CURRENTLY LIVE frame the alignment
+        // covers (frames the alignment used that have since aged out of
+        // the live graph simply have no velocity slot left to seed).
+        for (local, f) in self.graph.frames().iter().enumerate() {
+            if let Some(&v) = alignment.velocities.get(&(f.arrival_index as u64)) {
+                self.velocities[local] = v;
+            }
+        }
+        self.imu_bootstrapped = true;
+        // No longer needed once bootstrapped (never re-attempted — see this
+        // method's own doc) — release the memory rather than let it sit.
+        self.imu_bootstrap_history.clear();
+        self.imu_bootstrap_history.shrink_to_fit();
+    }
+
     /// One `update()` call (`dpvo.py:328-360`): reproject every active
     /// edge's patch grid, assemble the 2-pyramid-level correlation tensor
     /// (grouped by target frame — see the module doc's windowing/`corr_cpu`
-    /// notes), run the GRU update cell, then a windowed [`dpvo_ba`] call.
+    /// notes), run the GRU update cell, then a windowed [`dpvo_ba`] call
+    /// (or, once Milestone M5's IMU bootstrap has succeeded, the
+    /// IMU-coupled [`dpvo_vi_ba`] instead — see this module's doc, "IMU
+    /// coupling").
     fn update_step(&mut self) -> Result<(), DpvoOdometryError> {
         let n = self.graph.n_frames();
         let removal_window = self.graph.config().removal_window;
@@ -637,14 +1090,58 @@ impl DpvoOdometry {
         };
 
         let ba_start = Instant::now();
-        let solved = dpvo_ba(&problem, &ba_config)?;
+        // Milestone M5: once the IMU bootstrap chain has succeeded, couple
+        // consecutive-window IMU factors into the SAME Gauss-Newton solve
+        // (`crate::dpvo_vi_ba::dpvo_vi_ba`) instead of the plain visual-only
+        // `dpvo_ba` — see this module's own doc, "IMU coupling", and
+        // `crate::dpvo_vi_ba`'s module doc for the math. Falls back to the
+        // unmodified M4 path whenever `config.imu` is `None` or the
+        // bootstrap has not (yet) succeeded — visual-only behavior is
+        // therefore byte-for-byte unchanged from M4 in both of those cases.
+        let (new_poses, new_patches, new_velocities) = if self.imu_bootstrapped {
+            let imu_cfg = self
+                .config
+                .imu
+                .clone()
+                .expect("imu_bootstrapped can only be true when config.imu is Some — set together in try_imu_bootstrap");
+            let window_arrivals: Vec<usize> =
+                self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+            let mut imu_factors = Vec::new();
+            for local in 0..window_arrivals.len().saturating_sub(1) {
+                let key = (window_arrivals[local], window_arrivals[local + 1]);
+                if let Some(banked) = self.imu_deltas_by_arrival.get(&key) {
+                    let mut factor = banked.clone();
+                    factor.gravity_world = self
+                        .imu_gravity_world
+                        .expect("imu_bootstrapped implies imu_gravity_world is Some");
+                    imu_factors.push(DpvoImuFactor { i: local, j: local + 1, factor });
+                }
+            }
+            let imu_window = DpvoViWindow {
+                velocities: self.velocities[frame_lo..n].to_vec(),
+                factors: imu_factors,
+                body_to_camera: imu_cfg.body_to_camera,
+                bias_gyro: self.imu_bias_gyro,
+                bias_accel: self.imu_bias_accel,
+            };
+            let solved = dpvo_vi_ba(&problem, &imu_window, &ba_config)?;
+            (solved.poses, solved.patches, Some(solved.velocities))
+        } else {
+            let solved = dpvo_ba(&problem, &ba_config)?;
+            (solved.poses, solved.patches, None)
+        };
         self.stats.ba_ms_total += ba_start.elapsed().as_secs_f64() * 1000.0;
 
-        for (local, pose) in solved.poses.into_iter().enumerate() {
+        for (local, pose) in new_poses.into_iter().enumerate() {
             self.graph.frames_mut()[frame_lo + local].pose = pose;
         }
-        for (local, patch) in solved.patches.into_iter().enumerate() {
+        for (local, patch) in new_patches.into_iter().enumerate() {
             self.graph.patches_mut()[patches_lo + local] = patch;
+        }
+        if let Some(velocities) = new_velocities {
+            for (local, v) in velocities.into_iter().enumerate() {
+                self.velocities[frame_lo + local] = v;
+            }
         }
         Ok(())
     }

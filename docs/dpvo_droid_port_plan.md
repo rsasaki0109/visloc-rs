@@ -1429,3 +1429,312 @@ never its value, so it could not have moved these numbers, and it didn't.
   measurements implicated it at scale), `dpvo_patch_graph.rs`,
   `sparse_factor_graph.rs`, `bundle.rs` (BA was already sub-12 ms/frame,
   untouched, unaffected).
+
+## M5 results (2026-07-17)
+
+Milestone M5: couple the workspace's own battle-tested IMU preintegration
+stack (`imu_preintegration.rs`, `vi_motion_initializer.rs`'s gyro-bias/
+gravity-alignment chain) into the M3/M4 DPVO sliding window, to fix the
+monocular scale drift M4-perf's own EuRoC run measured (similarity scale
+1.266, ground truth 1.0). The joint-solve math (the milestone's stated
+"trickiest part") is implemented and rigorously validated by synthetic
+tests; the bootstrap chain that seeds it from a real EuRoC run is not yet
+reliable, and this section reports that honestly rather than papering over
+it — see "Honest negative: the bootstrap chain" below.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_vi_ba.rs` (**new**) — the IMU-coupled joint
+  Gauss-Newton solve: `DpvoImuFactor`, `DpvoViWindow`, `DpvoViBaSolution`,
+  `dpvo_vi_ba_step`/`dpvo_vi_ba`, and the private `imu_factor_jacobians`
+  helper implementing the left-perturbation IMU Jacobian derivation (see
+  below). A sibling of `dpvo_patch_ba.rs`, not an edit to it, for the same
+  reason M3 gave for not merging into `bundle.rs`: composing new state
+  alongside a tested, upstream-parity-verified solver is lower-risk than
+  mutating it. Re-derives (does not call into) `dpvo_ba_step`'s own visual
+  normal-equation assembly — a deliberate, tested duplication (see the
+  module doc's "Visual assembly" section and
+  `tests::zero_imu_factors_matches_visual_only_solve`, which cross-checks
+  the duplication against the trusted original to <1e-9).
+* `pipelines/slam/src/dpvo_patch_ba.rs` — **pure visibility change, no
+  logic edit**: `transform_edge`, `EdgeGeometry` (+ its fields), `DISP_MIN`/
+  `DISP_MAX`, `POSE_DIAG_LM` widened from private to `pub(crate)` so
+  `dpvo_vi_ba.rs` can reuse them. Confirmed inert:
+  `ba_fixture_one_iteration_matches_reference_within_1e_4`/
+  `ba_fixture_two_iterations_matches_reference_within_1e_4` (the M3 upstream
+  parity tests) still pass at the exact same max-abs-diff as M3's own
+  report (1.086e-6 / 1.007e-6).
+* `pipelines/slam/src/dpvo_vo.rs` — `DpvoOdometryConfig::imu: Option<DpvoImuConfig>`
+  (`None` by default — every M4 call site keeps compiling/behaving
+  unchanged); `DpvoImuConfig`, `DpvoImuDiagnostics`; `DpvoOdometry::push_imu`/
+  `imu_diagnostics`; private `integrate_imu_for_new_frame` (banks
+  `ImuPreintegrator` deltas between consecutive committed frames, keyed by
+  stable `arrival_index` pairs), `try_imu_bootstrap` (the
+  `estimate_gyro_bias` → `estimate_gravity_and_velocities` chain, gated on
+  `gravity_norm_deviation_ratio`, run at most once), `prune_stale_imu_deltas`;
+  `update_step` now branches to `dpvo_vi_ba` once bootstrapped, `dpvo_ba`
+  (unchanged) otherwise. `DpvoOdometryConfig` lost its `Copy` derive
+  (`SE3` isn't `Copy`) — checked non-breaking, every use was a `&self` field
+  read.
+* `pipelines/slam/src/lib.rs` — registered `dpvo_vi_ba`, re-exported its
+  public items.
+* `examples/euroc_dpvo_vo_demo.rs` — `--imu` (feeds `mav0/imu0/data.csv`,
+  interleaved by timestamp with camera frames), `--imu-gravity-norm-deviation-ratio`,
+  `--imu-min-bootstrap-factors`, `--imu-noise-scale` (a diagnostic knob added
+  while investigating the bootstrap finding below); `se3_from_t_bs` (a
+  verbatim copy of `examples/euroc_online_slam_vi_demo.rs`'s own helper,
+  building `DpvoImuConfig::body_to_camera` from `cam0/sensor.yaml`'s `T_BS`);
+  summary now echoes `imu_enabled`/`imu_bootstrapped`/`imu_gravity_world_*`/
+  `imu_bias_*` alongside the usual ATE/scale fields.
+
+### The jacobian-convention conversion (the hard math), summarized
+
+`bundle.rs`'s existing Forster IMU factor derives residual/Jacobians under
+`BundleAdjustment`'s **right**-perturbation convention (`T ← T·Exp(ξ)`) for
+the body pose `body = imu_body_to_camera ∘ camera_pose`. DPVO's own poses
+retract on the **left** (`T ← Exp(ξ)·T`, `dpvo_patch_ba.rs`'s own
+convention). `dpvo_vi_ba.rs` needs `bundle.rs`'s exact residual/Jacobian
+*content* (reused, not re-derived — re-deriving Forster's formulas a second
+time would just be a second, independently-fallible copy) reinterpreted for
+DPVO's camera pose's left perturbation. Two conjugations, both grounded in
+the single Adjoint definition already doc-commented on
+`visloc_core::geometry::SE3::adjoint` (`T·Exp(ξ)·T⁻¹ = Exp(Ad(T)·ξ)`):
+
+1. **Right-perturbation of `body` → left-perturbation of `body`**:
+   `J_left = J_right · Ad(T⁻¹)` (from `Exp(ξ)·T = T·Exp(Ad(T⁻¹)·ξ)`, itself
+   the Adjoint definition applied to `T⁻¹`).
+2. **Left-perturbation of `body` → left-perturbation of DPVO's camera pose**:
+   with `C = imu_body_to_camera`, `body = C ∘ P`, a DPVO left perturbation of
+   `P` induces `body_new = Exp(Ad(C)·ξ_P) ∘ body` (the Adjoint's own
+   definition, conjugating `Exp(ξ_P)` by `C`) — so `J_P = J_left(body) ·
+   Ad(C)`.
+
+Combined: `J_P_i = J_right(body_i) · Ad(body_i⁻¹) · Ad(imu_body_to_camera)`,
+symmetrically for `J_P_j`. Velocity Jacobians need no conversion (Euclidean,
+convention-independent). A second, independent subtlety (the "sign
+convention" section of the module doc): `dpvo_ba_step`'s visual accumulation
+secretly relies on its residual's `target − predicted` sign trick to turn a
+standard Gauss-Newton `-Jᵀr` into a `+Jᵀr` with no explicit minus anywhere;
+the IMU residual has no such trick (it is a literal `∂r/∂ξ`), so combining
+the two families in one shared `(B, v)` system needs the IMU block's RHS
+contribution to carry the minus sign explicitly (`v += −Jᵀr`) while the
+visual blocks keep their existing `+Jᵀr`.
+
+**Verification**: `dpvo_vi_ba::tests::imu_factor_jacobian_matches_numeric_finite_difference`
+checks every column of `J_pose_i`/`J_pose_j`/`J_vel_i`/`J_vel_j` (non-trivial
+rotation+translation poses, non-identity `body_to_camera`) against a central
+finite difference of the residual evaluated at the *actual*
+`SE3::exp(&xi).compose(&pose)` retraction this crate uses elsewhere — max
+error < 1e-5 (central-difference floor at `eps=1e-6`), for all 18 columns
+(6+6 pose, 3+3 velocity). `tests::pure_imu_window_matches_textbook_gauss_newton_sign`
+independently checks the sign convention (a pure-IMU window's residual norm
+must *decrease* after one `dpvo_vi_ba_step` — confirmed). Both pass.
+
+### Synthetic scale-recovery result
+
+`tests::synthetic_window_recovers_metric_scale_within_two_percent`: a
+4-frame window, 5 patches anchored in frame 0, starting-guess poses/inverse
+depths scaled **1.4×** from a true constant-*acceleration* trajectory
+(`a = (2, 0, 0) m/s²` — a first attempt at this test used constant
+*velocity* and found it information-theoretically degenerate for scale
+recovery, since `∂r/∂ξ` are then satisfied by *any* joint `(p, v)` rescale;
+documented in the module doc's test comment as a real finding, not a detail),
+with visual targets computed by literally reprojecting the wrong-scale
+starting guess (an exact visual fixed point, since mono reprojection is
+scale-invariant) and IMU factors built from the *true* metric kinematics.
+After 30 `dpvo_vi_ba` iterations: **recovered scale 1.000002** against a
+true scale of 1.0 (task's own bar was 2%; the actual result is four orders
+of magnitude tighter). This is the joint solve's own correctness validated
+in isolation from any bootstrap-quality question — see next section for why
+that distinction matters.
+
+Additional tests, all passing: `tests::zero_imu_factors_matches_visual_only_solve`
+(this module's independently-derived visual assembly matches
+`dpvo_ba_step`'s trusted original to <1e-9 given zero IMU factors) and the
+sign-convention/jacobian tests above.
+
+### EuRoC MH_01 run — honest negative: the bootstrap chain
+
+`--euroc-dir MH_01_easy --max-frames 400 --stride 2 --seed 0`,
+`fast.yaml`-equivalent graph sizing (`--patches-per-frame 48
+--removal-window 16 --optimization-window 7 --patch-lifetime 11`, identical
+to M4-perf's own reported run except `--imu`), CPU-only:
+
+| Metric | M4-perf baseline (no IMU) | M5 (`--imu`) |
+| --- | --- | --- |
+| `ate_rigid_rmse_m` | 0.1546 | 24.4719 |
+| `ate_rigid_max_m` | 0.4040 | 39.5517 |
+| `ate_similarity_rmse_m` | 0.1519 | 0.1407 |
+| `ate_similarity_max_m` | 0.4033 | 0.3500 |
+| `ate_similarity_scale` | 1.265951 | **0.006035** |
+| `tracked_fraction` | 1.0000 (400/400) | 1.0000 (400/400) |
+| `total_elapsed_s` | 482.02 | 809.46 |
+
+**This does not meet the acceptance target** (scale within `1.0±0.05`,
+rigid ATE at or below similarity ATE) — reported per the task's own explicit
+instruction to report honestly regardless. No crash, no NaN pose, no tracking
+loss (100% tracked, matching the visual-only baseline); the *similarity*-
+aligned ATE (which factors out scale) is actually slightly better than the
+M4-perf baseline (0.1407 vs 0.1519 m), but the *rigid* ATE and recovered
+scale show the joint solve converged to a badly wrong absolute scale rather
+than the target metric one — the opposite of a graceful "imprecise but
+metric-ish" result.
+
+**Diagnosis** (four experiments, not a guess):
+
+1. First attempt (`min_bootstrap_factors=3`, the initial default): bootstrap
+   fired at frame ≈11, against a visual reconstruction with almost no time
+   to stabilize. Scale collapsed to 0.0057.
+2. Investigating why raising the threshold didn't obviously help surfaced a
+   **genuine, separate bug**: the bootstrap was built from the graph's
+   *current live* window, but `DpvoPatchGraph::keyframe`'s motion-magnitude
+   folding (MH_01's opening seconds are close to stationary) discards
+   low-motion frames faster than 10 usable factors (the estimators' own
+   `MAX_ALIGNMENT_WINDOW`) could accumulate against a live-only view — at
+   `min_bootstrap_factors=10` the bootstrap simply never fired at all within
+   80 frames. Fixed by decoupling bootstrap evidence into its own
+   `imu_bootstrap_history` (pose snapshots taken at bank time, independent
+   of the BA window's own churn) — a real correctness fix, kept regardless
+   of the remaining finding below.
+3. With that fixed and `min_bootstrap_factors=10`: bootstrap now reliably
+   fires (frame ≈11 again, since 10 factors accumulate quickly once not
+   discarded), but the recovered gyro bias (`(-0.081, -0.182, 0.077)` rad/s)
+   is implausibly large for a real MEMS gyro (EuRoC's own bias is normally
+   `~1e-3` to `~1e-2` rad/s) and the joint solve still collapses scale to
+   0.008. Raising the threshold further to 40 improved one axis
+   (`bias_gyro_x` → `-0.006`, reasonable) but not the other two, and the
+   collapse persisted.
+4. To rule out "the joint solve is simply over-trusting a tight IMU
+   covariance": reran with `--imu-noise-scale 50` (50× looser covariance-
+   derived confidence). The bootstrap's own recovered gravity/bias was
+   **byte-identical** to experiment 3 (expected — noise scale only affects
+   the ongoing solve's weighting, not the bootstrap's own linear solve), and
+   the collapse was, if anything, slightly worse (scale 0.0033). This rules
+   out over-confident weighting as the cause: a systematically wrong
+   absolute velocity/gravity model pulls scale toward a bad fixed point
+   regardless of per-factor confidence, once every window's factors agree
+   (wrongly) with each other over hundreds of frames.
+
+**Root cause**: `estimate_gyro_bias`/`estimate_gravity_and_velocities`
+(`vi_motion_initializer.rs`) were designed for, and everywhere else in this
+codebase are run against, an **already metric, reasonably converged** set of
+visual poses (stereo, or a monocular pipeline already anchored by a prior
+successful VI init). DPVO's own reconstruction, at whatever point in a real
+run enough IMU factors first accumulate, is still in its own uncalibrated,
+non-metric scale and — during MH_01's slow, low-parallax opening seconds —
+comparatively noisy rotation regime: a precondition mismatch these two
+otherwise-correct, faithfully-reused functions were never built to tolerate.
+Because M5's own design fixes the recovered bias/gravity forever after one
+bootstrap attempt (the task's own staged-bias instruction), a single
+bad-quality bootstrap poisons the rest of the run — there is no subsequent
+opportunity for it to self-correct.
+
+**A secondary, measured consequence**: the corrupted joint solve also
+defeats `DpvoPatchGraph::keyframe`'s motion-magnitude-based folding — erratic
+poses read as "high relative motion", keeping far more frames live than
+intended (`frames_graph_n` reached **92** by frame ~371-400 with `--imu`,
+versus **10-15** in a freshly-run 150-frame visual-only check on the same
+sequence/config, consistent with M4's own report of `n: 1→37` over the full
+400-frame no-IMU baseline). This is very likely why the `--imu` run's
+`total_elapsed_s` (809.46 s) is ~1.7× the M4-perf baseline (482.02 s) — the
+joint-solve math itself stays cheap (`ms_per_frame_ba` 13.85 vs 11.13,
+barely different); the extra cost is the correlation/update stages doing
+more work over a larger, wrongly-retained active window. Expected to
+resolve on its own once the bootstrap-quality issue above is fixed, not a
+separate mechanism to build.
+
+### Visual-only path confirmed unchanged
+
+A 150-frame run of the **same** command with `--imu` omitted:
+`imu_enabled=false`, `imu_bootstrapped=false` throughout,
+`tracked_fraction=1.0000`, `ate_similarity_scale=0.473211` — a plausible,
+non-degenerate monocular scale-drift value (not directly comparable to the
+400-frame M4-perf number; a different prefix length), confirming
+`update_step`'s `else` branch (`dpvo_ba`, byte-for-byte the M4 call) still
+runs and produces sane, non-collapsed output when `config.imu = None`. This
+is also guaranteed structurally: every M5 addition to `dpvo_vo.rs` either
+guards on `self.config.imu.clone()` returning `None` (early return, no
+state ever mutated) or on `self.imu_bootstrapped` (which can only become
+`true` inside `try_imu_bootstrap`, itself gated on `config.imu.is_some()`).
+
+### Verification (verbatim)
+
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-slam --features onnx-inference`: **308 lib tests**
+  passed (up from M4-perf's 304 — the 4 new `dpvo_vi_ba` tests), 0 failed, 7
+  ignored (perf/benchmark tests, unaffected by this milestone plus the new
+  `dpvo_vi_ba` tests, none `#[ignore]`d); every integration test binary
+  green, 0 failed anywhere: 54 passed + 1 ignored, 0 passed + 2 ignored
+  (`dpvo_patch_ba_fixture.rs` — both its tests are `--ignored`-gated fixture
+  tests, covered by the dedicated `--ignored` run below), 6/6, 6/6, 132/132,
+  10/10, 9/9, 4/4 — unchanged counts from M4-perf plus the ignored-perf-test
+  bump already noted.
+* `ORT_DYLIB_PATH=... cargo test -p visloc-slam --features onnx-inference --
+  --ignored`: **10 ignored tests passed, 0 failed** across all binaries —
+  the lib's own 7 (`block_cholesky`/`incremental_pose_graph` benches plus
+  `dpvo_vo::tests::correlation_assembly_perf_at_realistic_working_set`),
+  `bundle_adjustment.rs`'s 1 (`bench_ba_sparse_solver`), and
+  `dpvo_patch_ba_fixture.rs`'s 2 (`ba_fixture_one_iteration_matches_reference_within_1e_4`/
+  `ba_fixture_two_iterations_matches_reference_within_1e_4`, the M3 upstream
+  parity tests, unchanged max-abs-diff from M3's own report — confirming
+  the `pub(crate)` visibility change above is inert).
+* `cargo test -p visloc-vision --features onnx-inference`: **149 passed**,
+  0 failed, 1 ignored — unaffected by this milestone (no `visloc-vision`
+  file touched).
+* `ORT_DYLIB_PATH=... cargo test -p visloc-vision --features onnx-inference
+  --test dpvo_onnx_parity -- --ignored`: **5 passed**, 0 failed — same
+  numbers as M2/M4-perf.
+* `cargo check --workspace --all-targets --features image-io,onnx-inference`:
+  clean.
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  same 6 pre-existing warnings as M3/M4/M4-perf (`map_atlas.rs` ×3,
+  `online_slam_vi_ba.rs` ×2, `vi_motion_initializer.rs`,
+  `online_slam_motion_vi_init.rs`, `online_slam.rs` ×2 — confirmed by
+  grepping clippy's output for `dpvo`: zero hits); **zero** warnings in
+  `dpvo_vi_ba.rs`, `dpvo_vo.rs`, or `dpvo_patch_ba.rs`.
+* `cargo clippy --example euroc_dpvo_vo_demo --features image-io,onnx-inference`:
+  clean, zero warnings.
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded.
+* `git diff --stat` on touched files: `dpvo_patch_ba.rs` (+25/-10, pure
+  visibility, confirmed above); `dpvo_vi_ba.rs` new (~1080 lines incl.
+  tests); `dpvo_vo.rs`, `lib.rs`, `examples/euroc_dpvo_vo_demo.rs` — all
+  additive, no removed visual-only behavior.
+
+### Blockers / open items for M6
+
+1. **The bootstrap chain, not the joint solve, is the blocker.** The
+   IMU-coupled Gauss-Newton math (Jacobian conversion, sign convention,
+   Schur elimination with the augmented velocity block, implicit scale
+   absorption) is validated by four passing synthetic/unit tests, including
+   exact-to-6-decimal scale recovery from a deliberately wrong start. Do not
+   rework `dpvo_vi_ba.rs`'s core math without new evidence it is wrong;
+   rework the bootstrap instead.
+2. **A genuinely monocular-aware VI bootstrap is needed.** Either (a) add
+   an explicit scale unknown `s` to a gravity/velocity/scale joint linear
+   solve (VINS-Mono/ORB-SLAM3-style monocular VI initialization) rather than
+   reusing `estimate_gravity_and_velocities` as-is (which assumes metric
+   input), or (b) gate promotion on more than a bare gravity-norm ratio —
+   e.g. cross-validate the bootstrap's own resulting IMU residual, or
+   require a minimum rotation/translation excitation — and (c) allow a
+   bounded number of re-attempts / a rollback if the joint solve's own
+   behavior (e.g. trending scale) looks pathological after bootstrapping,
+   rather than fixing bias/gravity forever on the first attempt that merely
+   clears the norm-ratio gate.
+3. **`imu_bias_accel` is never estimated** (fixed at `0` for the whole run,
+   a documented M5 narrowing) — the noise-scale experiment (finding 4 above)
+   suggests this is not the primary cause of the observed collapse, but a
+   real nonzero EuRoC accelerometer bias folds unmodeled into every
+   gravity/velocity/position residual and should be revisited once the
+   bootstrap's core reliability is fixed.
+4. **Secondary performance regression** (`frames_graph_n` growing to ~92 vs
+   ~37, ~1.7× wall clock) is very likely a symptom of finding 2, not a
+   separate mechanism — re-measure once the bootstrap is fixed before
+   assuming it needs its own work.
+5. **`Ad(imu_body_to_camera)` is recomputed per IMU factor**, not hoisted
+   once per window solve — a cost-negligible (single `6×6` product per
+   factor, dwarfed by every other per-frame cost measured in this port),
+   documented, trivial follow-up.
+6. **No loop closure, no global-BA fallback** — unchanged from M4's own
+   documented scope; M6 remains the milestone for DPV-SLAM-style proximity
+   loop closure per the plan doc's original schedule.
