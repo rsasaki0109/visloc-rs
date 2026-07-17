@@ -26,6 +26,14 @@
 //! `examples/unordered_sfm_demo.rs`'s `--colmap-verification` flag for the
 //! A/B wiring. [`homography`] and [`fundamental`] hold the estimators the
 //! classifier composes.
+//!
+//! [`correspondence_graph`] adds a third, independent tier: COLMAP's
+//! persistent `CorrespondenceGraph` view-graph structure (M2 in
+//! `docs/colmap_port_plan.md`), which stores per-image-pair
+//! [`colmap_verification::ConfigurationType`] and per-feature adjacency for
+//! track building and transitive-correspondence queries. It is consumed by
+//! `pipelines/slam/src/incremental_sfm.rs`'s `build_tracks_via_graph` as an
+//! opt-in alternative to the legacy ad hoc union-find.
 
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Point2, UnitQuaternion, Vector3};
 use rand::rngs::SmallRng;
@@ -35,11 +43,15 @@ use visloc_core::geometry::SE3;
 use visloc_core::types::Camera;
 
 pub mod colmap_verification;
+pub mod correspondence_graph;
 pub mod fundamental;
 pub mod homography;
 
 pub use colmap_verification::{
     ConfigurationType, TwoViewGeometryOptions, TwoViewGeometryReport, TwoViewGeometryVerifier,
+};
+pub use correspondence_graph::{
+    Correspondence, CorrespondenceGraph, CorrespondenceGraphError, EdgeMetadata, IngestStats,
 };
 pub use fundamental::{
     estimate_fundamental_dlt, fundamental_ransac, fundamental_squared_sampson_error,

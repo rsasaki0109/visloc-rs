@@ -183,8 +183,8 @@ pub use visloc_slam::{
     SparseFactorState, SparseKeyframeFactor, StationaryRejectionReason, StereoVoBaConfig,
     StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement, StereoVoBaImuSample,
     StereoVoBaRefinement, StereoVoReconstruction, SubmapId, SubmapIdRemap, SubmapMergeEvidence,
-    SubmapMergeQuality, SubmapMergeVerificationConfig, VerifiedSubmapMerge, ViInitFallback,
-    ViInitializationEvent, ViInitializationStatus, Viba2Config, Viba2Stats,
+    SubmapMergeQuality, SubmapMergeVerificationConfig, TrackSource, VerifiedSubmapMerge,
+    ViInitFallback, ViInitializationEvent, ViInitializationStatus, Viba2Config, Viba2Stats,
     VisualInertialInitializationResult, VisualInertialInitializer, VisualInertialInitializerConfig,
     VoLoopClosureConfig, VoLoopClosureError, VoLoopClosureResult,
 };

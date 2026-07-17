@@ -37,7 +37,16 @@
 //!    for `--verification-mode full`.
 //! 3. **Incremental SfM.** [`visloc_rs::slam::incremental_sfm`] seeds from the
 //!    strongest pair, registers images by PnP, triangulates tracks, and bundle-
-//!    adjusts.
+//!    adjusts. Its first internal step — building feature tracks out of the
+//!    verified pairs above — is itself an M2 A/B switch: `--track-source
+//!    union-find` (default) is the original ad hoc union-find, `--track-source
+//!    graph` routes through COLMAP's persistent `CorrespondenceGraph`
+//!    (`visloc_rs::vision::two_view::correspondence_graph`, ported from
+//!    `src/colmap/scene/correspondence_graph.{h,cc}`) instead. Both are proven
+//!    to produce byte-identical tracks (see `pipelines/slam/src/
+//!    incremental_sfm.rs`'s `graph_tracks_match_union_find_tracks_*` tests),
+//!    so this flag is the M2 acceptance experiment's switch, not a behaviour
+//!    change — see `docs/colmap_port_plan.md`'s "M2 results".
 //! 4. **Export.** The registered poses + merged multi-view tracks are written as
 //!    a COLMAP text model (`cameras.txt` / `images.txt` / `points3D.txt`),
 //!    ready for 3DGS / NeRF training.
@@ -80,7 +89,7 @@ use visloc_rs::vision::two_view::{
 use visloc_rs::{
     incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
     BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, FeatureSet, IncrementalSfmConfig,
-    Matcher, PairwiseMatches, Pose,
+    Matcher, PairwiseMatches, Pose, TrackSource,
 };
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
@@ -138,6 +147,24 @@ struct Args {
     colmap_style: bool,
     filter_images: bool,
     verification_mode: VerificationMode,
+    /// M2 A/B switch: which algorithm builds feature tracks from the verified
+    /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
+    /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
+    track_source: TrackSource,
+}
+
+/// Parse `--track-source`'s value into the M2 [`TrackSource`] A/B switch.
+/// `TrackSource` lives in `visloc-slam` and has no `FromStr` of its own (it's
+/// a plain engine config knob, not a CLI type), so this demo owns the string
+/// mapping.
+fn parse_track_source(s: &str) -> Result<TrackSource, String> {
+    match s {
+        "union-find" => Ok(TrackSource::UnionFind),
+        "graph" => Ok(TrackSource::CorrespondenceGraph),
+        other => Err(format!(
+            "unknown --track-source {other:?} (expected union-find|graph)"
+        )),
+    }
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -161,6 +188,7 @@ fn parse_args() -> Result<Args, String> {
     let mut colmap_style = false;
     let mut filter_images = false;
     let mut verification_mode = VerificationMode::Legacy;
+    let mut track_source = TrackSource::UnionFind;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -197,6 +225,7 @@ fn parse_args() -> Result<Args, String> {
             "--verification-mode" => {
                 verification_mode = a.remove(i + 1).parse().map_err(|e: String| e)?
             }
+            "--track-source" => track_source = parse_track_source(&a.remove(i + 1))?,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -234,6 +263,7 @@ fn parse_args() -> Result<Args, String> {
         colmap_style,
         filter_images,
         verification_mode,
+        track_source,
     })
 }
 
@@ -586,11 +616,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         colmap_style_mapper: args.colmap_style,
         filter_images: args.filter_images,
+        track_source: args.track_source,
         ..IncrementalSfmConfig::default()
     };
     let result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
     println!(
-        "reconstruction: {} / {} images registered, {} tracks, mean reproj {:.3} px",
+        "reconstruction ({}): {} / {} images registered, {} tracks, mean reproj {:.3} px",
+        match args.track_source {
+            TrackSource::UnionFind => "track-source=union-find",
+            TrackSource::CorrespondenceGraph => "track-source=graph",
+        },
         result.registered_images,
         features.len(),
         result.tracks.len(),

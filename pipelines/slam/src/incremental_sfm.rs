@@ -52,7 +52,9 @@ use visloc_vision::features::FeatureSet;
 use visloc_vision::pnp::{Correspondence2D3D, GaussNewtonPoseRefiner, P3PGrunert};
 use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 use visloc_vision::stereo_bootstrap::triangulate_two_view_left_frame;
-use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
+use visloc_vision::two_view::{
+    ConfigurationType, CorrespondenceGraph, RelativePoseEstimator, TwoViewCorrespondence,
+};
 
 use crate::{BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, RobustKernel};
 
@@ -217,6 +219,32 @@ pub struct IncrementalSfmConfig {
     /// Minimum well-supported observations an image must keep to stay registered
     /// under `filter_images`. Only consulted when `filter_images` is set.
     pub filter_min_image_observations: usize,
+    /// Which algorithm builds step 1's feature tracks from `pairwise`. See
+    /// [`TrackSource`]'s doc for the M2 background; `UnionFind` by default.
+    pub track_source: TrackSource,
+}
+
+/// Which algorithm builds step 1's feature tracks from `pairwise` — the M2
+/// port in `docs/colmap_port_plan.md` ("Persistent `CorrespondenceGraph`").
+/// [`Self::UnionFind`] is the original ad hoc union-find
+/// ([`build_tracks`]), kept as the default (see the M2 results section in
+/// that doc for the ETH3D A/B that motivated staying opt-in rather than
+/// flipping the default). [`Self::CorrespondenceGraph`] instead builds the
+/// same tracks by routing through
+/// `visloc_vision::two_view::correspondence_graph::CorrespondenceGraph`
+/// ([`build_tracks_via_graph`]) — COLMAP's persistent view-graph object,
+/// which also exposes `NumObservationsForImage`/`NumCorrespondencesForImage`/
+/// `ExtractTransitiveCorrespondences`-style queries the union-find has no way
+/// to answer, for future milestones (M4's transitive pairing, in particular).
+/// Both paths are proven to produce byte-identical tracks on this crate's
+/// existing fixtures (see the `graph_tracks_match_union_find_tracks_*` tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackSource {
+    /// The original ad hoc union-find over `(image, keypoint)` nodes.
+    #[default]
+    UnionFind,
+    /// COLMAP-style persistent [`CorrespondenceGraph`] (M2 port).
+    CorrespondenceGraph,
 }
 
 /// Minimal PnP solver used to register a new image against the reconstruction.
@@ -263,6 +291,7 @@ impl Default for IncrementalSfmConfig {
             refine_intrinsics: false,
             filter_images: false,
             filter_min_image_observations: 15,
+            track_source: TrackSource::default(),
         }
     }
 }
@@ -342,8 +371,13 @@ pub fn incremental_sfm(
 ) -> Result<IncrementalSfmResult, IncrementalSfmError> {
     let n_images = features.len();
 
-    // ---- 1. Build feature tracks via union-find over (image, keypoint) ----
-    let mut tracks = build_tracks(features.len(), pairwise, config.min_track_length);
+    // ---- 1. Build feature tracks (M2: union-find or CorrespondenceGraph) ----
+    let mut tracks = match config.track_source {
+        TrackSource::UnionFind => build_tracks(features.len(), pairwise, config.min_track_length),
+        TrackSource::CorrespondenceGraph => {
+            build_tracks_via_graph(features, pairwise, config.min_track_length)
+        }
+    };
 
     // For each image, which (keypoint, track) pairs it observes — drives both
     // triangulation and next-image selection.
@@ -608,6 +642,133 @@ fn build_tracks(
     // Deterministic track order (the grouping `HashMap` iterates in a random
     // order per run): a stable order makes landmark ids — and therefore the
     // whole incremental reconstruction — reproducible.
+    tracks.sort_unstable();
+    tracks
+}
+
+/// M2 port: build feature tracks by routing through a
+/// `visloc_vision::two_view::CorrespondenceGraph` instead of an ad hoc
+/// union-find (COLMAP's own `CorrespondenceGraph`, ported in
+/// `crates/vision/src/two_view/correspondence_graph.rs` — see that module's
+/// doc for full citations). Every `pairwise` entry is added via
+/// `CorrespondenceGraph::add_two_view_geometry`; this call site has no
+/// per-pair `ConfigurationType` available (that M1 classification, when it
+/// runs at all, is consumed upstream by the caller deciding which pairs make
+/// it into `pairwise` in the first place — see
+/// `examples/unordered_sfm_demo.rs`'s `verify_pairs` and the
+/// `correspondence_graph` module doc's "Degenerate-pair policy" section), so
+/// every edge is tagged with a placeholder [`ConfigurationType::Calibrated`]
+/// that this function never reads back.
+///
+/// Tracks are then exactly COLMAP's connected components: for every
+/// not-yet-visited `(image, keypoint)` observation, pull its **unbounded**
+/// transitive closure (`extract_transitive_correspondences(.., ..,
+/// usize::MAX)` — see that method's doc for why `usize::MAX` reproduces a
+/// full connected component rather than a `num_transitivity`-bounded
+/// neighbourhood) and apply the same same-image-conflict rejection and
+/// `min_track_length` gate [`build_tracks`] does. Because both algorithms
+/// partition the exact same node set by the exact same edge set into
+/// equivalence classes, and both sort observations within a track and tracks
+/// against each other identically, this produces **byte-identical**
+/// `Vec<Vec<(usize, usize)>>` output to [`build_tracks`] on any input — the
+/// M2 acceptance bar (`docs/colmap_port_plan.md`: "byte-identical tracks — a
+/// refactor gate, not an accuracy claim"). See the
+/// `graph_tracks_match_union_find_tracks_*` tests below.
+fn build_tracks_via_graph(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> Vec<Vec<(usize, usize)>> {
+    let mut graph = CorrespondenceGraph::new();
+    for (image_id, feature_set) in features.iter().enumerate() {
+        graph.add_image(image_id, feature_set.keypoints.len());
+    }
+
+    // `CorrespondenceGraph::add_two_view_geometry` — faithfully to COLMAP's
+    // own `THROW_CHECK(inserted)` — accepts a given unordered image pair only
+    // *once* (see that method's doc). The legacy union-find `build_tracks`
+    // has no such restriction: it just unions whatever `(image, keypoint)`
+    // pairs every `PairwiseMatches` entry hands it, in either direction,
+    // even if the same unordered pair appears more than once (e.g. a
+    // pathological/test input, or two independently-verified match sets for
+    // the same pair). To keep `build_tracks_via_graph` producing identical
+    // tracks on *any* such input, pre-merge every `pairwise` entry into one
+    // match list per unordered pair — normalizing direction to the pair's
+    // canonical `(min, max)` order — before a single `add_two_view_geometry`
+    // call per pair.
+    let mut merged: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
+    for pair in pairwise {
+        let key = (pair.image_i.min(pair.image_j), pair.image_i.max(pair.image_j));
+        let entry = merged.entry(key).or_default();
+        if pair.image_i <= pair.image_j {
+            entry.extend(pair.matches.iter().copied());
+        } else {
+            entry.extend(pair.matches.iter().map(|&(a, b)| (b, a)));
+        }
+    }
+    for (&(image_id1, image_id2), matches) in &merged {
+        // Ignore ingest errors: a self-pair (`image_i == image_j`) is a
+        // caller bug the legacy union-find path also has no defence against
+        // (it would silently union a node with itself, a no-op); dropping it
+        // here preserves the same "garbage in, best-effort out" behaviour
+        // rather than panicking.
+        let _ = graph.add_two_view_geometry(
+            image_id1,
+            image_id2,
+            matches,
+            ConfigurationType::Calibrated,
+        );
+    }
+    graph.finalize();
+
+    let mut visited: HashSet<(usize, usize)> = HashSet::new();
+    let mut tracks = Vec::new();
+    for (image_id, feature_set) in features.iter().enumerate() {
+        if !graph.exists_image(image_id) {
+            continue; // dropped by finalize: never received a correspondence
+        }
+        for point2d_idx in 0..feature_set.keypoints.len() {
+            if visited.contains(&(image_id, point2d_idx)) {
+                continue;
+            }
+            if !graph.has_correspondences(image_id, point2d_idx) {
+                visited.insert((image_id, point2d_idx));
+                continue;
+            }
+
+            let closure =
+                graph.extract_transitive_correspondences(image_id, point2d_idx, usize::MAX);
+            let mut obs: Vec<(usize, usize)> = closure
+                .iter()
+                .map(|c| (c.image_id, c.point2d_idx))
+                .collect();
+            obs.push((image_id, point2d_idx));
+            for &node in &obs {
+                visited.insert(node);
+            }
+
+            // Same conflict rule as `build_tracks`: two keypoints from the
+            // same image in one component means a bad match chain merged two
+            // distinct points — drop the whole track.
+            let mut images_seen: HashMap<usize, usize> = HashMap::new();
+            let mut conflict = false;
+            for &(image, _kp) in &obs {
+                let count = images_seen.entry(image).or_insert(0);
+                *count += 1;
+                if *count > 1 {
+                    conflict = true;
+                    break;
+                }
+            }
+            if conflict {
+                continue;
+            }
+            if images_seen.len() >= min_track_length {
+                obs.sort_unstable();
+                tracks.push(obs);
+            }
+        }
+    }
     tracks.sort_unstable();
     tracks
 }
@@ -1851,6 +2012,82 @@ mod tests {
         (features, pairwise)
     }
 
+    /// M2 acceptance test: on the same realistic multi-image synthetic scene
+    /// every other integration test in this module uses
+    /// (`build_scene`/`render` — a 45-point cloud seen by a 6-camera ring),
+    /// [`build_tracks_via_graph`] must produce **byte-identical** tracks to
+    /// the legacy [`build_tracks`] union-find — the refactor gate
+    /// `docs/colmap_port_plan.md`'s M2 milestone specifies ("byte-identical
+    /// tracks... a refactor gate, not an accuracy claim"), exercised here on
+    /// real transitive (multi-hop, multi-image) structure rather than the
+    /// small hand-built fixtures above.
+    #[test]
+    fn graph_tracks_match_union_find_tracks_on_synthetic_scene() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        assert!(
+            !pairwise.is_empty(),
+            "fixture sanity: the scene must produce at least one verified pair"
+        );
+
+        let union_find_tracks = build_tracks(features.len(), &pairwise, 2);
+        let graph_tracks = build_tracks_via_graph(&features, &pairwise, 2);
+        assert_eq!(
+            union_find_tracks, graph_tracks,
+            "CorrespondenceGraph-derived tracks must byte-match the legacy union-find's"
+        );
+        assert!(!union_find_tracks.is_empty(), "fixture sanity: some tracks must form");
+    }
+
+    /// M2 acceptance test, end-to-end: running the *full* `incremental_sfm`
+    /// pipeline with [`TrackSource::CorrespondenceGraph`] instead of the
+    /// default [`TrackSource::UnionFind`] on the same synthetic scene must
+    /// register the same images and produce the same track count and mean
+    /// reprojection error — i.e. the track-builder swap is invisible to
+    /// every downstream stage (seeding, growth, bundle adjustment).
+    #[test]
+    fn incremental_sfm_matches_between_track_sources() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+
+        let base_config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            ..IncrementalSfmConfig::default()
+        };
+        let union_find_config = IncrementalSfmConfig {
+            track_source: TrackSource::UnionFind,
+            ..base_config.clone()
+        };
+        let graph_config = IncrementalSfmConfig {
+            track_source: TrackSource::CorrespondenceGraph,
+            ..base_config
+        };
+
+        let union_find_result =
+            incremental_sfm(&scene.camera, &features, &pairwise, &union_find_config)
+                .expect("union-find track source must reconstruct this scene");
+        let graph_result = incremental_sfm(&scene.camera, &features, &pairwise, &graph_config)
+            .expect("CorrespondenceGraph track source must reconstruct this scene");
+
+        assert_eq!(
+            union_find_result.registered_images, graph_result.registered_images,
+            "both track sources must register the same number of images"
+        );
+        assert_eq!(
+            union_find_result.tracks.len(),
+            graph_result.tracks.len(),
+            "both track sources must produce the same number of output tracks"
+        );
+        assert!(
+            (union_find_result.mean_reprojection_px - graph_result.mean_reprojection_px).abs()
+                < 1.0e-6,
+            "both track sources must reach the same mean reprojection error: {} vs {}",
+            union_find_result.mean_reprojection_px,
+            graph_result.mean_reprojection_px,
+        );
+    }
+
     #[test]
     fn build_tracks_merges_shared_observations() {
         // Two images both see point P (kp 0 in each) and image-2 sees it too.
@@ -1887,6 +2124,90 @@ mod tests {
             },
         ];
         let tracks = build_tracks(2, &pairwise, 2);
+        assert!(tracks.is_empty(), "same-image conflict track is dropped");
+    }
+
+    /// Minimal `FeatureSet`s with `kp_counts[i]` dummy keypoints per image —
+    /// enough for `build_tracks_via_graph` to declare each image's point2D
+    /// capacity; keypoint/descriptor content is irrelevant to track building.
+    fn dummy_features(kp_counts: &[usize]) -> Vec<FeatureSet> {
+        kp_counts
+            .iter()
+            .map(|&n| {
+                let kps = vec![Point2::new(0.0, 0.0); n];
+                let descs = vec![vec![0.0f32; 4]; n];
+                FeatureSet::new(kps, descs).unwrap()
+            })
+            .collect()
+    }
+
+    /// M2: the [`TrackSource::CorrespondenceGraph`] path reproduces
+    /// [`build_tracks_merges_shared_observations`] exactly.
+    #[test]
+    fn graph_tracks_merges_shared_observations() {
+        let features = dummy_features(&[1, 1, 1]);
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 0)],
+            },
+            PairwiseMatches {
+                image_i: 1,
+                image_j: 2,
+                matches: vec![(0, 0)],
+            },
+        ];
+        let tracks = build_tracks_via_graph(&features, &pairwise, 2);
+        assert_eq!(tracks.len(), 1, "the chained matches form one track");
+        assert_eq!(tracks[0].len(), 3, "track spans all three images");
+    }
+
+    /// M2: the [`TrackSource::CorrespondenceGraph`] path reproduces
+    /// [`build_tracks_drops_same_image_conflict`] exactly — including the
+    /// repeated-pair-entry input shape that exercises this function's
+    /// pre-merge step (see `build_tracks_via_graph`'s doc).
+    #[test]
+    fn graph_tracks_drops_same_image_conflict() {
+        let features = dummy_features(&[2, 2]);
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 0)],
+            },
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 1)],
+            },
+        ];
+        let tracks = build_tracks_via_graph(&features, &pairwise, 2);
+        assert!(tracks.is_empty(), "same-image conflict track is dropped");
+    }
+
+    /// M2 acceptance bar: on a repeated-pair input in *swapped* direction
+    /// (`(1, 0)` instead of `(0, 1)`), the graph path's pre-merge
+    /// canonicalization must still see both entries as the same unordered
+    /// pair and produce the identical conflict-drop as
+    /// [`graph_tracks_drops_same_image_conflict`] — proving the merge step
+    /// doesn't silently drop the second entry via `DuplicatePair`.
+    #[test]
+    fn graph_tracks_drops_same_image_conflict_with_swapped_pair_direction() {
+        let features = dummy_features(&[2, 2]);
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 0)],
+            },
+            PairwiseMatches {
+                image_i: 1,
+                image_j: 0,
+                matches: vec![(1, 0)], // (kp1 in image1, kp0 in image0)
+            },
+        ];
+        let tracks = build_tracks_via_graph(&features, &pairwise, 2);
         assert!(tracks.is_empty(), "same-image conflict track is dropped");
     }
 

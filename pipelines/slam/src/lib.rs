@@ -29,7 +29,7 @@ pub use covisibility_ba::{
 pub mod incremental_sfm;
 pub use incremental_sfm::{
     incremental_sfm, IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult,
-    PairwiseMatches, SfmTrack,
+    PairwiseMatches, SfmTrack, TrackSource,
 };
 
 pub mod imu_preintegration;

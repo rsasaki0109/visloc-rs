@@ -747,3 +747,315 @@ threshold, since the threshold alone is harmful on 1 of the 3 scenes tested.
   on this branch, consistent with M1's own note about `dpvo_*`/`pipelines/
   slam` files being mid-edit throughout this session. None of the reported
   lints are in this task's touched files.
+
+## M2 results (implemented 2026-07-17)
+
+### Files changed
+
+- `crates/vision/src/two_view/correspondence_graph.rs` (new) — `Correspondence`,
+  `EdgeMetadata`, `IngestStats`, `CorrespondenceGraphError`,
+  `CorrespondenceGraph` (`add_image`/`add_two_view_geometry`/`finalize`/
+  `find_correspondences`/`extract_correspondences`/
+  `extract_transitive_correspondences`/`num_observations_for_image`/
+  `num_correspondences_for_image`/`num_matches_between_images`/
+  `num_matches_between_all_images`/`image_pairs`/`is_two_view_observation`/
+  `edge`/`update_edge_config`). Port of
+  `src/colmap/scene/correspondence_graph.{h,cc}`. 12 unit tests, including
+  direct ports of `correspondence_graph_test.cc`'s `Empty`/`TwoView`
+  (finalized + not-finalized)/`ThreeView` (finalized + not-finalized)/
+  `OutOfBounds`/`Duplicate`/`UpdateTwoViewGeometry` cases, plus new tests for
+  this port's own deviations (self-match rejection, duplicate-pair rejection,
+  finalize's image-dropping, and a 4-image-chain transitivity-bound test).
+- `crates/vision/src/two_view/mod.rs` — wired the new submodule in,
+  re-exported its public types, and extended the module doc to describe the
+  three-tier `two_view` module (classical essential-only /
+  `colmap_verification` / `correspondence_graph`).
+- `pipelines/slam/src/incremental_sfm.rs` — added `TrackSource` (`UnionFind`
+  default, `CorrespondenceGraph`) and `IncrementalSfmConfig::track_source`;
+  added `build_tracks_via_graph`, the M2 replacement for the ad hoc
+  union-find (`build_tracks`, untouched, stays the default code path); wired
+  `incremental_sfm()`'s step 1 to dispatch on `config.track_source`. 5 new
+  unit/integration tests: two direct ports of the existing
+  `build_tracks_merges_shared_observations`/`build_tracks_drops_same_image_
+  conflict` fixtures onto the graph path, one swapped-pair-direction variant
+  of the conflict test (exercises this function's pair-direction-
+  normalizing pre-merge step), and two full end-to-end acceptance tests on
+  the module's existing 6-camera/45-point synthetic scene fixture:
+  `graph_tracks_match_union_find_tracks_on_synthetic_scene` (byte-identical
+  `Vec<Vec<(usize,usize)>>` tracks) and
+  `incremental_sfm_matches_between_track_sources` (byte-identical registered
+  count / track count / mean reprojection error running the *full* pipeline
+  under both `TrackSource` values).
+- `pipelines/slam/src/lib.rs`, `src/lib.rs` — re-exported `TrackSource`.
+- `examples/unordered_sfm_demo.rs` — new `--track-source union-find|graph`
+  flag (default `union-find`, byte-identical to pre-M2 behaviour), wired to
+  `IncrementalSfmConfig::track_source`; the `reconstruction: ...` summary
+  line now echoes which track source ran, for the acceptance experiment's
+  logs.
+
+No new dependencies. `pipelines/slam/src/{dpvo_vo,dpvo_vi_ba}.rs`,
+`map_atlas.rs` not touched (concurrent DPVO work, confirmed still under
+active edit throughout this session — see "Verify" below).
+
+### Ported-semantics table (COLMAP source citations)
+
+Ported from `src/colmap/scene/correspondence_graph.{h,cc}` (BSD-3-Clause,
+ETH Zurich / UNC Chapel Hill, `main` branch, fetched 2026-07-17) and
+`src/colmap/scene/database_cache.cc` (same license) for the degenerate-pair
+call-site policy.
+
+| COLMAP concept | Source | This port |
+|---|---|---|
+| `Correspondence{image_id, point2D_idx}` | `correspondence_graph.h:47-58` | [`Correspondence`] struct, identical fields |
+| `AddImage` | `.h:103`, `.cc:94-98` | `CorrespondenceGraph::add_image` — panics if re-added (COLMAP `THROW_CHECK`s) |
+| `AddTwoViewGeometry` (ingest, dedupe, bounds-check) | `.h:109-111`, `.cc:100-201` | `add_two_view_geometry` — same three drop cases (self-match, out-of-bounds, duplicate); COLMAP's `LOG(WARNING)` per drop becomes an [`IngestStats`] tally instead (no logging dependency in this crate) |
+| `FindCorrespondences`/`ExtractCorrespondences` | `.cc:203-228` | `find_correspondences` (slice, not a raw pointer range) / `extract_correspondences` (owned `Vec`) |
+| `ExtractTransitiveCorrespondences` (BFS, level-bounded) | `.cc:230-291` | `extract_transitive_correspondences`, same level-by-level BFS and swap-remove-the-seed finish; `transitivity == 1` alias and `usize::MAX` "unbounded closure" both preserved |
+| `NumObservationsForImage`/`NumCorrespondencesForImage`/`NumMatchesBetweenImages`/`NumMatchesBetweenAllImages`/`ImagePairs` | `.h:82-100`, `.cc:38-55, 216-245` | direct equivalents, same semantics (0 for a never-added pair, panic — COLMAP: throw — for a never-added image) |
+| `IsTwoViewObservation` | `.h:157`, `.cc:354-363` | `is_two_view_observation`, identical predicate |
+| `Finalize` (flatten `corrs`→`flat_corrs`/`flat_corr_begs`) | `.h:68-74`, `.cc:57-92` | `finalize`, same flattening; **documented discrepancy**: this port also drops zero-observation images per the header comment's claim and this task's explicit "drop images without correspondences" instruction — the current `.cc` body does *not* actually do this despite its own header saying so (verified by reading the fetched `.cc` directly) |
+| `AddTwoViewGeometry` does **not** gate by `ConfigurationType`/`config`; the caller decides | `correspondence_graph.cc` has no config branch at all | `add_two_view_geometry` likewise takes `config: ConfigurationType` as pure edge metadata, never consulted for gating |
+| Degenerate-pair policy actually lives in `UseInlierMatchesCheck` (`min_num_matches`, optional `!= WATERMARK`) | `database_cache.cc:40-46, 284-300` | Same split honored: `examples/unordered_sfm_demo.rs`'s `verify_pairs` is the call site that decides which pairs reach `PairwiseMatches`/the graph at all (unchanged by M2) |
+| `ExtractTwoViewGeometry`/`UpdateTwoViewGeometry`'s direction-aware `Invert()`/`ShouldSwapImagePair` | `.cc:100-201 (196-201)`, `322-352` | **Not ported** — `edge()`/`update_edge_config()` are order-insensitive; see the module doc for why (no caller needs direction-consistent E/F/H/pose data yet — `incremental_sfm`'s seed placement always recomputes its own relative pose from raw correspondences) |
+
+### Degenerate-pair policy verification (M2 scope item 3)
+
+Confirmed by reading `database_cache.cc:40-46` directly (`UseInlierMatchesCheck`):
+COLMAP's own gate is `num_matches >= min_num_matches && (!ignore_watermarks ||
+config != WATERMARK)` — **not** a `ConfigurationType`-based allow-list.
+`DEGENERATE` pairs contribute nothing not because of an explicit check but
+because [`TwoViewGeometryVerifier`] (M1) always returns an **empty** inlier
+list for `DEGENERATE` (`colmap_verification.rs`'s `degenerate_report()`) — the
+same reason COLMAP's own degenerate branch never populates `inlier_matches`.
+`PLANAR`/`PANORAMIC`/`PLANAR_OR_PANORAMIC` pairs are **not** excluded by
+COLMAP's real gate and so *do* contribute their homography inliers in real
+COLMAP. This repo's current wiring
+(`examples/unordered_sfm_demo.rs`'s `verify_pairs` keep-list: `Calibrated |
+Uncalibrated | Planar | Multiple`) is **stricter than COLMAP** — it drops
+`Panoramic` (and unresolved `PlanarOrPanoramic`) before a `PairwiseMatches`
+list, let alone the graph, ever sees them. This milestone deliberately does
+**not** loosen that keep-list: doing so would change *which pairs reach
+`PairwiseMatches` at all* (an M1.1-adjacent lever), confounding the M2
+accuracy A/B, which is scoped to *which algorithm builds tracks from a fixed
+`pairwise` input*. Flagged as a follow-up (see "Blockers for M3" below).
+
+### Integration: default chosen, and why
+
+`IncrementalSfmConfig::track_source` defaults to `TrackSource::UnionFind`
+(the pre-M2 code path, byte-for-byte unchanged — `build_tracks` itself was
+not modified). `TrackSource::CorrespondenceGraph` is opt-in via
+`--track-source graph`. This is the **"default legacy, flag opt-in"** branch
+of the milestone's own instructions ("behind a config flag defaulting to the
+NEW path only if you can show byte-equivalent-or-better acceptance numbers;
+otherwise default legacy and flag opt-in"): the acceptance run below shows
+byte-**equivalent** (not better) numbers on every one of the three ETH3D
+scenes, so there is no accuracy case for flipping the default, and flipping
+it would add risk (a new, less-battle-tested code path becoming load-bearing)
+for zero measured benefit today. The value of `CorrespondenceGraph` today is
+architectural, not accuracy: a queryable, reusable structure
+(`NumObservationsForImage`/`NumCorrespondencesForImage`/
+`ExtractTransitiveCorrespondences`) that M4's vocab-tree/transitive-pairing
+milestone and any future bounded-transitivity track experiment can build on,
+which the union-find fundamentally cannot expose.
+
+### Acceptance experiment (ETH3D, legacy tracks vs. graph tracks)
+
+Ran `terrace`/`courtyard`/`office` at `verification-mode=full` (M1's
+`TwoViewGeometryVerifier`, `--colmap-style` mapper) × `{--track-source
+union-find, --track-source graph}`, using the *same* cached SuperPoint
+features and per-scene pinhole intrinsics read directly from each scene's own
+`dslr_calibration_undistorted/cameras.txt` (terrace: camera 0, 6205×4136,
+fx=3412.13 fy=3409.71 cx=3114.27 cy=2060.02 — matching M1's own reproduce
+block; courtyard: camera 3, 6208×4134, fx=3408.35 fy=3408.8 cx=3114.7
+cy=2070.92 — the camera whose dimensions match the demo's own `camera WxH`
+log line; office: camera 0, 6221×4146, fx=3437.84 fy=3435.95 cx=3127.19
+cy=2066.98), `--retrieval-topk 12 --min-matches 30`. Outputs, logs, and the
+Sim(3) scorer's output for every run: `E:/visloc_archive/colmap_m2_20260717/`.
+
+**Build note.** The real working tree's `pipelines/slam/src/{dpvo_vo,
+dpvo_vi_ba}.rs` were mid-edit by concurrent, unrelated DPVO work throughout
+this session (confirmed: `cargo check -p visloc-slam --lib` and `cargo build
+--release --example unordered_sfm_demo --features image-io,onnx-inference`
+both intermittently failed to compile with `dpvo_vo.rs`/`dpvo_vi_ba.rs`
+errors — e.g. `no field imu_rejection_counts on type DpvoOdometry` —
+depending on exactly when the other agent's next edit landed relative to the
+build; `dpvo_vo.rs` is gated behind the `onnx-inference` feature the demo
+binary requires, so this was a hard, unavoidable block on the release build
+specifically, not the milder "one unrelated example fails" case M1/M1.1
+documented). To get a reproducible, honest acceptance run without touching
+any file this task was told not to touch (or the actual repository's git
+state at all), the release build and every acceptance run below were
+executed against a **read-only `git archive HEAD` snapshot** extracted to a
+scratch directory (`git archive` never touches the working tree or `.git`),
+with this task's own changed files copied on top of that clean snapshot. HEAD
+(`43519b2`, the M1.1 commit) predates the concurrent DPVO working-tree edits
+entirely, so its `dpvo_vo.rs`/`dpvo_vi_ba.rs` compiled cleanly; the resulting
+binary is otherwise identical to what building in the real working tree
+would produce once the concurrent DPVO edits are either committed or
+reverted. This is disclosed in full rather than silently worked around.
+
+**Registered images (byte-identical between track sources on all three
+scenes — union-find and graph columns are the same run, split only to show
+the A/B explicitly):**
+
+| scene | union-find | graph |
+|---|---:|---:|
+| terrace (23) | 23 / 23 | 23 / 23 |
+| courtyard (38) | 14 / 38 | 14 / 38 |
+| office (26) | 18 / 26 | 18 / 26 |
+
+**Tracks / mean reprojection error (byte-identical):**
+
+| scene | union-find tracks | graph tracks | union-find mean px | graph mean px |
+|---|---:|---:|---:|---:|
+| terrace | 3845 | 3845 | 1.518 | 1.518 |
+| courtyard | 3098 | 3098 | 1.576 | 1.576 |
+| office | 1210 | 1210 | 1.493 | 1.493 |
+
+**Full registered-set Sim(3) RMSE vs ETH3D laser-scan GT (byte-identical),
+and the M1.1 "full" column for reference:**
+
+| scene | M1.1 "full" (2026-07-17) | union-find (this run) | graph (this run) |
+|---|---:|---:|---:|
+| terrace | 1.39 cm | 1.39 cm | 1.39 cm |
+| courtyard | 3.75 cm | 3.75 cm | 3.75 cm |
+| office | 0.50 cm | 0.50 cm | 0.50 cm |
+
+**Common-subset Sim(3) RMSE** (same common-subset GT files M1/M1.1 built —
+`E:/visloc_archive/colmap_m1_20260717/{terrace_gt_common8,
+courtyard_gt_common23}.txt` — reused verbatim; office has no common-subset
+row, as in M1/M1.1, since COLMAP registered its full 26/26 there):
+
+| scene (common N) | M1.1 "full" | union-find (this run) | graph (this run) |
+|---|---:|---:|---:|
+| terrace (8) | 0.93 cm | 0.93 cm | 0.93 cm |
+| courtyard (8) | 0.25 cm | 0.25 cm | 0.25 cm |
+
+**Result: no regression, and no accuracy gain either — an honest null,
+exactly matching the milestone's own "byte-identical tracks — a refactor
+gate, not an accuracy claim" framing.** Every registered-image count, track
+count, mean reprojection error, and Sim(3) RMSE (full-set and common-subset)
+is identical to the last measurable digit between `--track-source
+union-find` and `--track-source graph`, on all three ETH3D scenes, and also
+reproduces M1.1's own "full" numbers exactly — confirming this is a
+behaviour-preserving refactor on real data, not just the synthetic-scene unit
+tests in `incremental_sfm.rs`. The null accuracy result is expected, not a
+shortfall: both track builders compute the **same unbounded transitive
+closure** over the **same edge set** (`pairwise`, unchanged by this
+milestone), so they are mathematically guaranteed to partition
+`(image, keypoint)` nodes into the same equivalence classes — no new tracks
+can appear until either (a) the edge set itself changes (the deferred
+`Panoramic`-inclusion lever noted above) or (b) a *bounded* transitivity
+level is used deliberately instead of the union-find-equivalent full closure
+(a genuinely different milestone: trading track completeness for track
+purity/speed at scale, relevant once M4's vocab-tree makes thousands-of-image
+collections and `TransitivePairGenerator`-style pairing plausible).
+
+**Reproduce** (camera intrinsics per scene from that scene's own
+`dslr_calibration_undistorted/cameras.txt`, matching the "camera WxH" line
+each run's log prints):
+
+```sh
+./target/release/examples/unordered_sfm_demo.exe \
+    --features-dir E:/datasets/eth3d/battle/terrace/visloc_run/features \
+    --feature-suffix _features.txt --image-suffix .JPG \
+    --width 6205 --height 4136 --fx 3412.13 --fy 3409.71 --cx 3114.27 --cy 2060.02 \
+    --retrieval-topk 12 --min-matches 30 --colmap-style \
+    --verification-mode full --track-source graph \
+    --out-colmap /tmp/terrace_graph
+python scripts/compare_sfm_sim3.py \
+    E:/datasets/eth3d/terrace/dslr_calibration_undistorted/images.txt \
+    /tmp/terrace_graph/images.txt
+```
+
+### Verify (verbatim)
+
+- `cargo test -p visloc-vision`: **145 passed, 0 failed** (12 new
+  `correspondence_graph` tests; all 133 pre-existing tests, including M1/M1.1's
+  `colmap_verification`/`two_view` suites, unmodified and green).
+- `cargo test -p visloc-slam --lib incremental_sfm::`: **19 passed, 0 failed**
+  (5 new M2 tests — `graph_tracks_merges_shared_observations`,
+  `graph_tracks_drops_same_image_conflict`,
+  `graph_tracks_drops_same_image_conflict_with_swapped_pair_direction`,
+  `graph_tracks_match_union_find_tracks_on_synthetic_scene`,
+  `incremental_sfm_matches_between_track_sources` — plus all 14 pre-existing
+  `incremental_sfm` tests unmodified and green).
+- `cargo test -p visloc-slam --lib` (whole crate, real working tree, run at a
+  moment the concurrent DPVO edits happened to compile): **312 passed, 0
+  failed, 6 ignored** — no regressions anywhere in the crate.
+- `cargo check --workspace --lib --bins --features image-io,onnx-inference`:
+  **intermittently failed** in the real working tree throughout most of this
+  session, depending on the concurrent DPVO agent's in-flight edit state at
+  the exact moment the check ran (see the acceptance experiment's "Build
+  note" above for the full disclosure and the git-archive-snapshot workaround
+  used for the release build). By the end of the session the concurrent
+  edits had stabilized and this check passed cleanly (exit 0) in the real
+  working tree, unmodified from that snapshot workaround. `cargo check -p
+  visloc-vision --lib`: clean throughout. `cargo check -p visloc-slam --lib`
+  (default features, `onnx-inference` off — `dpvo_vo.rs` is
+  `#![cfg(feature = "onnx-inference")]`-gated so this excludes the
+  most-frequently-broken file entirely): clean, 1 pre-existing warning
+  (`dpvo_vi_ba::imu_factor_nis` dead-code) at every check performed, whether
+  the full workspace check happened to pass or not at that moment.
+- `cargo clippy -p visloc-vision --all-targets -- -D warnings`: clean, zero
+  warnings. `cargo clippy -p visloc-slam --lib -- -D warnings`, run both in
+  the git-archive snapshot and, once the tree stabilized, in the real working
+  tree (same result both times): 6-7 pre-existing warnings (count varies
+  slightly with the concurrent DPVO edit state), all in untouched
+  `pipelines/slam/src/{dpvo_vi_ba,map_atlas,online_slam_vi_ba,
+  vi_motion_initializer,online_slam_motion_vi_init}.rs` (`dead_code`,
+  `too_many_arguments`, `unnecessary closure used with bool::then`,
+  `contains_key` + `insert`, `manual_clamp`, `neg_cmp_op_on_partial_ord`,
+  `large_enum_variant`) — none in `incremental_sfm.rs` or the new
+  `correspondence_graph.rs`, confirmed both times.
+- Release build: `cargo build --release --example unordered_sfm_demo
+  --features image-io,onnx-inference` — clean, in the git-archive snapshot
+  described above. Used directly for the acceptance run.
+
+### Blockers for M4 (vocab-tree)
+
+- **The `Panoramic`-inclusion gap identified above is real and unclaimed.**
+  Real COLMAP's `UseInlierMatchesCheck` lets `PANORAMIC`/`PLANAR_OR_PANORAMIC`
+  pairs contribute correspondences to the graph; this repo's
+  `verify_pairs` keep-list still excludes them (M1's own choice, unchanged by
+  M2). Since `ExtractTransitiveCorrespondences`/`build_tracks_via_graph` can
+  now only ever be as complete as the edge set it's given, this is the
+  concrete, actionable next step toward a case where the graph produces
+  **more** tracks than the union-find ever could on the current wiring — not
+  because the algorithms differ, but because the input would. Should be
+  paired with an ablation isolating its accuracy effect (a Panoramic pair's
+  correspondences help connectivity but its own two-view geometry has no
+  triangulatable baseline, so it should only ever help — never directly
+  seed — a reconstruction).
+- **Bounded transitivity is unexplored.** This milestone's
+  `build_tracks_via_graph` intentionally used `extract_transitive_
+  correspondences(.., usize::MAX)` (unbounded closure) to guarantee the
+  byte-identical acceptance bar. COLMAP's own `num_transitivity` parameter
+  exists precisely because an unbounded closure over a large, densely
+  connected view graph (thousands of images, M4's actual scale target) can
+  produce enormous, weakly-supported tracks; a bounded-transitivity mode is
+  a natural M4-adjacent follow-up once thousands-of-image collections are
+  in scope, trading track completeness for track purity and BA cost.
+- **`TransitivePairGenerator`-equivalent pairing.** M4's plan already names
+  this: COLMAP uses the *same* transitive-closure primitive this milestone
+  ported, but at the *pair* level (propose new candidate pairs from
+  already-verified ones) rather than the *point* level (build tracks). The
+  graph this milestone shipped is the correct foundation for that — no
+  further graph-side work should be needed, only a new pair-generator
+  function consuming `CorrespondenceGraph::image_pairs`/
+  `num_matches_between_images`.
+- **Direction-aware edge geometry remains unported.** `edge()`/
+  `update_edge_config()` are order-insensitive because no current caller
+  needs a direction-consistent relative pose from the graph (`incremental_sfm`
+  recomputes its own). If a future milestone wants the graph to be the single
+  source of truth for per-pair relative poses (e.g. to skip re-estimating a
+  seed pair's pose at grow time), COLMAP's `Invert()`/`ShouldSwapImagePair`
+  bookkeeping (`correspondence_graph.cc:196-201, 322-352`) would need to be
+  ported at that point — deliberately deferred here, per the module doc.
+- **The concurrent-edit build fragility observed this session is worth a
+  process note**, not a code fix: `dpvo_vo.rs` being `onnx-inference`-gated
+  meant a single unrelated in-progress file blocked the *only* buildable
+  path to this milestone's own acceptance experiment (the demo binary needs
+  that feature for SuperPoint I/O). The `git archive HEAD` snapshot approach
+  used here is a reasonable one-off; a standing `worktree`-based or CI-gated
+  build lane would remove the need to improvise it next time.
