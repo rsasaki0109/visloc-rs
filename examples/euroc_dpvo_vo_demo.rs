@@ -155,6 +155,30 @@
 //! (accepted or not) this run ever surfaced to
 //! `<out-dir>/long_loop_candidates.csv` — the M11 open item 2 instrumentation
 //! (was the tightest GT revisit ever even surfaced as a candidate?).
+//!
+//! # `--hover-freeze` (Milestone M14, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Enables `DpvoOdometryConfig::low_parallax` — a causal, hysteresis-gated
+//! detector for a sustained near-zero-parallax ("hover") regime that
+//! freezes new-patch admission and patch/edge aging for its duration; see
+//! `pipelines/slam/src/dpvo_vo.rs`'s module doc, "Low-parallax hover
+//! freeze", for the full mechanism and the M13 finding it answers (MH_01's
+//! own genuine ~24s near-total-stillness hover mid-sequence, whose
+//! surviving ~9% of frames commit unconstrained-depth patches that BA later
+//! has nothing old enough left to out-vote). Off by default — omitting the
+//! flag reproduces M4-M13's exact behavior byte-for-byte (the detector is
+//! never even evaluated). `--hover-window`/`--hover-enter-flow`/
+//! `--hover-exit-flow` mirror `DpvoLowParallaxConfig`'s own fields 1:1 (a
+//! rolling-window MEDIAN design, not a raw consecutive-frame streak — see
+//! `dpvo_vo.rs`'s own module doc for why, and its own one-shot "disarms
+//! after the first exit" limitation). The summary echoes
+//! `hover_freeze_enabled`/`hover_regime_active`/`hover_times_entered`/
+//! `hover_times_exited`/`hover_frames_suppressed_total`/`hover_disarmed`/
+//! `hover_last_flow` alongside the usual ATE numbers, and every periodic
+//! progress line reports the same running counters. `<out-dir>/hover_flow_trace.csv`
+//! records every evaluated frame's own flow value + regime state — the
+//! acceptance evidence for "did this fire at the right place, for the
+//! right duration."
 
 use std::env;
 use std::fs;
@@ -169,7 +193,8 @@ use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, Euroc
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::{DpvoPatchGraph, DpvoVoConfig};
 use visloc_rs::slam::dpvo_vo::{
-    DpvoGlobalBaConfig, DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
+    DpvoGlobalBaConfig, DpvoImuConfig, DpvoLowParallaxConfig, DpvoOdometry, DpvoOdometryConfig,
+    DpvoScaleCouplingConfig,
 };
 use visloc_rs::slam::{
     DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel,
@@ -325,6 +350,16 @@ struct CliArgs {
     /// mirrored 1:1 — the physical-consistency gate added after a real 800f
     /// corruption run (see `docs/dpvo_droid_port_plan.md`'s "M12 results").
     ll_max_rotation_inconsistency_deg: f64,
+    /// Milestone M14 (`docs/dpvo_droid_port_plan.md`): enable the
+    /// low-parallax ("hover") freeze (`DpvoOdometryConfig::low_parallax`).
+    /// Default off — every prior milestone's behavior unaffected (the
+    /// detector is never even evaluated).
+    hover_freeze: bool,
+    /// Milestone M14: `DpvoLowParallaxConfig`'s own fields, mirrored 1:1 —
+    /// see that struct's own doc for what each gates.
+    hover_window: usize,
+    hover_enter_flow: f64,
+    hover_exit_flow: f64,
 }
 
 impl Default for CliArgs {
@@ -417,6 +452,12 @@ impl Default for CliArgs {
             ll_sp_anchored_patches: DpvoLongLoopConfig::default().sp_anchored_patches,
             ll_sp_patch_min_separation: DpvoLongLoopConfig::default().sp_patch_min_separation,
             ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default().max_rotation_inconsistency_deg,
+            hover_freeze: false,
+            // Mirror `DpvoLowParallaxConfig::default()` exactly so omitting
+            // these flags reproduces that struct's own defaults.
+            hover_window: DpvoLowParallaxConfig::default().window,
+            hover_enter_flow: DpvoLowParallaxConfig::default().enter_flow,
+            hover_exit_flow: DpvoLowParallaxConfig::default().exit_flow,
         }
     }
 }
@@ -546,6 +587,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--ll-sp-patch-min-separation" => args.ll_sp_patch_min_separation = raw.remove(i + 1).parse()?,
             "--ll-max-rotation-inconsistency-deg" => args.ll_max_rotation_inconsistency_deg = raw.remove(i + 1).parse()?,
+            "--hover-freeze" => {
+                args.hover_freeze = true;
+                raw.remove(i);
+                continue;
+            }
+            "--hover-window" => args.hover_window = raw.remove(i + 1).parse()?,
+            "--hover-enter-flow" => args.hover_enter_flow = raw.remove(i + 1).parse()?,
+            "--hover-exit-flow" => args.hover_exit_flow = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -796,6 +845,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_rotation_inconsistency_deg: args.ll_max_rotation_inconsistency_deg,
             ..DpvoLongLoopConfig::default()
         }),
+        // Milestone M14 (`docs/dpvo_droid_port_plan.md`): `--hover-freeze`
+        // enables the low-parallax hover freeze; omitting it reproduces
+        // M4-M13's exact behavior byte-for-byte (`low_parallax: None`, the
+        // detector never evaluated at all).
+        low_parallax: args.hover_freeze.then_some(DpvoLowParallaxConfig {
+            window: args.hover_window,
+            enter_flow: args.hover_enter_flow,
+            exit_flow: args.hover_exit_flow,
+        }),
     };
 
     if args.loop_closure {
@@ -857,6 +915,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.ll_sp_anchored_patches,
             args.ll_sp_patch_min_separation,
             args.ll_max_rotation_inconsistency_deg,
+        );
+    }
+
+    if args.hover_freeze {
+        println!(
+            "hover freeze enabled (Milestone M14): window={} enter_flow={:.3} exit_flow={:.3}",
+            args.hover_window, args.hover_enter_flow, args.hover_exit_flow,
         );
     }
 
@@ -1243,6 +1308,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s3b_diag.total_elapsed_ms,
                 );
             }
+            if args.hover_freeze {
+                let hf_diag = odometry.low_parallax_diagnostics();
+                println!(
+                    "  hover_regime_active={} hover_times_entered={} hover_times_exited={} \
+                     hover_frames_suppressed_total={} hover_disarmed={} hover_last_flow={:.4}",
+                    hf_diag.regime_active,
+                    hf_diag.times_entered,
+                    hf_diag.times_exited,
+                    hf_diag.frames_suppressed_total,
+                    hf_diag.disarmed,
+                    hf_diag.last_flow,
+                );
+            }
         }
     }
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
@@ -1330,6 +1408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gba_diag = odometry.global_ba_diagnostics();
     let s3b_diag = odometry.sim3_backend_diagnostics();
     let ll_diag = odometry.long_loop_diagnostics();
+    let hf_diag = odometry.low_parallax_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -1455,7 +1534,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          long_loop_sp_anchored_patches={ll_sp_anchored}\n\
          long_loop_sp_patch_min_separation={ll_sp_min_separation:.2}\n\
          long_loop_max_rotation_inconsistency_deg={ll_max_rot_inconsistency:.1}\n\
-         long_loop_query_log_entries={ll_query_log_len}\n",
+         long_loop_query_log_entries={ll_query_log_len}\n\
+         hover_freeze_enabled={hf_enabled}\n\
+         hover_regime_active={hf_regime_active}\n\
+         hover_times_entered={hf_times_entered}\n\
+         hover_times_exited={hf_times_exited}\n\
+         hover_frames_suppressed_total={hf_frames_suppressed}\n\
+         hover_disarmed={hf_disarmed}\n\
+         hover_last_flow={hf_last_flow:.6}\n\
+         hover_last_enter_frame={hf_last_enter_frame}\n\
+         hover_last_exit_frame={hf_last_exit_frame}\n\
+         hover_window={hf_window}\n\
+         hover_enter_flow={hf_enter_flow:.4}\n\
+         hover_exit_flow={hf_exit_flow:.4}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1574,6 +1665,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ll_sp_min_separation = args.ll_sp_patch_min_separation,
         ll_max_rot_inconsistency = args.ll_max_rotation_inconsistency_deg,
         ll_query_log_len = odometry.long_loop_query_log().len(),
+        hf_enabled = hf_diag.enabled,
+        hf_regime_active = hf_diag.regime_active,
+        hf_times_entered = hf_diag.times_entered,
+        hf_times_exited = hf_diag.times_exited,
+        hf_frames_suppressed = hf_diag.frames_suppressed_total,
+        hf_disarmed = hf_diag.disarmed,
+        hf_last_flow = hf_diag.last_flow,
+        hf_last_enter_frame = hf_diag.last_enter_frame.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string()),
+        hf_last_exit_frame = hf_diag.last_exit_frame.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string()),
+        hf_window = args.hover_window,
+        hf_enter_flow = args.hover_enter_flow,
+        hf_exit_flow = args.hover_exit_flow,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
@@ -1598,6 +1701,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
         fs::write(&csv_path, &csv)?;
         println!("wrote {} long-range candidate log entries to {}", query_log.len(), csv_path.display());
+    }
+
+    // Milestone M14: dump every frame the low-parallax detector was
+    // evaluated on — the acceptance evidence for "did the regime enter/exit
+    // at the right place, for the right duration" (fed straight into
+    // `m13_scale_profile.py`-style profiling alongside the trajectory CSV).
+    if args.hover_freeze {
+        let flow_log = odometry.low_parallax_flow_log();
+        let mut csv = String::from("frames_processed,flow,regime_active\n");
+        for &(frame, flow, active) in flow_log {
+            csv.push_str(&format!("{frame},{flow:.6},{active}\n"));
+        }
+        let csv_path = args.out_dir.join("hover_flow_trace.csv");
+        fs::write(&csv_path, &csv)?;
+        println!("wrote {} hover flow-trace entries to {}", flow_log.len(), csv_path.display());
     }
 
     println!("wrote {} and summary.txt to {}", traj_path.display(), args.out_dir.display());

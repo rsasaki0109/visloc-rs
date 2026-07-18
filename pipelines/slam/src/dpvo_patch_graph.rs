@@ -1453,6 +1453,60 @@ mod tests {
         assert_eq!(reconstructed, Some(SE3::identity()));
     }
 
+    /// Milestone M14: this is the structural property the low-parallax
+    /// ("hover") freeze in `crate::dpvo_vo::DpvoOdometry::low_parallax_gate`
+    /// relies on — repeatedly calling `begin_frame` + `reject_pending_frame`
+    /// (with NO `commit_frame`/`keyframe`/`keyframe_with_loop_protection`
+    /// call interleaved, exactly how a suppressed low-parallax candidate is
+    /// handled) leaves `frames()`/`patches()`/`edges()` byte-for-byte
+    /// untouched no matter how many "hover" frames are suppressed in a row:
+    /// `n_frames()` never advances (nothing is ever admitted via
+    /// `commit_frame`), so the removal-window aging check inside
+    /// `keyframe_inner` — which only ever runs from a
+    /// `keyframe()`/`keyframe_with_loop_protection()` call, never from
+    /// `reject_pending_frame` — never gets a chance to purge a pre-hover
+    /// patch's active edges either. This is exactly "freezing patch
+    /// aging/lifetime and window advancement" (see `crate::dpvo_vo`'s
+    /// module doc, "Low-parallax hover freeze"): it falls out of simply not
+    /// calling `commit_frame`, with no new suppression flag needed anywhere
+    /// in this module's own bookkeeping.
+    #[test]
+    fn suppressing_frames_via_reject_pending_frame_freezes_frames_patches_and_edges() {
+        let mut graph = DpvoPatchGraph::new(small_config());
+        let m = graph.config().patches_per_frame;
+        // A handful of "pre-hover" frames with real edges, standing in for
+        // well-constrained pre-hover patches.
+        for i in 0..4 {
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(SE3::identity(), intr(), patches_for_frame(m, i as f64)).unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+
+        let frames_before = graph.frames().to_vec();
+        let patches_before = graph.patches().to_vec();
+        let edges_before = graph.edges().to_vec();
+        let n_before = graph.n_frames();
+
+        // Simulate 50 consecutive suppressed "hover" frames — the
+        // low-parallax gate's own call pattern (`begin_frame` then
+        // `reject_pending_frame`, never `commit_frame`), spanning far more
+        // than this fixture's own `removal_window`/`patch_lifetime` so any
+        // aging that DID leak through would show up as a real difference.
+        for i in 0..50 {
+            graph.begin_frame(0.2 + i as f64 * 0.05);
+            graph.reject_pending_frame();
+        }
+
+        assert_eq!(graph.n_frames(), n_before, "n_frames() must not advance while every candidate is rejected");
+        assert_eq!(graph.frames(), frames_before.as_slice(), "live frame poses/intrinsics must be untouched");
+        assert_eq!(graph.patches(), patches_before.as_slice(), "patches must be untouched (none admitted)");
+        assert_eq!(graph.edges(), edges_before.as_slice(), "active edges must be untouched (no aging occurred)");
+    }
+
     /// Milestone M8: an edge dropped by the ordinary removal-window rule
     /// (NOT a fold) that HAS been touched by an `update()` call
     /// (`target_weight.is_some()`) is archived, frozen, into

@@ -188,6 +188,145 @@
 //! DPVO windows even with a working rollback net; the conservative default
 //! is what ships until a stronger acceptance check exists (see the plan
 //! doc's own "forward path" note).
+//!
+//! # Low-parallax hover freeze (Milestone M14, `docs/dpvo_droid_port_plan.md`)
+//!
+//! M13's own diagnosis (`docs/dpvo_droid_port_plan.md`'s "M13 results"):
+//! MH_01 800f contains a genuine ~24s near-total-stillness hover
+//! (processed frames ~200-440); `keyframe`/`KEYFRAME_THRESH` folds ~91% of
+//! its frames away (`store=False`, no trace left), but the surviving ~9%
+//! commit real patches with unconstrained, `rand()`/median-fallback depth
+//! (`crate::dpvo_patch_graph`'s own "Patch/frame addressing" section).
+//! Separately, ordinary removal-window aging (`threshold = n - REMOVAL_WINDOW`
+//! in [`DpvoPatchGraph`]'s own live-frame-count terms) purges every
+//! PRE-hover, well-constrained patch's active edges well before the hover
+//! ends, since `n` still advances by one for every surviving (non-folded)
+//! frame even though real motion is near zero — by the time real motion
+//! resumes, nothing old enough to pin scale is still live, and the BA must
+//! reconcile fresh, well-constrained evidence against only the
+//! ill-conditioned hover patches, baking in the ~20x scale explosion M6-M13
+//! all measured downstream of this event.
+//!
+//! [`DpvoOdometryConfig::low_parallax`] is `None` by default — every prior
+//! milestone's call site keeps compiling and running byte-for-byte as
+//! before (the detector is never even evaluated at all whenever this is
+//! `None`, since the gate sits entirely inside an `if let Some(cfg) = ...`
+//! block).
+//!
+//! ## A genuine finding: the obvious geometric proxy does not separate
+//! hover from motion — calibrated against real MH_01 data, not assumed
+//!
+//! The first candidate tried was purely geometric and ONNX-free:
+//! `flow_mag(prev_pose, candidate_pose, ...)` (the same primitive
+//! [`DpvoPatchGraph::motionmag`] already uses for `KEYFRAME_THRESH`
+//! decimation) between the last COMMITTED frame's own patches (at their
+//! CURRENT depth) and the not-yet-committed candidate's motion-model-
+//! predicted pose. A calibration run (`--hover-freeze` with an
+//! unreachable `enter_flow`, so the detector computes and logs but never
+//! fires) logged this value for every frame of an 800f MH_01 run and
+//! showed it sitting in a narrow `~0.9-1.3` band **for the ENTIRE run**,
+//! including deep inside the GT-confirmed hover (frames 200-440, where
+//! `docs/dpvo_droid_port_plan.md`'s own M13 windowed-profile data puts GT
+//! angular rate at `0.0007-0.002 rad/frame` — far too small to explain a
+//! ~1px reprojection flow via rotation) — no separation from the
+//! surrounding real-motion frames at all. Root cause: `flow_mag` is
+//! `beta=0.5 * (full 6-DoF flow) + 0.5 * (translation-only flow)`
+//! evaluated against the previous frame's patches at THEIR inverse depth —
+//! but a patch born during (or just before) a low-parallax span has
+//! exactly the ill-conditioned depth M13 diagnosed as the problem in the
+//! first place, so even the tiny pose-to-pose noise an imperfect monocular
+//! BA solve produces between two genuinely-static frames reprojects,
+//! through that bad depth, into an O(1) pixel "flow" reading — a noise
+//! floor that swamps the real signal. Raising `beta` toward the
+//! translation-only term alone does not fix this either, since the
+//! CONTAMINATION is in the depth the reprojection divides by, not in which
+//! half of `flow_mag`'s blend is used.
+//!
+//! [`DpvoOdometry::process_frame`] therefore reuses
+//! [`DpvoOdometry::motion_probe`] itself — the SAME learned, GRU-based
+//! correction-magnitude signal the bootstrap-only gate already uses (and
+//! which this codebase has trusted since M4/M5 via
+//! [`DpvoOdometryConfig::motion_probe_min_flow`]'s own `< 2.0` bootstrap
+//! gate) — as the causal "parallax" proxy, instead of the geometric
+//! attempt above. Being a learned correlation-network output rather than a
+//! raw depth-dependent reprojection, it does not inherit the same-depth
+//! contamination, and a calibration run confirmed a real (if modest —
+//! median `~12` inside the hover vs. `~17` immediately before it, not a
+//! collapse to near-zero) separation. The cost is real and worth stating
+//! plainly regardless of the two findings below: this doubles the
+//! correlation+GRU-update work for every frame once the graph is
+//! initialized (one call from `Self::process_frame`'s own gate, one from
+//! `Self::update_step`'s ordinary solve) whenever `config.low_parallax` is
+//! `Some` — accepted because the cheaper geometric signal was tried first
+//! and demonstrably does not work.
+//!
+//! ## Two more real-run findings, on top of the first: raw thresholding is
+//! too noise-sensitive, and the signal is not stationary across a run
+//!
+//! Two more live A/B attempts, each an honest finding in its own right (the
+//! full numbers are in `docs/dpvo_droid_port_plan.md`'s "M14 results"):
+//!
+//! 1. A raw "N consecutive frames below threshold" streak requirement (this
+//!    module's first design) is too fragile to `motion_probe`'s own
+//!    per-frame noise: even deep inside the confirmed hover, individual
+//!    readings cross a tight threshold every few frames, so a strict streak
+//!    breaks almost as often as it should fire. Worse, replaying one run's
+//!    own logged trace to pick a longer, apparently-safe streak length
+//!    (looked clean OFFLINE) still produced a WRONG live result on a fresh
+//!    binary — this codebase's own documented "binary rebuilds shift
+//!    RANSAC/HashMap ordering" gotcha is sharp enough to flip which side of
+//!    a tight per-frame threshold a noisy reading lands on.
+//! 2. Even after fixing (1) with [`LowParallaxRegimeState`]'s current
+//!    windowed-MEDIAN design (smooths the per-frame noise out), a live run
+//!    surfaced a THIRD, more fundamental problem: `motion_probe`'s own
+//!    baseline is not stationary across an 800-frame run. It sits
+//!    `~17-18` for frames 0-200, correctly drops to `~12` for the confirmed
+//!    hover 200-450, only PARTIALLY recovers to `~14` for 450-500, then
+//!    drops right back to `~12-13.5` for the REST of the run (500-800) —
+//!    a span with real GT speed `0.27-0.88 m/s` throughout, not a second
+//!    hover. Plausible mechanism: once M13's own diagnosed scale corruption
+//!    has baked itself into the pose chain (which happens in exactly this
+//!    450-780 window), the constant-velocity motion model's prediction
+//!    becomes self-consistently "easy" to satisfy within the now-corrupted
+//!    coordinate frame, so `motion_probe`'s own learned correction reads
+//!    low for reasons unrelated to true camera stillness. No fixed absolute
+//!    threshold can tell "genuinely still" apart from "already corrupted,
+//!    now internally consistent" — this is a property of the signal in
+//!    this post-corruption regime, not a tuning miss.
+//!
+//! Finding 2 is answered by an explicitly-scoped limitation, not a better
+//! detector (out of scope here — see the results doc's "what a real fix
+//! would need"): [`LowParallaxRegimeState`] permanently DISARMS itself the
+//! first time it exits the regime. This protects the ONE hover M13
+//! diagnosed on MH_01 (the only one confirmed in this 800f range) and will
+//! not detect a genuine second hover later in a longer sequence — a real,
+//! stated constraint, not a hidden one.
+//!
+//! **The freeze itself reuses existing plumbing, not a new mechanism**:
+//! while the regime is active, every candidate frame is rejected via the
+//! SAME [`DpvoPatchGraph::reject_pending_frame`] path the bootstrap-only
+//! `motion_probe` gate already uses (this module's own patches_vec/depth
+//! sampling above still runs — so RNG call counts stay identical to a
+//! `motion_probe` rejection — but [`DpvoPatchGraph::commit_frame`] never
+//! runs). Concretely, this means: no new patch is admitted to the graph (no
+//! unconstrained depth is created at all, rather than merely damping one
+//! after the fact), `n_frames()` does not advance, and — because
+//! `keyframe_dispatch`/`update_step`/every other per-frame mechanism below
+//! only runs in the `else if self.graph.is_initialized()` branch AFTER a
+//! successful commit — the removal-window aging check inside
+//! `crate::dpvo_patch_graph::DpvoPatchGraph::keyframe_inner` simply never
+//! runs during the frozen span either. Every pre-hover patch's active edges
+//! stay exactly as fresh as they were the instant the regime was entered,
+//! for as long as the regime lasts — "freezing patch aging/lifetime and
+//! window advancement" (the design brief's own phrasing) falls out of "stop
+//! calling `commit_frame`" for free, rather than needing a new suppression
+//! flag threaded through the patch graph's own bookkeeping.
+//!
+//! Diagnostics: [`DpvoOdometry::low_parallax_diagnostics`] (enter/exit
+//! counts, frames suppressed, current streak) and
+//! [`DpvoOdometry::low_parallax_flow_log`] (every evaluated frame's own
+//! flow value + regime state — the acceptance evidence for "did this fire
+//! at the right place, for the right duration").
 #![cfg(feature = "onnx-inference")]
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -382,7 +521,234 @@ pub struct DpvoOdometryConfig {
     /// byte-for-byte — no SuperPoint inference runs at all, and
     /// [`DpvoOdometry::new`] does not require a `superpoint_model_path`.
     pub long_loop: Option<DpvoLongLoopConfig>,
+    /// Milestone M14 (`docs/dpvo_droid_port_plan.md`): detect a sustained
+    /// near-zero-parallax ("hover") regime and freeze new-patch admission +
+    /// patch/edge aging for its duration — see [`DpvoOdometry`]'s own doc,
+    /// "Low-parallax hover freeze", for the full mechanism and why this
+    /// answers M13's own diagnosed root cause. `None` (default) preserves
+    /// every prior milestone's exact behavior byte-for-byte: the detector is
+    /// never evaluated at all (not merely disabled after computing
+    /// something), so there is no extra cost and no RNG-call-count change
+    /// on any existing call site.
+    pub low_parallax: Option<DpvoLowParallaxConfig>,
 }
+
+/// Milestone M14 (`docs/dpvo_droid_port_plan.md`): configuration for the
+/// low-parallax ("hover") freeze described on
+/// [`DpvoOdometryConfig::low_parallax`]'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoLowParallaxConfig {
+    /// Sliding-window size (in evaluated post-initialization frames) the
+    /// smoothed parallax statistic — a rolling MEDIAN of
+    /// [`DpvoOdometry::motion_probe`]'s own per-frame output — is computed
+    /// over, fed to [`LowParallaxRegimeState::update`]. See that struct's
+    /// own doc, and [`DpvoOdometry`]'s module-doc section "Low-parallax
+    /// hover freeze", for why a raw per-frame streak-of-consecutive-low-
+    /// readings design was tried FIRST and replaced with this windowed
+    /// design: the raw signal oscillates enough, even deep inside the true
+    /// hover, that individual readings cross a tight threshold every few
+    /// frames — a strict "every one of the last K frames must be below
+    /// threshold" streak breaks on that noise almost as often as it should
+    /// fire on the real thing. A rolling median absorbs that per-frame
+    /// noise while still tracking the real, sustained level shift between
+    /// a hover and ordinary motion.
+    pub window: usize,
+    /// Enter the regime once the rolling window is full and its median
+    /// drops below this value. Units match
+    /// [`DpvoOdometryConfig::motion_probe_min_flow`]'s own — the SAME
+    /// learned GRU correction-magnitude signal, just evaluated post-
+    /// initialization instead of only at bootstrap.
+    pub enter_flow: f64,
+    /// Exit the regime once the rolling window's median reaches this
+    /// (`>= exit_flow`). Must be `>= enter_flow` for the hysteresis band to
+    /// be non-empty (enforced by [`LowParallaxRegimeState::update`]'s own
+    /// doc, not an invariant this struct itself checks).
+    pub exit_flow: f64,
+}
+
+impl Default for DpvoLowParallaxConfig {
+    /// Calibrated against THREE real MH_01 800f runs, not one — each
+    /// earlier attempt was tried live and found unsafe, and each finding is
+    /// preserved here rather than quietly overwritten (see
+    /// `docs/dpvo_droid_port_plan.md`'s "M14 results" for the full,
+    /// honest blow-by-blow):
+    ///
+    /// 1. A raw per-frame streak design (`enter_streak=5`) re-triggered a
+    ///    dozen+ brief 1-10-frame cycles throughout processed frames
+    ///    500-800 — a real, FAST-motion span (GT speed `0.27-0.88 m/s`,
+    ///    confirmed by direct query), not a second hover — corrupting an
+    ///    800f run (`tracked_fraction` `1.00 -> 0.65`,
+    ///    `ate_similarity_scale` `20.6 -> 26.2`, worse not better).
+    /// 2. A longer streak (`enter_streak=10`), re-calibrated against that
+    ///    SAME run's own logged trace, looked clean offline (one cycle,
+    ///    `~220 -> 447`) — but a FRESH run using it entered only once,
+    ///    briefly, at completely the wrong place (`frame 623-625`, deep in
+    ///    the fast-motion span). Root cause: `motion_probe`'s raw per-frame
+    ///    value oscillates enough, even deep inside the confirmed hover,
+    ///    that individual readings cross a threshold like `12.0` every few
+    ///    frames (e.g. `220=11.55, 221=12.01, ..., 229=13.15`) — a strict
+    ///    all-K-consecutive-frames-below-threshold streak is fragile to
+    ///    exactly this kind of noise, and (per this codebase's own
+    ///    documented gotcha) a REBUILT binary's own floating-point/HashMap-
+    ///    ordering differences are enough to shift which side of a tight
+    ///    threshold a given frame's noisy reading lands on.
+    /// 3. Windowed-median smoothing (this design) fixes the noise problem,
+    ///    but surfaced a THIRD, more fundamental finding: `motion_probe`'s
+    ///    own baseline is not stationary across an 800f run.
+    ///    Bucket-by-50-frames medians: `~17-18` for frames `0-200`, drops
+    ///    to `~12` for the confirmed hover `200-450` (correct), bounces
+    ///    only PARTIALLY back to `~14` for `450-500`, then drops right back
+    ///    to `~12-13.5` for the REST of the run (`500-800`) — a span with
+    ///    real GT speed `0.27-0.88 m/s` throughout. Plausible mechanism:
+    ///    once M13's own diagnosed scale corruption has baked itself into
+    ///    the pose chain (which happens exactly in this `450-780` window),
+    ///    the constant-velocity motion model's prediction becomes
+    ///    self-consistently "easy" to satisfy within the now-corrupted (but
+    ///    internally smooth) coordinate frame, so `motion_probe`'s own
+    ///    learned correction reads low for reasons UNRELATED to true
+    ///    camera stillness. A global absolute threshold cannot distinguish
+    ///    "genuinely still" from "already corrupted, now self-consistent" —
+    ///    this is a property of the signal on this dataset in this
+    ///    post-corruption regime, not a tuning miss.
+    ///
+    /// Because (3) cannot be fixed by threshold/window tuning alone
+    /// without a materially different (e.g. adaptive/relative-baseline)
+    /// detector — out of scope for this milestone, see the results
+    /// section's "what a real fix would need" — [`LowParallaxRegimeState`]
+    /// additionally DISARMS itself permanently after its first exit (see
+    /// that struct's own doc). This is a deliberate, explicitly-scoped
+    /// limitation: it protects the ONE hover M13 diagnosed on MH_01 (the
+    /// only one confirmed to exist in this 800f range) and will not detect
+    /// a genuine SECOND hover later in a longer sequence. `window=20`,
+    /// `enter_flow=13.0`, `exit_flow=15.0` replayed against the run-3 log
+    /// enters at frame `216` and exits at frame `461` — matching M13's own
+    /// independently-derived hover span (`~200-440`) closely, with the
+    /// one-shot guard suppressing the would-be spurious later re-entry this
+    /// same log shows starting at frame `518` and never letting go again
+    /// before frame `800`.
+    fn default() -> Self {
+        Self { window: 20, enter_flow: 13.0, exit_flow: 15.0 }
+    }
+}
+
+/// Milestone M14: causal regime state for the low-parallax freeze — see
+/// [`DpvoOdometryConfig::low_parallax`]'s doc for the mechanism this
+/// drives. Deliberately free-standing (no [`DpvoOdometry`] dependency) so
+/// its enter/exit logic is unit-testable against synthetic flow sequences
+/// without an ONNX session.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LowParallaxRegimeState {
+    in_regime: bool,
+    /// One-shot guard (see [`Self::update`]'s own doc): once `true`, every
+    /// subsequent `update` call is a permanent no-op. Set the instant the
+    /// regime exits for the first time — never cleared.
+    disarmed: bool,
+    /// Ring buffer of the last (up to) `cfg.window` raw flow readings, in
+    /// arrival order (front = oldest). `VecDeque` rather than a fixed-size
+    /// array since `cfg.window` is a runtime config value, not a constant.
+    window: VecDeque<f64>,
+}
+
+/// One [`LowParallaxRegimeState::update`] call's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LowParallaxTransition {
+    /// Whether THIS frame should be suppressed (frozen) — the caller's own
+    /// "reject this candidate" decision.
+    pub suppress: bool,
+    /// Whether this call caused the regime to become active (it was not
+    /// active on entry, the windowed median just dropped below
+    /// `enter_flow`).
+    pub just_entered: bool,
+    /// Whether this call caused the regime to become inactive (it was
+    /// active on entry, the windowed median reached `exit_flow`).
+    pub just_exited: bool,
+}
+
+impl LowParallaxRegimeState {
+    /// Feed this frame's causal parallax-proxy value (in practice,
+    /// [`DpvoOdometry::motion_probe`] — see [`DpvoOdometryConfig::low_parallax`]'s
+    /// own doc); returns whether this frame should be suppressed and
+    /// whether a transition happened, updating internal window/regime
+    /// state in place.
+    ///
+    /// Always pushes `flow` into the rolling window first (even once
+    /// [`Self::disarmed`], so the internal state stays consistent — though
+    /// a disarmed instance never reads it again). Once permanently
+    /// disarmed, every call returns the all-`false` no-op transition
+    /// immediately, regardless of `flow` — see [`DpvoLowParallaxConfig::default`]'s
+    /// own doc, finding 3, for the real-run evidence this guards against
+    /// (a non-stationary `motion_probe` baseline that reads "hover-like"
+    /// again, for unrelated reasons, later in the same run). Before the
+    /// window is full for the first time, this always returns the no-op
+    /// transition too (not enough history for a reliable statistic; the
+    /// regime cannot yet be active at that point by construction, since
+    /// entering requires a full window).
+    ///
+    /// Hysteresis, once armed and the window is full: while NOT in the
+    /// regime, the window's median dropping below `cfg.enter_flow` enters
+    /// the regime THIS frame (so the frame that fills the window below
+    /// threshold is itself the first suppressed frame). While IN the
+    /// regime, the window's median reaching `cfg.exit_flow` exits
+    /// immediately AND disarms — the exiting frame itself is NOT suppressed
+    /// (it is the frame whose real motion just proved the hover is over,
+    /// so it should commit normally).
+    pub fn update(&mut self, cfg: &DpvoLowParallaxConfig, flow: f64) -> LowParallaxTransition {
+        let no_op = LowParallaxTransition { suppress: false, just_entered: false, just_exited: false };
+        if self.disarmed {
+            return no_op;
+        }
+        let capacity = cfg.window.max(1);
+        self.window.push_back(flow);
+        while self.window.len() > capacity {
+            self.window.pop_front();
+        }
+        if self.window.len() < capacity {
+            return no_op;
+        }
+        let median = windowed_median(&self.window);
+        if self.in_regime {
+            if median >= cfg.exit_flow {
+                self.in_regime = false;
+                self.disarmed = true;
+                return LowParallaxTransition { suppress: false, just_entered: false, just_exited: true };
+            }
+            return LowParallaxTransition { suppress: true, just_entered: false, just_exited: false };
+        }
+        if median < cfg.enter_flow {
+            self.in_regime = true;
+            return LowParallaxTransition { suppress: true, just_entered: true, just_exited: false };
+        }
+        no_op
+    }
+
+    /// Whether the regime is currently active.
+    pub fn in_regime(&self) -> bool {
+        self.in_regime
+    }
+
+    /// Whether the one-shot guard has fired (see [`Self::update`]'s own
+    /// doc) — every subsequent `update` call is a permanent no-op.
+    pub fn disarmed(&self) -> bool {
+        self.disarmed
+    }
+}
+
+/// The rolling-window "median" [`LowParallaxRegimeState::update`] smooths
+/// over — [`torch_quantile_50`] applied to the window's own contents,
+/// matching the same interpolated-median convention
+/// [`DpvoOdometry::motion_probe`] itself already uses (via [`torch_quantile_50`]
+/// over one frame's per-patch correction norms) — smoothing a sequence of
+/// already-quantile-50'd values with the SAME convention, rather than
+/// switching to `median_recent_depth`'s different `torch.median` (lower-of-
+/// two-middle, non-interpolated) convention, which exists only to match a
+/// specific upstream opcode this windowed statistic has no upstream
+/// reference for.
+fn windowed_median(window: &VecDeque<f64>) -> f64 {
+    let mut values: Vec<f64> = window.iter().copied().collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    torch_quantile_50(&values)
+}
+
 
 /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): configuration for the
 /// periodic full-graph "global" bundle adjustment described on
@@ -949,6 +1315,43 @@ pub struct DpvoLoopClosureDiagnostics {
     pub correction_magnitude_mean_m: f64,
 }
 
+/// Milestone M14 snapshot of [`DpvoOdometry`]'s low-parallax hover-freeze
+/// state — see [`DpvoOdometry::low_parallax_diagnostics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoLowParallaxDiagnostics {
+    /// Whether `config.low_parallax` is `Some` at all — `false` means every
+    /// other field here is a static default (the mechanism was never
+    /// engaged), not a claim that a hover was searched for and never found.
+    pub enabled: bool,
+    /// Whether the regime is active RIGHT NOW (after the most recent
+    /// `process_frame` call).
+    pub regime_active: bool,
+    /// Cumulative times the regime was entered.
+    pub times_entered: usize,
+    /// Cumulative times the regime was exited.
+    pub times_exited: usize,
+    /// Cumulative candidate frames suppressed (rejected via
+    /// `DpvoPatchGraph::reject_pending_frame`) because the regime was
+    /// active — the direct "how much of the hover did this actually
+    /// freeze" measurement.
+    pub frames_suppressed_total: usize,
+    /// Whether the one-shot guard has fired (see
+    /// [`LowParallaxRegimeState::update`]'s own doc) — once `true`, the
+    /// detector is permanently inert for the rest of the run, by design
+    /// (see [`DpvoLowParallaxConfig::default`]'s own doc, finding 3, for
+    /// the real-run evidence this guards against).
+    pub disarmed: bool,
+    /// The most recently evaluated frame's own [`DpvoOdometry::motion_probe`]
+    /// value.
+    pub last_flow: f64,
+    /// `stats.frames_processed` at the moment the regime was most recently
+    /// entered (`None` if never).
+    pub last_enter_frame: Option<usize>,
+    /// `stats.frames_processed` at the moment the regime was most recently
+    /// exited (`None` if never).
+    pub last_exit_frame: Option<usize>,
+}
+
 /// Milestone M5b: cumulative counters, one per DISTINCT rejection reason
 /// across both bootstrap gates (gyro-bias, then mono-alignment) — see
 /// [`DpvoOdometry::try_imu_bootstrap`]'s doc for exactly which check each
@@ -1281,6 +1684,26 @@ pub struct DpvoOdometry {
     // SuperPoint inference runs, `process_frame`'s own long-loop block is a
     // no-op. ----
     long_loop: Option<DpvoLongLoopRuntime>,
+
+    // ---- Milestone M14 (low-parallax hover freeze) state — see the module
+    // doc's own "Low-parallax hover freeze" section and
+    // [`LowParallaxRegimeState`]'s own doc. Inert (never evaluated at all)
+    // whenever `config.low_parallax` is `None`. ----
+    low_parallax_regime: LowParallaxRegimeState,
+    low_parallax_times_entered: usize,
+    low_parallax_times_exited: usize,
+    low_parallax_frames_suppressed_total: usize,
+    low_parallax_last_flow: f64,
+    low_parallax_last_enter_frame: Option<usize>,
+    low_parallax_last_exit_frame: Option<usize>,
+    /// `(frames_processed, flow, regime_active_after_this_frame)` for every
+    /// frame the detector was evaluated on — the acceptance-run evidence for
+    /// "did this fire at the right place, for the right duration" (see
+    /// [`DpvoOdometry::low_parallax_flow_log`]). Bounded implicitly by run
+    /// length (one entry per processed frame, at most), never by an
+    /// explicit cap — MH_01-scale runs (hundreds to low thousands of
+    /// frames) keep this negligible.
+    low_parallax_flow_log: Vec<(usize, f64, bool)>,
 }
 
 /// Milestone M11: the ONNX-runtime-dependent half of the long-range loop
@@ -1445,6 +1868,14 @@ impl DpvoOdometry {
             sim3_backend_last_scale_min: 1.0,
             sim3_backend_last_scale_max: 1.0,
             long_loop,
+            low_parallax_regime: LowParallaxRegimeState::default(),
+            low_parallax_times_entered: 0,
+            low_parallax_times_exited: 0,
+            low_parallax_frames_suppressed_total: 0,
+            low_parallax_last_flow: 0.0,
+            low_parallax_last_enter_frame: None,
+            low_parallax_last_exit_frame: None,
+            low_parallax_flow_log: Vec::new(),
         })
     }
 
@@ -1570,6 +2001,31 @@ impl DpvoOdometry {
     /// own doc. Empty whenever `config.long_loop` is `None`.
     pub fn long_loop_query_log(&self) -> &[QueryCandidateLogEntry] {
         self.long_loop.as_ref().map(|runtime| runtime.index.query_log()).unwrap_or(&[])
+    }
+
+    /// Snapshot of the Milestone M14 low-parallax hover-freeze state —
+    /// `enabled: false` (every other field a static default) whenever
+    /// `config.low_parallax` is `None`.
+    pub fn low_parallax_diagnostics(&self) -> DpvoLowParallaxDiagnostics {
+        DpvoLowParallaxDiagnostics {
+            enabled: self.config.low_parallax.is_some(),
+            regime_active: self.low_parallax_regime.in_regime(),
+            times_entered: self.low_parallax_times_entered,
+            times_exited: self.low_parallax_times_exited,
+            frames_suppressed_total: self.low_parallax_frames_suppressed_total,
+            disarmed: self.low_parallax_regime.disarmed(),
+            last_flow: self.low_parallax_last_flow,
+            last_enter_frame: self.low_parallax_last_enter_frame,
+            last_exit_frame: self.low_parallax_last_exit_frame,
+        }
+    }
+
+    /// Milestone M14: every frame the low-parallax detector was evaluated
+    /// on, as `(frames_processed, flow, regime_active_after_this_frame)` —
+    /// the acceptance-run profile-flatness evidence. Empty whenever
+    /// `config.low_parallax` is `None`.
+    pub fn low_parallax_flow_log(&self) -> &[(usize, f64, bool)] {
+        &self.low_parallax_flow_log
     }
 
     /// Buffer one raw body-frame IMU sample (Milestone M5). No-op (samples
@@ -1700,6 +2156,15 @@ impl DpvoOdometry {
                 self.graph.reject_pending_frame();
                 return Ok(None);
             }
+        } else if self.graph.is_initialized() && self.low_parallax_gate(&predicted_pose, &intr, &candidate_pyramid)? {
+            // Milestone M14: the low-parallax ("hover") freeze — see the
+            // module doc's own "Low-parallax hover freeze" section. Rejects
+            // exactly like the bootstrap-only `motion_probe` gate above:
+            // `patches_vec`/`depths` were already sampled (so RNG call
+            // counts are unaffected by whether this fires), but
+            // `commit_frame` never runs, so no patch is admitted and
+            // `n_frames()` does not advance.
+            return Ok(None);
         }
 
         self.graph.commit_frame(predicted_pose, intr, patches_vec)?;
@@ -1889,6 +2354,62 @@ impl DpvoOdometry {
             .collect();
         norms.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Ok(torch_quantile_50(&norms))
+    }
+
+    /// Milestone M14: evaluate the low-parallax ("hover") detector for the
+    /// current candidate frame — called only once the graph is initialized
+    /// (see [`Self::process_frame`]'s own call site; before initialization
+    /// the bootstrap-only `motion_probe` gate is the relevant one instead).
+    /// A no-op (`Ok(false)`) whenever `config.low_parallax` is `None`, or
+    /// before any frame has ever committed (`n_frames() == 0` — cannot
+    /// happen in practice once initialized, guarded defensively anyway).
+    /// Returns `Ok(true)` if the candidate was rejected via
+    /// [`crate::dpvo_patch_graph::DpvoPatchGraph::reject_pending_frame`] —
+    /// the caller must return `Ok(None)` without calling `commit_frame`.
+    ///
+    /// Reuses [`Self::motion_probe`] as the causal "parallax" proxy — see
+    /// the module doc's own "Low-parallax hover freeze" section for why a
+    /// cheaper, ONNX-free geometric proxy (`flow_mag` between the previous
+    /// frame's patches and the predicted candidate pose) was tried first and
+    /// rejected: a real-MH_01 calibration run showed it sitting in a narrow
+    /// band for the ENTIRE run, including deep inside the GT-confirmed
+    /// hover, with no separation from ordinary motion at all (contaminated
+    /// by exactly the ill-conditioned patch depth M13 diagnosed as the
+    /// problem in the first place). `motion_probe`'s learned GRU-based
+    /// correction magnitude does not share that contamination and DOES
+    /// separate cleanly (see `docs/dpvo_droid_port_plan.md`'s "M14 results"
+    /// for the calibration evidence) — at the cost of one extra
+    /// correlation+GRU-update pass per frame whenever this is engaged.
+    fn low_parallax_gate(
+        &mut self,
+        predicted_pose: &SE3,
+        candidate_intr: &DpvoIntrinsics,
+        candidate_pyramid: &FramePyramid,
+    ) -> Result<bool, DpvoOdometryError> {
+        let Some(cfg) = self.config.low_parallax else { return Ok(false) };
+        if self.graph.n_frames() == 0 {
+            return Ok(false);
+        }
+        let flow = self.motion_probe(predicted_pose, candidate_intr, candidate_pyramid)?;
+        let transition = self.low_parallax_regime.update(&cfg, flow);
+        self.low_parallax_last_flow = flow;
+        let frames_processed = self.stats.frames_processed;
+        if transition.just_entered {
+            self.low_parallax_times_entered += 1;
+            self.low_parallax_last_enter_frame = Some(frames_processed);
+        }
+        if transition.just_exited {
+            self.low_parallax_times_exited += 1;
+            self.low_parallax_last_exit_frame = Some(frames_processed);
+        }
+        self.low_parallax_flow_log.push((frames_processed, flow, self.low_parallax_regime.in_regime()));
+        if transition.suppress {
+            self.graph.reject_pending_frame();
+            self.low_parallax_frames_suppressed_total += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Milestone M5: fold every buffered [`Self::push_imu`] sample with
@@ -4666,5 +5187,150 @@ mod tests {
             "  [perf] total correlation-assembly (reproject + corr_pyramid): {:.3} ms/call",
             reproject_ms + corr_ms
         );
+    }
+}
+
+/// Milestone M14: [`LowParallaxRegimeState`] is a free-standing,
+/// signal-agnostic hysteresis state machine — tested directly here, without
+/// constructing a live `DpvoOdometry` (mirroring this file's own convention,
+/// e.g. `global_ba_due`/`gyro_bootstrap_gate_check`'s own test modules). Its
+/// actual production signal ([`DpvoOdometry::motion_probe`], an ONNX-backed
+/// GRU correction magnitude — see the module doc's own "Low-parallax hover
+/// freeze" section for why) is not free-standing and is instead exercised
+/// via real MH_01 calibration runs (`docs/dpvo_droid_port_plan.md`'s "M14
+/// results"), not a unit test.
+#[cfg(test)]
+mod low_parallax_tests {
+    use super::*;
+
+    fn cfg(window: usize, enter_flow: f64, exit_flow: f64) -> DpvoLowParallaxConfig {
+        DpvoLowParallaxConfig { window, enter_flow, exit_flow }
+    }
+
+    #[test]
+    fn stays_out_of_regime_while_the_window_is_still_filling() {
+        let c = cfg(5, 1.0, 4.0);
+        let mut state = LowParallaxRegimeState::default();
+        // Only 4 of the 5-frame window filled with low readings: not yet
+        // enough history for a reliable statistic, so this must be a no-op
+        // even though every reading so far is well below `enter_flow`.
+        for _ in 0..4 {
+            let t = state.update(&c, 0.1);
+            assert!(!t.suppress && !t.just_entered);
+        }
+        assert!(!state.in_regime());
+    }
+
+    #[test]
+    fn enters_the_instant_the_full_window_median_drops_below_enter_flow() {
+        let c = cfg(5, 1.0, 4.0);
+        let mut state = LowParallaxRegimeState::default();
+        for _ in 0..4 {
+            state.update(&c, 0.1);
+        }
+        // The 5th low reading fills the window; its median (0.1) is well
+        // below `enter_flow` (1.0) => enters THIS frame, and this frame is
+        // itself suppressed (not the next one).
+        let t5 = state.update(&c, 0.1);
+        assert!(t5.suppress, "the frame that fills the window below threshold must itself be suppressed");
+        assert!(t5.just_entered);
+        assert!(!t5.just_exited);
+        assert!(state.in_regime());
+        // Regime stays active on the next low (or even moderate,
+        // sub-exit-threshold) reading, with no further "just_entered".
+        let t6 = state.update(&c, 2.0);
+        assert!(t6.suppress);
+        assert!(!t6.just_entered);
+        assert!(!t6.just_exited);
+        assert!(state.in_regime());
+    }
+
+    #[test]
+    fn a_single_high_reading_is_absorbed_by_the_window_median_not_a_hard_reset() {
+        // The whole point of windowed-median smoothing over a raw
+        // consecutive-streak requirement: ONE noisy high reading among
+        // otherwise-low ones must not prevent entry, as long as the
+        // window's MEDIAN still clears the threshold — see
+        // `DpvoLowParallaxConfig::default`'s own doc, finding 2, for the
+        // real-run evidence a strict all-consecutive-frames streak design
+        // was too fragile to this exact kind of noise.
+        let c = cfg(5, 3.0, 6.0);
+        let mut state = LowParallaxRegimeState::default();
+        // [0.1, 0.1, 5.0, 0.1, 0.1] -> sorted [0.1,0.1,0.1,0.1,5.0] -> median 0.1.
+        let readings = [0.1, 0.1, 5.0, 0.1, 0.1];
+        let mut last = None;
+        for r in readings {
+            last = Some(state.update(&c, r));
+        }
+        let t = last.unwrap();
+        assert!(t.suppress && t.just_entered, "one noisy high reading must not block entry when the window median is still low");
+    }
+
+    #[test]
+    fn exits_once_the_window_median_reaches_exit_flow_and_disarms() {
+        let c = cfg(3, 1.0, 4.0);
+        let mut state = LowParallaxRegimeState::default();
+        for _ in 0..3 {
+            state.update(&c, 0.1);
+        }
+        assert!(state.in_regime());
+        // A window still mostly low (median under exit_flow) must NOT exit.
+        let mid = state.update(&c, 3.9); // window now [0.1,0.1,3.9] -> median 0.1.
+        assert!(mid.suppress && !mid.just_exited, "window median still below exit_flow must not exit");
+        assert!(state.in_regime());
+        // Push enough high readings that the window's OWN median clears
+        // exit_flow.
+        state.update(&c, 5.0); // [0.1,3.9,5.0] -> median 3.9, still < 4.0.
+        let exited = state.update(&c, 5.0); // [3.9,5.0,5.0] -> median 5.0 >= 4.0.
+        assert!(!exited.suppress, "the frame whose window median proves the hover is over must not be suppressed");
+        assert!(exited.just_exited);
+        assert!(!state.in_regime());
+        assert!(state.disarmed(), "exiting must permanently disarm the one-shot guard");
+    }
+
+    #[test]
+    fn disarmed_state_never_re_enters_even_with_sustained_low_readings_afterward() {
+        // This is the mechanism's own deliberate limitation (see
+        // `DpvoLowParallaxConfig::default`'s own doc, finding 3): a
+        // real-run 800f trace showed `motion_probe`'s baseline dropping
+        // "hover-like" again later in the SAME run for reasons unrelated to
+        // true stillness, and re-triggering there corrupted the
+        // trajectory. Once disarmed, sustained low readings must never
+        // re-arm the detector.
+        let c = cfg(3, 1.0, 4.0);
+        let mut state = LowParallaxRegimeState::default();
+        for _ in 0..3 {
+            state.update(&c, 0.1);
+        }
+        assert!(state.in_regime());
+        for _ in 0..3 {
+            state.update(&c, 10.0); // forces the window median well above exit_flow.
+        }
+        assert!(state.disarmed());
+        assert!(!state.in_regime());
+        // Many more sustained low readings, well past the window size.
+        for _ in 0..50 {
+            let t = state.update(&c, 0.05);
+            assert!(!t.suppress && !t.just_entered && !t.just_exited, "a disarmed detector must never re-enter");
+        }
+        assert!(!state.in_regime());
+    }
+
+    #[test]
+    fn disabled_mechanism_is_a_pure_no_op_by_construction() {
+        // There is no "disabled" state for `LowParallaxRegimeState` itself
+        // (it is only ever driven when `config.low_parallax` is `Some` — see
+        // `DpvoOdometry::low_parallax_gate`'s own early `let Some(cfg) = ...
+        // else { return false }`), so the no-op contract is structural, not
+        // a runtime flag this state machine itself carries. What IS testable
+        // here: a config whose window can never fill within any realistic
+        // run length behaves as an unconditional no-op.
+        let c = cfg(usize::MAX, 1.0, 4.0);
+        let mut state = LowParallaxRegimeState::default();
+        for _ in 0..1000 {
+            let t = state.update(&c, 0.0);
+            assert!(!t.suppress && !t.just_entered && !t.just_exited);
+        }
+        assert!(!state.in_regime());
     }
 }

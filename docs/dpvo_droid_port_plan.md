@@ -5760,3 +5760,362 @@ GT-alignment tooling both depend on stable frame indices, new unit tests,
 and an 800f + 400f A/B (~40 min combined) to confirm no regression before
 being called anything but another honest negative. Scoping that design and
 implementation is M14's job, not this milestone's.
+
+## M14 results (2026-07-19)
+
+Milestone M14: implement M13's own "next steps" design (a), the "elegant"
+candidate — detect a sustained near-zero-parallax ("hover") regime online
+and FREEZE new-patch admission + patch/edge aging for its duration, so the
+pre-hover, well-constrained patches that would otherwise have their active
+edges pruned mid-hover are still live at hover exit to pin post-hover BA's
+scale. **Result: an honest negative, but a thoroughly evidenced one** — the
+freeze mechanism itself is correctly implemented (verified via a dedicated
+structural unit test) and, after three live-calibration iterations, the
+detector fires EXACTLY once, cleanly, spanning almost precisely the hover
+M13 diagnosed (`processed frame 216 -> 457` vs M13's own independently
+derived `~200-440`) — yet real MH_01 runs show the mechanism makes
+`ate_similarity_scale` WORSE, not better (`20.63 -> 26.63` at 800f), and the
+400f no-regression guard also regresses. The scale-vs-frame profile shows
+why: freezing does not prevent the ramp, it moves the ramp's ONSET earlier
+(in real-motion terms) and makes it steeper — the abrupt resume, after a
+241-raw-frame gap with no committed frames at all, appears to be a WORSE
+transition than the baseline's own gradual, partially-decimated
+reconnection through the hover.
+
+### Design: reuse `reject_pending_frame`, not a new suppression flag
+
+[`DpvoOdometryConfig::low_parallax`] (`Option<DpvoLowParallaxConfig>`,
+`None` by default) gates a new per-frame check in
+[`DpvoOdometry::process_frame`], evaluated only once the graph is
+initialized (the existing bootstrap-only `motion_probe` gate stays
+untouched, and is structurally exclusive with this one — `if ... !is_initialized
+{ motion_probe gate } else if is_initialized { low_parallax_gate }`).
+When the detector says "suppress this candidate", the SAME
+[`DpvoPatchGraph::reject_pending_frame`] path the bootstrap gate already
+uses runs: `patches_vec`/depths were already sampled (so RNG call counts
+are byte-identical to a `motion_probe` rejection), but `commit_frame` never
+runs. This one call-site choice buys the entire freeze property for free:
+
+* No new patch is admitted (no fresh unconstrained depth is ever created,
+  rather than merely damped after the fact — Option B from the M13 design
+  space, "depth-trust weighting," was never needed).
+* `n_frames()` does not advance.
+* `keyframe_dispatch`/`update_step`/every other per-frame mechanism (loop
+  closure, global BA, Sim3 backend) only runs in the `else if
+  is_initialized` branch AFTER a successful `commit_frame` — so the
+  removal-window aging check inside
+  `crate::dpvo_patch_graph::DpvoPatchGraph::keyframe_inner` (the thing
+  M13 identified as the actual mechanism purging pre-hover patches' active
+  edges) simply never runs during the frozen span either.
+
+A dedicated structural test in `dpvo_patch_graph.rs`
+(`suppressing_frames_via_reject_pending_frame_freezes_frames_patches_and_edges`)
+pins exactly this: commit a handful of "pre-hover" frames with real edges,
+snapshot `frames()`/`patches()`/`edges()`, then call `begin_frame` +
+`reject_pending_frame` 50 times in a row (never `commit_frame`) and assert
+byte-for-byte equality with the snapshot. This is the freeze-semantics
+proof the task asked for, and it holds regardless of which signal drives
+the detector — the property is structural, not tuned.
+
+### Three signal designs tried, in order, each an honest finding
+
+**1. Geometric `flow_mag` (ONNX-free) — rejected on calibration data, not
+assumed.** The first candidate reused `crate::dpvo_patch_ba::flow_mag`
+(the same primitive `DpvoPatchGraph::motionmag` uses for `KEYFRAME_THRESH`
+decimation): median flow between the last committed frame's patches (at
+their current depth) and the not-yet-committed candidate's predicted pose.
+A calibration run (`--hover-freeze` with an unreachable `enter_flow`, so
+the detector computes and logs but never suppresses) showed this sitting
+in a narrow `~0.9-1.3` band for the ENTIRE 800f run, including deep inside
+the GT-confirmed hover (where M13's own windowed profile puts GT angular
+rate at `0.0007-0.002 rad/frame` — far too small to explain a ~1px flow
+via rotation) — no separation from ordinary motion at all. Root cause:
+`flow_mag` reprojects through the previous frame's OWN inverse depth, and
+a patch born during (or just before) a low-parallax span has exactly the
+ill-conditioned depth M13 diagnosed as the problem in the first place, so
+even tiny BA-noise-driven pose deltas between two genuinely-static frames
+reproject, through that bad depth, into an O(1) pixel "flow" reading — a
+noise floor that swamps the real signal.
+
+**2. `motion_probe` reuse, raw per-frame streak hysteresis — worked in
+calibration, failed live.** Switched to
+[`DpvoOdometry::motion_probe`] itself, the SAME learned GRU-based
+correction-magnitude signal the bootstrap gate has trusted since M4/M5.
+A calibration run showed a real (if modest) separation: hover median
+`11.90` (range `9.96-14.86`, processed frames `214-446`) vs. `17.12`/`14.14`
+immediately before/after. A streak-of-5-consecutive-low-readings design
+(`enter_flow=13.0`, `exit_flow=15.0`) replayed cleanly offline against that
+log (one cycle, `214 -> 447`) — but a REAL run using it re-triggered a
+dozen+ brief 1-10-frame cycles throughout processed frames `500-800` (a
+real, FAST-motion span — GT speed `0.27-0.88 m/s`, confirmed by direct
+query — not a second hover), corrupting the run
+(`tracked_fraction 1.00 -> 0.65`, `ate_similarity_scale 20.6 -> 26.2`).
+Re-tuning to a longer streak (`enter_streak=10`) against that SAME run's
+own log looked clean OFFLINE (one cycle) — but a FRESH run (rebuilt
+binary, same seed/config) entered only once, briefly, at completely the
+WRONG place (`frame 623-625`). Root cause, confirmed by inspecting the raw
+per-frame values: `motion_probe` oscillates enough, even deep inside the
+confirmed hover, that individual readings cross a tight threshold every
+few frames (`220=11.55, 221=12.01, ..., 229=13.15`, ...) — a strict
+all-K-consecutive-frames-below-threshold streak is fragile to exactly this
+noise, and this codebase's own documented "binary rebuilds shift
+RANSAC/HashMap ordering" gotcha is sharp enough to flip which side of a
+tight threshold a given noisy reading lands on between builds.
+
+**3. `motion_probe` + windowed-median smoothing + a one-shot guard —
+correctly targets the hover, but the underlying hypothesis is wrong.**
+Fixed the noise problem with [`LowParallaxRegimeState`]'s current design:
+a rolling window (`DpvoLowParallaxConfig::window`) of raw `motion_probe`
+readings, gated on the WINDOW'S OWN MEDIAN crossing `enter_flow`/`exit_flow`
+rather than raw per-frame values — smooths the noise `flow_mag`/design-2
+both foundered on. This surfaced a THIRD, more fundamental finding:
+`motion_probe`'s own baseline is not stationary across an 800f run.
+Bucket-by-50-frames medians: `~17-18` for frames `0-200`, correctly drops
+to `~12` for the confirmed hover `200-450`, only PARTIALLY recovers to
+`~14` for `450-500`, then drops right back to `~12-13.5` for the REST of
+the run (`500-800`) — a span with real GT speed `0.27-0.88 m/s`
+throughout. Plausible mechanism: once M13's own diagnosed scale corruption
+bakes itself into the pose chain (which happens in exactly this
+`450-780` window), the constant-velocity motion model's own prediction
+becomes self-consistently "easy" to satisfy within the now-corrupted
+coordinate frame, so `motion_probe`'s learned correction reads low for
+reasons unrelated to true stillness. No fixed absolute threshold can tell
+"genuinely still" apart from "already corrupted, now internally
+consistent." [`LowParallaxRegimeState`] answers this with an explicitly-
+scoped limitation, not a better detector: it permanently DISARMS itself
+the first time it exits the regime, so it protects the ONE hover M13
+diagnosed and will not detect a genuine second hover later in a longer
+sequence — a real, stated constraint.
+
+Calibrated defaults (`window=20, enter_flow=13.0, exit_flow=15.0`,
+`DpvoLowParallaxConfig::default`): replaying the run-3 log with these
+values enters at frame `216` and exits at frame `457`, disarming
+immediately after — matching M13's own `~200-440` hover closely. A live
+run with these exact defaults reproduced this precisely (see below):
+`hover_times_entered=1`, `hover_times_exited=1`, `hover_disarmed=true`,
+`hover_last_enter_frame=216`, `hover_last_exit_frame=457`,
+`hover_frames_suppressed_total=241` — no chatter anywhere else in the run.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_vo.rs` (+~660): `DpvoLowParallaxConfig`
+  (`window`/`enter_flow`/`exit_flow`), `LowParallaxRegimeState` +
+  `LowParallaxTransition` (windowed-median hysteresis + one-shot disarm,
+  free-standing/ONNX-free and unit-tested), `windowed_median` (reuses
+  `torch_quantile_50`, the same interpolated-median convention
+  `motion_probe` itself already uses), `DpvoOdometry::low_parallax_gate`
+  (calls `Self::motion_probe`, wires into `process_frame`'s existing
+  bootstrap-gate `if`/`else if`), `DpvoLowParallaxDiagnostics` +
+  `DpvoOdometry::low_parallax_diagnostics`/`low_parallax_flow_log`. Module
+  doc gained a full "Low-parallax hover freeze" section covering all three
+  signal-design attempts and why each was rejected/adopted. 7 new unit
+  tests (`low_parallax_tests`: window-filling no-op, windowed-median entry,
+  noise absorption vs. a hard per-frame reset, windowed-median exit +
+  disarm, disarmed-never-re-enters, disabled-is-a-no-op).
+* `pipelines/slam/src/dpvo_patch_graph.rs` (+54): one new test,
+  `suppressing_frames_via_reject_pending_frame_freezes_frames_patches_and_edges`
+  (the freeze-semantics structural proof described above).
+* `examples/euroc_dpvo_vo_demo.rs` (+122): `--hover-freeze` (the on/off
+  switch), `--hover-window`/`--hover-enter-flow`/`--hover-exit-flow`
+  (mirror `DpvoLowParallaxConfig`'s fields 1:1), summary keys
+  (`hover_freeze_enabled`/`hover_regime_active`/`hover_times_entered`/
+  `hover_times_exited`/`hover_frames_suppressed_total`/`hover_disarmed`/
+  `hover_last_flow`/`hover_last_enter_frame`/`hover_last_exit_frame`/
+  `hover_window`/`hover_enter_flow`/`hover_exit_flow`), the same running
+  counters in the periodic progress line, and
+  `<out-dir>/hover_flow_trace.csv` (every evaluated frame's own flow value
+  + regime-active state — the acceptance-run evidence cited throughout
+  this section).
+
+### Verify (verbatim)
+
+```
+cargo test -p visloc-slam --features onnx-inference --lib
+  -> ok. 391 passed; 0 failed; 7 ignored
+cargo clippy -p visloc-slam --all-targets --features onnx-inference
+  -> zero warnings touching dpvo_vo.rs/dpvo_patch_graph.rs (6 pre-existing,
+     unrelated warnings elsewhere: online_slam_vi_ba.rs, vi_motion_initializer.rs,
+     online_slam_motion_vi_init.rs, map_atlas.rs, online_slam.rs)
+cargo clippy --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> zero warnings touching euroc_dpvo_vo_demo.rs
+cargo build --release --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> clean
+20f smoke (--hover-freeze, real defaults) -> exit 0, hover diagnostics present
+```
+
+### Real MH_01 acceptance runs
+
+`--euroc-dir MH_01_easy --stride 2 --seed 0`, `fast.yaml`-equivalent graph
+sizing (`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11`), `--loop-closure --sim3-backend --global-ba
+--gba-widen-t0 --long-loop --ll-superpoint-model models/superpoint_1500.onnx`
+on every arm (M12's own primary configuration, reproduced digit-for-digit
+as this milestone's own control — see below), visual-only (no `--imu`),
+CPU-only (`--onnx-cpu`), release build. Outputs:
+`E:/visloc_archive/dpvo_m14_20260718/{control_800,mechanism_on_800_v3,control_400,mechanism_on_400_v3}/`.
+
+**800 frames — target MISSED, and WORSE than control, not merely inert:**
+
+| Metric | Control (mechanism off) | Mechanism ON (final design) |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 0.6987 |
+| `ate_rigid_rmse_m` | 4.0752 | 4.4203 |
+| `ate_similarity_rmse_m` | 2.8747 | 3.1679 |
+| `ate_similarity_scale` | 20.633359 | 26.630381 |
+| `loop_accepted` (proximity) | 9 | 1 |
+| `hover_times_entered`/`_exited` | 0 / 0 | 1 / 1 |
+| `hover_frames_suppressed_total` | 0 | 241 |
+| `hover_last_enter_frame`/`_exit_frame` | none / none | 216 / 457 |
+
+The control arm's own numbers (`4.0752`/`2.8747`/`20.633359`,
+`loop_accepted=9`) reproduce M12's own `on_800_control`
+(`4.0752`/`2.8747`/`20.633359`, per that milestone's results section)
+digit-for-digit — confirms this milestone's control lineage is a faithful
+baseline, not a rebuild-drifted one. Target was `ate_similarity_scale < 2`
+(ideally `~1.0-1.3`); actual result moved scale FARTHER from `1.0` (`20.6
+-> 26.6`), and both rigid and similarity RMSE got worse too, plus
+`loop_accepted` collapsed `9 -> 1` (fewer committed frames during the
+frozen span means fewer proximity-loop candidate pairs ever get evaluated
+against each other, so M6's own backend loses most of its own leverage as
+a side effect).
+
+**400 frames — no-regression guard also FAILS**, not merely "may legitimately
+fire":
+
+| Metric | Control (mechanism off) | Mechanism ON |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 0.5375 |
+| `ate_rigid_rmse_m` | 0.1543 | 0.1828 |
+| `ate_similarity_rmse_m` | 0.1521 | 0.1797 |
+| `ate_similarity_scale` | 1.234181 | 0.695100 |
+| `hover_times_entered`/`_exited` | 0 / 0 | 1 / 0 |
+| `hover_frames_suppressed_total` | 0 | 185 |
+
+The regime enters at frame `216` (same as the 800f run — deterministic up
+to that point) but the 400-frame window ends before frame `457`, so it
+never exits within this run: the mechanism spends the back half of a 400f
+run permanently suppressed, `tracked_fraction` collapses to `0.54`, both
+RMSE numbers regress `~18-19%`, and `ate_similarity_scale` moves FARTHER
+from `1.0` in the other direction (`|0.695-1|=0.305` vs.
+`|1.234-1|=0.234`) — this does not clear the guard bar
+("not materially worse than 0.154/0.152/1.23"), and does not qualify for
+the brief's own "if the mechanism IMPROVES 400f scale toward 1.0, report
+it as a win" exception either.
+
+### Profile-flatness evidence: the freeze does not prevent the ramp — it moves the ramp's onset earlier and makes it steeper
+
+`m14_scale_profile.py` (a verbatim copy of M13's own
+`m13_scale_profile.py`, `RUNS` repointed at this milestone's own
+trajectories — `E:/visloc_archive/dpvo_m14_20260718/`) computes the same
+expanding-window (`[0, k)`) Umeyama scale M6-M13's own
+`ate_similarity_scale` is a special case of. One caveat stated up front:
+because `tracked_fraction < 1` on the mechanism-ON arm, CSV ROW index
+(what the profiler windows over — one row per TRACKED frame, matching
+M13's own established convention) is no longer the same quantity as
+PROCESSED-frame index once past the suppressed span — row `217` in the
+mechanism-ON trajectory is processed frame `457` (the hover-exit frame),
+not processed frame `217`. With that in mind:
+
+| CSV row (≈ processed frame, control only) | Control scale | Mechanism-ON scale | Mechanism-ON's OWN processed-frame equivalent |
+| --- | --- | --- | --- |
+| 199 | 0.6150 | 0.5553 | 199 (pre-hover, identical up to here) |
+| 219 | 0.8206 | 0.7159 | ≈459 (hover just exited) |
+| 259 | 1.0909 | 0.7830 | ≈499 |
+| 299 | 1.2221 | 2.6507 | ≈539 |
+| 399 | 1.3091 | 13.0141 | ≈639 |
+| 459 (control's own onset) | 1.2494 | 20.4557 | ≈699 |
+| 519 | 1.3584 | 25.7808 | ≈759 |
+| 799 / 558 (each run's own last row) | 20.6334 | 26.6304 | 800 |
+
+Control stays FLAT (`0.4-1.3`) all the way through row `~500` — matching
+M13's own finding that the ramp's onset sits at `frame_end≈460-480` — then
+climbs smoothly to `20.63` by row `799`. The mechanism-ON arm is ALSO
+flat (`0.4-0.8`) through its own pre-hover rows (`0-259`, processed frames
+`0-499`, byte-identical to control up to the hover), but the ramp starts
+almost IMMEDIATELY once tracking resumes post-freeze (row `~260` = processed
+frame `~500`, i.e. right at hover exit) and climbs FASTER and to a HIGHER
+final value (`26.63` vs `20.63`) over FEWER real rows than control's own
+ramp needed. **The freeze does not prevent the corruption event — it
+appears to make the post-hover transition itself worse**: plausibly
+because the 241-raw-frame gap with literally zero committed frames (vs.
+control's own gradual, `KEYFRAME_THRESH`-decimated but non-zero admission
+rate through the hover) leaves the motion model with a much larger,
+more stale gap to extrapolate across at the exact moment tracking must
+reconnect, and/or removes whatever small stabilizing value the ~9% of
+hover frames that DO commit in the baseline run were providing even though
+individually scale-uninformative.
+
+### Honest verdict
+
+**A real, correctly-implemented, thoroughly-calibrated mechanism that
+answers M13's own literal question ("does preserving pre-hover patches'
+active edges through the hover let post-hover BA pin scale?") with a clear
+NO on real data — not "inconclusive," not "an implementation bug," a
+negative result with a plausible causal explanation.** The freeze-semantics
+mechanism (Option A from M13's design space) is implemented exactly as
+scoped and verified structurally correct (byte-identical
+frames/patches/edges across 50 simulated suppressed frames). The detector,
+after two live-tuning failures each preserved as their own honest finding,
+correctly and precisely fires on exactly the hover M13 diagnosed
+(`216 -> 457` vs. `~200-440`), with a one-shot guard that keeps it from
+misfiring on the rest of the run. Despite all of that working exactly as
+designed, real MH_01 runs show `ate_similarity_scale` getting WORSE
+(`20.6 -> 26.6` at 800f) and the 400f guard regressing too — the
+freeze-and-resume transition appears to be a harder failure mode than the
+baseline's own gradual reconnection through the hover, not an easier one.
+Options B ("depth-trust weighting" — damp new patches' depth confidence
+instead of blocking admission entirely) and C ("exit re-anchor" — a
+one-shot rescale at hover exit) from M13's own design space were NOT
+attempted this milestone; see below for why they are the more promising
+next steps.
+
+### What a real fix would need
+
+* **The most direct next step is Option C (M13's own "exit re-anchor"),
+  now BETTER MOTIVATED by this milestone's own finding**: since the
+  problem is specifically the ABRUPT resume transition, not the hover
+  itself, a one-shot Sim(3)/scale re-anchor applied exactly at the
+  detected hover-EXIT frame (using this milestone's own
+  `LowParallaxRegimeState` exit event as the trigger) against the
+  pre-hover trajectory's own last-known-good scale could directly counter
+  the "post-hover ramp reads a fresh/wrong scale" symptom this milestone
+  measured, without needing the freeze (and its resume-transition cost) at
+  all.
+* **Option B (depth-trust weighting) deserves a real try before more
+  freeze-mechanism tuning**: rather than blocking new-patch admission
+  outright (this milestone's choice), let hover-span frames commit
+  normally (preserving the baseline's own gradual reconnection this
+  milestone's ramp comparison shows matters) but heavily damp/prior their
+  depth channel toward the pre-hover median inverse depth, so they
+  contribute rotation constraints without dragging scale. This keeps the
+  graph's own temporal continuity intact through the hover (unlike the
+  freeze, which this milestone showed makes the resume WORSE) while still
+  addressing M13's own root cause (unconstrained depth on hover-born
+  patches).
+* **If a detector is still wanted for either of the above**, this
+  milestone's own `motion_probe` + windowed-median + one-shot design is
+  reusable as-is (`LowParallaxRegimeState`/`DpvoLowParallaxConfig` are
+  generic, signal-agnostic, and already unit-tested) — only the RESPONSE
+  to entering/exiting the regime would need to change, not the detection
+  machinery itself. The one-shot-disarm limitation (documented above)
+  would still apply and would need lifting (adaptive/relative
+  thresholding, most likely) for a dataset with a genuine second hover.
+* Not attempted, and now lower priority given the causal finding above:
+  tuning `window`/`enter_flow`/`exit_flow` further. The mechanism already
+  fires exactly where M13 said the problem was — the honest negative is in
+  the RESPONSE to that detection, not the detection itself.
+
+### Open items
+
+* Options B/C above, not started.
+* The `--hover-freeze` flag and `DpvoOdometryConfig::low_parallax` ship
+  as a correctly-implemented, off-by-default, opt-in mechanism (exactly
+  like M7's own "zero-corruption bounded negative" — not deleted, since
+  `LowParallaxRegimeState`'s detector machinery is reusable for whatever
+  M15 tries next) — do not enable it for any accuracy-seeking run until a
+  DIFFERENT response mechanism (B or C above) replaces the freeze.
+* The non-stationary `motion_probe` baseline (finding 3 above) is itself a
+  potentially interesting standalone signal — it may be detecting "the
+  pose chain has become self-consistently over-fit," which is closer to
+  what M8-M13's own scale-correction backends would want to trigger on
+  than a literal hover would be. Not explored further here.
