@@ -127,11 +127,17 @@
 //!    `.scale` is the accepted pair's `measured_scale`. Rejected outright
 //!    (see each gate's own doc on [`DpvoLongLoopConfig`]) for: too few
 //!    bridged correspondences, too few RANSAC inliers, too high a residual
-//!    relative to the point cloud's own scale, or a fitted scale outside a
-//!    sane range — **no fallback to `scale = 1`**: the whole point of this
-//!    milestone is a genuine scale measurement, so a candidate whose
-//!    geometry cannot support one is discarded rather than accepted with a
-//!    vacuous scale.
+//!    relative to the point cloud's own scale, a fitted scale outside a sane
+//!    range, or (Milestone M12, added after a real 800f corruption run —
+//!    `docs/dpvo_droid_port_plan.md`'s "M12 results") the fit's own
+//!    RECOVERED ROTATION disagreeing with DPVO's already-trusted relative
+//!    rotation by more than `max_rotation_inconsistency_deg` — an
+//!    independent physical check the RANSAC/residual gates alone cannot
+//!    provide, since they only verify the bridged SAMPLE's own internal
+//!    self-consistency, not agreement with a trajectory-level estimate — **no
+//!    fallback to `scale = 1`**: the whole point of this milestone is a
+//!    genuine scale measurement, so a candidate whose geometry cannot
+//!    support one is discarded rather than accepted with a vacuous scale.
 //!
 //! The accepted pair's ORDINARY rotation+translation `Sim3LoopMeasurement`
 //! (scale fixed at 1, per `crate::dpvo_sim3_backend`'s own two-edge design)
@@ -186,7 +192,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Point2, Point3, Rotation3, UnitQuaternion, Vector3};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -292,6 +298,57 @@ pub struct DpvoLongLoopConfig {
     pub max_scale: f64,
     /// Deterministic RANSAC sampling seed.
     pub ransac_seed: u64,
+    /// Milestone M12 (`docs/dpvo_droid_port_plan.md`): when `true`, this
+    /// frame's DPVO patch centers are chosen from its OWN SuperPoint
+    /// keypoints (the SAME ones this module already extracts for retrieval
+    /// indexing — see `crate::dpvo_vo::DpvoOdometry::process_frame`'s own
+    /// doc, "SuperPoint feature extraction is moved earlier") instead of
+    /// pure per-patch uniform-random sampling, ranked by keypoint score, up
+    /// to `patches_per_frame`; any shortfall (fewer usable keypoints than
+    /// `patches_per_frame` after the `sp_patch_min_separation` de-duplication
+    /// below) is filled by the SAME uniform-random sampler M1-M11 already
+    /// used, byte-identically. `false` (default) reproduces the exact M1-M11
+    /// fully-random sampling — see [`sp_anchored_patch_centers`] for the
+    /// actual coordinate mapping and the M11 motivation
+    /// (`docs/dpvo_droid_port_plan.md`'s "M11 results": at `fast.yaml` patch
+    /// density, a matched appearance keypoint essentially never lands near
+    /// an existing RANDOMLY-placed patch, so the bridge from a long-range
+    /// retrieval match to a DPVO-owned 3D point almost always fails).
+    pub sp_anchored_patches: bool,
+    /// Minimum center-to-center distance (patch-grid pixels, the SAME space
+    /// `DpvoPatch::x`/`y` live in) between two SP-anchored patch centers
+    /// chosen for the SAME frame — a simple de-duplication so two SuperPoint
+    /// keypoints that map to (almost) the same patch-grid cell do not spend
+    /// two of the frame's `patches_per_frame` budget on effectively the same
+    /// 3×3 correlation window. Default `2.0`: `patchify_cpu`'s own sampled
+    /// window is `2 * radius + 2 = 4` patch-grid pixels wide at DPVO's
+    /// `radius = 1`, so `2.0` keeps any two chosen centers from overlapping
+    /// more than half their own window. Unused when `sp_anchored_patches` is
+    /// `false`.
+    pub sp_patch_min_separation: f64,
+    /// Milestone M12 (post-mortem on a real 800f corruption this milestone's
+    /// own SP-anchoring diagnosis produced — `docs/dpvo_droid_port_plan.md`'s
+    /// "M12 results", "measurement-vs-application" section): reject a
+    /// candidate whenever [`ransac_umeyama_scale`]'s own RECOVERED ROTATION
+    /// disagrees with DPVO's own trusted relative rotation
+    /// (`current_pose.compose(&old_pose.inverse())`, the SAME rotation the
+    /// accepted measurement's ordinary edge already reuses — see the module
+    /// doc's "Feeding the existing M9/M10 machinery" section) by more than
+    /// this many DEGREES. An independent, physically-motivated check
+    /// RANSAC's own inlier-count/residual-ratio gates cannot provide — they
+    /// only check the bridged SAMPLE's own internal self-consistency, never
+    /// agreement with a trajectory-level rotation estimate DPVO's own
+    /// monocular tracking is generally reliable for (this port's own
+    /// standing assumption, restated in `crate::dpvo_sim3_backend`'s module
+    /// doc). Default `20.0`: on real MH_01 data, this milestone's own two
+    /// CONFIRMED-bad candidates (measured scale `386.9`/`173.8`, both an
+    /// order of magnitude past MH_01's own worst documented drift) disagreed
+    /// with the trusted rotation by tens of degrees while both CONFIRMED-good
+    /// candidates (scale `0.18`/`1.13`) disagreed by only a few degrees —
+    /// `20.0` sits comfortably between the two, loose enough to tolerate
+    /// ordinary VO rotation uncertainty over a `~150`-`450`-frame gap, tight
+    /// enough to catch a grossly wrong correspondence set.
+    pub max_rotation_inconsistency_deg: f64,
 }
 
 impl Default for DpvoLongLoopConfig {
@@ -316,6 +373,9 @@ impl Default for DpvoLongLoopConfig {
             min_scale: 1.0e-3,
             max_scale: 1.0e3,
             ransac_seed: 0,
+            sp_anchored_patches: false,
+            sp_patch_min_separation: 2.0,
+            max_rotation_inconsistency_deg: 20.0,
         }
     }
 }
@@ -340,9 +400,36 @@ pub struct DpvoLongLoopDiagnostics {
     /// Total candidates that reached geometric verification (cross-check
     /// matching + bridging + RANSAC).
     pub verification_attempts: usize,
+    /// Milestone M12: candidates whose bridged 3D-3D correspondence count
+    /// reached `min_bridge_correspondences` and so were actually handed to
+    /// [`ransac_umeyama_scale`] — the funnel step between
+    /// `verification_attempts` (bridge ATTEMPTED) and `accepted_total`
+    /// (RANSAC PASSED). Because [`DpvoLongLoopIndex::find_and_verify_long_range_loop`]
+    /// stops at the first accepted candidate, `accepted_total` IS this
+    /// milestone's own "ransac-passed" count for a query that found any
+    /// acceptable candidate at all (there is no separate "passed RANSAC but
+    /// not the first one tried" case in this design) — this field's own
+    /// purpose is isolating "insufficient bridge" from "bridge OK, RANSAC/
+    /// residual rejected" from "bridge+RANSAC OK, rotation-inconsistent"
+    /// (Milestone M12's own physical-consistency gate, added after a real
+    /// 800f corruption run — see [`DpvoLongLoopConfig::max_rotation_inconsistency_deg`]'s
+    /// own doc) among the `verification_attempts - accepted_total`
+    /// candidates that were NOT accepted:
+    /// `rejected_insufficient_bridge_total + bridge_sufficient_total ==
+    /// verification_attempts`, `rejected_ransac_total +
+    /// rejected_rotation_inconsistent_total + accepted_total ==
+    /// bridge_sufficient_total` (per query where a candidate is accepted,
+    /// the loop stops, so candidates ranked below it are never attempted at
+    /// all and count toward none of these fields).
+    pub bridge_sufficient_total: usize,
     pub accepted_total: usize,
     pub rejected_insufficient_bridge_total: usize,
     pub rejected_ransac_total: usize,
+    /// Milestone M12: candidates that passed RANSAC/residual verification
+    /// but were rejected because the RANSAC fit's own recovered rotation
+    /// disagreed with DPVO's own trusted relative rotation by more than
+    /// `max_rotation_inconsistency_deg` — see that config field's own doc.
+    pub rejected_rotation_inconsistent_total: usize,
     pub last_accepted_arrival_i: usize,
     pub last_accepted_arrival_j: usize,
     pub last_accepted_gap: usize,
@@ -361,6 +448,53 @@ pub struct AcceptedLongLoop {
     pub arrival_i: usize,
     pub arrival_j: usize,
     pub measurement: Sim3LoopMeasurement,
+}
+
+/// Milestone M12 (`docs/dpvo_droid_port_plan.md`, open item 2 carried
+/// forward from M11): one top-`K` retrieval candidate FOR ONE QUERY, logged
+/// unconditionally (accepted or not) — M11's own diagnostics recorded only
+/// the last ACCEPTED candidate's identity, leaving "was the tightest GT
+/// revisit ever even surfaced as a candidate" unanswerable from the run's
+/// own data. [`DpvoLongLoopIndex::query_log`] accumulates one of these per
+/// candidate returned by every query, across the whole run, so a post-hoc
+/// pass (e.g. `examples/euroc_dpvo_vo_demo.rs`'s own CSV export) can grep for
+/// a specific `candidate_arrival` and answer that question directly instead
+/// of arguing from absence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueryCandidateLogEntry {
+    /// The querying (current, "new-side") frame's arrival index.
+    pub query_arrival: usize,
+    /// This candidate's ("old-side") arrival index.
+    pub candidate_arrival: usize,
+    /// `query_arrival - candidate_arrival` (always `>= min_temporal_gap`,
+    /// per [`DpvoLongLoopIndex::query_candidates`]'s own filter).
+    pub gap: usize,
+    /// VLAD cosine similarity that ranked this candidate.
+    pub similarity: f32,
+    /// `0` = the highest-similarity candidate for this query, ascending.
+    pub rank: usize,
+    /// Whether THIS candidate is the one
+    /// [`DpvoLongLoopIndex::find_and_verify_long_range_loop`] accepted for
+    /// this query (at most one `true` entry per `query_arrival`) — `false`
+    /// does not necessarily mean this candidate was geometrically verified
+    /// and REJECTED: a candidate ranked below an accepted one is never
+    /// attempted at all (the search stops at the first acceptance), so
+    /// `false` covers both "tried and rejected" and "never tried because an
+    /// earlier-ranked candidate already won."
+    pub accepted: bool,
+    /// Milestone M12 (real-corruption post-mortem instrumentation): the
+    /// disagreement, in DEGREES, between [`ransac_umeyama_scale`]'s own
+    /// recovered rotation and DPVO's already-trusted relative rotation
+    /// (`current_pose.compose(&old_pose.inverse())`) — `Some(..)` whenever
+    /// this candidate reached that check (bridging AND RANSAC both
+    /// succeeded), regardless of whether it then passed or failed
+    /// `max_rotation_inconsistency_deg`; `None` if it never reached that far
+    /// (rejected earlier at bridging or RANSAC, or never attempted because
+    /// an earlier-ranked candidate already won this query). This is the
+    /// concrete, per-candidate number `docs/dpvo_droid_port_plan.md`'s "M12
+    /// results" needed to state, not merely infer, why each rejected
+    /// candidate was rejected.
+    pub rotation_disagreement_deg: Option<f64>,
 }
 
 /// One committed frame's retrieval+verification material. Images are never
@@ -396,13 +530,24 @@ pub struct DpvoLongLoopIndex {
     frames: VecDeque<IndexedFrame>,
     last_query_arrival: Option<usize>,
     rng: StdRng,
+    /// Milestone M12: every top-`K` candidate ever surfaced by a query, not
+    /// just accepted ones — see [`QueryCandidateLogEntry`]'s own doc.
+    /// Unbounded (like `dpvo_sim3_backend`'s own retained-pose history, this
+    /// index's own regime is hundreds to low thousands of frames per run,
+    /// not an unbounded streaming service), so a very long run's own memory
+    /// cost here is `queries_attempted * top_k` entries — reported, not
+    /// silently bounded, honestly documented rather than pretending it is
+    /// free.
+    query_log: Vec<QueryCandidateLogEntry>,
 
     diag_queries_attempted: usize,
     diag_candidates_considered: usize,
     diag_verification_attempts: usize,
+    diag_bridge_sufficient: usize,
     diag_accepted_total: usize,
     diag_rejected_insufficient_bridge: usize,
     diag_rejected_ransac: usize,
+    diag_rejected_rotation_inconsistent: usize,
     diag_last_arrival_i: usize,
     diag_last_arrival_j: usize,
     diag_last_gap: usize,
@@ -423,12 +568,15 @@ impl DpvoLongLoopIndex {
             frames: VecDeque::new(),
             last_query_arrival: None,
             rng: StdRng::seed_from_u64(seed),
+            query_log: Vec::new(),
             diag_queries_attempted: 0,
             diag_candidates_considered: 0,
             diag_verification_attempts: 0,
+            diag_bridge_sufficient: 0,
             diag_accepted_total: 0,
             diag_rejected_insufficient_bridge: 0,
             diag_rejected_ransac: 0,
+            diag_rejected_rotation_inconsistent: 0,
             diag_last_arrival_i: 0,
             diag_last_arrival_j: 0,
             diag_last_gap: 0,
@@ -458,9 +606,11 @@ impl DpvoLongLoopIndex {
             queries_attempted: self.diag_queries_attempted,
             candidates_considered: self.diag_candidates_considered,
             verification_attempts: self.diag_verification_attempts,
+            bridge_sufficient_total: self.diag_bridge_sufficient,
             accepted_total: self.diag_accepted_total,
             rejected_insufficient_bridge_total: self.diag_rejected_insufficient_bridge,
             rejected_ransac_total: self.diag_rejected_ransac,
+            rejected_rotation_inconsistent_total: self.diag_rejected_rotation_inconsistent,
             last_accepted_arrival_i: self.diag_last_arrival_i,
             last_accepted_arrival_j: self.diag_last_arrival_j,
             last_accepted_gap: self.diag_last_gap,
@@ -470,6 +620,14 @@ impl DpvoLongLoopIndex {
             last_accepted_mean_residual_ratio: self.diag_last_mean_residual_ratio,
             total_elapsed_ms: self.diag_total_elapsed_ms,
         }
+    }
+
+    /// Milestone M12 (open item 2 carried forward from M11): every top-`K`
+    /// retrieval candidate ever surfaced by any query, across the whole
+    /// run — see [`QueryCandidateLogEntry`]'s own doc for exactly what
+    /// `accepted: false` does and does not mean.
+    pub fn query_log(&self) -> &[QueryCandidateLogEntry] {
+        &self.query_log
     }
 
     /// Ingest one committed frame's raw SuperPoint keypoints (already in
@@ -602,7 +760,13 @@ impl DpvoLongLoopIndex {
         let matcher = CrossCheckMatcher::new(BruteForceMatcher { ratio: self.config.match_ratio });
 
         let mut accepted = None;
-        for (old_arrival, similarity) in candidates {
+        let mut winning_arrival: Option<usize> = None;
+        // Milestone M12: every candidate that reached the rotation-consistency
+        // check, and its own measured disagreement in degrees — logged
+        // unconditionally (pass or fail) so `QueryCandidateLogEntry::rotation_disagreement_deg`
+        // can report the CONCRETE number, not just the pass/fail outcome.
+        let mut rotation_checks: Vec<(usize, f64)> = Vec::new();
+        for &(old_arrival, similarity) in &candidates {
             let Some(old_idx) = self.frames.iter().position(|f| f.arrival_index == old_arrival) else { continue };
             let old_keypoints = self.frames[old_idx].keypoints.clone();
             let old_descriptors = self.frames[old_idx].descriptors.clone();
@@ -627,6 +791,7 @@ impl DpvoLongLoopIndex {
                 self.diag_rejected_insufficient_bridge += 1;
                 continue;
             }
+            self.diag_bridge_sufficient += 1;
 
             let Some(fit) = ransac_umeyama_scale(&bridged, &self.config, &mut self.rng) else {
                 self.diag_rejected_ransac += 1;
@@ -634,6 +799,24 @@ impl DpvoLongLoopIndex {
             };
 
             let relative_pose = current_pose.compose(&old_pose.inverse());
+            // Milestone M12 (post-mortem on a real 800f corruption):
+            // RANSAC's own inlier-count/residual-ratio gates check only the
+            // bridged sample's own internal self-consistency — they cannot
+            // tell a genuine revisit from an appearance-similar-but-
+            // structurally-different one that happens to produce enough
+            // mutually-agreeing (but jointly wrong) correspondences. Cross-
+            // check the fit's own recovered ROTATION against DPVO's already-
+            // trusted relative rotation (the SAME one `relative_pose` above
+            // already carries) as an independent physical consistency gate —
+            // see `GeometricFit::rotation`'s and
+            // `DpvoLongLoopConfig::max_rotation_inconsistency_deg`'s own doc.
+            let fit_rotation_uq = UnitQuaternion::from_rotation_matrix(&fit.rotation);
+            let rotation_disagreement_deg = fit_rotation_uq.angle_to(&relative_pose.rotation).to_degrees();
+            rotation_checks.push((old_arrival, rotation_disagreement_deg));
+            if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
+                self.diag_rejected_rotation_inconsistent += 1;
+                continue;
+            }
             let measurement = Sim3LoopMeasurement {
                 arrival_i: old_arrival,
                 arrival_j: current_arrival,
@@ -649,12 +832,135 @@ impl DpvoLongLoopIndex {
             self.diag_last_inliers = fit.inlier_count;
             self.diag_last_mean_residual_ratio = fit.mean_residual_ratio;
             accepted = Some(AcceptedLongLoop { arrival_i: old_arrival, arrival_j: current_arrival, measurement });
+            winning_arrival = Some(old_arrival);
             break;
+        }
+
+        // Milestone M12 (open item 2 carried forward from M11): log EVERY
+        // top-`K` candidate this query surfaced, not just the accepted one —
+        // see `QueryCandidateLogEntry`'s own doc for what `accepted: false`
+        // does and does not mean (a candidate ranked below the winner is
+        // never even attempted, per this function's own "stop at first
+        // accepted" design, and is still logged as `accepted: false`).
+        for (rank, &(candidate_arrival, similarity)) in candidates.iter().enumerate() {
+            let rotation_disagreement_deg =
+                rotation_checks.iter().find(|&&(arrival, _)| arrival == candidate_arrival).map(|&(_, deg)| deg);
+            self.query_log.push(QueryCandidateLogEntry {
+                query_arrival: current_arrival,
+                candidate_arrival,
+                gap: current_arrival.saturating_sub(candidate_arrival),
+                similarity,
+                rank,
+                accepted: winning_arrival == Some(candidate_arrival),
+                rotation_disagreement_deg,
+            });
         }
 
         self.diag_total_elapsed_ms += start.elapsed().as_secs_f64() * 1000.0;
         accepted
     }
+}
+
+/// Milestone M12 (`docs/dpvo_droid_port_plan.md`): choose a frame's
+/// `patches_per_frame` patch centers, optionally anchored at SuperPoint
+/// keypoint locations instead of pure uniform-random sampling — the "attack
+/// the bridge by construction" fix for M11's own honest negative (at
+/// `fast.yaml` patch density, a matched appearance keypoint essentially
+/// never lands near an existing randomly-placed patch, so
+/// [`bridge_matches_to_3d3d`] almost never finds enough 3D-3D
+/// correspondences). Anchoring patches AT the SAME keypoints a future
+/// long-range match will look for makes the bridge succeed by CONSTRUCTION,
+/// not by loosening `patch_pixel_radius` (M11's own module doc + results
+/// section: loosening the radius instead of the density is a confirmed
+/// corruption mode, never to be reopened).
+///
+/// # Coordinate mapping
+///
+/// `sp_keypoints` is `(x, y, score)` in FULL-RESOLUTION image pixels — the
+/// SAME raw form `crate::dpvo_vo::DpvoOdometry::process_frame` already
+/// extracts once (via SuperPoint) and reuses BOTH here and for
+/// [`DpvoLongLoopIndex::ingest_frame`]'s own `/RES` conversion (never
+/// extracted twice per frame). Each keypoint is divided by `res` here —
+/// identical to `ingest_frame`'s own conversion, using the SAME
+/// `visloc_vision::dpvo::RES` value the caller already has (passed in
+/// rather than imported directly: this module is deliberately
+/// `onnx-inference`-feature-agnostic — see the module doc's own "graph/
+/// policy only" placement note — while `visloc_vision::dpvo` itself is
+/// gated behind that feature) — to reach the SAME stride-`RES` patch-grid
+/// space `DpvoPatch::x`/`y` and this frame's `coords` already live in, then
+/// CLAMPED (never rejected) into `[1, ws - 2] x [1, hs - 2]`: the exact
+/// integer interior the legacy uniform-random sampler's own
+/// `rng.gen_range(1..ws - 1)` (`1 ..= ws - 2` inclusive) already enforces,
+/// so an SP-anchored center can never fall outside the border margin every
+/// prior milestone's patches already respected. Sub-pixel precision is
+/// intentionally PRESERVED (not rounded to the integer lattice):
+/// `patchify_cpu`'s own bilinear blend already handles a fractional
+/// centroid correctly (the exact same interpolation path every M1-M11 patch
+/// already exercises once its depth/pose estimate updates), so there is no
+/// reason to discard the keypoint's true sub-pixel location.
+///
+/// # Ranking, de-duplication, and fallback
+///
+/// Keypoints are ranked by SCORE, descending, and accepted greedily up to
+/// `m` as long as each is at least `min_separation` patch-grid pixels from
+/// every already-chosen center (see [`DpvoLongLoopConfig::sp_patch_min_separation`]'s
+/// own doc for why) — a simple, deterministic (score-order, not spatial
+/// binning) de-duplication, not a full non-max-suppression grid. Any
+/// shortfall (`sp_keypoints` empty, `ws`/`hs` too small for any margin at
+/// all, or fewer than `m` keypoints survive de-duplication) is filled by the
+/// EXACT SAME uniform-random sampler M1-M11 already used
+/// (`rng.gen_range(1..ws - 1)`/`rng.gen_range(1..hs - 1)`, same call order),
+/// so `sp_keypoints: &[]` reproduces the legacy fully-random sampling
+/// byte-for-byte (same RNG call sequence, same values) — the M12 "off =
+/// legacy" contract this function alone is responsible for.
+#[allow(clippy::too_many_arguments)]
+pub fn sp_anchored_patch_centers(
+    m: usize,
+    ws: usize,
+    hs: usize,
+    sp_keypoints: &[(f64, f64, f32)],
+    res: f64,
+    min_separation: f64,
+    rng: &mut StdRng,
+) -> Vec<(f32, f32)> {
+    let mut chosen: Vec<(f32, f32)> = Vec::with_capacity(m);
+    if !sp_keypoints.is_empty() && ws > 2 && hs > 2 {
+        let lo_x = 1.0_f64;
+        let hi_x = (ws as f64) - 2.0;
+        let lo_y = 1.0_f64;
+        let hi_y = (hs as f64) - 2.0;
+        let mut ranked: Vec<(f64, f64, f32)> = sp_keypoints
+            .iter()
+            .map(|&(x, y, score)| {
+                let gx = (x / res).clamp(lo_x, hi_x);
+                let gy = (y / res).clamp(lo_y, hi_y);
+                (gx, gy, score)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        for (gx, gy, _score) in ranked {
+            if chosen.len() >= m {
+                break;
+            }
+            let too_close = chosen.iter().any(|&(cx, cy)| {
+                let dx = cx as f64 - gx;
+                let dy = cy as f64 - gy;
+                (dx * dx + dy * dy).sqrt() < min_separation
+            });
+            if too_close {
+                continue;
+            }
+            chosen.push((gx as f32, gy as f32));
+        }
+    }
+    // Fallback — byte-identical to the legacy `Patchifier.forward` RANDOM
+    // strategy's own call sequence when `chosen` is (still) empty here.
+    while chosen.len() < m {
+        let x = rng.gen_range(1..ws - 1) as f32;
+        let y = rng.gen_range(1..hs - 1) as f32;
+        chosen.push((x, y));
+    }
+    chosen
 }
 
 /// Backproject a DPVO patch's anchor point into its OWNER frame's own
@@ -788,6 +1094,21 @@ struct GeometricFit {
     /// already uses, so this can feed `Sim3LoopMeasurement::measured_scale`
     /// directly with no sign/convention translation needed.
     scale: f64,
+    /// Milestone M12 (measurement-vs-application post-mortem): the refit's
+    /// own recovered ROTATION — previously computed and immediately
+    /// discarded (the caller always reused DPVO's own trusted
+    /// `current_pose.compose(&old_pose.inverse())` rotation for the ordinary
+    /// `Sim3LoopMeasurement` edge, per this module's own "DPVO's rotation is
+    /// more reliable than its translation scale" design choice). Propagated
+    /// out here so [`DpvoLongLoopIndex::find_and_verify_long_range_loop`] can
+    /// cross-check it against that SAME trusted rotation
+    /// (`DpvoLongLoopConfig::max_rotation_inconsistency_deg`) — RANSAC's own
+    /// inlier-count/residual-ratio gates check only the bridged SAMPLE's own
+    /// internal self-consistency, never agreement with an independent,
+    /// generally-reliable trajectory-level rotation estimate; a large
+    /// disagreement is strong evidence the correspondence set does not
+    /// describe the same physical revisit even when internally coherent.
+    rotation: Rotation3<f64>,
     inlier_count: usize,
     mean_residual_ratio: f64,
 }
@@ -854,13 +1175,12 @@ fn ransac_umeyama_scale(pairs: &[(Point3<f64>, Point3<f64>)], cfg: &DpvoLongLoop
         return None;
     }
 
-    Some(GeometricFit { scale: refit.scale, inlier_count: inlier_pairs.len(), mean_residual_ratio })
+    Some(GeometricFit { scale: refit.scale, rotation: refit.rotation, inlier_count: inlier_pairs.len(), mean_residual_ratio })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::Rotation3;
 
     fn intr() -> DpvoIntrinsics {
         DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 }
@@ -868,6 +1188,117 @@ mod tests {
 
     fn cfg() -> DpvoLongLoopConfig {
         DpvoLongLoopConfig::default()
+    }
+
+    // ---- sp_anchored_patch_centers (Milestone M12) ----
+
+    /// Mirrors `visloc_vision::dpvo::RES` (`4`) — this module cannot import
+    /// that constant directly (it lives behind the `onnx-inference` feature;
+    /// see [`sp_anchored_patch_centers`]'s own doc), so its tests hardcode
+    /// the same value the real caller (`crate::dpvo_vo::DpvoOdometry::process_frame`)
+    /// passes in.
+    const TEST_RES: f64 = 4.0;
+
+    #[test]
+    fn sp_anchored_patch_centers_with_no_keypoints_matches_legacy_random_sampling_exactly() {
+        // `sp_keypoints: &[]` must reproduce the EXACT legacy
+        // `Patchifier.forward` RANDOM sampling call sequence: same number of
+        // `gen_range` calls, in the same (x, y) order, so a seeded RNG
+        // produces byte-identical coordinates either way — the M12 "off =
+        // legacy" contract.
+        let (ws, hs, m) = (188usize, 120usize, 48usize);
+        let mut rng_a = StdRng::seed_from_u64(42);
+        let legacy: Vec<(f32, f32)> = (0..m)
+            .map(|_| {
+                let x = rng_a.gen_range(1..ws - 1) as f32;
+                let y = rng_a.gen_range(1..hs - 1) as f32;
+                (x, y)
+            })
+            .collect();
+        let mut rng_b = StdRng::seed_from_u64(42);
+        let via_helper = sp_anchored_patch_centers(m, ws, hs, &[], TEST_RES, 2.0, &mut rng_b);
+        assert_eq!(legacy, via_helper);
+    }
+
+    #[test]
+    fn sp_anchored_patch_centers_places_centers_at_given_keypoints() {
+        // Keypoints are given in FULL-RESOLUTION pixels; `RES` (4) divides
+        // them down to patch-grid space — pick values that land safely away
+        // from the border after that division so no clamping kicks in,
+        // making the expected output hand-checkable.
+        let kps = [(40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32), (50.0 * TEST_RES, 35.0 * TEST_RES, 0.8_f32)];
+        let mut rng = StdRng::seed_from_u64(1);
+        let centers = sp_anchored_patch_centers(2, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
+        assert_eq!(centers.len(), 2);
+        assert!((centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6, "{centers:?}");
+        assert!((centers[1].0 - 50.0).abs() < 1e-6 && (centers[1].1 - 35.0).abs() < 1e-6, "{centers:?}");
+    }
+
+    #[test]
+    fn sp_anchored_patch_centers_ranks_by_score_descending() {
+        // Three keypoints, deliberately given LOWEST-score-first, spaced far
+        // enough apart that de-duplication never removes any of them.
+        let kps = [
+            (20.0 * TEST_RES, 20.0 * TEST_RES, 0.1_f32),
+            (80.0 * TEST_RES, 20.0 * TEST_RES, 0.9_f32),
+            (140.0 * TEST_RES, 20.0 * TEST_RES, 0.5_f32),
+        ];
+        let mut rng = StdRng::seed_from_u64(2);
+        // Only room for the top 2 by score: (80,20) then (140,20).
+        let centers = sp_anchored_patch_centers(2, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
+        assert_eq!(centers.len(), 2);
+        assert!((centers[0].0 - 80.0).abs() < 1e-6, "{centers:?}");
+        assert!((centers[1].0 - 140.0).abs() < 1e-6, "{centers:?}");
+    }
+
+    #[test]
+    fn sp_anchored_patch_centers_clamps_into_the_legacy_border_margin() {
+        // A keypoint at the full-res image origin maps to patch-grid (0, 0)
+        // — outside the legacy `[1, ws-2] x [1, hs-2]` interior — and must be
+        // clamped to (1, 1), never rejected outright.
+        let kps = [(0.0, 0.0, 1.0_f32)];
+        let mut rng = StdRng::seed_from_u64(3);
+        let centers = sp_anchored_patch_centers(1, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
+        assert_eq!(centers.len(), 1);
+        assert!((centers[0].0 - 1.0).abs() < 1e-6 && (centers[0].1 - 1.0).abs() < 1e-6, "{centers:?}");
+    }
+
+    #[test]
+    fn sp_anchored_patch_centers_deduplicates_within_min_separation() {
+        // Two keypoints mapping to (almost) the same patch-grid cell — only
+        // the higher-scored one should be kept; the second slot falls back
+        // to random sampling rather than a near-duplicate center.
+        let kps = [(40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32), (40.5 * TEST_RES, 30.5 * TEST_RES, 0.95_f32)];
+        let mut rng = StdRng::seed_from_u64(4);
+        let centers = sp_anchored_patch_centers(2, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
+        assert_eq!(centers.len(), 2);
+        // The higher-scored keypoint (40.5, 30.5) wins the first slot.
+        assert!((centers[0].0 - 40.5).abs() < 1e-6 && (centers[0].1 - 30.5).abs() < 1e-6, "{centers:?}");
+        // The second slot is NOT the near-duplicate (40.0, 30.0) — it fell
+        // back to random sampling since that candidate was within
+        // `min_separation` of an already-chosen center.
+        assert!(
+            (centers[1].0 - 40.0).abs() > 1e-6 || (centers[1].1 - 30.0).abs() > 1e-6,
+            "expected the near-duplicate to be rejected, not chosen: {centers:?}"
+        );
+    }
+
+    #[test]
+    fn sp_anchored_patch_centers_fills_remainder_with_random_fallback() {
+        // Only 1 real keypoint but `m = 4` requested — the other 3 must come
+        // from the SAME random fallback the legacy sampler uses (verified by
+        // checking they fall within the legacy border margin, since an exact
+        // value match would require replicating the interleaved RNG state
+        // exactly, which the "off = legacy" test above already covers for
+        // the zero-keypoint case).
+        let kps = [(40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32)];
+        let mut rng = StdRng::seed_from_u64(5);
+        let centers = sp_anchored_patch_centers(4, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
+        assert_eq!(centers.len(), 4);
+        assert!((centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6, "{centers:?}");
+        for &(x, y) in &centers[1..] {
+            assert!((1.0..187.0).contains(&x) && (1.0..119.0).contains(&y), "fallback center out of legacy margin: ({x},{y})");
+        }
     }
 
     // ---- patch_to_world_point / nearest_patch_within / bridge ----
@@ -1141,6 +1572,88 @@ mod tests {
 
     // ---- End-to-end: find_and_verify_long_range_loop ----
 
+    /// Forward-project a world point into `pose`'s own camera frame (the
+    /// exact inverse of [`patch_to_world_point`]) and re-derive the
+    /// `DpvoPatch` that would have produced it — used to build fixtures
+    /// where the OLD-side and NEW-side worlds are related by a KNOWN,
+    /// hand-chosen Sim(3) that need not match `pose`'s own rotation (see
+    /// [`find_and_verify_long_range_loop_rejects_a_rotation_inconsistent_candidate`]).
+    fn patch_from_world_point(pose: &SE3, intr: &DpvoIntrinsics, world: Point3<f64>) -> DpvoPatch {
+        let cam = pose.transform_point(&world);
+        let x = intr.cx + intr.fx * cam.x / cam.z;
+        let y = intr.cy + intr.fy * cam.y / cam.z;
+        DpvoPatch { x, y, inverse_depth: 1.0 / cam.z }
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_rejects_a_rotation_inconsistent_candidate() {
+        // Milestone M12 (post-mortem on a real 800f corruption): construct a
+        // candidate whose bridged 3D-3D correspondences are a perfect,
+        // noise-free PURE-SCALE relationship (no rotation at all between the
+        // two independently-reconstructed point sets) — RANSAC/residual
+        // gates alone would accept this unconditionally (this is otherwise
+        // exactly `synthetic_drifted_pair`'s own fixture shape) — but
+        // `new_pose` itself carries a genuine 90-degree rotation relative to
+        // `old_pose` (both identity translation), so DPVO's own trusted
+        // relative rotation (`current_pose.compose(&old_pose.inverse())`)
+        // disagrees with the fit's own recovered (near-identity) rotation by
+        // ~90 degrees — must be rejected by `max_rotation_inconsistency_deg`
+        // (default 20 degrees) even though every OTHER gate is satisfied.
+        let intrinsics = intr();
+        let old_pose = SE3::identity();
+        let new_pose = SE3::new(UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2), Vector3::zeros());
+        let drift_scale = 8.0_f64;
+        let n = 12;
+        let mut old_patches = Vec::with_capacity(n);
+        let mut old_keypoints = Vec::with_capacity(n);
+        let mut new_patches = Vec::with_capacity(n);
+        let mut new_keypoints = Vec::with_capacity(n);
+        for i in 0..n {
+            let old_world = Point3::new(1.0 + i as f64 * 0.3, ((i * 3) % 5) as f64 * 0.4 - 0.8, 4.0 + (i as f64) * 0.5);
+            let new_world = Point3::from(old_world.coords * drift_scale); // pure scale, NO rotation.
+            old_patches.push(patch_from_world_point(&old_pose, &intrinsics, old_world));
+            new_patches.push(patch_from_world_point(&new_pose, &intrinsics, new_world));
+            old_keypoints.push(Point2::new(old_patches[i].x, old_patches[i].y));
+            new_keypoints.push(Point2::new(new_patches[i].x, new_patches[i].y));
+        }
+
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            patch_pixel_radius: 0.5,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        for arrival in 0..3 {
+            index.ingest_frame(arrival, vec![], frame_descriptors(1000 + arrival as u64, 20, 16));
+        }
+        let old_descriptors = frame_descriptors(1, n, 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 { Some((old_pose.clone(), intrinsics, old_patches.clone())) } else { None }
+        };
+        let result = index.find_and_verify_long_range_loop(300, &new_pose, &intrinsics, &new_patches, resolve_old);
+        assert!(result.is_none(), "a rotation-inconsistent (even if otherwise noise-free) candidate must be rejected");
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 0);
+        assert_eq!(diagnostics.bridge_sufficient_total, 1, "bridging and RANSAC should both succeed on this noise-free fixture");
+        assert_eq!(diagnostics.rejected_ransac_total, 0, "RANSAC itself should find a fit; the NEW rotation gate is what rejects it");
+        assert_eq!(diagnostics.rejected_rotation_inconsistent_total, 1);
+
+        // Milestone M12: the query log must carry the CONCRETE disagreement,
+        // not just the pass/fail outcome — should be close to 90 degrees
+        // (the fixture's own hand-chosen relative rotation).
+        let log = index.query_log();
+        let entry = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be logged");
+        let deg = entry.rotation_disagreement_deg.expect("a candidate that reached the rotation check must log its own disagreement");
+        assert!((deg - 90.0).abs() < 1.0, "expected ~90 degrees of disagreement, got {deg}");
+    }
+
     #[test]
     fn find_and_verify_long_range_loop_accepts_a_genuine_long_range_revisit_with_correct_scale() {
         let cfg = DpvoLongLoopConfig {
@@ -1197,6 +1710,69 @@ mod tests {
         let diagnostics = index.diagnostics();
         assert_eq!(diagnostics.accepted_total, 1);
         assert_eq!(diagnostics.last_accepted_gap, 280);
+        // Milestone M12: the funnel step between "bridge attempted" and
+        // "accepted" — a well-posed fixture should reach RANSAC and pass it.
+        assert_eq!(diagnostics.bridge_sufficient_total, 1);
+
+        // Milestone M12 (open item 2): the query log must contain this
+        // candidate, marked accepted — alongside the OTHER (lower-similarity,
+        // lower-ranked) filler-frame candidates the default `top_k = 3` also
+        // surfaced for this query, each logged as `accepted: false`.
+        let log = index.query_log();
+        assert_eq!(log.len(), 3, "top_k=3 should surface exactly 3 candidates: {log:?}");
+        assert!(log.iter().all(|e| e.query_arrival == 300));
+        let winner = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be among the logged candidates");
+        assert_eq!(winner.gap, 280);
+        assert_eq!(winner.rank, 0, "the accepted candidate is the top-similarity one");
+        assert!(winner.accepted);
+        assert_eq!(log.iter().filter(|e| e.accepted).count(), 1, "at most one candidate per query is ever marked accepted");
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_logs_rejected_candidates_as_not_accepted() {
+        // A candidate that clears retrieval (gap + similarity) but fails
+        // bridging (too few correspondences) must still appear in the query
+        // log, marked `accepted: false` — the whole point of open item 2 is
+        // that REJECTED candidates are logged too, not just accepted ones.
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        let intrinsics = intr();
+        for arrival in 0..3 {
+            index.ingest_frame(arrival, vec![], frame_descriptors(1000 + arrival as u64, 20, 16));
+        }
+        // OLD frame: 3 keypoints only, matched 1:1 with the new frame below —
+        // far fewer than `min_bridge_correspondences` (default 8), and no
+        // patches are supplied at all, so bridging fails outright.
+        let old_descriptors = frame_descriptors(1, 3, 16);
+        index.ingest_frame(20, vec![Point2::new(10.0, 10.0), Point2::new(20.0, 20.0), Point2::new(30.0, 30.0)], old_descriptors.clone());
+        index.ingest_frame(
+            300,
+            vec![Point2::new(10.0, 10.0), Point2::new(20.0, 20.0), Point2::new(30.0, 30.0)],
+            old_descriptors,
+        );
+        let pose = SE3::identity();
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 { Some((pose.clone(), intrinsics, vec![])) } else { None }
+        };
+        let result = index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], resolve_old);
+        assert!(result.is_none(), "no owned patches on either side => bridging must fail => no acceptance");
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 0);
+        assert_eq!(diagnostics.rejected_insufficient_bridge_total, 1);
+        assert_eq!(diagnostics.bridge_sufficient_total, 0);
+
+        let log = index.query_log();
+        assert!(!log.is_empty());
+        let entry = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be among the logged candidates");
+        assert!(!entry.accepted, "a bridging-rejected candidate must be logged as accepted=false");
+        assert!(log.iter().all(|e| !e.accepted), "no candidate was ever accepted this query");
     }
 
     #[test]

@@ -134,6 +134,27 @@
 //! (no mechanism ever corrects an already-committed frame's pose in that
 //! configuration, so the post-hoc lookup returns the exact same value the
 //! old incremental approach would have captured).
+//!
+//! # `--ll-sp-anchored-patches` (Milestone M12, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Layered on top of `--long-loop`: enables
+//! `DpvoLongLoopConfig::sp_anchored_patches`, attacking M11's own honest
+//! negative (at `fast.yaml` patch density, a matched long-range appearance
+//! keypoint essentially never lands near an existing RANDOMLY-placed DPVO
+//! patch, so the 3D-3D bridge almost never finds enough correspondences) BY
+//! CONSTRUCTION — patch centers are anchored at this frame's own SuperPoint
+//! keypoints instead of pure uniform-random sampling, so a future revisit's
+//! matched keypoint lands on (or very near) an existing patch. Off by
+//! default — omitting the flag reproduces M11's exact fully-random
+//! patch-sampling behavior byte-for-byte even with `--long-loop` itself on.
+//! `--ll-sp-patch-min-separation` mirrors `DpvoLongLoopConfig::sp_patch_min_separation`.
+//! See `crate::dpvo_long_loop::sp_anchored_patch_centers`'s own doc for the
+//! coordinate mapping. The summary additionally echoes
+//! `long_loop_bridge_sufficient_total` (the funnel step between "bridge
+//! attempted" and "accepted") and writes every top-`K` retrieval candidate
+//! (accepted or not) this run ever surfaced to
+//! `<out-dir>/long_loop_candidates.csv` — the M11 open item 2 instrumentation
+//! (was the tightest GT revisit ever even surfaced as a candidate?).
 
 use std::env;
 use std::fs;
@@ -288,6 +309,22 @@ struct CliArgs {
     ll_ransac_iterations: usize,
     ll_min_ransac_inliers: usize,
     ll_max_mean_residual_ratio: f64,
+    /// Milestone M12 (`docs/dpvo_droid_port_plan.md`): `DpvoLongLoopConfig::sp_anchored_patches` —
+    /// anchor this frame's DPVO patch centers at its own SuperPoint
+    /// keypoints instead of pure uniform-random sampling, attacking M11's
+    /// own honest negative (the bridge from a matched appearance keypoint to
+    /// a randomly-placed patch essentially never succeeds) "by construction"
+    /// rather than by loosening `--ll-patch-pixel-radius`. Requires
+    /// `--long-loop`. Default off — every prior milestone's behavior
+    /// unaffected.
+    ll_sp_anchored_patches: bool,
+    /// Milestone M12: `DpvoLongLoopConfig::sp_patch_min_separation`, mirrored
+    /// 1:1.
+    ll_sp_patch_min_separation: f64,
+    /// Milestone M12 (post-mortem addendum): `DpvoLongLoopConfig::max_rotation_inconsistency_deg`,
+    /// mirrored 1:1 — the physical-consistency gate added after a real 800f
+    /// corruption run (see `docs/dpvo_droid_port_plan.md`'s "M12 results").
+    ll_max_rotation_inconsistency_deg: f64,
 }
 
 impl Default for CliArgs {
@@ -377,6 +414,9 @@ impl Default for CliArgs {
             ll_ransac_iterations: DpvoLongLoopConfig::default().ransac_iterations,
             ll_min_ransac_inliers: DpvoLongLoopConfig::default().min_ransac_inliers,
             ll_max_mean_residual_ratio: DpvoLongLoopConfig::default().max_mean_residual_ratio,
+            ll_sp_anchored_patches: DpvoLongLoopConfig::default().sp_anchored_patches,
+            ll_sp_patch_min_separation: DpvoLongLoopConfig::default().sp_patch_min_separation,
+            ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default().max_rotation_inconsistency_deg,
         }
     }
 }
@@ -499,6 +539,13 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--ll-ransac-iterations" => args.ll_ransac_iterations = raw.remove(i + 1).parse()?,
             "--ll-min-ransac-inliers" => args.ll_min_ransac_inliers = raw.remove(i + 1).parse()?,
             "--ll-max-mean-residual-ratio" => args.ll_max_mean_residual_ratio = raw.remove(i + 1).parse()?,
+            "--ll-sp-anchored-patches" => {
+                args.ll_sp_anchored_patches = true;
+                raw.remove(i);
+                continue;
+            }
+            "--ll-sp-patch-min-separation" => args.ll_sp_patch_min_separation = raw.remove(i + 1).parse()?,
+            "--ll-max-rotation-inconsistency-deg" => args.ll_max_rotation_inconsistency_deg = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -740,6 +787,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ransac_iterations: args.ll_ransac_iterations,
             min_ransac_inliers: args.ll_min_ransac_inliers,
             max_mean_residual_ratio: args.ll_max_mean_residual_ratio,
+            // Milestone M12: `--ll-sp-anchored-patches` is the actual M12
+            // on/off switch; omitting it reproduces M11's exact fully-random
+            // patch-sampling behavior byte-for-byte even with `--long-loop`
+            // itself on.
+            sp_anchored_patches: args.ll_sp_anchored_patches,
+            sp_patch_min_separation: args.ll_sp_patch_min_separation,
+            max_rotation_inconsistency_deg: args.ll_max_rotation_inconsistency_deg,
             ..DpvoLongLoopConfig::default()
         }),
     };
@@ -784,7 +838,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "long-range loop enabled (Milestone M11): superpoint_model={} vocab_bootstrap_frames={} \
              vocab_words={} query_frequency={} top_k={} min_similarity={:.3} min_temporal_gap={} \
              max_indexed_frames={} patch_pixel_radius={:.2} min_bridge_correspondences={} \
-             ransac_iterations={} min_ransac_inliers={} max_mean_residual_ratio={:.3}",
+             ransac_iterations={} min_ransac_inliers={} max_mean_residual_ratio={:.3} \
+             sp_anchored_patches={} (Milestone M12) sp_patch_min_separation={:.2} \
+             max_rotation_inconsistency_deg={:.1}",
             args.ll_superpoint_model.display(),
             args.ll_vocab_bootstrap_frames,
             args.ll_vocab_words,
@@ -798,6 +854,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.ll_ransac_iterations,
             args.ll_min_ransac_inliers,
             args.ll_max_mean_residual_ratio,
+            args.ll_sp_anchored_patches,
+            args.ll_sp_patch_min_separation,
+            args.ll_max_rotation_inconsistency_deg,
         );
     }
 
@@ -1380,6 +1439,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          long_loop_queries_attempted={ll_queries_attempted}\n\
          long_loop_candidates_considered={ll_candidates_considered}\n\
          long_loop_verification_attempts={ll_verification_attempts}\n\
+         long_loop_bridge_sufficient_total={ll_bridge_sufficient}\n\
+         long_loop_rejected_rotation_inconsistent_total={ll_rejected_rotation}\n\
          long_loop_accepted_total={ll_accepted_total}\n\
          long_loop_rejected_insufficient_bridge_total={ll_rejected_bridge}\n\
          long_loop_rejected_ransac_total={ll_rejected_ransac}\n\
@@ -1390,7 +1451,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          long_loop_last_accepted_scale={ll_last_scale:.6}\n\
          long_loop_last_accepted_inliers={ll_last_inliers}\n\
          long_loop_last_accepted_mean_residual_ratio={ll_last_residual_ratio:.6}\n\
-         long_loop_total_elapsed_ms={ll_total_elapsed_ms:.3}\n",
+         long_loop_total_elapsed_ms={ll_total_elapsed_ms:.3}\n\
+         long_loop_sp_anchored_patches={ll_sp_anchored}\n\
+         long_loop_sp_patch_min_separation={ll_sp_min_separation:.2}\n\
+         long_loop_max_rotation_inconsistency_deg={ll_max_rot_inconsistency:.1}\n\
+         long_loop_query_log_entries={ll_query_log_len}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1492,6 +1557,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ll_queries_attempted = ll_diag.queries_attempted,
         ll_candidates_considered = ll_diag.candidates_considered,
         ll_verification_attempts = ll_diag.verification_attempts,
+        ll_bridge_sufficient = ll_diag.bridge_sufficient_total,
+        ll_rejected_rotation = ll_diag.rejected_rotation_inconsistent_total,
         ll_accepted_total = ll_diag.accepted_total,
         ll_rejected_bridge = ll_diag.rejected_insufficient_bridge_total,
         ll_rejected_ransac = ll_diag.rejected_ransac_total,
@@ -1503,9 +1570,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ll_last_inliers = ll_diag.last_accepted_inliers,
         ll_last_residual_ratio = ll_diag.last_accepted_mean_residual_ratio,
         ll_total_elapsed_ms = ll_diag.total_elapsed_ms,
+        ll_sp_anchored = args.ll_sp_anchored_patches,
+        ll_sp_min_separation = args.ll_sp_patch_min_separation,
+        ll_max_rot_inconsistency = args.ll_max_rotation_inconsistency_deg,
+        ll_query_log_len = odometry.long_loop_query_log().len(),
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
+
+    // Milestone M12 (`docs/dpvo_droid_port_plan.md`, open item 2 carried
+    // forward from M11): dump EVERY top-K long-range retrieval candidate
+    // this run ever surfaced (accepted or not) to a CSV — the data needed to
+    // answer "was the tightest GT revisit (i=42, j=456 per the M11 GT
+    // precheck) ever even surfaced as a candidate", which M11's own
+    // diagnostics (last-accepted-only) could not answer.
+    if args.long_loop {
+        let query_log = odometry.long_loop_query_log();
+        let mut csv =
+            String::from("query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg\n");
+        for entry in query_log {
+            let rot = entry.rotation_disagreement_deg.map(|d| format!("{d:.3}")).unwrap_or_default();
+            csv.push_str(&format!(
+                "{},{},{},{},{:.6},{},{}\n",
+                entry.query_arrival, entry.rank, entry.candidate_arrival, entry.gap, entry.similarity, entry.accepted, rot,
+            ));
+        }
+        let csv_path = args.out_dir.join("long_loop_candidates.csv");
+        fs::write(&csv_path, &csv)?;
+        println!("wrote {} long-range candidate log entries to {}", query_log.len(), csv_path.display());
+    }
+
     println!("wrote {} and summary.txt to {}", traj_path.display(), args.out_dir.display());
     Ok(())
 }

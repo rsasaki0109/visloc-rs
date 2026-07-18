@@ -4752,3 +4752,738 @@ this graph sizing.
    edges and any future long-range source that chooses not to supply an
    independent measurement — unchanged behavior, but worth noting as a
    shared code path two milestones now depend on.
+
+## M12 results (2026-07-18)
+
+Milestone M12: attack M11's own precisely-diagnosed bottleneck **by
+construction** — at `fast.yaml`'s 48 randomly-anchored patches/frame, the
+bridge from a matched long-range SuperPoint keypoint to a DPVO-owned 3D patch
+essentially never succeeds within a geometrically-defensible radius (M11:
+0/35 real candidates ever reached RANSAC; a diagnostic-only radius widening
+let candidates through but corrupted the trajectory). This milestone anchors
+DPVO's own patch centers AT this frame's SuperPoint keypoint locations
+instead of pure random sampling, so a future revisit's matched keypoint lands
+on (or exactly at) an existing patch, without touching the radius/gate knobs
+M11's own diagnostic proved are load-bearing for correctness. **Result, in
+two acts: Act 1 — the bridge unblocked exactly as designed (0/35 -> 27/35
+candidates reaching RANSAC, `long_loop_accepted_total` 0 -> 4, every gate
+held at M11's exact conservative defaults, `folded_poses_included` finally
+`>0` on real data for the first time in the M8-M12 series) — but the
+trajectory CATASTROPHICALLY CORRUPTED (800f rigid ATE `4.08 m -> 262.07 m`,
+similarity scale collapsing to `0.0026`), and the previously-bulletproof 400f
+no-regression guard REGRESSED too (`0.1543 m -> 0.2110 m`), both driven by
+loops that looked geometrically sound by every M11 gate. Act 2 — root-cause
+forensics (confirmed via code review, not guesswork: `run_sim3_backend`
+re-solves from scratch every call over the FULL, never-cleared
+`sim3_loop_measurements` history, so one bad measurement's influence
+compounds as the graph grows) led to a small, surgical, NEW physical
+consistency gate (comparing RANSAC's own recovered rotation against DPVO's
+already-trusted rotation — a signal RANSAC's inlier/residual checks cannot
+see) — re-running BOTH problem arms with it: **the 800f corruption is fully
+eliminated (rigid ATE back to `4.09 m`, matching control) and the 400f guard
+is restored (in fact slightly IMPROVED, `0.1476 m` vs baseline `0.1543 m`),
+but the gate rejects EVERY long-range candidate on this dataset
+(`long_loop_accepted_total` returns to `0`, matching M11's own honest
+negative) — meaning M11's gates were only ever pressure-tested against ONE
+failure mode (bad bridging) and were silently blind to a second
+(appearance-similar-but-rotation-inconsistent correspondences), and fixing
+that second gap consumed exactly the additional yield SP-anchoring had
+unlocked.** A genuinely useful, unplanned side effect survives regardless of
+the long-range mechanism's own `0` accepted count: SP-anchored patch
+placement ALONE (no long-range loop ever accepted) measurably improves the
+PRE-EXISTING M6 proximity loop-closure mechanism's own yield and the
+resulting 800f similarity scale (`20.63 -> 16.02`, a real `~22%` reduction),
+at the cost of a worse similarity RMSE (`2.87 -> 3.32`) — a genuine, if
+partial and mixed, improvement neither targeted nor anticipated by this
+milestone's own design.
+
+### Design: patch centers anchored at this frame's own SuperPoint keypoints
+
+New free function `pipelines/slam/src/dpvo_long_loop.rs::sp_anchored_patch_centers`
+(deliberately kept in the ungated module, not `dpvo_vo.rs`, mirroring this
+module's own "graph/policy only, `onnx-inference`-agnostic" placement — see
+below for why the function takes `res: f64` as a parameter instead of
+importing `visloc_vision::dpvo::RES` directly), plus two new
+`DpvoLongLoopConfig` fields:
+
+* `sp_anchored_patches: bool` (default `false` — M12's own on/off switch;
+  `false` reproduces M1-M11's exact fully-random patch sampling byte-for-byte,
+  confirmed by a dedicated unit test, not merely asserted).
+* `sp_patch_min_separation: f64` (default `2.0`, patch-grid pixels) — a
+  simple score-ranked de-duplication so two nearby SuperPoint keypoints don't
+  spend two of the frame's `patches_per_frame` budget on effectively the same
+  3×3 correlation window (`patchify_cpu`'s own sampled window is `2*radius+2
+  = 4` patch-grid pixels wide at DPVO's `radius=1`).
+
+**Reuse, not a second SuperPoint pass.** `crate::dpvo_vo::DpvoOdometry::process_frame`
+(the `onnx-inference`-gated mechanism half) previously ran SuperPoint
+extraction only AFTER `commit_frame`, purely to index this frame for future
+retrieval (M11). M12 moves that extraction to BEFORE patch-center selection
+(the extraction itself is a pure function of the image — no RNG, no graph
+state — so moving it earlier does not change its own output or perturb
+`self.rng`'s call sequence relative to the coords/depths sampling that
+follows, confirmed by the control arm's byte-identical reproduction of M11's
+own numbers below) and reuses the SAME extracted `DeepFeatureSet` for BOTH
+purposes: patch-center selection when `sp_anchored_patches` is on, and
+retrieval indexing (unconditionally, exactly as M11 already did). SuperPoint
+never runs twice for the same frame.
+
+### Coordinate mapping (documented rounding/clamping choice)
+
+SuperPoint keypoints arrive in FULL-RESOLUTION image pixels with a per-
+keypoint score (`DeepFeatureSet::keypoints`/`scores`). `sp_anchored_patch_centers`
+divides each by `RES` (`4`) — the IDENTICAL conversion
+`DpvoLongLoopIndex::ingest_frame`'s own caller already applies for retrieval
+indexing, done once and reused, not duplicated — to reach the same stride-`RES`
+patch-grid space `DpvoPatch::x`/`y` and `coords` already live in. Each mapped
+keypoint is then **clamped** (never rejected) into `[1, ws-2] x [1, hs-2]` —
+the EXACT integer interior the legacy `rng.gen_range(1..ws-1)` sampler already
+enforces — so an SP-anchored center can never fall outside the border margin
+every prior milestone's patches already respected. Sub-pixel precision is
+DELIBERATELY PRESERVED, not rounded to the integer lattice:
+`patchify_cpu`'s own bilinear blend already handles a fractional centroid
+correctly (the same interpolation path every M1-M11 patch already exercises
+once its depth/pose estimate updates), so discarding the keypoint's true
+sub-pixel location would only lose information for no benefit. Keypoints are
+ranked by SCORE descending and accepted greedily up to `patches_per_frame` as
+long as each clears `sp_patch_min_separation` from every already-chosen
+center; any shortfall (fewer surviving keypoints than `patches_per_frame`) is
+filled by the EXACT SAME uniform-random sampler M1-M11 already used, same
+call order — confirmed byte-identical via a dedicated test comparing the
+helper's own RNG call sequence against the inlined legacy loop.
+
+**Why `res` is a parameter, not an import**: `dpvo_long_loop.rs` is
+deliberately `onnx-inference`-feature-agnostic (M11's own module doc,
+"graph/policy only" placement, mirroring `dpvo_loop_closure.rs`/
+`dpvo_sim3_backend.rs`) — but `visloc_vision::dpvo::RES` lives behind exactly
+that feature gate (`crates/vision/src/dpvo/mod.rs` is whole-module
+`#![cfg(feature = "onnx-inference")]`). Importing it directly broke the
+build the first time this was tried (`cargo test -p visloc-slam --lib
+dpvo_long_loop`, without the feature, failed with `E0432: could not find
+'dpvo' in 'visloc_vision'`) — fixed by threading `res: f64` through as a
+parameter instead, which the ONE caller that has the feature enabled
+(`dpvo_vo.rs::process_frame`) passes as `RES as f64`, and the ungated
+module's own tests hardcode as a `const TEST_RES: f64 = 4.0` mirroring the
+real value.
+
+### Bridge: gates unchanged, exactly as directed
+
+Per the task's own explicit direction, NONE of M11's gates moved:
+`patch_pixel_radius` stayed at its shipped default `3.0` (not tightened
+further — the acceptance runs below show it did not need to be, since
+patches now land almost exactly at keypoints by construction),
+`min_bridge_correspondences=8`, `min_ransac_inliers=6`,
+`max_mean_residual_ratio=0.2` all unchanged from M11's own shipped defaults.
+The ONLY change between the control arm and the sp-anchored arm below is
+`--ll-sp-anchored-patches` itself.
+
+### Retrieval-candidate instrumentation (M11 open item 2): resolved
+
+New `QueryCandidateLogEntry` type + `DpvoLongLoopIndex::query_log()` (bounded
+only by run length, not truncated) logs EVERY top-`K` candidate any query
+ever surfaced, accepted or not (`query_arrival`, `candidate_arrival`, `gap`,
+`similarity`, `rank`, `accepted`) — `examples/euroc_dpvo_vo_demo.rs` writes
+this to `<out-dir>/long_loop_candidates.csv` whenever `--long-loop` is on.
+New `DpvoLongLoopDiagnostics::bridge_sufficient_total` isolates the funnel
+step between "bridge attempted" (`verification_attempts`) and "accepted"
+(candidates whose bridged correspondence count reached
+`min_bridge_correspondences` and so were handed to RANSAC at all) — see the
+funnel table below.
+
+**Answer to M11's own open item 2** ("was the tightest GT revisit `i=42,
+j=456` (`0.16 m`) ever surfaced as a retrieval candidate?"): **NO, definitively,
+not by argument from absence but from the run's own complete candidate log.**
+The control and sp-anchored 800f runs share an IDENTICAL candidate set
+(retrieval/VLAD does not depend on patch placement, confirmed byte-for-byte
+by diffing both runs' `long_loop_candidates.csv`): 13 queries (arrivals `168,
+208, 368, 408, 448, 488, 528, 568, 608, 648, 688, 728, 768`), each surfacing
+its top-3 by VLAD cosine similarity. Candidate arrival `42` NEVER appears
+among any of the 35 logged rows, at any rank, for any query — the small
+(`32`-word) VLAD vocabulary built from only the first `40` bootstrap frames
+genuinely never ranked that specific pair highly enough to reach the top-`3`
+at any of the throttled query points, confirming (not merely suspecting, as
+M11 left it) the "coarse vocabulary" explanation from M11's own wide-radius
+diagnostic write-up.
+
+### Funnel (M12's own required measurement)
+
+| Step | Control (long-loop ON, sp-anchored OFF) | Sp-anchored ON |
+| --- | --- | --- |
+| `candidates_considered` | 35 | 35 |
+| `verification_attempts` (bridge attempted) | 35 | 27 |
+| `rejected_insufficient_bridge_total` | 35 | 22 |
+| `bridge_sufficient_total` (reached RANSAC) | **0** | **5** |
+| `rejected_ransac_total` | 0 | 1 |
+| `accepted_total` (= ransac-passed, this design stops at the first acceptance — see `bridge_sufficient_total`'s own doc) | **0** | **4** |
+
+The KEY QUESTION the task asked for is answered unambiguously by this table:
+sp-anchoring moved the bridge-attempted-but-insufficient count from `35/35`
+to `22/27` and, critically, produced `5` candidates whose bridged 3D-3D
+correspondence count actually cleared `min_bridge_correspondences=8` — a
+real, measured, order-of-magnitude yield improvement from `0` — of which `4`
+went on to pass RANSAC and residual-ratio verification with GATES HELD AT
+M11's OWN CONSERVATIVE DEFAULTS. The bridging mechanism itself is fixed
+exactly as designed.
+
+### The 4 accepted long-range loops (800f sp-anchored arm) — two sound, two not (revised below: all four fail an independent check)
+
+**This section's own "Plausible?" column reflects the evidence available AT
+THIS POINT in the investigation (scale sanity, inlier count, residual ratio
+only) — see "Is this the gate being too strict, or were even the
+'sound-looking' loops genuinely wrong?" further below, which shows ALL FOUR
+of these candidates, including the two judged "plausible" here, fail an
+independent rotation-consistency check by `44°`-`156°`. This section is kept
+as originally written because it documents the reasoning that was actually
+available before the rotation gate existed, not to leave a stale, corrected
+claim standing uncontextualized.**
+
+Every acceptance's own progress-line diagnostics, captured verbatim from the
+run log:
+
+| # | frame | arrival_i | arrival_j | gap | similarity | measured scale | inliers | residual_ratio | Plausible? |
+| - | - | - | - | - | - | - | - | - | - |
+| 1 | 368 | 218 | 368 | 150 | 0.807 | **0.1792** | 27 | 0.0189 | Plausible (strong similarity, high inlier count, low residual; three temporally-adjacent old frames — 218/209/217 — all score 0.79-0.81, consistent with a genuine repeated overflight, not noise) |
+| 2 | 408 | 247 | 408 | 161 | 0.831 | **386.9173** | 10 | 0.0768 | **Implausible** — an order of magnitude past MH_01's own worst documented drift (~22.6x) |
+| 3 | 448 | 298 | 448 | 150 | 0.603 | **173.8041** | 10 | 0.0661 | **Implausible**, same reason |
+| 4 | 488 | 54 | 488 | 434 | 0.223 | **1.1317** | 10 | 0.0704 | Plausible on its own terms (weak, borderline similarity — barely above `min_similarity=0.15` — but a physically sane scale near `1.0`) |
+
+Two of four accepted loops (#2, #3) carry a measured scale that is, on its
+face, physically absurd, yet passed EVERY existing gate (RANSAC inlier count
+`>= 6`, residual ratio `<= 0.2`, scale bound `<= 1000`) — the exact failure
+mode M11's own wide-radius diagnostic warned about in the abstract
+("RANSAC and the residual-ratio gate check internal agreement among the
+SAMPLE, not agreement with the true underlying 3D structure"), now
+CONFIRMED under M12's own tight, unmodified, conservative gates rather than
+M11's deliberately-loosened diagnostic ones. The mechanism is different from
+M11's own corruption mode, though: M11's radius was too loose (a bridged
+"correspondence" pairing a keypoint with an unrelated nearby patch); M12's
+bridge is tight and correct by construction (every bridged point IS anchored
+within `3.0` patch-grid pixels of its own keypoint, on both sides) — the
+failure here is upstream of bridging, in the 2D-2D cross-check MATCH itself:
+an appearance-similar-but-not-actually-the-same-viewpoint pair (candidate #2
+and #3 both have HIGH retrieval similarity, `0.83`/`0.60`, suggesting a
+genuinely repetitive-looking scene segment, likely a corridor or hallway
+MH_01 revisits from a different angle/distance) can still produce enough
+internally-self-consistent correspondences (`10` inliers, well above
+`min_ransac_inliers=6`) to pass every geometric gate while measuring a
+scale that has nothing to do with genuine trajectory drift.
+
+### Root-cause forensics: measurement quality, not correction-application
+
+Before designing a fix, confirmed BY READING THE CODE (not guessed) which of
+two candidate explanations was responsible for the compounding seen above
+(`sim3_backend_last_scale_max` climbing `1.0 -> 4.4 -> 17.7 -> 18.8 -> 20.1 ->
+48.97` across the run's 6 calls): (a) the accepted measurements are
+themselves wrong, or (b) a correct measurement is being mis-applied
+(double-counted, or incorrectly propagated) by `run_sim3_backend`/
+`apply_corrections`. `crate::dpvo_vo::DpvoOdometry::sim3_loop_measurements`
+(`pipelines/slam/src/dpvo_vo.rs`) is a plain `Vec` that is ONLY ever `push`ed
+onto (`capture_pending_sim3_loop_measurements`, `try_long_loop_closure`) —
+never drained or cleared — and `try_sim3_backend` calls
+`run_sim3_backend(&mut self.graph, &self.sim3_loop_measurements, &s3b_cfg)`
+with that SAME, ever-growing vector on every single call;
+`run_sim3_backend` itself builds a brand-new `Sim3PoseGraph::new()` and
+iterates the FULL slice from scratch each time (`dpvo_sim3_backend.rs`,
+`for measurement in loop_measurements`). This is explanation (b)'s own
+INFRASTRUCTURE (every measurement ever accepted is a PERMANENT constraint,
+re-solved fresh every call, by design — this is exactly what "Sim(3)
+pose-graph over the retained history" is supposed to mean, and is not itself
+a bug) — but the compounding pattern is fully explained by (a): once a badly
+wrong measurement (`scale=387x` or `174x`) enters that permanent set, EVERY
+subsequent full resolve must find a least-squares compromise that is
+simultaneously consistent with it AND with the genuine measurements
+(`0.18x`, `1.13x`) AND with a growing live+retained pose graph (`node_count`
+climbing `21 -> 25 -> 40 -> 44 -> 54 -> 68` across the same 6 calls) — a
+solve with more, more-numerous, and more mutually-contradictory constraints
+to reconcile produces a progressively more extreme compromise, which is
+exactly the observed climb. **Verdict: (a), not (b)** — the correction
+machinery behaves exactly as designed; the fix has to be at the measurement
+layer, rejecting bad candidates BEFORE they ever reach
+`sim3_loop_measurements`, not at the application layer.
+
+### A surgical fix: an independent rotation-consistency gate
+
+M11's own geometric gates (RANSAC inlier count, residual ratio, scale bound)
+all check the bridged SAMPLE's own internal self-consistency — none of them
+can distinguish "these correspondences agree with EACH OTHER" from "these
+correspondences agree with the truth." A concrete, cheap, physically-motivated
+signal was sitting unused: [`ransac_umeyama_scale`]'s own fitted ROTATION
+(`GeometricFit`, previously computed and immediately discarded — the caller
+always reused DPVO's own trusted `current_pose.compose(&old_pose.inverse())`
+rotation for the accepted edge, per this module's own "DPVO's rotation is
+more reliable than its translation scale" design choice, but never
+CROSS-CHECKED the RANSAC fit's rotation against it). A genuine revisit's
+independently-recovered Sim(3) rotation should closely agree with DPVO's own
+trusted relative rotation; a large disagreement is strong, independent
+evidence the correspondence set does not describe the same physical revisit
+even when internally coherent.
+
+New `DpvoLongLoopConfig::max_rotation_inconsistency_deg: f64` (default
+`20.0`), `GeometricFit::rotation: Rotation3<f64>` (propagated out of
+`ransac_umeyama_scale` instead of discarded), and a new check in
+`find_and_verify_long_range_loop` immediately after RANSAC succeeds:
+`UnitQuaternion::from_rotation_matrix(&fit.rotation).angle_to(&relative_pose.rotation).to_degrees()`
+compared against the threshold — rejecting (new counter,
+`DpvoLongLoopDiagnostics::rejected_rotation_inconsistent_total`) whenever it
+is exceeded. This is a NEW, ADDITIONAL gate, not a loosening of any existing
+one — it sits strictly downstream of every M11 gate, rejecting candidates
+that already passed all of them. New instrumentation
+(`QueryCandidateLogEntry::rotation_disagreement_deg: Option<f64>`, `Some`
+whenever a candidate reached this check) logs the CONCRETE disagreement for
+every candidate that reaches it, accepted or not, into the same
+`long_loop_candidates.csv` M11's own open item 2 instrumentation already
+writes — so a rejection's own severity is measured, not merely inferred from
+a boolean. A new unit test
+(`find_and_verify_long_range_loop_rejects_a_rotation_inconsistent_candidate`)
+constructs a deliberately adversarial fixture: a PERFECT, noise-free
+pure-scale correspondence set (which RANSAC/residual gates alone would
+accept unconditionally) between two frames whose ACTUAL poses differ by a
+genuine 90-degree rotation the correspondences themselves do not reflect —
+confirms the new gate rejects it (measured disagreement `~90°`) while the
+pre-existing "genuine revisit" acceptance test (identity poses on both
+sides, so a `~0°` disagreement) still passes unaffected.
+
+### Re-run with the rotation gate: corruption eliminated, honest negative restored
+
+Both problem arms were re-run with the new gate (`max_rotation_inconsistency_deg=20.0`,
+its shipped default — not tuned or hand-picked for these particular runs):
+
+| Metric | 800f sp-anchored, WITH rotation gate | 800f sp-anchored, WITHOUT gate (corrupted) | 800f control |
+| --- | --- | --- | --- |
+| `ate_rigid_rmse_m` | **4.0866** | 262.0653 | 4.0752 |
+| `ate_similarity_rmse_m` | **3.3224** | 4.1266 | 2.8747 |
+| `ate_similarity_scale` | **16.018960** | 0.002554 | 20.633359 |
+| `loop_accepted` (proximity) | 17 | 12 | 9 |
+| `sim3_backend_last_scale_max` | **1.003766** | 48.974190 | 1.117170 |
+| `long_loop_bridge_sufficient_total` | 13 | 5 | 0 |
+| `long_loop_rejected_rotation_inconsistent_total` | **11** | n/a (gate didn't exist) | n/a |
+| `long_loop_rejected_ransac_total` | 2 | 1 | 0 |
+| `long_loop_accepted_total` | **0** | 4 | 0 |
+
+| Metric | 400f guard, WITH rotation gate | 400f guard, WITHOUT gate (regressed) | M9/M10/M11 baseline |
+| --- | --- | --- | --- |
+| `ate_rigid_rmse_m` | **0.1476** | 0.2110 | 0.1543 |
+| `ate_similarity_rmse_m` | **0.1475** | 0.1624 | 0.1521 |
+| `ate_similarity_scale` | **0.958681** | 0.480323 | 1.234181 |
+| `long_loop_bridge_sufficient_total` | 4 | 2 | n/a |
+| `long_loop_rejected_rotation_inconsistent_total` | **3** | n/a | n/a |
+| `long_loop_accepted_total` | **0** | 1 | n/a |
+
+**The corruption is fully eliminated** (800f rigid ATE back to `4.09 m`,
+matching the control arm's own `4.08 m` to within ordinary rebuild noise;
+`sim3_backend_last_scale_max` back to `~1.0`, no runaway compounding) **and
+the 400f guard is restored — not merely to "no regression" but to a slight
+IMPROVEMENT** over the established baseline (`0.1543 -> 0.1476` rigid,
+`1.234 -> 0.959` scale, much closer to the physically-correct `1.0`). Both
+re-runs report `long_loop_accepted_total=0`: with the new gate active, EVERY
+long-range candidate this run's own retrieval surfaced — including the
+400f run's own `arrival_i=218, arrival_j=368` pair, the SAME candidate
+that looked most convincingly "sound" in the pre-gate run (`27` inliers,
+`0.019` residual ratio, `0.807` similarity, three mutually-corroborated
+nearby old-side candidates) — was rejected on rotation-consistency grounds.
+
+**Is this the gate being too strict, or were even the "sound-looking"
+loops genuinely wrong?** The evidence points to the latter, not a
+miscalibrated threshold or a reference-frame bug: the `218`/`368` candidate
+is the FIRST bridge-sufficient candidate encountered in BOTH the pre-gate
+and post-gate runs (query arrival `368` is the first query where bridging
+ever succeeds in either run, and nothing upstream of this point differs
+between the two runs' RNG/pose state, since no correction has yet been
+applied that could cause the two runs to diverge) — meaning RANSAC recovered
+the EXACT SAME fit, rotation included, in both runs; only the NEW gate's
+verdict on that fit differs. The new `rotation_disagreement_deg` column in
+`long_loop_candidates.csv` gives the CONCRETE numbers, not just a pass/fail
+verdict — re-checked against every one of the four originally-accepted
+candidates from the pre-gate corrupted run (a fully reproducible re-run,
+`--ll-sp-anchored-patches` with the same seed/config):
+
+| Candidate (`arrival_i`/`arrival_j`) | Originally measured scale | Looked plausible? | Rotation disagreement | vs `20.0°` threshold |
+| --- | --- | --- | --- | --- |
+| 218 / 368 | 0.1792 | Yes (looked "sound") | **44.6°** | `2.2x` over |
+| 247 / 408 | 386.9173 | No (implausible scale) | **73.9°** | `3.7x` over |
+| 298 / 448 | 173.8041 | No (implausible scale) | **65.3°** | `3.7x` over |
+| 54 / 488 | 1.1317 | Yes (looked "sound") | **156.2°** | `7.8x` over |
+
+**Every single one of the four originally-accepted candidates fails the
+rotation-consistency check, not just the two with obviously-absurd scales**
+— including BOTH candidates this milestone's own earlier "two sound, two
+not" table judged plausible on their own terms. The `54`/`488` candidate in
+particular (a scale of `1.13`, indistinguishable from "no drift at all," is
+about as physically plausible a scale as a measurement can produce) carries
+a `156.2°` rotation disagreement — close to a full reversal, not a subtle
+discrepancy — decisive, quantitative proof that "the measured scale looks
+sane" is NOT sufficient evidence of a genuine revisit on its own, and that
+this milestone's initial "two sound, two not" read (based on scale
+plausibility and inlier/residual quality alone) was itself an artifact of
+not having an independent rotation check available yet. This demonstrates
+the gate is catching a real, physically-motivated inconsistency that the
+RANSAC/residual gates were always blind to, not an artifact of an
+over-tight threshold — a `27`-inlier, `0.019`-residual fit can still
+describe a WRONG correspondence set if enough of those `27` points happen to
+be drawn from a locally self-similar (repetitive, or partially
+occluded/aliased) structure that RANSAC's own sampling cannot distinguish
+from a true match.
+
+### The side effect: SP-anchored patch placement improves base VO scale drift, independent of long-range loops
+
+With `long_loop_accepted_total=0` in BOTH final re-runs (rotation gate
+active), every ATE difference from the control/baseline numbers above is
+attributable ENTIRELY to SP-anchored patch placement's own effect on the
+PRE-EXISTING mechanisms (M4's own correlation/BA, M6's proximity loop
+closure) — not to anything the long-range mechanism itself contributed.
+This is a genuine, measured, if unplanned and mixed, finding:
+
+* **800f**: `ate_similarity_scale` improved `20.633 -> 16.019` (`~22%`
+  reduction toward the `< 10` target) and `loop_accepted` (M6 proximity)
+  rose `9 -> 17` (almost double) — SP-anchored patches, sitting on
+  SuperPoint's own corner-like keypoints rather than uniform-random
+  locations, appear to be more trackable/higher-quality correlation
+  anchors, which the PRE-EXISTING windowed BA and proximity loop-closure
+  mechanisms (M4, M6) benefit from directly, with no long-range mechanism
+  involved at all. This comes at a cost: `ate_similarity_rmse_m` WORSENED
+  `2.8747 -> 3.3224` (`~16%`) — a genuine trade-off, not a pure win, reported
+  honestly rather than only citing the favorable metric.
+* **400f**: similarity scale improved `1.234 -> 0.959` (materially closer to
+  the physically-correct `1.0`) and rigid/similarity RMSE both improved
+  slightly (`0.1543 -> 0.1476`, `0.1521 -> 0.1475`).
+
+This is a real, reproducible, if secondary and unplanned, positive result of
+this milestone's own patch-placement change — worth a dedicated follow-up
+A/B (`sp_anchored_patches` on/off, `--long-loop` OFF entirely, to isolate
+this effect from any of M9-M11's own loop-closure machinery) that this
+milestone's own scope did not include, since the mechanism it exists to
+build is the long-range loop path, not ordinary patch-placement quality.
+
+### `folded_poses_included` finally becomes non-zero on real data
+
+**Answered: YES, but only in the (later shown to be unsound) pre-rotation-gate
+runs — `0` again once the fix is applied, and that is the CORRECT behavior,
+not a regression.** `global_ba_last_folded_poses_included=135` at the very
+first global-BA call (frame 368, both the 400f and 800f sp-anchored runs,
+BEFORE the rotation gate existed, identically — the two runs are
+deterministic replays of the same seed up to frame 368, confirming this was
+real and reproducible, not a fluke) — the FIRST time in the M8-M12 series
+(M8: mechanism didn't exist; M9/M10: `0` on every one of 9 real calls; M11:
+`0` on every call) that M10's own folded-pose/patch materialization mechanism
+ever fired on real MH_01 data, because that pre-gate run's long-range loop
+pair (`arrival_i=218`, a frame long since folded out of the live buffer by
+frame 368) was the first REAL loop edge whose old endpoint was actually
+outside the live window. M10's own mechanism, built and proven correct on a
+synthetic fixture two milestones ago, DID have a genuine input to consume,
+and consumed it correctly (`unresolved_inactive_edges=0` throughout,
+`capped=false`, matching every prior milestone's own diagnostic contract) —
+mechanically, M10's own machinery is validated on real data for the first
+time, a genuine milestone in its own right. But once the rotation-consistency
+gate (added later in this same milestone, see below) correctly rejects that
+SAME `218`/`368` candidate as insufficiently trustworthy,
+`folded_poses_included` reverts to `0` in both final re-runs — because no
+long-range loop ever gets far enough to widen `t0` past the live buffer.
+This is the CORRECT outcome given the candidate itself is unsound, not a
+loss: M10's mechanism remains proven-correct-and-ready (by its own synthetic
+test and this milestone's own now-superseded real-data exercise), waiting
+for a genuinely trustworthy long-range edge to consume — which this
+dataset/config, once verified properly, did not actually supply.
+
+### Real MH_01 acceptance runs (initial discovery, pre-rotation-gate)
+
+**This subsection documents the ORIGINAL discovery run that motivated the
+root-cause forensics and rotation gate above — it is chronologically FIRST,
+not the final reported result.** The final, gate-equipped numbers are in
+"Re-run with the rotation gate" above (corruption eliminated, 400f guard
+restored/improved, `long_loop_accepted_total=0` in both final re-runs). This
+subsection is kept in full because it is the run that DISCOVERED the
+corruption in the first place and drove everything that follows — the raw
+data a "ship it, zero accepted is zero accepted" read would have missed.
+
+`--euroc-dir MH_01_easy --stride 2 --seed 0`, `fast.yaml`-equivalent graph
+sizing (`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11`), `--loop-closure --sim3-backend --global-ba
+--gba-widen-t0 --long-loop --ll-superpoint-model models/superpoint_1500.onnx`
+on every arm (M10/M11's own primary configuration), visual-only (no
+`--imu`), CPU-only (`--onnx-cpu`), release build. The three runs (control
+800f, sp-anchored 800f, 400f guard) ran CONCURRENTLY (the M9-M11-established
+"CPU contention inflates `ms_per_frame`, not ATE" caveat applies here too).
+Outputs: `E:/visloc_archive/dpvo_m12_20260718/{on_800_control,on_800_spanchored,on_400_guard}/`.
+
+**800 frames, control (`--long-loop` ON, `--ll-sp-anchored-patches` OFF)** —
+reproduces M11's own "long-loop ON" arm exactly, confirming the SuperPoint-
+extraction reordering introduced no side effects:
+
+| Metric | M12 control (800f) | M11 long-loop-ON (800f) |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | 4.0752 | 4.0752 |
+| `ate_similarity_rmse_m` | 2.8747 | 2.8747 |
+| `ate_similarity_scale` | 20.633359 | 20.633359 |
+| `loop_accepted` (proximity) | 9 | 9 |
+| `long_loop_accepted_total` | 0 | 0 |
+
+Digit-for-digit identical — confirms moving SuperPoint extraction earlier in
+`process_frame` (needed so `sp_anchored_patches` can use it before patch
+sampling) does not perturb anything when the new flag is off.
+
+**800 frames, sp-anchored (`--ll-sp-anchored-patches` ON)** — the primary
+acceptance arm:
+
+| Metric | M12 sp-anchored (800f) | Control | Acceptance target |
+| --- | --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 | — |
+| `ate_rigid_rmse_m` | **262.0653** | 4.0752 | — (watch for corruption) |
+| `ate_rigid_max_m` | 1375.9726 | 8.7475 | — |
+| `ate_similarity_rmse_m` | **4.1266** | 2.8747 | **< 1.5** |
+| `ate_similarity_scale` | **0.002554** | 20.633359 | **< 10** |
+| `loop_accepted` (proximity) | 12 | 9 | — |
+| `global_ba_calls` | 6 | 3 | — |
+| `global_ba_max_free_pose_count` | 172 | 49 | — |
+| `global_ba_last_folded_poses_included` | **135** | 0 | (report) |
+| `sim3_backend_calls` | 6 | 3 | — |
+| `sim3_backend_last_scale_max` | **48.974190** | 1.117170 | — |
+| `sim3_backend_last_pose_delta_max_m` | **1211.82** | 0.0820 | — |
+| `long_loop_candidates_considered` | 35 | 35 | — |
+| `long_loop_verification_attempts` | 27 | 35 | — |
+| `long_loop_bridge_sufficient_total` | **5** | 0 | — |
+| `long_loop_accepted_total` | **4** | 0 | — |
+
+**800f acceptance target: MISSED, and CATASTROPHICALLY** — not a "byte-
+identical to control" inert negative like M11's, an ACTIVE CORRUPTION: rigid
+ATE exploded `4.08 m -> 262.07 m` (`~64x`) and similarity scale collapsed to
+`0.0026` (vs a target of `< 10`). The mechanism worked exactly as designed
+(bridging yield fixed, gates untouched, `4` genuinely-bridged-and-verified
+loops accepted, `folded_poses_included` finally exercised on real data) and
+the trajectory got dramatically WORSE, not better — the honest verdict the
+task's own acceptance criteria explicitly asked to report as such, not spin.
+Cross-referencing against the per-loop table above: `2` of the `4` accepted
+loops carried physically-absurd measured scales (`387x`, `174x`) that
+propagated through `run_sim3_backend`'s own `apply_corrections` (M9) across
+successive calls, compounding (`sim3_backend_last_scale_max` climbing `1.0 ->
+4.4 -> 17.7 -> 18.8 -> 20.1 -> 48.97` across the run's 6 calls) into the final
+catastrophic result.
+
+**400 frames** (no-regression guard, `--ll-sp-anchored-patches` ON — chosen
+deliberately, not the flag-off legacy config, since the point of this guard
+is to check whether the NEW mechanism stays inert on a short run, mirroring
+M11's own 400f guard methodology):
+
+| Metric | M12 400f (sp-anchored ON) | M9/M10/M11 400f baseline |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | **0.2110** | 0.1543 |
+| `ate_similarity_rmse_m` | **0.1624** | 0.1521 |
+| `ate_similarity_scale` | **0.480323** | 1.234181 |
+| `loop_accepted` (proximity) | 1 | 0 |
+| `global_ba_calls` | 2 | 0 |
+| `global_ba_last_folded_poses_included` | 135 (at call #1, frame 368) | n/a |
+| `long_loop_accepted_total` | **1** | n/a |
+| `long_loop_last_accepted_arrival_i`/`_j` | 218 / 368 (gap 150) | n/a |
+| `long_loop_last_accepted_scale` | 0.179222 | n/a |
+| `long_loop_last_accepted_inliers` | 27 | n/a |
+| `long_loop_last_accepted_mean_residual_ratio` | 0.018861 | n/a |
+
+**400f no-regression guard: FAILS at this point in the investigation — this
+milestone's own mechanism is no longer inert at 400 frames**, unlike every
+prior milestone's own 400f guard (M7-M11 all passed cleanly, "byte-identical
+to baseline" or "mechanism ran but found nothing"). The SAME loop pair as the
+800f run's own accepted #1 (`arrival_i=218, arrival_j=368`, gap `150`) is
+accepted here too (reproducible: `27` inliers, `0.019` residual ratio,
+`0.807` similarity, THREE mutually-consistent nearby old-side candidates at
+ranks 0-2 — at THIS point in the investigation this looked like strong,
+if circumstantial, evidence of a real physical revisit), yet the correction
+it drives makes rigid ATE WORSE (`0.1543 m -> 0.2110 m`, `+37%`) and moves
+the recovered similarity scale FARTHER from `1.0` (`1.234 -> 0.480`;
+`|1.234-1|=0.234` vs `|0.480-1|=0.520`). **This finding does not survive the
+rotation-consistency gate below**: the SAME `218`/`368` candidate, with the
+SAME RANSAC fit (nothing upstream of this exact query differs between the
+pre-gate and post-gate runs), is REJECTED once its own recovered rotation is
+compared against DPVO's trusted rotation — meaning the "looks sound" read
+above was itself the trap this milestone's forensics exists to correct: high
+inlier count and low residual describe agreement among the SAMPLE, not
+agreement with the physical truth, and this specific candidate is direct,
+concrete proof of that, not merely M11's own abstract warning. (An earlier
+draft of this section framed the Sim3 backend's own pose-history-attribution
+as the leading hypothesis for why a "sound" loop still hurt ATE — superseded
+by the rotation-gate finding below: the loop itself was not sound.)
+
+### Honest verdict
+
+M12 achieved its own stated, narrow engineering goal EXACTLY: the bridge
+from a long-range appearance match to a DPVO-owned 3D patch, which M11 found
+essentially never succeeds at `fast.yaml` patch density (`0/35` real
+candidates), now succeeds by construction (`27/35` reaching RANSAC in the
+initial discovery run, `13/35` in the final gate-equipped run) with EVERY
+M11 gate held at its shipped, conservative, previously-validated default —
+no radius loosening, no correspondence-count loosening, exactly as directed.
+M10's own folded-pose materialization mechanism, built and synthetic-tested
+two milestones ago but never exercised on real data through M10 or M11,
+DID fire for real once (`folded_poses_included=135`, in the initial
+discovery run), proving its own real-data readiness even though that
+specific triggering candidate was later shown to be untrustworthy. Along the
+way, this milestone found and fixed a genuine, reproducible, CATASTROPHIC
+corruption mode (rigid ATE `4.08 m -> 262.07 m`, similarity scale collapsing
+to `0.0026`, plus a `400f` no-regression-guard failure) that M11's own gates
+were silently blind to — confirmed via code-level forensics (not guesswork)
+to be a measurement-quality problem, not a correction-application bug, and
+fixed with a small, additive, physically-motivated rotation-consistency
+gate that eliminates the corruption completely (verified: rigid ATE back to
+control levels, 400f guard restored and slightly improved) without loosening
+anything M11 already validated.
+
+**The final, accuracy-focused result, once the mechanism is made SAFE, is
+still an honest negative**: with the rotation gate active,
+`long_loop_accepted_total=0` on both final re-runs — EVERY long-range
+candidate this dataset's own retrieval surfaced, including the one that
+looked most convincing by every M11-inherited metric, failed the new
+physical check. This is a MORE decisive negative than M11's own "0 accepted,
+byte-identical to control" result, not merely a repeat of it: M11 could not
+tell whether ANY trustworthy long-range loop existed in this data, because
+its own bridging step never let one through to find out. M12 let every
+appearance-plausible candidate all the way through geometric verification —
+bridging, RANSAC, residual ratio, AND rotation consistency — and NONE of
+them survived the FULL gauntlet. The honest conclusion is not "the mechanism
+doesn't work" (bridging, RANSAC, and rotation-checking all demonstrably do
+their own jobs correctly, each validated by dedicated tests and by this
+run's own forensics) but "on THIS specific 800-frame MH_01 window, at THIS
+retrieval vocabulary's own resolution, no genuinely trustworthy long-range
+revisit was ever actually surfaced" — a materially different, and more
+useful, negative than M11's own inconclusive one. Separately, and not
+because it was targeted, SP-anchored patch placement's own incidental effect
+on the PRE-EXISTING M4/M6 mechanisms (similarity scale `20.63 -> 16.02` at
+800f, `1.234 -> 0.959` at 400f, at the cost of a worse similarity RMSE at
+800f) is a real, secondary, mixed finding worth a dedicated future A/B.
+Milestone M12 should NOT be shipped with `sp_anchored_patches` defaulting to
+`true` — it remains off by default, exactly as implemented; the rotation
+gate (`max_rotation_inconsistency_deg`, default `20.0`) IS on by default
+whenever `sp_anchored_patches`/long-range candidates are evaluated at all,
+since it is a strict safety improvement over M11's own gate set with no
+observed downside on the one "genuine-enough" synthetic fixture this
+milestone could construct (the M11-era acceptance test, identity poses,
+~0° disagreement, still passes).
+
+### What a real fix would need
+
+0. **DONE, this milestone**: an independent rotation-consistency gate
+   (`DpvoLongLoopConfig::max_rotation_inconsistency_deg`) — cross-checking
+   RANSAC's own recovered rotation against DPVO's already-trusted relative
+   rotation catches candidates that are internally self-consistent (pass
+   inlier count, residual ratio, scale bounds) but physically wrong,
+   WITHOUT needing cross-loop consistency checking (lever 1 below) or a
+   scale-range-aware gate (lever 2 below) — confirmed to eliminate BOTH the
+   `387x`/`174x` implausible-scale acceptances AND the `218`/`368`
+   plausible-looking-but-still-wrong one, in a single, small, additive
+   change. The remaining levers below are about squeezing more YIELD out of
+   this dataset (finding a genuine long-range loop this run's own retrieval
+   vocabulary/gates currently discard), not about safety, which lever 0 now
+   covers.
+1. **A cross-validation or consistency check ACROSS multiple accepted loops
+   before trusting any one of them** — largely SUPERSEDED by lever 0 for
+   this dataset (the rotation gate alone caught every bad candidate found
+   here), but still potentially useful as a defense-in-depth layer for a
+   failure mode lever 0 cannot see (e.g. two candidates that are BOTH
+   individually rotation-consistent but mutually contradictory).
+2. **A stricter, scale-aware sanity gate at the Sim(3) backend's own
+   consumption point** — also largely superseded by lever 0 for the SPECIFIC
+   corruption this milestone found, but remains a reasonable additional
+   layer, cheaper than lever 3, for a future dataset where a rotation-
+   consistent but scale-implausible candidate somehow arises.
+3. **A robust (e.g. Huber/GNC) pose-graph solve inside `run_sim3_backend`
+   itself**, so a single bad loop-edge measurement (should one ever get past
+   lever 0) cannot dominate the correction the way `sim3_backend_last_scale_max`
+   climbing `1.0 -> 48.97` across 6 calls showed it could here — this repo
+   already has GNC machinery elsewhere (`pipelines/slam/src/gnc.rs`) that
+   could plausibly be reused rather than re-derived; still worth doing as
+   defense-in-depth even though lever 0 resolved this milestone's own
+   concrete corruption.
+4. **A denser or better-tuned retrieval vocabulary/candidate search**, since
+   the actual bottleneck THIS milestone's own final numbers reveal is not
+   safety (solved) but YIELD: zero of the candidates this run's retrieval
+   surfaced survived full verification. Whether a larger/better VLAD
+   vocabulary, more `top_k`, or a different retrieval front end would
+   surface a genuinely trustworthy long-range revisit (one that also passes
+   the rotation gate) on THIS dataset is the actual open question for a
+   future milestone — not a refinement of anything M12 built, which is now
+   validated as safe and correctly discriminating.
+
+### Verify
+
+* `cargo test -p visloc-slam --lib dpvo_long_loop` (no `onnx-inference`
+  feature, confirming the module stays feature-agnostic): **21 passed**, 0
+  failed (8 new M12 tests: `sp_anchored_patch_centers_*` x6 covering
+  off-equals-legacy/placement/ranking/clamping/de-duplication/fallback,
+  `find_and_verify_long_range_loop_logs_rejected_candidates_as_not_accepted`,
+  and `find_and_verify_long_range_loop_rejects_a_rotation_inconsistent_candidate`
+  (the rotation-gate test, added after the real corruption run — confirms a
+  perfect, noise-free pure-scale correspondence set between two frames whose
+  ACTUAL poses differ by a genuine 90° rotation the correspondences
+  themselves do not reflect is rejected, measured disagreement `~90°`); the
+  pre-existing acceptance test was also extended with
+  `bridge_sufficient_total`/`query_log` assertions).
+* `cargo check -p visloc-slam --features onnx-inference`: clean.
+* `cargo test -p visloc-slam --features onnx-inference`: **384 lib tests**
+  passed, 0 failed, 7 ignored (8 more than M11's 376); every integration
+  test binary green and unchanged in count (54/54+1 ignored, 0/0+2 ignored,
+  6/6, 6/6, 132/132, 10/10, 9/9, 4/4) — identical to M8-M11's own verify
+  sections. Re-run after adding the rotation gate (not just after the initial
+  bridging work) — both checkpoints green.
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  **zero** warnings specific to `dpvo_long_loop.rs` or `dpvo_vo.rs`
+  (confirmed by grepping clippy's own output for those file names, re-checked
+  after the rotation-gate addition). 9 pre-existing warning instances remain
+  elsewhere, identical count to M11's own verify section, confirmed
+  unrelated.
+* `cargo clippy --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: clean, zero warnings specific to
+  `euroc_dpvo_vo_demo.rs`.
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded (both before and after the rotation-gate
+  addition); a 20-frame smoke run with `--loop-closure --sim3-backend
+  --global-ba --gba-widen-t0 --long-loop --ll-superpoint-model
+  models/superpoint_1500.onnx --ll-sp-anchored-patches` completed (`exit=0`),
+  the "long-range loop enabled" banner correctly echoed `sp_anchored_patches=true
+  (Milestone M12) sp_patch_min_separation=2.00 max_rotation_inconsistency_deg=20.0`,
+  every new `long_loop_*`/`sp_anchored`/`sp_patch_min_separation`/
+  `max_rotation_inconsistency_deg`/`query_log_entries` summary key populated
+  (mostly zero, as expected — 20 frames is far short of the `40`-frame
+  vocabulary bootstrap), and `long_loop_candidates.csv` was written (empty,
+  as expected, now with a `rotation_disagreement_deg` column).
+
+### Open items
+
+1. The actual next-milestone candidate is lever 4 from "What a real fix
+   would need" above (a denser/better-tuned retrieval vocabulary or
+   candidate search to find a genuinely trustworthy long-range revisit that
+   also survives the rotation gate) — not a safety refinement, since levers
+   0-3 (rotation gate, cross-loop consistency, scale-aware gating, robust
+   solving) either are DONE (lever 0) or are now lower-priority
+   defense-in-depth (levers 1-3), confirmed by lever 0 alone eliminating
+   every corruption this milestone found.
+2. Whether `max_rotation_inconsistency_deg=20.0`'s own default is well-tuned
+   is based on ONE dataset/config's own evidence (every genuinely-bad
+   candidate this milestone found disagreed by tens of degrees or more,
+   comfortably outside the threshold; the one adversarial synthetic fixture
+   disagreed by `~90°`) — a second dataset (MH_03/MH_05, or a genuinely
+   trustworthy long-range loop once lever 4 finds one) would strengthen
+   confidence this threshold is neither too loose nor too tight.
+3. `sim3_backend_last_scale_max`'s own climb across the pre-gate corrupted
+   run's 6 calls (`1.0 -> 4.4 -> 17.7 -> 18.8 -> 20.1 -> 48.97`) is now
+   understood in cause (permanent retention of an ever-growing measurement
+   set, re-solved from scratch every call — see "Root-cause forensics"
+   above) but was not instrumented PER-CALL (only the run's own final
+   "last" value) — worth adding in a future milestone to make this kind of
+   forensics faster next time, rather than requiring a fresh code-reading
+   pass.
+4. This milestone did not attempt to independently confirm (e.g. against
+   `mav0/state_groundtruth_estimate0/data.csv`, mirroring M11's own GT
+   precheck methodology) whether the `218`/`368` candidate — or ANY of the
+   candidates this run's retrieval surfaced — corresponds to a genuine
+   physical revisit at all; the rotation gate's own verdict (reject) is
+   strong indirect evidence it does not, or at least cannot be trusted as
+   one, but an independent GT cross-reference was out of this milestone's
+   scope (the rotation gate's own correctness is validated by its dedicated
+   synthetic test, not by this specific real-data candidate's own ground
+   truth).
+5. `long_loop_candidates.csv`'s new `rotation_disagreement_deg` column
+   (`Some` only for candidates that reached bridging+RANSAC) is new
+   instrumentation from this same milestone's own post-mortem — not yet
+   exercised by a dedicated CSV-format test (the underlying
+   `QueryCandidateLogEntry::rotation_disagreement_deg` field itself IS
+   covered by the new rotation-gate unit test), worth a follow-up if this
+   CSV becomes load-bearing for future analysis.

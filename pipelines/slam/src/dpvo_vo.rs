@@ -210,9 +210,12 @@ use visloc_vision::dpvo::{CORR_DIM, CORR_RADIUS, DIM, FNET_DIM, PATCH, RES};
 use visloc_vision::features::superpoint_onnx::{
     OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxError, SuperPointOnnxExtractor,
 };
+use visloc_vision::features::deep::DeepFeatureSet;
 use visloc_vision::features::{DeepFeatureExtractor, GrayscaleImage};
 
-use crate::dpvo_long_loop::{DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex};
+use crate::dpvo_long_loop::{
+    sp_anchored_patch_centers, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex, QueryCandidateLogEntry,
+};
 use crate::dpvo_patch_ba::{
     dpvo_ba, reproject_patch_grid, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge,
     DpvoIntrinsics, DpvoPatch,
@@ -1561,6 +1564,14 @@ impl DpvoOdometry {
         self.long_loop.as_ref().map(|runtime| runtime.index.diagnostics()).unwrap_or_default()
     }
 
+    /// Milestone M12 (open item 2 carried forward from M11): every top-`K`
+    /// retrieval candidate ever surfaced by any long-range query this run,
+    /// accepted or not — see `crate::dpvo_long_loop::QueryCandidateLogEntry`'s
+    /// own doc. Empty whenever `config.long_loop` is `None`.
+    pub fn long_loop_query_log(&self) -> &[QueryCandidateLogEntry] {
+        self.long_loop.as_ref().map(|runtime| runtime.index.query_log()).unwrap_or(&[])
+    }
+
     /// Buffer one raw body-frame IMU sample (Milestone M5). No-op (samples
     /// are simply discarded on the next [`Self::process_frame`]'s drain if
     /// `config.imu` is `None` — accepted, not rejected with an error, since
@@ -1604,17 +1615,51 @@ impl DpvoOdometry {
         let imap_full = imap4.index_axis(Axis(0), 0).to_owned();
         let (_, hs, ws) = fmap.dim();
 
+        // Milestone M12 (`docs/dpvo_droid_port_plan.md`, `crate::dpvo_long_loop`'s
+        // module doc): extract this frame's SuperPoint features BEFORE
+        // choosing patch centers below (M11 extracted them only AFTER
+        // `commit_frame`, purely for retrieval indexing) so that, when
+        // `sp_anchored_patches` is enabled, the patch sampler can anchor
+        // centers at the SAME keypoints this frame will also index for
+        // long-range retrieval — computed ONCE, reused for BOTH purposes
+        // (never runs SuperPoint twice per frame). `None` whenever
+        // `config.long_loop` is `None` or extraction fails (a soft,
+        // non-fatal skip, exactly like M11's own commit-time extraction —
+        // the odometry solve never depends on this). Extraction is a pure
+        // function of `image` (no RNG, no graph state), so moving it earlier
+        // does not change its own output nor perturb `self.rng`'s call
+        // sequence relative to the coords/depths sampling below — M11's own
+        // `long_loop` runs (`sp_anchored_patches` unset, i.e. `false`)
+        // reproduce byte-for-byte.
+        let sp_features: Option<DeepFeatureSet> = self.long_loop.as_mut().and_then(|runtime| {
+            GrayscaleImage::from_luma_u8(w, h, image.iter().copied().collect())
+                .ok()
+                .and_then(|gray| runtime.extractor.extract_deep(&gray).ok())
+        });
+
         // Centroid sampling (`Patchifier.forward`, `RANDOM` strategy,
         // `net.py:131-133`): integers in `[1, w-1)`/`[1, h-1)` in `fmap`'s
-        // own (stride-RES) coordinate space.
+        // own (stride-RES) coordinate space. Milestone M12: when
+        // `sp_anchored_patches` is enabled, centers are anchored at this
+        // frame's OWN SuperPoint keypoints instead (see
+        // `crate::dpvo_long_loop::sp_anchored_patch_centers`'s own doc for
+        // the coordinate mapping and the "off = legacy" contract) — any
+        // shortfall falls back to the SAME random sampler below, byte-for-
+        // byte.
         let m = self.graph.config().patches_per_frame;
-        let coords: Vec<(f32, f32)> = (0..m)
-            .map(|_| {
-                let x = self.rng.gen_range(1..ws - 1) as f32;
-                let y = self.rng.gen_range(1..hs - 1) as f32;
-                (x, y)
-            })
-            .collect();
+        let sp_anchored = self.long_loop.as_ref().is_some_and(|r| r.index.config().sp_anchored_patches);
+        let sp_keypoints: Vec<(f64, f64, f32)> = if sp_anchored {
+            sp_features
+                .as_ref()
+                .map(|f| f.keypoints.iter().zip(f.scores.iter()).map(|(k, &s)| (k.x, k.y, s)).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let sp_min_separation =
+            self.long_loop.as_ref().map(|r| r.index.config().sp_patch_min_separation).unwrap_or(2.0);
+        let coords: Vec<(f32, f32)> =
+            sp_anchored_patch_centers(m, ws, hs, &sp_keypoints, RES as f64, sp_min_separation, &mut self.rng);
 
         let gmap = patchify_cpu(fmap.view(), &coords, 1); // (M, 128, 3, 3)
         let imap_patch4 = patchify_cpu(imap_full.view(), &coords, 0); // (M, 384, 1, 1)
@@ -1663,30 +1708,28 @@ impl DpvoOdometry {
             self.patch_gmap.push(gmap.index_axis(Axis(0), i).to_owned());
             self.patch_imap.push(squeeze_patch_vector(&imap_patch4, i));
         }
-        // Milestone M11 (`crate::dpvo_long_loop`'s module doc): extract and
-        // index this frame's SuperPoint appearance descriptor RIGHT NOW —
-        // `image` is a borrowed, transient view that will not be available
-        // again once this call returns, so this is the only chance to
-        // compute a retrieval descriptor for this committed frame. Runs
-        // unconditionally on every commit (not gated on `is_initialized`,
-        // unlike loop-closure/BA below) so early frames are still indexed as
-        // future candidates. A SuperPoint inference failure is a soft,
-        // non-fatal skip (this frame simply never becomes a retrieval
-        // candidate) — the odometry solve itself does not depend on this
-        // mechanism at all.
+        // Milestone M11 (`crate::dpvo_long_loop`'s module doc): index this
+        // frame's SuperPoint appearance descriptor RIGHT NOW — `image` is a
+        // borrowed, transient view that will not be available again once
+        // this call returns, so this is the only chance to index a
+        // retrieval descriptor for this committed frame. Runs unconditionally
+        // on every commit (not gated on `is_initialized`, unlike loop-
+        // closure/BA below) so early frames are still indexed as future
+        // candidates. Milestone M12: `sp_features` was already extracted
+        // ABOVE (before patch-center sampling) and is reused here verbatim —
+        // SuperPoint never runs twice for the same frame. A missing/failed
+        // extraction (`sp_features: None`) is a soft, non-fatal skip (this
+        // frame simply never becomes a retrieval candidate) — the odometry
+        // solve itself does not depend on this mechanism at all.
         if let Some(runtime) = self.long_loop.as_mut() {
             let arrival_index = self.graph.frames().last().map(|f| f.arrival_index);
-            if let Some(arrival_index) = arrival_index {
-                if let Ok(gray) = GrayscaleImage::from_luma_u8(w, h, image.iter().copied().collect()) {
-                    if let Ok(features) = runtime.extractor.extract_deep(&gray) {
-                        let keypoints: Vec<nalgebra::Point2<f64>> = features
-                            .keypoints
-                            .iter()
-                            .map(|k| nalgebra::Point2::new(k.x / RES as f64, k.y / RES as f64))
-                            .collect();
-                        runtime.index.ingest_frame(arrival_index, keypoints, features.descriptors);
-                    }
-                }
+            if let (Some(arrival_index), Some(features)) = (arrival_index, sp_features) {
+                let keypoints: Vec<nalgebra::Point2<f64>> = features
+                    .keypoints
+                    .iter()
+                    .map(|k| nalgebra::Point2::new(k.x / RES as f64, k.y / RES as f64))
+                    .collect();
+                runtime.index.ingest_frame(arrival_index, keypoints, features.descriptors);
             }
         }
         // Milestone M5: one velocity slot per live frame, parallel to
