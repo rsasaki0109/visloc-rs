@@ -156,6 +156,27 @@ pub struct DpvoLoopClosureConfig {
     /// M4-perf identified (see the module doc's "What 'global BA' becomes"
     /// section) — [`Self::max_edges_per_batch`] is the field actually
     /// tightened for CPU feasibility, not this one.
+    ///
+    /// # Milestone M10 finding: structurally unreachable on this port, confirmed not merely suspected
+    ///
+    /// [`find_loop_edges`]'s own `i` search floor is `ii_lo = max(l -
+    /// max_edge_age, 0)`, where `l = n - removal_window` and `n =
+    /// DpvoPatchGraph::n_frames()` — the CURRENT LIVE frame count, not an
+    /// arrival-index position. On every real MH_01 run across M6-M10, `n`
+    /// stays bounded to roughly the live patch buffer's own size (`~40-55`
+    /// frames, `docs/dpvo_droid_port_plan.md`'s M10 results), so `l ≤ ~40`
+    /// always — meaning `ii_lo = max(l - 1000, 0) = 0` on every real call
+    /// this port has ever made: the `1000` never binds, because `l` itself
+    /// never gets anywhere close to it. The practical search floor is
+    /// simply "the oldest frame still in the live buffer," never a
+    /// genuinely `1000`-frames-old one. This is the root cause the M10
+    /// results section traces in full: [`find_loop_edges`] can only ever
+    /// propose a loop whose old endpoint is still LIVE, capping every
+    /// accepted pair's temporal gap at roughly the live buffer's own size —
+    /// a mid-term consistency check, not a long-range revisit detector,
+    /// regardless of how large this field is set. Confirmed on real data,
+    /// not merely reasoned about — see the M10 results section for the
+    /// measured `~30-49`-frame gaps this produced.
     pub max_edge_age: usize,
     /// `config.py::GLOBAL_OPT_FREQ` (default `15`) — attempt a new
     /// loop-candidate search only every this many committed frames since the

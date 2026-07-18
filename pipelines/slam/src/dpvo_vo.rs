@@ -393,13 +393,55 @@ pub struct DpvoGlobalBaConfig {
     /// (`crate::dpvo_patch_graph::DpvoPatchGraph::enable_inactive_edge_retention`'s
     /// own cap argument, applied once by [`DpvoOdometry::new`]). See
     /// `docs/dpvo_droid_port_plan.md`'s M8 results for the CPU-cost
-    /// reasoning behind the chosen default.
+    /// reasoning behind the chosen default, and the M10 results for why the
+    /// STORE's own eviction policy changed even though this cap number did
+    /// not (`crate::dpvo_patch_graph::DpvoPatchGraph::inactive_edges`'s own
+    /// doc).
     pub inactive_edge_cap: usize,
+    /// Milestone M10 (`docs/dpvo_droid_port_plan.md`): widen this pass's own
+    /// free-pose gauge (`t0`) using every accepted proximity-loop edge's OLD
+    /// endpoint, decoupled from `optimization_window`'s unrelated per-frame
+    /// sizing purpose — see [`gather_widened_global_ba_problem`]'s own doc
+    /// for the full mechanism, and `docs/dpvo_droid_port_plan.md`'s M8
+    /// results, "Why the global pass barely moved anything", for the exact
+    /// finding this answers (`last_free_pose_count` pinned at
+    /// `removal_window` on every M8 call because `t0` was computed from
+    /// ACTIVE edges only, and the loop-protection exemption keeping a loop
+    /// edge active rarely survived long enough to be seen). `false`
+    /// (default) preserves M8's exact `t0 = min(active edges' owner frame)`
+    /// behavior byte-for-byte — this field, not `inactive_edge_cap` above,
+    /// is the actual "M10 on/off" switch.
+    pub widen_t0_with_loop_edges: bool,
+    /// Milestone M10: hard cap on the free-pose count (`n - t0`) a widened
+    /// pass will ever solve over. Only meaningful once
+    /// [`Self::widen_t0_with_loop_edges`] is `true` — a non-widened pass's
+    /// own free-pose count is already bounded by `removal_window`/the
+    /// loop-protection exemption and never needs this. See
+    /// [`gather_widened_global_ba_problem`]'s own doc, "Cost bounds", for
+    /// why the dense pose Hessian this solves (`dpvo_patch_ba.rs`'s own
+    /// `DMatrix::zeros(6 * n2, 6 * n2)`) makes an unbounded widened window
+    /// a real risk once a loop reaches back hundreds of frames, and why
+    /// this is a knob rather than a silent internal truncation — a capped
+    /// call is always reported via
+    /// [`DpvoGlobalBaDiagnostics::last_free_pose_count_capped`], never
+    /// silently narrower than what the loop evidence would otherwise
+    /// justify. Default `Some(256)`: chosen as a dense-solve cost budget
+    /// (a `1536×1536` pose Hessian), not a data-derived number — see the
+    /// M10 results section for the measured per-call cost at this default.
+    pub max_free_poses: Option<usize>,
 }
 
 impl Default for DpvoGlobalBaConfig {
     fn default() -> Self {
-        Self { frequency: 15, iterations: 2, ep: 100.0, lmbda: 1e-4, inactive_edge_cap: 4096 }
+        Self {
+            frequency: 15,
+            iterations: 2,
+            ep: 100.0,
+            lmbda: 1e-4,
+            inactive_edge_cap: 4096,
+            widen_t0_with_loop_edges: false,
+            max_free_poses: Some(256),
+        }
     }
 }
 
@@ -445,6 +487,30 @@ pub struct DpvoGlobalBaDiagnostics {
     pub last_elapsed_ms: f64,
     /// Cumulative wall-clock cost across every call, milliseconds.
     pub total_elapsed_ms: f64,
+    /// Milestone M10: largest [`Self::last_free_pose_count`] ever observed
+    /// across every call this run — the acceptance diagnostic for "did
+    /// `free_pose_count` ever exceed the ordinary `removal_window` bound and
+    /// reach toward a loop endpoint," answerable from a live run without
+    /// grepping the console log the way M8's own diagnosis needed to.
+    pub max_free_pose_count: usize,
+    /// Milestone M10: whether the MOST RECENT call's free-pose window was
+    /// widened by a known loop edge's endpoint beyond where an ordinary
+    /// active-edges-only `t0` would have landed (`false` on every call while
+    /// `DpvoGlobalBaConfig::widen_t0_with_loop_edges` is `false`, by
+    /// construction).
+    pub last_t0_widened_by_loop_edge: bool,
+    /// Milestone M10: how many FOLDED (no longer live) frames were
+    /// materialized as free pose variables on the most recent call, using
+    /// `crate::dpvo_patch_graph::DpvoPatchGraph::retained_poses`/
+    /// `retained_folded_frames` — `0` whenever the loop's own old endpoint
+    /// was still live (the common case on this port's real MH_01 runs, see
+    /// the M10 results) or widening is disabled.
+    pub last_folded_poses_included: usize,
+    /// Milestone M10: whether `DpvoGlobalBaConfig::max_free_poses` actually
+    /// clamped the most recent call's free-pose window short of what the
+    /// known loop evidence would otherwise justify — see that field's own
+    /// doc; never silent, always visible here.
+    pub last_free_pose_count_capped: bool,
 }
 
 /// Milestone M9 snapshot of [`DpvoOdometry`]'s Sim(3) pose-graph backend
@@ -1126,6 +1192,23 @@ pub struct DpvoOdometry {
     global_ba_last_unresolved_inactive: usize,
     global_ba_last_pose_delta_max_m: f64,
     global_ba_last_pose_delta_mean_m: f64,
+    /// Milestone M10: every accepted proximity-loop pair EVER seen, as
+    /// `(arrival_i, arrival_j)` — persists independently of whether the
+    /// patch-graph edge itself is still active, resolvable-inactive, or has
+    /// aged out of both (arrival indices never change, unlike live indices —
+    /// see `crate::dpvo_patch_graph::DpvoGraphFrame::arrival_index`'s own
+    /// doc). This is the actual "currently-known loop edges" list
+    /// [`gather_widened_global_ba_problem`]'s own doc, part A, computes `t0`
+    /// from — a deliberately separate, unbounded-but-tiny store (at most
+    /// `loop_accepted_total` entries) from `crate::dpvo_sim3_backend`'s own
+    /// `Sim3LoopMeasurement` list, since that one is gated on
+    /// `config.sim3_backend` while this one is gated on
+    /// `config.global_ba.map(|c| c.widen_t0_with_loop_edges)`.
+    loop_edge_arrival_pairs: Vec<(usize, usize)>,
+    global_ba_max_free_pose_count: usize,
+    global_ba_last_widened: bool,
+    global_ba_last_folded_included: usize,
+    global_ba_last_capped: bool,
 
     // ---- Milestone M9 (Sim(3) pose-graph scale-drift backend) state — see
     // `crate::dpvo_sim3_backend`'s module doc and
@@ -1269,6 +1352,11 @@ impl DpvoOdometry {
             global_ba_last_unresolved_inactive: 0,
             global_ba_last_pose_delta_max_m: 0.0,
             global_ba_last_pose_delta_mean_m: 0.0,
+            loop_edge_arrival_pairs: Vec::new(),
+            global_ba_max_free_pose_count: 0,
+            global_ba_last_widened: false,
+            global_ba_last_folded_included: 0,
+            global_ba_last_capped: false,
             sim3_loop_measurements: Vec::new(),
             pending_sim3_loop_pairs: Vec::new(),
             sim3_backend_ever_had_loop_edge: false,
@@ -1369,6 +1457,10 @@ impl DpvoOdometry {
             last_pose_delta_mean_m: self.global_ba_last_pose_delta_mean_m,
             last_elapsed_ms: self.global_ba_last_ms,
             total_elapsed_ms: self.global_ba_ms_total,
+            max_free_pose_count: self.global_ba_max_free_pose_count,
+            last_t0_widened_by_loop_edge: self.global_ba_last_widened,
+            last_folded_poses_included: self.global_ba_last_folded_included,
+            last_free_pose_count_capped: self.global_ba_last_capped,
         }
     }
 
@@ -2061,6 +2153,22 @@ impl DpvoOdometry {
             self.pending_sim3_loop_pairs.extend_from_slice(&accepted);
             self.sim3_backend_ever_had_loop_edge = true;
         }
+        // Milestone M10: record every accepted pair's stable ARRIVAL indices
+        // (not live indices, which `keyframe_dispatch` below can still shift
+        // or fold away entirely) — this is the persistent "currently-known
+        // loop edges" list [`gather_widened_global_ba_problem`]'s `t0`
+        // computation reads. Unlike `pending_sim3_loop_pairs`, there is no
+        // "capture later" subtlety here: an arrival index is a stable
+        // identity from the instant a frame commits, so recording it NOW
+        // (rather than after this frame's own `update_step`) loses nothing —
+        // only the sim3 backend's own scale-RATIO measurement needed to wait
+        // for a pose to have moved at least once (see
+        // [`Self::capture_pending_sim3_loop_measurements`]'s doc).
+        if self.config.global_ba.is_some_and(|gba| gba.widen_t0_with_loop_edges) {
+            for &(i, j) in &accepted {
+                self.loop_edge_arrival_pairs.push((self.graph.frames()[i].arrival_index, self.graph.frames()[j].arrival_index));
+            }
+        }
         let patch_edges = expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
         self.loop_patch_edges_added_total += patch_edges.len();
         self.graph.append_edges(&patch_edges, DIM);
@@ -2167,6 +2275,26 @@ impl DpvoOdometry {
         if n == 0 {
             return Ok(());
         }
+        // Same visibility-gate bounds `update_step` uses (`net.py`'s own BA
+        // call site bounds, image extent padded by 64px).
+        let ws = self.config.width as f64 / RES as f64;
+        let hs = self.config.height as f64 / RES as f64;
+        let bounds = [-64.0, -64.0, ws + 64.0, hs + 64.0];
+
+        if cfg.widen_t0_with_loop_edges && !self.loop_edge_arrival_pairs.is_empty() {
+            self.run_widened_global_ba(cfg, bounds)
+        } else {
+            self.run_legacy_global_ba(cfg, bounds)
+        }
+    }
+
+    /// M8's exact original solve — `t0 = min(active edges' owner frame)`,
+    /// no folded-frame materialization. Used whenever
+    /// [`DpvoGlobalBaConfig::widen_t0_with_loop_edges`] is `false` (the
+    /// default) or no loop edge is known yet — byte-identical to the M8
+    /// implementation, unchanged by the M10 split.
+    fn run_legacy_global_ba(&mut self, cfg: &DpvoGlobalBaConfig, bounds: [f64; 4]) -> Result<(), DpvoOdometryError> {
+        let n = self.graph.n_frames();
         let Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive)) =
             gather_global_ba_edges(&self.graph)
         else {
@@ -2180,11 +2308,6 @@ impl DpvoOdometry {
         let poses: Vec<SE3> = self.graph.frames().iter().map(|f| f.pose.clone()).collect();
         let intrinsics: Vec<DpvoIntrinsics> = self.graph.frames().iter().map(|f| f.intrinsics).collect();
         let patches: Vec<DpvoPatch> = self.graph.patches().to_vec();
-        // Same visibility-gate bounds `update_step` uses (`net.py`'s own BA
-        // call site bounds, image extent padded by 64px).
-        let ws = self.config.width as f64 / RES as f64;
-        let hs = self.config.height as f64 / RES as f64;
-        let bounds = [-64.0, -64.0, ws + 64.0, hs + 64.0];
 
         let free_pose_count = n.saturating_sub(t0);
         let edge_count = edges.len();
@@ -2208,12 +2331,89 @@ impl DpvoOdometry {
 
         self.global_ba_calls += 1;
         self.global_ba_last_free_pose_count = free_pose_count;
+        self.global_ba_max_free_pose_count = self.global_ba_max_free_pose_count.max(free_pose_count);
         self.global_ba_last_edge_count = edge_count;
         self.global_ba_last_resolved_inactive = resolved_inactive;
         self.global_ba_last_unresolved_inactive = unresolved_inactive;
         self.global_ba_last_pose_delta_max_m = max_delta;
         self.global_ba_last_pose_delta_mean_m =
             if free_pose_count > 0 { sum_delta / free_pose_count as f64 } else { 0.0 };
+        self.global_ba_last_widened = false;
+        self.global_ba_last_folded_included = 0;
+        self.global_ba_last_capped = false;
+        self.global_ba_last_ms = start.elapsed().as_secs_f64() * 1000.0;
+        self.global_ba_ms_total += self.global_ba_last_ms;
+        Ok(())
+    }
+
+    /// Milestone M10 (`docs/dpvo_droid_port_plan.md`): the widened solve —
+    /// see [`gather_widened_global_ba_problem`]'s own doc for the full
+    /// mechanism (parts A/B/C/E of the M10 design). Gathers a combined
+    /// live+folded problem, solves it, and writes corrected poses/patches
+    /// back to BOTH the live graph and the folded-frame retention stores.
+    fn run_widened_global_ba(&mut self, cfg: &DpvoGlobalBaConfig, bounds: [f64; 4]) -> Result<(), DpvoOdometryError> {
+        let Some(gathered) =
+            gather_widened_global_ba_problem(&self.graph, &self.loop_edge_arrival_pairs, cfg.max_free_poses)
+        else {
+            return Ok(());
+        };
+        if gathered.edges.is_empty() {
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let free_pose_count = gathered.poses.len() - gathered.fixedp;
+        let edge_count = gathered.edges.len();
+        let folded_count = gathered.folded_arrivals.len();
+        let problem = DpvoBaProblem {
+            poses: gathered.poses,
+            patches: gathered.patches,
+            intrinsics: gathered.intrinsics,
+            edges: gathered.edges,
+            targets: gathered.targets,
+            weights: gathered.weights,
+        };
+        let ba_cfg =
+            DpvoBaConfig { iterations: cfg.iterations, fixedp: gathered.fixedp, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
+        let solved = dpvo_ba(&problem, &ba_cfg)?;
+
+        let mut max_delta = 0.0_f64;
+        let mut sum_delta = 0.0_f64;
+        for combined in gathered.fixedp..problem.poses.len() {
+            let before = &problem.poses[combined];
+            let after = &solved.poses[combined];
+            let delta = (after.translation - before.translation).norm();
+            max_delta = max_delta.max(delta);
+            sum_delta += delta;
+        }
+
+        let patches_per_frame = self.graph.config().patches_per_frame;
+        // Write back the folded prefix into the retention stores.
+        for (idx, &arrival) in gathered.folded_arrivals.iter().enumerate() {
+            self.graph.retained_poses_mut().insert(arrival, solved.poses[idx].clone());
+            if let Some(ff) = self.graph.retained_folded_frames_mut().get_mut(&arrival) {
+                ff.patches = solved.patches[idx * patches_per_frame..(idx + 1) * patches_per_frame].to_vec();
+            }
+        }
+        // Write back the live suffix exactly like the legacy path.
+        for (local, pose) in solved.poses[folded_count..].iter().enumerate() {
+            self.graph.frames_mut()[local].pose = pose.clone();
+        }
+        for (local, patch) in solved.patches[folded_count * patches_per_frame..].iter().enumerate() {
+            self.graph.patches_mut()[local] = *patch;
+        }
+
+        self.global_ba_calls += 1;
+        self.global_ba_last_free_pose_count = free_pose_count;
+        self.global_ba_max_free_pose_count = self.global_ba_max_free_pose_count.max(free_pose_count);
+        self.global_ba_last_edge_count = edge_count;
+        self.global_ba_last_resolved_inactive = gathered.resolved_inactive;
+        self.global_ba_last_unresolved_inactive = gathered.unresolved_inactive;
+        self.global_ba_last_pose_delta_max_m = max_delta;
+        self.global_ba_last_pose_delta_mean_m = if free_pose_count > 0 { sum_delta / free_pose_count as f64 } else { 0.0 };
+        self.global_ba_last_widened = gathered.t0_widened_by_loop_edge;
+        self.global_ba_last_folded_included = folded_count;
+        self.global_ba_last_capped = gathered.capped;
         self.global_ba_last_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.global_ba_ms_total += self.global_ba_last_ms;
         Ok(())
@@ -3053,6 +3253,264 @@ pub(crate) fn gather_global_ba_edges(graph: &DpvoPatchGraph) -> Option<GlobalBaG
     Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive))
 }
 
+/// Return type of [`gather_widened_global_ba_problem`] — a complete,
+/// ready-to-solve [`DpvoBaProblem`] laid out as `[folded frames (oldest
+/// first)] ++ [live frames (as-is)]`, plus the bookkeeping needed to write a
+/// solved result back to the right place in each store.
+pub(crate) struct WidenedGlobalBaGather {
+    pub poses: Vec<SE3>,
+    pub patches: Vec<DpvoPatch>,
+    pub intrinsics: Vec<DpvoIntrinsics>,
+    pub edges: Vec<DpvoEdge>,
+    pub targets: Vec<Vector2<f64>>,
+    pub weights: Vec<Vector2<f64>>,
+    /// Always `0` when [`Self::folded_arrivals`] is non-empty (the earliest
+    /// included folded frame IS `t0` and must be free, matching upstream's
+    /// own `fixedp = t0 = ii.min()` when nothing older exists in the array —
+    /// see [`gather_widened_global_ba_problem`]'s own doc). Otherwise the
+    /// combined-space index of the live frame that plays the same role.
+    pub fixedp: usize,
+    /// Arrival indices of every FOLDED frame included, in ascending order —
+    /// `poses[0..folded_arrivals.len()]`/`patches`'s leading
+    /// `folded_arrivals.len() * patches_per_frame` entries correspond to
+    /// these, in the same order.
+    pub folded_arrivals: Vec<usize>,
+    pub resolved_inactive: usize,
+    pub unresolved_inactive: usize,
+    /// Whether this call's `t0` ended up older than a plain active-edges-only
+    /// `t0` would have (see [`DpvoGlobalBaDiagnostics::last_t0_widened_by_loop_edge`]).
+    pub t0_widened_by_loop_edge: bool,
+    /// Whether `max_free_poses` actually trimmed the folded prefix short of
+    /// what the known loop evidence would otherwise justify.
+    pub capped: bool,
+}
+
+/// Milestone M10 (`docs/dpvo_droid_port_plan.md`): the widened "gather" step
+/// — attacks the exact root cause M8's own results section measured
+/// (`last_free_pose_count` pinned at `removal_window` on every real call
+/// because `t0` was computed from ACTIVE edges only, and the
+/// `keyframe_with_loop_protection` exemption keeping a loop edge active
+/// rarely survives long enough to be seen by a `try_global_ba` call).
+///
+/// # Part A: `t0` from loop edges, decoupled from `optimization_window`
+///
+/// Computes `t0_arrival = min(loop_pairs.iter().map(|&(i, _)| i))` — the
+/// EARLIEST endpoint among every accepted proximity-loop edge EVER seen
+/// (`DpvoOdometry::loop_edge_arrival_pairs`, persistent and keyed by stable
+/// arrival index, never gated on whether the underlying patch-graph edge is
+/// still active). This is a strictly wider notion of `t0` than
+/// [`gather_global_ba_edges`]'s own `min(active edges' owner frame)`: it
+/// does not matter whether the loop edge itself survived
+/// `keyframe_with_loop_protection`'s exemption window — once a loop pair is
+/// EVER accepted, its old endpoint permanently becomes a `t0` candidate.
+///
+/// # Parts B/C: folded poses and patch geometry as free variables
+///
+/// Two cases, depending on whether `t0_arrival`'s frame is still live:
+///
+/// * **Still live** (the common case on this port's real MH_01 runs, per
+///   the M10 results — `keyframe_thresh` rarely folds a frame away on a
+///   fast-motion sequence, so `unresolved_inactive_edges` stays `0` and the
+///   loop's own old endpoint frame is simply still sitting in
+///   [`crate::dpvo_patch_graph::DpvoPatchGraph::frames`], just with few or
+///   no ACTIVE edges left touching it): resolve `t0_arrival` to its live
+///   index directly, no folded-frame materialization needed at all — `t0`
+///   in live-index space is `min(active t0, that live index)`, and any
+///   [`crate::dpvo_patch_graph::InactiveEdge`] anchored there (which the
+///   ordinary resolution loop already includes) supplies the actual
+///   constraint tying it to the rest of the graph.
+/// * **Folded away**: every folded frame with an arrival index `>=
+///   t0_arrival` that has BOTH a
+///   [`crate::dpvo_patch_graph::DpvoPatchGraph::retained_poses`] entry (M9)
+///   AND a [`crate::dpvo_patch_graph::DpvoPatchGraph::retained_folded_frames`]
+///   entry (M10) is prepended to the live frame array, oldest first, as a
+///   FREE pose variable (`fixedp = 0` for the combined array — see
+///   [`WidenedGlobalBaGather::fixedp`]'s own doc for why this matches
+///   upstream fidelity rather than being an ad-hoc choice). No upper bound
+///   is assumed on this range — deliberately NOT "up to the earliest still-
+///   live arrival," since [`crate::dpvo_patch_graph::DpvoPatchGraph::keyframe`]'s
+///   own fold-candidate arithmetic can never select array position `0` or
+///   `1` (the smallest valid frame count for the fold gate to fire at all
+///   makes `2` the earliest possible candidate), so the first two committed
+///   frames can stay live indefinitely while much later frames fold and
+///   unfold around them — "folded" and "live" are NOT simply an
+///   old/recent split. [`DpvoGlobalBaConfig::max_free_poses`] (Part E) is
+///   what bounds how far this search reaches, not an assumption about where
+///   live frames resume. Any arrival in range MISSING a snapshot (e.g. a
+///   frame folded before this port added retention, or one that was
+///   rejected by `motion_probe` and never committed at all, hence never had
+///   patches) is simply skipped — a real gap, not silently patched over,
+///   tracked only informally (the resulting chain may have holes; any edge
+///   referencing a skipped arrival is `unresolved_inactive` like any other
+///   unresolvable entry).
+///
+/// [`crate::dpvo_patch_graph::InactiveEdge`] resolution is generalized to
+/// match: an entry resolves if EITHER endpoint is live OR is one of the
+/// included folded frames (previously only live resolved) — this is what
+/// makes an edge connecting two folded frames, or a folded frame to a live
+/// one, usable as a REAL reprojection factor rather than merely a
+/// frozen-target pull, closing the exact gap Part C's task description
+/// flagged as "the hard part."
+///
+/// # Part E: cost bounds
+///
+/// The combined array's free-pose count (`folded_arrivals.len() + n`, since
+/// `fixedp` is `0` whenever any folded frame is included) drives
+/// `dpvo_patch_ba::dpvo_ba`'s dense `6·n2 × 6·n2` pose Hessian — see
+/// `DpvoGlobalBaConfig::max_free_poses`'s own doc for the cost this bounds.
+/// When set, the FRONT of `folded_arrivals` (the OLDEST included frames) is
+/// trimmed until the combined free-pose count fits — meaning a very tight
+/// cap can trim away the very endpoint `t0_arrival` was chosen for; this is
+/// a real, honestly-reported trade-off (see [`WidenedGlobalBaGather::capped`]),
+/// not a silent one.
+pub(crate) fn gather_widened_global_ba_problem(
+    graph: &DpvoPatchGraph,
+    loop_pairs: &[(usize, usize)],
+    max_free_poses: Option<usize>,
+) -> Option<WidenedGlobalBaGather> {
+    let patches_per_frame = graph.config().patches_per_frame;
+    let n = graph.n_frames();
+    if n == 0 || graph.edges().is_empty() {
+        return None;
+    }
+    let active_t0_live = graph.edges().iter().map(|e| e.i).min().unwrap_or(n);
+    let t0_arrival = loop_pairs.iter().map(|&(i, _)| i).min()?;
+
+    let arrival_to_live: HashMap<usize, usize> =
+        graph.frames().iter().enumerate().map(|(live, f)| (f.arrival_index, live)).collect();
+
+    // Branch purely on whether `t0_arrival`'s OWN frame is still live — NOT
+    // on whether it is older than the array's current minimum live arrival.
+    // An earlier version of this function used the latter, reasoning that
+    // "everything folded away is older than everything still live" — false
+    // in general for this port: [`crate::dpvo_patch_graph::DpvoPatchGraph::keyframe`]'s
+    // own fold-candidate arithmetic (`candidate = n - keyframe_index`) can
+    // NEVER select array position `0` or `1` (the smallest valid `n` for the
+    // fold gate to fire at all is `keyframe_index + 2`, making
+    // `candidate = n - keyframe_index = 2` the earliest possible target),
+    // so the very first two committed frames can remain live indefinitely
+    // while much later frames fold and unfold around them — confirmed by
+    // this module's own `widened_global_ba_closes_a_synthetic_drifted_loop_whose_old_endpoint_is_folded_away`
+    // test, which deliberately keeps arrival frames `0`/`1` live while
+    // folding arrival frame `2`. Gating on "older than the live minimum"
+    // would have wrongly concluded `t0_arrival` was still live in that case.
+    let t0_is_live = arrival_to_live.contains_key(&t0_arrival);
+
+    // Every folded arrival at or after `t0_arrival` that has BOTH a
+    // retained pose AND retained patch geometry, ascending order — no upper
+    // bound (Part E's `max_free_poses` cap below is what bounds this, not an
+    // assumption about where "live" resumes).
+    let mut folded_arrivals: Vec<usize> = if t0_is_live {
+        Vec::new()
+    } else {
+        graph
+            .retained_poses()
+            .range(t0_arrival..)
+            .map(|(&a, _)| a)
+            .filter(|a| graph.retained_folded_frames().contains_key(a))
+            .collect()
+    };
+    folded_arrivals.sort_unstable();
+
+    let mut capped = false;
+    if let Some(cap) = max_free_poses {
+        let uncapped_total = folded_arrivals.len() + n;
+        if uncapped_total > cap {
+            let excess = uncapped_total - cap;
+            let drop = excess.min(folded_arrivals.len());
+            folded_arrivals.drain(0..drop);
+            capped = true;
+        }
+    }
+    let folded_count = folded_arrivals.len();
+
+    let folded_index: HashMap<usize, usize> =
+        folded_arrivals.iter().enumerate().map(|(idx, &a)| (a, idx)).collect();
+    // A single resolver covering both stores: folded (this call's own
+    // materialized prefix) takes priority in the unlikely event an arrival
+    // somehow appears in both (never true by construction, since folded ==
+    // no longer live, but kept as an explicit `else` for clarity).
+    let combined_index_of = |arrival: usize| -> Option<usize> {
+        if let Some(&idx) = folded_index.get(&arrival) {
+            Some(idx)
+        } else {
+            arrival_to_live.get(&arrival).map(|&live| folded_count + live)
+        }
+    };
+
+    let mut poses = Vec::with_capacity(folded_count + n);
+    let mut intrinsics = Vec::with_capacity(folded_count + n);
+    let mut patches = Vec::with_capacity((folded_count + n) * patches_per_frame);
+    for &arrival in &folded_arrivals {
+        poses.push(graph.retained_poses()[&arrival].clone());
+        let ff = &graph.retained_folded_frames()[&arrival];
+        intrinsics.push(ff.intrinsics);
+        patches.extend_from_slice(&ff.patches);
+    }
+    for f in graph.frames() {
+        poses.push(f.pose.clone());
+        intrinsics.push(f.intrinsics);
+    }
+    patches.extend_from_slice(graph.patches());
+
+    let mut edges: Vec<DpvoEdge> = Vec::new();
+    let mut targets: Vec<Vector2<f64>> = Vec::new();
+    let mut weights: Vec<Vector2<f64>> = Vec::new();
+    for edge in graph.edges() {
+        if let Some((target, weight)) = edge.target_weight {
+            edges.push(DpvoEdge {
+                i: folded_count + edge.i,
+                j: folded_count + edge.j,
+                k: folded_count * patches_per_frame + edge.k,
+            });
+            targets.push(target);
+            weights.push(weight);
+        }
+    }
+    let mut resolved_inactive = 0usize;
+    let mut unresolved_inactive = 0usize;
+    for ie in graph.inactive_edges() {
+        match (combined_index_of(ie.arrival_i), combined_index_of(ie.arrival_j)) {
+            (Some(ci), Some(cj)) => {
+                let k = ci * patches_per_frame + ie.local_patch_offset;
+                edges.push(DpvoEdge { i: ci, j: cj, k });
+                targets.push(ie.target);
+                weights.push(ie.weight);
+                resolved_inactive += 1;
+            }
+            _ => unresolved_inactive += 1,
+        }
+    }
+
+    let fixedp = if folded_count > 0 {
+        0
+    } else {
+        // No folding needed: t0_arrival's own frame is still live. Widen in
+        // live-index space directly, same convention `gather_global_ba_edges`
+        // uses, just taking the min against the loop-derived candidate too.
+        let loop_t0_live = arrival_to_live.get(&t0_arrival).copied().unwrap_or(active_t0_live);
+        active_t0_live.min(loop_t0_live)
+    };
+    let free_pose_count = (folded_count + n).saturating_sub(fixedp);
+    let plain_active_free_pose_count = n.saturating_sub(active_t0_live);
+    let t0_widened_by_loop_edge = free_pose_count > plain_active_free_pose_count;
+
+    Some(WidenedGlobalBaGather {
+        poses,
+        patches,
+        intrinsics,
+        edges,
+        targets,
+        weights,
+        fixedp,
+        folded_arrivals,
+        resolved_inactive,
+        unresolved_inactive,
+        t0_widened_by_loop_edge,
+        capped,
+    })
+}
+
 /// Milestone M8: pure "due" computation for
 /// [`DpvoOdometry::try_global_ba`]'s own throttle — see that method's doc.
 /// Extracted as a free function so the throttle logic is unit-testable
@@ -3349,6 +3807,295 @@ mod global_ba_tests {
              untouched: error_without_loop={error_without_loop:.6} drift={:.6}",
             drift.norm()
         );
+    }
+
+    fn m10_graph_config(patches_per_frame: usize, keyframe_index: usize) -> DpvoVoConfig {
+        DpvoVoConfig {
+            buffer_size: 4096,
+            patches_per_frame,
+            removal_window: 2,
+            optimization_window: 4,
+            patch_lifetime: 1,
+            keyframe_index,
+            // Positive (matches upstream's own default): the fold this test
+            // relies on is forced by `motionmag() == 0.0` (no matching
+            // `(i, j)` edge exists at all, see this test's own doc), which
+            // is `< ANY positive threshold` regardless of its exact value.
+            keyframe_thresh: 12.5,
+            motion_damping: 0.5,
+        }
+    }
+
+    /// Milestone M10's required synthetic accuracy test (task spec, part G):
+    /// a synthetic drifted loop whose old endpoint is OUTSIDE the live
+    /// window (physically folded away via [`DpvoPatchGraph::keyframe`], not
+    /// merely aged out of the active-edge set the way the M8 fixture above
+    /// exercises) — [`gather_widened_global_ba_problem`] must reduce the
+    /// drifted frame's endpoint error by more than 10x by materializing the
+    /// folded frame as a free pose with real patch geometry, while the
+    /// M8-style [`gather_global_ba_edges`] path provably CANNOT touch it at
+    /// all (its own `unresolved_inactive` diagnostic proves the folded
+    /// endpoint is unreachable, and the drifted pose receives zero
+    /// correction because no edge in the legacy problem references it).
+    ///
+    /// # Engineering a real fold at a chosen frame, deterministically
+    ///
+    /// [`DpvoPatchGraph::keyframe`]'s own fold-candidate arithmetic
+    /// (`candidate = n - keyframe_index`, gated on `n > keyframe_index + 1`)
+    /// forces `candidate >= 2` on every possible call (the smallest valid
+    /// `n` is `keyframe_index + 2`, giving `candidate = 2` exactly) — so
+    /// array positions `0`/`1` can NEVER be folded directly, but position
+    /// `2` always CAN be, on the very first call, by choosing
+    /// `keyframe_index = n - 2` for whatever `n` the graph has at the time.
+    /// `OLD_FRAME` (arrival index `2`, the third frame committed) is this
+    /// test's designated fold target. [`DpvoPatchGraph::motionmag`] returns
+    /// `0.0` (guaranteed below any positive `keyframe_thresh`) whenever NO
+    /// active edge exists with the exact `(i, j)` pair the fold check
+    /// derives (`i = n - keyframe_index - 1 = 1`, `j = n - keyframe_index +
+    /// 1 = 3` for this test's own arithmetic) — this test simply never
+    /// creates such an edge, so the fold is unconditional, not motion-
+    /// dependent.
+    ///
+    /// Two separate `keyframe()` calls are required, in this order:
+    /// 1. **Call A** (while `OLD_FRAME` is still live): archives its
+    ///    touched pinning/loop edges into the inactive store via the
+    ///    ordinary removal-window drop. The fold gate cannot fire yet
+    ///    (`n <= keyframe_index + 1` at this point).
+    /// 2. **Call B** (after enough filler frames push `n` up to exactly
+    ///    `keyframe_index + 2`): folds `OLD_FRAME` away. Its edges are
+    ///    already safely in the inactive store by now — `fold_frame`'s own
+    ///    `store=False` edge-drop only touches [`DpvoPatchGraph::edges`],
+    ///    never the separate inactive-edge store, so nothing is lost.
+    ///
+    /// This ordering matters: if the SAME call both archived `OLD_FRAME`'s
+    /// edges AND folded it, `fold_frame`'s unconditional `store=False` drop
+    /// (which runs BEFORE the removal-window archiving phase even sees the
+    /// edges) would discard them with no trace at all.
+    #[test]
+    fn widened_global_ba_closes_a_synthetic_drifted_loop_whose_old_endpoint_is_folded_away() {
+        let m = LOOP_TEST_PATCHES_PER_FRAME;
+        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        let patch_for_local = |local: usize| -> DpvoPatch {
+            let col = (local % 8) as f64;
+            let row = (local / 8) as f64;
+            DpvoPatch { x: 20.0 + col * 10.0, y: 15.0 + row * 8.0, inverse_depth: 0.1 + 0.02 * (local % 7) as f64 }
+        };
+        const OLD_FRAME: usize = 2; // arrival index of the frame that gets folded away.
+        // 50 pinning frames left only a ~9.7x reduction (short of the
+        // required >10x) — matching the M8 fixture's own documented finding
+        // that pinning-frame COUNT, not baseline size or patch count, is the
+        // lever that closes a monocular depth/pose ambiguity; 90 comfortably
+        // clears the bar with margin, the same way M8's own fixture settled
+        // on more pinning frames than its first attempt.
+        const PINNING_COUNT: usize = 90; // arrival indices 3..=92.
+        const DRIFTED_FRAME: usize = OLD_FRAME + PINNING_COUNT; // 92: last pinning frame, stays live.
+        const N_BEFORE_ARCHIVE: usize = 3 + PINNING_COUNT; // 93: frame count at call A.
+        const N_FILLER: usize = 10;
+        const N_AT_FOLD: usize = N_BEFORE_ARCHIVE + N_FILLER; // 103: frame count at call B.
+        let keyframe_index = N_AT_FOLD - 2; // candidate = N_AT_FOLD - keyframe_index = 2 = OLD_FRAME.
+
+        let true_pose =
+            |i: usize| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0));
+        let drift = Vector3::new(0.15, 0.0, 0.0);
+
+        let mut graph = DpvoPatchGraph::new(m10_graph_config(m, keyframe_index));
+        graph.enable_inactive_edge_retention(m * (PINNING_COUNT + 5));
+
+        // Dummy frames 0, 1 — never referenced by any edge; exist purely so
+        // OLD_FRAME sits at array index 2 (see this test's own doc for why
+        // indices 0/1 can never themselves be folded).
+        for i in 0..OLD_FRAME {
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect()).unwrap();
+        }
+        // OLD_FRAME itself, hosting `m` distinct patches.
+        graph.begin_frame(OLD_FRAME as f64 * 0.05);
+        let old_frame_patches: Vec<DpvoPatch> = (0..m).map(patch_for_local).collect();
+        graph.commit_frame(true_pose(OLD_FRAME), intr, old_frame_patches.clone()).unwrap();
+
+        // Many DISTINCT pinning frames observing OLD_FRAME's patches — the
+        // same "one edge per patch, many distinct pinning viewpoints"
+        // recipe the M8 fixture's own doc derives is required to avoid a
+        // depth/pose ambiguity.
+        for target in (OLD_FRAME + 1)..=DRIFTED_FRAME {
+            graph.begin_frame(target as f64 * 0.05);
+            graph.commit_frame(true_pose(target), intr, (0..m).map(patch_for_local).collect()).unwrap();
+            let pairs: Vec<(usize, usize)> = (0..m).map(|local| (OLD_FRAME * m + local, target)).collect();
+            graph.append_edges(&pairs, 4);
+        }
+        for edge in graph.edges_mut() {
+            let local = edge.k - OLD_FRAME * m;
+            let owner_patch = old_frame_patches[local];
+            let target = transform_point(&true_pose(OLD_FRAME), &true_pose(edge.j), &intr, &intr, &owner_patch, false);
+            edge.target_weight = Some((target, Vector2::new(1.0, 1.0)));
+        }
+        assert_eq!(graph.n_frames(), N_BEFORE_ARCHIVE);
+
+        // Call A: archive OLD_FRAME's edges into the inactive store while it
+        // is still live — the fold gate cannot fire yet.
+        graph.keyframe();
+        assert!(graph.edges().iter().all(|e| e.i != OLD_FRAME), "OLD_FRAME's edges should have aged into the inactive store");
+        assert_eq!(graph.inactive_edge_stats(), (m * PINNING_COUNT, 0));
+        assert!(graph.retained_poses().is_empty(), "OLD_FRAME must still be LIVE at this point, not yet folded");
+
+        // Filler frames, no edges — pad `n` up to exactly `N_AT_FOLD`
+        // without ever creating an (i=1, j=3) edge (so `motionmag` returns
+        // the guaranteed `0.0` "no such edge" case at call B).
+        for i in N_BEFORE_ARCHIVE..N_AT_FOLD {
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect()).unwrap();
+        }
+
+        // Call B: fold OLD_FRAME away.
+        graph.keyframe();
+        assert_eq!(graph.retained_poses().len(), 1);
+        assert_eq!(graph.retained_folded_frames().len(), 1);
+        assert!(graph.frames().iter().all(|f| f.arrival_index != OLD_FRAME), "OLD_FRAME must no longer be live");
+
+        // Discover the drifted frame's now-shifted live index and apply the
+        // simulated accumulated drift (same recipe as the M8 fixture above).
+        let drifted_live = graph.frames().iter().position(|f| f.arrival_index == DRIFTED_FRAME).expect("still live");
+        let true_drifted_pose = true_pose(DRIFTED_FRAME);
+        graph.frames_mut()[drifted_live].pose =
+            SE3::new(true_drifted_pose.rotation, true_drifted_pose.translation + drift);
+
+        // A minimal keepalive self-edge (mathematically inert — see the M8
+        // fixture's own doc for the algebraic cancellation) so the LEGACY
+        // (M8-style) path has at least one active edge to compute its own
+        // `t0` from, rather than trivially returning `None`.
+        graph.append_edges(&[(0, 0)], 4);
+        let keepalive_patch = graph.patches()[0];
+        for edge in graph.edges_mut() {
+            edge.target_weight = Some((Vector2::new(keepalive_patch.x, keepalive_patch.y), Vector2::new(1.0, 1.0)));
+        }
+
+        let loop_pairs = vec![(OLD_FRAME, DRIFTED_FRAME)];
+
+        // --- M8-style (window-pinned) legacy path: PROVABLY cannot touch the drift. ---
+        let legacy = gather_global_ba_edges(&graph);
+        let error_legacy = if let Some((t0, edges, targets, weights, _resolved, unresolved)) = legacy {
+            assert!(unresolved > 0, "the loop edge's old (folded) endpoint must be unresolved under the legacy scheme");
+            let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
+            let patches: Vec<DpvoPatch> = graph.patches().to_vec();
+            let intrinsics = vec![intr; poses.len()];
+            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+            let cfg = DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+            let solved = dpvo_ba(&problem, &cfg).expect("legacy solve");
+            (solved.poses[drifted_live].translation - true_drifted_pose.translation).norm()
+        } else {
+            drift.norm()
+        };
+        assert!(
+            (error_legacy - drift.norm()).abs() < 1e-6,
+            "the legacy path has no edge referencing the drifted pose at all, so it must stay exactly \
+             at its drifted value: error_legacy={error_legacy:.6} drift={:.6}",
+            drift.norm()
+        );
+
+        // --- M10 widened path: reaches back through the fold. ---
+        let gathered = gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("widened gather");
+        assert_eq!(gathered.folded_arrivals, vec![OLD_FRAME], "the widened gather must materialize OLD_FRAME as a free pose");
+        assert_eq!(gathered.fixedp, 0);
+        assert_eq!(gathered.unresolved_inactive, 0, "every pinning+loop edge should now resolve via the folded-frame path");
+        assert_eq!(gathered.resolved_inactive, m * PINNING_COUNT);
+        assert!(gathered.t0_widened_by_loop_edge);
+        assert!(!gathered.capped);
+
+        let ba_cfg = DpvoBaConfig { iterations: 2, fixedp: gathered.fixedp, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+        let problem = DpvoBaProblem {
+            poses: gathered.poses,
+            patches: gathered.patches,
+            intrinsics: gathered.intrinsics,
+            edges: gathered.edges,
+            targets: gathered.targets,
+            weights: gathered.weights,
+        };
+        let solved = dpvo_ba(&problem, &ba_cfg).expect("widened solve");
+        let drifted_combined = 1 + drifted_live; // 1 folded frame prepended, then the live suffix.
+        let error_widened = (solved.poses[drifted_combined].translation - true_drifted_pose.translation).norm();
+
+        assert!(
+            error_widened * 10.0 < error_legacy,
+            "widened global BA over the folded-away loop endpoint should close the drift by >10x: \
+             widened={error_widened:.6} legacy={error_legacy:.6}"
+        );
+    }
+
+    /// Milestone M10 (task spec, part G): a tight `max_free_poses` cap can
+    /// trim away the very folded endpoint `t0_arrival` was chosen for — this
+    /// must be reported via [`WidenedGlobalBaGather::capped`], never silent.
+    /// Reuses the same folded-frame fixture shape as the test above, just
+    /// with `max_free_poses` set low enough to force the trim.
+    #[test]
+    fn widened_global_ba_reports_when_max_free_poses_trims_the_folded_endpoint() {
+        let m = 4usize; // small enough that this test's own solve isn't the point.
+        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        const OLD_FRAME: usize = 2;
+        const PINNING_COUNT: usize = 6;
+        const N_BEFORE_ARCHIVE: usize = 3 + PINNING_COUNT; // 9
+        const N_FILLER: usize = 3;
+        const N_AT_FOLD: usize = N_BEFORE_ARCHIVE + N_FILLER; // 12
+        let keyframe_index = N_AT_FOLD - 2;
+        let true_pose = |i: usize| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0));
+        let patch = |local: usize| DpvoPatch { x: 20.0 + local as f64, y: 15.0, inverse_depth: 0.15 };
+
+        let mut graph = DpvoPatchGraph::new(m10_graph_config(m, keyframe_index));
+        graph.enable_inactive_edge_retention(1000);
+        for i in 0..OLD_FRAME {
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(true_pose(i), intr, (0..m).map(patch).collect()).unwrap();
+        }
+        graph.begin_frame(OLD_FRAME as f64 * 0.05);
+        graph.commit_frame(true_pose(OLD_FRAME), intr, (0..m).map(patch).collect()).unwrap();
+        for target in (OLD_FRAME + 1)..=(OLD_FRAME + PINNING_COUNT) {
+            graph.begin_frame(target as f64 * 0.05);
+            graph.commit_frame(true_pose(target), intr, (0..m).map(patch).collect()).unwrap();
+            let pairs: Vec<(usize, usize)> = (0..m).map(|local| (OLD_FRAME * m + local, target)).collect();
+            graph.append_edges(&pairs, 4);
+        }
+        for edge in graph.edges_mut() {
+            edge.target_weight = Some((Vector2::new(1.0, 1.0), Vector2::new(1.0, 1.0)));
+        }
+        assert_eq!(graph.n_frames(), N_BEFORE_ARCHIVE);
+        graph.keyframe(); // archive
+        for i in N_BEFORE_ARCHIVE..N_AT_FOLD {
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(true_pose(i), intr, (0..m).map(patch).collect()).unwrap();
+        }
+        graph.keyframe(); // fold OLD_FRAME
+        assert_eq!(graph.retained_poses().len(), 1);
+        graph.append_edges(&[(0, 0)], 4);
+        for edge in graph.edges_mut() {
+            edge.target_weight = Some((Vector2::new(1.0, 1.0), Vector2::new(1.0, 1.0)));
+        }
+
+        let loop_pairs = vec![(OLD_FRAME, OLD_FRAME + PINNING_COUNT)];
+
+        // Uncapped: reaches the folded frame.
+        let uncapped = gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("uncapped gather");
+        assert_eq!(uncapped.folded_arrivals, vec![OLD_FRAME]);
+        assert!(!uncapped.capped);
+
+        // Capped to exactly the live frame count: no room left for the
+        // folded prefix at all.
+        let live_n = graph.n_frames();
+        let capped = gather_widened_global_ba_problem(&graph, &loop_pairs, Some(live_n)).expect("capped gather");
+        assert!(capped.folded_arrivals.is_empty(), "a cap with no headroom must drop the folded prefix entirely");
+        assert!(capped.capped, "the trim must be reported, never silent");
+    }
+
+    /// Milestone M10 (task spec, part G): "no-op when disabled" — with
+    /// `DpvoGlobalBaConfig::widen_t0_with_loop_edges` at its default
+    /// (`false`), [`DpvoOdometry::run_global_ba`] must dispatch to the
+    /// byte-identical M8 legacy path regardless of what
+    /// `loop_edge_arrival_pairs` contains — checked here at the "gather"
+    /// level (the pure functions), since exercising the full
+    /// `DpvoOdometry` requires a live ONNX session.
+    #[test]
+    fn default_global_ba_config_does_not_widen() {
+        let cfg = DpvoGlobalBaConfig::default();
+        assert!(!cfg.widen_t0_with_loop_edges, "M8 legacy behavior must be the default");
+        assert_eq!(cfg.max_free_poses, Some(256));
     }
 }
 

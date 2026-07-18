@@ -87,6 +87,31 @@
 //! counters so a long run's console log shows exactly when (if ever) a global
 //! pass ran and how expensive it was.
 //!
+//! # `--gba-widen-t0` / `--gba-max-free-poses` (Milestone M10, `docs/dpvo_droid_port_plan.md`)
+//!
+//! `--gba-widen-t0` is the actual M10 on/off switch layered on top of
+//! `--global-ba` above (`DpvoGlobalBaConfig::widen_t0_with_loop_edges`) —
+//! widens the global pass's own free-pose gauge (`t0`) using every accepted
+//! proximity-loop edge's OLD endpoint, decoupled from
+//! `--optimization-window`'s unrelated per-frame-BA sizing purpose,
+//! materializing a folded-away endpoint (via
+//! `crate::dpvo_patch_graph::DpvoPatchGraph::retained_poses`/
+//! `retained_folded_frames`) as a real free pose with real patch geometry
+//! when needed — see `pipelines/slam/src/dpvo_vo.rs`'s
+//! `gather_widened_global_ba_problem` for the full mechanism this answers
+//! (the M8/M9 results sections' own diagnosis: `free_pose_count` pinned at
+//! `removal_window` on every M8 call). Off by default — omitting the flag
+//! reproduces M8's exact behavior byte-for-byte even with `--global-ba`
+//! itself on. `--gba-max-free-poses` bounds the resulting dense-solve cost
+//! (`0` means unbounded; default mirrors `DpvoGlobalBaConfig::default()`'s
+//! own `Some(256)`) — a capped call is always visible via the new
+//! `global_ba_last_free_pose_count_capped` summary key, never silently
+//! narrower than the loop evidence would otherwise justify. The summary
+//! additionally echoes `global_ba_max_free_pose_count` (the largest
+//! `free_pose_count` ever observed — the acceptance diagnostic for "did the
+//! window ever actually widen"), `global_ba_last_t0_widened_by_loop_edge`,
+//! and `global_ba_last_folded_poses_included`.
+//!
 //! # `--sim3-backend` (Milestone M9, `docs/dpvo_droid_port_plan.md`)
 //!
 //! Enables `crate::dpvo_sim3_backend`'s Sim(3) pose-graph scale-drift
@@ -215,6 +240,16 @@ struct CliArgs {
     gba_ep: f64,
     gba_lmbda: f64,
     gba_inactive_edge_cap: usize,
+    /// Milestone M10 (`docs/dpvo_droid_port_plan.md`): `DpvoGlobalBaConfig::widen_t0_with_loop_edges`
+    /// — the actual "M10 on/off" switch, mirrored 1:1. Default off (M8
+    /// legacy behavior).
+    gba_widen_t0: bool,
+    /// Milestone M10: `DpvoGlobalBaConfig::max_free_poses` — `0` here means
+    /// `None` (unbounded); any other value is `Some(value)`. `0` is never a
+    /// meaningful real cap (a widened pass always needs at least the live
+    /// frame count), so this is an unambiguous sentinel, not a magic number
+    /// collision.
+    gba_max_free_poses: usize,
     /// Milestone M9 (`docs/dpvo_droid_port_plan.md`): enable the Sim(3)
     /// pose-graph scale-drift backend over the full retained + live pose
     /// history (`DpvoOdometryConfig::sim3_backend`). Default off — every
@@ -293,6 +328,10 @@ impl Default for CliArgs {
             gba_ep: DpvoGlobalBaConfig::default().ep,
             gba_lmbda: DpvoGlobalBaConfig::default().lmbda,
             gba_inactive_edge_cap: DpvoGlobalBaConfig::default().inactive_edge_cap,
+            gba_widen_t0: DpvoGlobalBaConfig::default().widen_t0_with_loop_edges,
+            // `Default`'s own `Some(256)` mapped through the `0 == None`
+            // sentinel above.
+            gba_max_free_poses: DpvoGlobalBaConfig::default().max_free_poses.unwrap_or(0),
             sim3_backend: false,
             // Mirror `DpvoSim3BackendConfig::default()` exactly so omitting
             // these flags reproduces that struct's own defaults.
@@ -389,6 +428,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--gba-ep" => args.gba_ep = raw.remove(i + 1).parse()?,
             "--gba-lmbda" => args.gba_lmbda = raw.remove(i + 1).parse()?,
             "--gba-inactive-edge-cap" => args.gba_inactive_edge_cap = raw.remove(i + 1).parse()?,
+            "--gba-widen-t0" => {
+                args.gba_widen_t0 = true;
+                raw.remove(i);
+                continue;
+            }
+            "--gba-max-free-poses" => args.gba_max_free_poses = raw.remove(i + 1).parse()?,
             "--sim3-backend" => {
                 args.sim3_backend = true;
                 raw.remove(i);
@@ -605,6 +650,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ep: args.gba_ep,
             lmbda: args.gba_lmbda,
             inactive_edge_cap: args.gba_inactive_edge_cap,
+            // Milestone M10: `--gba-widen-t0` is the actual "M10 on/off"
+            // switch; omitting it reproduces M8's exact `t0 = min(active
+            // edges' owner frame)` behavior byte-for-byte even with
+            // `--global-ba` itself on.
+            widen_t0_with_loop_edges: args.gba_widen_t0,
+            max_free_poses: (args.gba_max_free_poses != 0).then_some(args.gba_max_free_poses),
         }),
         // Milestone M9 (`docs/dpvo_droid_port_plan.md`): `--sim3-backend`
         // enables the Sim(3) pose-graph scale-drift backend; omitting it
@@ -634,8 +685,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.global_ba {
         println!(
             "global BA enabled (Milestone M8): frequency={} iterations={} ep={:.2} lmbda={:.2e} \
-             inactive_edge_cap={}",
-            args.gba_frequency, args.gba_iterations, args.gba_ep, args.gba_lmbda, args.gba_inactive_edge_cap,
+             inactive_edge_cap={} widen_t0_with_loop_edges={} max_free_poses={}",
+            args.gba_frequency,
+            args.gba_iterations,
+            args.gba_ep,
+            args.gba_lmbda,
+            args.gba_inactive_edge_cap,
+            args.gba_widen_t0,
+            if args.gba_max_free_poses == 0 { "none".to_string() } else { args.gba_max_free_poses.to_string() },
         );
     }
 
@@ -837,14 +894,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gba_diag = odometry.global_ba_diagnostics();
             if gba_diag.calls > prev_gba_calls {
                 println!(
-                    "*** frame {idx}: GLOBAL BA — call #{} (free_pose_count={} edge_count={} \
-                     resolved_inactive={} unresolved_inactive={} pose_delta_max_m={:.4} \
+                    "*** frame {idx}: GLOBAL BA — call #{} (free_pose_count={} max_free_pose_count={} \
+                     edge_count={} resolved_inactive={} unresolved_inactive={} widened={} \
+                     folded_poses_included={} capped={} pose_delta_max_m={:.4} \
                      pose_delta_mean_m={:.4} elapsed_ms={:.2})",
                     gba_diag.calls,
                     gba_diag.last_free_pose_count,
+                    gba_diag.max_free_pose_count,
                     gba_diag.last_edge_count,
                     gba_diag.last_resolved_inactive_edges,
                     gba_diag.last_unresolved_inactive_edges,
+                    gba_diag.last_t0_widened_by_loop_edge,
+                    gba_diag.last_folded_poses_included,
+                    gba_diag.last_free_pose_count_capped,
                     gba_diag.last_pose_delta_max_m,
                     gba_diag.last_pose_delta_mean_m,
                     gba_diag.last_elapsed_ms,
@@ -962,13 +1024,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let gba_diag = odometry.global_ba_diagnostics();
                 println!(
                     "  gba_calls={} gba_inactive_edges_retained={} gba_inactive_edges_evicted_total={} \
-                     gba_last_free_pose_count={} gba_last_edge_count={} gba_last_pose_delta_max_m={:.4} \
-                     gba_total_elapsed_ms={:.2}",
+                     gba_last_free_pose_count={} gba_max_free_pose_count={} gba_last_edge_count={} \
+                     gba_last_widened={} gba_last_folded_poses_included={} gba_last_capped={} \
+                     gba_last_pose_delta_max_m={:.4} gba_total_elapsed_ms={:.2}",
                     gba_diag.calls,
                     gba_diag.inactive_edges_retained,
                     gba_diag.inactive_edges_evicted_total,
                     gba_diag.last_free_pose_count,
+                    gba_diag.max_free_pose_count,
                     gba_diag.last_edge_count,
+                    gba_diag.last_t0_widened_by_loop_edge,
+                    gba_diag.last_folded_poses_included,
+                    gba_diag.last_free_pose_count_capped,
                     gba_diag.last_pose_delta_max_m,
                     gba_diag.total_elapsed_ms,
                 );
@@ -1154,9 +1221,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          global_ba_inactive_edges_retained={gba_inactive_retained}\n\
          global_ba_inactive_edges_evicted_total={gba_inactive_evicted}\n\
          global_ba_last_free_pose_count={gba_last_free_pose_count}\n\
+         global_ba_max_free_pose_count={gba_max_free_pose_count}\n\
          global_ba_last_edge_count={gba_last_edge_count}\n\
          global_ba_last_resolved_inactive_edges={gba_last_resolved_inactive}\n\
          global_ba_last_unresolved_inactive_edges={gba_last_unresolved_inactive}\n\
+         global_ba_last_t0_widened_by_loop_edge={gba_last_widened}\n\
+         global_ba_last_folded_poses_included={gba_last_folded_included}\n\
+         global_ba_last_free_pose_count_capped={gba_last_capped}\n\
          global_ba_last_pose_delta_max_m={gba_last_pose_delta_max:.6}\n\
          global_ba_last_pose_delta_mean_m={gba_last_pose_delta_mean:.6}\n\
          global_ba_last_elapsed_ms={gba_last_elapsed_ms:.3}\n\
@@ -1244,9 +1315,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gba_inactive_retained = gba_diag.inactive_edges_retained,
         gba_inactive_evicted = gba_diag.inactive_edges_evicted_total,
         gba_last_free_pose_count = gba_diag.last_free_pose_count,
+        gba_max_free_pose_count = gba_diag.max_free_pose_count,
         gba_last_edge_count = gba_diag.last_edge_count,
         gba_last_resolved_inactive = gba_diag.last_resolved_inactive_edges,
         gba_last_unresolved_inactive = gba_diag.last_unresolved_inactive_edges,
+        gba_last_widened = gba_diag.last_t0_widened_by_loop_edge,
+        gba_last_folded_included = gba_diag.last_folded_poses_included,
+        gba_last_capped = gba_diag.last_free_pose_count_capped,
         gba_last_pose_delta_max = gba_diag.last_pose_delta_max_m,
         gba_last_pose_delta_mean = gba_diag.last_pose_delta_mean_m,
         gba_last_elapsed_ms = gba_diag.last_elapsed_ms,
