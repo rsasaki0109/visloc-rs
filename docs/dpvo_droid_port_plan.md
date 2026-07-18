@@ -2842,3 +2842,408 @@ observed) blocker.
   — a follow-up full-length re-run under the exact post-fix binary is a
   natural, low-priority confirmation step, not required to trust the
   numbers reported above.
+
+## M8 results (2026-07-18)
+
+Milestone M8: port upstream's `__run_global_BA` (`dpvo.py:312-325`, the
+`ran_global_ba` throttle check at `dpvo.py:449-455`) as a periodic full-graph
+[`dpvo_ba`] pass over every retained ACTIVE **and** INACTIVE edge — the
+DPV-SLAM-style "pure-mono global backend" the plan doc's M8 spec bet on as
+the answer to the dominant open problem, MH_01's own ~22.6× monocular scale
+drift by 800 frames (M6/M7's own honest finding). **Result: correctly
+implemented, correctly wired end-to-end (unit test and a real MH_01 run both
+exercise the full mechanism), but an honest negative on the accuracy
+target** — real-run evidence, not guesswork, pins down exactly why: the
+"global" pass never actually widens its own free-pose window on this
+dataset/config, so it functions, in practice, as an ordinary local windowed
+BA plus a handful of extra frozen-target pulls, nowhere near enough leverage
+to undo a 22× accumulated scale error. Not swept under the rug — see "Real
+MH_01 acceptance runs" below for the diagnosis.
+
+### Design: inactive-edge retention + a gated global pass, no second BA entry point
+
+Two pieces, matching M6's own "reuse the same patch-BA machinery" philosophy
+rather than adding a parallel system:
+
+1. **Inactive-edge retention** (`pipelines/slam/src/dpvo_patch_graph.rs`,
+   [`InactiveEdge`], [`DpvoPatchGraph::enable_inactive_edge_retention`]): the
+   ordinary removal-window edge drop inside `keyframe_inner` (`to_remove`/
+   `remove_factors(..., store=True)`'s port — *not* the fold-frame drop,
+   which stays `store=False` exactly like upstream) now archives each
+   dropped edge's frozen `(target, weight)` measurement into a bounded ring
+   buffer instead of discarding it, keyed by [`DpvoGraphFrame::arrival_index`]
+   rather than a raw live index (a deliberately MORE careful choice than
+   upstream's own `ii_inac`/`jj_inac`/`kk_inac`, which are never re-shifted
+   by a later fold at all — see the module doc's "Inactive-edge retention"
+   section for the full derivation of why this port re-resolves against the
+   live frame set instead). Off by default (`cap = 0`); `DpvoOdometry::new`
+   opts the graph in only when `DpvoOdometryConfig::global_ba` is `Some`.
+2. **The gated global pass** (`pipelines/slam/src/dpvo_vo.rs`,
+   `DpvoOdometry::run_global_ba`/`try_global_ba`, the free function
+   `gather_global_ba_edges`): `try_global_ba` is a no-op until a loop edge
+   has EVER been accepted (a global pass is redundant, strictly more
+   expensive work before `t0` can differ from the ordinary window bound —
+   the same reasoning M4's own module doc already used to justify not
+   porting this as a separate call site at all), then throttled by an
+   INDEPENDENT `frequency` knob (default `15`, matching upstream's own
+   number but not sharing `DpvoLoopClosureConfig::global_opt_freq`'s clock —
+   see `DpvoGlobalBaConfig::frequency`'s own doc for why two separate "due"
+   clocks is the right call here) or forced immediately on the same frame a
+   loop batch is accepted. When due, `gather_global_ba_edges` computes
+   `t0 = min(active edges' owner frame)` (upstream's own `self.pg.ii.min()`)
+   and gathers every ACTIVE edge with a learned measurement plus every
+   retained [`InactiveEdge`] that still resolves against the CURRENT live
+   frame set (an entry whose endpoint has since been folded away entirely is
+   simply skipped, tracked only as a diagnostic, never an error); `run_global_ba`
+   then runs one bounded `dpvo_ba` solve over `[0, n)` with that gauge, and
+   writes the solved poses/patches back into the graph.
+3. **Sim3 pose-graph fallback**: not started, per the spec's own "decide on
+   evidence" clause — see "What a real fix needs" below for why the evidence
+   now says this fallback (or something like it) is very likely required,
+   not merely "probably unnecessary."
+
+### The failing synthetic test: root cause and fix
+
+The task's required accuracy fixture
+(`global_ba_closes_a_synthetic_drifted_loop_via_retained_inactive_edges`,
+`pipelines/slam/src/dpvo_vo.rs`) was left FAILING by the interrupted prior
+agent: `with_loop=0.149022` vs `without_loop=0.150000` — the retained
+inactive loop edge produced essentially zero correction, nowhere near the
+required >10× endpoint-drift reduction. Instrumenting the fixture (printing
+gathered edges/targets/weights and pre/post pose+patch state) showed the
+edge DID survive `gather_global_ba_edges` intact, with the correct nonzero
+weight and residual — ruling out the two hypotheses the task brief itself
+suggested (a gathering bug, or an inert edge). The real cause, confirmed
+both algebraically (deriving the Gauss-Newton normal equations by hand) and
+empirically (a series of controlled fixture variations), was a **genuine
+mathematical degeneracy in the fixture itself**, not a bug in
+`gather_global_ba_edges`/`dpvo_ba`:
+
+* The original fixture (mirroring `dpvo_loop_closure.rs`'s own M6 synthetic
+  test almost exactly) anchored the ordinary temporal chain AND the loop
+  revisit on the SAME single 3D patch. With only one landmark observed from
+  a fixed anchor frame plus one drifted frame, moving that patch's own
+  inverse depth and moving the drifted camera's pose are **first-order
+  equivalent** ways to explain the one point's reprojection error — a
+  classical monocular depth/translation ambiguity. Duplicating that single
+  point through more edges (tried: up to 1000 parallel copies, each with its
+  own independent depth variable) barely helped (`error_with_loop` moved
+  only 0.149→0.137) and was unaffected by more Gauss-Newton iterations
+  (tried up to 20; the fixture converges to the same degenerate joint
+  minimum in a single step) — confirmed by deriving the Schur complement
+  directly: duplicating an identical point just scales every term of the
+  same still-degenerate 2-way normal equations, adding no new geometric
+  constraint.
+* Giving each patch a genuinely different anchor pixel AND inverse depth
+  helped only a little (0.150→0.118 at 48 patches/frame), and — somewhat
+  counterintuitively — scaling up the two pinning frames' own baseline
+  (translation steps from 0.2m to 5.0m) changed almost nothing either
+  (0.118→0.115): with only 2 pinning views, each patch's own inverse depth
+  is still only weakly triangulated, and the loop edge's Jacobian and the
+  pinning edges' Jacobians scale together as the whole configuration is
+  scaled, so their ratio — which is what actually determines how much of
+  the loop residual gets diverted into depth instead of pose — stays the
+  same regardless of baseline size.
+* What actually worked: **many genuinely distinct PINNING FRAMES**, not a
+  bigger baseline on the same two and not more patches on the same two.
+  Sweeping the pinning-frame count from 6 to 80 (at 48 patches/frame) took
+  `error_with_loop` from 0.073 down to negligible, because each additional
+  pinning frame gives every patch's inverse depth an independent,
+  non-redundant new constraint — exactly how upstream's own patches behave
+  in practice (`PATCH_LIFETIME=12` default gives every real patch many
+  pinning edges across its whole life *before* `REMOVAL_WINDOW` ever retires
+  it, not just one or two).
+
+The fixed test (`LOOP_TEST_PATCHES_PER_FRAME = 48`, `N_FRAMES = 55`, 54
+pinning frames before the drifted final frame, every chain/loop edge shaped
+like `expand_frame_pairs_to_patch_edges`'s own "one edge per patch, never a
+single edge" expansion) now passes with `error_with_loop=0.011230` vs
+`error_without_loop=0.150000` — a **13.4×** reduction, comfortably clearing
+the required bar without gaming it (the margin exists because the fixture
+needed genuine headroom over a hard 10× threshold, not because the number
+was hand-tuned to just barely pass). This is not "tuning the test until it
+passes": the earlier single/few-pinning-frame fixtures were testing
+configurations with a real, inherent depth/pose ambiguity that no amount of
+BA iteration, duplicate-patch count, or baseline scaling could ever resolve,
+which is not what a real loop batch (with its patches' own long pinning
+history) actually looks like. This root cause is also the first hint of the
+real-run finding below: the mechanism's correction strength is fundamentally
+gated by how much *independent, non-redundant* geometric constraint reaches
+the drifted pose, and a real MH_01 run's own retained-edge window turns out
+to supply far less of that than the synthetic fixture's 54 pinning frames.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_patch_graph.rs` (+343 net over the interrupted
+  agent's own diff): `InactiveEdge`, `enable_inactive_edge_retention`,
+  `inactive_edges()`/`inactive_edge_stats()`, `archive_inactive_edge` hooked
+  into `keyframe_inner`'s removal-window drop. Untouched by this session
+  beyond what the interrupted agent had already written and verified passing
+  (3 tests: archive-on-fold, cap-evicts-oldest-first, frozen-as-graph-advances).
+* `pipelines/slam/src/dpvo_vo.rs`: the interrupted agent's `DpvoGlobalBaConfig`/
+  `DpvoGlobalBaDiagnostics`/`run_global_ba`/`try_global_ba`/
+  `gather_global_ba_edges`/`global_ba_due` all kept as written (verified
+  correct by this session's own instrumentation, not rewritten); this
+  session's own changes: rewrote the failing synthetic test's fixture (see
+  above) with a much more thorough root-cause doc comment; added
+  `GlobalBaGatheredEdges` (a named tuple-alias, purely to silence
+  `clippy::type_complexity` on `gather_global_ba_edges`'s return type, no
+  behavior change).
+* `pipelines/slam/src/lib.rs`: unchanged from the interrupted agent's own
+  `InactiveEdge` re-export.
+* `examples/euroc_dpvo_vo_demo.rs`: finished the interrupted agent's partial
+  wiring — `--global-ba`/`--gba-frequency`/`--gba-iterations`/`--gba-ep`/
+  `--gba-lmbda`/`--gba-inactive-edge-cap` parsed in the arg loop (mirroring
+  the `--lc-*` pattern), `Some(DpvoGlobalBaConfig{..})` constructed at the
+  `DpvoOdometryConfig` initializer, an "enabled" banner (mirroring `--imu`/
+  `--scale-coupling`/`--loop-closure`'s own), a `*** frame N: GLOBAL BA —
+  call #K ...` transition log fired only when `global_ba_calls` increases
+  (mirroring the `LOOP CLOSURE`/`SCALE COUPLING` transition logs), a
+  `gba_*` block in the periodic progress line, and 13 `global_ba_*` keys in
+  the final `summary.txt` (`enabled`, `calls`, `inactive_edges_retained`,
+  `inactive_edges_evicted_total`, `last_free_pose_count`, `last_edge_count`,
+  `last_resolved_inactive_edges`, `last_unresolved_inactive_edges`,
+  `last_pose_delta_max_m`, `last_pose_delta_mean_m`, `last_elapsed_ms`,
+  `total_elapsed_ms`) — the full `DpvoGlobalBaDiagnostics` struct, matching
+  the `loop_*`/`sc_*` reporting density already established.
+
+### Verify
+
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-slam --lib --features onnx-inference global_ba`:
+  **2 passed** (`global_ba_due_throttle_behaves_as_specified`,
+  `global_ba_closes_a_synthetic_drifted_loop_via_retained_inactive_edges`),
+  0 failed — the fix above.
+* `cargo test -p visloc-slam --features onnx-inference`: **353 lib tests**
+  passed, 0 failed, 7 ignored; every integration test binary green and
+  unchanged (54/54+1 ignored, 0/0+2 ignored, 6/6, 6/6, 132/132, 10/10, 9/9,
+  4/4) — identical counts/behavior to M7's own verify section aside from the
+  5 new `global_ba_tests` (2 shown above plus the pre-existing
+  `scale_coupling_windowing_tests`/etc. carried forward unchanged).
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  **zero** warnings in `dpvo_vo.rs`/`dpvo_patch_graph.rs` (confirmed by
+  grepping clippy's own output for those two file names specifically); one
+  `clippy::type_complexity` warning on `gather_global_ba_edges`'s own return
+  type was introduced by the interrupted agent's original signature and
+  fixed this session (the `GlobalBaGatheredEdges` alias above). 9 warning
+  *instances* remain elsewhere (`map_atlas.rs`, `online_slam_vi_ba.rs` ×2,
+  `online_slam.rs`, `vi_motion_initializer.rs`,
+  `online_slam_motion_vi_init.rs`, plus 2 more not individually named in
+  M7's own count) — confirmed via `git stash` to be **byte-identical
+  pre-existing baseline noise**, present before ANY M8 edit and unrelated to
+  this milestone, not something this session introduced or left behind.
+* `cargo clippy --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: clean, zero warnings specific to
+  `euroc_dpvo_vo_demo.rs` (the same pre-existing `visloc-slam` lib warnings
+  above surface transitively, since the example depends on that crate, but
+  nothing new).
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded, ran a 20-frame smoke test
+  end-to-end with `--loop-closure --global-ba` before committing to the
+  full-length acceptance runs (confirmed the new `global_ba_*` summary keys
+  populate correctly, all zero as expected since 20 frames is too short for
+  any loop to be found).
+
+### Real MH_01 acceptance runs
+
+`--euroc-dir MH_01_easy --stride 2 --seed 0`, `fast.yaml`-equivalent graph
+sizing (`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11`, identical to every M6/M7 reported run), visual-only (no
+`--imu`), `--loop-closure --global-ba`, CPU-only, release build, both runs
+launched concurrently on this 12-core machine (same time-budget choice M6/M7
+made; `ms_per_frame` is therefore not directly comparable across runs, ATE
+is). Outputs: `E:/visloc_archive/dpvo_m8_20260718/{on_800,on_400}/`.
+
+**800 frames** (vs M6's own ON-arm baseline, `E:/visloc_archive/dpvo_m6_20260717/on_800_fixed/`,
+same exact CLI config):
+
+| Metric | M8 800f | M6 800f baseline | Acceptance target |
+| --- | --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 | — |
+| `ate_rigid_rmse_m` | 4.0909 | 4.0761 | — |
+| `ate_rigid_max_m` | 8.7712 | 8.7406 | — |
+| `ate_similarity_rmse_m` | **2.9805** | 2.7412 | **< 1.5** |
+| `ate_similarity_max_m` | 5.6669 | 5.9332 | — |
+| `ate_similarity_scale` | **22.608941** | 22.536250 | **< 10** |
+| `loop_batches_attempted` | 424 | 424 | — |
+| `loop_candidates_evaluated` | 1468 | 1470 | — |
+| `loop_accepted` | 8 | 9 | — |
+| `loop_patch_edges_added` | 384 | 432 | — |
+| `global_ba_enabled` | true | n/a (M6 predates M8) | — |
+| `global_ba_calls` | 3 | n/a | — |
+| `global_ba_inactive_edges_retained` | 4096 (cap) | n/a | — |
+| `global_ba_inactive_edges_evicted_total` | 33104 | n/a | — |
+| `global_ba_last_free_pose_count` | 16 | n/a | — |
+| `global_ba_last_edge_count` | 14752 | n/a | — |
+| `global_ba_last_resolved_inactive_edges` | 4096 | n/a | — |
+| `global_ba_last_unresolved_inactive_edges` | 0 | n/a | — |
+| `global_ba_last_pose_delta_max_m` | 0.001735 | n/a | — |
+| `global_ba_last_pose_delta_mean_m` | 0.001127 | n/a | — |
+| `global_ba_total_elapsed_ms` | 97.02 | n/a | — |
+
+**400 frames** (no-regression guard vs M7's own `on_400`,
+`E:/visloc_archive/dpvo_m7_20260717/on_400/`):
+
+| Metric | M8 400f | M7 400f baseline |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | **0.1546** | 0.1546 |
+| `ate_rigid_max_m` | 0.4040 | 0.4040 |
+| `ate_similarity_rmse_m` | **0.1519** | 0.1519 |
+| `ate_similarity_max_m` | 0.4033 | 0.4033 |
+| `ate_similarity_scale` | **1.265951** | 1.265951 |
+| `loop_accepted` | 0 | n/a (M7 ran with `--loop-closure` off) |
+| `global_ba_enabled` | true | n/a |
+| `global_ba_calls` | **0** | n/a |
+| `global_ba_inactive_edges_retained` | 4096 (cap) | n/a |
+| `global_ba_inactive_edges_evicted_total` | 10400 | n/a |
+| `global_ba_total_elapsed_ms` | 0.000 | n/a |
+
+**400f no-regression guard: PASSES cleanly.** No loop was ever found or
+accepted at 400 frames (matching M6/M7's own observation that few/no
+proximity loops exist that early in MH_01), so `try_global_ba`'s own
+"no-op until the first loop edge is ever accepted" gate held for the entire
+run — `global_ba_calls=0`, every ATE digit identical to M7's own baseline to
+6 decimal places. This is the byte-identical-when-inactive contract the
+design promised, now confirmed on real data, not just `config.global_ba:
+None`'s trivial case.
+
+**800f acceptance target: MISSED.** `ate_similarity_rmse_m=2.9805` (target
+`< 1.5`) and `ate_similarity_scale=22.608941` (target `< 10`) — both
+essentially unchanged from M6's own pre-M8 numbers (`2.7412`/`22.536`), and
+if anything the similarity RMSE is slightly *worse* here (`2.98` vs `2.74`).
+The `loop_accepted` count differs by one pair (8 vs 9 — M6 accepted 8 pairs
+in its frame-613 batch, this run accepted 7 in an equivalent frame-618
+batch; the frame-430 single-pair acceptance is identical in both runs) —
+consistent with the documented "binary rebuilds shift RANSAC/HashMap
+ordering" gotcha (a rebuilt binary between M6 and M8 can legitimately select
+a slightly different greedy NMS tie-break among near-identical candidates),
+not a functional regression in `try_loop_closure`'s logic (its own return
+value change, `()`→`bool`, is purely additive and was unit-tested in
+isolation before this run).
+
+### Why the global pass barely moved anything: `last_free_pose_count=16` is the whole story
+
+The console log (`E:/visloc_archive/dpvo_m8_20260718/on_800.log`) shows all
+3 real `run_global_ba` calls:
+
+```
+frame 430: LOOP CLOSURE — accepted 1 new pair(s) ...
+frame 430: GLOBAL BA — call #1 (free_pose_count=16 edge_count=14752 resolved_inactive=4096 ... pose_delta_max_m=0.0050 ...)
+frame 617: GLOBAL BA — call #2 (free_pose_count=16 edge_count=14848 resolved_inactive=4096 ... pose_delta_max_m=0.0023 ...)
+frame 618: LOOP CLOSURE — accepted 7 new pair(s) ...
+frame 618: GLOBAL BA — call #3 (free_pose_count=16 edge_count=14752 resolved_inactive=4096 ... pose_delta_max_m=0.0017 ...)
+```
+
+`free_pose_count` is **exactly 16 on every single call** — precisely
+`removal_window` (`16` in `fast.yaml` sizing), i.e. the ORDINARY per-frame
+window bound, not a widened one. That is the direct, measured cause of the
+tiny (1.7-5.0mm) pose corrections: `t0 = min(active edges' owner frame)`
+never actually dropped to an accepted loop edge's own (much older) owner
+frame on this run, so the "global" pass's free-pose set stayed pinned to the
+same small recent window `update_step`'s own ordinary BA already uses —
+the mechanism degenerated, in practice, to "an ordinary local BA plus a
+handful of extra frozen-target pulls from resolved inactive edges anchoring
+recent poses against old (but still-live) 3D points," never the wide-window
+correction the design intended.
+
+Tracing why, using `find_loop_edges`'s own candidate search bounds
+(`dpvo_loop_closure.rs`): accepted loop edges are `(i, j)` with `i` drawn
+from `[l - max_edge_age, l)` where `l = n - removal_window` (an OLD frame,
+by construction, always *below* the removal-window threshold) and `j` from
+`[n - global_opt_freq, n - keyframe_index)` (a RECENT frame, within
+`global_opt_freq=15` of `n`, using `fast.yaml`'s own `--keyframe-index`
+default of `4`). `keyframe_with_loop_protection`'s own exemption — the ONE
+mechanism that could keep such an edge ACTIVE (and hence counted toward
+`t0`) past the ordinary removal-window drop — requires `j +
+optimization_window > n_after` (`optimization_window=7` in `fast.yaml`
+sizing). Since `j` can legitimately be as old as `n - 15` (the low end of
+its own search range), `j + 7` can be as low as `n - 8` — **which fails the
+exemption** whenever the selected candidate's `j` sits anywhere in roughly
+the older half of that 11-frame window. `unresolved_inactive_edges=0` on
+every call confirms the old endpoint frame itself was never physically
+folded away (`fold_frame` never removed it) — the resolved inactive edges
+correctly kept anchoring a real, still-live old 3D point against nearby
+current poses; they just never got the chance to widen `t0`, because the
+edge that would have done so (the loop edge itself, in its brief ACTIVE
+window) evidently did not satisfy its own exemption condition on either
+accepted batch. This is not a bug in the exemption logic (M6's own tests
+for `keyframe_with_loop_protection` still pass, confirming its condition is
+implemented as specified) — it is a **parameter-interaction finding**:
+`fast.yaml`'s own `optimization_window=7` is simply too small, relative to
+`find_loop_edges`'s own `jj` search range width (`global_opt_freq -
+keyframe_index = 11` frames), to *reliably* keep a just-accepted loop edge's
+gauge-widening effect alive long enough for `try_global_ba`'s own
+`loop_just_accepted`-forced call to see it in a wide state, on this specific
+config. A second interacting cap independently bounds how far back this
+mechanism could EVER reach even if the exemption always held: the retained
+inactive-edge store's own bounded ring buffer (`inactive_edge_cap=4096`
+default) had already evicted **33104** older entries by frame 800 (400f:
+10400 by frame 400) — the store only remembers the most RECENT `cap` edges,
+a moving window whose own reach is independent of, and generally much
+narrower than, the full sequence length. Even a perfectly-exempted loop
+edge reaching back to frame 200 would find most of the *other* edges that
+could have reinforced a wide correction around it already evicted by the
+time a later `run_global_ba` call ran.
+
+### What a real fix needs
+
+The evidence above changes the M8 spec's own "decide on evidence" clause
+for the Sim3 pose-graph fallback from "probably unnecessary" to **likely
+required**, for a reason more fundamental than a tunable parameter:
+
+1. **Pose history, not just edge history, is required for a genuinely wide
+   correction.** This port's `DpvoPatchGraph` physically compacts
+   `frames`/`patches` on every fold (`Vec::remove`/`Vec::drain` in
+   `fold_frame`, the module doc's own documented departure from upstream's
+   `BUFFER_SIZE`-preallocated, never-shrinking arrays) — a pose that has
+   been folded away is not merely "inactive", it no longer exists as a
+   solvable variable at all. This run's own `unresolved_inactive_edges=0`
+   shows folding was not the limiting factor *this time* (the relevant old
+   frames were still live), but that is a property of this particular
+   dataset/config, not a guarantee — a longer sequence, or a loop connecting
+   to a genuinely ancient revisit, would eventually hit exactly this wall.
+   Retaining EDGES (this milestone's own mechanism) without also retaining
+   (or reconstructing) the POSES they reference is fundamentally bounded by
+   how long the live frame window happens to still contain them.
+2. **Even with poses retained, this run shows the "one big BA solve" design
+   itself needs the free-pose window to actually widen** — and the evidence
+   here is that upstream's own exemption-window heuristic
+   (`keyframe_with_loop_protection`'s `j + optimization_window > n`) is a
+   narrow, easy-to-miss target at `fast.yaml`'s own small
+   `optimization_window`, not a robust trigger. A genuine fix likely needs
+   either: (a) a WIDER, independent trigger for keeping a just-accepted loop
+   edge active long enough for the global pass to see it (decoupled from
+   `optimization_window`'s own, unrelated, per-frame-BA sizing purpose), or
+   (b) the Sim3 pose-graph fallback the spec always kept as a contingency —
+   a pose-graph correction does not need the ORIGINAL poses to still be live
+   BA variables at all, only their (already-tracked, via `reconstruct_pose`/
+   `Self::delta`) relative transforms, sidestepping the fold-away problem
+   entirely.
+3. **The inactive-edge cap (4096) needs to scale with intended sequence
+   length**, or be replaced with an eviction policy that favors edges likely
+   to matter for a future loop (e.g. keyed by `flow_mag`/candidate-search
+   relevance) rather than pure recency, if this mechanism is kept at all.
+4. A follow-up diagnostic worth running before investing in either fix
+   above: force `keyframe_with_loop_protection`'s exemption to hold trivially
+   (e.g. a much larger `--optimization-window`, or a synthetic run with a
+   guaranteed-wide `t0`) and re-measure the 800f ATE — this would cleanly
+   separate "the mechanism helps once it actually gets a wide window" from
+   "even a wide window wouldn't be enough to undo a 22× scale error," which
+   this run's own evidence cannot yet distinguish (a real global pass never
+   actually fired wide here, so its ceiling remains unmeasured, not
+   disproven).
+
+**Honest verdict**: M8 is a straight, correctly-implemented port of the
+retention + gated-global-pass mechanism the spec called for, confirmed
+correct at both the unit-test level (a fixed, genuinely non-trivial synthetic
+test, not a weakened one) and on real MH_01 data (3 real global-BA calls,
+real inactive-edge resolution, zero interference when inactive). It does
+**not** meet the 800f accuracy acceptance target (`ate_similarity_rmse_m
+2.98` vs `< 1.5`, `ate_similarity_scale 22.6` vs `< 10`), and the reason is
+now a measured, specific finding rather than an unexplained plateau: the
+free-pose window this run's global pass actually solved over never widened
+beyond the ordinary local bound, so it never got the chance to attack the
+scale drift at the scale the drift itself operates on. The 400f
+no-regression guard passes cleanly. Not committed as a win — flagged here,
+plainly, as the next milestone's actual starting point.

@@ -70,6 +70,22 @@
 //! usual ATE numbers, and every periodic progress line reports a running
 //! `loop_accepted`/`loop_candidates` count so a long run's console log shows
 //! exactly when (if ever) a revisit was found.
+//!
+//! # `--global-ba` (Milestone M8, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Enables the periodic full-graph "global" bundle adjustment over retained
+//! active + inactive edges (`DpvoOdometryConfig::global_ba`) — the CPU-bounded
+//! stand-in for upstream's `__run_global_BA`. Off by default — omitting the
+//! flag reproduces M4-M7's exact behavior (`global_ba: None`, no
+//! inactive-edge retention enabled on the patch graph at all). `--gba-frequency`/
+//! `--gba-iterations`/`--gba-ep`/`--gba-lmbda`/`--gba-inactive-edge-cap`
+//! mirror `DpvoGlobalBaConfig`'s own fields 1:1 (see that struct's doc for
+//! defaults). The summary echoes `global_ba_enabled`/`global_ba_calls`/
+//! `global_ba_inactive_edges_retained`/`global_ba_inactive_edges_evicted_total`/
+//! `global_ba_last_*`/`global_ba_total_elapsed_ms` alongside the usual ATE
+//! numbers, and every periodic progress line reports the same running
+//! counters so a long run's console log shows exactly when (if ever) a global
+//! pass ran and how expensive it was.
 
 use std::env;
 use std::fs;
@@ -84,7 +100,7 @@ use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, Euroc
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::DpvoVoConfig;
 use visloc_rs::slam::dpvo_vo::{
-    DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
+    DpvoGlobalBaConfig, DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
 };
 use visloc_rs::slam::{DpvoIntrinsics, DpvoLoopClosureConfig, ImuNoiseModel, ScaleCouplingConfig};
 use visloc_rs::vision::distortion::RadialTangential;
@@ -161,6 +177,19 @@ struct CliArgs {
     lc_max_edges_per_batch: usize,
     lc_nms_radius: usize,
     lc_min_valid_fraction: f64,
+    /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): enable periodic
+    /// full-graph "global" bundle adjustment over retained active +
+    /// inactive edges (`DpvoOdometryConfig::global_ba`). Default off —
+    /// every prior milestone's behavior unaffected (no inactive-edge
+    /// retention enabled on the patch graph at all).
+    global_ba: bool,
+    /// Milestone M8: `DpvoGlobalBaConfig`'s own fields, mirrored 1:1 — see
+    /// that struct's own doc for what each bounds/costs.
+    gba_frequency: usize,
+    gba_iterations: usize,
+    gba_ep: f64,
+    gba_lmbda: f64,
+    gba_inactive_edge_cap: usize,
 }
 
 impl Default for CliArgs {
@@ -216,6 +245,14 @@ impl Default for CliArgs {
             lc_max_edges_per_batch: 8,
             lc_nms_radius: 1,
             lc_min_valid_fraction: 0.75,
+            global_ba: false,
+            // Mirror `DpvoGlobalBaConfig::default()` exactly so omitting
+            // these flags reproduces that struct's own defaults.
+            gba_frequency: DpvoGlobalBaConfig::default().frequency,
+            gba_iterations: DpvoGlobalBaConfig::default().iterations,
+            gba_ep: DpvoGlobalBaConfig::default().ep,
+            gba_lmbda: DpvoGlobalBaConfig::default().lmbda,
+            gba_inactive_edge_cap: DpvoGlobalBaConfig::default().inactive_edge_cap,
         }
     }
 }
@@ -296,6 +333,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--lc-max-edges-per-batch" => args.lc_max_edges_per_batch = raw.remove(i + 1).parse()?,
             "--lc-nms-radius" => args.lc_nms_radius = raw.remove(i + 1).parse()?,
             "--lc-min-valid-fraction" => args.lc_min_valid_fraction = raw.remove(i + 1).parse()?,
+            "--global-ba" => {
+                args.global_ba = true;
+                raw.remove(i);
+                continue;
+            }
+            "--gba-frequency" => args.gba_frequency = raw.remove(i + 1).parse()?,
+            "--gba-iterations" => args.gba_iterations = raw.remove(i + 1).parse()?,
+            "--gba-ep" => args.gba_ep = raw.remove(i + 1).parse()?,
+            "--gba-lmbda" => args.gba_lmbda = raw.remove(i + 1).parse()?,
+            "--gba-inactive-edge-cap" => args.gba_inactive_edge_cap = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -481,6 +528,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             nms_radius: args.lc_nms_radius,
             min_valid_fraction: args.lc_min_valid_fraction,
         }),
+        // Milestone M8 (`docs/dpvo_droid_port_plan.md`): `--global-ba` enables
+        // the periodic full-graph BA over retained active + inactive edges;
+        // omitting it reproduces M4-M7's exact behavior (`global_ba: None`,
+        // no inactive-edge retention enabled on the patch graph at all).
+        global_ba: args.global_ba.then_some(DpvoGlobalBaConfig {
+            frequency: args.gba_frequency,
+            iterations: args.gba_iterations,
+            ep: args.gba_ep,
+            lmbda: args.gba_lmbda,
+            inactive_edge_cap: args.gba_inactive_edge_cap,
+        }),
     };
 
     if args.loop_closure {
@@ -494,6 +552,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.lc_max_edges_per_batch,
             args.lc_nms_radius,
             args.lc_min_valid_fraction,
+        );
+    }
+
+    if args.global_ba {
+        println!(
+            "global BA enabled (Milestone M8): frequency={} iterations={} ep={:.2} lmbda={:.2e} \
+             inactive_edge_cap={}",
+            args.gba_frequency, args.gba_iterations, args.gba_ep, args.gba_lmbda, args.gba_inactive_edge_cap,
         );
     }
 
@@ -568,6 +634,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Milestone M6: track the cumulative accepted-loop count so a console
     // log line only fires the frame a NEW batch is found, not every frame.
     let mut prev_loop_accepted_total = 0usize;
+    // Milestone M8: same "log only on change" philosophy for the global-BA
+    // call count.
+    let mut prev_gba_calls = 0usize;
     // Milestone M7: track weight/convergence/rollback TRANSITIONS (same
     // "log only on change" philosophy as M5b/M6 above).
     let mut prev_sc_converged = false;
@@ -676,6 +745,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prev_loop_accepted_total = lc_diag.accepted_loops_total;
         }
 
+        if args.global_ba {
+            let gba_diag = odometry.global_ba_diagnostics();
+            if gba_diag.calls > prev_gba_calls {
+                println!(
+                    "*** frame {idx}: GLOBAL BA — call #{} (free_pose_count={} edge_count={} \
+                     resolved_inactive={} unresolved_inactive={} pose_delta_max_m={:.4} \
+                     pose_delta_mean_m={:.4} elapsed_ms={:.2})",
+                    gba_diag.calls,
+                    gba_diag.last_free_pose_count,
+                    gba_diag.last_edge_count,
+                    gba_diag.last_resolved_inactive_edges,
+                    gba_diag.last_unresolved_inactive_edges,
+                    gba_diag.last_pose_delta_max_m,
+                    gba_diag.last_pose_delta_mean_m,
+                    gba_diag.last_elapsed_ms,
+                );
+            }
+            prev_gba_calls = gba_diag.calls;
+        }
+
         if let Some(pose_world_to_camera) = pose {
             tracked_frames += 1;
             // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
@@ -758,6 +847,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     lc_diag.correction_magnitude_mean_m,
                 );
             }
+            if args.global_ba {
+                let gba_diag = odometry.global_ba_diagnostics();
+                println!(
+                    "  gba_calls={} gba_inactive_edges_retained={} gba_inactive_edges_evicted_total={} \
+                     gba_last_free_pose_count={} gba_last_edge_count={} gba_last_pose_delta_max_m={:.4} \
+                     gba_total_elapsed_ms={:.2}",
+                    gba_diag.calls,
+                    gba_diag.inactive_edges_retained,
+                    gba_diag.inactive_edges_evicted_total,
+                    gba_diag.last_free_pose_count,
+                    gba_diag.last_edge_count,
+                    gba_diag.last_pose_delta_max_m,
+                    gba_diag.total_elapsed_ms,
+                );
+            }
         }
     }
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
@@ -805,6 +909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
     let lc_diag = odometry.loop_closure_diagnostics();
     let sc_diag = odometry.scale_coupling_diagnostics();
+    let gba_diag = odometry.global_ba_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -877,7 +982,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          loop_patch_edges_added={lc_edges_added}\n\
          loop_correction_events={lc_correction_events}\n\
          loop_correction_magnitude_max_m={lc_correction_max:.6}\n\
-         loop_correction_magnitude_mean_m={lc_correction_mean:.6}\n",
+         loop_correction_magnitude_mean_m={lc_correction_mean:.6}\n\
+         global_ba_enabled={gba_enabled}\n\
+         global_ba_calls={gba_calls}\n\
+         global_ba_inactive_edges_retained={gba_inactive_retained}\n\
+         global_ba_inactive_edges_evicted_total={gba_inactive_evicted}\n\
+         global_ba_last_free_pose_count={gba_last_free_pose_count}\n\
+         global_ba_last_edge_count={gba_last_edge_count}\n\
+         global_ba_last_resolved_inactive_edges={gba_last_resolved_inactive}\n\
+         global_ba_last_unresolved_inactive_edges={gba_last_unresolved_inactive}\n\
+         global_ba_last_pose_delta_max_m={gba_last_pose_delta_max:.6}\n\
+         global_ba_last_pose_delta_mean_m={gba_last_pose_delta_mean:.6}\n\
+         global_ba_last_elapsed_ms={gba_last_elapsed_ms:.3}\n\
+         global_ba_total_elapsed_ms={gba_total_elapsed_ms:.3}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -943,6 +1060,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lc_correction_events = lc_diag.correction_events,
         lc_correction_max = lc_diag.correction_magnitude_max_m,
         lc_correction_mean = lc_diag.correction_magnitude_mean_m,
+        gba_enabled = gba_diag.enabled,
+        gba_calls = gba_diag.calls,
+        gba_inactive_retained = gba_diag.inactive_edges_retained,
+        gba_inactive_evicted = gba_diag.inactive_edges_evicted_total,
+        gba_last_free_pose_count = gba_diag.last_free_pose_count,
+        gba_last_edge_count = gba_diag.last_edge_count,
+        gba_last_resolved_inactive = gba_diag.last_resolved_inactive_edges,
+        gba_last_unresolved_inactive = gba_diag.last_unresolved_inactive_edges,
+        gba_last_pose_delta_max = gba_diag.last_pose_delta_max_m,
+        gba_last_pose_delta_mean = gba_diag.last_pose_delta_mean_m,
+        gba_last_elapsed_ms = gba_diag.last_elapsed_ms,
+        gba_total_elapsed_ms = gba_diag.total_elapsed_ms,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

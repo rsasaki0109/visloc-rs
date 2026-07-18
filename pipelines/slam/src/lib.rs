@@ -51,6 +51,7 @@ pub use dpvo_patch_ba::{
 pub mod dpvo_patch_graph;
 pub use dpvo_patch_graph::{
     active_edge_triples, DpvoGraphError, DpvoGraphEdge, DpvoGraphFrame, DpvoPatchGraph, DpvoVoConfig,
+    InactiveEdge,
 };
 pub mod dpvo_loop_closure;
 pub use dpvo_loop_closure::{

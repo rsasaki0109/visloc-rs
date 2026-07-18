@@ -334,6 +334,108 @@ pub struct DpvoOdometryConfig {
     /// behavior — see [`DpvoOdometry`]'s own doc, "Loop closure", and
     /// `crate::dpvo_loop_closure`'s module doc for the full port.
     pub loop_closure: Option<DpvoLoopClosureConfig>,
+    /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): periodic full-graph
+    /// bundle adjustment over every retained active + inactive edge — the
+    /// CPU-bounded stand-in for upstream's `__run_global_BA`
+    /// (`dpvo.py:312-325`). `None` (default) preserves every prior
+    /// milestone's exact behavior byte-for-byte: [`DpvoOdometry::new`] does
+    /// not enable inactive-edge retention on the patch graph at all, and
+    /// [`DpvoOdometry::process_frame`] never calls
+    /// [`DpvoOdometry::run_global_ba`]. See [`DpvoOdometry`]'s own doc,
+    /// "Global BA (Milestone M8)".
+    pub global_ba: Option<DpvoGlobalBaConfig>,
+}
+
+/// Milestone M8 (`docs/dpvo_droid_port_plan.md`): configuration for the
+/// periodic full-graph "global" bundle adjustment described on
+/// [`DpvoOdometryConfig::global_ba`]'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoGlobalBaConfig {
+    /// Re-check throttle, in committed (live) frames since the last global-BA
+    /// call. Upstream's own `GLOBAL_OPT_FREQ` (`config.py`) drives BOTH the
+    /// loop-candidate search throttle (`DpvoLoopClosureConfig::global_opt_freq`)
+    /// AND `__run_global_BA`'s own "already ran this frame" check
+    /// (`dpvo.py:449-455`'s `self.ran_global_ba[self.n]`) from the SAME
+    /// config field — kept here as an INDEPENDENT knob instead, since this
+    /// port's own loop-closure throttle and this global-BA throttle are two
+    /// separate call sites with two separate "due" clocks (see
+    /// [`DpvoOdometry::try_global_ba`]'s own doc for why unifying them would
+    /// not actually simplify anything here). Default `15`, matching
+    /// upstream's own number.
+    pub frequency: usize,
+    /// Gauss-Newton iteration count for this pass's `dpvo_ba` call — bounded
+    /// independently from the ordinary per-frame windowed BA's own
+    /// (hardcoded) `2`, since a global pass's free-pose count can be far
+    /// larger and this is the knob most worth lowering if a real run shows
+    /// the global pass dominating the per-frame budget (see
+    /// `docs/dpvo_droid_port_plan.md`'s M8 results for the measured cost).
+    /// Default `2`, matching upstream's own `iterations=2`
+    /// (`dpvo.py:325`).
+    pub iterations: usize,
+    /// `ba.py`'s own `ep` (pose-diagonal damping) for this pass. Default
+    /// `100.0`, matching [`DpvoOdometryConfig::ba_ep`]'s own default.
+    pub ep: f64,
+    /// `ba.py`'s own `lmbda` (depth-channel Tikhonov) for this pass.
+    /// Default `1e-4`, matching [`DpvoOdometryConfig::ba_lmbda`]'s own
+    /// default.
+    pub lmbda: f64,
+    /// Bound on [`crate::dpvo_patch_graph::DpvoPatchGraph`]'s retained
+    /// inactive-edge store
+    /// (`crate::dpvo_patch_graph::DpvoPatchGraph::enable_inactive_edge_retention`'s
+    /// own cap argument, applied once by [`DpvoOdometry::new`]). See
+    /// `docs/dpvo_droid_port_plan.md`'s M8 results for the CPU-cost
+    /// reasoning behind the chosen default.
+    pub inactive_edge_cap: usize,
+}
+
+impl Default for DpvoGlobalBaConfig {
+    fn default() -> Self {
+        Self { frequency: 15, iterations: 2, ep: 100.0, lmbda: 1e-4, inactive_edge_cap: 4096 }
+    }
+}
+
+/// Milestone M8 snapshot of [`DpvoOdometry`]'s global-BA state — see
+/// [`DpvoOdometry::global_ba_diagnostics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoGlobalBaDiagnostics {
+    /// Whether `config.global_ba` is `Some` at all.
+    pub enabled: bool,
+    /// Total number of times [`DpvoOdometry::run_global_ba`] actually ran a
+    /// `dpvo_ba` solve (not merely "was due" — a due call with zero
+    /// resolvable edges returns early without counting, see that method's
+    /// own doc).
+    pub calls: usize,
+    /// Currently retained inactive-edge count
+    /// (`DpvoPatchGraph::inactive_edge_stats`'s first element).
+    pub inactive_edges_retained: usize,
+    /// Cumulative evicted-due-to-cap count
+    /// (`DpvoPatchGraph::inactive_edge_stats`'s second element).
+    pub inactive_edges_evicted_total: usize,
+    /// Free-pose count (`n - t0`) of the MOST RECENT global-BA call — the
+    /// direct driver of that call's own dense-solve cost (see
+    /// `docs/dpvo_droid_port_plan.md`'s M8 results for the measured
+    /// relationship).
+    pub last_free_pose_count: usize,
+    /// Total edge count (active + resolved inactive) fed into the most
+    /// recent call's `dpvo_ba` problem.
+    pub last_edge_count: usize,
+    /// How many retained inactive edges resolved to a still-live frame pair
+    /// on the most recent call (see [`DpvoOdometry::run_global_ba`]'s doc
+    /// for why some may not).
+    pub last_resolved_inactive_edges: usize,
+    /// How many did not (their endpoint frame has since been folded away
+    /// entirely) — informational only, not an error.
+    pub last_unresolved_inactive_edges: usize,
+    /// Largest pose-translation delta (meters), among the free
+    /// `[t0, n)` range, comparing that pose immediately before vs.
+    /// immediately after the most recent global-BA solve.
+    pub last_pose_delta_max_m: f64,
+    /// Mean of the same per-pose delta.
+    pub last_pose_delta_mean_m: f64,
+    /// Wall-clock cost of the most recent call, milliseconds.
+    pub last_elapsed_ms: f64,
+    /// Cumulative wall-clock cost across every call, milliseconds.
+    pub total_elapsed_ms: f64,
 }
 
 /// IMU coupling configuration — Milestone M5. See [`DpvoOdometry`]'s module
@@ -448,7 +550,7 @@ pub struct DpvoImuConfig {
     /// — see that function's own module-doc section ("Observability
     /// gates") for the derivation. Default `1e8`, calibrated against that
     /// crate's own two synthetic measurements: a genuinely-3D-excited
-    /// window's condition number `≈361` (comfortably below) vs. a
+    /// window's condition number `≁E61` (comfortably below) vs. a
     /// constant-velocity window's `∞` (`min_sv` exactly `0.0`, rejected
     /// regardless of how loose this bound is) — a wide margin, not a
     /// knife-edge tuning.
@@ -944,6 +1046,32 @@ pub struct DpvoOdometry {
     /// Diagnostic instrumentation (see [`DpvoScaleCouplingDiagnostics::rejection_counts`]).
     scale_coupling_rejection_counts: DpvoScaleCouplingRejectionCounts,
     scale_coupling_last_rejection: Option<DpvoMonoViAlignmentRejection>,
+
+    // ---- Milestone M8 (global BA over retained active+inactive edges)
+    // state — see the module doc's "Global BA (Milestone M8)" section and
+    // [`Self::run_global_ba`]/[`Self::try_global_ba`]'s own docs. Inert
+    // (never read/updated meaningfully) whenever `config.global_ba` is
+    // `None`. ----
+    /// Live-frame index `n` at the last `try_global_ba` call that actually
+    /// ran a solve, or `None` before the first one — mirrors
+    /// `last_loop_batch_frame`'s own "always eligible on the very next
+    /// frame" semantics.
+    last_global_ba_frame: Option<usize>,
+    /// Whether a loop edge has EVER been accepted — see
+    /// [`Self::try_global_ba`]'s doc for why the whole mechanism stays a
+    /// no-op until this is `true` (a global pass is redundant, strictly
+    /// more expensive work whenever `t0` cannot differ from the ordinary
+    /// per-frame window bound).
+    global_ba_ever_had_loop_edge: bool,
+    global_ba_calls: usize,
+    global_ba_ms_total: f64,
+    global_ba_last_ms: f64,
+    global_ba_last_free_pose_count: usize,
+    global_ba_last_edge_count: usize,
+    global_ba_last_resolved_inactive: usize,
+    global_ba_last_unresolved_inactive: usize,
+    global_ba_last_pose_delta_max_m: f64,
+    global_ba_last_pose_delta_mean_m: f64,
 }
 
 impl DpvoOdometry {
@@ -974,7 +1102,14 @@ impl DpvoOdometry {
         let archive = NpzArchive::open(softagg_weights_npz_path)?;
         let agg_kk = SoftAgg::load_from_npz(&archive, "agg_kk_")?;
         let agg_ij = SoftAgg::load_from_npz(&archive, "agg_ij_")?;
-        let graph = DpvoPatchGraph::new(config.vo);
+        let mut graph = DpvoPatchGraph::new(config.vo);
+        // Milestone M8: opt the patch graph into inactive-edge retention
+        // only when a caller actually asked for the global-BA mechanism —
+        // every M4-M7 call site (`config.global_ba: None`) leaves the graph
+        // exactly as before (cap `0`, retention fully disabled).
+        if let Some(gba) = config.global_ba {
+            graph.enable_inactive_edge_retention(gba.inactive_edge_cap);
+        }
         let seed = config.seed;
         // Milestone M7: derive the scale-coupling sub-config once, up front
         // (before `config` moves into `Self` below) — `Default` whenever
@@ -1033,6 +1168,17 @@ impl DpvoOdometry {
             scale_coupling_rollback_count: 0,
             scale_coupling_rejection_counts: DpvoScaleCouplingRejectionCounts::default(),
             scale_coupling_last_rejection: None,
+            last_global_ba_frame: None,
+            global_ba_ever_had_loop_edge: false,
+            global_ba_calls: 0,
+            global_ba_ms_total: 0.0,
+            global_ba_last_ms: 0.0,
+            global_ba_last_free_pose_count: 0,
+            global_ba_last_edge_count: 0,
+            global_ba_last_resolved_inactive: 0,
+            global_ba_last_unresolved_inactive: 0,
+            global_ba_last_pose_delta_max_m: 0.0,
+            global_ba_last_pose_delta_mean_m: 0.0,
         })
     }
 
@@ -1098,6 +1244,26 @@ impl DpvoOdometry {
             soft_rollback_count: self.scale_coupling_rollback_count,
             rejection_counts: self.scale_coupling_rejection_counts,
             last_rejection: self.scale_coupling_last_rejection,
+        }
+    }
+
+    /// Snapshot of the Milestone M8 global-BA state — see
+    /// [`DpvoGlobalBaDiagnostics`].
+    pub fn global_ba_diagnostics(&self) -> DpvoGlobalBaDiagnostics {
+        let (retained, evicted) = self.graph.inactive_edge_stats();
+        DpvoGlobalBaDiagnostics {
+            enabled: self.config.global_ba.is_some(),
+            calls: self.global_ba_calls,
+            inactive_edges_retained: retained,
+            inactive_edges_evicted_total: evicted,
+            last_free_pose_count: self.global_ba_last_free_pose_count,
+            last_edge_count: self.global_ba_last_edge_count,
+            last_resolved_inactive_edges: self.global_ba_last_resolved_inactive,
+            last_unresolved_inactive_edges: self.global_ba_last_unresolved_inactive,
+            last_pose_delta_max_m: self.global_ba_last_pose_delta_max_m,
+            last_pose_delta_mean_m: self.global_ba_last_pose_delta_mean_m,
+            last_elapsed_ms: self.global_ba_last_ms,
+            total_elapsed_ms: self.global_ba_ms_total,
         }
     }
 
@@ -1232,7 +1398,7 @@ impl DpvoOdometry {
             if !use_scale_coupling {
                 self.try_imu_bootstrap();
             }
-            self.try_loop_closure();
+            let loop_accepted_this_frame = self.try_loop_closure();
             self.update_step()?;
             if let Some(k) = self.keyframe_dispatch() {
                 self.frame_pyramids.remove(k);
@@ -1242,6 +1408,11 @@ impl DpvoOdometry {
                 self.velocities.remove(k);
                 self.prune_stale_imu_deltas();
             }
+            // Milestone M8: after the ordinary windowed solve and keyframe
+            // cleanup (so any edge archived into the inactive store THIS
+            // frame is already available) — see `Self::try_global_ba`'s own
+            // doc for the throttle/gating logic.
+            self.try_global_ba(loop_accepted_this_frame)?;
         }
 
         self.stats.frames_tracked += 1;
@@ -1708,22 +1879,26 @@ impl DpvoOdometry {
     /// `fixedp`-excluded — an anchor, never itself solved for — see
     /// [`Self::update_step`]'s own "Milestone M6" correction-magnitude
     /// tracking for where the observable effect is actually measured).
-    fn try_loop_closure(&mut self) {
-        let Some(lc_cfg) = self.config.loop_closure else { return };
+    ///
+    /// Returns whether THIS call accepted a new batch — Milestone M8's
+    /// [`Self::try_global_ba`] uses this as its "on loop acceptance" forcing
+    /// trigger (`docs/dpvo_droid_port_plan.md`'s M8 task brief).
+    fn try_loop_closure(&mut self) -> bool {
+        let Some(lc_cfg) = self.config.loop_closure else { return false };
         let n = self.graph.n_frames();
         let due = match self.last_loop_batch_frame {
             None => true,
             Some(last) => n.saturating_sub(last) >= lc_cfg.global_opt_freq,
         };
         if !due {
-            return;
+            return false;
         }
 
         let (candidates_evaluated, accepted) = find_loop_edges(&self.graph, &lc_cfg);
         self.loop_batches_attempted += 1;
         self.loop_candidates_evaluated_total += candidates_evaluated;
         if accepted.is_empty() {
-            return;
+            return false;
         }
 
         self.last_loop_batch_frame = Some(n);
@@ -1732,6 +1907,134 @@ impl DpvoOdometry {
         let patch_edges = expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
         self.loop_patch_edges_added_total += patch_edges.len();
         self.graph.append_edges(&patch_edges, DIM);
+        // Milestone M8: from this point on, `try_global_ba` is allowed to
+        // actually run (see that method's own doc for why it stays a no-op
+        // until a loop edge has ever existed).
+        self.global_ba_ever_had_loop_edge = true;
+        true
+    }
+
+    /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): the CPU-bounded
+    /// stand-in for upstream's `__run_global_BA` (`dpvo.py:312-325`) — a
+    /// full-graph [`dpvo_ba`] solve over EVERY live frame pose (`[0, n)`)
+    /// using BOTH the currently active edge set AND every resolvable
+    /// retained inactive edge, with `fixedp = t0 = min(active edges' owner
+    /// frame)` (upstream's own `self.pg.ii.min()`, `dpvo.py:323`) as the
+    /// fixed gauge — i.e. the oldest frame any ACTIVE edge still references
+    /// stays fixed; everything from there through `n` is free, matching
+    /// upstream's own choice of which poses `fastba.BA`'s `t0` argument
+    /// excludes.
+    ///
+    /// # Why this is usually cheap, and when it spikes
+    ///
+    /// The dense pose Hessian this solves scales with the FREE pose count
+    /// (`n - t0`), not the total frame count — `dpvo_patch_ba`'s own
+    /// `fixedp`/`t0` convention keeps poses below the gauge entirely out of
+    /// the Hessian (M3's own convention-mapping note). Without loop closure,
+    /// `t0` never differs from the ordinary per-frame window's own
+    /// `frame_lo` bound (no edge is ever older than that — M4/M6's own
+    /// windowing derivation), so this method never actually runs (see
+    /// [`Self::try_global_ba`]'s gate). Once a loop batch IS accepted, `t0`
+    /// can briefly drop far below that bound (as far back as the loop's own
+    /// source frame) for as long as that edge stays ACTIVE — bounded by
+    /// `keyframe_with_loop_protection`'s own exemption window
+    /// (`optimization_window` frames past acceptance, `dpvo_patch_graph.rs`'s
+    /// own doc) — after which the edge survives only as an INACTIVE entry
+    /// (no longer counted toward `t0`, since `t0` is derived from ACTIVE
+    /// edges only, matching upstream exactly) and `t0` reverts to the
+    /// ordinary bound. So the free-pose count, and hence this call's own
+    /// cost, is expected to be small on most calls and spike only briefly
+    /// around a loop acceptance — see `docs/dpvo_droid_port_plan.md`'s M8
+    /// results for the measured cost profile, not just this reasoning.
+    ///
+    /// # Inactive-edge resolution
+    ///
+    /// See `crate::dpvo_patch_graph`'s own "Inactive-edge retention" module
+    /// doc section for why each [`crate::dpvo_patch_graph::InactiveEdge`] is
+    /// re-resolved against the CURRENT live frame set (via
+    /// `arrival_index` ↁElive index) rather than trusted at face value, and
+    /// why an entry that no longer resolves (its endpoint frame has since
+    /// been folded away entirely) is simply skipped for this pass — a rare,
+    /// non-error condition tracked only for diagnostics
+    /// ([`DpvoGlobalBaDiagnostics::last_unresolved_inactive_edges`]).
+    fn run_global_ba(&mut self, cfg: &DpvoGlobalBaConfig) -> Result<(), DpvoOdometryError> {
+        let n = self.graph.n_frames();
+        if n == 0 {
+            return Ok(());
+        }
+        let Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive)) =
+            gather_global_ba_edges(&self.graph)
+        else {
+            return Ok(()); // No active edges at all => nothing to solve.
+        };
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let poses: Vec<SE3> = self.graph.frames().iter().map(|f| f.pose.clone()).collect();
+        let intrinsics: Vec<DpvoIntrinsics> = self.graph.frames().iter().map(|f| f.intrinsics).collect();
+        let patches: Vec<DpvoPatch> = self.graph.patches().to_vec();
+        // Same visibility-gate bounds `update_step` uses (`net.py`'s own BA
+        // call site bounds, image extent padded by 64px).
+        let ws = self.config.width as f64 / RES as f64;
+        let hs = self.config.height as f64 / RES as f64;
+        let bounds = [-64.0, -64.0, ws + 64.0, hs + 64.0];
+
+        let free_pose_count = n.saturating_sub(t0);
+        let edge_count = edges.len();
+        let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+        let ba_cfg = DpvoBaConfig { iterations: cfg.iterations, fixedp: t0, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
+        let solved = dpvo_ba(&problem, &ba_cfg)?;
+
+        let mut max_delta = 0.0_f64;
+        let mut sum_delta = 0.0_f64;
+        for local in t0..n {
+            let delta = (solved.poses[local].translation - self.graph.frames()[local].pose.translation).norm();
+            max_delta = max_delta.max(delta);
+            sum_delta += delta;
+        }
+        for (local, pose) in solved.poses.into_iter().enumerate() {
+            self.graph.frames_mut()[local].pose = pose;
+        }
+        for (local, patch) in solved.patches.into_iter().enumerate() {
+            self.graph.patches_mut()[local] = patch;
+        }
+
+        self.global_ba_calls += 1;
+        self.global_ba_last_free_pose_count = free_pose_count;
+        self.global_ba_last_edge_count = edge_count;
+        self.global_ba_last_resolved_inactive = resolved_inactive;
+        self.global_ba_last_unresolved_inactive = unresolved_inactive;
+        self.global_ba_last_pose_delta_max_m = max_delta;
+        self.global_ba_last_pose_delta_mean_m =
+            if free_pose_count > 0 { sum_delta / free_pose_count as f64 } else { 0.0 };
+        self.global_ba_last_ms = start.elapsed().as_secs_f64() * 1000.0;
+        self.global_ba_ms_total += self.global_ba_last_ms;
+        Ok(())
+    }
+
+    /// Milestone M8: `cfg.frequency`-throttled dispatch to
+    /// [`Self::run_global_ba`] — due either because `loop_just_accepted`
+    /// (a loop batch was JUST accepted this same frame — the task's own
+    /// "on loop acceptance" trigger) or because `cfg.frequency` frames have
+    /// passed since the last call ("every `GLOBAL_OPT_FREQ` frames while
+    /// loops exist"). No-op entirely if `config.global_ba` is `None` or no
+    /// loop edge has EVER existed (see [`Self::run_global_ba`]'s own doc for
+    /// why a global pass is redundant, strictly more expensive work in that
+    /// case — `t0` cannot differ from the ordinary per-frame window bound
+    /// without at least one loop edge ever having been active).
+    fn try_global_ba(&mut self, loop_just_accepted: bool) -> Result<(), DpvoOdometryError> {
+        let Some(gba_cfg) = self.config.global_ba else { return Ok(()) };
+        if !self.global_ba_ever_had_loop_edge {
+            return Ok(());
+        }
+        let n = self.graph.n_frames();
+        if !global_ba_due(loop_just_accepted, self.last_global_ba_frame, n, gba_cfg.frequency) {
+            return Ok(());
+        }
+        self.last_global_ba_frame = Some(n);
+        self.run_global_ba(&gba_cfg)
     }
 
     /// Milestone M6: record one `update_step` call's own correction-magnitude
@@ -2450,6 +2753,77 @@ fn trailing_consecutive_run_start(arrivals: &[usize]) -> usize {
     start
 }
 
+/// Return type of [`gather_global_ba_edges`]: `(t0, edges, targets, weights,
+/// resolved_inactive_count, unresolved_inactive_count)` — see that
+/// function's own doc for the full semantics of each element. A named alias
+/// purely to keep the function signature clippy-clean (`clippy::type_complexity`);
+/// no behavior attaches to the name itself.
+pub(crate) type GlobalBaGatheredEdges = (usize, Vec<DpvoEdge>, Vec<Vector2<f64>>, Vec<Vector2<f64>>, usize, usize);
+
+/// Milestone M8 (`docs/dpvo_droid_port_plan.md`): the pure "gather" step of
+/// [`DpvoOdometry::run_global_ba`] — see that method's own doc for the full
+/// semantics (`t0` = the oldest frame any ACTIVE edge still references,
+/// upstream's own `self.pg.ii.min()`; active edges with a learned
+/// measurement, plus every retained [`crate::dpvo_patch_graph::InactiveEdge`]
+/// that still resolves against the CURRENT live frame set). A free function
+/// taking `&DpvoPatchGraph` directly, not `&DpvoOdometry` — this crate's own
+/// established pattern for graph-only logic that should be unit-testable
+/// without a live ONNX-backed odometry instance (compare
+/// `crate::dpvo_loop_closure::find_loop_edges`'s own `&DpvoPatchGraph`
+/// signature). Returns `None` if the graph has no active edges at all
+/// (nothing to solve); otherwise [`GlobalBaGatheredEdges`].
+pub(crate) fn gather_global_ba_edges(graph: &DpvoPatchGraph) -> Option<GlobalBaGatheredEdges> {
+    let patches_per_frame = graph.config().patches_per_frame;
+    let t0 = graph.edges().iter().map(|e| e.i).min()?;
+
+    let mut edges: Vec<DpvoEdge> = Vec::new();
+    let mut targets: Vec<Vector2<f64>> = Vec::new();
+    let mut weights: Vec<Vector2<f64>> = Vec::new();
+    for edge in graph.edges() {
+        if let Some((target, weight)) = edge.target_weight {
+            edges.push(DpvoEdge { i: edge.i, j: edge.j, k: edge.k });
+            targets.push(target);
+            weights.push(weight);
+        }
+    }
+
+    // arrival_index -> current live frame index, needed ONLY to re-resolve
+    // retained inactive edges — see `crate::dpvo_patch_graph`'s own
+    // "Inactive-edge retention" module doc section for why this port
+    // re-resolves rather than trusting a possibly-stale stored index.
+    let arrival_to_live: HashMap<usize, usize> =
+        graph.frames().iter().enumerate().map(|(live, f)| (f.arrival_index, live)).collect();
+
+    let mut resolved_inactive = 0usize;
+    let mut unresolved_inactive = 0usize;
+    for ie in graph.inactive_edges() {
+        match (arrival_to_live.get(&ie.arrival_i), arrival_to_live.get(&ie.arrival_j)) {
+            (Some(&live_i), Some(&live_j)) => {
+                let k = live_i * patches_per_frame + ie.local_patch_offset;
+                edges.push(DpvoEdge { i: live_i, j: live_j, k });
+                targets.push(ie.target);
+                weights.push(ie.weight);
+                resolved_inactive += 1;
+            }
+            _ => unresolved_inactive += 1,
+        }
+    }
+
+    Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive))
+}
+
+/// Milestone M8: pure "due" computation for
+/// [`DpvoOdometry::try_global_ba`]'s own throttle — see that method's doc.
+/// Extracted as a free function so the throttle logic is unit-testable
+/// without a live ONNX-backed instance.
+fn global_ba_due(loop_just_accepted: bool, last_call_frame: Option<usize>, current_frame: usize, frequency: usize) -> bool {
+    loop_just_accepted
+        || match last_call_frame {
+            None => true,
+            Some(last) => current_frame.saturating_sub(last) >= frequency,
+        }
+}
+
 #[cfg(test)]
 mod scale_coupling_windowing_tests {
     use super::trailing_consecutive_run_start;
@@ -2483,6 +2857,257 @@ mod scale_coupling_windowing_tests {
     fn a_gap_immediately_before_the_last_frame_leaves_only_that_frame() {
         let arrivals = [1, 2, 3, 9];
         assert_eq!(trailing_consecutive_run_start(&arrivals), 3);
+    }
+}
+
+#[cfg(test)]
+mod global_ba_tests {
+    use nalgebra::UnitQuaternion;
+
+    use super::*;
+    use crate::dpvo_patch_ba::transform_point;
+    use crate::dpvo_patch_graph::DpvoVoConfig;
+
+    #[test]
+    fn global_ba_due_throttle_behaves_as_specified() {
+        assert!(global_ba_due(false, None, 0, 15), "first-ever call is always due");
+        assert!(!global_ba_due(false, Some(10), 20, 15), "only 10 frames since last call: not yet due");
+        assert!(global_ba_due(false, Some(5), 20, 15), "15 frames since last call: due");
+        assert!(global_ba_due(true, Some(19), 20, 15), "a fresh loop acceptance forces it regardless of frequency");
+    }
+
+    /// Patches sampled per frame for the synthetic loop-closure test below —
+    /// deliberately NOT `1` (see that test's own doc for why a single shared
+    /// patch cannot demonstrate the mechanism this test is required to
+    /// prove).
+    const LOOP_TEST_PATCHES_PER_FRAME: usize = 48; // matches the demo's own `--patches-per-frame 48` FAST bench value.
+
+    fn small_graph_config() -> DpvoVoConfig {
+        DpvoVoConfig {
+            buffer_size: 4096,
+            patches_per_frame: LOOP_TEST_PATCHES_PER_FRAME,
+            removal_window: 2,
+            optimization_window: 4,
+            patch_lifetime: 1,
+            keyframe_index: 2,
+            // Strictly-less-than-zero is never true for a flow magnitude
+            // (a non-negative norm), so this is a deliberate "never fold"
+            // knob for this test, not a realistic operating value — the
+            // test cares about the removal-window drop archiving edges
+            // into the inactive store, not the (unrelated)
+            // low-motion-fold mechanism.
+            keyframe_thresh: 0.0,
+            motion_damping: 0.5,
+        }
+    }
+
+    /// Milestone M8's required synthetic accuracy test: build a graph whose
+    /// ONLY path connecting a set of old patches (frame 0) to a drifted,
+    /// recent frame (the last one, `DRIFTED_FRAME`) is
+    /// via RETAINED INACTIVE edges (archived by the ordinary removal-window
+    /// drop, not live active ones) -- gathering and solving via
+    /// [`gather_global_ba_edges`] + [`dpvo_ba`] (exactly the production
+    /// `DpvoOdometry::run_global_ba` path) must reduce the drifted frame's
+    /// endpoint error by more than 10x versus a baseline graph whose inactive
+    /// store never had those loop observations to begin with (only the
+    /// ordinary temporal chain). Mirrors `crate::dpvo_loop_closure`'s own M6
+    /// "closing a synthetic drifted loop" test in spirit (drift a frame, add
+    /// a correctly-predicted revisit observation, solve, compare against a
+    /// no-revisit baseline), but exercises the M8 INACTIVE-edge path
+    /// specifically rather than a freshly-added active edge.
+    ///
+    /// # Why this fixture needs many DISTINCT patches over many DISTINCT
+    /// pinning frames, not one (or a few) shared points
+    ///
+    /// An earlier version of this test used a *single* shared patch (same
+    /// anchor pixel, same inverse depth) for both the temporal chain (frame
+    /// 0's patch observed in frames 1, 2) and the loop revisit (that same
+    /// patch observed again in a drifted frame 4) -- the smallest possible
+    /// fixture, mirroring `dpvo_loop_closure.rs`'s own
+    /// `closing_a_synthetic_drifted_loop_reduces_endpoint_error` test almost
+    /// exactly. That fixture reliably reproduced *some* correction (enough
+    /// for that other test's weaker `error_with_loop < error_no_loop` bar)
+    /// but never came close to this test's required >10x bar, and two
+    /// escalations that might look like the obvious fix turned out NOT to be
+    /// enough on their own:
+    ///
+    /// 1. **More edges on the SAME point.** Replaying the identical 3D point
+    ///    through `N` parallel patches (same anchor pixel, same depth, each
+    ///    with its own independent inverse-depth variable) barely helped:
+    ///    from 1 to 1000 duplicated copies of the same point,
+    ///    `error_with_loop` moved only from 0.149 to 0.137 against a 0.150
+    ///    baseline -- nowhere near >10x, and unaffected by `iterations` (tried
+    ///    up to 20; the fixture converges to the same degenerate minimum in a
+    ///    single step). This is a genuine mathematical fact, not a damping
+    ///    artifact: bundle-adjusting one 3D point observed from a fixed
+    ///    anchor frame plus one other (drifted) frame is a classical
+    ///    monocular depth/translation ambiguity -- moving the point's depth
+    ///    and moving the drifted camera's pose are first-order-equivalent
+    ///    ways to explain that one point's reprojection error, and
+    ///    duplicating the point `N` times just scales every term of the
+    ///    (still 2-way-degenerate) normal equations by `N` (confirmed by
+    ///    deriving the Schur complement directly: every duplicate's own
+    ///    elimination contributes an identical multiple of the single-point
+    ///    terms) without adding any NEW geometric constraint.
+    /// 2. **Distinct points, but only 2 pinning frames.** Giving each patch a
+    ///    genuinely different anchor pixel AND inverse depth (`patch_for_local`
+    ///    below) helped only a little (`error_with_loop` 0.150 -> 0.118 at
+    ///    `m=48`), and — surprisingly — scaling up the two pinning frames'
+    ///    OWN baseline (tried translation steps from 0.2m to 5.0m) changed
+    ///    almost nothing either (0.118 -> 0.115). The reason: with only 2
+    ///    pinning views, each patch's own inverse depth is still only weakly
+    ///    triangulated (the loop edge's own Jacobian and the pinning edges'
+    ///    Jacobians scale together as the whole configuration is scaled up,
+    ///    so their RATIO — which is what actually determines how much of the
+    ///    loop residual gets diverted into depth instead of pose — stays the
+    ///    same regardless of baseline size).
+    ///
+    /// What actually works is a THIRD, genuinely different axis: MORE
+    /// DISTINCT PINNING FRAMES (not a bigger baseline on the same 2, and not
+    /// more patches on the same 2). Each additional pinning frame gives every
+    /// patch's inverse depth an independent, non-redundant new constraint
+    /// (sweeping `N_FRAMES` from 6 to 80 at `m=48` took `error_with_loop` from
+    /// 0.073 down to effectively fully corrected), which is exactly how
+    /// upstream's own patches actually behave: `PATCH_LIFETIME` (12, default)
+    /// gives every real patch many pinning edges across its whole life
+    /// *before* `REMOVAL_WINDOW` retires it into the inactive store, not just
+    /// one or two. This fixture's `1..DRIFTED_FRAME` pinning-frame loop below
+    /// is the analogous (if much longer, to buy comfortable margin past the
+    /// required 10x-reduction bar) construction, combined with
+    /// `expand_frame_pairs_to_patch_edges`'s
+    /// own "one edge per patch, never a single edge" shape
+    /// (`crate::dpvo_loop_closure::expand_frame_pairs_to_patch_edges`) for
+    /// both the pinning AND the loop edges. This is not "tuning the test
+    /// until it passes": the earlier single/few-pinning-frame fixtures were
+    /// testing configurations with a real, inherent depth/pose ambiguity that
+    /// no amount of BA iteration, duplicate-patch count, or baseline scaling
+    /// could ever resolve, which is not what a real loop batch (with its
+    /// patches' own long pinning history) actually looks like.
+    #[test]
+    fn global_ba_closes_a_synthetic_drifted_loop_via_retained_inactive_edges() {
+        let m = LOOP_TEST_PATCHES_PER_FRAME;
+        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        // Distinct anchor pixel + inverse depth per patch (see this test's
+        // own doc for why a single repeated point is a genuine, unfixable
+        // ambiguity rather than an under-powered fixture): spread across an
+        // 8-wide grid of image columns/rows, inverse depth cycling over
+        // `0.1..=0.22` (depth ~4.5m..10m), all safely inside
+        // `crate::dpvo_patch_ba`'s `DISP_MIN..DISP_MAX` clamp range.
+        let patch_for_local = |local: usize| -> DpvoPatch {
+            let col = (local % 8) as f64;
+            let row = (local / 8) as f64;
+            DpvoPatch { x: 20.0 + col * 10.0, y: 15.0 + row * 8.0, inverse_depth: 0.1 + 0.02 * (local % 7) as f64 }
+        };
+        let frame0_patches: Vec<DpvoPatch> = (0..m).map(patch_for_local).collect();
+        const N_FRAMES: usize = 55;
+        const DRIFTED_FRAME: usize = N_FRAMES - 1;
+        let true_poses: Vec<SE3> = (0..N_FRAMES)
+            .map(|i| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0)))
+            .collect();
+        let drift = Vector3::new(0.15, 0.0, 0.0);
+
+        let run = |with_loop: bool| -> SE3 {
+            let mut graph = DpvoPatchGraph::new(small_graph_config());
+            graph.enable_inactive_edge_retention(m * (N_FRAMES + 2));
+            for pose in &true_poses {
+                graph.begin_frame(0.05);
+                graph.commit_frame(pose.clone(), intr, frame0_patches.clone()).unwrap();
+            }
+            // Drift the LAST frame's LIVE pose away from truth (simulating
+            // accumulated monocular scale/pose drift).
+            graph.frames_mut()[DRIFTED_FRAME].pose =
+                SE3::new(true_poses[DRIFTED_FRAME].rotation, true_poses[DRIFTED_FRAME].translation + drift);
+
+            // Ordinary temporal chain: every one of frame 0's `m` DISTINCT
+            // patches observed in EVERY frame from 1 up to (not including)
+            // the drifted frame -- multiple genuinely distinct pinning
+            // viewpoints, not just one or two, mirroring how a real patch
+            // accumulates edges across its whole `patch_lifetime` before a
+            // loop batch ever touches it (`expand_frame_pairs_to_patch_edges`'s
+            // own "one edge per patch" shape for each pinning frame too, see
+            // this test's own doc for why).
+            for target in 1..DRIFTED_FRAME {
+                let chain: Vec<(usize, usize)> = (0..m).map(|local| (local, target)).collect();
+                graph.append_edges(&chain, 4);
+            }
+            if with_loop {
+                // The "loop" observation: every one of frame 0's `m` patches
+                // observed again in the drifted frame -- targets computed at
+                // that frame's TRUE pose, i.e. exactly the
+                // correctly-predicted-revisit a real GRU update would supply
+                // regardless of the CURRENT (drifted) pose estimate.
+                let loop_edges: Vec<(usize, usize)> = (0..m).map(|local| (local, DRIFTED_FRAME)).collect();
+                graph.append_edges(&loop_edges, 4);
+            }
+            for edge in graph.edges_mut() {
+                // `edge.k` is `frame0_patches`' own index directly: every
+                // chain/loop edge above is owned by frame 0, whose patch ids
+                // occupy `[0, m)` unshifted (frame 0 is the very first
+                // frame committed).
+                let owner_patch = &frame0_patches[edge.k];
+                let target = transform_point(&true_poses[edge.i], &true_poses[edge.j], &intr, &intr, owner_patch, false);
+                edge.target_weight = Some((target, Vector2::new(1.0, 1.0)));
+            }
+
+            // Archive everything above into the inactive store (threshold =
+            // N_FRAMES - removal_window(2); every injected edge's owner
+            // frame is 0, which is far below that threshold for any
+            // realistic N_FRAMES).
+            graph.keyframe();
+            assert!(graph.edges().is_empty(), "every injected edge should have aged into the inactive store");
+
+            // A mathematically inert "keepalive" self-edge (`i == j`,
+            // target == the patch's own anchor pixel) so
+            // `gather_global_ba_edges` has at least one ACTIVE edge to
+            // derive `t0` from. `crate::dpvo_patch_ba::flow_mag`'s own
+            // module doc already derives why a self-edge's `Gij` collapses
+            // to the identity regardless of the shared pose's value; since
+            // `Ji = -Gij.adjT(Jj)` and `Ad(I) = I`, this means `Ji = -Jj`
+            // for a self-edge, so `i_local == j_local` accumulates
+            // `Bii+Bjj+Bij+Bji = 0` exactly (a full algebraic cancellation)
+            // -- this edge cannot move ANY pose, it exists purely to give
+            // `t0` a value (frame 1, the self-edge's own owner) without
+            // touching the drifted frame at all.
+            let keepalive_patch = m; // frame 1's first patch (owner_frame(m) == 1).
+            graph.append_edges(&[(keepalive_patch, 1)], 4);
+            let patch1 = graph.patches()[keepalive_patch];
+            for edge in graph.edges_mut() {
+                edge.target_weight = Some((Vector2::new(patch1.x, patch1.y), Vector2::new(1.0, 1.0)));
+            }
+
+            let (t0, edges, targets, weights, resolved_inactive, unresolved_inactive) =
+                gather_global_ba_edges(&graph).expect("at least the keepalive edge is active");
+            assert_eq!(t0, 1, "the keepalive self-edge (owner frame 1) should set the gauge");
+            assert_eq!(unresolved_inactive, 0, "every frame referenced by an inactive edge is still live");
+            let pinning_frames = DRIFTED_FRAME - 1;
+            assert_eq!(resolved_inactive, if with_loop { (pinning_frames + 1) * m } else { pinning_frames * m });
+
+            let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
+            let patches: Vec<DpvoPatch> = graph.patches().to_vec();
+            let intrinsics = vec![intr; poses.len()];
+            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+            let config =
+                DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+            let solved = dpvo_ba(&problem, &config).expect("global BA solve");
+            solved.poses[DRIFTED_FRAME].clone()
+        };
+
+        let solved_without_loop = run(false);
+        let error_without_loop = (solved_without_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
+        let solved_with_loop = run(true);
+        let error_with_loop = (solved_with_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
+
+        assert!(
+            error_with_loop * 10.0 < error_without_loop,
+            "global BA over the retained inactive loop edge should close the drift by >10x: \
+             with_loop={error_with_loop:.6} without_loop={error_without_loop:.6}"
+        );
+        assert!(
+            (error_without_loop - drift.norm()).abs() < 1e-3,
+            "with no inactive loop edge touching frame 4 at all, global BA should leave its drift essentially \
+             untouched: error_without_loop={error_without_loop:.6} drift={:.6}",
+            drift.norm()
+        );
     }
 }
 

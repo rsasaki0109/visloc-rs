@@ -104,13 +104,71 @@
 //!   can never fire in that configuration.
 //! * **Inactive-edge retention** (`remove_factors(..., store=True)`'s
 //!   `ii_inac`/`jj_inac`/`kk_inac`/`weight_inac`/`target_inac` arrays).
-//!   Upstream keeps these forever so a future global-BA/loop-closure pass
-//!   can re-touch them; this module still discards edges falling outside
-//!   the window instead of retaining them (`store=False` in effect
-//!   always) — M6's own widened-window BA (see above) reads only the
-//!   *currently active* edge set (never a separate inactive store), so an
-//!   unbounded growing list with no reader remains a pure memory leak, not
-//!   a faithful port of live behavior, even now that loop closure exists.
+//!   **Implemented as of Milestone M8** (`docs/dpvo_droid_port_plan.md`'s "M8
+//!   results") — see [`InactiveEdge`], [`Self::enable_inactive_edge_retention`],
+//!   and the "Inactive-edge retention" section below for the full design and
+//!   why it is keyed by [`DpvoGraphFrame::arrival_index`] rather than raw
+//!   live-frame indices (a deliberate, MORE careful choice than upstream's
+//!   own `ii_inac`/`jj_inac`/`kk_inac`, which are silently NOT re-shifted by
+//!   a later `keyframe`-fold — `dpvo.py:283-285` only rewrites the active
+//!   `ii`/`jj`/`kk` arrays, never the `_inac` ones — an assumption that only
+//!   happens to hold because fold targets are always near-recent frames
+//!   while inactive edges are always old ones; this port does not rely on
+//!   that same assumption holding, see below).
+//!
+//! # Inactive-edge retention (Milestone M8, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Off by default (`inactive_edge_cap = 0`, set by [`Self::new`]) — every
+//! M4-M7 call site is unaffected byte-for-byte unless a caller opts in via
+//! [`Self::enable_inactive_edge_retention`] (`crate::dpvo_vo::DpvoOdometry::new`
+//! does so when `DpvoOdometryConfig::global_ba` is `Some`, mirroring how
+//! `loop_closure`/`imu`/`scale_coupling` are each gated at the odometry
+//! layer rather than baked into [`DpvoVoConfig`] itself — this struct stays
+//! a faithful 1:1 port of `config.py`'s own field set).
+//!
+//! When enabled, [`Self::keyframe_inner`]'s ordinary removal-window edge drop
+//! (the `to_remove`/`remove_factors(..., store=True)` port, NOT the
+//! fold-frame edge drop, which upstream itself calls with `store=False` —
+//! see `dpvo.py:280-281` vs. `dpvo.py:305-310`) archives each dropped edge
+//! that has ever been touched by an `update()` call (`target_weight.is_some()`
+//! — an edge appended but never yet solved carries no learned measurement to
+//! freeze) into a bounded [`InactiveEdge`] ring buffer instead of discarding
+//! it outright. The correspondence target/weight are frozen at eviction time
+//! (never touched by a later GRU update, matching upstream's own `target_inac`/
+//! `weight_inac` semantics — an inactive edge's measurement is whatever the
+//! network last predicted for it while it was still active).
+//!
+//! **Why keyed by `arrival_index`, not live frame index**: this port
+//! physically compacts `frames`/`patches`/`edges` on every fold
+//! ([`Self::fold_frame`]), so a live index valid at archival time can go
+//! stale if a LATER fold happens to shift it. Upstream's own `ii_inac`/
+//! `jj_inac`/`kk_inac` are never re-shifted at all (confirmed by reading
+//! `dpvo.py:283-285` directly — only `self.pg.ii`/`jj`/`kk`, the ACTIVE
+//! arrays, get the `> k` shift), so upstream implicitly relies on fold
+//! targets (`k = n - KEYFRAME_INDEX`, always near-recent) never exceeding an
+//! inactive edge's own (always old, aged-past-`REMOVAL_WINDOW`) index — true
+//! in practice given `KEYFRAME_INDEX ≪ REMOVAL_WINDOW` on every shipped
+//! config, but not a maintained invariant. This port does the analogous
+//! optimistic thing for ACTIVE edges (their `i`/`j`/`k` are always current,
+//! by construction of the shift itself) but is deliberately MORE careful for
+//! the retained INACTIVE store: each entry's `arrival_i`/`arrival_j` is
+//! re-resolved against the CURRENT live frame set at the point a global-BA
+//! pass consumes it (`crate::dpvo_vo::DpvoOdometry::run_global_ba`), and an
+//! entry whose endpoint has since been folded away entirely (no longer
+//! live) is simply skipped for that pass rather than risking a silently
+//! wrong pose reference.
+//!
+//! **Patch state is NOT snapshotted** — only the `(target, weight)`
+//! measurement is frozen. An inactive edge's patch inverse depth is read
+//! from the LIVE patch buffer at global-BA time (via
+//! `arrival_i`/`local_patch_offset` → current live patch index, since a
+//! patch's owner frame being "inactive" for edge purposes does not mean the
+//! patch itself has left the live buffer — only a full [`Self::fold_frame`]
+//! removes a patch, and folded frames are never archived as inactive edges
+//! in the first place, matching upstream's own `store=False` there). This
+//! is simpler than snapshotting and strictly more correct: the global pass
+//! optimizes the patch's actual current state, consistent with every other
+//! BA call in this port.
 //!
 //! # Ported line ranges
 //!
@@ -123,9 +181,9 @@
 //! | `DAMPED_LINEAR` motion model (`__call__`'s `if self.n > 1` block) | same | 410-424 |
 //! | `flatmeshgrid` | `dpvo/utils.py` | 85-87 |
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use nalgebra::Vector6;
+use nalgebra::{Vector2, Vector6};
 use visloc_core::geometry::SE3;
 
 use crate::dpvo_patch_ba::{flow_mag, DpvoEdge, DpvoIntrinsics, DpvoPatch};
@@ -250,10 +308,35 @@ pub struct DpvoGraphEdge {
     pub target_weight: Option<(nalgebra::Vector2<f64>, nalgebra::Vector2<f64>)>,
 }
 
+/// One retained "inactive" edge (Milestone M8) — the frozen correspondence
+/// measurement of an edge dropped by the ordinary removal-window rule (NOT
+/// a fold-frame drop, which is never retained, matching upstream's own
+/// `store=False` there — see the module doc). Keyed by
+/// [`DpvoGraphFrame::arrival_index`], not live frame index — see the module
+/// doc's "Inactive-edge retention" section for why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InactiveEdge {
+    /// Source (patch-owning) frame's stable arrival index.
+    pub arrival_i: usize,
+    /// Target frame's stable arrival index.
+    pub arrival_j: usize,
+    /// Patch `k`'s offset within its owner frame's contiguous block
+    /// (`0..patches_per_frame`) — combined with `arrival_i` (the owner,
+    /// always equal to the edge's own source frame — see
+    /// [`DpvoPatchGraph::owner_frame`]'s invariant) to resolve the CURRENT
+    /// live patch index at global-BA time.
+    pub local_patch_offset: usize,
+    /// Frozen learned target pixel, as of the last `update()` call that
+    /// touched this edge before it aged out.
+    pub target: Vector2<f64>,
+    /// Frozen learned 2-channel confidence, same provenance as `target`.
+    pub weight: Vector2<f64>,
+}
+
 /// The DPVO patch graph: live frames, their patches, and the active
 /// forward/backward edges between them. See the module doc for scope and
-/// the deliberate omissions (loop closure, global-BA fallback, inactive-edge
-/// retention).
+/// the deliberate omissions (loop closure, global-BA fallback), and the
+/// "Inactive-edge retention" section for Milestone M8's own addition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DpvoPatchGraph {
     config: DpvoVoConfig,
@@ -280,6 +363,18 @@ pub struct DpvoPatchGraph {
     /// not the sensor timestamp).
     delta: HashMap<usize, (usize, SE3)>,
     is_initialized: bool,
+    /// Milestone M8: bounded ring buffer of retained inactive edges — see
+    /// the module doc's "Inactive-edge retention" section. Empty and never
+    /// grown unless [`Self::enable_inactive_edge_retention`] has been called
+    /// with a nonzero cap.
+    inactive_edges: VecDeque<InactiveEdge>,
+    /// `0` disables retention entirely (the default, every M4-M7 call site's
+    /// behavior) — see [`Self::enable_inactive_edge_retention`].
+    inactive_edge_cap: usize,
+    /// Cumulative count of inactive edges evicted (oldest-first) once the
+    /// cap was exceeded — a Milestone M8 diagnostic
+    /// (`crate::dpvo_vo::DpvoGlobalBaDiagnostics::inactive_edges_evicted_total`).
+    inactive_edges_evicted: usize,
 }
 
 impl DpvoPatchGraph {
@@ -293,7 +388,31 @@ impl DpvoPatchGraph {
             tlist: Vec::new(),
             delta: HashMap::new(),
             is_initialized: false,
+            inactive_edges: VecDeque::new(),
+            inactive_edge_cap: 0,
+            inactive_edges_evicted: 0,
         }
+    }
+
+    /// Milestone M8: opt into inactive-edge retention with a bounded cap
+    /// (oldest evicted first once exceeded — see [`Self::inactive_edges`]'s
+    /// doc). Idempotent; calling again simply replaces the cap (a smaller
+    /// cap takes effect gradually, via eviction on the next few archival
+    /// events, not by immediately truncating existing entries — kept simple
+    /// since the one real caller, `crate::dpvo_vo::DpvoOdometry::new`, only
+    /// ever calls this once, at construction).
+    pub fn enable_inactive_edge_retention(&mut self, cap: usize) {
+        self.inactive_edge_cap = cap;
+    }
+
+    /// Every currently retained inactive edge — see [`InactiveEdge`]'s doc.
+    pub fn inactive_edges(&self) -> &VecDeque<InactiveEdge> {
+        &self.inactive_edges
+    }
+
+    /// `(currently retained, cumulative evicted)` — Milestone M8 diagnostic.
+    pub fn inactive_edge_stats(&self) -> (usize, usize) {
+        (self.inactive_edges.len(), self.inactive_edges_evicted)
     }
 
     pub fn config(&self) -> &DpvoVoConfig {
@@ -644,22 +763,66 @@ impl DpvoPatchGraph {
         let threshold = n_after.saturating_sub(removal_window);
         let patches_per_frame = self.config.patches_per_frame;
         const MIN_LOOP_GAP: usize = 30; // `optim_utils.py::reduce_edges`'s own hardcoded `(j - i) < 30` literal.
-        self.edges.retain(|edge| {
+        // Milestone M8: this used to be a plain `self.edges.retain(...)`;
+        // rewritten to a single-pass partition so a dropped edge can be
+        // archived into `self.inactive_edges` (`remove_factors(...,
+        // store=True)`'s port — see the module doc's "Inactive-edge
+        // retention" section) instead of merely discarded. `retain`'s
+        // closure has no side-channel for the removed items, so this takes
+        // ownership of the old `Vec` via `std::mem::take` and rebuilds it —
+        // still a single O(edges) pass, not the O(n^2) a `Vec::remove`-based
+        // rewrite would be.
+        let old_edges = std::mem::take(&mut self.edges);
+        self.edges = Vec::with_capacity(old_edges.len());
+        for edge in old_edges {
             let owner_frame = edge.k / patches_per_frame;
-            if owner_frame >= threshold {
-                return true; // Not stale — kept unconditionally, same as `keyframe()`.
-            }
-            match loop_protection {
-                Some(optimization_window) => {
-                    let is_loop_edge = edge.j.saturating_sub(edge.i) > MIN_LOOP_GAP;
-                    let target_still_in_window = edge.j + optimization_window > n_after;
-                    is_loop_edge && target_still_in_window
+            let keep = if owner_frame >= threshold {
+                true // Not stale — kept unconditionally, same as `keyframe()`.
+            } else {
+                match loop_protection {
+                    Some(optimization_window) => {
+                        let is_loop_edge = edge.j.saturating_sub(edge.i) > MIN_LOOP_GAP;
+                        let target_still_in_window = edge.j + optimization_window > n_after;
+                        is_loop_edge && target_still_in_window
+                    }
+                    None => false,
                 }
-                None => false,
+            };
+            if keep {
+                self.edges.push(edge);
+            } else {
+                self.archive_inactive_edge(&edge, patches_per_frame);
             }
-        });
+        }
 
         removed
+    }
+
+    /// Milestone M8: archive one edge dropped by the ordinary
+    /// removal-window rule (never called from [`Self::fold_frame`]'s own
+    /// edge drop — that one matches upstream's `store=False`, see the
+    /// module doc) into [`Self::inactive_edges`], subject to
+    /// [`Self::inactive_edge_cap`]. No-op if retention is disabled
+    /// (`inactive_edge_cap == 0`, the default) or the edge was never
+    /// touched by an `update()` call (`target_weight` still `None` — no
+    /// measurement exists to freeze).
+    fn archive_inactive_edge(&mut self, edge: &DpvoGraphEdge, patches_per_frame: usize) {
+        if self.inactive_edge_cap == 0 {
+            return;
+        }
+        let Some((target, weight)) = edge.target_weight else { return };
+        // `edge.i` is always patch `k`'s owner frame (see
+        // `DpvoPatchGraph::owner_frame`'s invariant, restated in
+        // `append_edges`'s own construction), so no separate lookup is
+        // needed for the patch's owning arrival index.
+        let arrival_i = self.frames[edge.i].arrival_index;
+        let arrival_j = self.frames[edge.j].arrival_index;
+        let local_patch_offset = edge.k % patches_per_frame;
+        self.inactive_edges.push_back(InactiveEdge { arrival_i, arrival_j, local_patch_offset, target, weight });
+        if self.inactive_edges.len() > self.inactive_edge_cap {
+            self.inactive_edges.pop_front();
+            self.inactive_edges_evicted += 1;
+        }
     }
 
     /// Fold frame `k` away: record its relative-pose delta from `k - 1`
@@ -1061,6 +1224,142 @@ mod tests {
         let live_pose_of = |arrival_index: usize| (arrival_index == 0).then(SE3::identity);
         let reconstructed = graph.reconstruct_pose(1, &live_pose_of);
         assert_eq!(reconstructed, Some(SE3::identity()));
+    }
+
+    /// Milestone M8: an edge dropped by the ordinary removal-window rule
+    /// (NOT a fold) that HAS been touched by an `update()` call
+    /// (`target_weight.is_some()`) is archived, frozen, into
+    /// [`DpvoPatchGraph::inactive_edges`] when retention is enabled — while
+    /// a sibling edge dropped in the SAME call that was never touched
+    /// (`target_weight` still `None`) is correctly skipped, not archived
+    /// with a meaningless placeholder measurement. Uses the same
+    /// proven-not-to-fold big-motion trajectory shape as
+    /// `large_motion_above_threshold_keeps_every_frame` (unmodified
+    /// `patch_lifetime`/`keyframe_index`/`keyframe_thresh`, only
+    /// `removal_window` shrunk so a stale-edge drop happens within a small
+    /// test trajectory) so the removal-window drop, not a keyframe fold, is
+    /// what triggers archiving.
+    #[test]
+    fn keyframe_archives_touched_stale_edges_and_skips_untouched_ones() {
+        let mut config = small_config();
+        config.removal_window = 4;
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        graph.enable_inactive_edge_retention(100);
+        for i in 0..8 {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+
+        // Simulate `update()` having touched only frame 0's active edges
+        // with a distinctive target/weight before the removal-window drop
+        // below runs; frame 1/2/3's edges (also about to age out, since
+        // threshold = 8 - 4 = 4) are deliberately left untouched.
+        for edge in graph.edges_mut() {
+            if edge.i == 0 {
+                edge.target_weight = Some((Vector2::new(11.0, 22.0), Vector2::new(0.9, 0.8)));
+            }
+        }
+        assert_eq!(graph.inactive_edge_stats(), (0, 0));
+
+        let removed = graph.keyframe();
+        assert_eq!(removed, None, "big motion must not have triggered a fold — only the removal-window drop");
+        assert!(graph.edges().iter().all(|e| e.i != 0), "frame 0's edges should have aged out of the active set");
+
+        let (retained, evicted) = graph.inactive_edge_stats();
+        assert!(retained > 0, "expected at least one archived inactive edge");
+        assert_eq!(evicted, 0, "cap (100) was never exceeded");
+        for ie in graph.inactive_edges() {
+            assert_eq!(ie.arrival_i, 0, "only frame 0's (touched) edges should have been archived");
+            assert_eq!(ie.target, Vector2::new(11.0, 22.0));
+            assert_eq!(ie.weight, Vector2::new(0.9, 0.8));
+        }
+    }
+
+    /// Milestone M8: the inactive-edge store is a bounded, FIFO (oldest-
+    /// evicted-first) ring buffer — once more edges are archived than the
+    /// configured cap, the oldest ones are dropped and
+    /// [`DpvoPatchGraph::inactive_edge_stats`]'s eviction counter grows.
+    #[test]
+    fn inactive_edge_cap_evicts_oldest_first() {
+        let mut config = small_config();
+        config.removal_window = 4;
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        graph.enable_inactive_edge_retention(1); // Cap of exactly 1.
+        for i in 0..8 {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+        for edge in graph.edges_mut() {
+            edge.target_weight = Some((Vector2::new(1.0, 1.0), Vector2::new(1.0, 1.0)));
+        }
+
+        graph.keyframe();
+
+        let (retained, evicted) = graph.inactive_edge_stats();
+        assert_eq!(retained, 1, "cap of 1 must bound the retained count regardless of how many were archived");
+        assert!(evicted > 0, "more than one stale touched edge existed, so eviction must have happened");
+    }
+
+    /// Milestone M8: an archived inactive edge's frozen `target`/`weight`
+    /// never changes afterward, even as the graph keeps advancing (no code
+    /// path re-touches a retained [`InactiveEdge`] — only
+    /// `crate::dpvo_vo::DpvoOdometry::run_global_ba` ever reads it).
+    #[test]
+    fn archived_inactive_edges_stay_frozen_as_the_graph_advances() {
+        let mut config = small_config();
+        config.removal_window = 4;
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        graph.enable_inactive_edge_retention(1000);
+        for i in 0..8 {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+        for edge in graph.edges_mut() {
+            edge.target_weight = Some((Vector2::new(3.0, 4.0), Vector2::new(0.5, 0.5)));
+        }
+        graph.keyframe();
+        let snapshot: Vec<InactiveEdge> = graph.inactive_edges().iter().copied().collect();
+        assert!(!snapshot.is_empty());
+
+        // Advance the graph further (more frames, more folds/removals).
+        for i in 8..14 {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+            graph.keyframe();
+        }
+
+        for ie in &snapshot {
+            assert!(
+                graph.inactive_edges().contains(ie),
+                "an already-archived inactive edge's frozen measurement must be unchanged by later graph activity: {ie:?}"
+            );
+        }
     }
 
     #[test]
