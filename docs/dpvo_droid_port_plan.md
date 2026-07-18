@@ -5487,3 +5487,276 @@ milestone could construct (the M11-era acceptance test, identity poses,
    `QueryCandidateLogEntry::rotation_disagreement_deg` field itself IS
    covered by the new rotation-gate unit test), worth a follow-up if this
    CSV becomes load-bearing for future analysis.
+
+## M13 results (2026-07-18)
+
+Milestone M13: DIAGNOSTIC-FIRST — after five milestones (M8-M12) attacking
+the *correction* side of the monocular scale explosion (global BA, Sim3
+pose-graph, loop-driven `t0` widening, long-range appearance retrieval,
+SP-anchored patches + a rotation gate) and landing five honest negatives,
+find WHERE and WHEN the injection actually happens, using only existing
+trajectories/ground truth first (no new runs) before touching any code.
+**Answer: it is not gradual, uniform drift. The recovered scale is flat and
+correct (~0.9-1.3, matching the reported "400f" acceptance numbers almost
+exactly) for the first ~460 of 800 processed frames, then ramps up smoothly
+and monotonically — not a single discrete jump — over the next ~300-340
+frames, converging near the run's own final reported scale. The onset
+(`F*`) lands, frame-for-frame, at the exact point MH_01's own ground truth
+transitions out of a genuine ~24-second near-total-stillness hover (GT
+speed collapses from 0.25-0.40 m/s to 0.0006-0.03 m/s for processed frames
+~200-440, then climbs back through 0.17→0.58 m/s over frames 450-510) —
+present in the dataset's own `state_groundtruth_estimate0/data.csv`, not an
+artifact of this port. This onset location and ramp shape is IDENTICAL
+across every 800f run checked, regardless of which M8-M12 backend
+correction was enabled — direct evidence that none of those backends could
+plausibly have fixed this, because the corruption is fully baked in on the
+frontend/injection side before any of them get a real chance to act.**
+
+### Method
+
+No Rust changes for Phase 1. Two new scripts (both saved to
+`E:/visloc_archive/dpvo_m13_20260718/`, alongside all CSVs/logs this
+section cites):
+
+* `m13_scale_profile.py` — loads `mav0/state_groundtruth_estimate0/data.csv`
+  (`timestamp_ns, p_RS_R_{x,y,z}, q_RS_{w,x,y,z}, v_RS_R_{x,y,z}, ...`,
+  confirmed by header inspection first) and a run's `dpvo_trajectory.csv`
+  (`timestamp_ns,tx,ty,tz,qw,qx,qy,qz`, one row per *processed* frame,
+  frame index = CSV row index, independent of `--stride`). Each estimated
+  timestamp is matched to its nearest GT sample (`np.searchsorted`; max
+  observed mismatch 1.075 s against a ~5 ms GT sampling period — negligible
+  at these window sizes). For every run it computes, per non-overlapping
+  window of 20/40/80 processed frames: a windowed Umeyama (Horn) similarity
+  fit (rotation + **scale** + translation) between the estimated and
+  GT-matched points in that window, a simpler arc-length ratio
+  (`Σ‖Δp_est‖ / Σ‖Δp_gt‖` over the window, no rotation fit needed), the GT's
+  own mean per-frame speed, and mean per-frame rotation-angle-between-quats
+  — plus an **expanding**-window Umeyama scale (`frames [0, k)` for
+  `k = 20, 40, …, 800`), which is the same quantity M6-M12's own
+  `ate_similarity_scale` reports (confirmed: the expanding-window value at
+  `frame_end=799` matches each run's own `summary.txt`
+  `ate_similarity_scale` to 2-3 significant figures for every run checked).
+  Outputs `m13_windowed_scale_profile.csv` and
+  `m13_expanding_scale_profile.csv` (all runs, all window sizes).
+* `m13_gt_velocity_check.py` — prints `‖v_RS_R‖` (the GT's own velocity
+  columns, not a finite-difference of position) at each processed frame,
+  used to confirm the hover is a real GT feature rather than a
+  matching/interpolation artifact. Output saved as
+  `m13_gt_velocity_profile.txt`.
+
+Nine 800f trajectories were profiled, chosen to span every distinct
+backend-lineage combination available without any new runs: `m6_off_800`
+(no loop closure), `m6_on_800` (M6 proximity loop closure),
+`m8_on_800_globalba` (M8), `m9_on_800_both` (M9 Sim3 backend),
+`m10_on_800_both` (M10 loop-driven `t0` widening), `m12_on_800_control`
+(M11/M12's shared control lineage — confirmed digit-for-digit identical to
+`m10_on_800_both`/`m11_on_800_control` in the M10-M12 results sections
+already), `m12_on_800_spanchored_final` (M12's SP-anchored, rotation-gated
+arm, final scale 16.02 vs control's 20.63 — the comparison lever this
+milestone's brief specifically asked for), plus the two catastrophically
+CORRUPTED arms as negative controls: `m11_on_800_longloop_wideradius` and
+`m12_on_800_spanchored` (pre-rotation-gate).
+
+### Finding A: the scale-vs-frame profile is flat, then one smooth ramp — not gradual drift, not a single jump
+
+Expanding-window Umeyama scale (`m6_off_800`, representative of every
+non-corrupted lineage — see the CSV for all nine):
+
+| `frame_end` | 199 | 299 | 399 | 439 | 459 | 479 | 519 | 559 | 599 | 639 | 679 | 719 | 759 | 799 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| scale | 0.562 | 1.152 | 1.266 | 1.261 | 1.245 | 1.161 | 1.380 | 3.071 | 6.227 | 10.298 | 14.671 | 19.180 | 21.921 | 22.627 |
+
+Scale sits in a `0.9-1.3` band from `frame_end≈240` all the way through
+`frame_end≈459` — this band is *exactly* what M7/M8's own reported "400f"
+acceptance number (`1.2659`/`1.2660`) is measuring; those short runs simply
+stop before the ramp starts. From `frame_end≈479` onward, scale climbs
+**monotonically and smoothly** — no discrete jump, no oscillation, no
+sign change — through 300 frames, decelerating and asymptoting near the
+run's own final reported value by `frame_end≈780`. Every one of the six
+non-corrupted 800f lineages checked (`m6_off/on_800`, `m8`, `m9`, `m10`,
+`m12_on_800_control`) shows this SAME shape at the SAME onset, converging
+to final scales in a narrow `20.6-22.6` band — this is a base-rate
+phenomenon of the frontend, present with loop closure off entirely
+(`m6_off_800`) and unmoved by every backend correction mechanism tried
+since (M8 global BA: 22.61; M9 Sim3 backend: 21.24-21.53; M10 widened `t0`:
+20.63-22.04; M12 control: 20.63 — all within the same band `m6_off_800`'s
+loop-closure-free 22.63 already occupies).
+
+The windowed (non-overlapping, non-expanding) Umeyama/arc-length profile
+localizes the SAME transition independently: local scale is `O(1-10)`
+through `[80,360]`, becomes numerically degenerate in `[200,440]` (GT arc
+length in that window is near-zero, see Finding B — local scale/arc-ratio
+are not meaningful there, only the near-zero denominator is), then jumps to
+`O(20-140)` for every window from `[440,480]` onward, for every
+non-corrupted run. `m13_windowed_scale_profile.csv` has the full table
+(all 9 runs × 3 window sizes).
+
+### Finding B: `F*` is the exit of a real, GT-confirmed ~24 s near-total-stillness hover
+
+`m13_gt_velocity_profile.txt` (GT's own `v_RS_R_{x,y,z}` columns, sampled
+every 10 processed frames):
+
+| frame | t (s, from sequence start) | ‖v_GT‖ (m/s) |
+| --- | --- | --- |
+| 180 | 16.92 | 0.2527 |
+| 190 | 17.92 | 0.3996 |
+| 200 | 18.92 | 0.0209 |
+| 210-430 | 19.92-41.92 | 0.0006-0.0145 (near-zero throughout) |
+| 440 | 42.92 | 0.0086 |
+| 450 | 43.92 | 0.1699 |
+| 460 | 44.92 | 0.3049 |
+| 480 | 46.92 | 0.1848 |
+| 500 | 48.92 | 0.5131 |
+| 510 | 49.92 | 0.5830 |
+
+Directly querying `mav0/state_groundtruth_estimate0/data.csv` confirms this
+is a real dataset feature, not a GT-matching artifact: GT position barely
+moves at all between processed frames 200 and 440 (e.g. `x` moves from
+`4.5625` to `4.5675` m — 5 mm — over 24 seconds and ~230 tracked frames).
+**`F*` — where the recovered scale starts ramping (`frame_end≈460-480`
+above) — is, frame-for-frame, the exact point GT velocity climbs back out
+of this hover.** The M6 `on_800` console log shows this window contains
+nothing else unusual: `frames_graph_n` climbs steadily (no fold/reset
+event logged), and the one proximity-loop-closure acceptance nearby (frame
+430, `on_800` only — `off_800` has none at all and shows the identical
+ramp) sits on the trailing edge of the hover with `correction_max_m=0.0000`
+— loop closure is not a plausible cause; both arms explode identically.
+
+### Finding C: mechanism — this is upstream DPVO's own documented design gap, faithfully ported, not a porting bug
+
+Two motion-aware gates exist in this port, both are straight ports of
+`E:/tools/DPVO/dpvo/dpvo.py`, and neither protects a mid-sequence
+low-parallax segment:
+
+1. **`motion_probe`** (`dpvo_vo.rs:1697-1703`, `motion_probe_min_flow`):
+   gated by `self.graph.n_frames() > 0 && !self.graph.is_initialized()` —
+   bootstrap-only, matching upstream's own `if self.n > 0 and not
+   self.is_initialized: if self.motion_probe() < 2.0: return`
+   (`dpvo.py:441-442`, confirmed by direct read of the cloned upstream
+   source). Once `is_initialized` flips true (at frame 8, near the very
+   start of the sequence), this gate never runs again for the rest of the
+   sequence, in EITHER codebase.
+2. **`keyframe`/`motionmag`/`KEYFRAME_THRESH`** (`dpvo_patch_graph.rs:827-876`,
+   faithfully porting `dpvo.py:266-285`'s `m/2 < KEYFRAME_THRESH` fold
+   test): this IS active throughout, and does fold away *most* incoming
+   frames during the hover — but not all of them. Console evidence
+   (`E:/visloc_archive/dpvo_m6_20260717/off_800_console.log`):
+   `frames_graph_n` grows from `20` (frame 201) to `41` (frame 431), a net
+   `+21` kept out of `230` processed frames of near-total stillness — a
+   ~91% fold rate, but the surviving ~9% (≈21 frames) are new-patch,
+   near-zero-parallax commits sitting live in the window with
+   depth initialized from `rand()`/median-of-last-3 fallback
+   (`dpvo_vo.rs:1667-1674`) rather than anything triangulated. This is
+   exactly the raw material for scale-unobservable depth: with no baseline,
+   monocular depth (and therefore the local notion of "scale") is
+   fundamentally unobservable, and once real motion resumes at `F*` the BA
+   must reconcile new, well-constrained information against these already
+   ill-conditioned patches and poses — with no mechanism in either
+   codebase to retroactively undo the already-committed pose chain's
+   baked-in scale.
+
+This is **not a deviation from upstream** — `dpvo.py` has exactly the same
+two gates with exactly the same scope. Upstream's benchmark suite is not
+obviously exercised against a comparably long (24 s), comparably early
+(19-43 s into an 800-frame/~145 s-equivalent run) total-stillness segment;
+this port inherited the same architectural gap and MH_01 is simply a
+dataset that triggers it.
+
+### Finding D: SP-anchoring dampens the ramp's magnitude, not its location or shape
+
+`m12_on_800_spanchored_final`'s windowed profile shows the identical
+flat-then-ramp shape, same onset (`frame_end≈459` still `≈1.0`, ramp begins
+`≈479-519`), converging to `16.02` instead of `20.6-22.6` (a real ~22-27%
+reduction, matching M12's own reported finding) — evidence that WHICH
+patches get created (SP-anchored vs. random) measurably changes the
+ramp's magnitude without changing its trigger or mechanism. The two
+catastrophically corrupted arms (`m11_..._wideradius`, pre-gate
+`m12_..._spanchored`) are a distinct, much earlier (already collapsing
+within the first 40-80 frames) and more severe failure mode — bad
+long-range loop bridging layered on top of, not a variant of, this
+milestone's mechanism; useful only as confirmation that the organic ramp
+described above is present at base rate independent of any loop-closure
+machinery.
+
+### Phase 2/3: one targeted, config-only probe — negative
+
+The obvious "surgical, config-level" candidate this diagnosis suggests:
+make the existing `keyframe`/`KEYFRAME_THRESH` decimation (Finding C,
+mechanism 2) more aggressive, so fewer near-zero-parallax frames from the
+hover survive into the window. `--keyframe-thresh` is already a CLI flag
+(`examples/euroc_dpvo_vo_demo.rs`, default `15.0`), so this required **no
+code changes at all** — a single 800f A/B run against the exact
+`m12_on_800_control` recipe (`--patches-per-frame 48 --removal-window 16
+--optimization-window 7 --patch-lifetime 11 --loop-closure --sim3-backend
+--global-ba --gba-widen-t0 --long-loop --ll-superpoint-model
+models/superpoint_1500.onnx`, visual-only, CPU-only), with `--keyframe-thresh
+60.0` (4× default) in place of the default, all else identical.
+Output: `E:/visloc_archive/dpvo_m13_20260718/kfthresh60_800/`.
+
+**Result: worse, not better.** `ate_similarity_scale` **32.99** (vs control
+`20.63`), `ate_rigid_rmse_m` 4.134 (vs 4.075), `ate_similarity_rmse_m` 3.31
+(vs 2.87). The windowed profile shows the identical `F*` onset and shape
+(flat `~1.0-1.55` through `frame_end≈459`, ramp from `≈479-519`), just a
+steeper, still-unconverged ramp reaching a higher final value by frame 799
+— i.e. raising the threshold did not prevent, shorten, or dampen the
+injection event; it made the overall run's cumulative scale error larger
+(plausibly because a globally-raised absolute flow-magnitude threshold
+folds away MORE frames everywhere, including during genuine fast-motion
+segments where the extra keyframe density was providing stabilizing
+redundancy — a blunt global knob cannot selectively target only the
+hover). Loop closure went fully inert under this setting too
+(`loop_accepted` 9→0, `global_ba_calls` stayed 0 — `global_ba`/`sim3_backend`
+never fire without at least one accepted loop edge — though this is
+unlikely to be causal given `off_800`, with loop closure disabled
+entirely, shows the identical ramp).
+
+**This is a genuine, informative honest negative**: it rules out "just
+retune the existing decimation threshold" as a fix, and supports the
+Finding C verdict that this is a structural gap (needs a NEW,
+motion-magnitude-conditioned mechanism specifically targeting near-zero
+real motion, not a global reweighting of an existing blunt instrument) —
+consistent with the task brief's own explicit instruction to stop at
+diagnosis, with a precise next-milestone design, when the fix is
+structural rather than surgical.
+
+### Verdict
+
+**Localized, not merely characterized.** `F*` ≈ processed frame 460-480
+(dataset time ≈ 44-47 s into the MH_01_easy sequence), the exit of a real,
+GT-confirmed ~24 s near-total-stillness hover (processed frames ~200-440,
+t≈19-43 s) — identical across every 800f run lineage checked (M6 off/on,
+M8, M9, M10, M12 control), regardless of which of five backend-correction
+mechanisms (M8-M12) was active. The mechanism is upstream DPVO's own
+architectural gap (bootstrap-only `motion_probe`, faithfully ported; a
+`KEYFRAME_THRESH` decimation that folds ~91% but not 100% of hover frames,
+faithfully ported), not a porting bug — and a targeted, no-code-change
+probe (raising `--keyframe-thresh` 4×) makes the outcome WORSE
+(scale 20.63→32.99), ruling out the one config-level fix this diagnosis
+suggested. **This is a structural gap, not a surgical one**: M8-M12's five
+honest negatives are now explained — none of them could plausibly have
+fixed a corruption event that finishes baking itself into the pose chain
+around frame 460-780, well before enough loop-closure geometry exists for
+any of those backends to reach back that far with real leverage.
+
+### Next steps (design for M14, not started)
+
+A real fix needs a NEW mechanism, specifically conditioned on near-zero
+real motion (not a global retune of an existing absolute-flow-magnitude
+threshold): e.g. (a) detect a sustained near-zero optical-flow/parallax
+regime and suppress NEW patch creation (not new frame commits) during it —
+reuse/extend existing patches' depth rather than seeding fresh ones from
+`rand()`/median fallback with no triangulation support; or (b) once such a
+regime is detected, anchor the pose-chain scale at its entry value (freeze
+scale-affecting updates) until parallax recovers, rather than letting the
+BA free-run against ill-conditioned patches; or (c) a post-hoc detection +
+targeted re-scaling of exactly the frame span `[hover_exit, hover_exit +
+~300]` once normal motion resumes and enough new well-constrained
+geometry exists to know what the "right" local scale should have been —
+closer in spirit to M8-M12's backend-correction approach but targeted at
+the KNOWN corrupted span instead of a generic global/loop-driven BA. Any
+of these requires: a genuine (not config-only) code change, careful
+frame-index bookkeeping given `dpvo_long_loop`'s `arrival_index` and the
+GT-alignment tooling both depend on stable frame indices, new unit tests,
+and an 800f + 400f A/B (~40 min combined) to confirm no regression before
+being called anything but another honest negative. Scoping that design and
+implementation is M14's job, not this milestone's.
