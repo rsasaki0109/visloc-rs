@@ -207,8 +207,12 @@ use visloc_vision::dpvo::onnx_session::{DpvoOnnxError, DpvoOnnxSession};
 use visloc_vision::dpvo::patchify::patchify_cpu;
 use visloc_vision::dpvo::softagg::{SoftAgg, SoftAggError};
 use visloc_vision::dpvo::{CORR_DIM, CORR_RADIUS, DIM, FNET_DIM, PATCH, RES};
-use visloc_vision::features::superpoint_onnx::OnnxBackend;
+use visloc_vision::features::superpoint_onnx::{
+    OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxError, SuperPointOnnxExtractor,
+};
+use visloc_vision::features::{DeepFeatureExtractor, GrayscaleImage};
 
+use crate::dpvo_long_loop::{DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex};
 use crate::dpvo_patch_ba::{
     dpvo_ba, reproject_patch_grid, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge,
     DpvoIntrinsics, DpvoPatch,
@@ -244,6 +248,13 @@ pub enum DpvoOdometryError {
     Ba(DpvoBaError),
     /// `image.dim()` did not match [`DpvoOdometryConfig::width`]/`height`.
     ImageShapeMismatch { expected: (usize, usize), actual: (usize, usize) },
+    /// Milestone M11: `config.long_loop` was `Some` but no SuperPoint ONNX
+    /// model path was supplied to [`DpvoOdometry::new`] — the long-range
+    /// loop mechanism needs a real per-frame appearance descriptor, so this
+    /// is a construction-time error, not a silent no-op.
+    LongLoopModelRequired,
+    /// Milestone M11: the SuperPoint ONNX session failed to load.
+    LongLoop(SuperPointOnnxError),
 }
 
 impl std::fmt::Display for DpvoOdometryError {
@@ -257,6 +268,10 @@ impl std::fmt::Display for DpvoOdometryError {
             Self::ImageShapeMismatch { expected, actual } => {
                 write!(f, "dpvo odometry: expected image shape {expected:?}, got {actual:?}")
             }
+            Self::LongLoopModelRequired => {
+                write!(f, "dpvo odometry: config.long_loop is Some but no superpoint_model_path was supplied")
+            }
+            Self::LongLoop(e) => write!(f, "dpvo odometry: long-loop superpoint error: {e}"),
         }
     }
 }
@@ -353,6 +368,17 @@ pub struct DpvoOdometryConfig {
     /// milestone's exact behavior byte-for-byte: [`DpvoOdometry::process_frame`]
     /// never calls [`crate::dpvo_sim3_backend::run_sim3_backend`].
     pub sim3_backend: Option<DpvoSim3BackendConfig>,
+    /// Milestone M11 (`docs/dpvo_droid_port_plan.md`): a long-range,
+    /// appearance-based loop-candidate source feeding M9's Sim(3) backend
+    /// and M10's widened global BA — see `crate::dpvo_long_loop`'s module
+    /// doc for the full design and why this exists (M10's own real-run
+    /// finding: the M6 proximity mechanism can never propose a loop edge
+    /// wider than the live patch buffer, an order of magnitude short of the
+    /// trajectory-spanning revisit MH_01's own scale drift needs). `None`
+    /// (default) preserves every prior milestone's exact behavior
+    /// byte-for-byte — no SuperPoint inference runs at all, and
+    /// [`DpvoOdometry::new`] does not require a `superpoint_model_path`.
+    pub long_loop: Option<DpvoLongLoopConfig>,
 }
 
 /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): configuration for the
@@ -1245,6 +1271,23 @@ pub struct DpvoOdometry {
     sim3_backend_last_pose_delta_mean_m: f64,
     sim3_backend_last_scale_min: f64,
     sim3_backend_last_scale_max: f64,
+
+    // ---- Milestone M11 (long-range appearance loop candidate source) state
+    // — see `crate::dpvo_long_loop`'s module doc. `None` whenever
+    // `config.long_loop` is `None` (every prior milestone's default): no
+    // SuperPoint inference runs, `process_frame`'s own long-loop block is a
+    // no-op. ----
+    long_loop: Option<DpvoLongLoopRuntime>,
+}
+
+/// Milestone M11: the ONNX-runtime-dependent half of the long-range loop
+/// mechanism (the SuperPoint session) paired with the pure-logic index/
+/// verifier (`crate::dpvo_long_loop::DpvoLongLoopIndex`) — kept as one
+/// `Option` field on [`DpvoOdometry`] so both are constructed/dropped
+/// together.
+struct DpvoLongLoopRuntime {
+    extractor: SuperPointOnnxExtractor,
+    index: DpvoLongLoopIndex,
 }
 
 impl DpvoOdometry {
@@ -1264,6 +1307,13 @@ impl DpvoOdometry {
         update_post_agg_path: impl AsRef<Path>,
         softagg_weights_npz_path: impl AsRef<Path>,
         backend: OnnxBackend,
+        // Milestone M11: required (returns `DpvoOdometryError::LongLoopModelRequired`
+        // otherwise) whenever `config.long_loop` is `Some` — reuses `backend`
+        // above for the SuperPoint session too (one shared execution-provider
+        // choice, not a second knob). `None` whenever `config.long_loop` is
+        // `None`, matching every other optional-mechanism argument's own
+        // "byte-identical when absent" contract.
+        superpoint_model_path: Option<impl AsRef<Path>>,
     ) -> Result<Self, DpvoOdometryError> {
         let session = DpvoOnnxSession::load_from_paths_with_backend(
             fnet_path,
@@ -1275,6 +1325,25 @@ impl DpvoOdometry {
         let archive = NpzArchive::open(softagg_weights_npz_path)?;
         let agg_kk = SoftAgg::load_from_npz(&archive, "agg_kk_")?;
         let agg_ij = SoftAgg::load_from_npz(&archive, "agg_ij_")?;
+        let long_loop = match (config.long_loop.clone(), superpoint_model_path) {
+            (Some(ll_cfg), Some(model_path)) => {
+                let sp_config = SuperPointOnnxConfig {
+                    // Milestone M11: bounds this module's own per-frame
+                    // memory footprint (see `crate::dpvo_long_loop`'s module
+                    // doc, "Failure modes") — deliberately smaller than
+                    // `SuperPointOnnxConfig::default()`'s own `1500` (tuned
+                    // for full place-recognition retrieval, not this bounded
+                    // streaming index).
+                    max_keypoints: 250,
+                    ..SuperPointOnnxConfig::default()
+                };
+                let extractor = SuperPointOnnxExtractor::load_from_path_with_backend(model_path, sp_config, backend)
+                    .map_err(DpvoOdometryError::LongLoop)?;
+                Some(DpvoLongLoopRuntime { extractor, index: DpvoLongLoopIndex::new(ll_cfg) })
+            }
+            (Some(_), None) => return Err(DpvoOdometryError::LongLoopModelRequired),
+            (None, _) => None,
+        };
         let mut graph = DpvoPatchGraph::new(config.vo);
         // Milestone M8: opt the patch graph into inactive-edge retention
         // only when a caller actually asked for the global-BA mechanism —
@@ -1372,6 +1441,7 @@ impl DpvoOdometry {
             sim3_backend_last_pose_delta_mean_m: 0.0,
             sim3_backend_last_scale_min: 1.0,
             sim3_backend_last_scale_max: 1.0,
+            long_loop,
         })
     }
 
@@ -1484,6 +1554,13 @@ impl DpvoOdometry {
         }
     }
 
+    /// Snapshot of the Milestone M11 long-range loop mechanism's own state —
+    /// `enabled: false` (a default-zeroed struct) whenever `config.long_loop`
+    /// is `None`.
+    pub fn long_loop_diagnostics(&self) -> DpvoLongLoopDiagnostics {
+        self.long_loop.as_ref().map(|runtime| runtime.index.diagnostics()).unwrap_or_default()
+    }
+
     /// Buffer one raw body-frame IMU sample (Milestone M5). No-op (samples
     /// are simply discarded on the next [`Self::process_frame`]'s drain if
     /// `config.imu` is `None` — accepted, not rejected with an error, since
@@ -1586,6 +1663,32 @@ impl DpvoOdometry {
             self.patch_gmap.push(gmap.index_axis(Axis(0), i).to_owned());
             self.patch_imap.push(squeeze_patch_vector(&imap_patch4, i));
         }
+        // Milestone M11 (`crate::dpvo_long_loop`'s module doc): extract and
+        // index this frame's SuperPoint appearance descriptor RIGHT NOW —
+        // `image` is a borrowed, transient view that will not be available
+        // again once this call returns, so this is the only chance to
+        // compute a retrieval descriptor for this committed frame. Runs
+        // unconditionally on every commit (not gated on `is_initialized`,
+        // unlike loop-closure/BA below) so early frames are still indexed as
+        // future candidates. A SuperPoint inference failure is a soft,
+        // non-fatal skip (this frame simply never becomes a retrieval
+        // candidate) — the odometry solve itself does not depend on this
+        // mechanism at all.
+        if let Some(runtime) = self.long_loop.as_mut() {
+            let arrival_index = self.graph.frames().last().map(|f| f.arrival_index);
+            if let Some(arrival_index) = arrival_index {
+                if let Ok(gray) = GrayscaleImage::from_luma_u8(w, h, image.iter().copied().collect()) {
+                    if let Ok(features) = runtime.extractor.extract_deep(&gray) {
+                        let keypoints: Vec<nalgebra::Point2<f64>> = features
+                            .keypoints
+                            .iter()
+                            .map(|k| nalgebra::Point2::new(k.x / RES as f64, k.y / RES as f64))
+                            .collect();
+                        runtime.index.ingest_frame(arrival_index, keypoints, features.descriptors);
+                    }
+                }
+            }
+        }
         // Milestone M5: one velocity slot per live frame, parallel to
         // `frame_pyramids` — see this struct's own field doc. Seeded at
         // zero; `try_imu_bootstrap`/`update_step` overwrite it once IMU
@@ -1627,6 +1730,15 @@ impl DpvoOdometry {
             // j)` live indices are still valid). See
             // [`Self::capture_pending_sim3_loop_measurements`]'s own doc.
             self.capture_pending_sim3_loop_measurements();
+            // Milestone M11: throttled long-range appearance loop search —
+            // AFTER this frame's own `update_step` (so the current frame's
+            // own pose has already had at least one visual BA refinement,
+            // matching M9's own capture-timing lesson) but BEFORE
+            // `keyframe_dispatch` (which can still shift/fold LIVE indices;
+            // the current frame's own live pose/patches must still be
+            // resolvable via `self.graph` at the point this runs). See
+            // `crate::dpvo_long_loop`'s module doc for the full mechanism.
+            self.try_long_loop_closure();
             if let Some(k) = self.keyframe_dispatch() {
                 self.frame_pyramids.remove(k);
                 let m = self.graph.config().patches_per_frame;
@@ -2223,8 +2335,69 @@ impl DpvoOdometry {
                 arrival_i: frame_i.arrival_index,
                 arrival_j: frame_j.arrival_index,
                 relative_pose,
+                // Milestone M6/M9 proximity loop edges have no independent
+                // 3D-3D scale measurement — `run_sim3_backend` falls back to
+                // `estimate_loop_scale_ratio` exactly as before. See
+                // `crate::dpvo_long_loop`'s module doc for the M11 mechanism
+                // that DOES supply one.
+                measured_scale: None,
             });
         }
+    }
+
+    /// Milestone M11 (`docs/dpvo_droid_port_plan.md`): throttled long-range
+    /// appearance loop search — no-op when `config.long_loop` is `None`. On
+    /// acceptance, feeds the SAME "ever had a loop edge" gates
+    /// `crate::dpvo_loop_closure`'s own proximity mechanism already
+    /// unlocks — no new gating logic: `(arrival_i, arrival_j)` onto
+    /// [`Self::loop_edge_arrival_pairs`] (gated on
+    /// `config.global_ba.widen_t0_with_loop_edges`, matching
+    /// [`Self::try_loop_closure`]'s own gate) and the `Sim3LoopMeasurement`
+    /// onto [`Self::sim3_loop_measurements`]. See `crate::dpvo_long_loop`'s
+    /// module doc for the full mechanism this dispatches to.
+    fn try_long_loop_closure(&mut self) {
+        let Some(runtime) = self.long_loop.as_mut() else { return };
+        let Some(current) = self.graph.frames().last() else { return };
+        let current_arrival = current.arrival_index;
+        if !runtime.index.due(current_arrival) {
+            return;
+        }
+        let current_pose = current.pose.clone();
+        let current_intrinsics = current.intrinsics;
+        let patches_per_frame = self.graph.config().patches_per_frame;
+        let n = self.graph.n_frames();
+        let current_patches: Vec<DpvoPatch> =
+            self.graph.patches()[(n - 1) * patches_per_frame..n * patches_per_frame].to_vec();
+
+        let graph_ref = &self.graph;
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if let Some(live) = graph_ref.frames().iter().position(|f| f.arrival_index == arrival) {
+                let pose = graph_ref.frames()[live].pose.clone();
+                let intrinsics = graph_ref.frames()[live].intrinsics;
+                let patches = graph_ref.patches()[live * patches_per_frame..(live + 1) * patches_per_frame].to_vec();
+                return Some((pose, intrinsics, patches));
+            }
+            let pose = graph_ref.retained_poses().get(&arrival)?.clone();
+            let folded = graph_ref.retained_folded_frames().get(&arrival)?;
+            Some((pose, folded.intrinsics, folded.patches.clone()))
+        };
+
+        let Some(accepted) = runtime.index.find_and_verify_long_range_loop(
+            current_arrival,
+            &current_pose,
+            &current_intrinsics,
+            &current_patches,
+            resolve_old,
+        ) else {
+            return;
+        };
+
+        self.sim3_loop_measurements.push(accepted.measurement);
+        self.sim3_backend_ever_had_loop_edge = true;
+        if self.config.global_ba.is_some_and(|gba| gba.widen_t0_with_loop_edges) {
+            self.loop_edge_arrival_pairs.push((accepted.arrival_i, accepted.arrival_j));
+        }
+        self.global_ba_ever_had_loop_edge = true;
     }
 
     /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): the CPU-bounded

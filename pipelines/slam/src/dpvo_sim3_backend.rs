@@ -242,6 +242,20 @@ pub struct Sim3LoopMeasurement {
     pub arrival_j: usize,
     /// `pose_j ∘ pose_i⁻¹` at the moment this loop pair was accepted.
     pub relative_pose: SE3,
+    /// Milestone M11 (`docs/dpvo_droid_port_plan.md`): an INDEPENDENTLY
+    /// measured relative scale for this pair, when one exists — e.g.
+    /// `crate::dpvo_long_loop`'s 3D-3D Umeyama-RANSAC bridge between the two
+    /// endpoints' own owned patch geometry (a genuine, non-circular scale
+    /// signal, unlike [`estimate_loop_scale_ratio`]'s frozen-vs-fresh
+    /// pose-composition comparison — see that function's own doc for why the
+    /// latter needs a time gap that M9's real-run evidence found mostly
+    /// absent). `None` for M6/M9's own short-range proximity loop edges
+    /// (every existing call site) — [`run_sim3_backend`] falls back to
+    /// [`estimate_loop_scale_ratio`] exactly as before whenever this is
+    /// `None`, so M9's byte-for-byte behavior is preserved unless a caller
+    /// (M11's long-range detector) explicitly supplies an independent
+    /// measurement.
+    pub measured_scale: Option<f64>,
 }
 
 /// Outcome of one [`run_sim3_backend`] call — Milestone M9's counterpart to
@@ -465,7 +479,15 @@ pub fn run_sim3_backend(
         // edge measured WORSE interior-error reduction, confirmed
         // empirically: the two residual components fought each other
         // in the same 7-vector rather than reinforcing).
-        let scale_ratio = estimate_loop_scale_ratio(measurement, pose_i, pose_j);
+        //
+        // Milestone M11: prefer an independently-measured scale
+        // (`measurement.measured_scale`, e.g. `crate::dpvo_long_loop`'s
+        // 3D-3D bridge) whenever the caller supplied one — falls back to
+        // the M9 frozen-vs-fresh estimator otherwise, preserving M9's own
+        // proximity-loop behavior byte-for-byte (every M6/M9 call site
+        // leaves `measured_scale: None`).
+        let scale_ratio =
+            measurement.measured_scale.unwrap_or_else(|| estimate_loop_scale_ratio(measurement, pose_i, pose_j));
         let mut scale_information = Sim3Information::zeros();
         scale_information[(6, 6)] = config.loop_edge_weight * 1000.0;
         sim3_graph.add_edge_with_information(
@@ -715,6 +737,7 @@ mod tests {
             arrival_i: graph.frames()[source].arrival_index,
             arrival_j: graph.frames()[last].arrival_index,
             relative_pose: true_relative,
+            measured_scale: None,
         }];
 
         // Milestone M9: judge "interior recovery" by RMS error over MANY
@@ -888,6 +911,7 @@ mod tests {
             arrival_i: 0,
             arrival_j: 0,
             relative_pose: SE3::identity(),
+            measured_scale: None,
         }];
         let config = DpvoSim3BackendConfig::default();
         assert!(run_sim3_backend(&mut graph, &measurements, &config).is_none());
@@ -900,6 +924,7 @@ mod tests {
             arrival_i: 7,
             arrival_j: 93,
             relative_pose: SE3::identity(),
+            measured_scale: None,
         }];
         let nodes = select_nodes(&ordered, 20, &measurements);
         assert!(nodes.contains(&0));

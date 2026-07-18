@@ -151,7 +151,8 @@ use visloc_rs::slam::dpvo_vo::{
     DpvoGlobalBaConfig, DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
 };
 use visloc_rs::slam::{
-    DpvoIntrinsics, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel, ScaleCouplingConfig,
+    DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel,
+    ScaleCouplingConfig,
 };
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
@@ -265,6 +266,28 @@ struct CliArgs {
     s3b_frequency: usize,
     s3b_node_stride: usize,
     s3b_loop_edge_weight: f64,
+    /// Milestone M11 (`docs/dpvo_droid_port_plan.md`): enable the long-range,
+    /// appearance-based loop-candidate source (`DpvoOdometryConfig::long_loop`)
+    /// feeding M9's Sim3 backend and M10's widened global BA. Requires
+    /// `--ll-superpoint-model`. Default off — every prior milestone's
+    /// behavior unaffected.
+    long_loop: bool,
+    /// SuperPoint ONNX model path — required whenever `--long-loop` is set.
+    ll_superpoint_model: PathBuf,
+    /// Milestone M11: `DpvoLongLoopConfig`'s own fields, mirrored 1:1 — see
+    /// that struct's own doc for what each bounds/gates.
+    ll_vocab_bootstrap_frames: usize,
+    ll_vocab_words: usize,
+    ll_query_frequency: usize,
+    ll_top_k: usize,
+    ll_min_similarity: f32,
+    ll_min_temporal_gap: usize,
+    ll_max_indexed_frames: usize,
+    ll_patch_pixel_radius: f64,
+    ll_min_bridge_correspondences: usize,
+    ll_ransac_iterations: usize,
+    ll_min_ransac_inliers: usize,
+    ll_max_mean_residual_ratio: f64,
 }
 
 impl Default for CliArgs {
@@ -338,6 +361,22 @@ impl Default for CliArgs {
             s3b_frequency: DpvoSim3BackendConfig::default().frequency,
             s3b_node_stride: DpvoSim3BackendConfig::default().node_stride,
             s3b_loop_edge_weight: DpvoSim3BackendConfig::default().loop_edge_weight,
+            long_loop: false,
+            ll_superpoint_model: PathBuf::new(),
+            // Mirror `DpvoLongLoopConfig::default()` exactly so omitting
+            // these flags reproduces that struct's own defaults.
+            ll_vocab_bootstrap_frames: DpvoLongLoopConfig::default().vocab_bootstrap_frames,
+            ll_vocab_words: DpvoLongLoopConfig::default().vocab_words,
+            ll_query_frequency: DpvoLongLoopConfig::default().query_frequency,
+            ll_top_k: DpvoLongLoopConfig::default().top_k,
+            ll_min_similarity: DpvoLongLoopConfig::default().min_similarity,
+            ll_min_temporal_gap: DpvoLongLoopConfig::default().min_temporal_gap,
+            ll_max_indexed_frames: DpvoLongLoopConfig::default().max_indexed_frames,
+            ll_patch_pixel_radius: DpvoLongLoopConfig::default().patch_pixel_radius,
+            ll_min_bridge_correspondences: DpvoLongLoopConfig::default().min_bridge_correspondences,
+            ll_ransac_iterations: DpvoLongLoopConfig::default().ransac_iterations,
+            ll_min_ransac_inliers: DpvoLongLoopConfig::default().min_ransac_inliers,
+            ll_max_mean_residual_ratio: DpvoLongLoopConfig::default().max_mean_residual_ratio,
         }
     }
 }
@@ -442,6 +481,24 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--s3b-frequency" => args.s3b_frequency = raw.remove(i + 1).parse()?,
             "--s3b-node-stride" => args.s3b_node_stride = raw.remove(i + 1).parse()?,
             "--s3b-loop-edge-weight" => args.s3b_loop_edge_weight = raw.remove(i + 1).parse()?,
+            "--long-loop" => {
+                args.long_loop = true;
+                raw.remove(i);
+                continue;
+            }
+            "--ll-superpoint-model" => args.ll_superpoint_model = PathBuf::from(raw.remove(i + 1)),
+            "--ll-vocab-bootstrap-frames" => args.ll_vocab_bootstrap_frames = raw.remove(i + 1).parse()?,
+            "--ll-vocab-words" => args.ll_vocab_words = raw.remove(i + 1).parse()?,
+            "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
+            "--ll-top-k" => args.ll_top_k = raw.remove(i + 1).parse()?,
+            "--ll-min-similarity" => args.ll_min_similarity = raw.remove(i + 1).parse()?,
+            "--ll-min-temporal-gap" => args.ll_min_temporal_gap = raw.remove(i + 1).parse()?,
+            "--ll-max-indexed-frames" => args.ll_max_indexed_frames = raw.remove(i + 1).parse()?,
+            "--ll-patch-pixel-radius" => args.ll_patch_pixel_radius = raw.remove(i + 1).parse()?,
+            "--ll-min-bridge-correspondences" => args.ll_min_bridge_correspondences = raw.remove(i + 1).parse()?,
+            "--ll-ransac-iterations" => args.ll_ransac_iterations = raw.remove(i + 1).parse()?,
+            "--ll-min-ransac-inliers" => args.ll_min_ransac_inliers = raw.remove(i + 1).parse()?,
+            "--ll-max-mean-residual-ratio" => args.ll_max_mean_residual_ratio = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -666,6 +723,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop_edge_weight: args.s3b_loop_edge_weight,
             ..DpvoSim3BackendConfig::default()
         }),
+        // Milestone M11 (`docs/dpvo_droid_port_plan.md`): `--long-loop`
+        // enables the long-range appearance loop-candidate source; omitting
+        // it reproduces M4-M10's exact behavior (`long_loop: None`, no
+        // SuperPoint inference at all).
+        long_loop: args.long_loop.then_some(DpvoLongLoopConfig {
+            vocab_bootstrap_frames: args.ll_vocab_bootstrap_frames,
+            vocab_words: args.ll_vocab_words,
+            query_frequency: args.ll_query_frequency,
+            top_k: args.ll_top_k,
+            min_similarity: args.ll_min_similarity,
+            min_temporal_gap: args.ll_min_temporal_gap,
+            max_indexed_frames: args.ll_max_indexed_frames,
+            patch_pixel_radius: args.ll_patch_pixel_radius,
+            min_bridge_correspondences: args.ll_min_bridge_correspondences,
+            ransac_iterations: args.ll_ransac_iterations,
+            min_ransac_inliers: args.ll_min_ransac_inliers,
+            max_mean_residual_ratio: args.ll_max_mean_residual_ratio,
+            ..DpvoLongLoopConfig::default()
+        }),
     };
 
     if args.loop_closure {
@@ -703,6 +779,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if args.long_loop {
+        println!(
+            "long-range loop enabled (Milestone M11): superpoint_model={} vocab_bootstrap_frames={} \
+             vocab_words={} query_frequency={} top_k={} min_similarity={:.3} min_temporal_gap={} \
+             max_indexed_frames={} patch_pixel_radius={:.2} min_bridge_correspondences={} \
+             ransac_iterations={} min_ransac_inliers={} max_mean_residual_ratio={:.3}",
+            args.ll_superpoint_model.display(),
+            args.ll_vocab_bootstrap_frames,
+            args.ll_vocab_words,
+            args.ll_query_frequency,
+            args.ll_top_k,
+            args.ll_min_similarity,
+            args.ll_min_temporal_gap,
+            args.ll_max_indexed_frames,
+            args.ll_patch_pixel_radius,
+            args.ll_min_bridge_correspondences,
+            args.ll_ransac_iterations,
+            args.ll_min_ransac_inliers,
+            args.ll_max_mean_residual_ratio,
+        );
+    }
+
     if args.imu {
         println!(
             "imu enabled: samples={} gyro_noise_density={:.6e} accel_noise_density={:.6e} \
@@ -732,6 +830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let superpoint_model_path = args.long_loop.then(|| args.ll_superpoint_model.clone());
     let mut odometry = DpvoOdometry::new(
         odometry_config,
         args.model_dir.join("fnet.onnx"),
@@ -740,6 +839,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.model_dir.join("dpvo_update_post_agg.onnx"),
         args.model_dir.join("fixtures").join("softagg_weights_fixture.npz"),
         backend,
+        superpoint_model_path,
     )?;
 
     let frame_cap = if args.max_frames == 0 { usize::MAX } else { args.max_frames };
@@ -782,6 +882,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Milestone M9: same "log only on change" philosophy for the Sim3
     // backend's own call count.
     let mut prev_s3b_calls = 0usize;
+    // Milestone M11: same "log only on change" philosophy for the long-range
+    // loop mechanism's own accepted-total count.
+    let mut prev_ll_accepted_total = 0usize;
     // Milestone M7: track weight/convergence/rollback TRANSITIONS (same
     // "log only on change" philosophy as M5b/M6 above).
     let mut prev_sc_converged = false;
@@ -935,6 +1038,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             prev_s3b_calls = s3b_diag.calls;
+        }
+
+        if args.long_loop {
+            let ll_diag = odometry.long_loop_diagnostics();
+            if ll_diag.accepted_total > prev_ll_accepted_total {
+                println!(
+                    "*** frame {idx}: LONG-RANGE LOOP — accepted #{} (arrival_i={} arrival_j={} gap={} \
+                     similarity={:.3} scale={:.4} inliers={} residual_ratio={:.4} frames_indexed={} \
+                     vocab_built={} queries_attempted={} verification_attempts={})",
+                    ll_diag.accepted_total,
+                    ll_diag.last_accepted_arrival_i,
+                    ll_diag.last_accepted_arrival_j,
+                    ll_diag.last_accepted_gap,
+                    ll_diag.last_accepted_similarity,
+                    ll_diag.last_accepted_scale,
+                    ll_diag.last_accepted_inliers,
+                    ll_diag.last_accepted_mean_residual_ratio,
+                    ll_diag.frames_indexed,
+                    ll_diag.vocab_built,
+                    ll_diag.queries_attempted,
+                    ll_diag.verification_attempts,
+                );
+            }
+            prev_ll_accepted_total = ll_diag.accepted_total;
         }
 
         // Milestone M9: record only `(timestamp, arrival_index)` here — the
@@ -1143,6 +1270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sc_diag = odometry.scale_coupling_diagnostics();
     let gba_diag = odometry.global_ba_diagnostics();
     let s3b_diag = odometry.sim3_backend_diagnostics();
+    let ll_diag = odometry.long_loop_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -1244,7 +1372,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          sim3_backend_last_scale_min={s3b_last_scale_min:.6}\n\
          sim3_backend_last_scale_max={s3b_last_scale_max:.6}\n\
          sim3_backend_last_elapsed_ms={s3b_last_elapsed_ms:.3}\n\
-         sim3_backend_total_elapsed_ms={s3b_total_elapsed_ms:.3}\n",
+         sim3_backend_total_elapsed_ms={s3b_total_elapsed_ms:.3}\n\
+         long_loop_enabled={ll_enabled}\n\
+         long_loop_frames_indexed={ll_frames_indexed}\n\
+         long_loop_vocab_built={ll_vocab_built}\n\
+         long_loop_estimated_index_bytes={ll_estimated_bytes}\n\
+         long_loop_queries_attempted={ll_queries_attempted}\n\
+         long_loop_candidates_considered={ll_candidates_considered}\n\
+         long_loop_verification_attempts={ll_verification_attempts}\n\
+         long_loop_accepted_total={ll_accepted_total}\n\
+         long_loop_rejected_insufficient_bridge_total={ll_rejected_bridge}\n\
+         long_loop_rejected_ransac_total={ll_rejected_ransac}\n\
+         long_loop_last_accepted_arrival_i={ll_last_arrival_i}\n\
+         long_loop_last_accepted_arrival_j={ll_last_arrival_j}\n\
+         long_loop_last_accepted_gap={ll_last_gap}\n\
+         long_loop_last_accepted_similarity={ll_last_similarity:.6}\n\
+         long_loop_last_accepted_scale={ll_last_scale:.6}\n\
+         long_loop_last_accepted_inliers={ll_last_inliers}\n\
+         long_loop_last_accepted_mean_residual_ratio={ll_last_residual_ratio:.6}\n\
+         long_loop_total_elapsed_ms={ll_total_elapsed_ms:.3}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1339,6 +1485,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3b_last_scale_max = s3b_diag.last_scale_max,
         s3b_last_elapsed_ms = s3b_diag.last_elapsed_ms,
         s3b_total_elapsed_ms = s3b_diag.total_elapsed_ms,
+        ll_enabled = ll_diag.enabled,
+        ll_frames_indexed = ll_diag.frames_indexed,
+        ll_vocab_built = ll_diag.vocab_built,
+        ll_estimated_bytes = ll_diag.estimated_index_bytes,
+        ll_queries_attempted = ll_diag.queries_attempted,
+        ll_candidates_considered = ll_diag.candidates_considered,
+        ll_verification_attempts = ll_diag.verification_attempts,
+        ll_accepted_total = ll_diag.accepted_total,
+        ll_rejected_bridge = ll_diag.rejected_insufficient_bridge_total,
+        ll_rejected_ransac = ll_diag.rejected_ransac_total,
+        ll_last_arrival_i = ll_diag.last_accepted_arrival_i,
+        ll_last_arrival_j = ll_diag.last_accepted_arrival_j,
+        ll_last_gap = ll_diag.last_accepted_gap,
+        ll_last_similarity = ll_diag.last_accepted_similarity,
+        ll_last_scale = ll_diag.last_accepted_scale,
+        ll_last_inliers = ll_diag.last_accepted_inliers,
+        ll_last_residual_ratio = ll_diag.last_accepted_mean_residual_ratio,
+        ll_total_elapsed_ms = ll_diag.total_elapsed_ms,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

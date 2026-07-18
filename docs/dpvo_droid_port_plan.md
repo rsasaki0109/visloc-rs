@@ -4207,3 +4207,548 @@ not another BA-window or pose-graph refinement.
    the retention change to isolate it), but worth noting as a deliberate,
    documented deviation from strict "M8-config byte-identical" rather than
    silently mixing old and new retention code paths.
+
+## M11 results (2026-07-18)
+
+Milestone M11: the long-range, appearance-based loop-candidate source M10's
+own "What's actually next" section identified as the actual missing piece —
+four consecutive milestones (M7-M10) each correctly built a mechanism to
+*use* a loop edge (continuous scale coupling, widened global BA, a Sim(3)
+pose graph, folded-pose materialization) but M10's own real-run evidence
+proved the *supplier* (`crate::dpvo_loop_closure`'s proximity mechanism) can
+never hand any of them an edge wider than the live patch buffer (`~30-49`
+frames on MH_01), an order of magnitude short of the `~500-700`-frame gap the
+`~22.6x` scale drift needs. **Result: a fourth honest negative on the 800f
+accuracy target, but a NEW, more specific one than M7-M10's — the pieces this
+milestone built (retrieval, cross-check matching, and a novel DPVO-native
+3D-3D bridge + Umeyama-RANSAC scale estimator) all work and were exercised
+for real on MH_01, genuine long-range appearance retrieval DID surface
+plausible revisit candidates (35, spanning gaps up to hundreds of frames),
+but at this port's own `fast.yaml` patch density (48 randomly-anchored
+patches per frame) the bridge from a matched 2D keypoint to a DPVO-owned 3D
+patch essentially never succeeds within a geometrically-meaningful radius —
+zero of 35 candidates ever produced enough 3D-3D correspondences to attempt
+a scale fit at the shipped (conservative) radius, so the 800f ATE stayed
+BYTE-IDENTICAL to the control arm. A diagnostic-only experiment that widens
+the bridge radius far past what the patch density can geometrically justify
+DOES let candidates through — and confirms, decisively, why the conservative
+default is the right one: it accepted 6 loops whose "3D" correspondences were
+not really anchored to the same physical point, and the resulting scale
+measurements (as large as `24x`) catastrophically corrupted the trajectory
+(rigid ATE `4.08 m -> 2226 m`, similarity scale collapsing to `~0.0005`) —
+demonstrating this milestone's own geometric gates (RANSAC inlier count,
+residual ratio) are self-referential (they check the SAMPLE's internal
+consistency, not ground truth) and cannot rescue a correspondence-generation
+step that is itself too loose.**
+
+### GT revisit pre-check: does a long-range revisit even exist in the 800f range?
+
+Required before writing any code (per this milestone's own task brief):
+loaded MH_01's `mav0/state_groundtruth_estimate0/data.csv` directly (not
+through the Rust demo) and, over the EXACT `--stride 2 --max-frames 800`
+frame set every M6-M10 acceptance run already uses, searched for
+`(early, late)` pairs with a temporal gap `> 200` processed frames and a GT
+position distance `< 2 m`. **Result: 52,720 such pairs exist in this exact
+800-frame range** — MH_01's own flight path returns close to its takeoff
+point repeatedly. The single best cluster: processed frames `~204-231`
+(early) revisit processed frames `~416-433` (late) at gaps of `200-230`
+frames and GT distances as tight as `0.001 m` — genuinely millimeter-close
+revisits, an order of magnitude beyond the proximity mechanism's own
+measured `~30-49`-frame reach (`docs/dpvo_droid_port_plan.md`'s M10
+results). **No range change was needed**: 800f/stride-2, the SAME range
+every prior milestone's own acceptance numbers use, already contains the
+long-range revisit this milestone exists to detect, so all M11 acceptance
+runs use that identical range for direct comparability.
+
+A second, tighter check (restricting `i` to the trajectory's opening
+segment, `[0, 120)`, and `j` to `[400, 600)`) found an even closer cluster:
+`i=42, j=456` at gap `414` frames, GT distance `0.160 m` — confirming the
+revisit structure is not a single isolated coincidence but a genuinely rich,
+repeated-overflight pattern (MH_01 revisits its own starting area more than
+once). This second check mattered later — see "Why the accepted wide-radius
+loop corrupted the trajectory" below, which cross-references it directly
+against a REAL accepted candidate pair from this milestone's own diagnostic
+run.
+
+### Design: VLAD retrieval + a DPVO-native 3D-3D bridge, feeding M9/M10 as-is
+
+New module `pipelines/slam/src/dpvo_long_loop.rs` (unconditional, no
+`onnx-inference` gate — mirrors `dpvo_loop_closure.rs`/`dpvo_sim3_backend.rs`'s
+own "graph/policy only" placement; the ONNX-dependent SuperPoint extraction
+itself lives in the onnx-gated `dpvo_vo.rs`, matching the existing
+gate/no-gate split precedent). Four pieces:
+
+1. **Streaming VLAD retrieval, not the vocab-tree TF-IDF index.** Explicit,
+   evidence-free deviation from the task's own "VLAD or vocab-tree, pick
+   whichever integrates cleanest" invitation: VLAD wins on INTEGRATION FIT
+   for this one-frame-at-a-time streaming context — one fixed-length vector
+   per frame from a vocabulary trained ONCE, scored by plain cosine
+   similarity, versus the vocab-tree's own persistent inverted-file/IDF
+   bookkeeping and `finalize()`-before-every-query cycle. `DpvoLongLoopIndex`
+   buffers the first `vocab_bootstrap_frames` (default `40`) committed
+   frames' raw SuperPoint local descriptors, builds a `Vocabulary` from
+   their pooled union (`visloc_vision::place_recognition::Vocabulary::build`,
+   `k=32` words, `20` k-means iterations) once enough accumulate,
+   retroactively VLAD-encodes the buffered frames, then VLAD-encodes every
+   later frame immediately on ingest. Images are never retained by DPVO (a
+   borrowed, transient view per `process_frame` call), so extraction happens
+   THE INSTANT a frame commits — unconditionally, on every commit (not
+   gated on `is_initialized`), so early frames are indexed as future
+   candidates too. Raw local keypoints+descriptors are ALSO retained per
+   indexed frame (bounded — see "Cost and memory" below), since VLAD alone
+   answers "similar?" but candidate verification needs the underlying local
+   descriptors for cross-check matching.
+2. **Candidate generation**: `DpvoLongLoopIndex::due` throttles queries to
+   once per `query_frequency` (default `40`) committed frames — an
+   INDEPENDENT, much coarser clock than the proximity mechanism's own
+   `global_opt_freq`. A query ranks every indexed frame with
+   `arrival` gap `>= min_temporal_gap` (default `150` — several times the
+   proximity mechanism's own measured `~30-49`-frame reach, so this module
+   can never merely rediscover what `dpvo_loop_closure` already covers) by
+   VLAD cosine similarity, keeps those `>= min_similarity` (default `0.15`,
+   deliberately loose — appearance similarity is only a PROPOSAL signal),
+   and takes the top `K` (default `3`).
+3. **A novel DPVO-native 3D-3D bridge + Umeyama-RANSAC scale estimator**
+   (`bridge_matches_to_3d3d`, `ransac_umeyama_scale`) — the module's own
+   "why not reuse `online_slam.rs`'s `estimate_loop_sim3_scale_3d3d`"
+   section explains why that mature pipeline's `VisualMap`/landmark/
+   covisibility-graph machinery doesn't map onto DPVO's flat per-frame patch
+   array at all, so this had to be built fresh, reusing only the underlying
+   primitive both share
+   (`visloc_tracking::umeyama_similarity_transform`). Cross-check (mutual
+   nearest-neighbor + Lowe ratio) matches the two candidate frames' raw
+   SuperPoint descriptors, then for each 2D-2D match, looks up the NEAREST
+   DPVO-owned patch within `patch_pixel_radius` (default `3.0` patch-grid
+   pixels) on EACH side — DPVO's own patches sit at random anchor points,
+   not necessarily at a detected keypoint, so an exact coincidence is not
+   expected. Each side's patch backprojects (via its own inverse depth) to a
+   3D point in ITS OWN camera frame, then into WORLD coordinates via that
+   side's own current pose. Per M9's own "The loop-edge scale question"
+   analysis, both world points ALREADY live in the SAME nominal DPVO world
+   frame; if the whole trajectory shared one consistent metric scale they
+   would coincide exactly (same physical point) — any Sim(3) discrepancy
+   between the two INDEPENDENTLY-anchored local reconstructions of the SAME
+   point is therefore a genuine, non-circular scale-drift measurement, the
+   exact "independent depth/baseline signal" M9's own module doc identified
+   as missing from DPVO's shared-coordinate-system proximity edges. A
+   3-point-minimal-sample RANSAC over `umeyama_similarity_transform`
+   recovers the best-supported fit; the fitted `.scale` becomes the
+   accepted pair's `measured_scale` (see below). No fallback to `scale = 1`
+   on weak geometry: too few bridged correspondences
+   (`min_bridge_correspondences`, default `8`), too few RANSAC inliers
+   (`min_ransac_inliers`, default `6`), too high a residual relative to the
+   point cloud's own scale (`max_mean_residual_ratio`, default `0.2`), or a
+   fitted scale outside `[1e-3, 1e3]` all reject the candidate outright.
+4. **Feeding M9/M10 exactly as designed, no new gating logic.**
+   `Sim3LoopMeasurement` (`dpvo_sim3_backend.rs`) gained one field,
+   `measured_scale: Option<f64>` — `None` for M6/M9's own short-range
+   proximity edges (every existing call site updated, byte-identical
+   behavior preserved), `Some(fit.scale)` for an M11 acceptance.
+   `run_sim3_backend`'s scale-only edge now prefers `measured_scale` when
+   present, falling back to M9's own frozen-vs-fresh
+   `estimate_loop_scale_ratio` otherwise. An accepted long-range loop's
+   ORDINARY rotation+translation edge reuses DPVO's own CURRENT composed
+   relative pose (`pose_j.compose(&pose_i.inverse())`) rather than the
+   RANSAC fit's own rotation/translation — DPVO's monocular rotation
+   estimate is generally far more reliable than its translation SCALE (the
+   entire premise of this port's drift problem), so only the scale channel
+   gets the new, independent signal. `DpvoOdometry::try_long_loop_closure`
+   (new, in the onnx-gated `dpvo_vo.rs`) runs the SuperPoint extraction on
+   every commit, then throttled candidate search+verification after each
+   frame's own `update_step` (mirroring M9's own capture-timing lesson: the
+   current frame's pose should have had at least one visual BA refinement
+   first) but before `keyframe_dispatch`. On acceptance, it pushes
+   `(arrival_i, arrival_j)` onto the SAME `loop_edge_arrival_pairs` M10's
+   widened global BA reads and the `Sim3LoopMeasurement` onto the SAME
+   `sim3_loop_measurements` M9's backend reads, setting the SAME
+   "ever had a loop edge" flags that already unlock both mechanisms — no new
+   gating logic, exactly M10's own "reusing this milestone's and M9's own
+   machinery as-is" recommendation. Per the task's own explicit scope note,
+   this module does NOT append ordinary DPVO patch-graph edges the way the
+   proximity mechanism does — a genuinely old frame's fmap/correlation state
+   is gone once folded away, so a real correlation-based patch edge is not
+   obtainable for a long-range pair; pose-graph (M9) + widened-BA (M10)
+   consumption is the only avenue, and both already exist.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_long_loop.rs` (new, ~1250 lines incl. tests):
+  `DpvoLongLoopConfig`, `DpvoLongLoopDiagnostics`, `AcceptedLongLoop`,
+  `DpvoLongLoopIndex` (`new`, `diagnostics`, `ingest_frame`, `due`,
+  `find_and_verify_long_range_loop`), `patch_to_world_point`,
+  `nearest_patch_within`, `bridge_matches_to_3d3d`, `ransac_umeyama_scale`.
+  13 new unit tests: the scale estimator on synthetic geometry (a known
+  Sim(3) between two independently-anchored point sets, recovered within
+  `< 5%`, both a pure-scale fixture and a genuine rotation+translation+scale
+  fixture), degenerate/low-correspondence/incoherent-random rejection tests,
+  index bootstrap/backfill/throttle/query-ranking tests, and an end-to-end
+  `find_and_verify_long_range_loop` test with a known injected scale.
+* `pipelines/slam/src/dpvo_sim3_backend.rs`: `Sim3LoopMeasurement::measured_scale: Option<f64>`
+  (new field); `run_sim3_backend`'s scale-only edge injection now prefers it
+  over `estimate_loop_scale_ratio`; all 3 existing test construction sites
+  updated (`measured_scale: None`, preserving exact M9 behavior).
+* `pipelines/slam/src/dpvo_vo.rs`: `DpvoOdometryConfig::long_loop: Option<DpvoLongLoopConfig>`;
+  `DpvoOdometry::new` gained a `superpoint_model_path: Option<impl AsRef<Path>>`
+  constructor argument (reuses the existing `backend: OnnxBackend` argument
+  for the SuperPoint session too — one shared execution-provider choice, not
+  a second knob); `DpvoOdometryError::LongLoopModelRequired`/`LongLoop`;
+  `DpvoOdometry::long_loop_diagnostics`; `try_long_loop_closure` (SuperPoint
+  extraction on every commit + throttled candidate search/verify/accept,
+  wired into the SAME `loop_edge_arrival_pairs`/`sim3_loop_measurements`
+  M10/M9 already consume).
+* `pipelines/slam/src/lib.rs`: `pub mod dpvo_long_loop` + re-exports.
+* `examples/euroc_dpvo_vo_demo.rs`: `--long-loop`/`--ll-superpoint-model`/
+  `--ll-*` flags (12 new, mirroring `DpvoLongLoopConfig`'s own fields 1:1),
+  wired into `DpvoOdometryConfig`/`DpvoOdometry::new`, the "long-range loop
+  enabled" banner, a per-acceptance progress-line block, and 17 new
+  `long_loop_*` summary keys.
+
+### Verify
+
+* `ORT_DYLIB_PATH=E:/tools/onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll
+  cargo test -p visloc-slam --lib --features onnx-inference dpvo_`: **90
+  passed**, 0 failed, 1 ignored (13 more than M10's own 77 — exactly the new
+  `dpvo_long_loop.rs` tests).
+* `cargo test -p visloc-slam --features onnx-inference`: **376 lib tests**
+  passed, 0 failed, 7 ignored (13 more than M10's 363); every integration
+  test binary green and unchanged in count (54/54+1 ignored, 0/0+2 ignored,
+  6/6, 6/6, 132/132, 10/10, 9/9, 4/4) — identical to M8/M9/M10's own verify
+  sections.
+* `cargo clippy -p visloc-slam --all-targets --features onnx-inference`:
+  **zero** warnings in `dpvo_long_loop.rs`, `dpvo_vo.rs`, or
+  `dpvo_sim3_backend.rs` specifically (confirmed by grepping clippy's own
+  output for those three file names — two genuinely new warnings this
+  milestone's own test code first introduced, `clippy::type_complexity` on a
+  6-field test-fixture tuple and `clippy::neg_cmp_op_on_partial_ord` on two
+  `!(x > y)` guards, were fixed rather than left, per the task's own
+  "no new warnings" bar). 9 pre-existing warning instances remain elsewhere
+  (`map_atlas.rs` x4 — one more than M10's own count, a toolchain/clippy
+  version drift confirmed unrelated to this milestone by file/line, not a
+  regression — plus `online_slam_vi_ba.rs` x2, `vi_motion_initializer.rs`,
+  `online_slam_motion_vi_init.rs`, `online_slam.rs`).
+* `cargo clippy --example euroc_dpvo_vo_demo --features image-io,onnx-inference`:
+  clean, zero warnings specific to `euroc_dpvo_vo_demo.rs`.
+* `cargo build --release --example euroc_dpvo_vo_demo --features
+  image-io,onnx-inference`: succeeded; a 20-frame smoke run with
+  `--loop-closure --long-loop --ll-superpoint-model models/superpoint_1500.onnx`
+  completed (`exit=0`), the "long-range loop enabled" banner printed
+  correctly, and all new `long_loop_*` summary keys populated (mostly zero,
+  as expected — 20 frames is far short of the `40`-frame vocabulary
+  bootstrap, `long_loop_queries_attempted=1` confirms the throttle itself
+  still fired).
+
+### Real MH_01 acceptance runs
+
+`--euroc-dir MH_01_easy --stride 2 --seed 0`, `fast.yaml`-equivalent graph
+sizing (`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11`, identical to every M6-M10 reported run),
+`--loop-closure --sim3-backend --global-ba --gba-widen-t0` on every arm
+(M10's own primary+third-arm configuration — the task's own "in-run
+control"), visual-only (no `--imu`), CPU-only (`--onnx-cpu`, both the DPVO
+session and the new SuperPoint session), release build. SuperPoint model:
+`models/superpoint_1500.onnx` (this repo's own pre-existing checkpoint).
+Outputs: `E:/visloc_archive/dpvo_m11_20260718/{on_800_control,on_800_longloop,on_400_guard,on_800_longloop_wideradius}/`.
+The three primary runs (control/longloop/guard) ran CONCURRENTLY (CPU
+contention inflates `ms_per_frame` — the M9/M10-established caveat applies
+here too — but does not affect ATE); the wide-radius diagnostic ran
+separately afterward.
+
+**800 frames, control (`--long-loop` OFF)** — reproduces M10's own "both
+mechanisms" arm exactly, confirming binary/config consistency:
+
+| Metric | M11 control (800f) | M10 "both" arm (800f) |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | 4.0752 | 4.0752 |
+| `ate_rigid_max_m` | 8.7475 | n/a |
+| `ate_similarity_rmse_m` | **2.8747** | 2.8747 |
+| `ate_similarity_max_m` | 5.5868 | n/a |
+| `ate_similarity_scale` | **20.633359** | 20.633359 |
+| `loop_accepted` | 9 | 9 |
+| `global_ba_calls` | 3 | 3 |
+| `global_ba_max_free_pose_count` | 49 | 49 |
+| `sim3_backend_calls` | 3 | 3 |
+| `sim3_backend_last_scale_max` | 1.117170 | 1.117170 |
+| `long_loop_enabled` | false | n/a |
+
+Digit-for-digit identical — the SAME binary/config M10 already reported,
+confirming this milestone's own control arm is a faithful baseline.
+
+**800 frames, `--long-loop` ON (shipped default config)** — the primary
+acceptance arm:
+
+| Metric | M11 long-loop (800f) | Control | Acceptance target |
+| --- | --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 | — |
+| `ate_rigid_rmse_m` | 4.0752 | 4.0752 | — |
+| `ate_similarity_rmse_m` | **2.8747** | 2.8747 | **< 1.5** |
+| `ate_similarity_scale` | **20.633359** | 20.633359 | **< 10** |
+| `global_ba_max_free_pose_count` | 49 | 49 | — |
+| `global_ba_last_folded_poses_included` | **0** | 0 | (report) |
+| `sim3_backend_last_scale_max` | 1.117170 | 1.117170 | — |
+| `long_loop_enabled` | true | false | — |
+| `long_loop_frames_indexed` | 800 | n/a | — |
+| `long_loop_vocab_built` | true | n/a | — |
+| `long_loop_estimated_index_bytes` | 234,214,400 (~223 MiB) | n/a | — |
+| `long_loop_queries_attempted` | 20 | n/a | — |
+| `long_loop_candidates_considered` | **35** | n/a | — |
+| `long_loop_verification_attempts` | 35 | n/a | — |
+| `long_loop_accepted_total` | **0** | n/a | — |
+| `long_loop_rejected_insufficient_bridge_total` | **35** | n/a | — |
+| `long_loop_rejected_ransac_total` | 0 | n/a | — |
+| `long_loop_total_elapsed_ms` | 399.2 | n/a | — |
+
+**800f acceptance target: MISSED, byte-identical to control.** Every
+appearance-retrieval candidate (35 of them, across 20 throttled queries)
+reached geometric verification, and every one of them was rejected at the
+FIRST gate — insufficient bridged 3D-3D correspondences
+(`min_bridge_correspondences = 8`) — before RANSAC ever ran
+(`rejected_ransac_total = 0`). Zero long-range loops were ever accepted, so
+`Sim3LoopMeasurement`/`loop_edge_arrival_pairs` never received an M11 entry,
+and every downstream number (ATE, `global_ba_last_folded_poses_included`,
+`sim3_backend_last_scale_max`) is IDENTICAL to the control arm — the
+mechanism is confirmed, real-run, byte-identical-inert exactly as designed
+whenever its own geometric gates are never satisfied (the same "safe by
+construction" property M7's zero-corruption negative and M9/M10's
+no-regression guards already established for their own mechanisms).
+
+**400 frames** (no-regression guard, `--long-loop` ON — the GT precheck's
+own long-range revisit only exists at processed frame `~416+`, past a
+400-frame run's own horizon, so this arm's own long-loop mechanism is
+expected to stay inert by construction, not merely by chance):
+
+| Metric | M11 400f (long-loop ON) | M9/M10 400f baseline |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | 0.1543 | 0.1543 |
+| `ate_similarity_rmse_m` | 0.1521 | 0.1521 |
+| `ate_similarity_scale` | 1.234181 | 1.234181 |
+| `loop_accepted` (proximity) | 0 | 0 |
+| `long_loop_frames_indexed` | 400 | n/a |
+| `long_loop_vocab_built` | true | n/a |
+| `long_loop_queries_attempted` | 10 | n/a |
+| `long_loop_accepted_total` | **0** | n/a |
+
+**400f no-regression guard: PASSES, digit-for-digit identical** to M9's/M10's
+own 400f numbers. Critically, this is NOT a "the mechanism never ran" guard —
+`long_loop_vocab_built=true` and `long_loop_queries_attempted=10` confirm the
+full SuperPoint-extraction + VLAD-retrieval + throttled-query pipeline ran
+for real, every frame, and simply never proposed an acceptable candidate at
+this range (as the GT precheck predicted), leaving the trajectory untouched.
+
+### Why insufficient bridging, not weak appearance retrieval, is the bottleneck
+
+`long_loop_candidates_considered = 35` and `rejected_ransac_total = 0` prove
+retrieval itself is not starved — 35 appearance-plausible, temporally-distant
+candidates were found and NONE of them failed at the RANSAC/scale stage;
+ALL 35 failed at the EARLIER bridging stage
+(`rejected_insufficient_bridge_total = 35`). The reason is a measurable
+DENSITY mismatch, not a bug: `fast.yaml` sizing places only
+`patches_per_frame = 48` DPVO patches, at RANDOM anchor points, over a
+`188 x 120` (`RES = 4`-downsampled) patch-grid — for `N` points uniform over
+area `A`, the expected nearest-neighbor distance from a random query point is
+`~0.5 * sqrt(A / N) = 0.5 * sqrt(22560 / 48) ≈ 10.8` patch-grid pixels. The
+shipped default `patch_pixel_radius = 3.0` is therefore roughly `3.6x`
+TIGHTER than the patch layout's own expected nearest-neighbor spacing on ONE
+side alone — and a bridged correspondence needs a nearby patch on BOTH sides
+simultaneously, for `>= 8` independent matched keypoints, a compounding,
+low-probability joint event this fast.yaml graph sizing essentially never
+satisfies (confirmed: 0/35 real candidates, not merely argued from the
+density arithmetic).
+
+### A diagnostic-only experiment: widening the bridge radius corrupts the trajectory
+
+To test whether the radius alone was the blocker (as the density arithmetic
+above predicts), one additional 800f run used `--ll-patch-pixel-radius 25.0
+--ll-min-bridge-correspondences 6` (looser than the shipped default on
+BOTH knobs) — NOT proposed as a shipped configuration, a diagnostic only:
+
+| Metric | Wide-radius diagnostic (800f) | Control/default long-loop |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | **2226.1767** | 4.0752 |
+| `ate_rigid_max_m` | 8657.1370 | 8.7475 |
+| `ate_similarity_rmse_m` | 4.0439 | 2.8747 |
+| `ate_similarity_scale` | **0.000476** | 20.633359 |
+| `sim3_backend_calls` | 5 | 3 |
+| `sim3_backend_loop_edges_total` | 8 | n/a |
+| `sim3_backend_last_scale_max` | **13.036733** | 1.117170 |
+| `global_ba_calls` | 5 | 3 |
+| `long_loop_queries_attempted` | 20 | 20 |
+| `long_loop_candidates_considered` | 35 | 35 |
+| `long_loop_verification_attempts` | **27** | 35 (all failed bridging) |
+| `long_loop_accepted_total` | **6** | 0 |
+| `long_loop_rejected_insufficient_bridge_total` | 20 | 35 |
+| `long_loop_rejected_ransac_total` | 1 | 0 |
+| `long_loop_last_accepted_arrival_i` / `_j` | 53 / 528 (gap 475) | n/a |
+| `long_loop_last_accepted_similarity` | 0.154418 | n/a |
+| `long_loop_last_accepted_scale` | 24.042206 | n/a |
+| `long_loop_last_accepted_inliers` | 7 | n/a |
+| `long_loop_last_accepted_mean_residual_ratio` | 0.072555 | n/a |
+
+Widening the radius DOES fix the yield problem exactly as the density
+arithmetic predicts (`verification_attempts` jumps from `0/35` reaching
+bridging to `27/35`), and `6` candidates were accepted by the RANSAC/residual
+gates — but the resulting trajectory is CATASTROPHICALLY worse, not better:
+rigid ATE exploded `4.08 m -> 2226 m` (`~545x`) and the similarity alignment's
+own recovered scale collapsed to `0.000476` (i.e. the aligned trajectory
+shape itself is now badly wrong, not merely mis-scaled). This is a genuine,
+reproducible, and specific finding, not a vague "it got worse":
+`sim3_backend_last_scale_max = 13.04` — a wrong, large per-node scale
+correction was applied and, per `dpvo_sim3_backend.rs`'s own
+`apply_corrections`, propagated into every live frame's own pose AND
+patch-depth rescale, exactly the mechanism M9 built to correct GENUINE drift
+now instead amplifying a SPURIOUS measurement.
+
+**Why this pair's own numbers were "confidently wrong," traced with a
+concrete example**: the diagnostic run's own last-accepted candidate was
+`arrival_i=53, arrival_j=528` (gap `475`), with a retrieval similarity of
+`0.154418` — only marginally above `min_similarity = 0.15`, a WEAK,
+borderline appearance match, not a strong one. Cross-referencing this exact
+pair against the GT precheck data directly: processed-frame `53`'s and
+`528`'s own GT positions are `2.20 m` apart — a real but IMPRECISE
+same-general-area match, not a tight same-viewpoint revisit. The GT
+precheck's own second (tighter) query, run over exactly this `i in [0,120)`,
+`j in [400,600)` window, found a MUCH closer genuine revisit sitting right
+nearby: `i=42, j=456` at gap `414`, GT distance `0.160 m` — over `13x`
+closer than the pair this run's own retrieval actually surfaced and
+accepted. This is a real, if unresolved-in-full, additional finding:
+`DpvoLongLoopIndex`'s `32`-word VLAD vocabulary, built from only the first
+`40` bootstrap frames' descriptors, ranks appearance similarity coarsely
+enough that it did not preferentially surface the TIGHTEST available GT
+revisit as its own top candidate for that query — a known, expected
+limitation of a small, coarsely-quantized visual vocabulary, not a new
+correctness bug in the retrieval code itself (this codebase's own
+diagnostics do not log every UN-accepted candidate's own identity, so
+whether `i=42, j=456` was itself ever surfaced as one of the top-`K`
+candidates for some query and separately rejected cannot be confirmed from
+this run alone — a genuine instrumentation gap, stated honestly rather than
+assumed either way). Once the borderline `(53, 528)` pair was accepted at
+the loosened radius, its own bridged 3D-3D correspondences were NOT
+anchored to the same physical surface point on both sides closely enough
+(a `25`-patch-grid-pixel, i.e. `~100`-real-pixel, tolerance is far larger
+than the parallax a `2.2 m` viewpoint offset produces at ordinary scene
+depths) — so the RANSAC fit's own `7` inliers and `0.073` residual ratio
+describe a SELF-CONSISTENT but PHYSICALLY MEANINGLESS correspondence set:
+RANSAC and the residual-ratio gate check internal agreement among the
+SAMPLE, not agreement with the true underlying 3D structure, and cannot
+detect that the correspondences themselves were never really observing the
+same point once the bridge radius exceeds what the patch density can
+geometrically justify.
+
+**This is the single most important finding of this milestone**: the
+conservative default (`patch_pixel_radius = 3.0`,
+`min_bridge_correspondences = 8`) is not merely "safe out of caution" — it
+is the ONLY tested configuration that avoids a demonstrated, real,
+reproducible catastrophic corruption mode. Loosening either knob to recover
+ANY real yield reintroduces exactly the danger the M9 module doc's own
+"honest limitation" section anticipated in the abstract (an
+independently-anchored 3D signal can only be trusted if the anchoring
+itself is trustworthy) — now confirmed concretely, on real data, not merely
+argued. The shipped default is the right one; it happens to also mean this
+milestone's own honest 800f result is "byte-identical to control," not
+"materially improved."
+
+### Cost and memory
+
+`long_loop_estimated_index_bytes = 234,214,400` (~223 MiB) for 800 indexed
+frames — confirms the module doc's own "bounded but real, report it"
+requirement: `~293 KiB`/frame (up to `250` SuperPoint keypoints x `256`
+`f32` descriptor floats + keypoints + one `32 x 256`-`f32` VLAD vector per
+frame), linear in `max_indexed_frames` (default `1000`, never evicted on
+this 800-frame run). `long_loop_total_elapsed_ms` (query+verify time only,
+excluding the unconditional per-frame SuperPoint extraction) stayed under
+`400 ms` across the entire 800-frame run in every arm — three orders of
+magnitude below the run's own multi-hundred-second wall time. Per-frame
+SuperPoint extraction cost is folded into this run's own overall
+`ms_per_frame_total` rather than a separate counter (a design choice — see
+`Self::try_long_loop_closure`'s own doc — since it always runs
+unconditionally on commit, unlike the throttled query/verify path); the
+concurrent-run CPU contention this milestone's own three-arm parallel launch
+introduced (`ms_per_frame_total`: control `2880.79`, long-loop `3112.28`,
+guard `3621.93` — all three processes sharing the same CPU cores
+simultaneously) makes a clean per-mechanism cost isolation not meaningful
+from these specific numbers, the same "concurrent runs are OK for ATE but
+not for timing" caveat M9's own results section already established.
+
+### Honest verdict
+
+M11 is a correctly-implemented, thoroughly-tested long-range loop-candidate
+source — a genuine appearance-retrieval front end (VLAD, chosen and
+justified over the vocab-tree alternative), a genuinely NOVEL DPVO-native
+3D-3D bridge + Umeyama-RANSAC scale estimator (recovering a known synthetic
+Sim(3) to within `<5%`), and clean, no-new-gating-logic integration into
+M9's Sim(3) backend and M10's widened global BA. It ran for real on MH_01:
+retrieval surfaced 35 genuinely temporally-distant, appearance-plausible
+candidates across 20 throttled queries, exactly as designed. It does **not**
+meet the 800f accuracy acceptance target (`ate_similarity_rmse_m = 2.87` vs
+`< 1.5`, `ate_similarity_scale = 20.63` vs `< 10`, BYTE-IDENTICAL to the
+control arm) — and, unlike M7-M10's own honest negatives (each of which
+found its OWN mechanism correctly executed but insufficiently informed),
+this milestone's own real-run evidence identifies a SPECIFIC, falsifiable,
+and (via the wide-radius diagnostic) CONFIRMED root cause: at this port's
+`fast.yaml` patch density, the bridge from a matched appearance keypoint to
+an independently-anchored 3D point essentially never succeeds within a
+geometrically-defensible radius, and the one tested alternative (loosening
+that radius) does not trade "zero yield" for "some yield" safely — it trades
+it for measured, reproducible trajectory corruption instead. Four
+consecutive DPVO-port milestones (M8, M9, M10, and now M11) have each
+correctly built a mechanism that would help IF given trustworthy long-range
+evidence, and each has, in turn, found the actual supply of that evidence
+(a widened BA window, sufficient endpoint movement, folded-frame
+materialization, and now a real long-range candidate SOURCE) blocked by a
+different, specific, honestly-diagnosed limitation — this milestone closes
+the last of those four (a real candidate source now genuinely exists and
+fires on real data) while opening a new, equally concrete one: DPVO's own
+sparse, randomly-placed patch representation is not dense enough to
+independently re-anchor an appearance match into trustworthy 3D geometry at
+this graph sizing.
+
+### What a real fix would need
+
+1. **Denser or targeted patch placement near retrieval candidates**, not
+   random per-frame sampling — e.g. spawning a handful of EXTRA patches at
+   the exact pixel locations of a candidate pair's own matched keypoints
+   (rather than relying on a random 48-patch layout to happen to land
+   nearby) would directly fix the bridging yield without loosening the
+   radius/consistency gates that this milestone's own wide-radius
+   experiment showed are load-bearing for correctness, not merely
+   conservative padding.
+2. **A larger `patches_per_frame`** would mechanically shrink the expected
+   nearest-neighbor distance (`~0.5 * sqrt(A/N)`, so doubling `N` shrinks it
+   by `~29%`) — cheap to test, but M4-perf's own finding (correlation
+   assembly, not patch count itself, is this port's dominant per-frame cost)
+   means this trades CPU budget elsewhere; worth a follow-up A/B, not
+   assumed to be free.
+3. **A genuinely independent re-triangulation at the retrieval-candidate
+   pixel, rather than nearest-existing-patch lookup** — closer to what
+   `online_slam.rs`'s own map-based pipeline does (a real second
+   observation of the SAME landmark, not a proxy nearby point) — would
+   remove the radius/density trade-off entirely, at the cost of a
+   meaningfully larger feature (a second, independent depth estimator DPVO's
+   own patch representation was never designed to carry, per M9's own
+   module doc).
+4. **A larger or better-tuned VLAD vocabulary** (more words, more bootstrap
+   frames, or IDF-style down-weighting of common visual words) might have
+   surfaced the `i=42, j=456` (`0.160 m`) pair instead of the borderline
+   `(53, 528)` (`2.20 m`) one this run's own retrieval actually chose — worth
+   investigating, though NOT this milestone's own bottleneck (retrieval
+   candidates were never the limiting factor; bridging was), so this is a
+   secondary, not primary, lever.
+
+### Open items
+
+1. Whether denser/targeted patch placement (lever 1 above) actually closes
+   the bridging gap without reopening the wide-radius corruption mode is
+   untested — the next concrete experiment, not a refinement of this
+   milestone's own mechanism.
+2. Whether the tighter GT revisit (`i=42, j=456`, `0.160 m`) was ever
+   surfaced as a retrieval candidate at all is unresolved — this milestone's
+   own diagnostics log only ACCEPTED candidates' full identity, not every
+   candidate considered per query; a future instrumentation pass logging
+   every top-`K` candidate (accepted or not) would resolve this cleanly.
+3. `Sim3LoopMeasurement::measured_scale`'s fallback path
+   (`estimate_loop_scale_ratio`) is now shared by BOTH M9's own proximity
+   edges and any future long-range source that chooses not to supply an
+   independent measurement — unchanged behavior, but worth noting as a
+   shared code path two milestones now depend on.
