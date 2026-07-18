@@ -348,6 +348,7 @@ fn ba_fixture_two_iterations_matches_reference_within_1e_4() {
         edges,
         targets,
         weights,
+        depth_damping: None,
     };
     let config = DpvoBaConfig {
         iterations: 2,
@@ -422,6 +423,7 @@ fn ba_fixture_one_iteration_matches_reference_within_1e_4() {
         edges,
         targets,
         weights,
+        depth_damping: None,
     };
     let config = DpvoBaConfig {
         iterations: 1,

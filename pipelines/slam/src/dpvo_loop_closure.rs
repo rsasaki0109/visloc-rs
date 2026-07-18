@@ -702,6 +702,7 @@ mod tests {
             edges: temporal_edges.clone(),
             targets: temporal_targets.clone(),
             weights: vec![Vector2::new(1.0, 1.0); temporal_edges.len()],
+            depth_damping: None,
         };
         let solved_no_loop = dpvo_ba(&problem_no_loop, &config).expect("ba solve");
         let error_no_loop = (solved_no_loop.poses[3].translation - true_poses[3].translation).norm();
@@ -720,6 +721,7 @@ mod tests {
             edges: edges_with_loop,
             targets: targets_with_loop,
             weights: vec![Vector2::new(1.0, 1.0); temporal_edges.len() + 1],
+            depth_damping: None,
         };
         let solved_with_loop = dpvo_ba(&problem_with_loop, &config).expect("ba solve");
         let error_with_loop = (solved_with_loop.poses[3].translation - true_poses[3].translation).norm();

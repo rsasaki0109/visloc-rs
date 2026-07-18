@@ -6119,3 +6119,415 @@ next steps.
   pose chain has become self-consistently over-fit," which is closer to
   what M8-M13's own scale-correction backends would want to trigger on
   than a literal hover would be. Not explored further here.
+
+## M15 results (2026-07-19)
+
+Milestone M15: implement M14's own "what a real fix would need" Option B
+("depth-trust damping" — let hover-span frames commit NORMALLY, preserving
+the baseline's own gradual `KEYFRAME_THRESH`-decimated reconnection through
+the hover that M14's freeze destroyed, but heavily damp the depth channel of
+whichever patches DO commit while the regime is active, via a per-patch
+multiplier on `dpvo_ba`'s own Tikhonov `lmbda`, so they contribute
+rotation/pose constraints without dragging scale) on the SAME
+`LowParallaxRegimeState` detector M14 built and calibrated. **Result: a
+THIRD honest negative, but a precisely diagnosed one** — the mechanism is
+implemented exactly as scoped (per-patch depth damping verified in the BA's
+own Schur solve via three synthetic unit tests; the flag/un-flag lifecycle
+verified via seven more; `tracked_fraction` stays `1.0000` throughout, unlike
+M14's collapse to `0.70`, because DepthDamp never rejects a frame) — yet a
+real MH_01 800f run still ends up WORSE than control
+(`ate_similarity_scale` `20.63 -> 26.77`), and the scale-vs-frame profile
+pinpoints exactly why: every damped patch un-flags in a single ~20-frame
+burst immediately at hover exit (`currently_damped_frames` `236 -> 15 -> 0`
+between processed frames `451` and `481`), reproducing a milder version of
+M14's own "abrupt resume" failure mode one layer deeper — not an abrupt
+*admission* this time, but an abrupt *un-damping* of ~230 already-committed,
+still poorly-constrained-depth patches all at once, landing directly on top
+of the ramp's own onset window.
+
+### Mechanism: per-patch depth damping threaded through the Schur solve
+
+**The depth-channel Tikhonov term becomes per-patch, not global-scalar.**
+`dpvo_patch_ba.rs`'s `dpvo_ba_step` (the direct port of `ba.py`'s `BA()`)
+computed `Q = 1 / (C + lmbda)` (`ba.py:158`) as one scalar `lmbda` shared by
+every patch in the problem, for every milestone through M14. `DpvoBaProblem`
+gained a new field:
+
+```rust
+pub struct DpvoBaProblem {
+    // ...poses, patches, intrinsics, edges, targets, weights (unchanged)...
+    pub depth_damping: Option<Vec<f64>>,
+}
+```
+
+`None` (every pre-M15 call site) reproduces the original expression
+byte-for-byte — confirmed by the existing `ba_fixture_*_matches_reference`
+parity tests against the real upstream-derived `ba_fixture.npz` still
+passing unmodified. `Some(v)`, indexed by the SAME global patch id
+`patches`/`edges` already use (not the Schur solve's own internal
+deduplicated "used patches" local index — a real off-by-index risk the
+`depth_damping_is_indexed_by_global_patch_id_not_by_used_patches_local_position`
+test pins directly, using a fixture with a deliberately-unreferenced global
+patch id so `local != global` for at least one entry), replaces the `q`
+computation with `q[k] = 1 / (C[k] + lmbda · depth_damping[k])`. This is
+carried across `dpvo_ba`'s own multi-iteration loop (`dpvo_ba_step` called
+`config.iterations` times, re-linearizing each time) by copying the field
+forward in `dpvo_ba_step`'s own return value, so a damped patch stays damped
+on iteration 2, not just iteration 1.
+
+**Why this surgically targets exactly the failure mode M13 diagnosed**: a
+low-parallax patch's depth Jacobian `jz` (how much the reprojected pixel
+moves per unit inverse-depth) is tiny when there is little baseline between
+the observing frames — so its own Hessian contribution `C[k] =
+Σ w·jz²` is tiny too, and `q[k]` is normally dominated by the bare `lmbda`
+FLOOR rather than real visual evidence, letting BA-noise-driven residuals
+produce an outsized, effectively-unconstrained depth update. Inflating that
+floor via a per-patch multiplier directly counters this — confirmed
+numerically by the first unit test below, which had to be built on a
+deliberately near-zero-baseline (`1e-4` m translation) fixture: an earlier
+attempt using the SAME well-conditioned fixture the module's other tests
+share showed `C[k]` already dominating `lmbda` outright, so even a 1000x
+multiplier changed the depth update by under 1% — the wrong regime to prove
+the mechanism in, and now documented as such directly in the fixture's own
+doc comment (`near_zero_parallax_problem`).
+
+**Response selection, reusing the SAME detector state machine unchanged.**
+`LowParallaxResponse` (`Freeze` | `DepthDamp`) is a new field on
+`DpvoLowParallaxConfig` (default `Freeze`, so M14's own behavior and every
+one of its tests are unaffected without the new field being touched).
+`LowParallaxRegimeState`'s own enter/exit/one-shot-disarm hysteresis logic
+is untouched — only `DpvoOdometry::low_parallax_gate`'s final `match` on
+`cfg.response` differs: `Freeze` still calls `reject_pending_frame` exactly
+as M14 built it; `DepthDamp` never rejects at all — the candidate commits
+through the ordinary `commit_frame` + `KEYFRAME_THRESH` decimation path,
+byte-identical to a run with `low_parallax: None` except for one thing: if
+`LowParallaxRegimeState::in_regime()` is true for that commit,
+`DpvoOdometry::process_frame` flags the just-committed frame's
+`patches_per_frame` patches into a new free-standing (no ONNX dependency,
+mirroring `LowParallaxRegimeState`'s own testability precedent)
+`LowParallaxDampState`.
+
+**Flagging is frame-level, not per-patch** — every patch born in the same
+frame shares one anchor pose/timestamp, so "how much real parallax has
+accumulated since birth" is the same signal for all of that frame's
+patches, a documented simplification that keeps the bookkeeping a plain
+`HashSet<usize>` keyed by `DpvoGraphFrame::arrival_index` (stable across
+`DpvoPatchGraph` compaction on keyframe removal or folding, unlike a live
+index — the same stability property M8's inactive-edge retention and M11's
+long-loop indexing already rely on) rather than a second per-patch parallel
+`Vec` needing its own manual keyframe-removal compaction hook the way
+`frame_pyramids`/`patch_gmap`/`patch_imap` need. `LowParallaxDampState::multipliers`
+builds the actual `depth_damping` vector for a given `dpvo_ba` call by
+mapping each block's frame arrival index through the flagged set — threaded
+into all three `dpvo_ba` call sites that matter for a visual-only run: the
+per-frame windowed solve (`DpvoOdometry::update_step`) and both Milestone
+M8/M10 global-BA passes (`run_legacy_global_ba`/`run_widened_global_ba`,
+including the widened pass's folded-frame prefix, resolved via
+`gathered.folded_arrivals`). `dpvo_vi_ba.rs`'s separately-duplicated visual
+assembly (module doc: "a deliberate, tested duplication") is NOT threaded —
+out of scope for M15's visual-only acceptance runs (`config.imu` stays
+`None` throughout), a documented limitation.
+
+### Un-flag rule: age-based, not a repeated geometric flow probe — and why that choice, though correct, still produced a cliff
+
+A flagged frame un-flags once `DpvoLowParallaxConfig::unflag_after_commits`
+further frames have committed since its OWN birth (an `arrival_index` gap)
+**AND** the regime is no longer active — `LowParallaxDampState::advance_unflagging`
+is a hard no-op while `still_in_regime` is true, so nothing can un-flag
+mid-hover no matter how old it gets. Age, not a repeated `flow_mag` probe,
+was chosen deliberately: M14's own "Two more real-run findings" already
+proved geometric flow reprojected through a patch's own possibly-still-bad
+depth is a noise floor unrelated to true motion — reusing it as the UN-flag
+signal risked the identical contamination immediately after a patch's own
+depth was, by construction, the least-constrained thing in the graph.
+
+**This choice is correct in isolation (verified structurally: seven
+free-standing unit tests in `low_parallax_damp_tests` cover flag
+idempotency, the `still_in_regime` guard, age-threshold un-flagging, and a
+"self-cleaning" property — an entry ages out purely from `now` growing even
+if its owning frame was pruned from the live graph long before, with no
+keyframe-removal hook needed) but interacts badly with a hover much LONGER
+than `unflag_after_commits`.** With the calibrated hover span (`216 -> 461`,
+245 processed/committed frames — nearly every hover frame commits under
+`DepthDamp`, unlike control's own ~91% *fold* rate, because folding removes
+a frame from the ACTIVE window later, not at commit time) and
+`unflag_after_commits = 16`, every frame born more than 16 commits before
+the eventual exit is ALREADY past its own age threshold the instant the
+regime exits — so the very first `advance_low_parallax_unflagging` call
+after exit un-flags essentially the WHOLE accumulated population at once.
+Real progress-line evidence from `mech_on_800.log`
+(`hover_currently_damped_frames`, sampled every 10 frames):
+
+| processed frame | 441 | 451 | 461 (exit) | 471 | 481 | 491+ |
+| --- | --- | --- | --- | --- | --- | --- |
+| `currently_damped_frames` | 226 | 236 | 15 | 5 | 0 | 0 |
+
+230 of 245 ever-flagged frames un-flag within the SAME 10-frame progress
+interval as the exit event itself, and the last 15 drain out within another
+20 frames — a real, measured "mass un-flag cliff," not a hypothesis. This
+lands directly on top of control's own already-diagnosed ramp onset window
+(`frame_end≈479-519` per M13/M14's own profiling), compounding it rather
+than easing the transition the way Option B was meant to.
+
+### Damp-factor sweep (550f calibration range, `unflag_after_commits=16` fixed)
+
+`--patches-per-frame 48 --removal-window 16 --optimization-window 7
+--patch-lifetime 11 --loop-closure --sim3-backend --global-ba --gba-widen-t0
+--long-loop --ll-superpoint-model models/superpoint_1500.onnx`, visual-only,
+`--onnx-cpu`, MH_01 550f stride 2 seed 0 — this milestone's own control
+lineage, run fresh against the M15 binary (not reused from M14, since a
+rebuild shifts RANSAC/HashMap ordering per this codebase's own documented
+gotcha):
+
+| `depth_damp_factor` | `ate_rigid_rmse_m` | `ate_similarity_rmse_m` | `ate_similarity_scale` |
+| --- | --- | --- | --- |
+| control (mechanism off) | 0.5990 | 0.5733 | 2.5059 |
+| 100 | 0.6159 | 0.6044 | 2.2151 |
+| 1000 | 0.6141 | 0.5995 | 2.3761 |
+| 10000 | 0.6183 | 0.6083 | 2.1754 |
+| 1,000,000 | 0.6187 | 0.6091 | 2.1546 |
+
+Scale moves toward `1.0` at every damp factor tried (a real, if modest,
+`~12-14%` reduction, saturating between `10000` and `1e6` — consistent with
+`q[k] = 1/(C[k] + lmbda·multiplier)` asymptoting once the multiplier term
+dominates `C[k]` outright), but rigid/similarity RMSE are consistently
+`~2-6%` WORSE than control at every factor, and the ordering between `100`
+and `1000` is non-monotonic (`2.2151` then `2.3761` before resuming its
+downward trend at `10000`) — a real property of a highly-coupled nonlinear
+Gauss-Newton solve under re-weighted residuals, not a bug (confirmed: the
+same non-monotonicity is absent from the `damped_solve_count`/
+`frames_flagged_total` diagnostics, which are identical at every factor —
+only the SOLVED trajectory differs). `depth_damp_factor = 10000` was chosen
+for the 800f/400f acceptance runs below: past the steepest part of the
+saturation curve, without the extra risk of an even larger, untested
+multiplier.
+
+### Real MH_01 acceptance runs
+
+Same recipe as M14's own control (reproduced digit-for-digit as this
+milestone's control lineage — see below), visual-only, CPU-only, release
+build. Outputs: `E:/visloc_archive/dpvo_m15_20260719/{control_800,mech_on_800,control_400,mech_on_400,control_550,mech550_damp100,mech550_damp1000,mech550_damp10000,mech550_damp1e6}/`.
+
+**800 frames — target MISSED, and WORSE than control, same shape as M14's own miss:**
+
+| Metric | Control (mechanism off) | Mechanism ON (`DepthDamp`, factor `10000`) |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | 4.0752 | 4.1030 |
+| `ate_similarity_rmse_m` | 2.8747 | 2.9486 |
+| `ate_similarity_scale` | 20.633359 | 26.772934 |
+| `loop_accepted` (proximity) | 9 | 9 |
+| `hover_times_entered`/`_exited` | 0 / 0 | 1 / 1 |
+| `hover_last_enter_frame`/`_exit_frame` | none / none | 216 / 461 |
+| `hover_frames_flagged_total` | 0 | 245 |
+| `hover_unflagged_total` | 0 | 245 |
+| `hover_damped_solve_count` | 0 | 248 |
+
+The control arm's own numbers (`4.0752`/`2.8747`/`20.633359`,
+`loop_accepted=9`) reproduce M12/M14's own control digit-for-digit,
+confirming this milestone's control lineage is a faithful baseline. Unlike
+M14, `tracked_fraction` and `loop_accepted` are BOTH fully preserved (Option
+B never suppresses a frame, so proximity loop closure loses none of its own
+candidate pairs) — a genuine structural improvement over the freeze
+response — but the target metric itself, `ate_similarity_scale`, moved
+FARTHER from `1.0` than control (`20.6 -> 26.8`, vs. M14's own `20.6 ->
+26.6` — nearly identical magnitude of harm, via a different mechanism).
+
+**400 frames — no-regression guard: a real, if mild, regression — nowhere near M14's collapse:**
+
+| Metric | Control (mechanism off) | Mechanism ON |
+| --- | --- | --- |
+| `tracked_fraction` | 1.0000 | 1.0000 |
+| `ate_rigid_rmse_m` | 0.1543 | 0.1599 |
+| `ate_similarity_rmse_m` | 0.1521 | 0.1575 |
+| `ate_similarity_scale` | 1.234181 | 1.264543 |
+| `hover_times_entered`/`_exited` | 0 / 0 | 1 / 0 |
+| `hover_frames_flagged_total` | 0 | 185 |
+
+The regime enters at frame `216` (deterministic up to that point, same as
+800f) and the 400-frame window ends at frame `400`, well before the `461`
+exit — so every one of the 185 flagged frames stays damped (never un-flags)
+for the rest of this run, and the "mass un-flag cliff" never has a chance to
+fire at all. The result: `tracked_fraction` stays `1.0000` (M14's collapse
+to `0.5375` does not recur — the headline structural win of Option B), and
+both RMSE numbers regress a real but mild `~3.5-3.6%`, with scale moving
+`~2.5%` farther from `1.0` (`|1.235-1|` -> `|1.265-1|`) — this does not
+cleanly clear "not materially worse," but it is not remotely the same
+severity of failure M14's guard produced (`+18-19%` RMSE, `tracked_fraction`
+`0.54`, a scale-sign flip).
+
+### Profile-flatness evidence: the ramp's onset is unmoved; the mechanism reduces mid-ramp steepness for ~100 frames, then overshoots
+
+`m15_scale_profile.py` (a verbatim copy of M13/M14's own profiler,
+`RUNS` repointed at this milestone's own trajectories) computes the same
+expanding-window (`[0, k)`) Umeyama scale `ate_similarity_scale` is a
+special case of:
+
+| `frame_end` | 199 | 299 | 399 | 459 | 479 | 499 | 519 | 559 | 599 | 639 | 679 | 719 | 759 | 799 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Control | 0.615 | 1.222 | 1.309 | 1.249 | 1.116 | 1.035 | 1.358 | 3.246 | 6.341 | 9.874 | 13.578 | 17.348 | 19.756 | 20.633 |
+| Mechanism ON | 0.557 | 1.118 | 1.278 | 1.317 | 1.275 | 1.244 | 1.403 | 2.773 | 5.729 | 10.388 | 16.140 | 22.129 | 25.774 | 26.773 |
+
+Both arms are byte-identical through the pre-hover span (control and
+mechanism track within floating-point noise through `frame_end≈199`, as
+expected — `DepthDamp` never alters anything before the regime first
+activates). The ramp's onset is UNMOVED (`frame_end≈479-519` in both arms,
+matching M13's own independently-derived location exactly) — Option B does
+NOT prevent or delay the corruption event, consistent with this milestone's
+own root-cause finding that the mechanism's real effect window (mid-ramp
+damping) sits well inside, not upstream of, the onset. From `frame_end=559`
+through `frame_end=619` the mechanism arm IS genuinely lower than control
+(`2.77 < 3.25`, `5.73 < 6.34`, `7.91 < 8.12` at `619` — not shown in the
+table above but present in the full CSV) — a real, if short-lived, ~100-frame
+window where depth damping measurably slows the ramp, plausibly because the
+patches still flagged in that window (the last ~15 to un-flag, per the
+`currently_damped_frames` table above) are still contributing damped, not
+free-running, depth updates. But by `frame_end=639` the mechanism arm
+CROSSES OVER and stays higher than control for the rest of the run,
+finishing `26.8` vs `20.6` — the mass un-flag cliff at `461-481` (which
+lands almost exactly at the ramp's own onset, per the table above) releases
+~230 patches' depth constraints back to full trust at precisely the moment
+the BA most needs stable, trusted geometry to resist the incoming
+corruption, and the subsequent reconciliation overshoots past where an
+undamped run would have ended up.
+
+### Honest verdict
+
+**A third honest negative — but the most precisely diagnosed one of the
+three (M8-M12's backend corrections, M14's freeze, now M15's damping): the
+mechanism is implemented and verified exactly as scoped, structurally sound
+(`LowParallaxDampState`'s flag/un-flag lifecycle: 7 passing unit tests; the
+per-patch Schur-solve threading: 3 passing unit tests including a dedicated
+global-vs-local-index regression), calibrated with a real damp-factor sweep
+showing the expected asymptotic behavior, and delivers a genuine structural
+improvement over M14 (`tracked_fraction` stays `1.0000` throughout both
+800f and 400f — the freeze's own `0.70`/`0.54` collapses do not recur, and
+proximity loop closure keeps its full `loop_accepted=9`) — yet still makes
+`ate_similarity_scale` WORSE at 800f (`20.6 -> 26.8`) via a DIFFERENT,
+now-precisely-measured mechanism than M14's own vaguer "abrupt resume
+transition" explanation: a mass un-flag event, driven by
+`unflag_after_commits` being far shorter than the hover span itself,
+releasing ~230 still-poorly-constrained patches back to full depth trust in
+a single ~20-frame burst that lands directly on the ramp's own onset
+window. The mid-ramp window (`frame_end≈559-619`) shows the mechanism DOES
+work as intended for as long as patches stay damped — this is not evidence
+the underlying idea is wrong, it is evidence the un-flag SCHEDULE is wrong.
+
+### What a real fix would need (M16)
+
+* **The un-flag rule needs to be gradual, not a hard cutoff.** The single
+  clearest, most directly-supported-by-evidence next step: replace the
+  binary flagged/un-flagged state with a per-patch multiplier that DECAYS
+  from `depth_damp_factor` toward `1.0` over `unflag_after_commits` frames
+  (e.g. linear or exponential ramp-down keyed by the SAME `now - arrival`
+  age this milestone already computes) rather than snapping to `1.0`
+  the instant the age threshold is crossed. This directly targets the
+  measured failure (a simultaneous release of ~230 patches) without
+  discarding any of this milestone's own correctly-verified machinery —
+  `LowParallaxDampState::multipliers` would return a per-patch INTERPOLATED
+  value instead of a binary "damped or not," and `advance_unflagging`'s
+  `still_in_regime` guard and self-cleaning property are unaffected.
+* **Option C ("exit re-anchor") remains untried and is now BETTER motivated
+  by two independent findings pointing at the same transition, not one**:
+  M14's own "abrupt commit resume" AND this milestone's own "abrupt
+  un-damp release" both land on the SAME `[hover_exit, hover_exit + ~20]`
+  window. A one-shot Sim(3)/scale correction applied exactly there — using
+  pre-hover surviving patches' own trusted depth to re-anchor hover-born
+  patches' depth BEFORE the mass un-flag (or blended into a gradual un-flag
+  from the point above) — could address both failure modes' shared root
+  cause directly, rather than needing an even more gradual un-flag schedule
+  to paper over it.
+* Not attempted, and lower priority than the above given the causal finding:
+  further `depth_damp_factor` tuning beyond the sweep already run — the
+  sweep shows the factor itself saturates cleanly around `1e4`-`1e6`; the
+  un-flag SCHEDULE, not the damping STRENGTH, is the lever this milestone's
+  own evidence points at.
+
+### Files changed
+
+* `pipelines/slam/src/dpvo_patch_ba.rs` (+~160): `DpvoBaProblem::depth_damping`
+  (`Option<Vec<f64>>`, indexed by global patch id), `dpvo_ba_step`'s `q`
+  computation now per-patch, `dpvo_ba_step`'s return value carries
+  `depth_damping` forward across iterations. 3 new tests
+  (`depth_damping_multiplier_shrinks_that_patch_depth_update`,
+  `depth_damping_all_ones_matches_none_exactly`,
+  `depth_damping_is_indexed_by_global_patch_id_not_by_used_patches_local_position`),
+  plus a new near-zero-parallax test fixture
+  (`near_zero_parallax_problem`) documenting why the module's existing
+  well-conditioned fixture cannot demonstrate this mechanism. Every
+  pre-existing `DpvoBaProblem` construction site in this file (and in
+  `dpvo_vi_ba.rs`, `dpvo_loop_closure.rs`, and
+  `tests/dpvo_patch_ba_fixture.rs`) updated to `depth_damping: None`
+  (byte-identical, confirmed by the untouched `ba_fixture_*` parity tests
+  still passing).
+* `pipelines/slam/src/dpvo_vo.rs` (+~450): `LowParallaxResponse`
+  (`Freeze` | `DepthDamp`, default `Freeze`), `DpvoLowParallaxConfig` gains
+  `response`/`depth_damp_factor`/`unflag_after_commits`, `LowParallaxDampState`
+  (free-standing flag/un-flag bookkeeping + per-patch multiplier
+  construction, mirroring `LowParallaxRegimeState`'s own testability
+  design), `LowParallaxGateOutcome` (splits M14's single `bool` return into
+  independent `reject`/`flag_on_commit` signals), `low_parallax_gate`'s
+  `match` on `cfg.response`, `advance_low_parallax_unflagging`,
+  `depth_damping_for` (threaded into `update_step`/`run_legacy_global_ba`/
+  `run_widened_global_ba`'s own `DpvoBaProblem` construction). Module doc
+  gained a "Milestone M15: depth-trust damping" section. 10 new unit tests
+  (`low_parallax_damp_tests`: multipliers-none-when-unflagged,
+  flag-then-damps-only-that-block, multipliers-none-when-frame-outside-window,
+  flag-idempotency, still-in-regime guard, age-threshold un-flag,
+  self-cleaning-for-orphaned-frames — 7 tests — plus the 3 in
+  `dpvo_patch_ba.rs` counted above).
+* `examples/euroc_dpvo_vo_demo.rs` (+~60): `--hover-response
+  {freeze,depth_damp}`, `--hover-depth-damp-factor`,
+  `--hover-unflag-after-commits` (mirror `DpvoLowParallaxConfig`'s new
+  fields 1:1), summary/progress-line keys
+  (`hover_response`/`hover_currently_damped_frames`/
+  `hover_frames_flagged_total`/`hover_patches_flagged_total`/
+  `hover_unflagged_total`/`hover_damped_solve_count`).
+
+### Verify (verbatim)
+
+```
+cargo test -p visloc-slam --features onnx-inference --lib
+  -> ok. 401 passed; 0 failed; 7 ignored (was 391 at M14; +10 new M15 tests)
+cargo test -p visloc-slam --features onnx-inference --test dpvo_patch_ba_fixture -- --ignored
+  -> ok. 2 passed; 0 failed (upstream-fixture numeric parity unaffected by
+     depth_damping: None on every pre-M15 call site)
+cargo clippy -p visloc-slam --all-targets --features onnx-inference
+  -> zero warnings touching dpvo_vo.rs/dpvo_patch_ba.rs/dpvo_patch_graph.rs/
+     dpvo_vi_ba.rs/dpvo_loop_closure.rs (6 pre-existing, unrelated warnings
+     elsewhere, identical set to M14's own reported baseline: map_atlas.rs,
+     online_slam_vi_ba.rs, vi_motion_initializer.rs,
+     online_slam_motion_vi_init.rs, online_slam.rs)
+cargo clippy --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> zero warnings touching euroc_dpvo_vo_demo.rs
+cargo build --release --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> clean
+20f smoke (--hover-freeze --hover-response depth_damp, real defaults)
+  -> exit 0, hover diagnostics present (hover_response=DepthDamp, all
+     counters zero — regime does not activate this early, as expected)
+```
+
+### Open items
+
+* M16 design above (gradual un-flag decay, and/or Option C exit-reanchor)
+  not started.
+* `--hover-response depth_damp` ships as a correctly-implemented,
+  off-by-default (via `low_parallax: None`), opt-in mechanism — do not
+  enable it for any accuracy-seeking run until the gradual-un-flag or
+  exit-reanchor follow-up replaces the hard-cutoff schedule diagnosed
+  above.
+* The 550f damp-factor sweep used `unflag_after_commits=16` throughout
+  (the same default used for the 800f/400f acceptance runs) — this
+  milestone's own root-cause finding means an `unflag_after_commits` sweep
+  would likely matter MORE than the damp-factor sweep already run (a
+  larger value spreads the eventual mass-release over more frames but does
+  not eliminate the "release still lands near the onset window" problem
+  entirely on its own without also becoming gradual); not attempted here,
+  since M16's own gradual-decay redesign supersedes tuning the hard-cutoff
+  version further.
+* `dpvo_vi_ba.rs`'s separately-duplicated visual assembly does not consult
+  `depth_damping` at all (documented limitation, out of scope for this
+  milestone's visual-only acceptance runs) — a future IMU-coupled run using
+  `DepthDamp` would silently get undamped depth updates on that code path
+  specifically; worth flagging before anyone combines `--imu` with
+  `--hover-response depth_damp`.

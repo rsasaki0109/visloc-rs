@@ -327,6 +327,86 @@
 //! [`DpvoOdometry::low_parallax_flow_log`] (every evaluated frame's own
 //! flow value + regime state — the acceptance evidence for "did this fire
 //! at the right place, for the right duration").
+//!
+//! ## Milestone M15: "depth-trust damping" — same detector, a different
+//! response
+//!
+//! M14's own "what a real fix would need" section proposed two untried
+//! responses to the SAME [`LowParallaxRegimeState`] detector: Option C
+//! ("exit re-anchor", a one-shot rescale at hover exit) and Option B
+//! ("depth-trust damping" — let hover-span frames commit NORMALLY,
+//! preserving the baseline's own gradual `KEYFRAME_THRESH`-decimated
+//! reconnection through the hover that M14's freeze destroyed, but heavily
+//! damp the depth channel of whichever patches DO get committed while the
+//! regime is active, so they contribute rotation/pose constraints without
+//! dragging scale). [`DpvoLowParallaxConfig::response`] selects between
+//! [`LowParallaxResponse::Freeze`] (M14's mechanism, default, unchanged) and
+//! [`LowParallaxResponse::DepthDamp`] (M15's Option B) — the SAME
+//! [`LowParallaxRegimeState`] enter/exit/one-shot-disarm state machine drives
+//! both; only what happens once a candidate is known to be "hover-active"
+//! differs.
+//!
+//! **Mechanism**: [`DpvoOdometry::low_parallax_gate`] no longer calls
+//! [`crate::dpvo_patch_graph::DpvoPatchGraph::reject_pending_frame`] under
+//! `DepthDamp` — the candidate falls through to the ordinary
+//! `commit_frame`/keyframe-decimation path exactly like every prior
+//! milestone's default behavior. Immediately after a successful commit,
+//! [`DpvoOdometry::process_frame`] flags that frame's `patches_per_frame`
+//! patches into [`LowParallaxDampState`] whenever
+//! [`LowParallaxRegimeState::in_regime`] was true for that commit. Flagging
+//! is FRAME-level, not per-patch: every patch born in the same frame shares
+//! one anchor pose/timestamp, so "how much real parallax has accumulated
+//! since birth" is the same signal (this run's own ego-motion since that
+//! frame) for all of that frame's patches — a documented simplification, not
+//! an oversight, that also keeps the bookkeeping a plain
+//! `HashSet<arrival_index>` (stable across
+//! `crate::dpvo_patch_graph::DpvoPatchGraph` compaction on keyframe removal,
+//! unlike a live index) instead of a second per-patch parallel `Vec` needing
+//! its own manual removal-compaction hook the way `frame_pyramids`/
+//! `patch_gmap`/`patch_imap` already need.
+//!
+//! At every [`crate::dpvo_patch_ba::dpvo_ba`] call site in this module
+//! (the per-frame windowed solve in [`DpvoOdometry::update_step`], and both
+//! Milestone M8/M10 global-BA passes in [`DpvoOdometry::run_legacy_global_ba`]/
+//! [`DpvoOdometry::run_widened_global_ba`]), a flagged frame's patches get a
+//! [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`] multiplier of
+//! [`DpvoLowParallaxConfig::depth_damp_factor`] instead of the implicit
+//! `1.0` — see that field's own doc for exactly what this does to the
+//! depth-channel Tikhonov term (`q = 1/(C + lmbda·multiplier)`, `ba.py:158`):
+//! a low-parallax patch's own Jacobian information `C` is near-zero (no
+//! baseline to observe depth from), so `q` is normally dominated by the bare
+//! `lmbda` floor rather than real visual evidence — inflating that floor is
+//! a direct, surgical counter to the unconstrained-depth mechanism M13's own
+//! diagnosis pinned as the root cause, without withholding the frame's real
+//! ROTATION/pose evidence (which the freeze response withheld too, and
+//! which M14's own post-mortem blames for the freeze's abrupt, worse
+//! resume transition). `dpvo_vi_ba.rs`'s own separately-duplicated visual
+//! assembly (see that module's doc, "Visual assembly is a deliberate, tested
+//! duplication") is NOT threaded through this mechanism — out of scope for
+//! M15's visual-only acceptance runs (`config.imu` stays `None` throughout),
+//! a documented limitation, not a silent gap.
+//!
+//! **Un-flag rule (age-based, not a repeated geometric flow probe)**: a
+//! flagged frame is un-flagged once [`DpvoLowParallaxConfig::unflag_after_commits`]
+//! further frames have committed since its own birth AND the regime is no
+//! longer active (never un-flag while still inside a — possibly still
+//! ongoing — hover; nothing has had a chance to accumulate real motion yet).
+//! Deliberately NOT the geometric `flow_mag` probe this module's own
+//! "Two more real-run findings" section above already rejected as a
+//! DETECTOR: that finding's root cause (a patch reprojected through its own
+//! still-unconstrained depth produces an `O(1)`-pixel noise floor
+//! independent of true motion) applies just as much to a patch's SELF-flow
+//! immediately after birth as it does during the hover itself, so reusing it
+//! as the UN-flag signal would risk the identical contamination. Age (a
+//! frame count) carries no such risk and is directly measurable without any
+//! extra ONNX inference. See [`LowParallaxDampState::advance_unflagging`]'s
+//! own doc for why this bookkeeping is self-cleaning (never accumulates
+//! unbounded stale entries) even without a keyframe-removal hook.
+//!
+//! Diagnostics: [`DpvoLowParallaxDiagnostics`] gained
+//! `response`/`currently_damped_frames`/`frames_flagged_total`/
+//! `patches_flagged_total`/`damped_solve_count`/`unflagged_total` — see that
+//! struct's own field docs.
 #![cfg(feature = "onnx-inference")]
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -533,6 +613,30 @@ pub struct DpvoOdometryConfig {
     pub low_parallax: Option<DpvoLowParallaxConfig>,
 }
 
+/// Milestone M15 (`docs/dpvo_droid_port_plan.md`): which action
+/// [`DpvoOdometry`] takes once [`LowParallaxRegimeState`] reports the regime
+/// active for a candidate frame — see the module doc's "Milestone M15:
+/// depth-trust damping" section for the full design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LowParallaxResponse {
+    /// Milestone M14's mechanism, unchanged: reject the candidate via
+    /// [`crate::dpvo_patch_graph::DpvoPatchGraph::reject_pending_frame`] —
+    /// no patch is admitted, `n_frames()` does not advance, keyframe aging
+    /// is frozen for the regime's duration. Kept as the default so every
+    /// pre-M15 caller (and `DpvoLowParallaxConfig::default`'s own doc
+    /// evidence) is unaffected.
+    #[default]
+    Freeze,
+    /// Milestone M15's Option B: commit candidates normally (through the
+    /// ordinary keyframe-decimation path, unchanged), but flag whichever
+    /// frames DO commit while the regime is active so their patches' depth
+    /// channel gets [`DpvoLowParallaxConfig::depth_damp_factor`]-heavier
+    /// Tikhonov damping in every subsequent [`crate::dpvo_patch_ba::dpvo_ba`]
+    /// call until [`DpvoLowParallaxConfig::unflag_after_commits`]'s own
+    /// age-based un-flag rule fires.
+    DepthDamp,
+}
+
 /// Milestone M14 (`docs/dpvo_droid_port_plan.md`): configuration for the
 /// low-parallax ("hover") freeze described on
 /// [`DpvoOdometryConfig::low_parallax`]'s own doc.
@@ -564,6 +668,29 @@ pub struct DpvoLowParallaxConfig {
     /// be non-empty (enforced by [`LowParallaxRegimeState::update`]'s own
     /// doc, not an invariant this struct itself checks).
     pub exit_flow: f64,
+    /// Milestone M15: which response [`DpvoOdometry`] takes once the regime
+    /// is active for a candidate — see [`LowParallaxResponse`]'s own doc.
+    /// Defaults to [`LowParallaxResponse::Freeze`] (M14's mechanism,
+    /// unchanged) so every pre-M15 construction of this struct (including
+    /// every `Default::default()` call site already shipped) is byte-for-byte
+    /// unaffected; the fields below are only consulted when this is
+    /// [`LowParallaxResponse::DepthDamp`].
+    pub response: LowParallaxResponse,
+    /// Milestone M15 (`DepthDamp` only): multiplier on
+    /// [`crate::dpvo_patch_ba::DpvoBaConfig::lmbda`] applied to a flagged
+    /// frame's patches in every [`crate::dpvo_patch_ba::dpvo_ba`] call — see
+    /// [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]'s own doc for
+    /// the mechanism. `docs/dpvo_droid_port_plan.md`'s "M15 results" reports
+    /// the calibration sweep this default (`1000.0`, two orders of
+    /// magnitude above the bare `lmbda=1e-4` floor's own scale) was chosen
+    /// from. Irrelevant (never read) when `response == Freeze`.
+    pub depth_damp_factor: f64,
+    /// Milestone M15 (`DepthDamp` only): a flagged frame is un-flagged once
+    /// this many further frames have committed since its OWN birth
+    /// (measured as an `arrival_index` gap — see
+    /// [`LowParallaxDampState::advance_unflagging`]'s own doc) AND the
+    /// regime is no longer active. Irrelevant when `response == Freeze`.
+    pub unflag_after_commits: usize,
 }
 
 impl Default for DpvoLowParallaxConfig {
@@ -627,7 +754,14 @@ impl Default for DpvoLowParallaxConfig {
     /// same log shows starting at frame `518` and never letting go again
     /// before frame `800`.
     fn default() -> Self {
-        Self { window: 20, enter_flow: 13.0, exit_flow: 15.0 }
+        Self {
+            window: 20,
+            enter_flow: 13.0,
+            exit_flow: 15.0,
+            response: LowParallaxResponse::Freeze,
+            depth_damp_factor: 1000.0,
+            unflag_after_commits: 16,
+        }
     }
 }
 
@@ -749,6 +883,156 @@ fn windowed_median(window: &VecDeque<f64>) -> f64 {
     torch_quantile_50(&values)
 }
 
+/// Milestone M15 (`docs/dpvo_droid_port_plan.md`): free-standing (no
+/// [`DpvoOdometry`]/ONNX dependency — exactly like [`LowParallaxRegimeState`]
+/// itself, so the flag/un-flag lifecycle is unit-testable without a live
+/// ONNX session) bookkeeping for the "depth-trust damping" response
+/// ([`LowParallaxResponse::DepthDamp`]) — see the module doc's own
+/// "Milestone M15: depth-trust damping" section for the full mechanism this
+/// drives.
+///
+/// Frame-level, not per-patch: every patch committed in the same frame
+/// shares one anchor pose/timestamp, so "real parallax accumulated since
+/// birth" is the same signal (this run's own ego-motion since that frame)
+/// for every one of that frame's patches — a documented simplification that
+/// keeps this a plain `HashSet<usize>` keyed by
+/// [`crate::dpvo_patch_graph::DpvoGraphFrame::arrival_index`] (stable across
+/// patch-graph compaction, unlike a live frame index) rather than a second
+/// per-patch parallel `Vec` needing its own manual keyframe-removal
+/// compaction hook.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LowParallaxDampState {
+    damped_frames: HashSet<usize>,
+    frames_flagged_total: usize,
+    patches_flagged_total: usize,
+    unflagged_total: usize,
+    damped_solve_count: usize,
+}
+
+impl LowParallaxDampState {
+    /// Flag `arrival`'s `patches_per_frame` patches as depth-damped —
+    /// called once, immediately after a frame commits while the regime is
+    /// active. A no-op (does not double-count) if `arrival` is already
+    /// flagged.
+    pub fn flag(&mut self, arrival: usize, patches_per_frame: usize) {
+        if self.damped_frames.insert(arrival) {
+            self.frames_flagged_total += 1;
+            self.patches_flagged_total += patches_per_frame;
+        }
+    }
+
+    /// Age-based un-flag rule — see the module doc's own "Un-flag rule"
+    /// section for why NOT a repeated geometric flow probe. Every currently
+    /// flagged frame whose `arrival_index` gap to `now` (the most recently
+    /// committed frame's own arrival index) is at least
+    /// `unflag_after_commits` is un-flagged, but ONLY when `still_in_regime`
+    /// is `false` — nothing has had a chance to accumulate real parallax
+    /// while the regime remains active, so a hover longer than
+    /// `unflag_after_commits` itself must not self-unflag mid-hover.
+    ///
+    /// Self-cleaning without a keyframe-removal hook: a flagged frame that
+    /// gets pruned from the live graph long before it would otherwise
+    /// un-flag still ages out here purely from `now` monotonically growing
+    /// (arrival indices are never reused or decreased) — `damped_frames`
+    /// therefore never accumulates unbounded stale entries for frames that
+    /// are long gone from the live graph, even though this state has no
+    /// visibility into `DpvoPatchGraph`'s own removal bookkeeping at all.
+    pub fn advance_unflagging(&mut self, now: usize, unflag_after_commits: usize, still_in_regime: bool) {
+        if still_in_regime {
+            return;
+        }
+        let graduated: Vec<usize> = self
+            .damped_frames
+            .iter()
+            .copied()
+            .filter(|&arrival| now.saturating_sub(arrival) >= unflag_after_commits)
+            .collect();
+        for arrival in graduated {
+            self.damped_frames.remove(&arrival);
+            self.unflagged_total += 1;
+        }
+    }
+
+    /// Build a per-patch [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]
+    /// vector for a problem whose `patches` are contiguous per-frame blocks
+    /// of `patches_per_frame`, one block per `frame_arrivals` entry, in the
+    /// SAME order as the problem's own `poses`/`patches` — every `dpvo_ba`
+    /// call site in this module satisfies this (the per-frame windowed
+    /// solve, and both the legacy and widened-with-folded-prefix global-BA
+    /// passes). Returns `None` (every patch's multiplier is the implicit
+    /// `1.0` — see [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]'s
+    /// own doc) whenever no currently LIVE frame in `frame_arrivals` is
+    /// flagged, so a run before the first flag (or with `DepthDamp` never
+    /// enabled at all, since [`Self::flag`] is then never called) pays zero
+    /// extra allocation and is byte-identical to `depth_damping: None`.
+    /// Increments [`Self::damped_solve_count`] exactly when it returns
+    /// `Some` (i.e. this call site's own solve was genuinely affected).
+    pub fn multipliers(&mut self, frame_arrivals: &[usize], patches_per_frame: usize, damp_factor: f64) -> Option<Vec<f64>> {
+        if self.damped_frames.is_empty() {
+            return None;
+        }
+        let mut any = false;
+        let mut out = vec![1.0_f64; frame_arrivals.len() * patches_per_frame];
+        for (local, &arrival) in frame_arrivals.iter().enumerate() {
+            if self.damped_frames.contains(&arrival) {
+                any = true;
+                let lo = local * patches_per_frame;
+                out[lo..lo + patches_per_frame].fill(damp_factor);
+            }
+        }
+        if !any {
+            return None;
+        }
+        self.damped_solve_count += 1;
+        Some(out)
+    }
+
+    /// Number of frames flagged RIGHT NOW (already un-flagged frames are not
+    /// counted).
+    pub fn currently_damped_frames(&self) -> usize {
+        self.damped_frames.len()
+    }
+    /// Cumulative frames ever flagged (never decremented by un-flagging).
+    pub fn frames_flagged_total(&self) -> usize {
+        self.frames_flagged_total
+    }
+    /// Cumulative patches ever flagged (`frames_flagged_total *
+    /// patches_per_frame`, summed incrementally at flag time in case
+    /// `patches_per_frame` were ever to change mid-run — it does not in
+    /// practice, but this avoids baking in that assumption twice).
+    pub fn patches_flagged_total(&self) -> usize {
+        self.patches_flagged_total
+    }
+    /// Cumulative frames un-flagged.
+    pub fn unflagged_total(&self) -> usize {
+        self.unflagged_total
+    }
+    /// Cumulative [`Self::multipliers`] calls that returned `Some` (i.e. a
+    /// real `dpvo_ba` solve was actually damped, not just evaluated).
+    pub fn damped_solve_count(&self) -> usize {
+        self.damped_solve_count
+    }
+}
+
+/// Milestone M15: [`DpvoOdometry::low_parallax_gate`]'s outcome — separated
+/// from a plain `bool` (M14's own return type) because
+/// [`LowParallaxResponse::DepthDamp`] needs to communicate two INDEPENDENT
+/// things to [`DpvoOdometry::process_frame`]: whether to reject the
+/// candidate (only ever `true` under [`LowParallaxResponse::Freeze`]) and
+/// whether to flag it once committed (only ever `true` under `DepthDamp`) —
+/// the two responses are mutually exclusive by construction (see
+/// [`DpvoOdometry::low_parallax_gate`]'s own `match`), but keeping both
+/// fields rather than a tri-state enum keeps the caller's own `if`/`else`
+/// shape unchanged from M14.
+struct LowParallaxGateOutcome {
+    /// The candidate must be rejected via
+    /// [`crate::dpvo_patch_graph::DpvoPatchGraph::reject_pending_frame`] —
+    /// the caller must return `Ok(None)` without calling `commit_frame`.
+    reject: bool,
+    /// The candidate, once (normally) committed, must be flagged into
+    /// [`LowParallaxDampState`].
+    flag_on_commit: bool,
+}
 
 /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): configuration for the
 /// periodic full-graph "global" bundle adjustment described on
@@ -1350,6 +1634,26 @@ pub struct DpvoLowParallaxDiagnostics {
     /// `stats.frames_processed` at the moment the regime was most recently
     /// exited (`None` if never).
     pub last_exit_frame: Option<usize>,
+    /// Milestone M15: which response is configured — a static default
+    /// ([`LowParallaxResponse::Freeze`]) whenever `enabled` is `false`.
+    pub response: LowParallaxResponse,
+    /// Milestone M15 (`DepthDamp` only, `0` otherwise): frames flagged RIGHT
+    /// NOW (already un-flagged frames are not counted) — see
+    /// [`LowParallaxDampState::currently_damped_frames`].
+    pub currently_damped_frames: usize,
+    /// Milestone M15: cumulative frames ever flagged — see
+    /// [`LowParallaxDampState::frames_flagged_total`].
+    pub frames_flagged_total: usize,
+    /// Milestone M15: cumulative patches ever flagged — see
+    /// [`LowParallaxDampState::patches_flagged_total`].
+    pub patches_flagged_total: usize,
+    /// Milestone M15: cumulative frames un-flagged — see
+    /// [`LowParallaxDampState::unflagged_total`].
+    pub unflagged_total: usize,
+    /// Milestone M15: cumulative `dpvo_ba` solves that were genuinely
+    /// damped (i.e. at least one currently-live frame in that solve's own
+    /// window was flagged) — see [`LowParallaxDampState::damped_solve_count`].
+    pub damped_solve_count: usize,
 }
 
 /// Milestone M5b: cumulative counters, one per DISTINCT rejection reason
@@ -1704,6 +2008,13 @@ pub struct DpvoOdometry {
     /// explicit cap — MH_01-scale runs (hundreds to low thousands of
     /// frames) keep this negligible.
     low_parallax_flow_log: Vec<(usize, f64, bool)>,
+    /// Milestone M15 (`LowParallaxResponse::DepthDamp` only): the flag/
+    /// un-flag bookkeeping described on [`LowParallaxDampState`]'s own doc.
+    /// Stays at its `Default` (empty, all counters `0`) for the entire run
+    /// whenever `response != DepthDamp` — [`Self::process_frame`] only ever
+    /// calls [`LowParallaxDampState::flag`] from the `DepthDamp` branch of
+    /// [`Self::low_parallax_gate`].
+    low_parallax_damp: LowParallaxDampState,
 }
 
 /// Milestone M11: the ONNX-runtime-dependent half of the long-range loop
@@ -1876,6 +2187,7 @@ impl DpvoOdometry {
             low_parallax_last_enter_frame: None,
             low_parallax_last_exit_frame: None,
             low_parallax_flow_log: Vec::new(),
+            low_parallax_damp: LowParallaxDampState::default(),
         })
     }
 
@@ -2017,6 +2329,12 @@ impl DpvoOdometry {
             last_flow: self.low_parallax_last_flow,
             last_enter_frame: self.low_parallax_last_enter_frame,
             last_exit_frame: self.low_parallax_last_exit_frame,
+            response: self.config.low_parallax.map(|cfg| cfg.response).unwrap_or_default(),
+            currently_damped_frames: self.low_parallax_damp.currently_damped_frames(),
+            frames_flagged_total: self.low_parallax_damp.frames_flagged_total(),
+            patches_flagged_total: self.low_parallax_damp.patches_flagged_total(),
+            unflagged_total: self.low_parallax_damp.unflagged_total(),
+            damped_solve_count: self.low_parallax_damp.damped_solve_count(),
         }
     }
 
@@ -2150,24 +2468,43 @@ impl DpvoOdometry {
             level1: ChannelLastImage::from_chw(level1_chw.view()),
         };
 
+        // Milestone M15: `true` only under `LowParallaxResponse::DepthDamp`
+        // when the regime is active for this candidate — read AFTER a
+        // successful commit below to flag the just-committed frame (see the
+        // module doc's own "Milestone M15" section). Declared here (rather
+        // than inline) so it survives past the `if`/`else if` below.
+        let mut low_parallax_flag_on_commit = false;
         if self.graph.n_frames() > 0 && !self.graph.is_initialized() {
             let flow = self.motion_probe(&predicted_pose, &intr, &candidate_pyramid)?;
             if flow < self.config.motion_probe_min_flow {
                 self.graph.reject_pending_frame();
                 return Ok(None);
             }
-        } else if self.graph.is_initialized() && self.low_parallax_gate(&predicted_pose, &intr, &candidate_pyramid)? {
-            // Milestone M14: the low-parallax ("hover") freeze — see the
-            // module doc's own "Low-parallax hover freeze" section. Rejects
-            // exactly like the bootstrap-only `motion_probe` gate above:
-            // `patches_vec`/`depths` were already sampled (so RNG call
-            // counts are unaffected by whether this fires), but
-            // `commit_frame` never runs, so no patch is admitted and
-            // `n_frames()` does not advance.
-            return Ok(None);
+        } else if self.graph.is_initialized() {
+            let outcome = self.low_parallax_gate(&predicted_pose, &intr, &candidate_pyramid)?;
+            if outcome.reject {
+                // Milestone M14: the low-parallax ("hover") freeze — see the
+                // module doc's own "Low-parallax hover freeze" section.
+                // Rejects exactly like the bootstrap-only `motion_probe` gate
+                // above: `patches_vec`/`depths` were already sampled (so RNG
+                // call counts are unaffected by whether this fires), but
+                // `commit_frame` never runs, so no patch is admitted and
+                // `n_frames()` does not advance.
+                return Ok(None);
+            }
+            low_parallax_flag_on_commit = outcome.flag_on_commit;
         }
 
         self.graph.commit_frame(predicted_pose, intr, patches_vec)?;
+        // Milestone M15 ("depth-trust damping"): flag the frame we just
+        // committed AFTER `commit_frame` succeeds (so the flag is keyed by
+        // this frame's own, now-assigned `arrival_index`) — see the module
+        // doc's own "Milestone M15" section for why flagging is frame-level.
+        if low_parallax_flag_on_commit {
+            if let Some(arrival) = self.graph.frames().last().map(|f| f.arrival_index) {
+                self.low_parallax_damp.flag(arrival, self.graph.config().patches_per_frame);
+            }
+        }
         self.frame_pyramids.push(candidate_pyramid);
         for i in 0..m {
             self.patch_gmap.push(gmap.index_axis(Axis(0), i).to_owned());
@@ -2215,6 +2552,13 @@ impl DpvoOdometry {
                 self.update_step()?;
             }
         } else if self.graph.is_initialized() {
+            // Milestone M15: advance the depth-damping un-flag age check
+            // BEFORE this frame's own BA solves below, so a frame that just
+            // crossed `unflag_after_commits` this very frame is already
+            // un-flagged for its own solve. A no-op whenever `response !=
+            // DepthDamp` (see `Self::advance_low_parallax_unflagging`'s own
+            // doc).
+            self.advance_low_parallax_unflagging();
             // Milestone M7: the continuous scale-coupling mechanism (see
             // `Self::scale_coupling_step`, called from `update_step` below)
             // REPLACES M5b's one-shot bootstrap entirely when enabled — it
@@ -2356,16 +2700,13 @@ impl DpvoOdometry {
         Ok(torch_quantile_50(&norms))
     }
 
-    /// Milestone M14: evaluate the low-parallax ("hover") detector for the
-    /// current candidate frame — called only once the graph is initialized
-    /// (see [`Self::process_frame`]'s own call site; before initialization
-    /// the bootstrap-only `motion_probe` gate is the relevant one instead).
-    /// A no-op (`Ok(false)`) whenever `config.low_parallax` is `None`, or
+    /// Milestone M14/M15: evaluate the low-parallax ("hover") detector for
+    /// the current candidate frame — called only once the graph is
+    /// initialized (see [`Self::process_frame`]'s own call site; before
+    /// initialization the bootstrap-only `motion_probe` gate is the relevant
+    /// one instead). A no-op whenever `config.low_parallax` is `None`, or
     /// before any frame has ever committed (`n_frames() == 0` — cannot
     /// happen in practice once initialized, guarded defensively anyway).
-    /// Returns `Ok(true)` if the candidate was rejected via
-    /// [`crate::dpvo_patch_graph::DpvoPatchGraph::reject_pending_frame`] —
-    /// the caller must return `Ok(None)` without calling `commit_frame`.
     ///
     /// Reuses [`Self::motion_probe`] as the causal "parallax" proxy — see
     /// the module doc's own "Low-parallax hover freeze" section for why a
@@ -2380,15 +2721,22 @@ impl DpvoOdometry {
     /// separate cleanly (see `docs/dpvo_droid_port_plan.md`'s "M14 results"
     /// for the calibration evidence) — at the cost of one extra
     /// correlation+GRU-update pass per frame whenever this is engaged.
+    ///
+    /// The [`LowParallaxRegimeState`] enter/exit/one-shot-disarm state
+    /// machine itself, and every diagnostic counter it drives
+    /// (`times_entered`/`times_exited`/`flow_log`/`last_flow`), is IDENTICAL
+    /// regardless of [`DpvoLowParallaxConfig::response`] — only the final
+    /// `match` below (M15's own addition) differs by response.
     fn low_parallax_gate(
         &mut self,
         predicted_pose: &SE3,
         candidate_intr: &DpvoIntrinsics,
         candidate_pyramid: &FramePyramid,
-    ) -> Result<bool, DpvoOdometryError> {
-        let Some(cfg) = self.config.low_parallax else { return Ok(false) };
+    ) -> Result<LowParallaxGateOutcome, DpvoOdometryError> {
+        let no_op = LowParallaxGateOutcome { reject: false, flag_on_commit: false };
+        let Some(cfg) = self.config.low_parallax else { return Ok(no_op) };
         if self.graph.n_frames() == 0 {
-            return Ok(false);
+            return Ok(no_op);
         }
         let flow = self.motion_probe(predicted_pose, candidate_intr, candidate_pyramid)?;
         let transition = self.low_parallax_regime.update(&cfg, flow);
@@ -2403,13 +2751,65 @@ impl DpvoOdometry {
             self.low_parallax_last_exit_frame = Some(frames_processed);
         }
         self.low_parallax_flow_log.push((frames_processed, flow, self.low_parallax_regime.in_regime()));
-        if transition.suppress {
-            self.graph.reject_pending_frame();
-            self.low_parallax_frames_suppressed_total += 1;
-            Ok(true)
-        } else {
-            Ok(false)
+        match cfg.response {
+            LowParallaxResponse::Freeze => {
+                if transition.suppress {
+                    self.graph.reject_pending_frame();
+                    self.low_parallax_frames_suppressed_total += 1;
+                    Ok(LowParallaxGateOutcome { reject: true, flag_on_commit: false })
+                } else {
+                    Ok(no_op)
+                }
+            }
+            LowParallaxResponse::DepthDamp => {
+                // Milestone M15: never reject — the candidate commits
+                // normally through the ordinary keyframe-decimation path
+                // (see the module doc's own "Milestone M15" section for why
+                // this is the whole point of Option B). `in_regime()` is
+                // read AFTER `update` above, so it already reflects this
+                // frame's own transition (true for the entering frame,
+                // false for the exiting frame — the SAME semantics
+                // `transition.suppress` encodes for `Freeze`, just without
+                // rejecting).
+                Ok(LowParallaxGateOutcome { reject: false, flag_on_commit: self.low_parallax_regime.in_regime() })
+            }
         }
+    }
+
+    /// Milestone M15: advance [`LowParallaxDampState`]'s age-based un-flag
+    /// check for the most-recently-committed frame's own `arrival_index` —
+    /// see that struct's [`LowParallaxDampState::advance_unflagging`] for
+    /// the rule. A no-op whenever `config.low_parallax` is `None` or
+    /// `response != DepthDamp` (checked here, not inside
+    /// `LowParallaxDampState` itself, since that type has no knowledge of
+    /// `DpvoLowParallaxConfig` at all — see its own doc for why it stays
+    /// free-standing).
+    fn advance_low_parallax_unflagging(&mut self) {
+        let Some(cfg) = self.config.low_parallax else { return };
+        if cfg.response != LowParallaxResponse::DepthDamp {
+            return;
+        }
+        let Some(now) = self.graph.frames().last().map(|f| f.arrival_index) else { return };
+        let still_in_regime = self.low_parallax_regime.in_regime();
+        self.low_parallax_damp.advance_unflagging(now, cfg.unflag_after_commits, still_in_regime);
+    }
+
+    /// Milestone M15: build a [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]
+    /// vector for a `dpvo_ba` problem whose `patches` are contiguous
+    /// per-frame blocks, one block per `frame_arrivals` entry (in the SAME
+    /// order as the problem's own `poses`/`patches`) — see
+    /// [`LowParallaxDampState::multipliers`]'s own doc for the layout
+    /// contract every call site in this module satisfies. `None` whenever
+    /// `config.low_parallax` is `None` (the `?` on `self.config.low_parallax?`
+    /// below) — this also correctly covers `response == Freeze`, since
+    /// [`LowParallaxDampState::flag`] is only ever called from the
+    /// `DepthDamp` branch of [`Self::low_parallax_gate`], so
+    /// `low_parallax_damp`'s own `damped_frames` set stays permanently empty
+    /// under `Freeze` and [`LowParallaxDampState::multipliers`] returns
+    /// `None` on its own first line regardless.
+    fn depth_damping_for(&mut self, frame_arrivals: &[usize], patches_per_frame: usize) -> Option<Vec<f64>> {
+        let damp_factor = self.config.low_parallax?.depth_damp_factor;
+        self.low_parallax_damp.multipliers(frame_arrivals, patches_per_frame, damp_factor)
     }
 
     /// Milestone M5: fold every buffered [`Self::push_imu`] sample with
@@ -3045,10 +3445,16 @@ impl DpvoOdometry {
         let poses: Vec<SE3> = self.graph.frames().iter().map(|f| f.pose.clone()).collect();
         let intrinsics: Vec<DpvoIntrinsics> = self.graph.frames().iter().map(|f| f.intrinsics).collect();
         let patches: Vec<DpvoPatch> = self.graph.patches().to_vec();
+        // Milestone M15: this pass covers every live frame in `graph.frames()`
+        // order, exactly matching `poses`/`patches`' own layout above — see
+        // `Self::depth_damping_for`'s own doc.
+        let arrivals: Vec<usize> = self.graph.frames().iter().map(|f| f.arrival_index).collect();
+        let patches_per_frame = self.graph.config().patches_per_frame;
+        let depth_damping = self.depth_damping_for(&arrivals, patches_per_frame);
 
         let free_pose_count = n.saturating_sub(t0);
         let edge_count = edges.len();
-        let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+        let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping };
         let ba_cfg = DpvoBaConfig { iterations: cfg.iterations, fixedp: t0, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
         let solved = dpvo_ba(&problem, &ba_cfg)?;
 
@@ -3102,6 +3508,20 @@ impl DpvoOdometry {
         let free_pose_count = gathered.poses.len() - gathered.fixedp;
         let edge_count = gathered.edges.len();
         let folded_count = gathered.folded_arrivals.len();
+        // Milestone M15: `gathered.poses`/`patches` is the folded prefix
+        // (`gathered.folded_arrivals`, oldest first) followed by EVERY live
+        // frame in `graph.frames()` order (see
+        // `gather_widened_global_ba_problem`'s own doc, Parts B/C — the
+        // live suffix is never a subset) — so the same concatenation order
+        // reproduces the arrival index for every pose/patch block.
+        let patches_per_frame = self.graph.config().patches_per_frame;
+        let arrivals: Vec<usize> = gathered
+            .folded_arrivals
+            .iter()
+            .copied()
+            .chain(self.graph.frames().iter().map(|f| f.arrival_index))
+            .collect();
+        let depth_damping = self.depth_damping_for(&arrivals, patches_per_frame);
         let problem = DpvoBaProblem {
             poses: gathered.poses,
             patches: gathered.patches,
@@ -3109,6 +3529,7 @@ impl DpvoOdometry {
             edges: gathered.edges,
             targets: gathered.targets,
             weights: gathered.weights,
+            depth_damping,
         };
         let ba_cfg =
             DpvoBaConfig { iterations: cfg.iterations, fixedp: gathered.fixedp, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
@@ -3413,6 +3834,14 @@ impl DpvoOdometry {
                 .then(|| window_poses.clone())
         });
 
+        // Milestone M15: `window_patches` above is exactly `graph.patches()`'s
+        // `[patches_lo, ...)` suffix, one contiguous block of
+        // `patches_per_frame` per frame in `[frame_lo, n)` order — the SAME
+        // order `window_poses`/`window_intr` use, matching
+        // `Self::depth_damping_for`'s own layout contract.
+        let window_arrivals: Vec<usize> =
+            self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+        let depth_damping = self.depth_damping_for(&window_arrivals, patches_per_frame);
         let problem = DpvoBaProblem {
             poses: window_poses,
             patches: window_patches,
@@ -3420,6 +3849,7 @@ impl DpvoOdometry {
             edges: ba_edges,
             targets,
             weights,
+            depth_damping,
         };
         let ba_config = DpvoBaConfig {
             iterations: 2,
@@ -3451,8 +3881,9 @@ impl DpvoOdometry {
                 .imu
                 .clone()
                 .expect("imu_bootstrapped can only be true when config.imu is Some — set together in try_imu_bootstrap");
-            let window_arrivals: Vec<usize> =
-                self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+            // Milestone M15: reuses the SAME `window_arrivals` computed above
+            // for `depth_damping_for` — identical `[frame_lo, n)` arrival-index
+            // list, no need to recompute it.
             let mut imu_factors = Vec::new();
             for local in 0..window_arrivals.len().saturating_sub(1) {
                 let key = (window_arrivals[local], window_arrivals[local + 1]);
@@ -4521,7 +4952,7 @@ mod global_ba_tests {
             let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
             let patches: Vec<DpvoPatch> = graph.patches().to_vec();
             let intrinsics = vec![intr; poses.len()];
-            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping: None };
             let config =
                 DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
             let solved = dpvo_ba(&problem, &config).expect("global BA solve");
@@ -4715,7 +5146,7 @@ mod global_ba_tests {
             let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
             let patches: Vec<DpvoPatch> = graph.patches().to_vec();
             let intrinsics = vec![intr; poses.len()];
-            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights };
+            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping: None };
             let cfg = DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
             let solved = dpvo_ba(&problem, &cfg).expect("legacy solve");
             (solved.poses[drifted_live].translation - true_drifted_pose.translation).norm()
@@ -4746,6 +5177,7 @@ mod global_ba_tests {
             edges: gathered.edges,
             targets: gathered.targets,
             weights: gathered.weights,
+            depth_damping: None,
         };
         let solved = dpvo_ba(&problem, &ba_cfg).expect("widened solve");
         let drifted_combined = 1 + drifted_live; // 1 folded frame prepended, then the live suffix.
@@ -5204,7 +5636,19 @@ mod low_parallax_tests {
     use super::*;
 
     fn cfg(window: usize, enter_flow: f64, exit_flow: f64) -> DpvoLowParallaxConfig {
-        DpvoLowParallaxConfig { window, enter_flow, exit_flow }
+        // `response`/`depth_damp_factor`/`unflag_after_commits` are
+        // irrelevant to every test in this module — they exercise
+        // `LowParallaxRegimeState` directly, which has no knowledge of
+        // `response` at all (see [`LowParallaxResponse`]'s own doc: only
+        // `DpvoOdometry::low_parallax_gate`'s final `match` reads it).
+        DpvoLowParallaxConfig {
+            window,
+            enter_flow,
+            exit_flow,
+            response: LowParallaxResponse::Freeze,
+            depth_damp_factor: 1000.0,
+            unflag_after_commits: 16,
+        }
     }
 
     #[test]
@@ -5332,5 +5776,104 @@ mod low_parallax_tests {
             assert!(!t.suppress && !t.just_entered && !t.just_exited);
         }
         assert!(!state.in_regime());
+    }
+}
+
+/// Milestone M15: [`LowParallaxDampState`] is free-standing (no
+/// `DpvoOdometry`/ONNX dependency — see that struct's own doc, mirroring
+/// [`LowParallaxRegimeState`]'s own testability precedent above), so its
+/// flag/un-flag lifecycle and per-patch multiplier construction are fully
+/// unit-testable without a live ONNX session.
+#[cfg(test)]
+mod low_parallax_damp_tests {
+    use super::*;
+
+    #[test]
+    fn multipliers_is_none_when_nothing_has_ever_been_flagged() {
+        let mut state = LowParallaxDampState::default();
+        assert_eq!(state.multipliers(&[1, 2, 3], 4, 1000.0), None);
+        assert_eq!(state.damped_solve_count(), 0, "an unaffected solve must not be counted as damped");
+    }
+
+    #[test]
+    fn flag_then_multipliers_damps_only_the_flagged_frames_block() {
+        let mut state = LowParallaxDampState::default();
+        state.flag(5, 3); // arrival_index 5, patches_per_frame 3.
+        // Window [4, 5, 6): only arrival 5 (local block 1) is flagged.
+        let out = state.multipliers(&[4, 5, 6], 3, 1000.0).expect("frame 5 is live and flagged, must damp");
+        assert_eq!(out.len(), 9);
+        assert_eq!(&out[0..3], &[1.0, 1.0, 1.0], "frame 4's block must be untouched");
+        assert_eq!(&out[3..6], &[1000.0, 1000.0, 1000.0], "frame 5's block must be damped");
+        assert_eq!(&out[6..9], &[1.0, 1.0, 1.0], "frame 6's block must be untouched");
+        assert_eq!(state.damped_solve_count(), 1);
+        // A second call with the SAME (still-flagged) window must count as
+        // another genuinely-damped solve.
+        state.multipliers(&[4, 5, 6], 3, 1000.0);
+        assert_eq!(state.damped_solve_count(), 2);
+    }
+
+    #[test]
+    fn multipliers_is_none_when_the_flagged_frame_is_outside_this_windows_arrivals() {
+        // A frame can be flagged (still tracked) but not appear in a
+        // PARTICULAR `dpvo_ba` call's own window (e.g. it fell outside the
+        // per-frame windowed solve's `[frame_lo, n)` bound, even though it
+        // is still live in the full graph) — that solve must be a true
+        // no-op, not accidentally damp some unrelated local index.
+        let mut state = LowParallaxDampState::default();
+        state.flag(100, 4);
+        assert_eq!(state.multipliers(&[1, 2, 3], 4, 1000.0), None);
+        assert_eq!(state.damped_solve_count(), 0);
+    }
+
+    #[test]
+    fn flag_is_idempotent_and_does_not_double_count() {
+        let mut state = LowParallaxDampState::default();
+        state.flag(7, 5);
+        state.flag(7, 5); // same arrival again — must not double-count.
+        assert_eq!(state.frames_flagged_total(), 1);
+        assert_eq!(state.patches_flagged_total(), 5);
+        assert_eq!(state.currently_damped_frames(), 1);
+    }
+
+    #[test]
+    fn advance_unflagging_never_fires_while_still_in_regime() {
+        // Even an arbitrarily large age gap must not un-flag while the
+        // regime is still active — see `advance_unflagging`'s own doc for
+        // why (nothing has had a chance to accumulate real parallax yet).
+        let mut state = LowParallaxDampState::default();
+        state.flag(0, 4);
+        state.advance_unflagging(1_000_000, 5, true);
+        assert_eq!(state.currently_damped_frames(), 1);
+        assert_eq!(state.unflagged_total(), 0);
+    }
+
+    #[test]
+    fn advance_unflagging_removes_once_the_age_threshold_is_reached() {
+        let mut state = LowParallaxDampState::default();
+        state.flag(10, 4); // born at arrival_index 10.
+        // Age 4 (< unflag_after_commits=5): must stay flagged.
+        state.advance_unflagging(14, 5, false);
+        assert_eq!(state.currently_damped_frames(), 1);
+        assert_eq!(state.unflagged_total(), 0);
+        // Age 5 (>= 5): un-flags now.
+        state.advance_unflagging(15, 5, false);
+        assert_eq!(state.currently_damped_frames(), 0);
+        assert_eq!(state.unflagged_total(), 1);
+        // A subsequent solve over a window that still includes arrival 10
+        // must no longer be damped.
+        assert_eq!(state.multipliers(&[9, 10, 11], 4, 1000.0), None);
+    }
+
+    #[test]
+    fn advance_unflagging_is_self_cleaning_for_frames_far_older_than_now() {
+        // A frame flagged long ago (and, in a real run, very likely already
+        // pruned from the live graph) still ages out purely from `now`
+        // growing — see `advance_unflagging`'s own doc, "self-cleaning".
+        let mut state = LowParallaxDampState::default();
+        state.flag(0, 4);
+        state.flag(50, 4);
+        state.advance_unflagging(60, 5, false);
+        assert_eq!(state.currently_damped_frames(), 0, "both entries are well past the age threshold");
+        assert_eq!(state.unflagged_total(), 2);
     }
 }

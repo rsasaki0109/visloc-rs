@@ -1372,6 +1372,7 @@ mod tests {
             edges: vec![],
             targets: vec![],
             weights: vec![],
+            depth_damping: None,
         };
         let true_relative_translation = Vector3::new(0.1, 0.0, 0.0);
         let factor = DpvoImuFactor {
@@ -1497,6 +1498,7 @@ mod tests {
             edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }],
             targets: vec![target],
             weights: vec![Vector2::new(1.0, 1.0)],
+            depth_damping: None,
         };
         let config = DpvoBaConfig { fixedp: 1, ..DpvoBaConfig::default() };
         let imu = DpvoViWindow {
@@ -1609,6 +1611,7 @@ mod tests {
             edges,
             targets,
             weights,
+            depth_damping: None,
         };
 
         // IMU factors built from TRUE metric kinematics (constant

@@ -179,6 +179,24 @@
 //! records every evaluated frame's own flow value + regime state — the
 //! acceptance evidence for "did this fire at the right place, for the
 //! right duration."
+//!
+//! # `--hover-response` / `--hover-depth-damp-factor` / `--hover-unflag-after-commits`
+//! (Milestone M15, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Only meaningful alongside `--hover-freeze` (which, despite its name, now
+//! just means "enable `DpvoOdometryConfig::low_parallax`" — see
+//! `dpvo_vo.rs`'s own module doc, "Milestone M15: depth-trust damping", for
+//! why the flag name was kept for backward-compatible scripts).
+//! `--hover-response freeze` (default) reproduces M14's exact mechanism;
+//! `--hover-response depth_damp` switches to M15's Option B (commit
+//! hover-span frames normally, but heavily damp their patches' depth
+//! channel in every subsequent `dpvo_ba` call until the frame ages out —
+//! `--hover-depth-damp-factor`/`--hover-unflag-after-commits` mirror
+//! `DpvoLowParallaxConfig`'s own fields 1:1). The summary/progress-line
+//! output gains `hover_response`/`hover_currently_damped_frames`/
+//! `hover_frames_flagged_total`/`hover_patches_flagged_total`/
+//! `hover_unflagged_total`/`hover_damped_solve_count` alongside M14's own
+//! counters (all `0`/`freeze` whenever `depth_damp` is not selected).
 
 use std::env;
 use std::fs;
@@ -194,7 +212,7 @@ use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::{DpvoPatchGraph, DpvoVoConfig};
 use visloc_rs::slam::dpvo_vo::{
     DpvoGlobalBaConfig, DpvoImuConfig, DpvoLowParallaxConfig, DpvoOdometry, DpvoOdometryConfig,
-    DpvoScaleCouplingConfig,
+    DpvoScaleCouplingConfig, LowParallaxResponse,
 };
 use visloc_rs::slam::{
     DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel,
@@ -360,6 +378,17 @@ struct CliArgs {
     hover_window: usize,
     hover_enter_flow: f64,
     hover_exit_flow: f64,
+    /// Milestone M15: `"freeze"` (default, M14's mechanism) or `"depth_damp"`
+    /// (M15's Option B) — parsed into `LowParallaxResponse` at config-build
+    /// time (see `--hover-response`'s own arg-loop entry for the exact
+    /// accepted spellings).
+    hover_response: LowParallaxResponse,
+    /// Milestone M15 (`DpvoLowParallaxConfig::depth_damp_factor`, mirrored
+    /// 1:1).
+    hover_depth_damp_factor: f64,
+    /// Milestone M15 (`DpvoLowParallaxConfig::unflag_after_commits`,
+    /// mirrored 1:1).
+    hover_unflag_after_commits: usize,
 }
 
 impl Default for CliArgs {
@@ -458,6 +487,9 @@ impl Default for CliArgs {
             hover_window: DpvoLowParallaxConfig::default().window,
             hover_enter_flow: DpvoLowParallaxConfig::default().enter_flow,
             hover_exit_flow: DpvoLowParallaxConfig::default().exit_flow,
+            hover_response: DpvoLowParallaxConfig::default().response,
+            hover_depth_damp_factor: DpvoLowParallaxConfig::default().depth_damp_factor,
+            hover_unflag_after_commits: DpvoLowParallaxConfig::default().unflag_after_commits,
         }
     }
 }
@@ -595,6 +627,25 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--hover-window" => args.hover_window = raw.remove(i + 1).parse()?,
             "--hover-enter-flow" => args.hover_enter_flow = raw.remove(i + 1).parse()?,
             "--hover-exit-flow" => args.hover_exit_flow = raw.remove(i + 1).parse()?,
+            // Milestone M15 (`docs/dpvo_droid_port_plan.md`): `LowParallaxResponse`
+            // has no `FromStr` impl of its own (it is not a general-purpose
+            // parseable type, just this demo's own CLI surface for it), so
+            // this arm matches the accepted spellings directly.
+            "--hover-response" => {
+                let raw_value = raw.remove(i + 1);
+                args.hover_response = match raw_value.as_str() {
+                    "freeze" => LowParallaxResponse::Freeze,
+                    "depth_damp" => LowParallaxResponse::DepthDamp,
+                    other => {
+                        return Err(format!(
+                            "--hover-response: expected \"freeze\" or \"depth_damp\", got {other:?}"
+                        )
+                        .into())
+                    }
+                };
+            }
+            "--hover-depth-damp-factor" => args.hover_depth_damp_factor = raw.remove(i + 1).parse()?,
+            "--hover-unflag-after-commits" => args.hover_unflag_after_commits = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -853,6 +904,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window: args.hover_window,
             enter_flow: args.hover_enter_flow,
             exit_flow: args.hover_exit_flow,
+            // Milestone M15: `--hover-response depth_damp` switches to
+            // Option B; omitting it keeps M14's own `Freeze` default.
+            response: args.hover_response,
+            depth_damp_factor: args.hover_depth_damp_factor,
+            unflag_after_commits: args.hover_unflag_after_commits,
         }),
     };
 
@@ -920,8 +976,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.hover_freeze {
         println!(
-            "hover freeze enabled (Milestone M14): window={} enter_flow={:.3} exit_flow={:.3}",
-            args.hover_window, args.hover_enter_flow, args.hover_exit_flow,
+            "hover detector enabled (Milestone M14/M15): window={} enter_flow={:.3} exit_flow={:.3} \
+             response={:?} depth_damp_factor={:.3} unflag_after_commits={}",
+            args.hover_window,
+            args.hover_enter_flow,
+            args.hover_exit_flow,
+            args.hover_response,
+            args.hover_depth_damp_factor,
+            args.hover_unflag_after_commits,
         );
     }
 
@@ -1320,6 +1382,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     hf_diag.disarmed,
                     hf_diag.last_flow,
                 );
+                // Milestone M15: only ever nonzero under `--hover-response
+                // depth_damp` — see `LowParallaxDampState`'s own doc.
+                println!(
+                    "  hover_response={:?} hover_currently_damped_frames={} hover_frames_flagged_total={} \
+                     hover_patches_flagged_total={} hover_unflagged_total={} hover_damped_solve_count={}",
+                    hf_diag.response,
+                    hf_diag.currently_damped_frames,
+                    hf_diag.frames_flagged_total,
+                    hf_diag.patches_flagged_total,
+                    hf_diag.unflagged_total,
+                    hf_diag.damped_solve_count,
+                );
             }
         }
     }
@@ -1546,7 +1620,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          hover_last_exit_frame={hf_last_exit_frame}\n\
          hover_window={hf_window}\n\
          hover_enter_flow={hf_enter_flow:.4}\n\
-         hover_exit_flow={hf_exit_flow:.4}\n",
+         hover_exit_flow={hf_exit_flow:.4}\n\
+         hover_response={hf_response:?}\n\
+         hover_depth_damp_factor={hf_depth_damp_factor:.3}\n\
+         hover_unflag_after_commits={hf_unflag_after_commits}\n\
+         hover_currently_damped_frames={hf_currently_damped_frames}\n\
+         hover_frames_flagged_total={hf_frames_flagged_total}\n\
+         hover_patches_flagged_total={hf_patches_flagged_total}\n\
+         hover_unflagged_total={hf_unflagged_total}\n\
+         hover_damped_solve_count={hf_damped_solve_count}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1677,6 +1759,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hf_window = args.hover_window,
         hf_enter_flow = args.hover_enter_flow,
         hf_exit_flow = args.hover_exit_flow,
+        hf_response = hf_diag.response,
+        hf_depth_damp_factor = args.hover_depth_damp_factor,
+        hf_unflag_after_commits = args.hover_unflag_after_commits,
+        hf_currently_damped_frames = hf_diag.currently_damped_frames,
+        hf_frames_flagged_total = hf_diag.frames_flagged_total,
+        hf_patches_flagged_total = hf_diag.patches_flagged_total,
+        hf_unflagged_total = hf_diag.unflagged_total,
+        hf_damped_solve_count = hf_diag.damped_solve_count,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

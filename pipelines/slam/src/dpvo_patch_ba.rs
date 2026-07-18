@@ -361,6 +361,27 @@ pub struct DpvoBaProblem {
     /// so this is a diagonal (not isotropic) per-edge information matrix
     /// `diag(w_u, w_v)`.
     pub weights: Vec<Vector2<f64>>,
+    /// Milestone M15 (`docs/dpvo_droid_port_plan.md`, "depth-trust damping"):
+    /// optional per-patch multiplier on [`DpvoBaConfig::lmbda`] for that
+    /// patch's own depth-channel Tikhonov term. `None` — every prior
+    /// milestone's construction, and every call site that does not opt in —
+    /// means every patch's multiplier is `1.0`, reproducing `q = 1/(C +
+    /// lmbda)` (`ba.py:158`) byte-for-byte. When `Some`, must be
+    /// `patches.len()` long (indexed by the SAME global patch index
+    /// `patches`/edges use, not a compacted "used patches" index — see
+    /// [`dpvo_ba_step`]'s own "Depth damping" section for exactly where this
+    /// is consulted); entry `k`'s value replaces the implicit `1.0` in
+    /// `q[k] = 1/(C[k] + lmbda * depth_damping[k])`. A value `> 1.0` pulls
+    /// that patch's depth update toward zero (i.e. trusts its CURRENT value
+    /// more, since a low-parallax patch's own Jacobian information `C[k]` is
+    /// near-zero, `q[k]` is dominated by the `lmbda` floor, not by real
+    /// visual evidence — inflating that floor directly counters the
+    /// unconstrained-depth explosion `docs/dpvo_droid_port_plan.md`'s "M13
+    /// results" diagnosed). Left un-consulted (and therefore free) whenever
+    /// `None` — no extra allocation, no extra branch inside the per-edge
+    /// accumulation loop, only one extra lookup per LOCAL (used) patch when
+    /// building `q` itself.
+    pub depth_damping: Option<Vec<f64>>,
 }
 
 /// Configuration matching `BA()`'s remaining call arguments
@@ -947,8 +968,20 @@ pub fn dpvo_ba_step(
         }
     }
 
-    // Q = 1 / (C + lmbda) (ba.py:158).
-    let q: DVector<f64> = c_diag.map(|c| 1.0 / (c + config.lmbda));
+    // Q = 1 / (C + lmbda) (ba.py:158). Milestone M15 ("depth-trust damping",
+    // see `DpvoBaProblem::depth_damping`'s own doc): when a per-patch
+    // multiplier vector is supplied, patch `k_local`'s (`used_patches[k_local]`
+    // in GLOBAL patch-index terms) `lmbda` term is scaled by its own entry
+    // instead of the shared scalar every prior milestone used unconditionally
+    // — `problem.depth_damping.is_none()` reproduces the original expression
+    // exactly (multiplier `1.0` for every patch).
+    let q: DVector<f64> = DVector::from_iterator(
+        m,
+        used_patches.iter().enumerate().map(|(local, &global_k)| {
+            let multiplier = problem.depth_damping.as_ref().map_or(1.0, |d| d[global_k]);
+            1.0 / (c_diag[local] + config.lmbda * multiplier)
+        }),
+    );
 
     // dZ (and dX, unless n2 == 0) via the Schur complement (ba.py:160-173).
     let (dx, dz): (DVector<f64>, DVector<f64>) = if n2 == 0 {
@@ -1016,6 +1049,11 @@ pub fn dpvo_ba_step(
         edges: problem.edges.clone(),
         targets: problem.targets.clone(),
         weights: problem.weights.clone(),
+        // Milestone M15: carried forward unchanged so `dpvo_ba`'s own
+        // multi-iteration loop (`dpvo_ba_step` called `config.iterations`
+        // times, re-linearizing at `current` each time) keeps damping every
+        // flagged patch on every iteration, not just the first.
+        depth_damping: problem.depth_damping.clone(),
     })
 }
 
@@ -1058,6 +1096,7 @@ mod tests {
             edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }],
             targets: vec![geom.coords_center],
             weights: vec![Vector2::new(0.8, 0.8)],
+            depth_damping: None,
         }
     }
 
@@ -1110,6 +1149,7 @@ mod tests {
             edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }],
             targets: vec![target],
             weights: vec![weight],
+            depth_damping: None,
         };
         let config = DpvoBaConfig { iterations: 1, fixedp: 1, lmbda: 1e-4, ep: 100.0, bounds: DpvoBaConfig::default().bounds };
 
@@ -1218,6 +1258,7 @@ mod tests {
             edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }],
             targets: vec![target],
             weights: vec![Vector2::new(0.8, 0.8)],
+            depth_damping: None,
         }
     }
 
@@ -1257,6 +1298,150 @@ mod tests {
         let r1 = residual_after(&one);
         let r2 = residual_after(&two);
         assert!(r2 <= r1 + 1e-9, "second GN iteration should not increase the residual: r1={r1} r2={r2}");
+    }
+
+    // --- Milestone M15: per-patch depth damping (docs/dpvo_droid_port_plan.md,
+    // "M15 results", Option B — see `DpvoBaProblem::depth_damping`'s own doc
+    // for the mechanism) ---
+
+    /// A deliberately near-zero-parallax 2-frame/1-patch/1-edge scene — the
+    /// exact regime M13's own diagnosis pins as the failure mode this
+    /// mechanism targets (`docs/dpvo_droid_port_plan.md`'s "M13 results":
+    /// with almost no baseline, the depth Jacobian `jz` is tiny, so the
+    /// depth-channel Hessian `C[k]` is tiny too, and `q = 1/(C + lmbda)` is
+    /// dominated by the bare `lmbda` FLOOR rather than real visual evidence —
+    /// exactly the condition under which inflating that floor via a per-
+    /// patch multiplier has a large, measurable effect). A fixture with a
+    /// substantial baseline (e.g. `zero_residual_or_nonzero_two_frame_problem`,
+    /// used by this module's other tests) is the WRONG regime to prove this
+    /// mechanism in: there, `C[k]` already dominates `lmbda` outright, so
+    /// even a 1000x multiplier changes `q` negligibly — confirmed by running
+    /// exactly that fixture through this test first and observing dz_damped
+    /// barely differ from dz_undamped, before switching to this near-zero-
+    /// baseline construction.
+    fn near_zero_parallax_problem() -> DpvoBaProblem {
+        let pose0 = SE3::identity();
+        // 1e-4 m translation, no rotation: almost no real depth-observing
+        // baseline, but not exactly zero (avoids degenerate/singular
+        // corner cases).
+        let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(1e-4, 0.0, 0.0));
+        let intrinsics = intr(110.0, 110.0, 32.0, 24.0);
+        let patch = DpvoPatch { x: 34.0, y: 21.0, inverse_depth: 0.7 };
+        let geom = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch);
+        // A large-relative-to-the-tiny-Jacobian target perturbation — the
+        // "BA-noise-driven residual reprojected through an almost-flat
+        // depth Jacobian" M13's own Finding C describes.
+        let target = geom.coords_center + Vector2::new(2.0, -1.0);
+        DpvoBaProblem {
+            poses: vec![pose0, pose1],
+            patches: vec![patch],
+            intrinsics: vec![intrinsics, intrinsics],
+            edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }],
+            targets: vec![target],
+            weights: vec![Vector2::new(0.8, 0.8)],
+            depth_damping: None,
+        }
+    }
+
+    #[test]
+    fn depth_damping_multiplier_shrinks_that_patch_depth_update() {
+        // Solved twice: once undamped (`depth_damping: None`), once with a
+        // heavy per-patch multiplier on the ONLY patch present. If the
+        // Schur-complement threading is correct, the damped solve's depth
+        // update must be far smaller in magnitude — the direct "does M15's
+        // mechanism do anything" proof, on the near-zero-parallax fixture
+        // this mechanism is actually meant for (see
+        // `near_zero_parallax_problem`'s own doc for why a well-conditioned
+        // fixture cannot demonstrate this).
+        let undamped = near_zero_parallax_problem();
+        let mut damped = undamped.clone();
+        damped.depth_damping = Some(vec![1000.0]);
+
+        let config = DpvoBaConfig::default();
+        let solved_undamped = dpvo_ba_step(&undamped, &config).expect("solvable");
+        let solved_damped = dpvo_ba_step(&damped, &config).expect("solvable");
+
+        let dz_undamped = (solved_undamped.patches[0].inverse_depth - undamped.patches[0].inverse_depth).abs();
+        let dz_damped = (solved_damped.patches[0].inverse_depth - damped.patches[0].inverse_depth).abs();
+        assert!(dz_undamped > 1e-6, "fixture should have a genuinely nonzero undamped update: dz={dz_undamped}");
+        assert!(
+            dz_damped < dz_undamped / 10.0,
+            "a 1000x lmbda multiplier should shrink the depth update by at least 10x: undamped={dz_undamped} damped={dz_damped}"
+        );
+    }
+
+    #[test]
+    fn depth_damping_all_ones_matches_none_exactly() {
+        // `Some(vec![1.0; m])` must reproduce the pre-M15 `q = 1/(C + lmbda)`
+        // expression bit-for-bit — the "off is a true no-op" contract every
+        // milestone in this port relies on (see e.g. M8/M14's own
+        // "byte-for-byte" language). Uses the ordinary (well-conditioned)
+        // fixture — this equivalence must hold regardless of conditioning.
+        let none_problem = zero_residual_or_nonzero_two_frame_problem();
+        let mut ones_problem = none_problem.clone();
+        ones_problem.depth_damping = Some(vec![1.0]);
+
+        let config = DpvoBaConfig::default();
+        let solved_none = dpvo_ba_step(&none_problem, &config).expect("solvable");
+        let solved_ones = dpvo_ba_step(&ones_problem, &config).expect("solvable");
+
+        assert_eq!(solved_none.patches[0].inverse_depth, solved_ones.patches[0].inverse_depth);
+        assert_eq!(solved_none.poses[1].translation, solved_ones.poses[1].translation);
+    }
+
+    #[test]
+    fn depth_damping_is_indexed_by_global_patch_id_not_by_used_patches_local_position() {
+        // `q`'s own accumulation loop walks `used_patches` (the sorted,
+        // DEDUPLICATED set of patch ids any edge actually references) and
+        // must look `depth_damping` up by the GLOBAL id
+        // (`used_patches[local]`), not by `local` itself — a plausible
+        // off-by-index bug that a fixture where every patch is referenced
+        // (local == global for every entry) cannot catch. This fixture
+        // deliberately leaves global patch id 1 UNREFERENCED by any edge, so
+        // `used_patches == [0, 2]` and local position 1 maps to global id 2,
+        // not global id 1 — if the solver read `depth_damping[local]`
+        // instead of `depth_damping[global_k]`, it would consult index 1
+        // (the deliberately-unused, undamped slot) for patch 2 and this
+        // test's own assertion would fail.
+        //
+        // Near-zero-parallax pose pair (see `near_zero_parallax_problem`'s
+        // own doc for why this, not a well-conditioned baseline, is the
+        // regime that actually exercises the mechanism).
+        let pose0 = SE3::identity();
+        let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(1e-4, 0.0, 0.0));
+        let intrinsics = intr(110.0, 110.0, 32.0, 24.0);
+        let patch_a = DpvoPatch { x: 34.0, y: 21.0, inverse_depth: 0.7 }; // global id 0
+        let patch_unused = DpvoPatch { x: 10.0, y: 10.0, inverse_depth: 0.7 }; // global id 1, no edge
+        let patch_c = DpvoPatch { x: 26.0, y: 27.0, inverse_depth: 0.7 }; // global id 2
+        let geom_a = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch_a);
+        let geom_c = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch_c);
+        let target_a = geom_a.coords_center + Vector2::new(2.0, -1.0);
+        let target_c = geom_c.coords_center + Vector2::new(2.0, -1.0);
+
+        let problem = DpvoBaProblem {
+            poses: vec![pose0, pose1],
+            patches: vec![patch_a, patch_unused, patch_c],
+            intrinsics: vec![intrinsics, intrinsics],
+            edges: vec![DpvoEdge { i: 0, j: 1, k: 0 }, DpvoEdge { i: 0, j: 1, k: 2 }],
+            targets: vec![target_a, target_c],
+            weights: vec![Vector2::new(0.8, 0.8), Vector2::new(0.8, 0.8)],
+            // Damp global patch 2 heavily; global patch 1's entry is never
+            // consulted (unreferenced by any edge) and is set to an
+            // implausible sentinel to make a wrong lookup obvious if this
+            // test's assertion were ever loosened.
+            depth_damping: Some(vec![1.0, f64::NAN, 1000.0]),
+        };
+        let config = DpvoBaConfig::default();
+        let solved = dpvo_ba_step(&problem, &config).expect("solvable");
+
+        let dz_a = (solved.patches[0].inverse_depth - problem.patches[0].inverse_depth).abs();
+        let dz_c = (solved.patches[2].inverse_depth - problem.patches[2].inverse_depth).abs();
+        assert!(dz_a > 1e-6, "patch 0 (undamped) should move: dz_a={dz_a}");
+        assert!(dz_a.is_finite() && dz_c.is_finite(), "the NaN sentinel at unreferenced global id 1 must never be read");
+        assert!(
+            dz_c < dz_a / 10.0,
+            "patch 2 (damped 1000x via its own global id) should move far less than patch 0: dz_a={dz_a} dz_c={dz_c}"
+        );
     }
 
     // --- M4 additions: transform_point / reproject_patch_grid / flow_mag ---
