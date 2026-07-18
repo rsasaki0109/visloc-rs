@@ -86,6 +86,29 @@
 //! numbers, and every periodic progress line reports the same running
 //! counters so a long run's console log shows exactly when (if ever) a global
 //! pass ran and how expensive it was.
+//!
+//! # `--sim3-backend` (Milestone M9, `docs/dpvo_droid_port_plan.md`)
+//!
+//! Enables `crate::dpvo_sim3_backend`'s Sim(3) pose-graph scale-drift
+//! correction over the full retained + live pose history
+//! (`DpvoOdometryConfig::sim3_backend`) — see that module's own doc for the
+//! full design and why this is a NEW mechanism layered on top of the ported
+//! DPVO pipeline, not itself a straight port. Off by default — omitting the
+//! flag reproduces M4-M8's exact behavior (`sim3_backend: None`). `--s3b-frequency`/
+//! `--s3b-node-stride`/`--s3b-loop-edge-weight` mirror `DpvoSim3BackendConfig`'s
+//! own fields 1:1. The summary echoes `sim3_backend_enabled`/`sim3_backend_calls`/
+//! `sim3_backend_loop_edges_total`/`sim3_backend_last_*`/`sim3_backend_total_elapsed_ms`
+//! alongside the usual ATE numbers. **Also note**: as of this milestone, the
+//! trajectory CSV and ATE alignment vectors are built in a POST-HOC pass
+//! after the whole run finishes (`final_pose_of`), reading each tracked
+//! frame's FINAL pose rather than the live-at-commit-time pose
+//! `process_frame` returns — required so a later correction (this
+//! milestone's own Sim3 backend, or M8's global BA) actually reaches the
+//! exported trajectory instead of being silently dropped; this changes
+//! nothing for a run with neither `--global-ba` nor `--sim3-backend` enabled
+//! (no mechanism ever corrects an already-committed frame's pose in that
+//! configuration, so the post-hoc lookup returns the exact same value the
+//! old incremental approach would have captured).
 
 use std::env;
 use std::fs;
@@ -98,11 +121,13 @@ use ndarray::Array2;
 use visloc_rs::core::geometry::SE3;
 use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, EurocImuSample};
 use visloc_rs::io::images::read_common_image;
-use visloc_rs::slam::dpvo_patch_graph::DpvoVoConfig;
+use visloc_rs::slam::dpvo_patch_graph::{DpvoPatchGraph, DpvoVoConfig};
 use visloc_rs::slam::dpvo_vo::{
     DpvoGlobalBaConfig, DpvoImuConfig, DpvoOdometry, DpvoOdometryConfig, DpvoScaleCouplingConfig,
 };
-use visloc_rs::slam::{DpvoIntrinsics, DpvoLoopClosureConfig, ImuNoiseModel, ScaleCouplingConfig};
+use visloc_rs::slam::{
+    DpvoIntrinsics, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel, ScaleCouplingConfig,
+};
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
@@ -190,6 +215,21 @@ struct CliArgs {
     gba_ep: f64,
     gba_lmbda: f64,
     gba_inactive_edge_cap: usize,
+    /// Milestone M9 (`docs/dpvo_droid_port_plan.md`): enable the Sim(3)
+    /// pose-graph scale-drift backend over the full retained + live pose
+    /// history (`DpvoOdometryConfig::sim3_backend`). Default off — every
+    /// prior milestone's behavior unaffected.
+    sim3_backend: bool,
+    /// Milestone M9: `DpvoSim3BackendConfig`'s own throttle/subsampling/
+    /// loop-weight fields, mirrored 1:1 — see that struct's own doc. The
+    /// nested `Sim3PoseGraphConfig` solver knobs are left at their own
+    /// default (not exposed here) since M8's own `--gba-*` precedent already
+    /// exposes every field of ITS solver-adjacent config and this milestone
+    /// found no evidence yet that the reused `Sim3PoseGraph` solver's own
+    /// iteration/damping defaults need tuning for this call site.
+    s3b_frequency: usize,
+    s3b_node_stride: usize,
+    s3b_loop_edge_weight: f64,
 }
 
 impl Default for CliArgs {
@@ -253,6 +293,12 @@ impl Default for CliArgs {
             gba_ep: DpvoGlobalBaConfig::default().ep,
             gba_lmbda: DpvoGlobalBaConfig::default().lmbda,
             gba_inactive_edge_cap: DpvoGlobalBaConfig::default().inactive_edge_cap,
+            sim3_backend: false,
+            // Mirror `DpvoSim3BackendConfig::default()` exactly so omitting
+            // these flags reproduces that struct's own defaults.
+            s3b_frequency: DpvoSim3BackendConfig::default().frequency,
+            s3b_node_stride: DpvoSim3BackendConfig::default().node_stride,
+            s3b_loop_edge_weight: DpvoSim3BackendConfig::default().loop_edge_weight,
         }
     }
 }
@@ -343,6 +389,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--gba-ep" => args.gba_ep = raw.remove(i + 1).parse()?,
             "--gba-lmbda" => args.gba_lmbda = raw.remove(i + 1).parse()?,
             "--gba-inactive-edge-cap" => args.gba_inactive_edge_cap = raw.remove(i + 1).parse()?,
+            "--sim3-backend" => {
+                args.sim3_backend = true;
+                raw.remove(i);
+                continue;
+            }
+            "--s3b-frequency" => args.s3b_frequency = raw.remove(i + 1).parse()?,
+            "--s3b-node-stride" => args.s3b_node_stride = raw.remove(i + 1).parse()?,
+            "--s3b-loop-edge-weight" => args.s3b_loop_edge_weight = raw.remove(i + 1).parse()?,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
@@ -413,6 +467,19 @@ fn bilinear_sample_u8(image: &Array2<u8>, x: f64, y: f64) -> u8 {
         + v10 * (1.0 - fx) * fy
         + v11 * fx * fy;
     value.round().clamp(0.0, 255.0) as u8
+}
+
+/// Milestone M9: a tracked frame's FINAL best pose, by `arrival_index` —
+/// checks `retained_poses` (folded frames, possibly Sim3-corrected) first,
+/// then falls back to scanning still-live `frames()` (also possibly
+/// corrected, by either the global-BA pass or the Sim3 backend). See the
+/// main loop's own comment on why this is a POST-HOC lookup rather than the
+/// live-at-commit-time pose `process_frame` returns.
+fn final_pose_of(graph: &DpvoPatchGraph, arrival_index: usize) -> Option<SE3> {
+    if let Some(pose) = graph.retained_poses().get(&arrival_index) {
+        return Some(pose.clone());
+    }
+    graph.frames().iter().find(|f| f.arrival_index == arrival_index).map(|f| f.pose.clone())
 }
 
 fn nearest_ground_truth(samples: &[EurocGroundTruthSample], target_ts: i128) -> Option<&EurocGroundTruthSample> {
@@ -539,6 +606,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lmbda: args.gba_lmbda,
             inactive_edge_cap: args.gba_inactive_edge_cap,
         }),
+        // Milestone M9 (`docs/dpvo_droid_port_plan.md`): `--sim3-backend`
+        // enables the Sim(3) pose-graph scale-drift backend; omitting it
+        // reproduces M4-M8's exact behavior (`sim3_backend: None`).
+        sim3_backend: args.sim3_backend.then(|| DpvoSim3BackendConfig {
+            frequency: args.s3b_frequency,
+            node_stride: args.s3b_node_stride,
+            loop_edge_weight: args.s3b_loop_edge_weight,
+            ..DpvoSim3BackendConfig::default()
+        }),
     };
 
     if args.loop_closure {
@@ -560,6 +636,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "global BA enabled (Milestone M8): frequency={} iterations={} ep={:.2} lmbda={:.2e} \
              inactive_edge_cap={}",
             args.gba_frequency, args.gba_iterations, args.gba_ep, args.gba_lmbda, args.gba_inactive_edge_cap,
+        );
+    }
+
+    if args.sim3_backend {
+        println!(
+            "sim3 backend enabled (Milestone M9): frequency={} node_stride={} loop_edge_weight={:.2}",
+            args.s3b_frequency, args.s3b_node_stride, args.s3b_loop_edge_weight,
         );
     }
 
@@ -606,9 +689,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frames: Vec<_> = dataset.cam0_images.iter().step_by(args.stride.max(1)).take(frame_cap).collect();
     println!("processing {} frames (stride={})", frames.len(), args.stride);
 
-    let mut traj_csv = String::from("timestamp_ns,tx,ty,tz,qw,qx,qy,qz\n");
-    let mut aligned_estimated: Vec<Point3<f64>> = Vec::new();
-    let mut aligned_reference: Vec<Point3<f64>> = Vec::new();
+    // Milestone M9: `(timestamp_ns, arrival_index)` per successfully tracked
+    // frame — see the main loop's own comment (right before this Vec is
+    // pushed to) for why the trajectory CSV/ATE are no longer built
+    // incrementally here.
+    let mut tracked_entries: Vec<(i128, usize)> = Vec::new();
     let mut tracked_frames = 0usize;
 
     // Coarse timing split for everything *outside* `DpvoOdometry` itself
@@ -637,6 +722,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Milestone M8: same "log only on change" philosophy for the global-BA
     // call count.
     let mut prev_gba_calls = 0usize;
+    // Milestone M9: same "log only on change" philosophy for the Sim3
+    // backend's own call count.
+    let mut prev_s3b_calls = 0usize;
     // Milestone M7: track weight/convergence/rollback TRANSITIONS (same
     // "log only on change" philosophy as M5b/M6 above).
     let mut prev_sc_converged = false;
@@ -765,28 +853,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prev_gba_calls = gba_diag.calls;
         }
 
-        if let Some(pose_world_to_camera) = pose {
-            tracked_frames += 1;
-            // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
-            // convention-mapping doc) — the camera center in world is the
-            // inverse's translation.
-            let camera_in_world = pose_world_to_camera.inverse();
-            let q = camera_in_world.rotation.quaternion();
-            traj_csv.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
-                entry.timestamp_nanoseconds,
-                camera_in_world.translation.x,
-                camera_in_world.translation.y,
-                camera_in_world.translation.z,
-                q.w,
-                q.i,
-                q.j,
-                q.k,
-            ));
-            if let Some(gt) = nearest_ground_truth(&dataset.ground_truth, entry.timestamp_nanoseconds) {
-                aligned_estimated.push(Point3::from(camera_in_world.translation));
-                aligned_reference.push(Point3::from(gt.position_world));
+        if args.sim3_backend {
+            let s3b_diag = odometry.sim3_backend_diagnostics();
+            if s3b_diag.calls > prev_s3b_calls {
+                println!(
+                    "*** frame {idx}: SIM3 BACKEND — call #{} (node_count={} edge_count={} \
+                     loop_edges_used={} corrections_applied={} pose_delta_max_m={:.4} \
+                     pose_delta_mean_m={:.4} scale_min={:.4} scale_max={:.4} elapsed_ms={:.2})",
+                    s3b_diag.calls,
+                    s3b_diag.last_node_count,
+                    s3b_diag.last_edge_count,
+                    s3b_diag.last_loop_edges_used,
+                    s3b_diag.last_scale_corrections_applied,
+                    s3b_diag.last_pose_delta_max_m,
+                    s3b_diag.last_pose_delta_mean_m,
+                    s3b_diag.last_scale_min,
+                    s3b_diag.last_scale_max,
+                    s3b_diag.last_elapsed_ms,
+                );
             }
+            prev_s3b_calls = s3b_diag.calls;
+        }
+
+        // Milestone M9: record only `(timestamp, arrival_index)` here — the
+        // trajectory CSV and ATE evaluation are built in a POST-HOC pass
+        // after the whole run finishes (see `final_pose_of`, called below
+        // the main loop), so that a LATER correction (global BA widening the
+        // window, or this milestone's own Sim3 backend correcting a frame
+        // that already committed many iterations ago) is actually reflected
+        // in the exported trajectory instead of the STALE pose this frame's
+        // own `process_frame` call happened to return at commit time. Prior
+        // milestones built `traj_csv`/`aligned_estimated` incrementally,
+        // right here, which silently froze each frame's pose at ITS OWN
+        // commit time — harmless before M9 (a corrected OLD frame's pose was
+        // never written back this far outside the BA window), but exactly
+        // the gap M9's own retained-pose-history + Sim3 corrections need
+        // this pass to close.
+        if pose.is_some() {
+            tracked_frames += 1;
+            let arrival_index = odometry
+                .graph()
+                .frames()
+                .last()
+                .expect("process_frame returned Some(pose) => at least one live frame exists")
+                .arrival_index;
+            tracked_entries.push((entry.timestamp_nanoseconds, arrival_index));
         }
 
         if idx % 10 == 0 || idx + 1 == frames.len() {
@@ -862,9 +973,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gba_diag.total_elapsed_ms,
                 );
             }
+            if args.sim3_backend {
+                let s3b_diag = odometry.sim3_backend_diagnostics();
+                println!(
+                    "  s3b_calls={} s3b_loop_edges_total={} s3b_last_node_count={} s3b_last_edge_count={} \
+                     s3b_last_corrections_applied={} s3b_last_pose_delta_max_m={:.4} \
+                     s3b_last_scale_min={:.4} s3b_last_scale_max={:.4} s3b_total_elapsed_ms={:.2}",
+                    s3b_diag.calls,
+                    s3b_diag.loop_edges_total,
+                    s3b_diag.last_node_count,
+                    s3b_diag.last_edge_count,
+                    s3b_diag.last_scale_corrections_applied,
+                    s3b_diag.last_pose_delta_max_m,
+                    s3b_diag.last_scale_min,
+                    s3b_diag.last_scale_max,
+                    s3b_diag.total_elapsed_ms,
+                );
+            }
         }
     }
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
+
+    // Milestone M9: build the trajectory CSV / ATE alignment vectors NOW,
+    // reading each tracked frame's FINAL pose (`final_pose_of`) — live
+    // frames read straight from `odometry.graph().frames()`, folded frames
+    // from `odometry.graph().retained_poses()` (both already reflect every
+    // correction applied up to this point, including the Sim3 backend's
+    // own write-back) — rather than the stale live-at-commit-time pose the
+    // old incremental approach captured. See the main loop's own comment at
+    // the `tracked_entries.push(...)` call site for the full rationale.
+    let mut traj_csv = String::from("timestamp_ns,tx,ty,tz,qw,qx,qy,qz\n");
+    let mut aligned_estimated: Vec<Point3<f64>> = Vec::new();
+    let mut aligned_reference: Vec<Point3<f64>> = Vec::new();
+    for &(timestamp_ns, arrival_index) in &tracked_entries {
+        let Some(pose_world_to_camera) = final_pose_of(odometry.graph(), arrival_index) else {
+            continue;
+        };
+        // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
+        // convention-mapping doc) — the camera center in world is the
+        // inverse's translation.
+        let camera_in_world = pose_world_to_camera.inverse();
+        let q = camera_in_world.rotation.quaternion();
+        traj_csv.push_str(&format!(
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+            timestamp_ns,
+            camera_in_world.translation.x,
+            camera_in_world.translation.y,
+            camera_in_world.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+        ));
+        if let Some(gt) = nearest_ground_truth(&dataset.ground_truth, timestamp_ns) {
+            aligned_estimated.push(Point3::from(camera_in_world.translation));
+            aligned_reference.push(Point3::from(gt.position_world));
+        }
+    }
 
     let traj_path = args.out_dir.join("dpvo_trajectory.csv");
     fs::write(&traj_path, &traj_csv)?;
@@ -910,6 +1075,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lc_diag = odometry.loop_closure_diagnostics();
     let sc_diag = odometry.scale_coupling_diagnostics();
     let gba_diag = odometry.global_ba_diagnostics();
+    let s3b_diag = odometry.sim3_backend_diagnostics();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -994,7 +1160,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          global_ba_last_pose_delta_max_m={gba_last_pose_delta_max:.6}\n\
          global_ba_last_pose_delta_mean_m={gba_last_pose_delta_mean:.6}\n\
          global_ba_last_elapsed_ms={gba_last_elapsed_ms:.3}\n\
-         global_ba_total_elapsed_ms={gba_total_elapsed_ms:.3}\n",
+         global_ba_total_elapsed_ms={gba_total_elapsed_ms:.3}\n\
+         sim3_backend_enabled={s3b_enabled}\n\
+         sim3_backend_calls={s3b_calls}\n\
+         sim3_backend_loop_edges_total={s3b_loop_edges_total}\n\
+         sim3_backend_last_node_count={s3b_last_node_count}\n\
+         sim3_backend_last_edge_count={s3b_last_edge_count}\n\
+         sim3_backend_last_loop_edges_used={s3b_last_loop_edges_used}\n\
+         sim3_backend_last_scale_corrections_applied={s3b_last_corrections}\n\
+         sim3_backend_last_pose_delta_max_m={s3b_last_pose_delta_max:.6}\n\
+         sim3_backend_last_pose_delta_mean_m={s3b_last_pose_delta_mean:.6}\n\
+         sim3_backend_last_scale_min={s3b_last_scale_min:.6}\n\
+         sim3_backend_last_scale_max={s3b_last_scale_max:.6}\n\
+         sim3_backend_last_elapsed_ms={s3b_last_elapsed_ms:.3}\n\
+         sim3_backend_total_elapsed_ms={s3b_total_elapsed_ms:.3}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1072,6 +1251,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gba_last_pose_delta_mean = gba_diag.last_pose_delta_mean_m,
         gba_last_elapsed_ms = gba_diag.last_elapsed_ms,
         gba_total_elapsed_ms = gba_diag.total_elapsed_ms,
+        s3b_enabled = s3b_diag.enabled,
+        s3b_calls = s3b_diag.calls,
+        s3b_loop_edges_total = s3b_diag.loop_edges_total,
+        s3b_last_node_count = s3b_diag.last_node_count,
+        s3b_last_edge_count = s3b_diag.last_edge_count,
+        s3b_last_loop_edges_used = s3b_diag.last_loop_edges_used,
+        s3b_last_corrections = s3b_diag.last_scale_corrections_applied,
+        s3b_last_pose_delta_max = s3b_diag.last_pose_delta_max_m,
+        s3b_last_pose_delta_mean = s3b_diag.last_pose_delta_mean_m,
+        s3b_last_scale_min = s3b_diag.last_scale_min,
+        s3b_last_scale_max = s3b_diag.last_scale_max,
+        s3b_last_elapsed_ms = s3b_diag.last_elapsed_ms,
+        s3b_total_elapsed_ms = s3b_diag.total_elapsed_ms,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;

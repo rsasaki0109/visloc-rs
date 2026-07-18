@@ -60,6 +60,10 @@ pub use dpvo_loop_closure::{
 };
 pub mod dpvo_vi_ba;
 pub use dpvo_vi_ba::{dpvo_vi_ba, dpvo_vi_ba_step, DpvoImuFactor, DpvoViBaSolution, DpvoViWindow};
+pub mod dpvo_sim3_backend;
+pub use dpvo_sim3_backend::{
+    run_sim3_backend, DpvoSim3BackendConfig, Sim3BackendResult, Sim3LoopMeasurement,
+};
 pub mod dpvo_scale_coupling;
 pub use dpvo_scale_coupling::{
     apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment, AnnealingWeight,

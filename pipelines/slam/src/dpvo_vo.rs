@@ -225,6 +225,7 @@ use crate::dpvo_scale_coupling::{
     apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment, AnnealingWeight,
     RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCouplingConfig,
 };
+use crate::dpvo_sim3_backend::{run_sim3_backend, DpvoSim3BackendConfig, Sim3LoopMeasurement};
 use crate::imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator,
 };
@@ -344,6 +345,14 @@ pub struct DpvoOdometryConfig {
     /// [`DpvoOdometry::run_global_ba`]. See [`DpvoOdometry`]'s own doc,
     /// "Global BA (Milestone M8)".
     pub global_ba: Option<DpvoGlobalBaConfig>,
+    /// Milestone M9 (`docs/dpvo_droid_port_plan.md`): a `Sim(3)` pose-graph
+    /// scale-drift correction over the FULL retained + live pose history —
+    /// see `crate::dpvo_sim3_backend`'s module doc for the full design and
+    /// why this is a new addition (not a straight DPVO port) built on M8's
+    /// own diagnosed limitation. `None` (default) preserves every prior
+    /// milestone's exact behavior byte-for-byte: [`DpvoOdometry::process_frame`]
+    /// never calls [`crate::dpvo_sim3_backend::run_sim3_backend`].
+    pub sim3_backend: Option<DpvoSim3BackendConfig>,
 }
 
 /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): configuration for the
@@ -432,6 +441,51 @@ pub struct DpvoGlobalBaDiagnostics {
     pub last_pose_delta_max_m: f64,
     /// Mean of the same per-pose delta.
     pub last_pose_delta_mean_m: f64,
+    /// Wall-clock cost of the most recent call, milliseconds.
+    pub last_elapsed_ms: f64,
+    /// Cumulative wall-clock cost across every call, milliseconds.
+    pub total_elapsed_ms: f64,
+}
+
+/// Milestone M9 snapshot of [`DpvoOdometry`]'s Sim(3) pose-graph backend
+/// state — see [`DpvoOdometry::sim3_backend_diagnostics`] and
+/// `crate::dpvo_sim3_backend`'s module doc for the mechanism this reports on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DpvoSim3BackendDiagnostics {
+    /// Whether `config.sim3_backend` is `Some` at all.
+    pub enabled: bool,
+    /// Total number of times [`DpvoOdometry::try_sim3_backend`] actually ran
+    /// a solve (not merely "was due" — a due call with zero resolvable loop
+    /// edges returns early without counting, mirroring
+    /// [`DpvoGlobalBaDiagnostics::calls`]'s own contract).
+    pub calls: usize,
+    /// Cumulative distinct loop measurements ever recorded (captured at
+    /// proximity-loop-acceptance time — see
+    /// `crate::dpvo_sim3_backend::Sim3LoopMeasurement`), whether or not they
+    /// have been consumed by a solve yet.
+    pub loop_edges_total: usize,
+    /// `Sim3PoseGraph` node count (after subsampling) of the MOST RECENT
+    /// call.
+    pub last_node_count: usize,
+    /// Total edges (sequential + loop) fed into the most recent call's
+    /// solve.
+    pub last_edge_count: usize,
+    /// Of those, how many were loop edges.
+    pub last_loop_edges_used: usize,
+    /// How many retained + live poses received a (possibly interpolated)
+    /// correction on the most recent call — the task's own "scale
+    /// corrections applied" diagnostic.
+    pub last_scale_corrections_applied: usize,
+    /// Largest observed pose-translation correction (meters) across every
+    /// corrected pose on the most recent call.
+    pub last_pose_delta_max_m: f64,
+    /// Mean of the same per-pose correction magnitude.
+    pub last_pose_delta_mean_m: f64,
+    /// Smallest/largest solved-or-interpolated `Sim(3)` scale across every
+    /// corrected pose on the most recent call (`1.0`/`1.0` if nothing was
+    /// corrected).
+    pub last_scale_min: f64,
+    pub last_scale_max: f64,
     /// Wall-clock cost of the most recent call, milliseconds.
     pub last_elapsed_ms: f64,
     /// Cumulative wall-clock cost across every call, milliseconds.
@@ -1072,6 +1126,42 @@ pub struct DpvoOdometry {
     global_ba_last_unresolved_inactive: usize,
     global_ba_last_pose_delta_max_m: f64,
     global_ba_last_pose_delta_mean_m: f64,
+
+    // ---- Milestone M9 (Sim(3) pose-graph scale-drift backend) state — see
+    // `crate::dpvo_sim3_backend`'s module doc and
+    // [`Self::run_sim3_backend`]/[`Self::try_sim3_backend`]'s own docs.
+    // Inert whenever `config.sim3_backend` is `None`. ----
+    /// Every proximity loop pair ever accepted, frozen as a `Sim(3)`
+    /// measurement — see
+    /// `crate::dpvo_sim3_backend::Sim3LoopMeasurement`'s own doc and
+    /// [`Self::capture_pending_sim3_loop_measurements`]'s doc for exactly
+    /// WHEN each entry's `relative_pose` is captured (deliberately not the
+    /// instant `try_loop_closure` accepts the pair). Collected only when
+    /// `config.sim3_backend` is `Some` (cheap: one small struct per accepted
+    /// batch, never more than `loop_accepted_total` entries).
+    sim3_loop_measurements: Vec<Sim3LoopMeasurement>,
+    /// Live-index `(i, j)` pairs accepted by [`Self::try_loop_closure`] this
+    /// same frame but not yet frozen into a [`Sim3LoopMeasurement`] — see
+    /// [`Self::capture_pending_sim3_loop_measurements`]'s own doc. Always
+    /// drained (to empty) by the very next call to that method, which
+    /// `process_frame` makes unconditionally right after `update_step`
+    /// every frame — never carries over across a `process_frame` call.
+    pending_sim3_loop_pairs: Vec<(usize, usize)>,
+    /// Mirrors `global_ba_ever_had_loop_edge`'s own no-op-until-evidence
+    /// gate — see [`Self::try_sim3_backend`]'s doc.
+    sim3_backend_ever_had_loop_edge: bool,
+    last_sim3_backend_frame: Option<usize>,
+    sim3_backend_calls: usize,
+    sim3_backend_ms_total: f64,
+    sim3_backend_last_ms: f64,
+    sim3_backend_last_node_count: usize,
+    sim3_backend_last_edge_count: usize,
+    sim3_backend_last_loop_edges_used: usize,
+    sim3_backend_last_corrected_pose_count: usize,
+    sim3_backend_last_pose_delta_max_m: f64,
+    sim3_backend_last_pose_delta_mean_m: f64,
+    sim3_backend_last_scale_min: f64,
+    sim3_backend_last_scale_max: f64,
 }
 
 impl DpvoOdometry {
@@ -1179,6 +1269,21 @@ impl DpvoOdometry {
             global_ba_last_unresolved_inactive: 0,
             global_ba_last_pose_delta_max_m: 0.0,
             global_ba_last_pose_delta_mean_m: 0.0,
+            sim3_loop_measurements: Vec::new(),
+            pending_sim3_loop_pairs: Vec::new(),
+            sim3_backend_ever_had_loop_edge: false,
+            last_sim3_backend_frame: None,
+            sim3_backend_calls: 0,
+            sim3_backend_ms_total: 0.0,
+            sim3_backend_last_ms: 0.0,
+            sim3_backend_last_node_count: 0,
+            sim3_backend_last_edge_count: 0,
+            sim3_backend_last_loop_edges_used: 0,
+            sim3_backend_last_corrected_pose_count: 0,
+            sim3_backend_last_pose_delta_max_m: 0.0,
+            sim3_backend_last_pose_delta_mean_m: 0.0,
+            sim3_backend_last_scale_min: 1.0,
+            sim3_backend_last_scale_max: 1.0,
         })
     }
 
@@ -1264,6 +1369,26 @@ impl DpvoOdometry {
             last_pose_delta_mean_m: self.global_ba_last_pose_delta_mean_m,
             last_elapsed_ms: self.global_ba_last_ms,
             total_elapsed_ms: self.global_ba_ms_total,
+        }
+    }
+
+    /// Snapshot of the Milestone M9 Sim(3) pose-graph backend state — see
+    /// [`DpvoSim3BackendDiagnostics`].
+    pub fn sim3_backend_diagnostics(&self) -> DpvoSim3BackendDiagnostics {
+        DpvoSim3BackendDiagnostics {
+            enabled: self.config.sim3_backend.is_some(),
+            calls: self.sim3_backend_calls,
+            loop_edges_total: self.sim3_loop_measurements.len(),
+            last_node_count: self.sim3_backend_last_node_count,
+            last_edge_count: self.sim3_backend_last_edge_count,
+            last_loop_edges_used: self.sim3_backend_last_loop_edges_used,
+            last_scale_corrections_applied: self.sim3_backend_last_corrected_pose_count,
+            last_pose_delta_max_m: self.sim3_backend_last_pose_delta_max_m,
+            last_pose_delta_mean_m: self.sim3_backend_last_pose_delta_mean_m,
+            last_scale_min: self.sim3_backend_last_scale_min,
+            last_scale_max: self.sim3_backend_last_scale_max,
+            last_elapsed_ms: self.sim3_backend_last_ms,
+            total_elapsed_ms: self.sim3_backend_ms_total,
         }
     }
 
@@ -1400,6 +1525,16 @@ impl DpvoOdometry {
             }
             let loop_accepted_this_frame = self.try_loop_closure();
             self.update_step()?;
+            // Milestone M9: freeze any pending loop pairs' `Sim3LoopMeasurement`
+            // NOW — after this frame's own `update_step` (so the new loop
+            // edges have gone through at least one windowed BA pass that
+            // could genuinely move either endpoint via real visual evidence,
+            // not the pre-BA values `try_loop_closure` saw) but BEFORE
+            // `keyframe_dispatch` below (which can still shift/fold LIVE
+            // indices — this call must run while the accepted pairs' `(i,
+            // j)` live indices are still valid). See
+            // [`Self::capture_pending_sim3_loop_measurements`]'s own doc.
+            self.capture_pending_sim3_loop_measurements();
             if let Some(k) = self.keyframe_dispatch() {
                 self.frame_pyramids.remove(k);
                 let m = self.graph.config().patches_per_frame;
@@ -1413,6 +1548,12 @@ impl DpvoOdometry {
             // frame is already available) — see `Self::try_global_ba`'s own
             // doc for the throttle/gating logic.
             self.try_global_ba(loop_accepted_this_frame)?;
+            // Milestone M9: after the global-BA pass — both mechanisms are
+            // independent (different node sets, different solvers), but
+            // running the (much cheaper) Sim3 backend last means it corrects
+            // whatever the global-BA pass just wrote, rather than the other
+            // way around.
+            self.try_sim3_backend(loop_accepted_this_frame)?;
         }
 
         self.stats.frames_tracked += 1;
@@ -1904,6 +2045,22 @@ impl DpvoOdometry {
         self.last_loop_batch_frame = Some(n);
         self.loop_accepted_total += accepted.len();
         self.loop_last_batch_accepted = accepted.len();
+        // Milestone M9: record the accepted PAIRS now (live indices, valid
+        // until `keyframe_dispatch` next runs), but do NOT freeze their
+        // `Sim3LoopMeasurement` yet — see
+        // [`Self::capture_pending_sim3_loop_measurements`]'s own doc for why
+        // capturing the relative pose HERE, before this frame's own
+        // `update_step` has even seen the new edges once, would freeze a
+        // measurement carrying NO independent visual evidence at all (it
+        // would just reproduce whatever the sequential VO chain already
+        // implied for this exact pair, since both readings come from the
+        // SAME pre-BA pose values — a real degeneracy this milestone's own
+        // synthetic test caught empirically, see that method's doc for the
+        // full account).
+        if self.config.sim3_backend.is_some() {
+            self.pending_sim3_loop_pairs.extend_from_slice(&accepted);
+            self.sim3_backend_ever_had_loop_edge = true;
+        }
         let patch_edges = expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
         self.loop_patch_edges_added_total += patch_edges.len();
         self.graph.append_edges(&patch_edges, DIM);
@@ -1912,6 +2069,54 @@ impl DpvoOdometry {
         // until a loop edge has ever existed).
         self.global_ba_ever_had_loop_edge = true;
         true
+    }
+
+    /// Milestone M9: freeze every pending accepted loop pair's
+    /// `Sim3LoopMeasurement`, reading `(i, j)`'s CURRENT pose — i.e. AFTER
+    /// this frame's own `update_step` has already run at least one windowed
+    /// `dpvo_ba`/`dpvo_vi_ba` solve with the new patch-BA loop edges active.
+    ///
+    /// # Why not capture this the instant `try_loop_closure` accepts the pair
+    ///
+    /// A first version of this milestone froze the measurement immediately
+    /// on acceptance, before `append_edges`/`update_step` had any chance to
+    /// touch the new edges — this turned out to be a real bug, not merely a
+    /// missed optimization, caught by this milestone's own synthetic unit
+    /// test (`dpvo_sim3_backend.rs`'s
+    /// `se3_only_chain_cannot_recover_multiplicative_drift_but_sim3_backend_does`):
+    /// at the exact moment of acceptance, `frame_i`/`frame_j`'s poses are
+    /// whatever the ordinary sequential VO chain already produced, so
+    /// `frame_j.pose.compose(&frame_i.pose.inverse())` at THAT instant is
+    /// mathematically IDENTICAL to what composing every intervening
+    /// sequential edge already implies for that same pair (composition
+    /// telescopes exactly) — a measurement with ZERO new information versus
+    /// the chain it is supposed to disagree with, which starved the Sim3
+    /// solve of any real signal to redistribute as scale (confirmed by
+    /// deriving `Sim3PoseGraph::optimize`'s own per-edge Jacobian by hand:
+    /// a node's scale tangent dimension couples into another edge's
+    /// residual only through the OTHER endpoint's own translation
+    /// magnitude, never directly — a self-consistent, zero-residual seed
+    /// everywhere gives that weak channel nothing to work with). Waiting
+    /// until AFTER `update_step` has run at least once lets the loop edges'
+    /// own GRU-refined correlation target (genuine, appearance-based visual
+    /// evidence, not merely propagated dead-reckoning) actually pull
+    /// `frame_i`/`frame_j` toward mutual consistency FIRST, so the frozen
+    /// measurement reflects that pull rather than reproducing the
+    /// pre-existing chain state.
+    fn capture_pending_sim3_loop_measurements(&mut self) {
+        if self.pending_sim3_loop_pairs.is_empty() {
+            return;
+        }
+        for (i, j) in self.pending_sim3_loop_pairs.drain(..) {
+            let frame_i = &self.graph.frames()[i];
+            let frame_j = &self.graph.frames()[j];
+            let relative_pose = frame_j.pose.compose(&frame_i.pose.inverse());
+            self.sim3_loop_measurements.push(Sim3LoopMeasurement {
+                arrival_i: frame_i.arrival_index,
+                arrival_j: frame_j.arrival_index,
+                relative_pose,
+            });
+        }
     }
 
     /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): the CPU-bounded
@@ -2035,6 +2240,42 @@ impl DpvoOdometry {
         }
         self.last_global_ba_frame = Some(n);
         self.run_global_ba(&gba_cfg)
+    }
+
+    /// Milestone M9: `cfg.frequency`-throttled dispatch to
+    /// `crate::dpvo_sim3_backend::run_sim3_backend` — mirrors
+    /// [`Self::try_global_ba`]'s own gating exactly (no-op until a loop edge
+    /// has EVER been accepted, since a Sim3 correction needs at least one
+    /// loop measurement's chain-vs-hop disagreement to have anything to
+    /// distribute — see `crate::dpvo_sim3_backend`'s module doc; due either
+    /// because `loop_just_accepted` or because `cfg.frequency` frames have
+    /// passed since the last call).
+    fn try_sim3_backend(&mut self, loop_just_accepted: bool) -> Result<(), DpvoOdometryError> {
+        let Some(s3b_cfg) = self.config.sim3_backend.clone() else { return Ok(()) };
+        if !self.sim3_backend_ever_had_loop_edge {
+            return Ok(());
+        }
+        let n = self.graph.n_frames();
+        if !global_ba_due(loop_just_accepted, self.last_sim3_backend_frame, n, s3b_cfg.frequency) {
+            return Ok(());
+        }
+        self.last_sim3_backend_frame = Some(n);
+        let start = Instant::now();
+        let Some(result) = run_sim3_backend(&mut self.graph, &self.sim3_loop_measurements, &s3b_cfg) else {
+            return Ok(());
+        };
+        self.sim3_backend_calls += 1;
+        self.sim3_backend_last_node_count = result.node_count;
+        self.sim3_backend_last_edge_count = result.edge_count;
+        self.sim3_backend_last_loop_edges_used = result.loop_edge_count;
+        self.sim3_backend_last_corrected_pose_count = result.corrected_pose_count;
+        self.sim3_backend_last_pose_delta_max_m = result.pose_delta_max_m;
+        self.sim3_backend_last_pose_delta_mean_m = result.pose_delta_mean_m;
+        self.sim3_backend_last_scale_min = result.scale_min;
+        self.sim3_backend_last_scale_max = result.scale_max;
+        self.sim3_backend_last_ms = start.elapsed().as_secs_f64() * 1000.0;
+        self.sim3_backend_ms_total += self.sim3_backend_last_ms;
+        Ok(())
     }
 
     /// Milestone M6: record one `update_step` call's own correction-magnitude

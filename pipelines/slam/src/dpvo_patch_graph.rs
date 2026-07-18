@@ -181,7 +181,7 @@
 //! | `DAMPED_LINEAR` motion model (`__call__`'s `if self.n > 1` block) | same | 410-424 |
 //! | `flatmeshgrid` | `dpvo/utils.py` | 85-87 |
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use nalgebra::{Vector2, Vector6};
 use visloc_core::geometry::SE3;
@@ -375,6 +375,23 @@ pub struct DpvoPatchGraph {
     /// cap was exceeded — a Milestone M8 diagnostic
     /// (`crate::dpvo_vo::DpvoGlobalBaDiagnostics::inactive_edges_evicted_total`).
     inactive_edges_evicted: usize,
+    /// Milestone M9 (`docs/dpvo_droid_port_plan.md`): every folded-away
+    /// frame's FINAL world pose (the value it held the instant
+    /// [`Self::fold_frame`] removed it from [`Self::frames`]), keyed by
+    /// [`DpvoGraphFrame::arrival_index`] — an append-only, unbounded store
+    /// (unlike [`Self::inactive_edges`], never capped: this holds one `SE3`
+    /// per folded frame, cheap even over a very long sequence — see the
+    /// module doc's "Retained pose history" section for the memory-growth
+    /// note and why the M8 finding makes this necessary: `fold_frame` is the
+    /// ONLY way a frame's pose stops being reachable at all once it leaves
+    /// `frames` — M8's own inactive-edge retention kept EDGES alive past a
+    /// fold but never the POSE a resolved edge's endpoint needs, and that
+    /// gap is exactly what this store closes). `crate::dpvo_vo`'s Sim3
+    /// pose-graph backend (Milestone M9) is the one reader; entries are also
+    /// the one thing that store OVERWRITES in place (not merely appends),
+    /// when a later Sim3 solve corrects a folded frame's pose (see
+    /// `crate::dpvo_sim3_backend`'s module doc).
+    retained_poses: BTreeMap<usize, SE3>,
 }
 
 impl DpvoPatchGraph {
@@ -391,6 +408,7 @@ impl DpvoPatchGraph {
             inactive_edges: VecDeque::new(),
             inactive_edge_cap: 0,
             inactive_edges_evicted: 0,
+            retained_poses: BTreeMap::new(),
         }
     }
 
@@ -413,6 +431,19 @@ impl DpvoPatchGraph {
     /// `(currently retained, cumulative evicted)` — Milestone M8 diagnostic.
     pub fn inactive_edge_stats(&self) -> (usize, usize) {
         (self.inactive_edges.len(), self.inactive_edges_evicted)
+    }
+
+    /// Milestone M9: every folded-away frame's retained pose, keyed by
+    /// `arrival_index` — see [`Self::retained_poses`]'s own field doc.
+    pub fn retained_poses(&self) -> &BTreeMap<usize, SE3> {
+        &self.retained_poses
+    }
+
+    /// Mutable access so `crate::dpvo_sim3_backend`'s pose-graph solve can
+    /// write corrected poses back into already-folded frames (the live
+    /// counterpart is [`Self::frames_mut`]).
+    pub fn retained_poses_mut(&mut self) -> &mut BTreeMap<usize, SE3> {
+        &mut self.retained_poses
     }
 
     pub fn config(&self) -> &DpvoVoConfig {
@@ -840,6 +871,11 @@ impl DpvoPatchGraph {
         // dP = poses[k] * poses[k-1].inv() (dpvo.py:277).
         let delta_pose = self.frames[k].pose.compose(&self.frames[k - 1].pose.inverse());
         self.delta.insert(t1, (t0, delta_pose));
+        // Milestone M9: archive frame k's own FINAL pose (unconditional,
+        // unlike inactive-edge retention's opt-in cap — see
+        // `Self::retained_poses`'s own doc) before it stops being reachable
+        // via `self.frames` at all.
+        self.retained_poses.insert(t1, self.frames[k].pose.clone());
 
         // to_remove = (ii == k) | (jj == k); store=False (dpvo.py:280-281).
         self.edges.retain(|edge| edge.i != k && edge.j != k);
@@ -1118,6 +1154,53 @@ mod tests {
         let removed = graph.keyframe();
         assert_eq!(removed, Some(n_before - config.keyframe_index));
         assert_eq!(graph.n_frames(), n_before - 1);
+    }
+
+    /// Milestone M9: `retained_poses` must capture the EXACT pose (keyed by
+    /// the correct `arrival_index`) of whichever frame `keyframe()` folds
+    /// away — distinct per-frame poses here (unlike the zero-motion fixture
+    /// above, which uses identity for every frame) so a wrong key or a
+    /// stale/duplicated value would be caught, and repeated across TWO folds
+    /// so a later fold cannot accidentally clobber an earlier entry.
+    #[test]
+    fn fold_frame_retains_the_folded_frames_final_pose_across_multiple_folds() {
+        let config = small_config();
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        // Tiny, DISTINCT per-frame translations (near-zero motion so
+        // `keyframe()` keeps folding, matching `zero_motion_...`'s own
+        // near-identity-pose recipe, but distinguishable per frame).
+        for i in 0..12 {
+            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.001, 0.0, 0.0));
+            graph.begin_frame(i as f64 * 0.05);
+            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).expect("buffer has room");
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+        assert!(graph.retained_poses().is_empty(), "nothing folded yet");
+
+        // First fold.
+        let folded_local_1 = graph.n_frames() - config.keyframe_index;
+        let arrival_1 = graph.frames()[folded_local_1].arrival_index;
+        let pose_1 = graph.frames()[folded_local_1].pose.clone();
+        let removed_1 = graph.keyframe().expect("near-zero motion should fold");
+        assert_eq!(removed_1, folded_local_1);
+        assert_eq!(graph.retained_poses().len(), 1);
+        assert_eq!(graph.retained_poses()[&arrival_1].translation, pose_1.translation);
+
+        // Second fold: must ADD a new entry, not overwrite/lose the first.
+        let folded_local_2 = graph.n_frames() - config.keyframe_index;
+        let arrival_2 = graph.frames()[folded_local_2].arrival_index;
+        let pose_2 = graph.frames()[folded_local_2].pose.clone();
+        assert_ne!(arrival_1, arrival_2, "the two folds must retire distinct frames");
+        let removed_2 = graph.keyframe().expect("near-zero motion should fold again");
+        assert_eq!(removed_2, folded_local_2);
+        assert_eq!(graph.retained_poses().len(), 2);
+        assert_eq!(graph.retained_poses()[&arrival_1].translation, pose_1.translation, "first entry must survive");
+        assert_eq!(graph.retained_poses()[&arrival_2].translation, pose_2.translation);
     }
 
     #[test]
