@@ -384,10 +384,21 @@ pub fn find_loop_edges(
                 // second `val` return, itself `transform(..., valid=True)`'s
                 // `X1[...,2] > 0.2`, projective_ops.py:113): reprojected
                 // center depth > 0.2 in frame j.
-                let z = reprojected_center_depth(&frame_i.pose, &frame_j.pose, &frame_i.intrinsics, &patch);
+                let z = reprojected_center_depth(
+                    &frame_i.pose,
+                    &frame_j.pose,
+                    &frame_i.intrinsics,
+                    &patch,
+                );
                 if z > 0.2 {
-                    sum +=
-                        flow_mag(&frame_i.pose, &frame_j.pose, &frame_i.intrinsics, &frame_j.intrinsics, &patch, 0.5);
+                    sum += flow_mag(
+                        &frame_i.pose,
+                        &frame_j.pose,
+                        &frame_i.intrinsics,
+                        &frame_j.intrinsics,
+                        &patch,
+                        0.5,
+                    );
                     valid_count += 1;
                 }
             }
@@ -396,14 +407,22 @@ pub fn find_loop_edges(
             }
             let mean_flow = sum / valid_count as f64;
             if mean_flow < config.backend_thresh {
-                candidates.push(LoopEdgeCandidate { i, j, flow_mag: mean_flow });
+                candidates.push(LoopEdgeCandidate {
+                    i,
+                    j,
+                    flow_mag: mean_flow,
+                });
             }
         }
     }
 
     let candidates_evaluated = candidates.len();
-    let accepted =
-        select_loop_edges(&candidates, config.min_loop_gap, config.max_edges_per_batch, config.nms_radius);
+    let accepted = select_loop_edges(
+        &candidates,
+        config.min_loop_gap,
+        config.max_edges_per_batch,
+        config.nms_radius,
+    );
     (candidates_evaluated, accepted)
 }
 
@@ -436,7 +455,12 @@ mod tests {
     use crate::dpvo_patch_graph::DpvoVoConfig;
 
     fn intr() -> DpvoIntrinsics {
-        DpvoIntrinsics { fx: 120.0, fy: 120.0, cx: 32.0, cy: 24.0 }
+        DpvoIntrinsics {
+            fx: 120.0,
+            fy: 120.0,
+            cx: 32.0,
+            cy: 24.0,
+        }
     }
 
     fn patches_for_frame(m: usize) -> Vec<DpvoPatch> {
@@ -446,7 +470,11 @@ mod tests {
         (0..m)
             .map(|i| {
                 let dx = (i as f64 - m as f64 / 2.0) * 2.0;
-                DpvoPatch { x: 32.0 + dx, y: 24.0 + dx * 0.5, inverse_depth: 0.5 }
+                DpvoPatch {
+                    x: 32.0 + dx,
+                    y: 24.0 + dx * 0.5,
+                    inverse_depth: 0.5,
+                }
             })
             .collect()
     }
@@ -491,7 +519,11 @@ mod tests {
     /// "newest `keyframe_index` frames", i.e. so the revisit falls inside the
     /// candidate `jj` window `[n - global_opt_freq, n - keyframe_index)`
     /// rather than past its upper end.
-    fn build_square_loop(steps_per_side: usize, side_length: f64, tail_frames: usize) -> DpvoPatchGraph {
+    fn build_square_loop(
+        steps_per_side: usize,
+        side_length: f64,
+        tail_frames: usize,
+    ) -> DpvoPatchGraph {
         let config = square_loop_config();
         let m = config.patches_per_frame;
         let mut graph = DpvoPatchGraph::new(config);
@@ -500,14 +532,21 @@ mod tests {
         // Four straight segments (+X, +Z, -X, -Z), identity orientation
         // throughout (a translating, non-rotating square) — enough to create
         // real pose-proximity revisits without needing to model rotation.
-        let directions = [Vector3::new(step, 0.0, 0.0), Vector3::new(0.0, 0.0, step), Vector3::new(-step, 0.0, 0.0), Vector3::new(0.0, 0.0, -step)];
+        let directions = [
+            Vector3::new(step, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, step),
+            Vector3::new(-step, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, -step),
+        ];
         let mut position = Vector3::new(0.0, 0.0, 0.0);
         let mut t = 0.0_f64;
         for dir in directions {
             for _ in 0..steps_per_side {
                 let pose = SE3::new(UnitQuaternion::identity(), position);
                 graph.begin_frame(t);
-                graph.commit_frame(pose, intr(), patches_for_frame(m)).unwrap();
+                graph
+                    .commit_frame(pose, intr(), patches_for_frame(m))
+                    .unwrap();
                 let forw = graph.edges_forw();
                 let back = graph.edges_back();
                 graph.append_edges(&forw, 4);
@@ -523,7 +562,9 @@ mod tests {
         for _ in 0..tail_frames {
             let pose = SE3::new(UnitQuaternion::identity(), position);
             graph.begin_frame(t);
-            graph.commit_frame(pose, intr(), patches_for_frame(m)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -547,7 +588,10 @@ mod tests {
         let n = graph.n_frames();
         assert_eq!(n, 58);
 
-        let mut config = DpvoLoopClosureConfig { min_loop_gap: 20, ..Default::default() };
+        let mut config = DpvoLoopClosureConfig {
+            min_loop_gap: 20,
+            ..Default::default()
+        };
         // global_opt_freq/keyframe_index bound the *candidate* jj range; use
         // upstream's own defaults (15/2) so jj sits in [n-15, n-2) =
         // [43, 56) — covering the near-revisit frame (47), thanks to the
@@ -555,15 +599,27 @@ mod tests {
         config.max_edge_age = n; // search the whole trajectory's history.
         let (candidates_evaluated, accepted) = find_loop_edges(&graph, &config);
 
-        assert!(candidates_evaluated > 0, "expected at least one candidate near the square's revisited corner");
-        assert!(!accepted.is_empty(), "expected the near-identical start/end poses to be accepted as a loop");
+        assert!(
+            candidates_evaluated > 0,
+            "expected at least one candidate near the square's revisited corner"
+        );
+        assert!(
+            !accepted.is_empty(),
+            "expected the near-identical start/end poses to be accepted as a loop"
+        );
         for &(i, j) in &accepted {
             assert!(j > i, "accepted pair should have a forward-in-time target");
-            assert!(j - i >= config.min_loop_gap, "accepted pair violated the temporal-gap gate: i={i} j={j}");
+            assert!(
+                j - i >= config.min_loop_gap,
+                "accepted pair violated the temporal-gap gate: i={i} j={j}"
+            );
             // The revisit is near the trajectory's START (low i, since the
             // square returns to its own origin) — not two merely-adjacent
             // frames a few steps apart within the same straight segment.
-            assert!(i < 5, "expected the loop's source frame to be near the trajectory start, got i={i}");
+            assert!(
+                i < 5,
+                "expected the loop's source frame to be near the trajectory start, got i={i}"
+            );
         }
     }
 
@@ -578,23 +634,40 @@ mod tests {
         for i in 0..48 {
             let pose = SE3::new(UnitQuaternion::identity(), position);
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
             graph.append_edges(&back, 4);
             position += Vector3::new(0.5, 0.0, 0.0);
         }
-        let lc_config = DpvoLoopClosureConfig { min_loop_gap: 20, max_edge_age: 48, ..Default::default() };
+        let lc_config = DpvoLoopClosureConfig {
+            min_loop_gap: 20,
+            max_edge_age: 48,
+            ..Default::default()
+        };
         let (_, accepted) = find_loop_edges(&graph, &lc_config);
-        assert!(accepted.is_empty(), "a straight-line trajectory should never produce a loop candidate");
+        assert!(
+            accepted.is_empty(),
+            "a straight-line trajectory should never produce a loop candidate"
+        );
     }
 
     #[test]
     fn select_loop_edges_enforces_the_temporal_gap_gate() {
         let candidates = vec![
-            LoopEdgeCandidate { i: 10, j: 15, flow_mag: 1.0 }, // gap=5, too small
-            LoopEdgeCandidate { i: 10, j: 60, flow_mag: 2.0 }, // gap=50, ok
+            LoopEdgeCandidate {
+                i: 10,
+                j: 15,
+                flow_mag: 1.0,
+            }, // gap=5, too small
+            LoopEdgeCandidate {
+                i: 10,
+                j: 60,
+                flow_mag: 2.0,
+            }, // gap=50, ok
         ];
         let accepted = select_loop_edges(&candidates, 30, 10, 1);
         assert_eq!(accepted, vec![(10, 60)]);
@@ -602,10 +675,19 @@ mod tests {
 
     #[test]
     fn select_loop_edges_respects_the_edge_budget() {
-        let candidates: Vec<LoopEdgeCandidate> =
-            (0..20).map(|k| LoopEdgeCandidate { i: k * 3, j: k * 3 + 100, flow_mag: k as f64 }).collect();
+        let candidates: Vec<LoopEdgeCandidate> = (0..20)
+            .map(|k| LoopEdgeCandidate {
+                i: k * 3,
+                j: k * 3 + 100,
+                flow_mag: k as f64,
+            })
+            .collect();
         let accepted = select_loop_edges(&candidates, 30, 4, 0);
-        assert_eq!(accepted.len(), 4, "edge budget must cap the number of accepted candidates");
+        assert_eq!(
+            accepted.len(),
+            4,
+            "edge budget must cap the number of accepted candidates"
+        );
         // Greedy ascending-flow_mag order => the 4 best (lowest flow_mag)
         // candidates are the first 4 by construction.
         assert_eq!(accepted, vec![(0, 100), (3, 103), (6, 106), (9, 109)]);
@@ -614,10 +696,26 @@ mod tests {
     #[test]
     fn select_loop_edges_nms_suppresses_near_duplicate_sources_for_the_same_target() {
         let candidates = vec![
-            LoopEdgeCandidate { i: 50, j: 100, flow_mag: 1.0 }, // best
-            LoopEdgeCandidate { i: 49, j: 100, flow_mag: 2.0 }, // within nms_radius=1 of (50,100)
-            LoopEdgeCandidate { i: 51, j: 100, flow_mag: 3.0 }, // within nms_radius=1 of (50,100)
-            LoopEdgeCandidate { i: 40, j: 100, flow_mag: 4.0 }, // far enough away => kept
+            LoopEdgeCandidate {
+                i: 50,
+                j: 100,
+                flow_mag: 1.0,
+            }, // best
+            LoopEdgeCandidate {
+                i: 49,
+                j: 100,
+                flow_mag: 2.0,
+            }, // within nms_radius=1 of (50,100)
+            LoopEdgeCandidate {
+                i: 51,
+                j: 100,
+                flow_mag: 3.0,
+            }, // within nms_radius=1 of (50,100)
+            LoopEdgeCandidate {
+                i: 40,
+                j: 100,
+                flow_mag: 4.0,
+            }, // far enough away => kept
         ];
         let accepted = select_loop_edges(&candidates, 30, 10, 1);
         assert_eq!(accepted, vec![(50, 100), (40, 100)]);
@@ -626,8 +724,16 @@ mod tests {
     #[test]
     fn select_loop_edges_rejects_non_finite_flow_mag() {
         let candidates = vec![
-            LoopEdgeCandidate { i: 0, j: 100, flow_mag: f64::INFINITY },
-            LoopEdgeCandidate { i: 1, j: 101, flow_mag: 5.0 },
+            LoopEdgeCandidate {
+                i: 0,
+                j: 100,
+                flow_mag: f64::INFINITY,
+            },
+            LoopEdgeCandidate {
+                i: 1,
+                j: 101,
+                flow_mag: 5.0,
+            },
         ];
         let accepted = select_loop_edges(&candidates, 30, 10, 1);
         assert_eq!(accepted, vec![(1, 101)]);
@@ -655,7 +761,9 @@ mod tests {
     /// fact, independent of how the edge's `target`/`weight` were produced.
     #[test]
     fn closing_a_synthetic_drifted_loop_reduces_endpoint_error() {
-        use crate::dpvo_patch_ba::{dpvo_ba, transform_point, DpvoBaConfig, DpvoBaProblem, DpvoEdge};
+        use crate::dpvo_patch_ba::{
+            dpvo_ba, transform_point, DpvoBaConfig, DpvoBaProblem, DpvoEdge,
+        };
 
         // Truth: 4 frames, translating along +X, one patch anchored in frame
         // 0 observed by every frame (an ordinary temporal chain) PLUS a
@@ -666,17 +774,30 @@ mod tests {
         // as a correct GRU/correlation prediction would (it predicts where
         // the patch truly is in image space, regardless of the current pose
         // estimate's own error).
-        let intrinsics = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        let intrinsics = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        };
         let true_poses: Vec<SE3> = (0..4)
-            .map(|i| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0)))
+            .map(|i| {
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(i as f64 * 0.2, 0.0, 0.0),
+                )
+            })
             .collect();
-        let patch = DpvoPatch { x: 64.0, y: 48.0, inverse_depth: 0.2 }; // depth=5, anchored in frame 0.
+        let patch = DpvoPatch {
+            x: 64.0,
+            y: 48.0,
+            inverse_depth: 0.2,
+        }; // depth=5, anchored in frame 0.
 
         // Perturb frame 3 (the "current" frame) away from truth: drift.
         let drift = Vector3::new(0.15, 0.0, 0.0); // 0.15m translation drift.
         let mut drifted_poses = true_poses.clone();
-        drifted_poses[3] =
-            SE3::new(true_poses[3].rotation, true_poses[3].translation + drift);
+        drifted_poses[3] = SE3::new(true_poses[3].rotation, true_poses[3].translation + drift);
 
         // Ordinary temporal edges: frame 0's patch observed in frames 1, 2
         // (chain edges only — frame 3 is NOT temporally chained here, only
@@ -688,10 +809,25 @@ mod tests {
         ];
         let temporal_targets: Vec<_> = temporal_edges
             .iter()
-            .map(|e| transform_point(&true_poses[e.i], &true_poses[e.j], &intrinsics, &intrinsics, &patch, false))
+            .map(|e| {
+                transform_point(
+                    &true_poses[e.i],
+                    &true_poses[e.j],
+                    &intrinsics,
+                    &intrinsics,
+                    &patch,
+                    false,
+                )
+            })
             .collect();
 
-        let config = DpvoBaConfig { iterations: 2, fixedp: 1, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+        let config = DpvoBaConfig {
+            iterations: 2,
+            fixedp: 1,
+            lmbda: 1e-4,
+            ep: 100.0,
+            bounds: [-1e6, -1e6, 1e6, 1e6],
+        };
 
         // (A) No loop edge: frame 3 has NO edge touching it at all, so BA
         // cannot correct its drift — it stays exactly as drifted.
@@ -705,7 +841,8 @@ mod tests {
             depth_damping: None,
         };
         let solved_no_loop = dpvo_ba(&problem_no_loop, &config).expect("ba solve");
-        let error_no_loop = (solved_no_loop.poses[3].translation - true_poses[3].translation).norm();
+        let error_no_loop =
+            (solved_no_loop.poses[3].translation - true_poses[3].translation).norm();
 
         // (B) Add the loop edge (frame 0's patch, observed in frame 3, target
         // computed at the TRUE frame-3 pose — the "correctly predicted
@@ -713,7 +850,14 @@ mod tests {
         let mut edges_with_loop = temporal_edges.clone();
         edges_with_loop.push(DpvoEdge { i: 0, j: 3, k: 0 });
         let mut targets_with_loop = temporal_targets.clone();
-        targets_with_loop.push(transform_point(&true_poses[0], &true_poses[3], &intrinsics, &intrinsics, &patch, false));
+        targets_with_loop.push(transform_point(
+            &true_poses[0],
+            &true_poses[3],
+            &intrinsics,
+            &intrinsics,
+            &patch,
+            false,
+        ));
         let problem_with_loop = DpvoBaProblem {
             poses: drifted_poses,
             patches: vec![patch],
@@ -724,7 +868,8 @@ mod tests {
             depth_damping: None,
         };
         let solved_with_loop = dpvo_ba(&problem_with_loop, &config).expect("ba solve");
-        let error_with_loop = (solved_with_loop.poses[3].translation - true_poses[3].translation).norm();
+        let error_with_loop =
+            (solved_with_loop.poses[3].translation - true_poses[3].translation).norm();
 
         assert!(
             error_with_loop < error_no_loop,

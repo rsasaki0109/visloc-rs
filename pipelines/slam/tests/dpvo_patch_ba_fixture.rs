@@ -30,8 +30,7 @@ use visloc_slam::{
     dpvo_ba, se3_from_dpvo_pose, DpvoBaConfig, DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
 };
 
-const FIXTURE_PATH: &str =
-    "E:/visloc_archive/dpvo_onnx_m1/fixtures/ba_fixture.npz";
+const FIXTURE_PATH: &str = "E:/visloc_archive/dpvo_onnx_m1/fixtures/ba_fixture.npz";
 
 // ---------------------------------------------------------------------------
 // Minimal read-only `.npz` (uncompressed ZIP of `.npy`) reader — see the
@@ -87,7 +86,10 @@ impl NpzArchive {
         for _ in 0..central_dir_count {
             let record = &self.bytes[cursor..];
             let signature = u32::from_le_bytes(record[0..4].try_into().unwrap());
-            assert_eq!(signature, 0x0201_4b50, "expected central directory signature");
+            assert_eq!(
+                signature, 0x0201_4b50,
+                "expected central directory signature"
+            );
             let compression_method = u16::from_le_bytes(record[10..12].try_into().unwrap());
             let compressed_size = u32::from_le_bytes(record[20..24].try_into().unwrap()) as usize;
             let file_name_len = u16::from_le_bytes(record[28..30].try_into().unwrap()) as usize;
@@ -98,7 +100,10 @@ impl NpzArchive {
             let file_name = &record[46..46 + file_name_len];
 
             if file_name == entry_name.as_bytes() {
-                assert_eq!(compression_method, 0, "only ZIP_STORED fixtures are supported");
+                assert_eq!(
+                    compression_method, 0,
+                    "only ZIP_STORED fixtures are supported"
+                );
                 return self.read_stored_entry(local_header_offset, compressed_size);
             }
             cursor += 46 + file_name_len + extra_len + comment_len;
@@ -109,7 +114,10 @@ impl NpzArchive {
     fn read_stored_entry(&self, local_header_offset: usize, compressed_size: usize) -> &[u8] {
         let header = &self.bytes[local_header_offset..];
         let signature = u32::from_le_bytes(header[0..4].try_into().unwrap());
-        assert_eq!(signature, 0x0403_4b50, "expected local file header signature");
+        assert_eq!(
+            signature, 0x0403_4b50,
+            "expected local file header signature"
+        );
         let file_name_len = u16::from_le_bytes(header[26..28].try_into().unwrap()) as usize;
         let extra_len = u16::from_le_bytes(header[28..30].try_into().unwrap()) as usize;
         let data_offset = local_header_offset + 30 + file_name_len + extra_len;
@@ -131,9 +139,15 @@ fn parse_npy(bytes: &[u8]) -> NpyArray {
     assert_eq!(&bytes[0..6], b"\x93NUMPY", "missing npy magic");
     let major_version = bytes[6];
     let (header_len, header_start) = if major_version == 1 {
-        (u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize, 10)
+        (
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize,
+            10,
+        )
     } else {
-        (u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize, 12)
+        (
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
+            12,
+        )
     };
     let header_end = header_start + header_len;
     let header_str = std::str::from_utf8(&bytes[header_start..header_end]).unwrap();
@@ -144,7 +158,10 @@ fn parse_npy(bytes: &[u8]) -> NpyArray {
         .and_then(|(_, rest)| rest.split_once('\''))
         .map(|(value, _)| value)
         .expect("missing descr field");
-    assert!(!header_str.contains("'fortran_order': True"), "fortran order not supported");
+    assert!(
+        !header_str.contains("'fortran_order': True"),
+        "fortran order not supported"
+    );
     let shape_str = header_str
         .split_once("'shape':")
         .and_then(|(_, rest)| rest.split_once('('))
@@ -159,7 +176,11 @@ fn parse_npy(bytes: &[u8]) -> NpyArray {
         .collect();
 
     let data_bytes = &bytes[header_end..];
-    let element_count: usize = shape.iter().product::<usize>().max(if shape.is_empty() { 1 } else { 0 });
+    let element_count: usize =
+        shape
+            .iter()
+            .product::<usize>()
+            .max(if shape.is_empty() { 1 } else { 0 });
 
     match descr {
         "<f4" => {
@@ -328,7 +349,10 @@ fn ba_fixture_two_iterations_matches_reference_within_1e_4() {
     let weights = load_vec2(&archive, "weight");
     let edges = load_edges(&archive);
     let (lmbda_shape, lmbda_data) = archive.read_f32("lmbda");
-    assert!(lmbda_shape.is_empty(), "lmbda expected to be a scalar in this fixture");
+    assert!(
+        lmbda_shape.is_empty(),
+        "lmbda expected to be a scalar in this fixture"
+    );
     let lmbda = lmbda_data[0] as f64;
     let (_, bounds_data) = archive.read_f32("bounds");
     let bounds = [
@@ -384,8 +408,14 @@ fn ba_fixture_two_iterations_matches_reference_within_1e_4() {
          max abs inverse-depth diff = {depth_diff:.6e} (threshold 1e-4)"
     );
 
-    assert!(pose_diff < 1e-4, "pose parity failed: max abs diff = {pose_diff:.6e}");
-    assert!(depth_diff < 1e-4, "depth parity failed: max abs diff = {depth_diff:.6e}");
+    assert!(
+        pose_diff < 1e-4,
+        "pose parity failed: max abs diff = {pose_diff:.6e}"
+    );
+    assert!(
+        depth_diff < 1e-4,
+        "depth parity failed: max abs diff = {depth_diff:.6e}"
+    );
 }
 
 /// Same fixture, but only through one Gauss-Newton iteration
@@ -433,7 +463,8 @@ fn ba_fixture_one_iteration_matches_reference_within_1e_4() {
         bounds,
     };
 
-    let solved = visloc_slam::dpvo_ba_step(&problem, &config).expect("fixture problem is well-posed");
+    let solved =
+        visloc_slam::dpvo_ba_step(&problem, &config).expect("fixture problem is well-posed");
 
     let pose_diff = max_abs_pose_diff(&solved.poses, &poses_after_iter1);
     let depth_diff = max_abs_depth_diff(&solved.patches, &patches_after_iter1);
@@ -443,6 +474,12 @@ fn ba_fixture_one_iteration_matches_reference_within_1e_4() {
          max abs inverse-depth diff = {depth_diff:.6e} (threshold 1e-4)"
     );
 
-    assert!(pose_diff < 1e-4, "pose parity failed (iter 1): max abs diff = {pose_diff:.6e}");
-    assert!(depth_diff < 1e-4, "depth parity failed (iter 1): max abs diff = {depth_diff:.6e}");
+    assert!(
+        pose_diff < 1e-4,
+        "pose parity failed (iter 1): max abs diff = {pose_diff:.6e}"
+    );
+    assert!(
+        depth_diff < 1e-4,
+        "depth parity failed (iter 1): max abs diff = {depth_diff:.6e}"
+    );
 }

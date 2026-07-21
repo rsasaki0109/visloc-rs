@@ -420,7 +420,12 @@ impl Default for DpvoBaConfig {
             fixedp: 1,
             lmbda: 1e-4,
             ep: 100.0,
-            bounds: [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY],
+            bounds: [
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            ],
         }
     }
 }
@@ -445,7 +450,10 @@ impl std::fmt::Display for DpvoBaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DpvoBaError::SingularSystem => {
-                write!(f, "dpvo patch bundle adjustment: damped pose system is singular")
+                write!(
+                    f,
+                    "dpvo patch bundle adjustment: damped pose system is singular"
+                )
             }
         }
     }
@@ -547,7 +555,11 @@ pub(crate) fn transform_edge(
 
     // Jacobian-only divide-by-zero guard (projective_ops.py:79-80): |Z| > 0.2,
     // a *different* condition from the validity mask above.
-    let depth_inv_jac = if z1.abs() > JACOBIAN_MIN_ABS_Z { 1.0 / z1 } else { 0.0 };
+    let depth_inv_jac = if z1.abs() > JACOBIAN_MIN_ABS_Z {
+        1.0 / z1
+    } else {
+        0.0
+    };
 
     // Ja (4x6): projective_ops.py:83-88, tangent order (rho, phi).
     #[rustfmt::skip]
@@ -608,7 +620,11 @@ struct ReprojectionInvariant {
     t: Vector3<f64>,
 }
 
-fn reprojection_invariant(pose_i: &SE3, pose_j: &SE3, translation_only: bool) -> ReprojectionInvariant {
+fn reprojection_invariant(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    translation_only: bool,
+) -> ReprojectionInvariant {
     // Optionally zero the rotation to the identity (projective_ops.py:62-63:
     // `Gij[...,3:] = [0,0,0,1]` — DPVO's 7-vector layout is
     // `[tx,ty,tz,qx,qy,qz,qw]`, so slicing `[3:]` zeroes the *quaternion*
@@ -618,7 +634,10 @@ fn reprojection_invariant(pose_i: &SE3, pose_j: &SE3, translation_only: bool) ->
     if translation_only {
         g_ij = SE3::new(UnitQuaternion::identity(), g_ij.translation);
     }
-    ReprojectionInvariant { r: g_ij.rotation.to_rotation_matrix().into_inner(), t: g_ij.translation }
+    ReprojectionInvariant {
+        r: g_ij.rotation.to_rotation_matrix().into_inner(),
+        t: g_ij.translation,
+    }
 }
 
 /// Jacobian-free core of `projective_ops.py::transform` (lines 56-68: `iproj`,
@@ -688,7 +707,16 @@ pub fn transform_point(
     patch: &DpvoPatch,
     translation_only: bool,
 ) -> Vector2<f64> {
-    project_no_jacobian(pose_i, pose_j, intr_i, intr_j, patch.x, patch.y, patch.inverse_depth, translation_only)
+    project_no_jacobian(
+        pose_i,
+        pose_j,
+        intr_i,
+        intr_j,
+        patch.x,
+        patch.y,
+        patch.inverse_depth,
+        translation_only,
+    )
 }
 
 /// Reproject every pixel of a patch's `3×3` grid (integer offsets `dx, dy ∈
@@ -784,7 +812,12 @@ pub fn flow_mag(
 /// `update_step`'s per-frame hot path), so the extra ~10 flops of duplicate
 /// work is immaterial (see `dpvo_loop_closure.rs`'s own module doc for the
 /// call site and its cost budget).
-pub fn reprojected_center_depth(pose_i: &SE3, pose_j: &SE3, intr_i: &DpvoIntrinsics, patch: &DpvoPatch) -> f64 {
+pub fn reprojected_center_depth(
+    pose_i: &SE3,
+    pose_j: &SE3,
+    intr_i: &DpvoIntrinsics,
+    patch: &DpvoPatch,
+) -> f64 {
     let inv = reprojection_invariant(pose_i, pose_j, false);
     let xn = (patch.x - intr_i.cx) / intr_i.fx;
     let yn = (patch.y - intr_i.cy) / intr_i.fy;
@@ -825,8 +858,11 @@ pub fn dpvo_ba_step(
     used_patches.sort_unstable();
     used_patches.dedup();
     let m = used_patches.len();
-    let local_patch_index =
-        |k: usize| used_patches.binary_search(&k).expect("k is drawn from used_patches");
+    let local_patch_index = |k: usize| {
+        used_patches
+            .binary_search(&k)
+            .expect("k is drawn from used_patches")
+    };
 
     // Per-edge geometry, residual, and gated weight (ba.py:92-112).
     struct EdgeContribution {
@@ -879,8 +915,16 @@ pub fn dpvo_ba_step(
         w_jj.row_mut(1).scale_mut(weight.y);
         let w_jz = Vector2::new(geom.jz.x * weight.x, geom.jz.y * weight.y);
 
-        let i_local = if edge.i >= fixedp { Some(edge.i - fixedp) } else { None };
-        let j_local = if edge.j >= fixedp { Some(edge.j - fixedp) } else { None };
+        let i_local = if edge.i >= fixedp {
+            Some(edge.i - fixedp)
+        } else {
+            None
+        };
+        let j_local = if edge.j >= fixedp {
+            Some(edge.j - fixedp)
+        } else {
+            None
+        };
 
         contributions.push(EdgeContribution {
             i_local,
@@ -934,10 +978,17 @@ pub fn dpvo_ba_step(
                 .zip(bii.iter())
                 .for_each(|(dst, src)| *dst += src);
             let vi = w_ji.transpose() * r;
-            v_rhs.rows_mut(i * 6, 6).iter_mut().zip(vi.iter()).for_each(|(dst, src)| *dst += src);
+            v_rhs
+                .rows_mut(i * 6, 6)
+                .iter_mut()
+                .zip(vi.iter())
+                .for_each(|(dst, src)| *dst += src);
             let eik = w_ji.transpose() * jz;
             let mut e_col = e_mat.view_mut((i * 6, k_local), (6, 1));
-            e_col.iter_mut().zip(eik.iter()).for_each(|(dst, src)| *dst += src);
+            e_col
+                .iter_mut()
+                .zip(eik.iter())
+                .for_each(|(dst, src)| *dst += src);
         }
         if let Some(j) = j_local {
             let bjj = w_jj.transpose() * jj;
@@ -947,10 +998,17 @@ pub fn dpvo_ba_step(
                 .zip(bjj.iter())
                 .for_each(|(dst, src)| *dst += src);
             let vj = w_jj.transpose() * r;
-            v_rhs.rows_mut(j * 6, 6).iter_mut().zip(vj.iter()).for_each(|(dst, src)| *dst += src);
+            v_rhs
+                .rows_mut(j * 6, 6)
+                .iter_mut()
+                .zip(vj.iter())
+                .for_each(|(dst, src)| *dst += src);
             let ejk = w_jj.transpose() * jz;
             let mut e_col = e_mat.view_mut((j * 6, k_local), (6, 1));
-            e_col.iter_mut().zip(ejk.iter()).for_each(|(dst, src)| *dst += src);
+            e_col
+                .iter_mut()
+                .zip(ejk.iter())
+                .for_each(|(dst, src)| *dst += src);
         }
         if let (Some(i), Some(j)) = (i_local, j_local) {
             let bij = w_ji.transpose() * jj;
@@ -1007,10 +1065,7 @@ pub fn dpvo_ba_step(
             s[(d, d)] = s[(d, d)] * (1.0 + POSE_DIAG_LM) + config.ep;
         }
 
-        let dx = s
-            .lu()
-            .solve(&y)
-            .ok_or(DpvoBaError::SingularSystem)?;
+        let dx = s.lu().solve(&y).ok_or(DpvoBaError::SingularSystem)?;
 
         // dZ = Q * (w - E^T @ dX) (ba.py:171).
         let et_dx = e_mat.transpose() * &dx;
@@ -1081,12 +1136,13 @@ mod tests {
     /// residual fixed point (perfect data unchanged)".
     fn zero_residual_problem() -> DpvoBaProblem {
         let pose0 = SE3::identity();
-        let pose1 = SE3::new(
-            UnitQuaternion::identity(),
-            Vector3::new(0.2, 0.0, 0.0),
-        );
+        let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(0.2, 0.0, 0.0));
         let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.8 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.8,
+        };
 
         let geom = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch);
         DpvoBaProblem {
@@ -1121,7 +1177,10 @@ mod tests {
         assert!(dr < 1e-10, "rotation drifted with zero residual: dr={dr}");
 
         let dd = (solved.patches[0].inverse_depth - problem.patches[0].inverse_depth).abs();
-        assert!(dd < 1e-10, "inverse depth drifted with zero residual: dd={dd}");
+        assert!(
+            dd < 1e-10,
+            "inverse depth drifted with zero residual: dd={dd}"
+        );
     }
 
     /// A tiny one-free-pose, one-patch, one-edge scene with a *nonzero*
@@ -1134,7 +1193,11 @@ mod tests {
         let pose0 = SE3::identity();
         let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(0.15, 0.02, 0.0));
         let intrinsics = intr(120.0, 120.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 36.0, y: 22.0, inverse_depth: 0.6 };
+        let patch = DpvoPatch {
+            x: 36.0,
+            y: 22.0,
+            inverse_depth: 0.6,
+        };
 
         let geom = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch);
         // Perturb the target away from the exact reprojection so the
@@ -1151,7 +1214,13 @@ mod tests {
             weights: vec![weight],
             depth_damping: None,
         };
-        let config = DpvoBaConfig { iterations: 1, fixedp: 1, lmbda: 1e-4, ep: 100.0, bounds: DpvoBaConfig::default().bounds };
+        let config = DpvoBaConfig {
+            iterations: 1,
+            fixedp: 1,
+            lmbda: 1e-4,
+            ep: 100.0,
+            bounds: DpvoBaConfig::default().bounds,
+        };
 
         // --- hand-computed expectation, independent of dpvo_ba_step ---
         let r = target - geom.coords_center;
@@ -1178,15 +1247,24 @@ mod tests {
         let expected_pose1 = SE3::exp(&expected_dx).compose(&pose1);
 
         let dt = (solved.poses[1].translation - expected_pose1.translation).norm();
-        assert!(dt < 1e-9, "translation mismatch vs hand-solved system: dt={dt}");
+        assert!(
+            dt < 1e-9,
+            "translation mismatch vs hand-solved system: dt={dt}"
+        );
         let dr = (solved.poses[1].rotation.to_rotation_matrix().into_inner()
             - expected_pose1.rotation.to_rotation_matrix().into_inner())
         .norm();
-        assert!(dr < 1e-9, "rotation mismatch vs hand-solved system: dr={dr}");
+        assert!(
+            dr < 1e-9,
+            "rotation mismatch vs hand-solved system: dr={dr}"
+        );
 
         let expected_depth = (patch.inverse_depth + expected_dz).clamp(DISP_MIN, DISP_MAX);
         let dd = (solved.patches[0].inverse_depth - expected_depth).abs();
-        assert!(dd < 1e-9, "inverse depth mismatch vs hand-solved system: dd={dd}");
+        assert!(
+            dd < 1e-9,
+            "inverse depth mismatch vs hand-solved system: dd={dd}"
+        );
     }
 
     /// `fixedp` covering every pose (`fixedp = n_frames`) must leave every
@@ -1195,7 +1273,10 @@ mod tests {
     #[test]
     fn all_poses_fixed_leaves_every_pose_untouched() {
         let problem = zero_residual_or_nonzero_two_frame_problem();
-        let config = DpvoBaConfig { fixedp: problem.poses.len(), ..DpvoBaConfig::default() };
+        let config = DpvoBaConfig {
+            fixedp: problem.poses.len(),
+            ..DpvoBaConfig::default()
+        };
         let solved = dpvo_ba_step(&problem, &config).expect("solvable");
         for (before, after) in problem.poses.iter().zip(solved.poses.iter()) {
             assert_eq!(before, after, "a fixed pose must not move");
@@ -1210,7 +1291,10 @@ mod tests {
     #[test]
     fn depth_only_updates_when_all_poses_fixed() {
         let problem = zero_residual_or_nonzero_two_frame_problem();
-        let config = DpvoBaConfig { fixedp: problem.poses.len(), ..DpvoBaConfig::default() };
+        let config = DpvoBaConfig {
+            fixedp: problem.poses.len(),
+            ..DpvoBaConfig::default()
+        };
         let solved = dpvo_ba_step(&problem, &config).expect("solvable");
 
         let before = problem.patches[0].inverse_depth;
@@ -1248,7 +1332,11 @@ mod tests {
         let pose0 = SE3::identity();
         let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(0.1, 0.0, 0.0));
         let intrinsics = intr(110.0, 110.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 34.0, y: 21.0, inverse_depth: 0.7 };
+        let patch = DpvoPatch {
+            x: 34.0,
+            y: 21.0,
+            inverse_depth: 0.7,
+        };
         let geom = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch);
         let target = geom.coords_center + Vector2::new(0.9, 0.4);
         DpvoBaProblem {
@@ -1286,18 +1374,39 @@ mod tests {
         // wired to call dpvo_ba_step repeatedly and re-linearize, matching
         // the module doc's "Iteration count" section.
         let problem = zero_residual_or_nonzero_two_frame_problem();
-        let one = dpvo_ba(&problem, &DpvoBaConfig { iterations: 1, ..DpvoBaConfig::default() })
-            .expect("solvable");
-        let two = dpvo_ba(&problem, &DpvoBaConfig { iterations: 2, ..DpvoBaConfig::default() })
-            .expect("solvable");
+        let one = dpvo_ba(
+            &problem,
+            &DpvoBaConfig {
+                iterations: 1,
+                ..DpvoBaConfig::default()
+            },
+        )
+        .expect("solvable");
+        let two = dpvo_ba(
+            &problem,
+            &DpvoBaConfig {
+                iterations: 2,
+                ..DpvoBaConfig::default()
+            },
+        )
+        .expect("solvable");
 
         let residual_after = |p: &DpvoBaProblem| -> f64 {
-            let geom = transform_edge(&p.poses[0], &p.poses[1], &p.intrinsics[0], &p.intrinsics[1], &p.patches[0]);
+            let geom = transform_edge(
+                &p.poses[0],
+                &p.poses[1],
+                &p.intrinsics[0],
+                &p.intrinsics[1],
+                &p.patches[0],
+            );
             (p.targets[0] - geom.coords_center).norm()
         };
         let r1 = residual_after(&one);
         let r2 = residual_after(&two);
-        assert!(r2 <= r1 + 1e-9, "second GN iteration should not increase the residual: r1={r1} r2={r2}");
+        assert!(
+            r2 <= r1 + 1e-9,
+            "second GN iteration should not increase the residual: r1={r1} r2={r2}"
+        );
     }
 
     // --- Milestone M15: per-patch depth damping (docs/dpvo_droid_port_plan.md,
@@ -1326,7 +1435,11 @@ mod tests {
         // corner cases).
         let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(1e-4, 0.0, 0.0));
         let intrinsics = intr(110.0, 110.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 34.0, y: 21.0, inverse_depth: 0.7 };
+        let patch = DpvoPatch {
+            x: 34.0,
+            y: 21.0,
+            inverse_depth: 0.7,
+        };
         let geom = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch);
         // A large-relative-to-the-tiny-Jacobian target perturbation — the
         // "BA-noise-driven residual reprojected through an almost-flat
@@ -1361,9 +1474,14 @@ mod tests {
         let solved_undamped = dpvo_ba_step(&undamped, &config).expect("solvable");
         let solved_damped = dpvo_ba_step(&damped, &config).expect("solvable");
 
-        let dz_undamped = (solved_undamped.patches[0].inverse_depth - undamped.patches[0].inverse_depth).abs();
-        let dz_damped = (solved_damped.patches[0].inverse_depth - damped.patches[0].inverse_depth).abs();
-        assert!(dz_undamped > 1e-6, "fixture should have a genuinely nonzero undamped update: dz={dz_undamped}");
+        let dz_undamped =
+            (solved_undamped.patches[0].inverse_depth - undamped.patches[0].inverse_depth).abs();
+        let dz_damped =
+            (solved_damped.patches[0].inverse_depth - damped.patches[0].inverse_depth).abs();
+        assert!(
+            dz_undamped > 1e-6,
+            "fixture should have a genuinely nonzero undamped update: dz={dz_undamped}"
+        );
         assert!(
             dz_damped < dz_undamped / 10.0,
             "a 1000x lmbda multiplier should shrink the depth update by at least 10x: undamped={dz_undamped} damped={dz_damped}"
@@ -1385,8 +1503,14 @@ mod tests {
         let solved_none = dpvo_ba_step(&none_problem, &config).expect("solvable");
         let solved_ones = dpvo_ba_step(&ones_problem, &config).expect("solvable");
 
-        assert_eq!(solved_none.patches[0].inverse_depth, solved_ones.patches[0].inverse_depth);
-        assert_eq!(solved_none.poses[1].translation, solved_ones.poses[1].translation);
+        assert_eq!(
+            solved_none.patches[0].inverse_depth,
+            solved_ones.patches[0].inverse_depth
+        );
+        assert_eq!(
+            solved_none.poses[1].translation,
+            solved_ones.poses[1].translation
+        );
     }
 
     #[test]
@@ -1410,9 +1534,21 @@ mod tests {
         let pose0 = SE3::identity();
         let pose1 = SE3::new(UnitQuaternion::identity(), Vector3::new(1e-4, 0.0, 0.0));
         let intrinsics = intr(110.0, 110.0, 32.0, 24.0);
-        let patch_a = DpvoPatch { x: 34.0, y: 21.0, inverse_depth: 0.7 }; // global id 0
-        let patch_unused = DpvoPatch { x: 10.0, y: 10.0, inverse_depth: 0.7 }; // global id 1, no edge
-        let patch_c = DpvoPatch { x: 26.0, y: 27.0, inverse_depth: 0.7 }; // global id 2
+        let patch_a = DpvoPatch {
+            x: 34.0,
+            y: 21.0,
+            inverse_depth: 0.7,
+        }; // global id 0
+        let patch_unused = DpvoPatch {
+            x: 10.0,
+            y: 10.0,
+            inverse_depth: 0.7,
+        }; // global id 1, no edge
+        let patch_c = DpvoPatch {
+            x: 26.0,
+            y: 27.0,
+            inverse_depth: 0.7,
+        }; // global id 2
         let geom_a = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch_a);
         let geom_c = transform_edge(&pose0, &pose1, &intrinsics, &intrinsics, &patch_c);
         let target_a = geom_a.coords_center + Vector2::new(2.0, -1.0);
@@ -1437,7 +1573,10 @@ mod tests {
         let dz_a = (solved.patches[0].inverse_depth - problem.patches[0].inverse_depth).abs();
         let dz_c = (solved.patches[2].inverse_depth - problem.patches[2].inverse_depth).abs();
         assert!(dz_a > 1e-6, "patch 0 (undamped) should move: dz_a={dz_a}");
-        assert!(dz_a.is_finite() && dz_c.is_finite(), "the NaN sentinel at unreferenced global id 1 must never be read");
+        assert!(
+            dz_a.is_finite() && dz_c.is_finite(),
+            "the NaN sentinel at unreferenced global id 1 must never be read"
+        );
         assert!(
             dz_c < dz_a / 10.0,
             "patch 2 (damped 1000x via its own global id) should move far less than patch 0: dz_a={dz_a} dz_c={dz_c}"
@@ -1449,11 +1588,19 @@ mod tests {
     #[test]
     fn transform_point_center_matches_reproject_patch_grid_center_entry() {
         let pose_i = SE3::identity();
-        let pose_j = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.05, 0.0)), Vector3::new(0.3, 0.0, 0.0));
+        let pose_j = SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.05, 0.0)),
+            Vector3::new(0.3, 0.0, 0.0),
+        );
         let intrinsics = intr(120.0, 120.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.6 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.6,
+        };
 
-        let via_transform_point = transform_point(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch, false);
+        let via_transform_point =
+            transform_point(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch, false);
         let grid = reproject_patch_grid(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch);
         let via_grid_center = grid[1][1];
         assert!(
@@ -1468,9 +1615,16 @@ mod tests {
         // offsets to 9 distinct pixels (sanity check that the grid isn't
         // silently collapsing to one repeated point).
         let pose_i = SE3::identity();
-        let pose_j = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.02, 0.03, 0.0)), Vector3::new(0.2, 0.05, 0.0));
+        let pose_j = SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.02, 0.03, 0.0)),
+            Vector3::new(0.2, 0.05, 0.0),
+        );
         let intrinsics = intr(150.0, 150.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.5 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.5,
+        };
         let grid = reproject_patch_grid(&pose_i, &pose_j, &intrinsics, &intrinsics, &patch);
         let mut flat: Vec<Vector2<f64>> = Vec::new();
         for row in &grid {
@@ -1480,7 +1634,10 @@ mod tests {
         }
         for i in 0..flat.len() {
             for j in (i + 1)..flat.len() {
-                assert!((flat[i] - flat[j]).norm() > 1e-6, "grid offsets {i} and {j} coincide: {flat:?}");
+                assert!(
+                    (flat[i] - flat[j]).norm() > 1e-6,
+                    "grid offsets {i} and {j} coincide: {flat:?}"
+                );
             }
         }
     }
@@ -1490,18 +1647,32 @@ mod tests {
         // i == j (both poses/intrinsics identical) => Gij is the identity
         // for both the full and translation-only transforms => flow1 =
         // flow2 = 0 regardless of beta.
-        let pose = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)), Vector3::new(1.0, 2.0, 3.0));
+        let pose = SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)),
+            Vector3::new(1.0, 2.0, 3.0),
+        );
         let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.7 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.7,
+        };
         let flow = flow_mag(&pose, &pose, &intrinsics, &intrinsics, &patch, 0.5);
-        assert!(flow < 1e-10, "expected zero flow for an identical pose pair, got {flow}");
+        assert!(
+            flow < 1e-10,
+            "expected zero flow for an identical pose pair, got {flow}"
+        );
     }
 
     #[test]
     fn flow_mag_grows_with_translation_magnitude() {
         let pose_i = SE3::identity();
         let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.5 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.5,
+        };
         let small = SE3::new(UnitQuaternion::identity(), Vector3::new(0.05, 0.0, 0.0));
         let large = SE3::new(UnitQuaternion::identity(), Vector3::new(0.5, 0.0, 0.0));
         let flow_small = flow_mag(&pose_i, &small, &intrinsics, &intrinsics, &patch, 0.5);
@@ -1517,11 +1688,21 @@ mod tests {
         // Same algebraic fact `flow_mag`'s own doc comment already proves for
         // i==j (any patch depth): xyz1 == (xn, yn, 1), so z1 == 1.0 exactly,
         // independent of `inverse_depth`.
-        let pose = SE3::new(UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)), Vector3::new(1.0, 2.0, 3.0));
+        let pose = SE3::new(
+            UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.0, 0.0)),
+            Vector3::new(1.0, 2.0, 3.0),
+        );
         let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: 40.0, y: 20.0, inverse_depth: 0.7 };
+        let patch = DpvoPatch {
+            x: 40.0,
+            y: 20.0,
+            inverse_depth: 0.7,
+        };
         let z = reprojected_center_depth(&pose, &pose, &intrinsics, &patch);
-        assert!((z - 1.0).abs() < 1e-10, "expected z==1.0 for an i==j reprojection, got {z}");
+        assert!(
+            (z - 1.0).abs() < 1e-10,
+            "expected z==1.0 for an i==j reprojection, got {z}"
+        );
     }
 
     #[test]
@@ -1532,10 +1713,20 @@ mod tests {
         // xyz1 = R_ij*(0,0,1) + t_ij*d = (0,0,-1) + 0 — behind camera j
         // regardless of the patch's inverse depth (t_ij is zero here).
         let pose_i = SE3::identity();
-        let pose_j = SE3::new(UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI), Vector3::zeros());
+        let pose_j = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI),
+            Vector3::zeros(),
+        );
         let intrinsics = intr(100.0, 100.0, 32.0, 24.0);
-        let patch = DpvoPatch { x: intrinsics.cx, y: intrinsics.cy, inverse_depth: 0.5 };
+        let patch = DpvoPatch {
+            x: intrinsics.cx,
+            y: intrinsics.cy,
+            inverse_depth: 0.5,
+        };
         let z = reprojected_center_depth(&pose_i, &pose_j, &intrinsics, &patch);
-        assert!(z < 0.2, "expected an invalid (behind-camera-j) depth below the 0.2 gate, got {z}");
+        assert!(
+            z < 0.2,
+            "expected an invalid (behind-camera-j) depth below the 0.2 gate, got {z}"
+        );
     }
 }

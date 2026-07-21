@@ -185,8 +185,14 @@ pub fn corr_cpu_prebuilt_target(
     radius: usize,
 ) -> Array4<f32> {
     let (num_edges, channels, patch, patch_check) = patch_feats.dim();
-    debug_assert_eq!(patch, patch_check, "patch_feats must be square in its last two dims");
-    debug_assert_eq!(channels, fmap_hwc.channels, "patch_feats/target_fmap channel count mismatch");
+    debug_assert_eq!(
+        patch, patch_check,
+        "patch_feats must be square in its last two dims"
+    );
+    debug_assert_eq!(
+        channels, fmap_hwc.channels,
+        "patch_feats/target_fmap channel count mismatch"
+    );
     let taps = 2 * radius + 1;
     let scale = (channels as f32).sqrt();
 
@@ -198,8 +204,9 @@ pub fn corr_cpu_prebuilt_target(
 
     let mut out = Array4::<f32>::zeros((num_edges, patch, patch, taps * taps));
     let chunk_len = patch * patch * taps * taps;
-    let out_slice =
-        out.as_slice_mut().expect("corr_cpu's freshly-allocated output array is always contiguous C-order");
+    let out_slice = out
+        .as_slice_mut()
+        .expect("corr_cpu's freshly-allocated output array is always contiguous C-order");
 
     let per_edge = |edge: usize, out_chunk: &mut [f32]| {
         for py in 0..patch {
@@ -212,21 +219,26 @@ pub fn corr_cpu_prebuilt_target(
                 // this is computed once here, not once per tap.
                 let weights = BilinearWeights::new(center_x, center_y);
                 let anchor = feats_hwc.row(edge, py, px);
-                let out_row = &mut out_chunk[(py * patch + px) * taps * taps..(py * patch + px + 1) * taps * taps];
+                let out_row = &mut out_chunk
+                    [(py * patch + px) * taps * taps..(py * patch + px + 1) * taps * taps];
                 for ty in 0..taps {
                     let dy = ty as isize - radius as isize;
                     let iy0 = weights.iy0 + dy;
                     for tx in 0..taps {
                         let dx = tx as isize - radius as isize;
                         let ix0 = weights.ix0 + dx;
-                        out_row[ty * taps + tx] = weights.sample_dot(fmap_hwc, ix0, iy0, anchor) / scale;
+                        out_row[ty * taps + tx] =
+                            weights.sample_dot(fmap_hwc, ix0, iy0, anchor) / scale;
                     }
                 }
             }
         }
     };
 
-    out_slice.par_chunks_mut(chunk_len).enumerate().for_each(|(edge, out_chunk)| per_edge(edge, out_chunk));
+    out_slice
+        .par_chunks_mut(chunk_len)
+        .enumerate()
+        .for_each(|(edge, out_chunk)| per_edge(edge, out_chunk));
     out
 }
 
@@ -339,7 +351,12 @@ impl ChannelLastImage {
                 }
             }
         }
-        ChannelLastImage { data, height, width, channels }
+        ChannelLastImage {
+            data,
+            height,
+            width,
+            channels,
+        }
     }
 
     /// Contiguous channel slice at `(x, y)`, or `None` if either coordinate
@@ -377,7 +394,11 @@ impl ChannelLastPatches {
                 }
             }
         }
-        ChannelLastPatches { data, patch, channels }
+        ChannelLastPatches {
+            data,
+            patch,
+            channels,
+        }
     }
 
     #[inline]
@@ -451,7 +472,10 @@ fn corr_cpu_reference(
     use ndarray::Array1;
 
     let (num_edges, channels, patch, patch_check) = patch_feats.dim();
-    debug_assert_eq!(patch, patch_check, "patch_feats must be square in its last two dims");
+    debug_assert_eq!(
+        patch, patch_check,
+        "patch_feats must be square in its last two dims"
+    );
     let taps = 2 * radius + 1;
     let scale = (channels as f32).sqrt();
 
@@ -509,7 +533,11 @@ mod tests {
         let coords_center = array![[[[2.0_f32, 1.0_f32]]]]; // (edge=1, py=1, px=1, xy=2)
         let out = corr_cpu(patch_feats.view(), fmap.view(), coords_center.view(), 0);
         assert_eq!(out.shape(), &[1, 1, 1, 1]);
-        assert!((out[(0, 0, 0, 0)] - 2.0).abs() < 1e-6, "got {}", out[(0, 0, 0, 0)]);
+        assert!(
+            (out[(0, 0, 0, 0)] - 2.0).abs() < 1e-6,
+            "got {}",
+            out[(0, 0, 0, 0)]
+        );
     }
 
     /// Sampling exactly on the last valid column (no fractional part) must
@@ -526,7 +554,11 @@ mod tests {
         let patch_feats = Array4::<f32>::from_elem((1, 1, 1, 1), 1.0_f32);
         let coords_center = array![[[[2.0_f32, 0.0_f32]]]]; // exactly the last column
         let out = corr_cpu(patch_feats.view(), fmap.view(), coords_center.view(), 0);
-        assert!((out[(0, 0, 0, 0)] - 30.0).abs() < 1e-6, "got {}", out[(0, 0, 0, 0)]);
+        assert!(
+            (out[(0, 0, 0, 0)] - 30.0).abs() < 1e-6,
+            "got {}",
+            out[(0, 0, 0, 0)]
+        );
     }
 
     /// Sampling one pixel past the border should zero-pad (not clamp): with
@@ -544,7 +576,11 @@ mod tests {
         // of range, weight 0.5, zero-padded). Expected = 0.5*7.0 + 0.5*0 = 3.5.
         let coords_center = array![[[[1.5_f32, 0.0_f32]]]];
         let out = corr_cpu(patch_feats.view(), fmap.view(), coords_center.view(), 0);
-        assert!((out[(0, 0, 0, 0)] - 3.5).abs() < 1e-6, "got {}", out[(0, 0, 0, 0)]);
+        assert!(
+            (out[(0, 0, 0, 0)] - 3.5).abs() < 1e-6,
+            "got {}",
+            out[(0, 0, 0, 0)]
+        );
     }
 
     /// Normalization by `sqrt(channels)`: two channels, anchor = target =
@@ -558,7 +594,11 @@ mod tests {
         let coords_center = array![[[[0.0_f32, 0.0_f32]]]];
         let out = corr_cpu(patch_feats.view(), fmap.view(), coords_center.view(), 0);
         let expected = 2.0_f32 / (2.0_f32).sqrt();
-        assert!((out[(0, 0, 0, 0)] - expected).abs() < 1e-6, "got {}", out[(0, 0, 0, 0)]);
+        assert!(
+            (out[(0, 0, 0, 0)] - expected).abs() < 1e-6,
+            "got {}",
+            out[(0, 0, 0, 0)]
+        );
     }
 
     /// M4-perf equivalence test (task requirement: "keep a slow-reference
@@ -581,21 +621,32 @@ mod tests {
 
         let patch_feats =
             Array4::<f32>::from_shape_fn((num_edges, channels, patch, patch), |_| rng.next_f32());
-        let target_fmap = Array3::<f32>::from_shape_fn((channels, height, width), |_| rng.next_f32());
+        let target_fmap =
+            Array3::<f32>::from_shape_fn((channels, height, width), |_| rng.next_f32());
         // Centres scattered around the valid image extent, including some
         // deliberately out-of-bounds ones (module doc's zero-padding path)
         // by letting the random offset exceed `[0, width) x [0, height)`.
-        let coords_center = Array4::<f32>::from_shape_fn((num_edges, patch, patch, 2), |(_, _, _, axis)| {
-            if axis == 0 {
-                rng.next_f32() * (width as f32 + 8.0) - 4.0
-            } else {
-                rng.next_f32() * (height as f32 + 8.0) - 4.0
-            }
-        });
+        let coords_center =
+            Array4::<f32>::from_shape_fn((num_edges, patch, patch, 2), |(_, _, _, axis)| {
+                if axis == 0 {
+                    rng.next_f32() * (width as f32 + 8.0) - 4.0
+                } else {
+                    rng.next_f32() * (height as f32 + 8.0) - 4.0
+                }
+            });
 
-        let fast = corr_cpu(patch_feats.view(), target_fmap.view(), coords_center.view(), radius);
-        let reference =
-            corr_cpu_reference(patch_feats.view(), target_fmap.view(), coords_center.view(), radius);
+        let fast = corr_cpu(
+            patch_feats.view(),
+            target_fmap.view(),
+            coords_center.view(),
+            radius,
+        );
+        let reference = corr_cpu_reference(
+            patch_feats.view(),
+            target_fmap.view(),
+            coords_center.view(),
+            radius,
+        );
 
         assert_eq!(fast.shape(), reference.shape());
         let max_abs_diff = fast
@@ -603,7 +654,10 @@ mod tests {
             .zip(reference.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f32, f32::max);
-        assert!(max_abs_diff <= 1e-5, "fast/reference corr_cpu mismatch: max abs diff {max_abs_diff:.3e}");
+        assert!(
+            max_abs_diff <= 1e-5,
+            "fast/reference corr_cpu mismatch: max abs diff {max_abs_diff:.3e}"
+        );
     }
 
     /// Tiny dependency-free PRNG (xorshift64*) so the equivalence/perf tests
@@ -654,14 +708,16 @@ mod tests {
 
         let patch_feats =
             Array4::<f32>::from_shape_fn((num_edges, channels, patch, patch), |_| rng.next_f32());
-        let target_fmap = Array3::<f32>::from_shape_fn((channels, height, width), |_| rng.next_f32());
-        let coords_center = Array4::<f32>::from_shape_fn((num_edges, patch, patch, 2), |(_, _, _, axis)| {
-            if axis == 0 {
-                rng.next_f32() * width as f32
-            } else {
-                rng.next_f32() * height as f32
-            }
-        });
+        let target_fmap =
+            Array3::<f32>::from_shape_fn((channels, height, width), |_| rng.next_f32());
+        let coords_center =
+            Array4::<f32>::from_shape_fn((num_edges, patch, patch, 2), |(_, _, _, axis)| {
+                if axis == 0 {
+                    rng.next_f32() * width as f32
+                } else {
+                    rng.next_f32() * height as f32
+                }
+            });
 
         let repeats = 10;
         let start = std::time::Instant::now();

@@ -268,7 +268,9 @@ use std::collections::VecDeque;
 use visloc_core::geometry::SE3;
 
 use crate::dpvo_patch_ba::DpvoPatch;
-use crate::dpvo_vi_ba::{imu_factor_jacobians, imu_factor_whitener, DpvoImuFactor, DpvoMonoViAlignment};
+use crate::dpvo_vi_ba::{
+    imu_factor_jacobians, imu_factor_whitener, DpvoImuFactor, DpvoMonoViAlignment,
+};
 use nalgebra::Vector3;
 
 /// Finite-difference step used by [`apply_gentle_scale_correction`]'s
@@ -418,7 +420,11 @@ pub struct RecursiveScaleEstimator {
 
 impl RecursiveScaleEstimator {
     pub fn new(cfg: ScaleCouplingConfig) -> Self {
-        Self { posterior: None, recent_raw: VecDeque::new(), cfg }
+        Self {
+            posterior: None,
+            recent_raw: VecDeque::new(),
+            cfg,
+        }
     }
 
     pub fn posterior(&self) -> Option<LogScalePosterior> {
@@ -446,23 +452,39 @@ impl RecursiveScaleEstimator {
             };
             self.posterior = Some(seeded);
             self.push_raw(measurement.log_scale);
-            return ScaleUpdateReport { gain: 1.0, huber_inflation: 1.0, innovation: 0.0, posterior: seeded };
+            return ScaleUpdateReport {
+                gain: 1.0,
+                huber_inflation: 1.0,
+                innovation: 0.0,
+                posterior: seeded,
+            };
         };
 
         let innovation = measurement.log_scale - prior.mean;
         let combined_std = (prior.variance + meas_var).sqrt().max(1.0e-12);
         let normalized = innovation.abs() / combined_std;
-        let huber_inflation =
-            if normalized > self.cfg.huber_delta { (normalized / self.cfg.huber_delta).powi(2) } else { 1.0 };
+        let huber_inflation = if normalized > self.cfg.huber_delta {
+            (normalized / self.cfg.huber_delta).powi(2)
+        } else {
+            1.0
+        };
         let effective_meas_var = (meas_var * huber_inflation).max(self.cfg.variance_floor);
 
         let gain = prior.variance / (prior.variance + effective_meas_var);
         let new_mean = prior.mean + gain * innovation;
         let new_variance = ((1.0 - gain) * prior.variance).max(self.cfg.variance_floor);
-        let posterior = LogScalePosterior { mean: new_mean, variance: new_variance };
+        let posterior = LogScalePosterior {
+            mean: new_mean,
+            variance: new_variance,
+        };
         self.posterior = Some(posterior);
         self.push_raw(measurement.log_scale);
-        ScaleUpdateReport { gain, huber_inflation, innovation, posterior }
+        ScaleUpdateReport {
+            gain,
+            huber_inflation,
+            innovation,
+            posterior,
+        }
     }
 
     fn push_raw(&mut self, log_scale: f64) {
@@ -475,7 +497,9 @@ impl RecursiveScaleEstimator {
     /// Both convergence gates — see the module doc's "Convergence and
     /// annealing" section for why both are required.
     pub fn is_converged(&self) -> bool {
-        let Some(posterior) = self.posterior else { return false };
+        let Some(posterior) = self.posterior else {
+            return false;
+        };
         if posterior.variance.sqrt() >= self.cfg.convergence_std {
             return false;
         }
@@ -516,7 +540,10 @@ pub fn scale_measurement_from_alignment(
     let sigma = alignment.mean_residual_after.max(cfg.variance_floor.sqrt());
     let min_sv = alignment.min_singular_value.max(cfg.variance_floor.sqrt());
     let variance = ((sigma * sigma) / (min_sv * min_sv)).max(cfg.variance_floor);
-    ScaleMeasurement { log_scale: alignment.scale.max(1.0e-9).ln(), variance }
+    ScaleMeasurement {
+        log_scale: alignment.scale.max(1.0e-9).ln(),
+        variance,
+    }
 }
 
 /// Posterior belief over a Euclidean quantity (gyro bias) with a SHARED
@@ -548,7 +575,10 @@ pub struct RecursiveGyroBiasEstimator {
 
 impl RecursiveGyroBiasEstimator {
     pub fn new(cfg: ScaleCouplingConfig) -> Self {
-        Self { posterior: None, cfg }
+        Self {
+            posterior: None,
+            cfg,
+        }
     }
 
     pub fn posterior(&self) -> Option<Vector3Posterior> {
@@ -563,26 +593,41 @@ impl RecursiveGyroBiasEstimator {
     /// least one measurement has always already arrived — see
     /// `crate::dpvo_vo::DpvoOdometry::scale_coupling_step`).
     pub fn mean(&self) -> Vector3<f64> {
-        self.posterior.map(|p| p.mean).unwrap_or_else(Vector3::zeros)
+        self.posterior
+            .map(|p| p.mean)
+            .unwrap_or_else(Vector3::zeros)
     }
 
-    pub fn update(&mut self, measurement_mean: Vector3<f64>, measurement_variance: f64) -> Vector3Posterior {
+    pub fn update(
+        &mut self,
+        measurement_mean: Vector3<f64>,
+        measurement_variance: f64,
+    ) -> Vector3Posterior {
         let meas_var = measurement_variance.max(self.cfg.variance_floor);
         let Some(prior) = self.posterior else {
-            let seeded = Vector3Posterior { mean: measurement_mean, variance: meas_var.max(self.cfg.prior_variance) };
+            let seeded = Vector3Posterior {
+                mean: measurement_mean,
+                variance: meas_var.max(self.cfg.prior_variance),
+            };
             self.posterior = Some(seeded);
             return seeded;
         };
         let innovation = measurement_mean - prior.mean;
         let combined_std = (prior.variance + meas_var).sqrt().max(1.0e-12);
         let normalized = innovation.norm() / combined_std;
-        let huber_inflation =
-            if normalized > self.cfg.huber_delta { (normalized / self.cfg.huber_delta).powi(2) } else { 1.0 };
+        let huber_inflation = if normalized > self.cfg.huber_delta {
+            (normalized / self.cfg.huber_delta).powi(2)
+        } else {
+            1.0
+        };
         let effective_meas_var = (meas_var * huber_inflation).max(self.cfg.variance_floor);
         let gain = prior.variance / (prior.variance + effective_meas_var);
         let new_mean = prior.mean + gain * innovation;
         let new_variance = ((1.0 - gain) * prior.variance).max(self.cfg.variance_floor);
-        let posterior = Vector3Posterior { mean: new_mean, variance: new_variance };
+        let posterior = Vector3Posterior {
+            mean: new_mean,
+            variance: new_variance,
+        };
         self.posterior = Some(posterior);
         posterior
     }
@@ -611,7 +656,11 @@ pub struct AnnealingWeight {
 
 impl AnnealingWeight {
     pub fn new(anneal_frames: f64, decay_frames: f64) -> Self {
-        Self { value: 0.0, up_step: 1.0 / anneal_frames.max(1.0), down_step: 1.0 / decay_frames.max(1.0) }
+        Self {
+            value: 0.0,
+            up_step: 1.0 / anneal_frames.max(1.0),
+            down_step: 1.0 / decay_frames.max(1.0),
+        }
     }
 
     /// Step toward `1.0` (if `should_increase`) or `0.0` otherwise, by this
@@ -668,7 +717,10 @@ pub fn apply_gentle_scale_correction(
     cfg: &ScaleCouplingConfig,
 ) -> ScaleCorrectionResult {
     if weight_multiplier <= 0.0 || factors.is_empty() {
-        return ScaleCorrectionResult { delta_log_s: 0.0, applied: false };
+        return ScaleCorrectionResult {
+            delta_log_s: 0.0,
+            applied: false,
+        };
     }
 
     let mut sum_a = 0.0_f64;
@@ -680,7 +732,13 @@ pub fn apply_gentle_scale_correction(
             continue;
         }
         let (r0, ..) = imu_factor_jacobians(
-            &poses[i], &poses[j], &velocities[i], &velocities[j], body_to_camera, &f.factor, bias_gyro,
+            &poses[i],
+            &poses[j],
+            &velocities[i],
+            &velocities[j],
+            body_to_camera,
+            &f.factor,
+            bias_gyro,
             bias_accel,
         );
         let mut pose_i_h = poses[i].clone();
@@ -692,7 +750,13 @@ pub fn apply_gentle_scale_correction(
             pose_j_h.translation *= scale_factor_h;
         }
         let (r1, ..) = imu_factor_jacobians(
-            &pose_i_h, &pose_j_h, &velocities[i], &velocities[j], body_to_camera, &f.factor, bias_gyro,
+            &pose_i_h,
+            &pose_j_h,
+            &velocities[i],
+            &velocities[j],
+            body_to_camera,
+            &f.factor,
+            bias_gyro,
             bias_accel,
         );
 
@@ -707,7 +771,10 @@ pub fn apply_gentle_scale_correction(
     let information = weight_multiplier / posterior.variance.max(cfg.variance_floor);
     let lhs = sum_a + information;
     if lhs <= 1.0e-12 {
-        return ScaleCorrectionResult { delta_log_s: 0.0, applied: false };
+        return ScaleCorrectionResult {
+            delta_log_s: 0.0,
+            applied: false,
+        };
     }
     let rhs = -sum_b + information * posterior.mean;
     let delta_log_s = (rhs / lhs).clamp(-cfg.max_log_step, cfg.max_log_step);
@@ -721,7 +788,10 @@ pub fn apply_gentle_scale_correction(
     for patch in patches.iter_mut() {
         patch.inverse_depth /= factor;
     }
-    ScaleCorrectionResult { delta_log_s, applied: true }
+    ScaleCorrectionResult {
+        delta_log_s,
+        applied: true,
+    }
 }
 
 /// Milestone M7 output-space blend — see the module doc's "Why output-space
@@ -788,7 +858,11 @@ mod tests {
         );
     }
 
-    fn synthetic_alignment(scale: f64, min_singular_value: f64, mean_residual_after: f64) -> DpvoMonoViAlignment {
+    fn synthetic_alignment(
+        scale: f64,
+        min_singular_value: f64,
+        mean_residual_after: f64,
+    ) -> DpvoMonoViAlignment {
         DpvoMonoViAlignment {
             scale,
             gravity_world: Vector3::new(0.0, 0.0, -9.81),
@@ -830,10 +904,18 @@ mod tests {
                 );
             }
         }
-        let posterior = estimator.posterior().expect("at least one measurement fused");
+        let posterior = estimator
+            .posterior()
+            .expect("at least one measurement fused");
         assert_close(posterior.mean, true_log_scale, 0.05);
-        assert!(posterior.variance < 0.01, "variance should have shrunk below the single-measurement variance");
-        assert!(estimator.is_converged(), "8 consistent measurements should satisfy both convergence gates");
+        assert!(
+            posterior.variance < 0.01,
+            "variance should have shrunk below the single-measurement variance"
+        );
+        assert!(
+            estimator.is_converged(),
+            "8 consistent measurements should satisfy both convergence gates"
+        );
     }
 
     // ---- Requirement: "refuses to converge (std stays high) under M5b's
@@ -869,9 +951,18 @@ mod tests {
         // DISAGREE with each other by more than `convergence_band` — the
         // posterior variance can end up small, but raw agreement must still
         // fail.
-        estimator.update(ScaleMeasurement { log_scale: 0.0, variance: 1e-6 });
-        estimator.update(ScaleMeasurement { log_scale: 0.5, variance: 1e-6 });
-        estimator.update(ScaleMeasurement { log_scale: 0.0, variance: 1e-6 });
+        estimator.update(ScaleMeasurement {
+            log_scale: 0.0,
+            variance: 1e-6,
+        });
+        estimator.update(ScaleMeasurement {
+            log_scale: 0.5,
+            variance: 1e-6,
+        });
+        estimator.update(ScaleMeasurement {
+            log_scale: 0.0,
+            variance: 1e-6,
+        });
         assert!(
             !estimator.is_converged(),
             "posterior variance may be tiny, but the raw measurements disagree by 0.5 >> convergence_band"
@@ -886,16 +977,28 @@ mod tests {
         let mut estimator = RecursiveScaleEstimator::new(cfg);
         let true_log_scale = 1.0_f64.ln(); // near-1x, matching M4-perf's own ~1.27 baseline order of magnitude
         for _ in 0..12 {
-            estimator.update(ScaleMeasurement { log_scale: true_log_scale, variance: 0.01 });
+            estimator.update(ScaleMeasurement {
+                log_scale: true_log_scale,
+                variance: 0.01,
+            });
         }
         let pre_poison = estimator.posterior().unwrap();
-        assert!(estimator.is_converged(), "12 consistent measurements should have converged first");
+        assert!(
+            estimator.is_converged(),
+            "12 consistent measurements should have converged first"
+        );
 
         // M5b's own real failure mode: a single alignment recovers 18.66x
         // amid a stream of near-1x windows.
         let poison_log_scale = 18.66_f64.ln();
-        let report = estimator.update(ScaleMeasurement { log_scale: poison_log_scale, variance: 0.01 });
-        assert!(report.huber_inflation > 1.0, "an 18.66x outlier must trip the Huber down-weight");
+        let report = estimator.update(ScaleMeasurement {
+            log_scale: poison_log_scale,
+            variance: 0.01,
+        });
+        assert!(
+            report.huber_inflation > 1.0,
+            "an 18.66x outlier must trip the Huber down-weight"
+        );
 
         let post_poison = estimator.posterior().unwrap();
         // "Does not move materially": the mean shift from one poisoned
@@ -912,7 +1015,10 @@ mod tests {
         // Recovers: a following run of consistent, correct measurements
         // should pull the (still Huber-protected) posterior right back.
         for _ in 0..12 {
-            estimator.update(ScaleMeasurement { log_scale: true_log_scale, variance: 0.01 });
+            estimator.update(ScaleMeasurement {
+                log_scale: true_log_scale,
+                variance: 0.01,
+            });
         }
         let recovered = estimator.posterior().unwrap();
         assert_close(recovered.mean, true_log_scale, 0.05);
@@ -967,10 +1073,24 @@ mod tests {
 
     #[test]
     fn blend_solutions_reproduces_endpoints_exactly_at_weight_zero_and_one() {
-        let visual = vec![SE3::identity(), SE3::exp(&nalgebra::Vector6::new(1.0, 0.0, 0.0, 0.0, 0.0, 0.0))];
-        let imu = vec![SE3::identity(), SE3::exp(&nalgebra::Vector6::new(2.0, 0.0, 0.0, 0.3, 0.0, 0.0))];
-        let visual_patches = vec![DpvoPatch { x: 1.0, y: 2.0, inverse_depth: 0.5 }];
-        let imu_patches = vec![DpvoPatch { x: 1.0, y: 2.0, inverse_depth: 0.8 }];
+        let visual = vec![
+            SE3::identity(),
+            SE3::exp(&nalgebra::Vector6::new(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        ];
+        let imu = vec![
+            SE3::identity(),
+            SE3::exp(&nalgebra::Vector6::new(2.0, 0.0, 0.0, 0.3, 0.0, 0.0)),
+        ];
+        let visual_patches = vec![DpvoPatch {
+            x: 1.0,
+            y: 2.0,
+            inverse_depth: 0.5,
+        }];
+        let imu_patches = vec![DpvoPatch {
+            x: 1.0,
+            y: 2.0,
+            inverse_depth: 0.8,
+        }];
 
         let (poses0, patches0) = blend_solutions(&visual, &visual_patches, &imu, &imu_patches, 0.0);
         for (a, b) in poses0.iter().zip(visual.iter()) {
@@ -984,7 +1104,8 @@ mod tests {
         }
         assert_close(patches1[0].inverse_depth, 0.8, 1e-12);
 
-        let (poses_half, patches_half) = blend_solutions(&visual, &visual_patches, &imu, &imu_patches, 0.5);
+        let (poses_half, patches_half) =
+            blend_solutions(&visual, &visual_patches, &imu, &imu_patches, 0.5);
         // Second pose's translation should sit strictly between the two
         // (monotonic interpolation, not identical to either endpoint).
         let t_visual = visual[1].translation.x;
@@ -1092,15 +1213,22 @@ mod tests {
             };
             let window_poses = &visual_poses[0..k];
             let zero = Vector3::zeros();
-            if let Ok(alignment) =
-                estimate_mono_vi_alignment(window_poses, &factors, &SE3::identity(), zero, zero, &gates)
-            {
+            if let Ok(alignment) = estimate_mono_vi_alignment(
+                window_poses,
+                &factors,
+                &SE3::identity(),
+                zero,
+                zero,
+                &gates,
+            ) {
                 let measurement = scale_measurement_from_alignment(&alignment, &estimator.config());
                 estimator.update(measurement);
             }
         }
 
-        let posterior = estimator.posterior().expect("at least one window should have produced a measurement");
+        let posterior = estimator
+            .posterior()
+            .expect("at least one window should have produced a measurement");
         let recovered_scale = posterior.mean.exp();
         let relative_error = (recovered_scale - true_scale_error).abs() / true_scale_error;
         assert!(
@@ -1123,7 +1251,10 @@ mod tests {
         let var_before = estimator.posterior().unwrap().variance;
         estimator.soft_reset();
         let var_after = estimator.posterior().unwrap().variance;
-        assert!(var_after > var_before, "soft_reset must widen (not shrink) the posterior variance");
+        assert!(
+            var_after > var_before,
+            "soft_reset must widen (not shrink) the posterior variance"
+        );
         // Mean is preserved across a soft reset (module doc: "keep the mean").
         assert_close_vec3(estimator.mean(), truth, 1e-3);
     }

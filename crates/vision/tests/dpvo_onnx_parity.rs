@@ -51,8 +51,17 @@ fn onnx_dir() -> PathBuf {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "length mismatch: {} vs {}", a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "length mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f32, f32::max)
 }
 
 /// Rough `Instant`-based per-stage CPU timing, reported alongside the
@@ -84,36 +93,49 @@ fn time_repeated<T>(label: &str, repeats: u32, mut f: impl FnMut() -> T) -> T {
 #[test]
 #[ignore = "reads E:/visloc_archive/dpvo_onnx_m1/fixtures — not present in CI, see module doc"]
 fn patchify_parity_against_fixture() {
-    let archive = NpzArchive::open(fixtures_dir().join("patchify_fixture.npz"))
-        .expect("open patchify_fixture.npz (regenerate via scripts/export_dpvo_onnx.py if missing)");
+    let archive = NpzArchive::open(fixtures_dir().join("patchify_fixture.npz")).expect(
+        "open patchify_fixture.npz (regenerate via scripts/export_dpvo_onnx.py if missing)",
+    );
 
     let (fmap_shape, fmap_data) = archive.read_f32("fmap").unwrap();
     assert_eq!(fmap_shape.len(), 4, "fmap shape: {fmap_shape:?}");
     let (_, channels, height, width) = (fmap_shape[0], fmap_shape[1], fmap_shape[2], fmap_shape[3]);
-    let fmap =
-        ndarray::Array3::from_shape_vec((channels, height, width), fmap_data).unwrap();
+    let fmap = ndarray::Array3::from_shape_vec((channels, height, width), fmap_data).unwrap();
 
     let (coords_shape, coords_data) = archive.read_f32("coords").unwrap();
     assert_eq!(coords_shape, vec![1, coords_shape[1], 2]);
     let num_patches = coords_shape[1];
-    let coords: Vec<(f32, f32)> =
-        coords_data.chunks_exact(2).map(|xy| (xy[0], xy[1])).collect();
+    let coords: Vec<(f32, f32)> = coords_data
+        .chunks_exact(2)
+        .map(|xy| (xy[0], xy[1]))
+        .collect();
     assert_eq!(coords.len(), num_patches);
 
     let (radius_shape, radius_data) = archive.read_i64("radius").unwrap();
-    assert!(radius_shape.is_empty(), "radius should be a scalar, got shape {radius_shape:?}");
+    assert!(
+        radius_shape.is_empty(),
+        "radius should be a scalar, got shape {radius_shape:?}"
+    );
     let radius = radius_data[0] as usize;
 
     let (expected_shape, expected_data) = archive.read_f32("patches").unwrap();
-    assert_eq!(expected_shape, vec![1, num_patches, channels, 2 * radius + 1, 2 * radius + 1]);
+    assert_eq!(
+        expected_shape,
+        vec![1, num_patches, channels, 2 * radius + 1, 2 * radius + 1]
+    );
 
-    let got = time_repeated("patchify_cpu", 200, || patchify_cpu(fmap.view(), &coords, radius));
+    let got = time_repeated("patchify_cpu", 200, || {
+        patchify_cpu(fmap.view(), &coords, radius)
+    });
     assert_eq!(got.shape(), &expected_shape[1..]);
 
     let got_flat: Vec<f32> = got.iter().copied().collect();
     let diff = max_abs_diff(&got_flat, &expected_data);
     println!("patchify_cpu max abs diff vs fixture: {diff:.3e}");
-    assert!(diff <= PASS_THRESHOLD, "patchify_cpu parity FAILED: max abs diff {diff:.3e}");
+    assert!(
+        diff <= PASS_THRESHOLD,
+        "patchify_cpu parity FAILED: max abs diff {diff:.3e}"
+    );
 }
 
 /// Scope note: same "own reference, not upstream CUDA" caveat as patchify
@@ -127,18 +149,25 @@ fn correlation_parity_against_fixture() {
 
     let (anchor_shape, anchor_data) = archive.read_f32("anchor_patch_feats").unwrap();
     assert_eq!(anchor_shape.len(), 4);
-    let (num_edges, channels, patch, patch2) =
-        (anchor_shape[0], anchor_shape[1], anchor_shape[2], anchor_shape[3]);
+    let (num_edges, channels, patch, patch2) = (
+        anchor_shape[0],
+        anchor_shape[1],
+        anchor_shape[2],
+        anchor_shape[3],
+    );
     assert_eq!(patch, patch2);
-    let anchor = ndarray::Array4::from_shape_vec((num_edges, channels, patch, patch), anchor_data)
-        .unwrap();
+    let anchor =
+        ndarray::Array4::from_shape_vec((num_edges, channels, patch, patch), anchor_data).unwrap();
 
     let (target_shape, target_data) = archive.read_f32("target_fmap").unwrap();
-    assert_eq!(target_shape[0], 1, "fixture's target_fmap keeps an unexpanded batch dim of 1");
+    assert_eq!(
+        target_shape[0], 1,
+        "fixture's target_fmap keeps an unexpanded batch dim of 1"
+    );
     let (t_channels, t_height, t_width) = (target_shape[1], target_shape[2], target_shape[3]);
     assert_eq!(t_channels, channels);
-    let target = ndarray::Array3::from_shape_vec((t_channels, t_height, t_width), target_data)
-        .unwrap();
+    let target =
+        ndarray::Array3::from_shape_vec((t_channels, t_height, t_width), target_data).unwrap();
 
     let (center_shape, center_data) = archive.read_f32("coords_center").unwrap();
     assert_eq!(center_shape, vec![num_edges, patch, patch, 2]);
@@ -161,7 +190,10 @@ fn correlation_parity_against_fixture() {
     let got_flat: Vec<f32> = got.iter().copied().collect();
     let diff = max_abs_diff(&got_flat, &expected_data);
     println!("corr_cpu max abs diff vs fixture: {diff:.3e}");
-    assert!(diff <= PASS_THRESHOLD, "corr_cpu parity FAILED: max abs diff {diff:.3e}");
+    assert!(
+        diff <= PASS_THRESHOLD,
+        "corr_cpu parity FAILED: max abs diff {diff:.3e}"
+    );
 }
 
 /// Loads the two SoftAgg instances (`agg_kk`, `agg_ij`) from
@@ -199,7 +231,11 @@ fn softagg_parity_against_fixture() {
     let agg_kk = SoftAgg::load_from_npz(&weights_fixture, "agg_kk_").expect("load agg_kk weights");
     let agg_ij = SoftAgg::load_from_npz(&weights_fixture, "agg_ij_").expect("load agg_ij weights");
 
-    let pair_key: Vec<i64> = ii.iter().zip(jj.iter()).map(|(&i, &j)| i * 12345 + j).collect();
+    let pair_key: Vec<i64> = ii
+        .iter()
+        .zip(jj.iter())
+        .map(|(&i, &j)| i * 12345 + j)
+        .collect();
     let net_post_agg_2d = time_repeated("SoftAgg host step (agg_kk + agg_ij)", 200, || {
         let agg_kk_out = agg_kk.forward(net_pre_agg_2d.view(), &kk);
         let agg_ij_out = agg_ij.forward(net_pre_agg_2d.view(), &pair_key);
@@ -208,7 +244,10 @@ fn softagg_parity_against_fixture() {
     let got_flat: Vec<f32> = net_post_agg_2d.iter().copied().collect();
     let diff = max_abs_diff(&got_flat, &expected_data);
     println!("SoftAgg host step max abs diff vs fixture: {diff:.3e}");
-    assert!(diff <= PASS_THRESHOLD, "SoftAgg parity FAILED: max abs diff {diff:.3e}");
+    assert!(
+        diff <= PASS_THRESHOLD,
+        "SoftAgg parity FAILED: max abs diff {diff:.3e}"
+    );
 }
 
 /// End-to-end: `dpvo_update_pre_agg.onnx` → host [`SoftAgg`] →
@@ -270,14 +309,25 @@ fn update_cell_end_to_end_parity_against_fixture() {
 
     let (net_out, delta, weight) = time_repeated("update_iteration (end-to-end)", 20, || {
         session
-            .update_iteration(net.view(), inp.view(), corr.view(), &kk, &ii, &jj, &agg_kk, &agg_ij)
+            .update_iteration(
+                net.view(),
+                inp.view(),
+                corr.view(),
+                &kk,
+                &ii,
+                &jj,
+                &agg_kk,
+                &agg_ij,
+            )
             .expect("update_iteration succeeds")
     });
 
     let (expected_out_shape, expected_net_out) = update_fixture.read_f32("net_out").unwrap();
     assert_eq!(net_out.shape(), expected_out_shape.as_slice());
-    let diff_net_out =
-        max_abs_diff(&net_out.iter().copied().collect::<Vec<_>>(), &expected_net_out);
+    let diff_net_out = max_abs_diff(
+        &net_out.iter().copied().collect::<Vec<_>>(),
+        &expected_net_out,
+    );
 
     let (expected_delta_shape, expected_delta) = update_fixture.read_f32("delta").unwrap();
     assert_eq!(delta.shape(), expected_delta_shape.as_slice());
@@ -285,15 +335,27 @@ fn update_cell_end_to_end_parity_against_fixture() {
 
     let (expected_weight_shape, expected_weight) = update_fixture.read_f32("weight").unwrap();
     assert_eq!(weight.shape(), expected_weight_shape.as_slice());
-    let diff_weight = max_abs_diff(&weight.iter().copied().collect::<Vec<_>>(), &expected_weight);
+    let diff_weight = max_abs_diff(
+        &weight.iter().copied().collect::<Vec<_>>(),
+        &expected_weight,
+    );
 
     println!(
         "update_iteration max abs diff vs fixture: net_out={diff_net_out:.3e} \
          delta={diff_delta:.3e} weight={diff_weight:.3e}"
     );
-    assert!(diff_net_out <= PASS_THRESHOLD, "net_out parity FAILED: {diff_net_out:.3e}");
-    assert!(diff_delta <= PASS_THRESHOLD, "delta parity FAILED: {diff_delta:.3e}");
-    assert!(diff_weight <= PASS_THRESHOLD, "weight parity FAILED: {diff_weight:.3e}");
+    assert!(
+        diff_net_out <= PASS_THRESHOLD,
+        "net_out parity FAILED: {diff_net_out:.3e}"
+    );
+    assert!(
+        diff_delta <= PASS_THRESHOLD,
+        "delta parity FAILED: {diff_delta:.3e}"
+    );
+    assert!(
+        diff_weight <= PASS_THRESHOLD,
+        "weight parity FAILED: {diff_weight:.3e}"
+    );
 }
 
 /// Smoke test for the ONNX session wrapper itself (M2 scope item #1):
@@ -334,12 +396,24 @@ fn fnet_inet_sessions_load_and_produce_finite_output_of_the_documented_shape() {
     let fmap = time_repeated("run_fnet (64x96 input)", 20, || {
         session.run_fnet(image.view()).expect("run_fnet")
     });
-    assert_eq!(fmap.shape(), &[1, visloc_vision::dpvo::FNET_DIM, height / 4, width / 4]);
-    assert!(fmap.iter().all(|v| v.is_finite()), "fnet produced a non-finite value");
+    assert_eq!(
+        fmap.shape(),
+        &[1, visloc_vision::dpvo::FNET_DIM, height / 4, width / 4]
+    );
+    assert!(
+        fmap.iter().all(|v| v.is_finite()),
+        "fnet produced a non-finite value"
+    );
 
     let imap = time_repeated("run_inet (64x96 input)", 20, || {
         session.run_inet(image.view()).expect("run_inet")
     });
-    assert_eq!(imap.shape(), &[1, visloc_vision::dpvo::DIM, height / 4, width / 4]);
-    assert!(imap.iter().all(|v| v.is_finite()), "inet produced a non-finite value");
+    assert_eq!(
+        imap.shape(),
+        &[1, visloc_vision::dpvo::DIM, height / 4, width / 4]
+    );
+    assert!(
+        imap.iter().all(|v| v.is_finite()),
+        "inet produced a non-finite value"
+    );
 }

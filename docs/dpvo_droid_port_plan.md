@@ -6531,3 +6531,107 @@ cargo build --release --example euroc_dpvo_vo_demo --features image-io,onnx-infe
   `DepthDamp` would silently get undamped depth updates on that code path
   specifically; worth flagging before anyone combines `--imu` with
   `--hover-response depth_damp`.
+
+## M16 results (2026-07-19)
+
+Milestone M16 implements M15's directly measured next step: gradual,
+rate-limited release of hover-born patches from depth damping. This remains a
+pure-monocular experiment. The original binary unflag path is retained exactly
+when `gradual_release_duration_commits=0` (the default), so existing users do
+not silently change behavior.
+
+### Release law and diagnostics
+
+After hover exit, at most `gradual_release_start_cap_frames` oldest eligible
+arrival cohorts begin release per graph advance. Each cohort's multiplier then
+decays geometrically (linear in log multiplier) from `depth_damp_factor` to
+`1.0` over `gradual_release_duration_commits`. No cohort begins release while
+the detector remains in hover. The acceptance candidate uses duration `32`,
+start cap `4`, and 48 patches per arrival frame, hence no more than 192 patches
+can start release on one advance.
+
+`LowParallaxDampState` now reports the currently releasing frame count,
+cumulative release starts, maximum starts on any one advance, and a five-bin
+frame histogram `[fully damped, 0-25%, 25-50%, 50-75%, 75-100%]`. The EuRoC
+demo exposes these as `--hover-release-duration-commits`,
+`--hover-release-start-cap-frames`, progress-line fields, and `summary.txt`
+keys.
+
+### 550-frame same-binary A/B
+
+Both arms used the same M16 release executable, MH_01_easy cam0, stride 2,
+seed 0, CPU ONNX, 48 patches/frame, and the existing M15 loop/GBA/Sim(3)
+configuration. The control left hover handling disabled; the mechanism arm
+used depth damp `10000`, release duration `32`, and start cap `4`. Runs were
+concurrent, so timing is diagnostic only.
+
+| metric | control | M16 d32/cap4 | delta |
+|---|---:|---:|---:|
+| tracked fraction | 1.0000 | 1.0000 | unchanged |
+| rigid ATE RMSE (m) | 0.5990 | 0.6167 | +3.0% |
+| similarity ATE RMSE (m) | 0.5733 | 0.6049 | +5.5% |
+| similarity scale | 2.505855 | 2.270371 | -9.4% |
+
+The detector entered at processed frame 216 and exited at 461, matching M15.
+At exit, exactly four cohorts began release; `hover_release_start_max=4` for
+the entire run. Twenty processed frames later the histogram was
+`[161, 32, 32, 20, 0]`, rather than M15's mass binary unflag. All 245 cohorts
+eventually started release; 13 were still in the final release bin at frame
+550. Thus M16 removes the measured release cliff and improves final scale, but
+the 550 result is a trade-off rather than an accuracy win because similarity
+ATE regresses modestly.
+
+The expanding-window profile is archived at
+`E:/visloc_archive/dpvo_m16_20260719/m16_expanding_scale_profile.csv`. M16
+avoids the control's post-exit scale dip (frame 499: `1.2520` vs `1.0792`) and
+reduces the terminal overshoot (frame 549: `2.2704` vs `2.5059`). This supports
+the release-schedule hypothesis while also showing that a duration of 32 is
+slightly too slow to be fully settled at the 550 boundary.
+
+### Verification completed before the acceptance runs
+
+```
+cargo test -p visloc-slam --features onnx-inference gradual_release --lib
+  -> ok. 3 passed (monotonic/full recovery, bounded oldest-first starts,
+     and no release during hover)
+cargo test -p visloc-slam --features onnx-inference advance_unflagging --lib
+  -> ok. 3 passed (legacy duration=0 compatibility path)
+cargo check --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> clean
+cargo build --release --example euroc_dpvo_vo_demo --features image-io,onnx-inference
+  -> clean
+30f smoke (M16 d32/cap4)
+  -> exit 0, tracked_fraction=1.0000, release diagnostics present
+```
+
+### Formal 400/800 acceptance gate
+
+The 400- and 800-frame mechanism arms used the same release binary and M16
+settings as the 550 arm. The controls are M15's archived controls: the fresh
+same-binary 550 control reproduced M15's 550 metrics exactly, confirming that
+M16's default-off compatibility path did not change the control trajectory.
+
+| frames | arm | tracked | similarity ATE RMSE (m) | similarity scale |
+|---:|---|---:|---:|---:|
+| 400 | control | 1.0000 | 0.1521 | 1.234181 |
+| 400 | M16 d32/cap4 | 1.0000 | 0.1575 | 1.264543 |
+| 800 | control | 1.0000 | 2.8747 | 20.633359 |
+| 800 | M16 d32/cap4 | 1.0000 | 3.0859 | 26.593359 |
+
+The 400 regression is small (ATE +3.6%, scale +2.5%) and tracking remains
+perfect. At 800, however, scale is 28.9% worse and similarity ATE is 7.3%
+worse. The release machinery itself remains correct: detector `216 -> 461`,
+all 245 cohorts started release, `hover_release_start_max=4`, no cohort was
+still releasing at completion, and tracking was 800/800.
+
+The expanding profile explains why the promising 550 checkpoint did not
+generalize. M16 is better than control through frame 619 (`7.5912` vs
+`8.1184`) and nearly equal at 639 (`9.8058` vs `9.8744`), but then crosses
+over and accelerates to `26.5934` while control ends at `20.6334`. Gradual
+release removes M15's discrete cliff but does not recover an observable metric
+scale; it only delays the same monocular gauge drift. The A1 gate therefore
+**fails** (`scale >= 10`). Per the unified plan, stop adding detector-specific
+pure-monocular hover heuristics. Keep M16 off by default as instrumented
+research code, do not promote d32/cap4 as an accuracy configuration, skip the
+deferred IMU A2 under the mono-first directive, and move to the monocular
+ordered-view-graph / structure-less-registration work in B1 and B2.

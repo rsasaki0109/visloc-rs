@@ -28,7 +28,10 @@ use super::softagg::{neighbors_cpu, SoftAgg};
 pub enum DpvoOnnxError {
     /// A model output had an unexpected shape, or a named output was
     /// missing entirely.
-    OutputShapeMismatch { expected: &'static str, actual: String },
+    OutputShapeMismatch {
+        expected: &'static str,
+        actual: String,
+    },
     /// An input tensor's shape did not match what a graph requires (e.g.
     /// `net`/`inp`/`corr` disagreeing on the edge-count axis).
     InputShapeMismatch { message: String },
@@ -41,7 +44,10 @@ impl fmt::Display for DpvoOnnxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutputShapeMismatch { expected, actual } => {
-                write!(f, "DPVO ONNX output shape: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "DPVO ONNX output shape: expected {expected}, got {actual}"
+                )
             }
             Self::InputShapeMismatch { message } => {
                 write!(f, "DPVO ONNX input shape mismatch: {message}")
@@ -196,7 +202,13 @@ impl DpvoOnnxSession {
         // Positional binding follows the export's declared input order:
         // net, inp, corr, ix, jx (see this module doc's contract).
         let mut outputs = session
-            .run(ort::inputs![net_tensor, inp_tensor, corr_tensor, ix_tensor, jx_tensor])
+            .run(ort::inputs![
+                net_tensor,
+                inp_tensor,
+                corr_tensor,
+                ix_tensor,
+                jx_tensor
+            ])
             .map_err(DpvoOnnxError::from_ort)?;
         extract_array3(&mut outputs, "net_pre_agg")
     }
@@ -214,7 +226,9 @@ impl DpvoOnnxSession {
         let tensor = ort::value::Tensor::from_array(net_post_agg.to_owned())
             .map_err(DpvoOnnxError::from_ort)?;
         let mut session = self.update_post_agg.lock().map_err(lock_poisoned)?;
-        let mut outputs = session.run(ort::inputs![tensor]).map_err(DpvoOnnxError::from_ort)?;
+        let mut outputs = session
+            .run(ort::inputs![tensor])
+            .map_err(DpvoOnnxError::from_ort)?;
         let net_out = extract_array3(&mut outputs, "net_out")?;
         let delta = extract_array3(&mut outputs, "delta")?;
         let weight = extract_array3(&mut outputs, "weight")?;
@@ -262,12 +276,14 @@ impl DpvoOnnxSession {
         // exported graphs keep PyTorch's batch axis; `SoftAgg` here works
         // in plain `(edges, dim)` since DPVO never batches beyond 1 frame
         // pair at a time).
-        let net_pre_agg_2d = net_pre_agg
-            .index_axis(Axis(0), 0)
-            .to_owned();
+        let net_pre_agg_2d = net_pre_agg.index_axis(Axis(0), 0).to_owned();
 
         let agg_kk_out = agg_kk.forward(net_pre_agg_2d.view(), kk);
-        let pair_key: Vec<i64> = ii.iter().zip(jj.iter()).map(|(&i, &j)| i * 12345 + j).collect();
+        let pair_key: Vec<i64> = ii
+            .iter()
+            .zip(jj.iter())
+            .map(|(&i, &j)| i * 12345 + j)
+            .collect();
         let agg_ij_out = agg_ij.forward(net_pre_agg_2d.view(), &pair_key);
 
         let net_post_agg_2d = &net_pre_agg_2d + &agg_kk_out + &agg_ij_out;
@@ -307,7 +323,9 @@ fn run_encoder(
     let tensor =
         ort::value::Tensor::from_array(image.to_owned()).map_err(DpvoOnnxError::from_ort)?;
     let mut session = session.lock().map_err(lock_poisoned)?;
-    let mut outputs = session.run(ort::inputs![tensor]).map_err(DpvoOnnxError::from_ort)?;
+    let mut outputs = session
+        .run(ort::inputs![tensor])
+        .map_err(DpvoOnnxError::from_ort)?;
     extract_array4(&mut outputs, output_name)
 }
 
@@ -315,28 +333,44 @@ fn extract_array3(
     outputs: &mut ort::session::SessionOutputs<'_>,
     name: &str,
 ) -> Result<Array3<f32>, DpvoOnnxError> {
-    let value = outputs.remove(name).ok_or_else(|| DpvoOnnxError::OutputShapeMismatch {
-        expected: "an output present in the session's declared outputs",
-        actual: format!("missing output named `{name}`"),
-    })?;
-    let array = value.try_extract_array::<f32>().map_err(DpvoOnnxError::from_ort)?;
-    array.into_owned().into_dimensionality::<ndarray::Ix3>().map_err(|e| {
-        DpvoOnnxError::OutputShapeMismatch { expected: "a 3-D output", actual: e.to_string() }
-    })
+    let value = outputs
+        .remove(name)
+        .ok_or_else(|| DpvoOnnxError::OutputShapeMismatch {
+            expected: "an output present in the session's declared outputs",
+            actual: format!("missing output named `{name}`"),
+        })?;
+    let array = value
+        .try_extract_array::<f32>()
+        .map_err(DpvoOnnxError::from_ort)?;
+    array
+        .into_owned()
+        .into_dimensionality::<ndarray::Ix3>()
+        .map_err(|e| DpvoOnnxError::OutputShapeMismatch {
+            expected: "a 3-D output",
+            actual: e.to_string(),
+        })
 }
 
 fn extract_array4(
     outputs: &mut ort::session::SessionOutputs<'_>,
     name: &str,
 ) -> Result<Array4<f32>, DpvoOnnxError> {
-    let value = outputs.remove(name).ok_or_else(|| DpvoOnnxError::OutputShapeMismatch {
-        expected: "an output present in the session's declared outputs",
-        actual: format!("missing output named `{name}`"),
-    })?;
-    let array = value.try_extract_array::<f32>().map_err(DpvoOnnxError::from_ort)?;
-    array.into_owned().into_dimensionality::<ndarray::Ix4>().map_err(|e| {
-        DpvoOnnxError::OutputShapeMismatch { expected: "a 4-D output", actual: e.to_string() }
-    })
+    let value = outputs
+        .remove(name)
+        .ok_or_else(|| DpvoOnnxError::OutputShapeMismatch {
+            expected: "an output present in the session's declared outputs",
+            actual: format!("missing output named `{name}`"),
+        })?;
+    let array = value
+        .try_extract_array::<f32>()
+        .map_err(DpvoOnnxError::from_ort)?;
+    array
+        .into_owned()
+        .into_dimensionality::<ndarray::Ix4>()
+        .map_err(|e| DpvoOnnxError::OutputShapeMismatch {
+            expected: "a 4-D output",
+            actual: e.to_string(),
+        })
 }
 
 fn lock_poisoned<T>(error: std::sync::PoisonError<T>) -> DpvoOnnxError {

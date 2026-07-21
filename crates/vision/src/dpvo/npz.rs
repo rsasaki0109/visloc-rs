@@ -79,7 +79,10 @@ pub enum NpzError {
     MalformedNpy(String),
     /// The entry's dtype does not match what the caller asked for
     /// ([`NpzArchive::read_f32`] called on an `<i8` entry, etc).
-    DtypeMismatch { expected: &'static str, actual: String },
+    DtypeMismatch {
+        expected: &'static str,
+        actual: String,
+    },
 }
 
 impl fmt::Display for NpzError {
@@ -152,12 +155,16 @@ impl NpzArchive {
     /// supported) bytes.
     fn locate_entry(&self, entry_name: &str) -> Result<&[u8], NpzError> {
         let eocd_offset = find_eocd(&self.bytes)?;
-        let central_dir_offset =
-            u32::from_le_bytes(self.bytes[eocd_offset + 16..eocd_offset + 20].try_into().unwrap())
-                as usize;
-        let central_dir_count =
-            u16::from_le_bytes(self.bytes[eocd_offset + 10..eocd_offset + 12].try_into().unwrap())
-                as usize;
+        let central_dir_offset = u32::from_le_bytes(
+            self.bytes[eocd_offset + 16..eocd_offset + 20]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let central_dir_count = u16::from_le_bytes(
+            self.bytes[eocd_offset + 10..eocd_offset + 12]
+                .try_into()
+                .unwrap(),
+        ) as usize;
 
         let mut cursor = central_dir_offset;
         for _ in 0..central_dir_count {
@@ -227,7 +234,9 @@ impl NpzArchive {
 /// from the end.
 fn find_eocd(bytes: &[u8]) -> Result<usize, NpzError> {
     if bytes.len() < 22 {
-        return Err(NpzError::MalformedZip("file shorter than a bare EOCD record".to_string()));
+        return Err(NpzError::MalformedZip(
+            "file shorter than a bare EOCD record".to_string(),
+        ));
     }
     let search_start = bytes.len().saturating_sub(22 + 65535);
     for offset in (search_start..=bytes.len() - 22).rev() {
@@ -236,23 +245,35 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, NpzError> {
             return Ok(offset);
         }
     }
-    Err(NpzError::MalformedZip("End-Of-Central-Directory record not found".to_string()))
+    Err(NpzError::MalformedZip(
+        "End-Of-Central-Directory record not found".to_string(),
+    ))
 }
 
 /// Parse one `.npy` v1/v2 payload (the bytes of a single ZIP entry) into a
 /// dtype-tagged array.
 fn parse_npy(bytes: &[u8]) -> Result<NpyArray, NpzError> {
     if bytes.len() < 10 || &bytes[0..6] != b"\x93NUMPY" {
-        return Err(NpzError::MalformedNpy("missing \\x93NUMPY magic".to_string()));
+        return Err(NpzError::MalformedNpy(
+            "missing \\x93NUMPY magic".to_string(),
+        ));
     }
     let major_version = bytes[6];
     let (header_len, header_start) = if major_version == 1 {
-        (u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize, 10)
+        (
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()) as usize,
+            10,
+        )
     } else {
         if bytes.len() < 12 {
-            return Err(NpzError::MalformedNpy("truncated v2+ header length".to_string()));
+            return Err(NpzError::MalformedNpy(
+                "truncated v2+ header length".to_string(),
+            ));
         }
-        (u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize, 12)
+        (
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
+            12,
+        )
     };
     let header_end = header_start + header_len;
     let header_str = std::str::from_utf8(&bytes[header_start..header_end])
@@ -272,11 +293,11 @@ fn parse_npy(bytes: &[u8]) -> Result<NpyArray, NpzError> {
     let shape = parse_shape_tuple(&shape_str)?;
 
     let data_bytes = &bytes[header_end..];
-    let element_count: usize = shape.iter().product::<usize>().max(if shape.is_empty() {
-        1
-    } else {
-        0
-    });
+    let element_count: usize =
+        shape
+            .iter()
+            .product::<usize>()
+            .max(if shape.is_empty() { 1 } else { 0 });
     // `shape.iter().product()` is already `1` for an empty (scalar) shape,
     // so the `.max` above is a no-op safety net, not load-bearing — kept
     // for clarity that a `()` shape means "exactly one element", not zero.
@@ -368,7 +389,11 @@ mod tests {
             1 => format!("({},)", shape[0]),
             _ => format!(
                 "({})",
-                shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+                shape
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         };
         let header_dict =
@@ -509,14 +534,26 @@ mod tests {
         npy.extend_from_slice(&2i64.to_le_bytes());
 
         let parsed = parse_npy(&npy).expect("parses as i64");
-        assert_eq!(parsed, NpyArray::I64 { shape: vec![2], data: vec![1, 2] });
+        assert_eq!(
+            parsed,
+            NpyArray::I64 {
+                shape: vec![2],
+                data: vec![1, 2]
+            }
+        );
     }
 
     #[test]
     fn extract_quoted_and_paren_helpers_handle_a_real_numpy_header() {
         let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (1, 97, 384), }";
-        assert_eq!(extract_quoted_value(header, "'descr':").as_deref(), Some("<f4"));
-        assert_eq!(extract_paren_value(header, "'shape':").as_deref(), Some("1, 97, 384"));
+        assert_eq!(
+            extract_quoted_value(header, "'descr':").as_deref(),
+            Some("<f4")
+        );
+        assert_eq!(
+            extract_paren_value(header, "'shape':").as_deref(),
+            Some("1, 97, 384")
+        );
         assert_eq!(parse_shape_tuple("1, 97, 384").unwrap(), vec![1, 97, 384]);
         assert_eq!(parse_shape_tuple("").unwrap(), Vec::<usize>::new());
         assert_eq!(parse_shape_tuple("64,").unwrap(), vec![64]);

@@ -449,14 +449,25 @@ pub fn dpvo_vi_ba(
     let mut patches = problem.patches.clone();
     let mut velocities = imu.velocities.clone();
     for _ in 0..config.iterations {
-        let current_problem = DpvoBaProblem { poses, patches, ..problem.clone() };
-        let current_imu = DpvoViWindow { velocities, ..imu.clone() };
+        let current_problem = DpvoBaProblem {
+            poses,
+            patches,
+            ..problem.clone()
+        };
+        let current_imu = DpvoViWindow {
+            velocities,
+            ..imu.clone()
+        };
         let solved = dpvo_vi_ba_step(&current_problem, &current_imu, config)?;
         poses = solved.poses;
         patches = solved.patches;
         velocities = solved.velocities;
     }
-    Ok(DpvoViBaSolution { poses, patches, velocities })
+    Ok(DpvoViBaSolution {
+        poses,
+        patches,
+        velocities,
+    })
 }
 
 /// One joint Gauss-Newton iteration over visual patch residuals (identical
@@ -499,8 +510,11 @@ pub fn dpvo_vi_ba_step(
     used_patches.sort_unstable();
     used_patches.dedup();
     let m = used_patches.len();
-    let local_patch_index =
-        |k: usize| used_patches.binary_search(&k).expect("k is drawn from used_patches");
+    let local_patch_index = |k: usize| {
+        used_patches
+            .binary_search(&k)
+            .expect("k is drawn from used_patches")
+    };
 
     let mut b_pose = DMatrix::<f64>::zeros(6 * n2, 6 * n2);
     let mut e_mat = DMatrix::<f64>::zeros(6 * n2, m);
@@ -540,30 +554,70 @@ pub fn dpvo_vi_ba_step(
         c_diag[k_local] += w_jz.x * geom.jz.x + w_jz.y * geom.jz.y;
         w_rhs[k_local] += w_jz.x * r.x + w_jz.y * r.y;
 
-        let i_local = if edge.i >= fixedp { Some(edge.i - fixedp) } else { None };
-        let j_local = if edge.j >= fixedp { Some(edge.j - fixedp) } else { None };
+        let i_local = if edge.i >= fixedp {
+            Some(edge.i - fixedp)
+        } else {
+            None
+        };
+        let j_local = if edge.j >= fixedp {
+            Some(edge.j - fixedp)
+        } else {
+            None
+        };
 
         if let Some(i) = i_local {
             let bii = w_ji.transpose() * geom.ji;
-            b_pose.view_mut((i * 6, i * 6), (6, 6)).iter_mut().zip(bii.iter()).for_each(|(d, s)| *d += s);
+            b_pose
+                .view_mut((i * 6, i * 6), (6, 6))
+                .iter_mut()
+                .zip(bii.iter())
+                .for_each(|(d, s)| *d += s);
             let vi = w_ji.transpose() * r;
-            v_pose.rows_mut(i * 6, 6).iter_mut().zip(vi.iter()).for_each(|(d, s)| *d += s);
+            v_pose
+                .rows_mut(i * 6, 6)
+                .iter_mut()
+                .zip(vi.iter())
+                .for_each(|(d, s)| *d += s);
             let eik = w_ji.transpose() * geom.jz;
-            e_mat.view_mut((i * 6, k_local), (6, 1)).iter_mut().zip(eik.iter()).for_each(|(d, s)| *d += s);
+            e_mat
+                .view_mut((i * 6, k_local), (6, 1))
+                .iter_mut()
+                .zip(eik.iter())
+                .for_each(|(d, s)| *d += s);
         }
         if let Some(j) = j_local {
             let bjj = w_jj.transpose() * geom.jj;
-            b_pose.view_mut((j * 6, j * 6), (6, 6)).iter_mut().zip(bjj.iter()).for_each(|(d, s)| *d += s);
+            b_pose
+                .view_mut((j * 6, j * 6), (6, 6))
+                .iter_mut()
+                .zip(bjj.iter())
+                .for_each(|(d, s)| *d += s);
             let vj = w_jj.transpose() * r;
-            v_pose.rows_mut(j * 6, 6).iter_mut().zip(vj.iter()).for_each(|(d, s)| *d += s);
+            v_pose
+                .rows_mut(j * 6, 6)
+                .iter_mut()
+                .zip(vj.iter())
+                .for_each(|(d, s)| *d += s);
             let ejk = w_jj.transpose() * geom.jz;
-            e_mat.view_mut((j * 6, k_local), (6, 1)).iter_mut().zip(ejk.iter()).for_each(|(d, s)| *d += s);
+            e_mat
+                .view_mut((j * 6, k_local), (6, 1))
+                .iter_mut()
+                .zip(ejk.iter())
+                .for_each(|(d, s)| *d += s);
         }
         if let (Some(i), Some(j)) = (i_local, j_local) {
             let bij = w_ji.transpose() * geom.jj;
-            b_pose.view_mut((i * 6, j * 6), (6, 6)).iter_mut().zip(bij.iter()).for_each(|(d, s)| *d += s);
+            b_pose
+                .view_mut((i * 6, j * 6), (6, 6))
+                .iter_mut()
+                .zip(bij.iter())
+                .for_each(|(d, s)| *d += s);
             let bji = w_jj.transpose() * geom.ji;
-            b_pose.view_mut((j * 6, i * 6), (6, 6)).iter_mut().zip(bji.iter()).for_each(|(d, s)| *d += s);
+            b_pose
+                .view_mut((j * 6, i * 6), (6, 6))
+                .iter_mut()
+                .zip(bji.iter())
+                .for_each(|(d, s)| *d += s);
         }
     }
 
@@ -600,17 +654,33 @@ pub fn dpvo_vi_ba_step(
         let j_vel_j = whitener * j_vel_j;
 
         let pose_off = |idx: usize| -> Option<usize> {
-            if idx < fixedp { None } else { Some((idx - fixedp) * 6) }
+            if idx < fixedp {
+                None
+            } else {
+                Some((idx - fixedp) * 6)
+            }
         };
         // Velocity is free for every frame, including a pose-gauge-fixed one
         // — see the module doc's "Per-window state and gauge-fixing" section.
         let vel_off = |idx: usize| -> Option<usize> { Some(6 * n2 + idx * 3) };
 
         let blocks: [(Option<usize>, DMatrix<f64>); 4] = [
-            (pose_off(i), DMatrix::from_column_slice(9, 6, j_pose_i.as_slice())),
-            (pose_off(j), DMatrix::from_column_slice(9, 6, j_pose_j.as_slice())),
-            (vel_off(i), DMatrix::from_column_slice(9, 3, j_vel_i.as_slice())),
-            (vel_off(j), DMatrix::from_column_slice(9, 3, j_vel_j.as_slice())),
+            (
+                pose_off(i),
+                DMatrix::from_column_slice(9, 6, j_pose_i.as_slice()),
+            ),
+            (
+                pose_off(j),
+                DMatrix::from_column_slice(9, 6, j_pose_j.as_slice()),
+            ),
+            (
+                vel_off(i),
+                DMatrix::from_column_slice(9, 3, j_vel_i.as_slice()),
+            ),
+            (
+                vel_off(j),
+                DMatrix::from_column_slice(9, 3, j_vel_j.as_slice()),
+            ),
         ];
         let r_dyn = DVector::from_column_slice(r_stack.as_slice());
 
@@ -668,7 +738,10 @@ pub fn dpvo_vi_ba_step(
         b_aug[(d, d)] += VELOCITY_DIAG_EPSILON;
     }
 
-    let dx_aug = b_aug.lu().solve(&v_aug).ok_or(DpvoBaError::SingularSystem)?;
+    let dx_aug = b_aug
+        .lu()
+        .solve(&v_aug)
+        .ok_or(DpvoBaError::SingularSystem)?;
     let dx_pose = dx_aug.rows(0, 6 * n2).clone_owned();
     let et_dx = e_mat.transpose() * &dx_pose;
     let dz = DVector::from_iterator(m, (0..m).map(|k| q[k] * (w_rhs[k] - et_dx[k])));
@@ -696,7 +769,11 @@ pub fn dpvo_vi_ba_step(
         patch.inverse_depth = patch.inverse_depth.clamp(DISP_MIN, DISP_MAX);
     }
 
-    Ok(DpvoViBaSolution { poses: new_poses, patches: new_patches, velocities: new_velocities })
+    Ok(DpvoViBaSolution {
+        poses: new_poses,
+        patches: new_patches,
+        velocities: new_velocities,
+    })
 }
 
 /// `bundle.rs`'s own `skew` (`crates/../bundle.rs:3662`), duplicated rather
@@ -777,19 +854,35 @@ pub(crate) fn imu_factor_jacobians(
     let jr_inv_rwc_j = jr_inv * r_wc_j;
 
     let mut j_right_body_i = SMatrix::<f64, 9, 6>::zeros();
-    j_right_body_i.fixed_view_mut::<3, 3>(0, 3).copy_from(&jr_inv_rwc_j);
-    j_right_body_i.fixed_view_mut::<3, 3>(3, 3).copy_from(&(-r_wc_i * skew(&q_diff)));
-    j_right_body_i.fixed_view_mut::<3, 3>(6, 0).copy_from(&r_wc_i);
-    j_right_body_i.fixed_view_mut::<3, 3>(6, 3).copy_from(&(-r_wc_i * skew(&q_pos_i)));
+    j_right_body_i
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&jr_inv_rwc_j);
+    j_right_body_i
+        .fixed_view_mut::<3, 3>(3, 3)
+        .copy_from(&(-r_wc_i * skew(&q_diff)));
+    j_right_body_i
+        .fixed_view_mut::<3, 3>(6, 0)
+        .copy_from(&r_wc_i);
+    j_right_body_i
+        .fixed_view_mut::<3, 3>(6, 3)
+        .copy_from(&(-r_wc_i * skew(&q_pos_i)));
 
     let mut j_right_body_j = SMatrix::<f64, 9, 6>::zeros();
-    j_right_body_j.fixed_view_mut::<3, 3>(0, 3).copy_from(&(-jr_inv_rwc_j));
-    j_right_body_j.fixed_view_mut::<3, 3>(6, 0).copy_from(&(-r_wc_i));
-    j_right_body_j.fixed_view_mut::<3, 3>(6, 3).copy_from(&(r_wc_i * skew(&c_j)));
+    j_right_body_j
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-jr_inv_rwc_j));
+    j_right_body_j
+        .fixed_view_mut::<3, 3>(6, 0)
+        .copy_from(&(-r_wc_i));
+    j_right_body_j
+        .fixed_view_mut::<3, 3>(6, 3)
+        .copy_from(&(r_wc_i * skew(&c_j)));
 
     let mut j_vel_i = SMatrix::<f64, 9, 3>::zeros();
     j_vel_i.fixed_view_mut::<3, 3>(3, 0).copy_from(&(-r_wc_i));
-    j_vel_i.fixed_view_mut::<3, 3>(6, 0).copy_from(&(-dt * r_wc_i));
+    j_vel_i
+        .fixed_view_mut::<3, 3>(6, 0)
+        .copy_from(&(-dt * r_wc_i));
     let mut j_vel_j = SMatrix::<f64, 9, 3>::zeros();
     j_vel_j.fixed_view_mut::<3, 3>(3, 0).copy_from(&r_wc_i);
 
@@ -821,9 +914,15 @@ pub(crate) fn imu_factor_jacobians(
 pub(crate) fn imu_factor_whitener(factor: &ImuPreintegrationFactor) -> Matrix9 {
     factor.covariance_sqrt_information().unwrap_or_else(|| {
         let mut diagonal = SVector::<f64, 9>::zeros();
-        diagonal.fixed_rows_mut::<3>(0).fill(factor.weight_rotation.max(0.0).sqrt());
-        diagonal.fixed_rows_mut::<3>(3).fill(factor.weight_velocity.max(0.0).sqrt());
-        diagonal.fixed_rows_mut::<3>(6).fill(factor.weight_position.max(0.0).sqrt());
+        diagonal
+            .fixed_rows_mut::<3>(0)
+            .fill(factor.weight_rotation.max(0.0).sqrt());
+        diagonal
+            .fixed_rows_mut::<3>(3)
+            .fill(factor.weight_velocity.max(0.0).sqrt());
+        diagonal
+            .fixed_rows_mut::<3>(6)
+            .fill(factor.weight_position.max(0.0).sqrt());
         Matrix9::from_diagonal(&diagonal)
     })
 }
@@ -849,8 +948,16 @@ pub(crate) fn imu_factor_nis(
     bias_gyro: &Vector3<f64>,
     bias_accel: &Vector3<f64>,
 ) -> f64 {
-    let (residual, ..) =
-        imu_factor_jacobians(pose_i, pose_j, v_i, v_j, body_to_camera, factor, bias_gyro, bias_accel);
+    let (residual, ..) = imu_factor_jacobians(
+        pose_i,
+        pose_j,
+        v_i,
+        v_j,
+        body_to_camera,
+        factor,
+        bias_gyro,
+        bias_accel,
+    );
     let whitener = imu_factor_whitener(factor);
     (whitener * residual).norm_squared()
 }
@@ -895,18 +1002,32 @@ pub enum DpvoMonoViAlignmentRejection {
     NotEnoughFactors,
     /// Degrees-of-freedom gate (module doc, "Observability gates" #1):
     /// `6 * usable_factors < 3 * n + 4`.
-    Underdetermined { usable_factors: usize, n_poses: usize },
+    Underdetermined {
+        usable_factors: usize,
+        n_poses: usize,
+    },
     /// Excitation/conditioning gate (module doc, "Observability gates" #2).
-    IllConditioned { condition_number: f64, max_condition_number: f64 },
+    IllConditioned {
+        condition_number: f64,
+        max_condition_number: f64,
+    },
     /// The unconstrained SVD solve itself failed, or produced a
     /// non-finite/near-zero gravity vector or non-finite scale — a
     /// numerically degenerate system distinct from a merely
     /// poorly-conditioned one.
     DegenerateSolve,
     /// Gravity-norm gate (module doc, "Observability gates" #3a).
-    GravityNormDeviation { raw_gravity_norm: f64, deviation_ratio: f64, max_deviation_ratio: f64 },
+    GravityNormDeviation {
+        raw_gravity_norm: f64,
+        deviation_ratio: f64,
+        max_deviation_ratio: f64,
+    },
     /// Scale-plausibility gate (module doc, "Observability gates" #3b).
-    ScaleOutOfRange { scale: f64, min_scale: f64, max_scale: f64 },
+    ScaleOutOfRange {
+        scale: f64,
+        min_scale: f64,
+        max_scale: f64,
+    },
 }
 
 /// Outcome of [`estimate_mono_vi_alignment`]: everything
@@ -1000,7 +1121,10 @@ pub fn estimate_mono_vi_alignment(
     // center in world, per window-local pose index — the module doc's
     // `R_bw_i`/`p_i`, read directly off DPVO's own poses (no `VisualMap`
     // needed here, unlike the metric estimators this replaces).
-    let world_from_body: Vec<SE3> = poses.iter().map(|p| body_to_camera.compose(p).inverse()).collect();
+    let world_from_body: Vec<SE3> = poses
+        .iter()
+        .map(|p| body_to_camera.compose(p).inverse())
+        .collect();
 
     struct Row {
         idx_from: usize,
@@ -1026,7 +1150,8 @@ pub fn estimate_mono_vi_alignment(
         let r_i = world_from_body[i].rotation;
         let p_i = world_from_body[i].translation;
         let p_j = world_from_body[j].translation;
-        let (_, delta_velocity, delta_position) = imu_factor.factor.delta.corrected(&bias_gyro, &bias_accel);
+        let (_, delta_velocity, delta_position) =
+            imu_factor.factor.delta.corrected(&bias_gyro, &bias_accel);
         rows.push(Row {
             idx_from: i,
             idx_to: j,
@@ -1077,7 +1202,11 @@ pub fn estimate_mono_vi_alignment(
     let singular_values = svd.singular_values.clone();
     let max_sv = singular_values.max();
     let min_sv = singular_values.min();
-    let condition_number = if min_sv > 0.0 && max_sv.is_finite() { max_sv / min_sv } else { f64::INFINITY };
+    let condition_number = if min_sv > 0.0 && max_sv.is_finite() {
+        max_sv / min_sv
+    } else {
+        f64::INFINITY
+    };
     if !condition_number.is_finite() || condition_number > gates.max_condition_number {
         // Excitation/conditioning gate (module doc, "Observability gates" #2).
         return Err(DpvoMonoViAlignmentRejection::IllConditioned {
@@ -1098,8 +1227,8 @@ pub fn estimate_mono_vi_alignment(
     if !raw_scale.is_finite() {
         return Err(DpvoMonoViAlignmentRejection::DegenerateSolve);
     }
-    let deviation_ratio =
-        (raw_gravity_norm - gates.expected_gravity_magnitude).abs() / gates.expected_gravity_magnitude;
+    let deviation_ratio = (raw_gravity_norm - gates.expected_gravity_magnitude).abs()
+        / gates.expected_gravity_magnitude;
     if !deviation_ratio.is_finite() || deviation_ratio > gates.gravity_norm_deviation_ratio {
         // Gravity-norm gate (module doc, "Observability gates" #3a).
         return Err(DpvoMonoViAlignmentRejection::GravityNormDeviation {
@@ -1116,8 +1245,9 @@ pub fn estimate_mono_vi_alignment(
     // itself, exactly like every free velocity).
     let mag = gates.expected_gravity_magnitude;
     let mut g_hat = raw_gravity / raw_gravity_norm;
-    let mut velocities_final: Vec<Vector3<f64>> =
-        (0..n).map(|k| Vector3::new(solution[3 * k], solution[3 * k + 1], solution[3 * k + 2])).collect();
+    let mut velocities_final: Vec<Vector3<f64>> = (0..n)
+        .map(|k| Vector3::new(solution[3 * k], solution[3 * k + 1], solution[3 * k + 2]))
+        .collect();
     let mut scale_final = raw_scale;
     let mut refined = false;
     for _ in 0..REFINEMENT_ITERATIONS {
@@ -1136,7 +1266,8 @@ pub fn estimate_mono_vi_alignment(
                 a2[(base + k, w1_off)] = 0.5 * row.delta_time * row.delta_time * mag * b1[k];
                 a2[(base + k, w2_off)] = 0.5 * row.delta_time * row.delta_time * mag * b2[k];
                 a2[(base + k, s2_off)] = -row.position_vis_diff[k];
-                b2vec[base + k] = -row.rhs_position[k] - 0.5 * row.delta_time * row.delta_time * g0[k];
+                b2vec[base + k] =
+                    -row.rhs_position[k] - 0.5 * row.delta_time * row.delta_time * g0[k];
 
                 a2[(base + 3 + k, 3 * row.idx_from + k)] = -1.0;
                 a2[(base + 3 + k, 3 * row.idx_to + k)] = 1.0;
@@ -1167,7 +1298,11 @@ pub fn estimate_mono_vi_alignment(
         refined = true;
     }
 
-    let gravity_world = if refined { mag * g_hat } else { mag * (raw_gravity / raw_gravity_norm) };
+    let gravity_world = if refined {
+        mag * g_hat
+    } else {
+        mag * (raw_gravity / raw_gravity_norm)
+    };
     let scale = if refined { scale_final } else { raw_scale };
     if !scale.is_finite() || scale < gates.min_scale || scale > gates.max_scale {
         // Scale-plausibility gate (module doc, "Observability gates" #3b).
@@ -1208,7 +1343,11 @@ pub fn estimate_mono_vi_alignment(
 /// is a deliberate duplication, matching [`skew`]/[`right_jacobian_inverse_so3`]'s
 /// own precedent elsewhere in this file).
 fn mono_vi_tangent_basis(g_hat: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
-    let reference = if g_hat.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
+    let reference = if g_hat.x.abs() < 0.9 {
+        Vector3::x()
+    } else {
+        Vector3::y()
+    };
     let b1 = g_hat.cross(&reference).normalize();
     let b2 = g_hat.cross(&b1).normalize();
     (b1, b2)
@@ -1280,7 +1419,14 @@ mod tests {
         let factor = synthetic_factor(0.1, Vector3::new(0.0, 0.0, -9.81));
 
         let (r0, j_pose_i, j_pose_j, j_vel_i, j_vel_j) = imu_factor_jacobians(
-            &pose_i, &pose_j, &v_i, &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+            &pose_i,
+            &pose_j,
+            &v_i,
+            &v_j,
+            &body_to_camera,
+            &factor,
+            &bias_gyro,
+            &bias_accel,
         );
         // r0 is unused directly (central differences don't need the base
         // point) but computing it also exercises the "both jacobians share
@@ -1300,28 +1446,62 @@ mod tests {
             let pose_i_p = SE3::exp(&xi_p).compose(&pose_i);
             let pose_i_m = SE3::exp(&xi_m).compose(&pose_i);
             let (r_p, _, _, _, _) = imu_factor_jacobians(
-                &pose_i_p, &pose_j, &v_i, &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i_p,
+                &pose_j,
+                &v_i,
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let (r_m, _, _, _, _) = imu_factor_jacobians(
-                &pose_i_m, &pose_j, &v_i, &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i_m,
+                &pose_j,
+                &v_i,
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let numeric = (r_p - r_m) / (2.0 * eps);
             let analytic = j_pose_i.column(k);
             let err = (numeric - analytic).norm();
-            assert!(err < tol, "pose_i column {k}: numeric={numeric:?} analytic={analytic:?} err={err}");
+            assert!(
+                err < tol,
+                "pose_i column {k}: numeric={numeric:?} analytic={analytic:?} err={err}"
+            );
 
             let pose_j_p = SE3::exp(&xi_p).compose(&pose_j);
             let pose_j_m = SE3::exp(&xi_m).compose(&pose_j);
             let (r_p, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j_p, &v_i, &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j_p,
+                &v_i,
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let (r_m, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j_m, &v_i, &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j_m,
+                &v_i,
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let numeric = (r_p - r_m) / (2.0 * eps);
             let analytic = j_pose_j.column(k);
             let err = (numeric - analytic).norm();
-            assert!(err < tol, "pose_j column {k}: numeric={numeric:?} analytic={analytic:?} err={err}");
+            assert!(
+                err < tol,
+                "pose_j column {k}: numeric={numeric:?} analytic={analytic:?} err={err}"
+            );
         }
 
         // Velocity: plain Euclidean perturbation, no SE3 retraction needed.
@@ -1329,26 +1509,60 @@ mod tests {
             let mut e_k = Vector3::zeros();
             e_k[k] = eps;
             let (r_p, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j, &(v_i + e_k), &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j,
+                &(v_i + e_k),
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let (r_m, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j, &(v_i - e_k), &v_j, &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j,
+                &(v_i - e_k),
+                &v_j,
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let numeric = (r_p - r_m) / (2.0 * eps);
             let analytic = j_vel_i.column(k);
             let err = (numeric - analytic).norm();
-            assert!(err < tol, "v_i column {k}: numeric={numeric:?} analytic={analytic:?} err={err}");
+            assert!(
+                err < tol,
+                "v_i column {k}: numeric={numeric:?} analytic={analytic:?} err={err}"
+            );
 
             let (r_p, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j, &v_i, &(v_j + e_k), &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j,
+                &v_i,
+                &(v_j + e_k),
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let (r_m, _, _, _, _) = imu_factor_jacobians(
-                &pose_i, &pose_j, &v_i, &(v_j - e_k), &body_to_camera, &factor, &bias_gyro, &bias_accel,
+                &pose_i,
+                &pose_j,
+                &v_i,
+                &(v_j - e_k),
+                &body_to_camera,
+                &factor,
+                &bias_gyro,
+                &bias_accel,
             );
             let numeric = (r_p - r_m) / (2.0 * eps);
             let analytic = j_vel_j.column(k);
             let err = (numeric - analytic).norm();
-            assert!(err < tol, "v_j column {k}: numeric={numeric:?} analytic={analytic:?} err={err}");
+            assert!(
+                err < tol,
+                "v_j column {k}: numeric={numeric:?} analytic={analytic:?} err={err}"
+            );
         }
     }
 
@@ -1358,16 +1572,28 @@ mod tests {
     /// a wrong sign on the RHS would instead *increase* the residual.
     #[test]
     fn pure_imu_window_matches_textbook_gauss_newton_sign() {
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 100.0, cy: 100.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 100.0,
+            cy: 100.0,
+        };
         let pose0 = SE3::identity();
         // A deliberately "wrong" pose_1 guess (true relative motion is a
         // small rotation + translation; start elsewhere so there is a
         // nonzero residual to reduce).
-        let pose1 = SE3::new(UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0), Vector3::new(0.5, 0.0, 0.0));
+        let pose1 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+            Vector3::new(0.5, 0.0, 0.0),
+        );
 
         let problem = DpvoBaProblem {
             poses: vec![pose0, pose1],
-            patches: vec![DpvoPatch { x: 100.0, y: 100.0, inverse_depth: 0.2 }],
+            patches: vec![DpvoPatch {
+                x: 100.0,
+                y: 100.0,
+                inverse_depth: 0.2,
+            }],
             intrinsics: vec![intr, intr],
             edges: vec![],
             targets: vec![],
@@ -1401,12 +1627,21 @@ mod tests {
             bias_gyro: Vector3::zeros(),
             bias_accel: Vector3::zeros(),
         };
-        let config = DpvoBaConfig { fixedp: 1, ..DpvoBaConfig::default() };
+        let config = DpvoBaConfig {
+            fixedp: 1,
+            ..DpvoBaConfig::default()
+        };
 
         let residual_norm_before = {
             let (r, ..) = imu_factor_jacobians(
-                &problem.poses[0], &problem.poses[1], &imu.velocities[0], &imu.velocities[1],
-                &imu.body_to_camera, &factor.factor, &imu.bias_gyro, &imu.bias_accel,
+                &problem.poses[0],
+                &problem.poses[1],
+                &imu.velocities[0],
+                &imu.velocities[1],
+                &imu.body_to_camera,
+                &factor.factor,
+                &imu.bias_gyro,
+                &imu.bias_accel,
             );
             r.norm()
         };
@@ -1415,8 +1650,14 @@ mod tests {
 
         let residual_norm_after = {
             let (r, ..) = imu_factor_jacobians(
-                &solved.poses[0], &solved.poses[1], &solved.velocities[0], &solved.velocities[1],
-                &imu.body_to_camera, &factor.factor, &imu.bias_gyro, &imu.bias_accel,
+                &solved.poses[0],
+                &solved.poses[1],
+                &solved.velocities[0],
+                &solved.velocities[1],
+                &imu.body_to_camera,
+                &factor.factor,
+                &imu.bias_gyro,
+                &imu.bias_accel,
             );
             r.norm()
         };
@@ -1434,7 +1675,8 @@ mod tests {
     /// [`crate::dpvo_vo::rollback_monitor_step`] threshold ultimately acts
     /// on, checked directly at the source rather than assumed meaningful.
     #[test]
-    fn imu_factor_nis_is_large_for_an_obviously_inconsistent_factor_and_small_for_a_consistent_one() {
+    fn imu_factor_nis_is_large_for_an_obviously_inconsistent_factor_and_small_for_a_consistent_one()
+    {
         let pose0 = SE3::identity();
         // A large, obviously-implausible relative displacement/velocity for
         // a 0.1s IMU interval (50 m/s over 0.1s would be a 5m jump) — large
@@ -1461,18 +1703,34 @@ mod tests {
         factor.delta.delta_velocity = -gravity * dt;
         factor.delta.delta_position = -0.5 * gravity * dt * dt;
         let consistent_nis = imu_factor_nis(
-            &pose0, &pose0, &Vector3::zeros(), &Vector3::zeros(), &SE3::identity(), &factor,
-            &Vector3::zeros(), &Vector3::zeros(),
+            &pose0,
+            &pose0,
+            &Vector3::zeros(),
+            &Vector3::zeros(),
+            &SE3::identity(),
+            &factor,
+            &Vector3::zeros(),
+            &Vector3::zeros(),
         );
 
         // Inconsistent: a large relative translation/velocity the (still
         // zeroed) delta does not predict at all.
         let inconsistent_nis = imu_factor_nis(
-            &pose0, &pose1, &v0, &v1, &SE3::identity(), &factor, &Vector3::zeros(), &Vector3::zeros(),
+            &pose0,
+            &pose1,
+            &v0,
+            &v1,
+            &SE3::identity(),
+            &factor,
+            &Vector3::zeros(),
+            &Vector3::zeros(),
         );
 
         println!("[imu nis] consistent={consistent_nis:.6e} inconsistent={inconsistent_nis:.6e}");
-        assert!(consistent_nis < 1.0e-6, "expected a near-zero NIS for a self-consistent factor, got {consistent_nis}");
+        assert!(
+            consistent_nis < 1.0e-6,
+            "expected a near-zero NIS for a self-consistent factor, got {consistent_nis}"
+        );
         assert!(
             inconsistent_nis > 100.0,
             "expected a large NIS for an obviously inconsistent factor, got {inconsistent_nis}"
@@ -1485,12 +1743,25 @@ mod tests {
     /// the same problem.
     #[test]
     fn zero_imu_factors_matches_visual_only_solve() {
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 100.0, cy: 100.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 100.0,
+            cy: 100.0,
+        };
         let pose0 = SE3::identity();
-        let pose1 = SE3::new(UnitQuaternion::from_euler_angles(0.02, -0.01, 0.03), Vector3::new(0.15, 0.02, -0.01));
-        let patch = DpvoPatch { x: 105.0, y: 98.0, inverse_depth: 0.22 };
-        let target = crate::dpvo_patch_ba::transform_point(&pose0, &pose1, &intr, &intr, &patch, false)
-            + Vector2::new(0.7, -0.3);
+        let pose1 = SE3::new(
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.03),
+            Vector3::new(0.15, 0.02, -0.01),
+        );
+        let patch = DpvoPatch {
+            x: 105.0,
+            y: 98.0,
+            inverse_depth: 0.22,
+        };
+        let target =
+            crate::dpvo_patch_ba::transform_point(&pose0, &pose1, &intr, &intr, &patch, false)
+                + Vector2::new(0.7, -0.3);
         let problem = DpvoBaProblem {
             poses: vec![pose0, pose1],
             patches: vec![patch],
@@ -1500,7 +1771,10 @@ mod tests {
             weights: vec![Vector2::new(1.0, 1.0)],
             depth_damping: None,
         };
-        let config = DpvoBaConfig { fixedp: 1, ..DpvoBaConfig::default() };
+        let config = DpvoBaConfig {
+            fixedp: 1,
+            ..DpvoBaConfig::default()
+        };
         let imu = DpvoViWindow {
             velocities: vec![Vector3::zeros(), Vector3::zeros()],
             factors: vec![],
@@ -1528,7 +1802,12 @@ mod tests {
     /// synthetic scale-recovery test.
     #[test]
     fn synthetic_window_recovers_metric_scale_within_two_percent() {
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 100.0, cy: 100.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 100.0,
+            cy: 100.0,
+        };
         let n_frames = 4;
         let dt = 0.1;
         // Genuine constant *acceleration* (not constant velocity — see the
@@ -1564,24 +1843,36 @@ mod tests {
         // so `r_v = 0` now pins the recovered velocity (and hence position)
         // scale to exactly `1`, not to an arbitrary value.
         let true_velocity_at = |i: usize| true_accel * (dt * i as f64);
-        let true_position_at =
-            |i: usize| true_accel * (0.5 * (dt * i as f64) * (dt * i as f64));
+        let true_position_at = |i: usize| true_accel * (0.5 * (dt * i as f64) * (dt * i as f64));
 
         // True (metric) camera centers in world.
         let true_centers: Vec<Vector3<f64>> = (0..n_frames).map(true_position_at).collect();
         // Starting-guess (wrong-scale) camera centers and poses.
-        let guess_centers: Vec<Vector3<f64>> = true_centers.iter().map(|c| c * wrong_scale).collect();
-        let guess_poses: Vec<SE3> =
-            guess_centers.iter().map(|c| SE3::new(UnitQuaternion::identity(), -c)).collect();
+        let guess_centers: Vec<Vector3<f64>> =
+            true_centers.iter().map(|c| c * wrong_scale).collect();
+        let guess_poses: Vec<SE3> = guess_centers
+            .iter()
+            .map(|c| SE3::new(UnitQuaternion::identity(), -c))
+            .collect();
 
         // Five patches anchored in frame 0 at varying pixel offsets / true
         // depths, all visible from every later frame.
-        let anchor_pixels = [(90.0, 100.0), (100.0, 100.0), (110.0, 100.0), (100.0, 90.0), (100.0, 110.0)];
+        let anchor_pixels = [
+            (90.0, 100.0),
+            (100.0, 100.0),
+            (110.0, 100.0),
+            (100.0, 90.0),
+            (100.0, 110.0),
+        ];
         let true_depths = [4.0, 5.0, 6.0, 4.5, 5.5];
         let guess_patches: Vec<DpvoPatch> = anchor_pixels
             .iter()
             .zip(true_depths.iter())
-            .map(|(&(x, y), &depth)| DpvoPatch { x, y, inverse_depth: 1.0 / (depth * wrong_scale) })
+            .map(|(&(x, y), &depth)| DpvoPatch {
+                x,
+                y,
+                inverse_depth: 1.0 / (depth * wrong_scale),
+            })
             .collect();
 
         let mut edges = Vec::new();
@@ -1596,7 +1887,12 @@ mod tests {
                 // (mono reprojection is scale-invariant), with no separate
                 // hand-derived pixel formula to get subtly wrong.
                 let target = crate::dpvo_patch_ba::transform_point(
-                    &guess_poses[0], &guess_poses[j], &intr, &intr, patch, false,
+                    &guess_poses[0],
+                    &guess_poses[j],
+                    &intr,
+                    &intr,
+                    patch,
+                    false,
                 );
                 edges.push(DpvoEdge { i: 0, j, k });
                 targets.push(target);
@@ -1658,7 +1954,12 @@ mod tests {
             iterations: 80,
             lmbda: 1.0e-6,
             ep: 0.1,
-            bounds: [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY],
+            bounds: [
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            ],
         };
 
         let solved = dpvo_vi_ba(&problem, &imu, &config).expect("joint solve should converge");
@@ -1840,7 +2141,11 @@ mod tests {
             alignment.scale
         );
         let gravity_error = (alignment.gravity_world - gravity).norm() / gravity.norm();
-        assert!(gravity_error < 0.01, "expected gravity within 1%, got error {gravity_error} ({:?})", alignment.gravity_world);
+        assert!(
+            gravity_error < 0.01,
+            "expected gravity within 1%, got error {gravity_error} ({:?})",
+            alignment.gravity_world
+        );
     }
 
     /// Degenerate case (mirrors this file's own coupled-BA degeneracy note
@@ -1866,7 +2171,12 @@ mod tests {
         let dt_local = dt;
         let v_const = Vector3::new(1.0, 0.0, 0.0);
         let poses: Vec<SE3> = (0..n_frames)
-            .map(|i| SE3::new(UnitQuaternion::identity(), -(v_const * (dt_local * i as f64) * visual_scale)))
+            .map(|i| {
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    -(v_const * (dt_local * i as f64) * visual_scale),
+                )
+            })
             .collect();
         let mut factors = Vec::new();
         for i in 0..n_frames - 1 {
@@ -1922,7 +2232,10 @@ mod tests {
             ),
             Err(reason) => println!("[mono-vi degenerate] rejected: {reason:?}"),
         }
-        assert!(result.is_err(), "expected the constant-velocity window to be rejected by the excitation gate");
+        assert!(
+            result.is_err(),
+            "expected the constant-velocity window to be rejected by the excitation gate"
+        );
         assert!(
             matches!(
                 result,

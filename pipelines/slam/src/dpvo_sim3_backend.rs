@@ -390,7 +390,11 @@ fn full_pose_history(graph: &DpvoPatchGraph) -> BTreeMap<usize, SE3> {
 /// retained + live arrival index, ascending) — see the module doc's
 /// "Design" section for the stride/loop-endpoint/oldest/newest selection
 /// rule. Returns a sorted, deduplicated node list.
-fn select_nodes(ordered: &[usize], stride: usize, loop_measurements: &[Sim3LoopMeasurement]) -> Vec<usize> {
+fn select_nodes(
+    ordered: &[usize],
+    stride: usize,
+    loop_measurements: &[Sim3LoopMeasurement],
+) -> Vec<usize> {
     let stride = stride.max(1);
     let mut nodes: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     for (position, &arrival) in ordered.iter().enumerate() {
@@ -457,9 +461,10 @@ pub fn run_sim3_backend(
 
     let mut loop_edge_count = 0usize;
     for measurement in loop_measurements {
-        let (Some(pose_i), Some(pose_j)) =
-            (all_poses.get(&measurement.arrival_i), all_poses.get(&measurement.arrival_j))
-        else {
+        let (Some(pose_i), Some(pose_j)) = (
+            all_poses.get(&measurement.arrival_i),
+            all_poses.get(&measurement.arrival_j),
+        ) else {
             continue; // Neither live nor retained — see this fn's own doc.
         };
         // The ordinary rotation+translation edge (scale fixed at 1 — see the
@@ -486,8 +491,9 @@ pub fn run_sim3_backend(
         // the M9 frozen-vs-fresh estimator otherwise, preserving M9's own
         // proximity-loop behavior byte-for-byte (every M6/M9 call site
         // leaves `measured_scale: None`).
-        let scale_ratio =
-            measurement.measured_scale.unwrap_or_else(|| estimate_loop_scale_ratio(measurement, pose_i, pose_j));
+        let scale_ratio = measurement
+            .measured_scale
+            .unwrap_or_else(|| estimate_loop_scale_ratio(measurement, pose_i, pose_j));
         let mut scale_information = Sim3Information::zeros();
         scale_information[(6, 6)] = config.loop_edge_weight * 1000.0;
         sim3_graph.add_edge_with_information(
@@ -524,13 +530,19 @@ pub fn run_sim3_backend(
             let alpha = (arrival - a) as f64 / span;
             let correction = interpolate_correction(correction_a, correction_b, alpha);
             let corrected_sim3 = correction.compose(&sim3_at_unit_scale(old_pose));
-            corrected.insert(arrival, (se3_from_sim3(&corrected_sim3), corrected_sim3.scale));
+            corrected.insert(
+                arrival,
+                (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
+            );
         }
     }
     let last_node = *nodes.last().unwrap();
     let correction_last = &node_correction[&last_node];
     let corrected_sim3 = correction_last.compose(&sim3_at_unit_scale(&all_poses[&last_node]));
-    corrected.insert(last_node, (se3_from_sim3(&corrected_sim3), corrected_sim3.scale));
+    corrected.insert(
+        last_node,
+        (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
+    );
 
     let outcome = apply_corrections(graph, &corrected);
 
@@ -561,7 +573,10 @@ struct ApplyOutcome {
 /// `inverse_depth` scaled (see the module doc's "Patch depth must move
 /// with..." section); retained (folded) frames get only the pose write-back
 /// (their patches no longer exist).
-fn apply_corrections(graph: &mut DpvoPatchGraph, corrected: &BTreeMap<usize, (SE3, f64)>) -> ApplyOutcome {
+fn apply_corrections(
+    graph: &mut DpvoPatchGraph,
+    corrected: &BTreeMap<usize, (SE3, f64)>,
+) -> ApplyOutcome {
     let mut pose_delta_max_m = 0.0_f64;
     let mut pose_delta_sum_m = 0.0_f64;
     let mut corrected_pose_count = 0usize;
@@ -571,7 +586,9 @@ fn apply_corrections(graph: &mut DpvoPatchGraph, corrected: &BTreeMap<usize, (SE
     let patches_per_frame = graph.config().patches_per_frame;
     let live_arrivals: Vec<usize> = graph.frames().iter().map(|f| f.arrival_index).collect();
     for (idx, arrival) in live_arrivals.into_iter().enumerate() {
-        let Some((new_pose, scale)) = corrected.get(&arrival) else { continue };
+        let Some((new_pose, scale)) = corrected.get(&arrival) else {
+            continue;
+        };
         let scale = *scale;
         let old_translation = graph.frames()[idx].pose.translation;
         let delta = (new_pose.translation - old_translation).norm();
@@ -588,7 +605,9 @@ fn apply_corrections(graph: &mut DpvoPatchGraph, corrected: &BTreeMap<usize, (SE
 
     let retained_arrivals: Vec<usize> = graph.retained_poses().keys().copied().collect();
     for arrival in retained_arrivals {
-        let Some((new_pose, scale)) = corrected.get(&arrival) else { continue };
+        let Some((new_pose, scale)) = corrected.get(&arrival) else {
+            continue;
+        };
         let scale = *scale;
         let old_pose = graph.retained_poses()[&arrival].clone();
         let delta = (new_pose.translation - old_pose.translation).norm();
@@ -601,12 +620,22 @@ fn apply_corrections(graph: &mut DpvoPatchGraph, corrected: &BTreeMap<usize, (SE
         graph.retained_poses_mut().insert(arrival, new_pose);
     }
 
-    let pose_delta_mean_m = if corrected_pose_count > 0 { pose_delta_sum_m / corrected_pose_count as f64 } else { 0.0 };
+    let pose_delta_mean_m = if corrected_pose_count > 0 {
+        pose_delta_sum_m / corrected_pose_count as f64
+    } else {
+        0.0
+    };
     if corrected_pose_count == 0 {
         scale_min = 1.0;
         scale_max = 1.0;
     }
-    ApplyOutcome { corrected_pose_count, pose_delta_max_m, pose_delta_mean_m, scale_min, scale_max }
+    ApplyOutcome {
+        corrected_pose_count,
+        pose_delta_max_m,
+        pose_delta_mean_m,
+        scale_min,
+        scale_max,
+    }
 }
 
 #[cfg(test)]
@@ -614,13 +643,18 @@ mod tests {
     use super::*;
     use nalgebra::{Matrix6, UnitQuaternion, Vector3};
 
-    use crate::dpvo_patch_graph::DpvoVoConfig;
     use crate::dpvo_patch_ba::{DpvoIntrinsics, DpvoPatch};
+    use crate::dpvo_patch_graph::DpvoVoConfig;
     use crate::pose_graph::{PoseGraph, PoseGraphEdgeKind, PoseGraphSe3Config};
     use visloc_core::geometry::Pose;
 
     fn intr() -> DpvoIntrinsics {
-        DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 }
+        DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        }
     }
 
     fn cfg() -> DpvoVoConfig {
@@ -646,7 +680,11 @@ mod tests {
 
     fn patches(m: usize) -> Vec<DpvoPatch> {
         (0..m)
-            .map(|i| DpvoPatch { x: 64.0 + i as f64 * 3.0, y: 48.0 + i as f64 * 1.5, inverse_depth: 0.2 })
+            .map(|i| DpvoPatch {
+                x: 64.0 + i as f64 * 3.0,
+                y: 48.0 + i as f64 * 1.5,
+                inverse_depth: 0.2,
+            })
             .collect()
     }
 
@@ -668,14 +706,20 @@ mod tests {
         let mut true_x = 0.0_f64;
         let mut scale = 1.0_f64;
         for i in 0..n {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(drifted_x, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(drifted_x, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
             graph.commit_frame(pose, intr(), patches(m)).unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
             graph.append_edges(&back, 4);
-            true_poses.push(SE3::new(UnitQuaternion::identity(), Vector3::new(true_x, 0.0, 0.0)));
+            true_poses.push(SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(true_x, 0.0, 0.0),
+            ));
             drifted_x += step * scale;
             true_x += step;
             scale *= growth;
@@ -691,7 +735,10 @@ mod tests {
         let drifted_last_x = graph.frames()[last].pose.translation.x;
         let true_last_x = true_poses[last].translation.x;
         let injected_drift = (drifted_last_x - true_last_x).abs();
-        assert!(injected_drift > 1.0, "fixture should inject a large drift: {injected_drift}");
+        assert!(
+            injected_drift > 1.0,
+            "fixture should inject a large drift: {injected_drift}"
+        );
 
         // The loop measurement: frame `source` -> frame `last`, carrying the
         // TRUE relative pose (a correctly-predicted revisit, exactly like
@@ -765,7 +812,10 @@ mod tests {
             (sum_sq / sample_points.len() as f64).sqrt()
         };
         let rms_before = rms_error(&|idx| graph.frames()[idx].pose.translation.x);
-        assert!(rms_before > 1.0, "expected substantial pre-correction RMS drift: {rms_before}");
+        assert!(
+            rms_before > 1.0,
+            "expected substantial pre-correction RMS drift: {rms_before}"
+        );
 
         // (A) EXPLICIT control, not just an argument: fit the SAME node set
         // and the SAME two edge classes (sequential chain + one loop hop)
@@ -781,13 +831,24 @@ mod tests {
         let nodes = select_nodes(&ordered, node_stride, &measurements);
         let mut rigid = PoseGraph::new();
         for &arrival in &nodes {
-            rigid.add_pose(arrival as u64, Pose { world_to_camera: all_poses_before[&arrival].clone() });
+            rigid.add_pose(
+                arrival as u64,
+                Pose {
+                    world_to_camera: all_poses_before[&arrival].clone(),
+                },
+            );
         }
         rigid.anchor(nodes[0] as u64);
         for pair in nodes.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let relative = all_poses_before[&b].compose(&all_poses_before[&a].inverse());
-            rigid.add_edge_with_information(a as u64, b as u64, relative, PoseGraphEdgeKind::Sequential, Matrix6::identity());
+            rigid.add_edge_with_information(
+                a as u64,
+                b as u64,
+                relative,
+                PoseGraphEdgeKind::Sequential,
+                Matrix6::identity(),
+            );
         }
         for measurement in &measurements {
             rigid.add_edge_with_information(
@@ -801,10 +862,16 @@ mod tests {
         let rigid_result = rigid
             .optimize_se3_iterative(&PoseGraphSe3Config::default())
             .expect("rigid solve should run");
-        assert!(rigid_result.converged, "expected the rigid control solve to converge too");
+        assert!(
+            rigid_result.converged,
+            "expected the rigid control solve to converge too"
+        );
         let rigid_arrival_of = |idx: usize| graph.frames()[idx].arrival_index;
         let rms_rigid_after = rms_error(&|idx| {
-            rigid.poses[&(rigid_arrival_of(idx) as u64)].world_to_camera.translation.x
+            rigid.poses[&(rigid_arrival_of(idx) as u64)]
+                .world_to_camera
+                .translation
+                .x
         });
         assert!(
             rms_rigid_after > rms_before / 10.0,
@@ -824,12 +891,22 @@ mod tests {
         // assuming a fixed iteration count was enough.
         let config = DpvoSim3BackendConfig {
             node_stride,
-            pose_graph: Sim3PoseGraphConfig { max_iterations: 500, ..Sim3PoseGraphConfig::default() },
+            pose_graph: Sim3PoseGraphConfig {
+                max_iterations: 500,
+                ..Sim3PoseGraphConfig::default()
+            },
             ..Default::default()
         };
-        let result = run_sim3_backend(&mut graph, &measurements, &config).expect("solve should run");
-        assert!(result.node_count > 2, "expected interior nodes, not just the two loop endpoints");
-        assert!(result.converged, "expected the Sim3 solve to converge on this well-posed fixture");
+        let result =
+            run_sim3_backend(&mut graph, &measurements, &config).expect("solve should run");
+        assert!(
+            result.node_count > 2,
+            "expected interior nodes, not just the two loop endpoints"
+        );
+        assert!(
+            result.converged,
+            "expected the Sim3 solve to converge on this well-posed fixture"
+        );
 
         // HONEST FINDING (not the originally-targeted >10x — see the module
         // doc's "The loop-edge scale question" section and
@@ -943,6 +1020,10 @@ mod tests {
         assert_eq!(interpolate_correction(&identity, &shifted, 0.0), identity);
         assert_eq!(interpolate_correction(&identity, &shifted, 1.0), shifted);
         let mid = interpolate_correction(&identity, &shifted, 0.5);
-        assert!((mid.scale - 1.5_f64.sqrt()).abs() < 1e-9, "log-scale should blend to sqrt: {}", mid.scale);
+        assert!(
+            (mid.scale - 1.5_f64.sqrt()).abs() < 1e-9,
+            "log-scale should blend to sqrt: {}",
+            mid.scale
+        );
     }
 }

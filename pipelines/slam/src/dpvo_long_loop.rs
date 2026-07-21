@@ -511,7 +511,11 @@ struct IndexedFrame {
 }
 
 fn indexed_frame_bytes(frame: &IndexedFrame) -> usize {
-    let descriptor_bytes: usize = frame.descriptors.iter().map(|d| d.len() * std::mem::size_of::<f32>()).sum();
+    let descriptor_bytes: usize = frame
+        .descriptors
+        .iter()
+        .map(|d| d.len() * std::mem::size_of::<f32>())
+        .sum();
     let keypoint_bytes = frame.keypoints.len() * std::mem::size_of::<Point2<f64>>();
     let vlad_bytes = frame.vlad.len() * std::mem::size_of::<f32>();
     descriptor_bytes + keypoint_bytes + vlad_bytes
@@ -641,18 +645,32 @@ impl DpvoLongLoopIndex {
     /// [`Vocabulary::build`] every subsequent call until it succeeds, then
     /// retroactively VLAD-encodes every buffered frame. After a vocabulary
     /// exists, VLAD-encodes and indexes immediately.
-    pub fn ingest_frame(&mut self, arrival_index: usize, keypoints: Vec<Point2<f64>>, descriptors: Vec<Vec<f32>>) {
+    pub fn ingest_frame(
+        &mut self,
+        arrival_index: usize,
+        keypoints: Vec<Point2<f64>>,
+        descriptors: Vec<Vec<f32>>,
+    ) {
         if descriptors.is_empty() {
             return;
         }
         let encoded = self.vocab.as_ref().map(|vocab| vlad(&descriptors, vocab));
         if let Some(vlad_vector) = encoded {
-            self.push_indexed(IndexedFrame { arrival_index, vlad: vlad_vector, keypoints, descriptors });
+            self.push_indexed(IndexedFrame {
+                arrival_index,
+                vlad: vlad_vector,
+                keypoints,
+                descriptors,
+            });
             return;
         }
 
         self.bootstrap.push((arrival_index, keypoints, descriptors));
-        let safety_cap = self.config.vocab_bootstrap_frames.saturating_mul(3).max(self.config.vocab_bootstrap_frames);
+        let safety_cap = self
+            .config
+            .vocab_bootstrap_frames
+            .saturating_mul(3)
+            .max(self.config.vocab_bootstrap_frames);
         while self.bootstrap.len() > safety_cap {
             self.bootstrap.remove(0);
         }
@@ -662,17 +680,28 @@ impl DpvoLongLoopIndex {
     }
 
     fn try_build_vocab(&mut self) {
-        let pooled: Vec<&[f32]> =
-            self.bootstrap.iter().flat_map(|(_, _, descriptors)| descriptors.iter().map(|d| d.as_slice())).collect();
-        let Some(vocab) =
-            Vocabulary::build(&pooled, self.config.vocab_words, self.config.vocab_kmeans_iterations, self.config.vocab_seed)
-        else {
+        let pooled: Vec<&[f32]> = self
+            .bootstrap
+            .iter()
+            .flat_map(|(_, _, descriptors)| descriptors.iter().map(|d| d.as_slice()))
+            .collect();
+        let Some(vocab) = Vocabulary::build(
+            &pooled,
+            self.config.vocab_words,
+            self.config.vocab_kmeans_iterations,
+            self.config.vocab_seed,
+        ) else {
             return; // Keep buffering — see `Self::ingest_frame`'s own doc.
         };
         let buffered = std::mem::take(&mut self.bootstrap);
         for (arrival_index, keypoints, descriptors) in buffered {
             let vlad_vector = vlad(&descriptors, &vocab);
-            self.push_indexed(IndexedFrame { arrival_index, vlad: vlad_vector, keypoints, descriptors });
+            self.push_indexed(IndexedFrame {
+                arrival_index,
+                vlad: vlad_vector,
+                keypoints,
+                descriptors,
+            });
         }
         self.vocab = Some(vocab);
     }
@@ -694,7 +723,9 @@ impl DpvoLongLoopIndex {
     pub fn due(&mut self, current_arrival: usize) -> bool {
         let due = match self.last_query_arrival {
             None => true,
-            Some(last) => current_arrival.saturating_sub(last) >= self.config.query_frequency.max(1),
+            Some(last) => {
+                current_arrival.saturating_sub(last) >= self.config.query_frequency.max(1)
+            }
         };
         if due {
             self.last_query_arrival = Some(current_arrival);
@@ -706,14 +737,22 @@ impl DpvoLongLoopIndex {
     /// `>= min_temporal_gap` AND `>= min_similarity`, descending similarity,
     /// truncated to `top_k`.
     fn query_candidates(&self, current_arrival: usize) -> Vec<(usize, f32)> {
-        let Some(current) = self.frames.iter().rev().find(|f| f.arrival_index == current_arrival) else {
+        let Some(current) = self
+            .frames
+            .iter()
+            .rev()
+            .find(|f| f.arrival_index == current_arrival)
+        else {
             return Vec::new();
         };
         let min_gap = self.config.min_temporal_gap;
         let mut scored: Vec<(usize, f32)> = self
             .frames
             .iter()
-            .filter(|f| f.arrival_index != current_arrival && current_arrival.saturating_sub(f.arrival_index) >= min_gap)
+            .filter(|f| {
+                f.arrival_index != current_arrival
+                    && current_arrival.saturating_sub(f.arrival_index) >= min_gap
+            })
             .map(|f| (f.arrival_index, cosine_similarity(&current.vlad, &f.vlad)))
             .filter(|&(_, score)| score >= self.config.min_similarity)
             .collect();
@@ -751,13 +790,19 @@ impl DpvoLongLoopIndex {
             return None;
         }
 
-        let Some(current_idx) = self.frames.iter().position(|f| f.arrival_index == current_arrival) else {
+        let Some(current_idx) = self
+            .frames
+            .iter()
+            .position(|f| f.arrival_index == current_arrival)
+        else {
             self.diag_total_elapsed_ms += start.elapsed().as_secs_f64() * 1000.0;
             return None;
         };
         let current_keypoints = self.frames[current_idx].keypoints.clone();
         let current_descriptors = self.frames[current_idx].descriptors.clone();
-        let matcher = CrossCheckMatcher::new(BruteForceMatcher { ratio: self.config.match_ratio });
+        let matcher = CrossCheckMatcher::new(BruteForceMatcher {
+            ratio: self.config.match_ratio,
+        });
 
         let mut accepted = None;
         let mut winning_arrival: Option<usize> = None;
@@ -767,14 +812,25 @@ impl DpvoLongLoopIndex {
         // can report the CONCRETE number, not just the pass/fail outcome.
         let mut rotation_checks: Vec<(usize, f64)> = Vec::new();
         for &(old_arrival, similarity) in &candidates {
-            let Some(old_idx) = self.frames.iter().position(|f| f.arrival_index == old_arrival) else { continue };
+            let Some(old_idx) = self
+                .frames
+                .iter()
+                .position(|f| f.arrival_index == old_arrival)
+            else {
+                continue;
+            };
             let old_keypoints = self.frames[old_idx].keypoints.clone();
             let old_descriptors = self.frames[old_idx].descriptors.clone();
-            let Some((old_pose, old_intr, old_patches)) = resolve_old(old_arrival) else { continue };
+            let Some((old_pose, old_intr, old_patches)) = resolve_old(old_arrival) else {
+                continue;
+            };
 
             self.diag_verification_attempts += 1;
             let matches = matcher.match_descriptors(&old_descriptors, &current_descriptors);
-            let raw_pairs: Vec<(usize, usize)> = matches.iter().map(|m| (m.query_index, m.train_index)).collect();
+            let raw_pairs: Vec<(usize, usize)> = matches
+                .iter()
+                .map(|m| (m.query_index, m.train_index))
+                .collect();
             let bridged = bridge_matches_to_3d3d(
                 &raw_pairs,
                 &old_keypoints,
@@ -811,7 +867,9 @@ impl DpvoLongLoopIndex {
             // see `GeometricFit::rotation`'s and
             // `DpvoLongLoopConfig::max_rotation_inconsistency_deg`'s own doc.
             let fit_rotation_uq = UnitQuaternion::from_rotation_matrix(&fit.rotation);
-            let rotation_disagreement_deg = fit_rotation_uq.angle_to(&relative_pose.rotation).to_degrees();
+            let rotation_disagreement_deg = fit_rotation_uq
+                .angle_to(&relative_pose.rotation)
+                .to_degrees();
             rotation_checks.push((old_arrival, rotation_disagreement_deg));
             if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
                 self.diag_rejected_rotation_inconsistent += 1;
@@ -831,7 +889,11 @@ impl DpvoLongLoopIndex {
             self.diag_last_scale = fit.scale;
             self.diag_last_inliers = fit.inlier_count;
             self.diag_last_mean_residual_ratio = fit.mean_residual_ratio;
-            accepted = Some(AcceptedLongLoop { arrival_i: old_arrival, arrival_j: current_arrival, measurement });
+            accepted = Some(AcceptedLongLoop {
+                arrival_i: old_arrival,
+                arrival_j: current_arrival,
+                measurement,
+            });
             winning_arrival = Some(old_arrival);
             break;
         }
@@ -843,8 +905,10 @@ impl DpvoLongLoopIndex {
         // never even attempted, per this function's own "stop at first
         // accepted" design, and is still logged as `accepted: false`).
         for (rank, &(candidate_arrival, similarity)) in candidates.iter().enumerate() {
-            let rotation_disagreement_deg =
-                rotation_checks.iter().find(|&&(arrival, _)| arrival == candidate_arrival).map(|&(_, deg)| deg);
+            let rotation_disagreement_deg = rotation_checks
+                .iter()
+                .find(|&&(arrival, _)| arrival == candidate_arrival)
+                .map(|&(_, deg)| deg);
             self.query_log.push(QueryCandidateLogEntry {
                 query_arrival: current_arrival,
                 candidate_arrival,
@@ -972,7 +1036,11 @@ pub fn sp_anchored_patch_centers(
 /// `crate::dpvo_patch_ba::reprojected_center_depth`'s own `> 0.2` spirit,
 /// just a looser `> 0` floor since this is a one-off backprojection, not an
 /// iterated BA residual).
-fn patch_to_world_point(pose: &SE3, intr: &DpvoIntrinsics, patch: &DpvoPatch) -> Option<Point3<f64>> {
+fn patch_to_world_point(
+    pose: &SE3,
+    intr: &DpvoIntrinsics,
+    patch: &DpvoPatch,
+) -> Option<Point3<f64>> {
     if !patch.inverse_depth.is_finite() || patch.inverse_depth <= 1.0e-6 {
         return None;
     }
@@ -994,7 +1062,11 @@ fn patch_to_world_point(pose: &SE3, intr: &DpvoIntrinsics, patch: &DpvoPatch) ->
 /// `None` if none is that close — see the module doc's "Failure modes"
 /// section on why this is expected to reject most raw 2D-2D matches (DPVO's
 /// own patches are sparse, randomly-anchored).
-fn nearest_patch_within<'a>(kp: &Point2<f64>, patches: &'a [DpvoPatch], radius: f64) -> Option<&'a DpvoPatch> {
+fn nearest_patch_within<'a>(
+    kp: &Point2<f64>,
+    patches: &'a [DpvoPatch],
+    radius: f64,
+) -> Option<&'a DpvoPatch> {
     let mut best: Option<(&DpvoPatch, f64)> = None;
     for patch in patches {
         let d = ((patch.x - kp.x).powi(2) + (patch.y - kp.y).powi(2)).sqrt();
@@ -1028,15 +1100,19 @@ fn bridge_matches_to_3d3d(
 ) -> Vec<(Point3<f64>, Point3<f64>)> {
     let mut out = Vec::new();
     for &(oi, ni) in raw_pairs {
-        let (Some(kp_o), Some(kp_n)) = (old_keypoints.get(oi), new_keypoints.get(ni)) else { continue };
-        let (Some(p_o), Some(p_n)) =
-            (nearest_patch_within(kp_o, old_patches, radius), nearest_patch_within(kp_n, new_patches, radius))
-        else {
+        let (Some(kp_o), Some(kp_n)) = (old_keypoints.get(oi), new_keypoints.get(ni)) else {
             continue;
         };
-        let (Some(w_o), Some(w_n)) =
-            (patch_to_world_point(old_pose, old_intr, p_o), patch_to_world_point(new_pose, new_intr, p_n))
-        else {
+        let (Some(p_o), Some(p_n)) = (
+            nearest_patch_within(kp_o, old_patches, radius),
+            nearest_patch_within(kp_n, new_patches, radius),
+        ) else {
+            continue;
+        };
+        let (Some(w_o), Some(w_n)) = (
+            patch_to_world_point(old_pose, old_intr, p_o),
+            patch_to_world_point(new_pose, new_intr, p_n),
+        ) else {
             continue;
         };
         out.push((w_o, w_n));
@@ -1078,8 +1154,15 @@ fn predict(fit: &TrajectorySimilarityTransform, source: &Point3<f64>) -> Point3<
     Point3::from(fit.scale * (fit.rotation * source.coords) + fit.translation)
 }
 
-fn count_inliers(fit: &TrajectorySimilarityTransform, pairs: &[(Point3<f64>, Point3<f64>)], threshold: f64) -> usize {
-    pairs.iter().filter(|(source, target)| (predict(fit, source) - target).norm() <= threshold).count()
+fn count_inliers(
+    fit: &TrajectorySimilarityTransform,
+    pairs: &[(Point3<f64>, Point3<f64>)],
+    threshold: f64,
+) -> usize {
+    pairs
+        .iter()
+        .filter(|(source, target)| (predict(fit, source) - target).norm() <= threshold)
+        .count()
 }
 
 /// One accepted geometric fit's own diagnostics — see
@@ -1122,7 +1205,11 @@ struct GeometricFit {
 /// than `min_bridge_correspondences`/`3` pairs, no hypothesis reaching
 /// `min_ransac_inliers`, a fitted scale outside `[min_scale, max_scale]`, or a
 /// refit mean-residual-to-scene-scale ratio above `max_mean_residual_ratio`.
-fn ransac_umeyama_scale(pairs: &[(Point3<f64>, Point3<f64>)], cfg: &DpvoLongLoopConfig, rng: &mut StdRng) -> Option<GeometricFit> {
+fn ransac_umeyama_scale(
+    pairs: &[(Point3<f64>, Point3<f64>)],
+    cfg: &DpvoLongLoopConfig,
+    rng: &mut StdRng,
+) -> Option<GeometricFit> {
     let n = pairs.len();
     if n < cfg.min_bridge_correspondences || n < 3 {
         return None;
@@ -1137,10 +1224,14 @@ fn ransac_umeyama_scale(pairs: &[(Point3<f64>, Point3<f64>)], cfg: &DpvoLongLoop
     let mut best_count = 0usize;
     let mut best_fit: Option<TrajectorySimilarityTransform> = None;
     for _ in 0..cfg.ransac_iterations {
-        let Some(sample) = sample_three_distinct(n, rng, 50) else { break };
+        let Some(sample) = sample_three_distinct(n, rng, 50) else {
+            break;
+        };
         let source: Vec<Point3<f64>> = sample.iter().map(|&i| pairs[i].0).collect();
         let target: Vec<Point3<f64>> = sample.iter().map(|&i| pairs[i].1).collect();
-        let Some(fit) = umeyama_similarity_transform(&source, &target, true) else { continue };
+        let Some(fit) = umeyama_similarity_transform(&source, &target, true) else {
+            continue;
+        };
         if !(fit.scale.is_finite() && fit.scale >= cfg.min_scale && fit.scale <= cfg.max_scale) {
             continue;
         }
@@ -1155,8 +1246,11 @@ fn ransac_umeyama_scale(pairs: &[(Point3<f64>, Point3<f64>)], cfg: &DpvoLongLoop
         return None;
     }
 
-    let inlier_pairs: Vec<(Point3<f64>, Point3<f64>)> =
-        pairs.iter().copied().filter(|(source, target)| (predict(&fit0, source) - target).norm() <= inlier_threshold).collect();
+    let inlier_pairs: Vec<(Point3<f64>, Point3<f64>)> = pairs
+        .iter()
+        .copied()
+        .filter(|(source, target)| (predict(&fit0, source) - target).norm() <= inlier_threshold)
+        .collect();
     if inlier_pairs.len() < cfg.min_ransac_inliers {
         return None;
     }
@@ -1167,15 +1261,22 @@ fn ransac_umeyama_scale(pairs: &[(Point3<f64>, Point3<f64>)], cfg: &DpvoLongLoop
         return None;
     }
 
-    let mean_residual: f64 =
-        inlier_pairs.iter().map(|(source, target)| (predict(&refit, source) - target).norm()).sum::<f64>()
-            / inlier_pairs.len() as f64;
+    let mean_residual: f64 = inlier_pairs
+        .iter()
+        .map(|(source, target)| (predict(&refit, source) - target).norm())
+        .sum::<f64>()
+        / inlier_pairs.len() as f64;
     let mean_residual_ratio = mean_residual / scene_scale;
     if mean_residual_ratio > cfg.max_mean_residual_ratio {
         return None;
     }
 
-    Some(GeometricFit { scale: refit.scale, rotation: refit.rotation, inlier_count: inlier_pairs.len(), mean_residual_ratio })
+    Some(GeometricFit {
+        scale: refit.scale,
+        rotation: refit.rotation,
+        inlier_count: inlier_pairs.len(),
+        mean_residual_ratio,
+    })
 }
 
 #[cfg(test)]
@@ -1183,7 +1284,12 @@ mod tests {
     use super::*;
 
     fn intr() -> DpvoIntrinsics {
-        DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 }
+        DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        }
     }
 
     fn cfg() -> DpvoLongLoopConfig {
@@ -1226,12 +1332,21 @@ mod tests {
         // them down to patch-grid space — pick values that land safely away
         // from the border after that division so no clamping kicks in,
         // making the expected output hand-checkable.
-        let kps = [(40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32), (50.0 * TEST_RES, 35.0 * TEST_RES, 0.8_f32)];
+        let kps = [
+            (40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32),
+            (50.0 * TEST_RES, 35.0 * TEST_RES, 0.8_f32),
+        ];
         let mut rng = StdRng::seed_from_u64(1);
         let centers = sp_anchored_patch_centers(2, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
         assert_eq!(centers.len(), 2);
-        assert!((centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6, "{centers:?}");
-        assert!((centers[1].0 - 50.0).abs() < 1e-6 && (centers[1].1 - 35.0).abs() < 1e-6, "{centers:?}");
+        assert!(
+            (centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6,
+            "{centers:?}"
+        );
+        assert!(
+            (centers[1].0 - 50.0).abs() < 1e-6 && (centers[1].1 - 35.0).abs() < 1e-6,
+            "{centers:?}"
+        );
     }
 
     #[test]
@@ -1260,7 +1375,10 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(3);
         let centers = sp_anchored_patch_centers(1, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
         assert_eq!(centers.len(), 1);
-        assert!((centers[0].0 - 1.0).abs() < 1e-6 && (centers[0].1 - 1.0).abs() < 1e-6, "{centers:?}");
+        assert!(
+            (centers[0].0 - 1.0).abs() < 1e-6 && (centers[0].1 - 1.0).abs() < 1e-6,
+            "{centers:?}"
+        );
     }
 
     #[test]
@@ -1268,12 +1386,18 @@ mod tests {
         // Two keypoints mapping to (almost) the same patch-grid cell — only
         // the higher-scored one should be kept; the second slot falls back
         // to random sampling rather than a near-duplicate center.
-        let kps = [(40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32), (40.5 * TEST_RES, 30.5 * TEST_RES, 0.95_f32)];
+        let kps = [
+            (40.0 * TEST_RES, 30.0 * TEST_RES, 0.9_f32),
+            (40.5 * TEST_RES, 30.5 * TEST_RES, 0.95_f32),
+        ];
         let mut rng = StdRng::seed_from_u64(4);
         let centers = sp_anchored_patch_centers(2, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
         assert_eq!(centers.len(), 2);
         // The higher-scored keypoint (40.5, 30.5) wins the first slot.
-        assert!((centers[0].0 - 40.5).abs() < 1e-6 && (centers[0].1 - 30.5).abs() < 1e-6, "{centers:?}");
+        assert!(
+            (centers[0].0 - 40.5).abs() < 1e-6 && (centers[0].1 - 30.5).abs() < 1e-6,
+            "{centers:?}"
+        );
         // The second slot is NOT the near-duplicate (40.0, 30.0) — it fell
         // back to random sampling since that candidate was within
         // `min_separation` of an already-chosen center.
@@ -1295,9 +1419,15 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         let centers = sp_anchored_patch_centers(4, 188, 120, &kps, TEST_RES, 2.0, &mut rng);
         assert_eq!(centers.len(), 4);
-        assert!((centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6, "{centers:?}");
+        assert!(
+            (centers[0].0 - 40.0).abs() < 1e-6 && (centers[0].1 - 30.0).abs() < 1e-6,
+            "{centers:?}"
+        );
         for &(x, y) in &centers[1..] {
-            assert!((1.0..187.0).contains(&x) && (1.0..119.0).contains(&y), "fallback center out of legacy margin: ({x},{y})");
+            assert!(
+                (1.0..187.0).contains(&x) && (1.0..119.0).contains(&y),
+                "fallback center out of legacy margin: ({x},{y})"
+            );
         }
     }
 
@@ -1307,25 +1437,62 @@ mod tests {
     fn patch_to_world_point_matches_hand_derivation_for_identity_pose() {
         let pose = SE3::identity();
         let intrinsics = intr();
-        let patch = DpvoPatch { x: 64.0, y: 48.0, inverse_depth: 0.5 }; // depth = 2, at the principal point.
+        let patch = DpvoPatch {
+            x: 64.0,
+            y: 48.0,
+            inverse_depth: 0.5,
+        }; // depth = 2, at the principal point.
         let world = patch_to_world_point(&pose, &intrinsics, &patch).expect("positive depth");
-        assert!((world.coords - Vector3::new(0.0, 0.0, 2.0)).norm() < 1e-9, "{world:?}");
+        assert!(
+            (world.coords - Vector3::new(0.0, 0.0, 2.0)).norm() < 1e-9,
+            "{world:?}"
+        );
     }
 
     #[test]
     fn patch_to_world_point_rejects_non_positive_inverse_depth() {
         let pose = SE3::identity();
         let intrinsics = intr();
-        assert!(patch_to_world_point(&pose, &intrinsics, &DpvoPatch { x: 64.0, y: 48.0, inverse_depth: 0.0 }).is_none());
-        assert!(patch_to_world_point(&pose, &intrinsics, &DpvoPatch { x: 64.0, y: 48.0, inverse_depth: -0.5 }).is_none());
+        assert!(patch_to_world_point(
+            &pose,
+            &intrinsics,
+            &DpvoPatch {
+                x: 64.0,
+                y: 48.0,
+                inverse_depth: 0.0
+            }
+        )
+        .is_none());
+        assert!(patch_to_world_point(
+            &pose,
+            &intrinsics,
+            &DpvoPatch {
+                x: 64.0,
+                y: 48.0,
+                inverse_depth: -0.5
+            }
+        )
+        .is_none());
     }
 
     #[test]
     fn nearest_patch_within_picks_the_closest_and_respects_radius() {
         let patches = vec![
-            DpvoPatch { x: 10.0, y: 10.0, inverse_depth: 0.5 },
-            DpvoPatch { x: 10.5, y: 10.5, inverse_depth: 0.5 },
-            DpvoPatch { x: 50.0, y: 50.0, inverse_depth: 0.5 },
+            DpvoPatch {
+                x: 10.0,
+                y: 10.0,
+                inverse_depth: 0.5,
+            },
+            DpvoPatch {
+                x: 10.5,
+                y: 10.5,
+                inverse_depth: 0.5,
+            },
+            DpvoPatch {
+                x: 50.0,
+                y: 50.0,
+                inverse_depth: 0.5,
+            },
         ];
         // Distance to (10,10) is sqrt(0.2^2+0.2^2)=0.283; to (10.5,10.5) is
         // sqrt(0.3^2+0.3^2)=0.424 — (10,10) is the true nearest.
@@ -1372,28 +1539,57 @@ mod tests {
             let depth = 3.0 + (i as f64) * 0.2;
             let x = intrinsics.cx + dx;
             let y = intrinsics.cy + dy;
-            old_patches.push(DpvoPatch { x, y, inverse_depth: 1.0 / depth });
+            old_patches.push(DpvoPatch {
+                x,
+                y,
+                inverse_depth: 1.0 / depth,
+            });
             old_keypoints.push(Point2::new(x, y));
             // Same pixel anchor (identity pose on both sides, so a physical
             // point at old-side depth `depth` reprojects to new-side pixel
             // `(x, y)` scaled radially only if the pose changed — with both
             // poses identity, the ONLY thing differing is depth itself,
             // scaled by `drift_scale`).
-            new_patches.push(DpvoPatch { x, y, inverse_depth: 1.0 / (depth * drift_scale) });
+            new_patches.push(DpvoPatch {
+                x,
+                y,
+                inverse_depth: 1.0 / (depth * drift_scale),
+            });
             new_keypoints.push(Point2::new(x, y));
         }
-        DriftedPairFixture { old_pose, old_patches, old_keypoints, new_pose, new_patches, new_keypoints }
+        DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        }
     }
 
     #[test]
     fn bridge_matches_to_3d3d_recovers_expected_world_points() {
-        let DriftedPairFixture { old_pose, old_patches, old_keypoints, new_pose, new_patches, new_keypoints } =
-            synthetic_drifted_pair(10, 4.0);
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(10, 4.0);
         let intrinsics = intr();
         let raw_pairs: Vec<(usize, usize)> = (0..10).map(|i| (i, i)).collect();
         let bridged = bridge_matches_to_3d3d(
-            &raw_pairs, &old_keypoints, &old_pose, &intrinsics, &old_patches, &new_keypoints, &new_pose, &intrinsics,
-            &new_patches, 1.0,
+            &raw_pairs,
+            &old_keypoints,
+            &old_pose,
+            &intrinsics,
+            &old_patches,
+            &new_keypoints,
+            &new_pose,
+            &intrinsics,
+            &new_patches,
+            1.0,
         );
         assert_eq!(bridged.len(), 10);
         for (old_world, new_world) in &bridged {
@@ -1407,17 +1603,32 @@ mod tests {
 
     #[test]
     fn ransac_umeyama_scale_recovers_a_known_scale_within_a_few_percent() {
-        let DriftedPairFixture { old_pose, old_patches, old_keypoints, new_pose, new_patches, new_keypoints } =
-            synthetic_drifted_pair(30, 6.5);
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(30, 6.5);
         let intrinsics = intr();
         let raw_pairs: Vec<(usize, usize)> = (0..30).map(|i| (i, i)).collect();
         let bridged = bridge_matches_to_3d3d(
-            &raw_pairs, &old_keypoints, &old_pose, &intrinsics, &old_patches, &new_keypoints, &new_pose, &intrinsics,
-            &new_patches, 1.0,
+            &raw_pairs,
+            &old_keypoints,
+            &old_pose,
+            &intrinsics,
+            &old_patches,
+            &new_keypoints,
+            &new_pose,
+            &intrinsics,
+            &new_patches,
+            1.0,
         );
         assert_eq!(bridged.len(), 30);
         let mut rng = StdRng::seed_from_u64(7);
-        let fit = ransac_umeyama_scale(&bridged, &cfg(), &mut rng).expect("well-posed synthetic fixture should fit");
+        let fit = ransac_umeyama_scale(&bridged, &cfg(), &mut rng)
+            .expect("well-posed synthetic fixture should fit");
         assert!(
             (fit.scale - 6.5).abs() / 6.5 < 0.05,
             "expected scale close to 6.5, got {} (inliers={} residual_ratio={})",
@@ -1425,7 +1636,10 @@ mod tests {
             fit.inlier_count,
             fit.mean_residual_ratio
         );
-        assert_eq!(fit.inlier_count, 30, "a noise-free fixture should have every pair as an inlier");
+        assert_eq!(
+            fit.inlier_count, 30,
+            "a noise-free fixture should have every pair as an inlier"
+        );
     }
 
     #[test]
@@ -1445,25 +1659,47 @@ mod tests {
                 Point3::new(t * 0.3, (t * 1.7).sin() * 2.0, (t * 0.9).cos() * 2.0 + 5.0)
             })
             .collect();
-        let new_points: Vec<Point3<f64>> =
-            old_points.iter().map(|p| Point3::from(true_scale * (true_rotation * p.coords) + true_translation)).collect();
-        let pairs: Vec<(Point3<f64>, Point3<f64>)> = old_points.into_iter().zip(new_points).collect();
+        let new_points: Vec<Point3<f64>> = old_points
+            .iter()
+            .map(|p| Point3::from(true_scale * (true_rotation * p.coords) + true_translation))
+            .collect();
+        let pairs: Vec<(Point3<f64>, Point3<f64>)> =
+            old_points.into_iter().zip(new_points).collect();
 
         let mut rng = StdRng::seed_from_u64(42);
-        let fit = ransac_umeyama_scale(&pairs, &cfg(), &mut rng).expect("well-posed rigid+scale fixture should fit");
-        assert!((fit.scale - true_scale).abs() / true_scale < 0.02, "expected scale near {true_scale}, got {}", fit.scale);
+        let fit = ransac_umeyama_scale(&pairs, &cfg(), &mut rng)
+            .expect("well-posed rigid+scale fixture should fit");
+        assert!(
+            (fit.scale - true_scale).abs() / true_scale < 0.02,
+            "expected scale near {true_scale}, got {}",
+            fit.scale
+        );
         assert_eq!(fit.inlier_count, 20);
     }
 
     #[test]
     fn ransac_umeyama_scale_rejects_below_min_bridge_correspondences() {
-        let DriftedPairFixture { old_pose, old_patches, old_keypoints, new_pose, new_patches, new_keypoints } =
-            synthetic_drifted_pair(3, 2.0);
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(3, 2.0);
         let intrinsics = intr();
         let raw_pairs: Vec<(usize, usize)> = (0..3).map(|i| (i, i)).collect();
         let bridged = bridge_matches_to_3d3d(
-            &raw_pairs, &old_keypoints, &old_pose, &intrinsics, &old_patches, &new_keypoints, &new_pose, &intrinsics,
-            &new_patches, 1.0,
+            &raw_pairs,
+            &old_keypoints,
+            &old_pose,
+            &intrinsics,
+            &old_patches,
+            &new_keypoints,
+            &new_pose,
+            &intrinsics,
+            &new_patches,
+            1.0,
         );
         // 3 correspondences < the default `min_bridge_correspondences = 8`.
         let mut rng = StdRng::seed_from_u64(1);
@@ -1480,8 +1716,16 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99);
         let pairs: Vec<(Point3<f64>, Point3<f64>)> = (0..20)
             .map(|_| {
-                let source = Point3::new(rng.gen_range(-5.0..5.0), rng.gen_range(-5.0..5.0), rng.gen_range(1.0..10.0));
-                let target = Point3::new(rng.gen_range(-5.0..5.0), rng.gen_range(-5.0..5.0), rng.gen_range(1.0..10.0));
+                let source = Point3::new(
+                    rng.gen_range(-5.0..5.0),
+                    rng.gen_range(-5.0..5.0),
+                    rng.gen_range(1.0..10.0),
+                );
+                let target = Point3::new(
+                    rng.gen_range(-5.0..5.0),
+                    rng.gen_range(-5.0..5.0),
+                    rng.gen_range(1.0..10.0),
+                );
                 (source, target)
             })
             .collect();
@@ -1512,26 +1756,49 @@ mod tests {
     /// (small jitter) — two frames built from the SAME `base_seed` are
     /// "appearance-similar"; different `base_seed`s are not.
     fn frame_descriptors(base_seed: u64, count: usize, dim: usize) -> Vec<Vec<f32>> {
-        (0..count).map(|k| synthetic_descriptor(base_seed.wrapping_add(k as u64 * 7919), dim)).collect()
+        (0..count)
+            .map(|k| synthetic_descriptor(base_seed.wrapping_add(k as u64 * 7919), dim))
+            .collect()
     }
 
     #[test]
     fn index_stays_unbuilt_until_bootstrap_threshold_then_builds_and_backfills() {
-        let cfg = DpvoLongLoopConfig { vocab_bootstrap_frames: 5, vocab_words: 4, ..DpvoLongLoopConfig::default() };
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 5,
+            vocab_words: 4,
+            ..DpvoLongLoopConfig::default()
+        };
         let mut index = DpvoLongLoopIndex::new(cfg);
         for arrival in 0..4 {
             index.ingest_frame(arrival, vec![], frame_descriptors(arrival as u64, 20, 16));
-            assert!(!index.diagnostics().vocab_built, "should not build before the bootstrap threshold");
-            assert_eq!(index.diagnostics().frames_indexed, 0, "nothing indexed until the vocabulary exists");
+            assert!(
+                !index.diagnostics().vocab_built,
+                "should not build before the bootstrap threshold"
+            );
+            assert_eq!(
+                index.diagnostics().frames_indexed,
+                0,
+                "nothing indexed until the vocabulary exists"
+            );
         }
         index.ingest_frame(4, vec![], frame_descriptors(4, 20, 16));
-        assert!(index.diagnostics().vocab_built, "vocabulary should build once the threshold is reached");
-        assert_eq!(index.diagnostics().frames_indexed, 5, "every buffered frame should be backfilled");
+        assert!(
+            index.diagnostics().vocab_built,
+            "vocabulary should build once the threshold is reached"
+        );
+        assert_eq!(
+            index.diagnostics().frames_indexed,
+            5,
+            "every buffered frame should be backfilled"
+        );
     }
 
     #[test]
     fn due_throttles_by_query_frequency() {
-        let cfg = DpvoLongLoopConfig { query_frequency: 10, ..DpvoLongLoopConfig::default() };
+        let cfg = DpvoLongLoopConfig {
+            query_frequency: 10,
+            ..DpvoLongLoopConfig::default()
+        };
         let mut index = DpvoLongLoopIndex::new(cfg);
         assert!(index.due(0), "first call is always due");
         assert!(!index.due(5), "too soon");
@@ -1565,9 +1832,18 @@ mod tests {
 
         let candidates = index.query_candidates(210);
         let arrivals: Vec<usize> = candidates.iter().map(|&(a, _)| a).collect();
-        assert!(arrivals.contains(&10), "arrival 10 (gap=200) should be a candidate: {arrivals:?}");
-        assert!(!arrivals.contains(&190), "arrival 190 (gap=20 < min_temporal_gap=50) must be excluded: {arrivals:?}");
-        assert!(!arrivals.contains(&210), "the query frame itself must never be its own candidate");
+        assert!(
+            arrivals.contains(&10),
+            "arrival 10 (gap=200) should be a candidate: {arrivals:?}"
+        );
+        assert!(
+            !arrivals.contains(&190),
+            "arrival 190 (gap=20 < min_temporal_gap=50) must be excluded: {arrivals:?}"
+        );
+        assert!(
+            !arrivals.contains(&210),
+            "the query frame itself must never be its own candidate"
+        );
     }
 
     // ---- End-to-end: find_and_verify_long_range_loop ----
@@ -1582,7 +1858,11 @@ mod tests {
         let cam = pose.transform_point(&world);
         let x = intr.cx + intr.fx * cam.x / cam.z;
         let y = intr.cy + intr.fy * cam.y / cam.z;
-        DpvoPatch { x, y, inverse_depth: 1.0 / cam.z }
+        DpvoPatch {
+            x,
+            y,
+            inverse_depth: 1.0 / cam.z,
+        }
     }
 
     #[test]
@@ -1601,7 +1881,10 @@ mod tests {
         // (default 20 degrees) even though every OTHER gate is satisfied.
         let intrinsics = intr();
         let old_pose = SE3::identity();
-        let new_pose = SE3::new(UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2), Vector3::zeros());
+        let new_pose = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2),
+            Vector3::zeros(),
+        );
         let drift_scale = 8.0_f64;
         let n = 12;
         let mut old_patches = Vec::with_capacity(n);
@@ -1609,7 +1892,11 @@ mod tests {
         let mut new_patches = Vec::with_capacity(n);
         let mut new_keypoints = Vec::with_capacity(n);
         for i in 0..n {
-            let old_world = Point3::new(1.0 + i as f64 * 0.3, ((i * 3) % 5) as f64 * 0.4 - 0.8, 4.0 + (i as f64) * 0.5);
+            let old_world = Point3::new(
+                1.0 + i as f64 * 0.3,
+                ((i * 3) % 5) as f64 * 0.4 - 0.8,
+                4.0 + (i as f64) * 0.5,
+            );
             let new_world = Point3::from(old_world.coords * drift_scale); // pure scale, NO rotation.
             old_patches.push(patch_from_world_point(&old_pose, &intrinsics, old_world));
             new_patches.push(patch_from_world_point(&new_pose, &intrinsics, new_world));
@@ -1627,31 +1914,62 @@ mod tests {
         };
         let mut index = DpvoLongLoopIndex::new(cfg);
         for arrival in 0..3 {
-            index.ingest_frame(arrival, vec![], frame_descriptors(1000 + arrival as u64, 20, 16));
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
         }
         let old_descriptors = frame_descriptors(1, n, 16);
         index.ingest_frame(20, old_keypoints, old_descriptors.clone());
         index.ingest_frame(300, new_keypoints, old_descriptors);
 
         let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
-            if arrival == 20 { Some((old_pose.clone(), intrinsics, old_patches.clone())) } else { None }
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, old_patches.clone()))
+            } else {
+                None
+            }
         };
-        let result = index.find_and_verify_long_range_loop(300, &new_pose, &intrinsics, &new_patches, resolve_old);
-        assert!(result.is_none(), "a rotation-inconsistent (even if otherwise noise-free) candidate must be rejected");
+        let result = index.find_and_verify_long_range_loop(
+            300,
+            &new_pose,
+            &intrinsics,
+            &new_patches,
+            resolve_old,
+        );
+        assert!(
+            result.is_none(),
+            "a rotation-inconsistent (even if otherwise noise-free) candidate must be rejected"
+        );
 
         let diagnostics = index.diagnostics();
         assert_eq!(diagnostics.accepted_total, 0);
-        assert_eq!(diagnostics.bridge_sufficient_total, 1, "bridging and RANSAC should both succeed on this noise-free fixture");
-        assert_eq!(diagnostics.rejected_ransac_total, 0, "RANSAC itself should find a fit; the NEW rotation gate is what rejects it");
+        assert_eq!(
+            diagnostics.bridge_sufficient_total, 1,
+            "bridging and RANSAC should both succeed on this noise-free fixture"
+        );
+        assert_eq!(
+            diagnostics.rejected_ransac_total, 0,
+            "RANSAC itself should find a fit; the NEW rotation gate is what rejects it"
+        );
         assert_eq!(diagnostics.rejected_rotation_inconsistent_total, 1);
 
         // Milestone M12: the query log must carry the CONCRETE disagreement,
         // not just the pass/fail outcome — should be close to 90 degrees
         // (the fixture's own hand-chosen relative rotation).
         let log = index.query_log();
-        let entry = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be logged");
-        let deg = entry.rotation_disagreement_deg.expect("a candidate that reached the rotation check must log its own disagreement");
-        assert!((deg - 90.0).abs() < 1.0, "expected ~90 degrees of disagreement, got {deg}");
+        let entry = log
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be logged");
+        let deg = entry
+            .rotation_disagreement_deg
+            .expect("a candidate that reached the rotation check must log its own disagreement");
+        assert!(
+            (deg - 90.0).abs() < 1.0,
+            "expected ~90 degrees of disagreement, got {deg}"
+        );
     }
 
     #[test]
@@ -1667,14 +1985,24 @@ mod tests {
         let mut index = DpvoLongLoopIndex::new(cfg);
 
         let intrinsics = intr();
-        let DriftedPairFixture { old_pose, old_patches, old_keypoints, new_pose, new_patches, new_keypoints } =
-            synthetic_drifted_pair(30, 8.0);
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(30, 8.0);
 
         // Bootstrap filler frames (distinct appearance, far from both real
         // frames in arrival index and appearance) so the vocabulary builds
         // without becoming a trivial 1-frame-vs-1-frame retrieval.
         for arrival in 0..3 {
-            index.ingest_frame(arrival, vec![], frame_descriptors(1000 + arrival as u64, 20, 16));
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
         }
         // The OLD frame (arrival 20), matching descriptors shared with the
         // NEW frame below (appearance base_seed `1` on both sides, matched
@@ -1701,11 +2029,20 @@ mod tests {
         assert_eq!(accepted.arrival_j, 300);
         assert_eq!(accepted.measurement.arrival_i, 20);
         assert_eq!(accepted.measurement.arrival_j, 300);
-        let measured_scale = accepted.measurement.measured_scale.expect("M11 acceptance must carry a measured scale");
-        assert!((measured_scale - 8.0).abs() / 8.0 < 0.05, "expected measured_scale near 8.0, got {measured_scale}");
+        let measured_scale = accepted
+            .measurement
+            .measured_scale
+            .expect("M11 acceptance must carry a measured scale");
+        assert!(
+            (measured_scale - 8.0).abs() / 8.0 < 0.05,
+            "expected measured_scale near 8.0, got {measured_scale}"
+        );
         // The ordinary rotation+translation edge reuses DPVO's own current
         // pose composition (both poses are identity here, so this is trivially identity too).
-        assert_eq!(accepted.measurement.relative_pose, new_pose.compose(&old_pose.inverse()));
+        assert_eq!(
+            accepted.measurement.relative_pose,
+            new_pose.compose(&old_pose.inverse())
+        );
 
         let diagnostics = index.diagnostics();
         assert_eq!(diagnostics.accepted_total, 1);
@@ -1719,13 +2056,27 @@ mod tests {
         // lower-ranked) filler-frame candidates the default `top_k = 3` also
         // surfaced for this query, each logged as `accepted: false`.
         let log = index.query_log();
-        assert_eq!(log.len(), 3, "top_k=3 should surface exactly 3 candidates: {log:?}");
+        assert_eq!(
+            log.len(),
+            3,
+            "top_k=3 should surface exactly 3 candidates: {log:?}"
+        );
         assert!(log.iter().all(|e| e.query_arrival == 300));
-        let winner = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be among the logged candidates");
+        let winner = log
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be among the logged candidates");
         assert_eq!(winner.gap, 280);
-        assert_eq!(winner.rank, 0, "the accepted candidate is the top-similarity one");
+        assert_eq!(
+            winner.rank, 0,
+            "the accepted candidate is the top-similarity one"
+        );
         assert!(winner.accepted);
-        assert_eq!(log.iter().filter(|e| e.accepted).count(), 1, "at most one candidate per query is ever marked accepted");
+        assert_eq!(
+            log.iter().filter(|e| e.accepted).count(),
+            1,
+            "at most one candidate per query is ever marked accepted"
+        );
     }
 
     #[test]
@@ -1744,24 +2095,48 @@ mod tests {
         let mut index = DpvoLongLoopIndex::new(cfg);
         let intrinsics = intr();
         for arrival in 0..3 {
-            index.ingest_frame(arrival, vec![], frame_descriptors(1000 + arrival as u64, 20, 16));
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
         }
         // OLD frame: 3 keypoints only, matched 1:1 with the new frame below —
         // far fewer than `min_bridge_correspondences` (default 8), and no
         // patches are supplied at all, so bridging fails outright.
         let old_descriptors = frame_descriptors(1, 3, 16);
-        index.ingest_frame(20, vec![Point2::new(10.0, 10.0), Point2::new(20.0, 20.0), Point2::new(30.0, 30.0)], old_descriptors.clone());
+        index.ingest_frame(
+            20,
+            vec![
+                Point2::new(10.0, 10.0),
+                Point2::new(20.0, 20.0),
+                Point2::new(30.0, 30.0),
+            ],
+            old_descriptors.clone(),
+        );
         index.ingest_frame(
             300,
-            vec![Point2::new(10.0, 10.0), Point2::new(20.0, 20.0), Point2::new(30.0, 30.0)],
+            vec![
+                Point2::new(10.0, 10.0),
+                Point2::new(20.0, 20.0),
+                Point2::new(30.0, 30.0),
+            ],
             old_descriptors,
         );
         let pose = SE3::identity();
         let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
-            if arrival == 20 { Some((pose.clone(), intrinsics, vec![])) } else { None }
+            if arrival == 20 {
+                Some((pose.clone(), intrinsics, vec![]))
+            } else {
+                None
+            }
         };
-        let result = index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], resolve_old);
-        assert!(result.is_none(), "no owned patches on either side => bridging must fail => no acceptance");
+        let result =
+            index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], resolve_old);
+        assert!(
+            result.is_none(),
+            "no owned patches on either side => bridging must fail => no acceptance"
+        );
 
         let diagnostics = index.diagnostics();
         assert_eq!(diagnostics.accepted_total, 0);
@@ -1770,9 +2145,18 @@ mod tests {
 
         let log = index.query_log();
         assert!(!log.is_empty());
-        let entry = log.iter().find(|e| e.candidate_arrival == 20).expect("arrival 20 must be among the logged candidates");
-        assert!(!entry.accepted, "a bridging-rejected candidate must be logged as accepted=false");
-        assert!(log.iter().all(|e| !e.accepted), "no candidate was ever accepted this query");
+        let entry = log
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be among the logged candidates");
+        assert!(
+            !entry.accepted,
+            "a bridging-rejected candidate must be logged as accepted=false"
+        );
+        assert!(
+            log.iter().all(|e| !e.accepted),
+            "no candidate was ever accepted this query"
+        );
     }
 
     #[test]

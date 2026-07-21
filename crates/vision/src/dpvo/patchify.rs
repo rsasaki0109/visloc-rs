@@ -48,7 +48,11 @@ use ndarray::{Array4, ArrayView3};
 ///    blend of its own integer-aligned sample and its right/down/diagonal
 ///    neighbours in the oversized window, exactly compensating for the
 ///    fact that `(⌊cx⌋, ⌊cy⌋)` is not the true (sub-pixel) centroid.
-pub fn patchify_cpu(fmap: ArrayView3<'_, f32>, coords: &[(f32, f32)], radius: usize) -> Array4<f32> {
+pub fn patchify_cpu(
+    fmap: ArrayView3<'_, f32>,
+    coords: &[(f32, f32)],
+    radius: usize,
+) -> Array4<f32> {
     let (channels, height, width) = fmap.dim();
     let num_patches = coords.len();
     let window = 2 * radius + 2;

@@ -47,7 +47,10 @@ impl LinearWeights {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoftAggError {
     Npz(NpzError),
-    ShapeMismatch { field: &'static str, message: String },
+    ShapeMismatch {
+        field: &'static str,
+        message: String,
+    },
 }
 
 impl fmt::Display for SoftAggError {
@@ -145,7 +148,10 @@ impl SoftAgg {
                 });
             }
             let weight = Array2::from_shape_vec((w_shape[0], w_shape[1]), w_data).map_err(|e| {
-                SoftAggError::ShapeMismatch { field: "weight", message: e.to_string() }
+                SoftAggError::ShapeMismatch {
+                    field: "weight",
+                    message: e.to_string(),
+                }
             })?;
             let bias = Array1::from_vec(b_data);
             Ok(LinearWeights { weight, bias })
@@ -272,9 +278,16 @@ pub fn neighbors_cpu(kk: &[i64], jj: &[i64]) -> (Vec<i64>, Vec<i64>) {
         // `std::stable_sort`).
         members.sort_by_key(|&edge| jj[edge]);
         for (position, &edge) in members.iter().enumerate() {
-            ix[edge] = if position > 0 { members[position - 1] as i64 } else { -1 };
-            jx[edge] =
-                if position + 1 < members.len() { members[position + 1] as i64 } else { -1 };
+            ix[edge] = if position > 0 {
+                members[position - 1] as i64
+            } else {
+                -1
+            };
+            jx[edge] = if position + 1 < members.len() {
+                members[position + 1] as i64
+            } else {
+                -1
+            };
         }
     }
     (ix, jx)
@@ -332,7 +345,10 @@ mod tests {
     }
 
     fn identity_linear(dim: usize) -> LinearWeights {
-        LinearWeights { weight: Array2::eye(dim), bias: Array1::zeros(dim) }
+        LinearWeights {
+            weight: Array2::eye(dim),
+            bias: Array1::zeros(dim),
+        }
     }
 
     /// With `f = g = identity, h = identity`, `SoftAgg` reduces to a plain
@@ -341,9 +357,12 @@ mod tests {
     #[test]
     fn softagg_forward_reduces_to_hand_computable_softmax_average_with_identity_weights() {
         let dim = 1;
-        let agg =
-            SoftAgg::new(identity_linear(dim), identity_linear(dim), identity_linear(dim))
-                .unwrap();
+        let agg = SoftAgg::new(
+            identity_linear(dim),
+            identity_linear(dim),
+            identity_linear(dim),
+        )
+        .unwrap();
         // x = [[0.0], [1.0], [5.0]], groups = [0, 0, 1].
         let x = array![[0.0_f32], [1.0], [5.0]];
         let group_key = vec![0_i64, 0, 1];
@@ -354,8 +373,16 @@ mod tests {
         // weights = [0.2689414, 0.7310586]. f(x) = x, so
         // y_group0 = 0.2689414*0 + 0.7310586*1 = 0.7310586.
         let expected_group0 = 0.7310586_f32;
-        assert!((out[(0, 0)] - expected_group0).abs() < 1e-5, "out[0]={}", out[(0, 0)]);
-        assert!((out[(1, 0)] - expected_group0).abs() < 1e-5, "out[1]={}", out[(1, 0)]);
+        assert!(
+            (out[(0, 0)] - expected_group0).abs() < 1e-5,
+            "out[0]={}",
+            out[(0, 0)]
+        );
+        assert!(
+            (out[(1, 0)] - expected_group0).abs() < 1e-5,
+            "out[1]={}",
+            out[(1, 0)]
+        );
 
         // Group 1: a single-member group; softmax over one element is
         // always 1.0, so the aggregate is exactly that element's own
@@ -366,9 +393,12 @@ mod tests {
     #[test]
     fn softagg_forward_handles_empty_input() {
         let dim = 4;
-        let agg =
-            SoftAgg::new(identity_linear(dim), identity_linear(dim), identity_linear(dim))
-                .unwrap();
+        let agg = SoftAgg::new(
+            identity_linear(dim),
+            identity_linear(dim),
+            identity_linear(dim),
+        )
+        .unwrap();
         let x = Array2::<f32>::zeros((0, dim));
         let out = agg.forward(x.view(), &[]);
         assert_eq!(out.shape(), &[0, dim]);

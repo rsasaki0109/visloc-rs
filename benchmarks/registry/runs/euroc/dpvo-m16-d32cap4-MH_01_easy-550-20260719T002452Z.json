@@ -1,0 +1,134 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "E:\\visloc_archive\\dpvo_m16_20260719\\m16_550_d32_cap4\\summary.txt",
+      "sha256": "f659478b1cd640905f988ec99107e405e905138c33c80a3ed0be3f1aedceafaa"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\dpvo_m16_20260719\\m16_550_d32_cap4\\dpvo_trajectory.csv",
+      "sha256": "350c200b5d6829a3348760189fbb54e129e3fb43f7d0316ad79da1a4e6f7a3df"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/dpvo_droid_port_plan.md",
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "dpvo-monocular-hover-release",
+    "name": "Monocular DPVO hover transition",
+    "protocol": "MH_01 cam0, stride 2, seed 0, CPU ONNX; GT only for post-run alignment",
+    "script": "examples/euroc_dpvo_vo_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "euroc_dpvo_vo_demo"
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\euroc_dpvo_vo_demo.exe",
+      "--euroc-dir",
+      "MH_01_easy",
+      "--max-frames",
+      "550",
+      "--stride",
+      "2",
+      "--hover-freeze",
+      "--hover-response",
+      "depth_damp",
+      "--hover-depth-damp-factor",
+      "10000",
+      "--hover-release-duration-commits",
+      "32",
+      "--hover-release-start-cap-frames",
+      "4"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\euroc_dpvo_vo_demo.exe --euroc-dir MH_01_easy --max-frames 550 --stride 2 --hover-freeze --hover-response depth_damp --hover-depth-damp-factor 10000 --hover-release-duration-commits 32 --hover-release-start-cap-frames 4"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "frames": 550,
+      "patches_per_frame": 48,
+      "sensor_mode": "monocular",
+      "stride": 2
+    },
+    "seed": "0"
+  },
+  "created_utc": "2026-07-19T01:05:19Z",
+  "dataset": {
+    "checksum": "ca18bb77e66e0244f37afd4c3f6e5c9c1184df320ad959b22877e0640496143c",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_01_easy",
+    "sequence": "MH_01_easy",
+    "version": "ASL EuRoC MAV dataset"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "tracked_fraction",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "ate_rigid_rmse_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": ""
+    },
+    {
+      "implementation": null,
+      "name": "ate_similarity_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": ""
+    }
+  ],
+  "models": [
+    {
+      "exists": true,
+      "license": null,
+      "name": "dpvo",
+      "path": "E:\\visloc_archive\\dpvo_onnx_m1",
+      "sha256": null,
+      "source": null
+    }
+  ],
+  "notes": "M16 removes release cliff and improves scale 9.4%, but Sim3 ATE regresses 5.5%; exploratory checkpoint.",
+  "result_kind": "visloc_run",
+  "run_id": "dpvo-m16-d32cap4-MH_01_easy-550-20260719T002452Z",
+  "schema_version": 1,
+  "status": "success"
+}

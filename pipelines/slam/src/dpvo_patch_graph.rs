@@ -681,7 +681,9 @@ impl DpvoPatchGraph {
     ) -> Result<usize, DpvoGraphError> {
         debug_assert_eq!(patches.len(), self.config.patches_per_frame);
         if self.frames.len() + 1 >= self.config.buffer_size {
-            return Err(DpvoGraphError::BufferFull { buffer_size: self.config.buffer_size });
+            return Err(DpvoGraphError::BufferFull {
+                buffer_size: self.config.buffer_size,
+            });
         }
         self.frames.push(DpvoGraphFrame {
             arrival_index: self.counter - 1,
@@ -701,7 +703,8 @@ impl DpvoPatchGraph {
     /// motion-model extrapolation.
     pub fn reject_pending_frame(&mut self) {
         if self.counter >= 2 {
-            self.delta.insert(self.counter - 1, (self.counter - 2, SE3::identity()));
+            self.delta
+                .insert(self.counter - 1, (self.counter - 2, SE3::identity()));
         }
     }
 
@@ -889,15 +892,15 @@ impl DpvoPatchGraph {
         let threshold = n_after.saturating_sub(removal_window);
         let patches_per_frame = self.config.patches_per_frame;
         const MIN_LOOP_GAP: usize = 30; // `optim_utils.py::reduce_edges`'s own hardcoded `(j - i) < 30` literal.
-        // Milestone M8: this used to be a plain `self.edges.retain(...)`;
-        // rewritten to a single-pass partition so a dropped edge can be
-        // archived into `self.inactive_edges` (`remove_factors(...,
-        // store=True)`'s port — see the module doc's "Inactive-edge
-        // retention" section) instead of merely discarded. `retain`'s
-        // closure has no side-channel for the removed items, so this takes
-        // ownership of the old `Vec` via `std::mem::take` and rebuilds it —
-        // still a single O(edges) pass, not the O(n^2) a `Vec::remove`-based
-        // rewrite would be.
+                                        // Milestone M8: this used to be a plain `self.edges.retain(...)`;
+                                        // rewritten to a single-pass partition so a dropped edge can be
+                                        // archived into `self.inactive_edges` (`remove_factors(...,
+                                        // store=True)`'s port — see the module doc's "Inactive-edge
+                                        // retention" section) instead of merely discarded. `retain`'s
+                                        // closure has no side-channel for the removed items, so this takes
+                                        // ownership of the old `Vec` via `std::mem::take` and rebuilds it —
+                                        // still a single O(edges) pass, not the O(n^2) a `Vec::remove`-based
+                                        // rewrite would be.
         let old_edges = std::mem::take(&mut self.edges);
         self.edges = Vec::with_capacity(old_edges.len());
         for edge in old_edges {
@@ -955,7 +958,9 @@ impl DpvoPatchGraph {
         if self.inactive_edge_cap == 0 {
             return;
         }
-        let Some((target, weight)) = edge.target_weight else { return };
+        let Some((target, weight)) = edge.target_weight else {
+            return;
+        };
         // `edge.i` is always patch `k`'s owner frame (see
         // `DpvoPatchGraph::owner_frame`'s invariant, restated in
         // `append_edges`'s own construction), so no separate lookup is
@@ -973,7 +978,13 @@ impl DpvoPatchGraph {
             return;
         }
 
-        self.inactive_edges.push(InactiveEdge { arrival_i, arrival_j, local_patch_offset, target, weight });
+        self.inactive_edges.push(InactiveEdge {
+            arrival_i,
+            arrival_j,
+            local_patch_offset,
+            target,
+            weight,
+        });
         if self.inactive_edges.len() > self.inactive_edge_cap {
             let before = self.inactive_edges.len();
             let mut kept_index = 0usize;
@@ -1000,7 +1011,9 @@ impl DpvoPatchGraph {
         let t0 = self.frames[k - 1].arrival_index;
         let t1 = self.frames[k].arrival_index;
         // dP = poses[k] * poses[k-1].inv() (dpvo.py:277).
-        let delta_pose = self.frames[k].pose.compose(&self.frames[k - 1].pose.inverse());
+        let delta_pose = self.frames[k]
+            .pose
+            .compose(&self.frames[k - 1].pose.inverse());
         self.delta.insert(t1, (t0, delta_pose));
         // Milestone M9: archive frame k's own FINAL pose (unconditional,
         // unlike inactive-edge retention's opt-in cap — see
@@ -1076,7 +1089,15 @@ impl DpvoPatchGraph {
 /// `crate::dpvo_vo` orchestration layer uses when assembling a
 /// [`crate::dpvo_patch_ba::DpvoBaProblem`].
 pub fn active_edge_triples(graph: &DpvoPatchGraph) -> Vec<DpvoEdge> {
-    graph.edges().iter().map(|e| DpvoEdge { i: e.i, j: e.j, k: e.k }).collect()
+    graph
+        .edges()
+        .iter()
+        .map(|e| DpvoEdge {
+            i: e.i,
+            j: e.j,
+            k: e.k,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1085,12 +1106,21 @@ mod tests {
     use nalgebra::{UnitQuaternion, Vector3};
 
     fn intr() -> DpvoIntrinsics {
-        DpvoIntrinsics { fx: 100.0, fy: 100.0, cx: 32.0, cy: 24.0 }
+        DpvoIntrinsics {
+            fx: 100.0,
+            fy: 100.0,
+            cx: 32.0,
+            cy: 24.0,
+        }
     }
 
     fn patches_for_frame(m: usize, seed: f64) -> Vec<DpvoPatch> {
         (0..m)
-            .map(|i| DpvoPatch { x: 10.0 + i as f64 + seed, y: 10.0 + seed, inverse_depth: 0.5 })
+            .map(|i| DpvoPatch {
+                x: 10.0 + i as f64 + seed,
+                y: 10.0 + seed,
+                inverse_depth: 0.5,
+            })
             .collect()
     }
 
@@ -1169,7 +1199,10 @@ mod tests {
                 graph.owner_frame(edge.k),
                 "owner_frame(k) invariant broken after fold: edge={edge:?}"
             );
-            assert!(edge.i < 5 && edge.j < 5, "dangling frame reference after fold: edge={edge:?}");
+            assert!(
+                edge.i < 5 && edge.j < 5,
+                "dangling frame reference after fold: edge={edge:?}"
+            );
         }
     }
 
@@ -1178,9 +1211,14 @@ mod tests {
         let mut graph = push_frames(8);
         graph.set_initialized(true);
         graph.keyframe();
-        let threshold = graph.n_frames().saturating_sub(graph.config().removal_window);
+        let threshold = graph
+            .n_frames()
+            .saturating_sub(graph.config().removal_window);
         for edge in graph.edges() {
-            assert!(graph.owner_frame(edge.k) >= threshold, "a stale edge survived keyframe()'s cleanup");
+            assert!(
+                graph.owner_frame(edge.k) >= threshold,
+                "a stale edge survived keyframe()'s cleanup"
+            );
         }
     }
 
@@ -1208,7 +1246,9 @@ mod tests {
         let mut graph = DpvoPatchGraph::new(config);
         for i in 0..40 {
             let pose = graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, i as f64))
+                .unwrap();
         }
         graph.set_initialized(true);
         // Inject a single loop edge: patch 0 (owner frame 0) -> frame 39.
@@ -1221,7 +1261,10 @@ mod tests {
         // frame 0 is far below threshold and there is no exemption => the
         // loop edge must be dropped.
         graph.keyframe();
-        assert!(graph.edges().is_empty(), "plain keyframe() should drop a stale, unprotected loop edge");
+        assert!(
+            graph.edges().is_empty(),
+            "plain keyframe() should drop a stale, unprotected loop edge"
+        );
 
         // Protected keyframe: optimization_window=4 (small_config's own
         // value) => target frame must satisfy `39 + 4 > 40`, i.e. `43 > 40`
@@ -1247,7 +1290,9 @@ mod tests {
         let mut graph = DpvoPatchGraph::new(config);
         for i in 0..40 {
             let pose = graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, i as f64))
+                .unwrap();
         }
         graph.set_initialized(true);
         graph.append_edges(&[(0, 39)], 4);
@@ -1255,7 +1300,9 @@ mod tests {
         // target (39) eventually falls outside `n - optimization_window`.
         for i in 40..50 {
             let pose = graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, i as f64)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, i as f64))
+                .unwrap();
         }
         // n=50, optimization_window=4 => target must satisfy 39+4>50 i.e.
         // 43>50 — false, so the exemption no longer applies.
@@ -1315,9 +1362,14 @@ mod tests {
         // `keyframe()` keeps folding, matching `zero_motion_...`'s own
         // near-identity-pose recipe, but distinguishable per frame).
         for i in 0..12 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.001, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(i as f64 * 0.001, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).expect("buffer has room");
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .expect("buffer has room");
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1333,18 +1385,33 @@ mod tests {
         let removed_1 = graph.keyframe().expect("near-zero motion should fold");
         assert_eq!(removed_1, folded_local_1);
         assert_eq!(graph.retained_poses().len(), 1);
-        assert_eq!(graph.retained_poses()[&arrival_1].translation, pose_1.translation);
+        assert_eq!(
+            graph.retained_poses()[&arrival_1].translation,
+            pose_1.translation
+        );
 
         // Second fold: must ADD a new entry, not overwrite/lose the first.
         let folded_local_2 = graph.n_frames() - config.keyframe_index;
         let arrival_2 = graph.frames()[folded_local_2].arrival_index;
         let pose_2 = graph.frames()[folded_local_2].pose.clone();
-        assert_ne!(arrival_1, arrival_2, "the two folds must retire distinct frames");
-        let removed_2 = graph.keyframe().expect("near-zero motion should fold again");
+        assert_ne!(
+            arrival_1, arrival_2,
+            "the two folds must retire distinct frames"
+        );
+        let removed_2 = graph
+            .keyframe()
+            .expect("near-zero motion should fold again");
         assert_eq!(removed_2, folded_local_2);
         assert_eq!(graph.retained_poses().len(), 2);
-        assert_eq!(graph.retained_poses()[&arrival_1].translation, pose_1.translation, "first entry must survive");
-        assert_eq!(graph.retained_poses()[&arrival_2].translation, pose_2.translation);
+        assert_eq!(
+            graph.retained_poses()[&arrival_1].translation,
+            pose_1.translation,
+            "first entry must survive"
+        );
+        assert_eq!(
+            graph.retained_poses()[&arrival_2].translation,
+            pose_2.translation
+        );
     }
 
     #[test]
@@ -1356,9 +1423,14 @@ mod tests {
         let m = config.patches_per_frame;
         let mut graph = DpvoPatchGraph::new(config);
         for i in 0..5 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).expect("buffer has room");
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .expect("buffer has room");
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1394,7 +1466,9 @@ mod tests {
         config.motion_damping = 1.0;
         let mut graph = DpvoPatchGraph::new(config);
         graph.begin_frame(0.0);
-        graph.commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0)).unwrap();
+        graph
+            .commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0))
+            .unwrap();
         graph.begin_frame(0.05);
         graph
             .commit_frame(
@@ -1420,7 +1494,9 @@ mod tests {
         config.motion_damping = 1.0;
         let mut graph = DpvoPatchGraph::new(config);
         graph.begin_frame(0.0);
-        graph.commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0)).unwrap();
+        graph
+            .commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0))
+            .unwrap();
         graph.begin_frame(0.05);
         graph
             .commit_frame(
@@ -1441,7 +1517,9 @@ mod tests {
     fn reject_pending_frame_records_identity_delta_from_predecessor() {
         let mut graph = DpvoPatchGraph::new(small_config());
         graph.begin_frame(0.0);
-        graph.commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0)).unwrap();
+        graph
+            .commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0))
+            .unwrap();
         graph.begin_frame(0.05); // counter becomes 2, rejected
         graph.reject_pending_frame();
         // delta[1] = (0, Identity); the recursive lookup needs a live-pose
@@ -1478,7 +1556,9 @@ mod tests {
         // well-constrained pre-hover patches.
         for i in 0..4 {
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(SE3::identity(), intr(), patches_for_frame(m, i as f64)).unwrap();
+            graph
+                .commit_frame(SE3::identity(), intr(), patches_for_frame(m, i as f64))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1501,10 +1581,26 @@ mod tests {
             graph.reject_pending_frame();
         }
 
-        assert_eq!(graph.n_frames(), n_before, "n_frames() must not advance while every candidate is rejected");
-        assert_eq!(graph.frames(), frames_before.as_slice(), "live frame poses/intrinsics must be untouched");
-        assert_eq!(graph.patches(), patches_before.as_slice(), "patches must be untouched (none admitted)");
-        assert_eq!(graph.edges(), edges_before.as_slice(), "active edges must be untouched (no aging occurred)");
+        assert_eq!(
+            graph.n_frames(),
+            n_before,
+            "n_frames() must not advance while every candidate is rejected"
+        );
+        assert_eq!(
+            graph.frames(),
+            frames_before.as_slice(),
+            "live frame poses/intrinsics must be untouched"
+        );
+        assert_eq!(
+            graph.patches(),
+            patches_before.as_slice(),
+            "patches must be untouched (none admitted)"
+        );
+        assert_eq!(
+            graph.edges(),
+            edges_before.as_slice(),
+            "active edges must be untouched (no aging occurred)"
+        );
     }
 
     /// Milestone M8: an edge dropped by the ordinary removal-window rule
@@ -1528,9 +1624,14 @@ mod tests {
         let mut graph = DpvoPatchGraph::new(config);
         graph.enable_inactive_edge_retention(100);
         for i in 0..8 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1550,14 +1651,23 @@ mod tests {
         assert_eq!(graph.inactive_edge_stats(), (0, 0));
 
         let removed = graph.keyframe();
-        assert_eq!(removed, None, "big motion must not have triggered a fold — only the removal-window drop");
-        assert!(graph.edges().iter().all(|e| e.i != 0), "frame 0's edges should have aged out of the active set");
+        assert_eq!(
+            removed, None,
+            "big motion must not have triggered a fold — only the removal-window drop"
+        );
+        assert!(
+            graph.edges().iter().all(|e| e.i != 0),
+            "frame 0's edges should have aged out of the active set"
+        );
 
         let (retained, evicted) = graph.inactive_edge_stats();
         assert!(retained > 0, "expected at least one archived inactive edge");
         assert_eq!(evicted, 0, "cap (100) was never exceeded");
         for ie in graph.inactive_edges() {
-            assert_eq!(ie.arrival_i, 0, "only frame 0's (touched) edges should have been archived");
+            assert_eq!(
+                ie.arrival_i, 0,
+                "only frame 0's (touched) edges should have been archived"
+            );
             assert_eq!(ie.target, Vector2::new(11.0, 22.0));
             assert_eq!(ie.weight, Vector2::new(0.9, 0.8));
         }
@@ -1581,9 +1691,14 @@ mod tests {
         let mut graph = DpvoPatchGraph::new(config);
         graph.enable_inactive_edge_retention(1); // Cap of exactly 1.
         for i in 0..8 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1597,8 +1712,14 @@ mod tests {
         graph.keyframe();
 
         let (retained, evicted) = graph.inactive_edge_stats();
-        assert_eq!(retained, 1, "cap of 1 must bound the retained count regardless of how many were archived");
-        assert!(evicted > 0, "more than one stale touched edge existed, so eviction must have happened");
+        assert_eq!(
+            retained, 1,
+            "cap of 1 must bound the retained count regardless of how many were archived"
+        );
+        assert!(
+            evicted > 0,
+            "more than one stale touched edge existed, so eviction must have happened"
+        );
     }
 
     /// Milestone M10 (`docs/dpvo_droid_port_plan.md`): the required
@@ -1635,9 +1756,14 @@ mod tests {
         graph.enable_inactive_edge_retention(20); // Cap far smaller than the total archived below.
         const N_FRAMES: usize = 150;
         for i in 0..N_FRAMES {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(1, 0.0)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(1, 0.0))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1648,7 +1774,8 @@ mod tests {
             // `inactive_edges()` can tell which arrival range survived.
             for edge in graph.edges_mut() {
                 let arrival_i = i; // not yet folded, so live index == arrival index order here.
-                edge.target_weight = Some((Vector2::new(arrival_i as f64, 0.0), Vector2::new(1.0, 1.0)));
+                edge.target_weight =
+                    Some((Vector2::new(arrival_i as f64, 0.0), Vector2::new(1.0, 1.0)));
             }
             graph.keyframe();
         }
@@ -1660,12 +1787,28 @@ mod tests {
         // toward the cap again at the CURRENT stride until it thins again)
         // — the invariant this policy actually guarantees is the UPPER
         // bound, never exceeding the cap, not landing on it exactly.
-        assert!(retained <= 20, "cap must still bound the retained count, got {retained}");
+        assert!(
+            retained <= 20,
+            "cap must still bound the retained count, got {retained}"
+        );
         assert!(retained > 0, "the cap must not have degenerated to zero");
-        assert!(evicted > 0, "this trajectory must have archived far more than the cap");
+        assert!(
+            evicted > 0,
+            "this trajectory must have archived far more than the cap"
+        );
 
-        let min_arrival_i = graph.inactive_edges().iter().map(|ie| ie.target.x as usize).min().unwrap();
-        let max_arrival_i = graph.inactive_edges().iter().map(|ie| ie.target.x as usize).max().unwrap();
+        let min_arrival_i = graph
+            .inactive_edges()
+            .iter()
+            .map(|ie| ie.target.x as usize)
+            .min()
+            .unwrap();
+        let max_arrival_i = graph
+            .inactive_edges()
+            .iter()
+            .map(|ie| ie.target.x as usize)
+            .max()
+            .unwrap();
         // A plain FIFO cap of 20 could never retain anything with
         // arrival_i below roughly `N_FRAMES - 20`; the decimating policy
         // must retain something from at least the first THIRD of the run.
@@ -1691,9 +1834,14 @@ mod tests {
         let mut graph = DpvoPatchGraph::new(config);
         graph.enable_inactive_edge_retention(1000);
         for i in 0..8 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1709,9 +1857,14 @@ mod tests {
 
         // Advance the graph further (more frames, more folds/removals).
         for i in 8..14 {
-            let pose = SE3::new(UnitQuaternion::identity(), Vector3::new(5.0 * i as f64, 0.0, 0.0));
+            let pose = SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(5.0 * i as f64, 0.0, 0.0),
+            );
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(pose, intr(), patches_for_frame(m, 0.0)).unwrap();
+            graph
+                .commit_frame(pose, intr(), patches_for_frame(m, 0.0))
+                .unwrap();
             let forw = graph.edges_forw();
             let back = graph.edges_back();
             graph.append_edges(&forw, 4);
@@ -1733,7 +1886,9 @@ mod tests {
         config.buffer_size = 2;
         let mut graph = DpvoPatchGraph::new(config);
         graph.begin_frame(0.0);
-        graph.commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0)).unwrap();
+        graph
+            .commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0))
+            .unwrap();
         graph.begin_frame(0.05);
         let err = graph.commit_frame(SE3::identity(), intr(), patches_for_frame(4, 0.0));
         assert_eq!(err, Err(DpvoGraphError::BufferFull { buffer_size: 2 }));

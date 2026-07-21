@@ -426,32 +426,34 @@ use visloc_vision::dpvo::onnx_session::{DpvoOnnxError, DpvoOnnxSession};
 use visloc_vision::dpvo::patchify::patchify_cpu;
 use visloc_vision::dpvo::softagg::{SoftAgg, SoftAggError};
 use visloc_vision::dpvo::{CORR_DIM, CORR_RADIUS, DIM, FNET_DIM, PATCH, RES};
+use visloc_vision::features::deep::DeepFeatureSet;
 use visloc_vision::features::superpoint_onnx::{
     OnnxBackend, SuperPointOnnxConfig, SuperPointOnnxError, SuperPointOnnxExtractor,
 };
-use visloc_vision::features::deep::DeepFeatureSet;
 use visloc_vision::features::{DeepFeatureExtractor, GrayscaleImage};
 
 use crate::dpvo_long_loop::{
-    sp_anchored_patch_centers, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex, QueryCandidateLogEntry,
+    sp_anchored_patch_centers, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex,
+    QueryCandidateLogEntry,
+};
+use crate::dpvo_loop_closure::{
+    expand_frame_pairs_to_patch_edges, find_loop_edges, DpvoLoopClosureConfig,
+    UPSTREAM_MIN_LOOP_GAP,
 };
 use crate::dpvo_patch_ba::{
     dpvo_ba, reproject_patch_grid, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge,
     DpvoIntrinsics, DpvoPatch,
 };
-use crate::dpvo_loop_closure::{
-    expand_frame_pairs_to_patch_edges, find_loop_edges, DpvoLoopClosureConfig, UPSTREAM_MIN_LOOP_GAP,
-};
 use crate::dpvo_patch_graph::{DpvoGraphError, DpvoPatchGraph, DpvoVoConfig};
-use crate::dpvo_vi_ba::{
-    dpvo_vi_ba, estimate_mono_vi_alignment, imu_factor_nis, DpvoImuFactor, DpvoMonoViAlignmentGates,
-    DpvoMonoViAlignmentRejection, DpvoViWindow,
-};
 use crate::dpvo_scale_coupling::{
-    apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment, AnnealingWeight,
-    RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCouplingConfig,
+    apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment,
+    AnnealingWeight, RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCouplingConfig,
 };
 use crate::dpvo_sim3_backend::{run_sim3_backend, DpvoSim3BackendConfig, Sim3LoopMeasurement};
+use crate::dpvo_vi_ba::{
+    dpvo_vi_ba, estimate_mono_vi_alignment, imu_factor_nis, DpvoImuFactor,
+    DpvoMonoViAlignmentGates, DpvoMonoViAlignmentRejection, DpvoViWindow,
+};
 use crate::imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator,
 };
@@ -469,7 +471,10 @@ pub enum DpvoOdometryError {
     Graph(DpvoGraphError),
     Ba(DpvoBaError),
     /// `image.dim()` did not match [`DpvoOdometryConfig::width`]/`height`.
-    ImageShapeMismatch { expected: (usize, usize), actual: (usize, usize) },
+    ImageShapeMismatch {
+        expected: (usize, usize),
+        actual: (usize, usize),
+    },
     /// Milestone M11: `config.long_loop` was `Some` but no SuperPoint ONNX
     /// model path was supplied to [`DpvoOdometry::new`] — the long-range
     /// loop mechanism needs a real per-frame appearance descriptor, so this
@@ -488,7 +493,10 @@ impl std::fmt::Display for DpvoOdometryError {
             Self::Graph(e) => write!(f, "dpvo odometry: graph error: {e}"),
             Self::Ba(e) => write!(f, "dpvo odometry: bundle adjustment error: {e}"),
             Self::ImageShapeMismatch { expected, actual } => {
-                write!(f, "dpvo odometry: expected image shape {expected:?}, got {actual:?}")
+                write!(
+                    f,
+                    "dpvo odometry: expected image shape {expected:?}, got {actual:?}"
+                )
             }
             Self::LongLoopModelRequired => {
                 write!(f, "dpvo odometry: config.long_loop is Some but no superpoint_model_path was supplied")
@@ -691,6 +699,14 @@ pub struct DpvoLowParallaxConfig {
     /// [`LowParallaxDampState::advance_unflagging`]'s own doc) AND the
     /// regime is no longer active. Irrelevant when `response == Freeze`.
     pub unflag_after_commits: usize,
+    /// Milestone M16 (`DepthDamp` only): number of committed frames over
+    /// which an eligible cohort's multiplier decays geometrically from
+    /// `depth_damp_factor` to `1.0`. Zero preserves M15's binary un-flag.
+    pub gradual_release_duration_commits: usize,
+    /// Milestone M16 (`DepthDamp` only): maximum frame cohorts allowed to
+    /// begin gradual release in one commit. Each cohort contains exactly
+    /// `patches_per_frame` patches, so this directly bounds release mass.
+    pub gradual_release_start_cap_frames: usize,
 }
 
 impl Default for DpvoLowParallaxConfig {
@@ -761,6 +777,8 @@ impl Default for DpvoLowParallaxConfig {
             response: LowParallaxResponse::Freeze,
             depth_damp_factor: 1000.0,
             unflag_after_commits: 16,
+            gradual_release_duration_commits: 0,
+            gradual_release_start_cap_frames: 4,
         }
     }
 }
@@ -827,7 +845,11 @@ impl LowParallaxRegimeState {
     /// (it is the frame whose real motion just proved the hover is over,
     /// so it should commit normally).
     pub fn update(&mut self, cfg: &DpvoLowParallaxConfig, flow: f64) -> LowParallaxTransition {
-        let no_op = LowParallaxTransition { suppress: false, just_entered: false, just_exited: false };
+        let no_op = LowParallaxTransition {
+            suppress: false,
+            just_entered: false,
+            just_exited: false,
+        };
         if self.disarmed {
             return no_op;
         }
@@ -844,13 +866,25 @@ impl LowParallaxRegimeState {
             if median >= cfg.exit_flow {
                 self.in_regime = false;
                 self.disarmed = true;
-                return LowParallaxTransition { suppress: false, just_entered: false, just_exited: true };
+                return LowParallaxTransition {
+                    suppress: false,
+                    just_entered: false,
+                    just_exited: true,
+                };
             }
-            return LowParallaxTransition { suppress: true, just_entered: false, just_exited: false };
+            return LowParallaxTransition {
+                suppress: true,
+                just_entered: false,
+                just_exited: false,
+            };
         }
         if median < cfg.enter_flow {
             self.in_regime = true;
-            return LowParallaxTransition { suppress: true, just_entered: true, just_exited: false };
+            return LowParallaxTransition {
+                suppress: true,
+                just_entered: true,
+                just_exited: false,
+            };
         }
         no_op
     }
@@ -903,10 +937,17 @@ fn windowed_median(window: &VecDeque<f64>) -> f64 {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LowParallaxDampState {
     damped_frames: HashSet<usize>,
+    /// Release start, keyed by the stable frame arrival index. This is a
+    /// subset of `damped_frames`; absence means still fully damped.
+    release_started_at: HashMap<usize, usize>,
+    last_advance_now: usize,
+    release_duration_commits: usize,
     frames_flagged_total: usize,
     patches_flagged_total: usize,
     unflagged_total: usize,
     damped_solve_count: usize,
+    release_started_total: usize,
+    max_release_started_per_advance: usize,
 }
 
 impl LowParallaxDampState {
@@ -937,7 +978,13 @@ impl LowParallaxDampState {
     /// therefore never accumulates unbounded stale entries for frames that
     /// are long gone from the live graph, even though this state has no
     /// visibility into `DpvoPatchGraph`'s own removal bookkeeping at all.
-    pub fn advance_unflagging(&mut self, now: usize, unflag_after_commits: usize, still_in_regime: bool) {
+    pub fn advance_unflagging(
+        &mut self,
+        now: usize,
+        unflag_after_commits: usize,
+        still_in_regime: bool,
+    ) {
+        self.last_advance_now = now;
         if still_in_regime {
             return;
         }
@@ -949,8 +996,57 @@ impl LowParallaxDampState {
             .collect();
         for arrival in graduated {
             self.damped_frames.remove(&arrival);
+            self.release_started_at.remove(&arrival);
             self.unflagged_total += 1;
         }
+    }
+
+    /// Milestone M16 gradual alternative to [`Self::advance_unflagging`].
+    /// Existing releases advance concurrently, while at most
+    /// `start_cap_frames` newly eligible cohorts enter release per commit.
+    /// Oldest arrivals start first, making the schedule deterministic.
+    pub fn advance_gradual_release(
+        &mut self,
+        now: usize,
+        unflag_after_commits: usize,
+        still_in_regime: bool,
+        duration_commits: usize,
+        start_cap_frames: usize,
+    ) {
+        self.last_advance_now = now;
+        self.release_duration_commits = duration_commits.max(1);
+        if still_in_regime {
+            return;
+        }
+
+        let completed: Vec<usize> = self
+            .release_started_at
+            .iter()
+            .filter_map(|(&arrival, &start)| {
+                (now.saturating_sub(start) >= self.release_duration_commits).then_some(arrival)
+            })
+            .collect();
+        for arrival in completed {
+            self.release_started_at.remove(&arrival);
+            if self.damped_frames.remove(&arrival) {
+                self.unflagged_total += 1;
+            }
+        }
+
+        let mut eligible: Vec<usize> = self
+            .damped_frames
+            .iter()
+            .copied()
+            .filter(|arrival| !self.release_started_at.contains_key(arrival))
+            .filter(|&arrival| now.saturating_sub(arrival) >= unflag_after_commits)
+            .collect();
+        eligible.sort_unstable();
+        let started = eligible.len().min(start_cap_frames.max(1));
+        for arrival in eligible.into_iter().take(started) {
+            self.release_started_at.insert(arrival, now);
+        }
+        self.release_started_total += started;
+        self.max_release_started_per_advance = self.max_release_started_per_advance.max(started);
     }
 
     /// Build a per-patch [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]
@@ -967,7 +1063,12 @@ impl LowParallaxDampState {
     /// extra allocation and is byte-identical to `depth_damping: None`.
     /// Increments [`Self::damped_solve_count`] exactly when it returns
     /// `Some` (i.e. this call site's own solve was genuinely affected).
-    pub fn multipliers(&mut self, frame_arrivals: &[usize], patches_per_frame: usize, damp_factor: f64) -> Option<Vec<f64>> {
+    pub fn multipliers(
+        &mut self,
+        frame_arrivals: &[usize],
+        patches_per_frame: usize,
+        damp_factor: f64,
+    ) -> Option<Vec<f64>> {
         if self.damped_frames.is_empty() {
             return None;
         }
@@ -977,7 +1078,16 @@ impl LowParallaxDampState {
             if self.damped_frames.contains(&arrival) {
                 any = true;
                 let lo = local * patches_per_frame;
-                out[lo..lo + patches_per_frame].fill(damp_factor);
+                let multiplier =
+                    self.release_started_at
+                        .get(&arrival)
+                        .map_or(damp_factor, |&start| {
+                            let elapsed = self.last_advance_now.saturating_sub(start);
+                            let remaining =
+                                1.0 - elapsed as f64 / self.release_duration_commits.max(1) as f64;
+                            damp_factor.powf(remaining.clamp(0.0, 1.0))
+                        });
+                out[lo..lo + patches_per_frame].fill(multiplier);
             }
         }
         if !any {
@@ -1011,6 +1121,33 @@ impl LowParallaxDampState {
     /// real `dpvo_ba` solve was actually damped, not just evaluated).
     pub fn damped_solve_count(&self) -> usize {
         self.damped_solve_count
+    }
+    /// Frame cohorts currently partway through M16's gradual release.
+    pub fn currently_releasing_frames(&self) -> usize {
+        self.release_started_at.len()
+    }
+    /// Cumulative cohorts that entered gradual release.
+    pub fn release_started_total(&self) -> usize {
+        self.release_started_total
+    }
+    /// Largest number of cohorts started by one advance call.
+    pub fn max_release_started_per_advance(&self) -> usize {
+        self.max_release_started_per_advance
+    }
+    /// `[fully_damped, 0-25%, 25-50%, 50-75%, 75-100% released]` cohorts.
+    pub fn release_histogram_frames(&self) -> [usize; 5] {
+        let mut histogram = [0usize; 5];
+        for arrival in &self.damped_frames {
+            let Some(start) = self.release_started_at.get(arrival) else {
+                histogram[0] += 1;
+                continue;
+            };
+            let elapsed = self.last_advance_now.saturating_sub(*start);
+            let progress = elapsed as f64 / self.release_duration_commits.max(1) as f64;
+            let bucket = 1 + (progress.clamp(0.0, 0.999_999) * 4.0) as usize;
+            histogram[bucket] += 1;
+        }
+        histogram
     }
 }
 
@@ -1441,7 +1578,10 @@ pub struct DpvoScaleCouplingConfig {
 
 impl Default for DpvoScaleCouplingConfig {
     fn default() -> Self {
-        Self { scale: ScaleCouplingConfig::default(), min_window_factors: 4 }
+        Self {
+            scale: ScaleCouplingConfig::default(),
+            min_window_factors: 4,
+        }
     }
 }
 
@@ -1654,6 +1794,15 @@ pub struct DpvoLowParallaxDiagnostics {
     /// damped (i.e. at least one currently-live frame in that solve's own
     /// window was flagged) — see [`LowParallaxDampState::damped_solve_count`].
     pub damped_solve_count: usize,
+    /// Milestone M16: cohorts currently between full damping and 1.0.
+    pub currently_releasing_frames: usize,
+    /// Milestone M16: cumulative cohorts admitted to gradual release.
+    pub release_started_total: usize,
+    /// Milestone M16: observed one-commit release-start maximum.
+    pub max_release_started_per_advance: usize,
+    /// Milestone M16 release progress histogram; see
+    /// [`LowParallaxDampState::release_histogram_frames`].
+    pub release_histogram_frames: [usize; 5],
 }
 
 /// Milestone M5b: cumulative counters, one per DISTINCT rejection reason
@@ -1702,7 +1851,12 @@ pub enum DpvoImuRejectionDetail {
     /// doc for `reason`'s meaning; `bias_norm`/`rms_before`/`rms_after` are
     /// the actual recovered values (vs. `DpvoImuConfig`'s configured
     /// bounds) at the time of rejection.
-    GyroGate { reason: GyroGateRejection, bias_norm: f64, rms_before: f64, rms_after: f64 },
+    GyroGate {
+        reason: GyroGateRejection,
+        bias_norm: f64,
+        rms_before: f64,
+        rms_after: f64,
+    },
     /// `crate::dpvo_vi_ba::estimate_mono_vi_alignment` rejected — the
     /// wrapped `DpvoMonoViAlignmentRejection` already carries its own
     /// specific offending value(s).
@@ -2074,9 +2228,14 @@ impl DpvoOdometry {
                     max_keypoints: 250,
                     ..SuperPointOnnxConfig::default()
                 };
-                let extractor = SuperPointOnnxExtractor::load_from_path_with_backend(model_path, sp_config, backend)
-                    .map_err(DpvoOdometryError::LongLoop)?;
-                Some(DpvoLongLoopRuntime { extractor, index: DpvoLongLoopIndex::new(ll_cfg) })
+                let extractor = SuperPointOnnxExtractor::load_from_path_with_backend(
+                    model_path, sp_config, backend,
+                )
+                .map_err(DpvoOdometryError::LongLoop)?;
+                Some(DpvoLongLoopRuntime {
+                    extractor,
+                    index: DpvoLongLoopIndex::new(ll_cfg),
+                })
             }
             (Some(_), None) => return Err(DpvoOdometryError::LongLoopModelRequired),
             (None, _) => None,
@@ -2242,7 +2401,11 @@ impl DpvoOdometry {
     pub fn scale_coupling_diagnostics(&self) -> DpvoScaleCouplingDiagnostics {
         let posterior = self.scale_estimator.posterior();
         DpvoScaleCouplingDiagnostics {
-            enabled: self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some()),
+            enabled: self
+                .config
+                .imu
+                .as_ref()
+                .is_some_and(|c| c.scale_coupling.is_some()),
             weight: self.scale_coupling_weight.value,
             converged: self.scale_estimator.is_converged(),
             recovered_scale: posterior.map(|p| p.mean.exp()),
@@ -2304,7 +2467,10 @@ impl DpvoOdometry {
     /// `enabled: false` (a default-zeroed struct) whenever `config.long_loop`
     /// is `None`.
     pub fn long_loop_diagnostics(&self) -> DpvoLongLoopDiagnostics {
-        self.long_loop.as_ref().map(|runtime| runtime.index.diagnostics()).unwrap_or_default()
+        self.long_loop
+            .as_ref()
+            .map(|runtime| runtime.index.diagnostics())
+            .unwrap_or_default()
     }
 
     /// Milestone M12 (open item 2 carried forward from M11): every top-`K`
@@ -2312,7 +2478,10 @@ impl DpvoOdometry {
     /// accepted or not — see `crate::dpvo_long_loop::QueryCandidateLogEntry`'s
     /// own doc. Empty whenever `config.long_loop` is `None`.
     pub fn long_loop_query_log(&self) -> &[QueryCandidateLogEntry] {
-        self.long_loop.as_ref().map(|runtime| runtime.index.query_log()).unwrap_or(&[])
+        self.long_loop
+            .as_ref()
+            .map(|runtime| runtime.index.query_log())
+            .unwrap_or(&[])
     }
 
     /// Snapshot of the Milestone M14 low-parallax hover-freeze state —
@@ -2329,12 +2498,22 @@ impl DpvoOdometry {
             last_flow: self.low_parallax_last_flow,
             last_enter_frame: self.low_parallax_last_enter_frame,
             last_exit_frame: self.low_parallax_last_exit_frame,
-            response: self.config.low_parallax.map(|cfg| cfg.response).unwrap_or_default(),
+            response: self
+                .config
+                .low_parallax
+                .map(|cfg| cfg.response)
+                .unwrap_or_default(),
             currently_damped_frames: self.low_parallax_damp.currently_damped_frames(),
             frames_flagged_total: self.low_parallax_damp.frames_flagged_total(),
             patches_flagged_total: self.low_parallax_damp.patches_flagged_total(),
             unflagged_total: self.low_parallax_damp.unflagged_total(),
             damped_solve_count: self.low_parallax_damp.damped_solve_count(),
+            currently_releasing_frames: self.low_parallax_damp.currently_releasing_frames(),
+            release_started_total: self.low_parallax_damp.release_started_total(),
+            max_release_started_per_advance: self
+                .low_parallax_damp
+                .max_release_started_per_advance(),
+            release_histogram_frames: self.low_parallax_damp.release_histogram_frames(),
         }
     }
 
@@ -2421,19 +2600,38 @@ impl DpvoOdometry {
         // shortfall falls back to the SAME random sampler below, byte-for-
         // byte.
         let m = self.graph.config().patches_per_frame;
-        let sp_anchored = self.long_loop.as_ref().is_some_and(|r| r.index.config().sp_anchored_patches);
+        let sp_anchored = self
+            .long_loop
+            .as_ref()
+            .is_some_and(|r| r.index.config().sp_anchored_patches);
         let sp_keypoints: Vec<(f64, f64, f32)> = if sp_anchored {
             sp_features
                 .as_ref()
-                .map(|f| f.keypoints.iter().zip(f.scores.iter()).map(|(k, &s)| (k.x, k.y, s)).collect())
+                .map(|f| {
+                    f.keypoints
+                        .iter()
+                        .zip(f.scores.iter())
+                        .map(|(k, &s)| (k.x, k.y, s))
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
         };
-        let sp_min_separation =
-            self.long_loop.as_ref().map(|r| r.index.config().sp_patch_min_separation).unwrap_or(2.0);
-        let coords: Vec<(f32, f32)> =
-            sp_anchored_patch_centers(m, ws, hs, &sp_keypoints, RES as f64, sp_min_separation, &mut self.rng);
+        let sp_min_separation = self
+            .long_loop
+            .as_ref()
+            .map(|r| r.index.config().sp_patch_min_separation)
+            .unwrap_or(2.0);
+        let coords: Vec<(f32, f32)> = sp_anchored_patch_centers(
+            m,
+            ws,
+            hs,
+            &sp_keypoints,
+            RES as f64,
+            sp_min_separation,
+            &mut self.rng,
+        );
 
         let gmap = patchify_cpu(fmap.view(), &coords, 1); // (M, 128, 3, 3)
         let imap_patch4 = patchify_cpu(imap_full.view(), &coords, 0); // (M, 384, 1, 1)
@@ -2447,7 +2645,11 @@ impl DpvoOdometry {
             depths.iter_mut().for_each(|d| *d = median);
         }
         let patches_vec: Vec<DpvoPatch> = (0..m)
-            .map(|i| DpvoPatch { x: coords[i].0 as f64, y: coords[i].1 as f64, inverse_depth: depths[i] })
+            .map(|i| DpvoPatch {
+                x: coords[i].0 as f64,
+                y: coords[i].1 as f64,
+                inverse_depth: depths[i],
+            })
             .collect();
 
         let predicted_pose = self.graph.begin_frame(timestamp);
@@ -2502,7 +2704,8 @@ impl DpvoOdometry {
         // doc's own "Milestone M15" section for why flagging is frame-level.
         if low_parallax_flag_on_commit {
             if let Some(arrival) = self.graph.frames().last().map(|f| f.arrival_index) {
-                self.low_parallax_damp.flag(arrival, self.graph.config().patches_per_frame);
+                self.low_parallax_damp
+                    .flag(arrival, self.graph.config().patches_per_frame);
             }
         }
         self.frame_pyramids.push(candidate_pyramid);
@@ -2531,7 +2734,9 @@ impl DpvoOdometry {
                     .iter()
                     .map(|k| nalgebra::Point2::new(k.x / RES as f64, k.y / RES as f64))
                     .collect();
-                runtime.index.ingest_frame(arrival_index, keypoints, features.descriptors);
+                runtime
+                    .index
+                    .ingest_frame(arrival_index, keypoints, features.descriptors);
             }
         }
         // Milestone M5: one velocity slot per live frame, parallel to
@@ -2566,7 +2771,11 @@ impl DpvoOdometry {
             // one-shot `try_imu_bootstrap` must not also run (the two
             // mechanisms would otherwise both try to own
             // `self.imu_bias_gyro`/`self.imu_bootstrapped`).
-            let use_scale_coupling = self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some());
+            let use_scale_coupling = self
+                .config
+                .imu
+                .as_ref()
+                .is_some_and(|c| c.scale_coupling.is_some());
             if !use_scale_coupling {
                 self.try_imu_bootstrap();
             }
@@ -2625,7 +2834,10 @@ impl DpvoOdometry {
         let m = self.graph.config().patches_per_frame;
         let lo = n.saturating_sub(3) * m;
         let hi = n * m;
-        let mut values: Vec<f64> = self.graph.patches()[lo..hi].iter().map(|p| p.inverse_depth).collect();
+        let mut values: Vec<f64> = self.graph.patches()[lo..hi]
+            .iter()
+            .map(|p| p.inverse_depth)
+            .collect();
         if values.is_empty() {
             return 1.0;
         }
@@ -2657,8 +2869,16 @@ impl DpvoOdometry {
         let mut coords_grid_px = Array4::<f32>::zeros((m, PATCH, PATCH, 2));
         for local in 0..m {
             let patch = self.graph.patches()[patch_lo + local];
-            let grid = reproject_patch_grid(&prev_pose, predicted_pose, &prev_intr, candidate_intr, &patch);
-            anchor_gmap.index_axis_mut(Axis(0), local).assign(&self.patch_gmap[patch_lo + local]);
+            let grid = reproject_patch_grid(
+                &prev_pose,
+                predicted_pose,
+                &prev_intr,
+                candidate_intr,
+                &patch,
+            );
+            anchor_gmap
+                .index_axis_mut(Axis(0), local)
+                .assign(&self.patch_gmap[patch_lo + local]);
             for py in 0..PATCH {
                 for px in 0..PATCH {
                     coords_grid_px[(local, py, px, 0)] = grid[py][px].x as f32;
@@ -2677,16 +2897,26 @@ impl DpvoOdometry {
         let net_zero = Array3::<f32>::zeros((1, m, DIM));
         let mut inp_arr = Array3::<f32>::zeros((1, m, DIM));
         for local in 0..m {
-            inp_arr.index_axis_mut(Axis(0), 0).index_axis_mut(Axis(0), local).assign(&self.patch_imap[patch_lo + local]);
+            inp_arr
+                .index_axis_mut(Axis(0), 0)
+                .index_axis_mut(Axis(0), local)
+                .assign(&self.patch_imap[patch_lo + local]);
         }
         let kk: Vec<i64> = (patch_lo..patch_lo + m).map(|k| k as i64).collect();
         let ii = vec![prev_frame as i64; m];
         let jj = vec![n as i64; m];
         let corr3 = corr_flat.insert_axis(Axis(0));
         let update_start = Instant::now();
-        let (_net_out, delta, _weight) = self
-            .session
-            .update_iteration(net_zero.view(), inp_arr.view(), corr3.view(), &kk, &ii, &jj, &self.agg_kk, &self.agg_ij)?;
+        let (_net_out, delta, _weight) = self.session.update_iteration(
+            net_zero.view(),
+            inp_arr.view(),
+            corr3.view(),
+            &kk,
+            &ii,
+            &jj,
+            &self.agg_kk,
+            &self.agg_ij,
+        )?;
         self.stats.update_ms_total += update_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut norms: Vec<f64> = (0..m)
@@ -2733,8 +2963,13 @@ impl DpvoOdometry {
         candidate_intr: &DpvoIntrinsics,
         candidate_pyramid: &FramePyramid,
     ) -> Result<LowParallaxGateOutcome, DpvoOdometryError> {
-        let no_op = LowParallaxGateOutcome { reject: false, flag_on_commit: false };
-        let Some(cfg) = self.config.low_parallax else { return Ok(no_op) };
+        let no_op = LowParallaxGateOutcome {
+            reject: false,
+            flag_on_commit: false,
+        };
+        let Some(cfg) = self.config.low_parallax else {
+            return Ok(no_op);
+        };
         if self.graph.n_frames() == 0 {
             return Ok(no_op);
         }
@@ -2750,13 +2985,20 @@ impl DpvoOdometry {
             self.low_parallax_times_exited += 1;
             self.low_parallax_last_exit_frame = Some(frames_processed);
         }
-        self.low_parallax_flow_log.push((frames_processed, flow, self.low_parallax_regime.in_regime()));
+        self.low_parallax_flow_log.push((
+            frames_processed,
+            flow,
+            self.low_parallax_regime.in_regime(),
+        ));
         match cfg.response {
             LowParallaxResponse::Freeze => {
                 if transition.suppress {
                     self.graph.reject_pending_frame();
                     self.low_parallax_frames_suppressed_total += 1;
-                    Ok(LowParallaxGateOutcome { reject: true, flag_on_commit: false })
+                    Ok(LowParallaxGateOutcome {
+                        reject: true,
+                        flag_on_commit: false,
+                    })
                 } else {
                     Ok(no_op)
                 }
@@ -2771,7 +3013,10 @@ impl DpvoOdometry {
                 // false for the exiting frame — the SAME semantics
                 // `transition.suppress` encodes for `Freeze`, just without
                 // rejecting).
-                Ok(LowParallaxGateOutcome { reject: false, flag_on_commit: self.low_parallax_regime.in_regime() })
+                Ok(LowParallaxGateOutcome {
+                    reject: false,
+                    flag_on_commit: self.low_parallax_regime.in_regime(),
+                })
             }
         }
     }
@@ -2785,13 +3030,31 @@ impl DpvoOdometry {
     /// `DpvoLowParallaxConfig` at all — see its own doc for why it stays
     /// free-standing).
     fn advance_low_parallax_unflagging(&mut self) {
-        let Some(cfg) = self.config.low_parallax else { return };
+        let Some(cfg) = self.config.low_parallax else {
+            return;
+        };
         if cfg.response != LowParallaxResponse::DepthDamp {
             return;
         }
-        let Some(now) = self.graph.frames().last().map(|f| f.arrival_index) else { return };
+        let Some(now) = self.graph.frames().last().map(|f| f.arrival_index) else {
+            return;
+        };
         let still_in_regime = self.low_parallax_regime.in_regime();
-        self.low_parallax_damp.advance_unflagging(now, cfg.unflag_after_commits, still_in_regime);
+        if cfg.gradual_release_duration_commits == 0 {
+            self.low_parallax_damp.advance_unflagging(
+                now,
+                cfg.unflag_after_commits,
+                still_in_regime,
+            );
+        } else {
+            self.low_parallax_damp.advance_gradual_release(
+                now,
+                cfg.unflag_after_commits,
+                still_in_regime,
+                cfg.gradual_release_duration_commits,
+                cfg.gradual_release_start_cap_frames,
+            );
+        }
     }
 
     /// Milestone M15: build a [`crate::dpvo_patch_ba::DpvoBaProblem::depth_damping`]
@@ -2807,9 +3070,14 @@ impl DpvoOdometry {
     /// `low_parallax_damp`'s own `damped_frames` set stays permanently empty
     /// under `Freeze` and [`LowParallaxDampState::multipliers`] returns
     /// `None` on its own first line regardless.
-    fn depth_damping_for(&mut self, frame_arrivals: &[usize], patches_per_frame: usize) -> Option<Vec<f64>> {
+    fn depth_damping_for(
+        &mut self,
+        frame_arrivals: &[usize],
+        patches_per_frame: usize,
+    ) -> Option<Vec<f64>> {
         let damp_factor = self.config.low_parallax?.depth_damp_factor;
-        self.low_parallax_damp.multipliers(frame_arrivals, patches_per_frame, damp_factor)
+        self.low_parallax_damp
+            .multipliers(frame_arrivals, patches_per_frame, damp_factor)
     }
 
     /// Milestone M5: fold every buffered [`Self::push_imu`] sample with
@@ -2833,10 +3101,17 @@ impl DpvoOdometry {
     /// sample period's contribution to a multi-sample window, well inside
     /// the noise this factor's own covariance already accounts for.
     fn integrate_imu_for_new_frame(&mut self, frame_timestamp: f64) {
-        let Some(imu_cfg) = self.config.imu.clone() else { return };
-        let mut integrator =
-            ImuPreintegrator::new_with_bias_and_noise(self.imu_bias_gyro, self.imu_bias_accel, imu_cfg.noise)
-                .unwrap_or_else(|| ImuPreintegrator::new_with_bias(self.imu_bias_gyro, self.imu_bias_accel));
+        let Some(imu_cfg) = self.config.imu.clone() else {
+            return;
+        };
+        let mut integrator = ImuPreintegrator::new_with_bias_and_noise(
+            self.imu_bias_gyro,
+            self.imu_bias_accel,
+            imu_cfg.noise,
+        )
+        .unwrap_or_else(|| {
+            ImuPreintegrator::new_with_bias(self.imu_bias_gyro, self.imu_bias_accel)
+        });
 
         let mut last_ts = self.last_imu_boundary_timestamp;
         let mut integrated_any = false;
@@ -2844,7 +3119,10 @@ impl DpvoOdometry {
             if ts > frame_timestamp {
                 break;
             }
-            let (ts, gyro, accel) = self.pending_imu.pop_front().expect("front() just matched Some");
+            let (ts, gyro, accel) = self
+                .pending_imu
+                .pop_front()
+                .expect("front() just matched Some");
             if let Some(prev) = last_ts {
                 let dt = ts - prev;
                 if dt > 0.0 {
@@ -2888,7 +3166,8 @@ impl DpvoOdometry {
         if !self.imu_bootstrapped {
             let pose_from = self.graph.frames()[n - 2].pose.clone();
             let pose_to = self.graph.frames()[n - 1].pose.clone();
-            self.imu_bootstrap_history.push((from_arrival, to_arrival, pose_from, pose_to, delta));
+            self.imu_bootstrap_history
+                .push((from_arrival, to_arrival, pose_from, pose_to, delta));
             if self.imu_bootstrap_history.len() > IMU_BOOTSTRAP_HISTORY_CAP {
                 let overflow = self.imu_bootstrap_history.len() - IMU_BOOTSTRAP_HISTORY_CAP;
                 self.imu_bootstrap_history.drain(0..overflow);
@@ -2902,8 +3181,11 @@ impl DpvoOdometry {
     /// of the graph). Cheap: `arrival_index` is monotonically increasing,
     /// so a single comparison against the oldest live frame suffices.
     fn prune_stale_imu_deltas(&mut self) {
-        let Some(oldest_live) = self.graph.frames().first().map(|f| f.arrival_index) else { return };
-        self.imu_deltas_by_arrival.retain(|&(_, to), _| to >= oldest_live);
+        let Some(oldest_live) = self.graph.frames().first().map(|f| f.arrival_index) else {
+            return;
+        };
+        self.imu_deltas_by_arrival
+            .retain(|&(_, to), _| to >= oldest_live);
     }
 
     /// Milestone M5b's bootstrap chain: gyro-bias estimate (rotation-only,
@@ -2951,7 +3233,9 @@ impl DpvoOdometry {
         if self.imu_bootstrapped {
             return;
         }
-        let Some(imu_cfg) = self.config.imu.clone() else { return };
+        let Some(imu_cfg) = self.config.imu.clone() else {
+            return;
+        };
         if self.imu_bootstrap_history.len() < imu_cfg.min_bootstrap_factors {
             return;
         }
@@ -2972,8 +3256,11 @@ impl DpvoOdometry {
         }
         let mut arrival_ids_sorted: Vec<usize> = arrival_id_set.into_iter().collect();
         arrival_ids_sorted.sort_unstable();
-        let local_index: HashMap<usize, usize> =
-            arrival_ids_sorted.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
+        let local_index: HashMap<usize, usize> = arrival_ids_sorted
+            .iter()
+            .enumerate()
+            .map(|(idx, &id)| (id, idx))
+            .collect();
         let arrival_ids: Vec<u64> = arrival_ids_sorted.iter().map(|&id| id as u64).collect();
 
         let mut map = VisualMap::new();
@@ -2985,8 +3272,16 @@ impl DpvoOdometry {
                 }
                 let body = imu_cfg.body_to_camera.compose(pose);
                 let mut frame = Frame::new(id as u64, 0);
-                frame.pose = Some(Pose { world_to_camera: body });
-                map.keyframes.insert(id as u64, Keyframe { frame, observations: Vec::new() });
+                frame.pose = Some(Pose {
+                    world_to_camera: body,
+                });
+                map.keyframes.insert(
+                    id as u64,
+                    Keyframe {
+                        frame,
+                        observations: Vec::new(),
+                    },
+                );
                 local_poses[local_index[&id]] = pose.clone();
             }
         }
@@ -3023,7 +3318,8 @@ impl DpvoOdometry {
             .collect();
 
         // ---- Stage 1: gyro bias (rotation-only, scale-invariant) ----
-        let Some(gyro_bias) = estimate_gyro_bias(&map, &arrival_ids, &factors, self.imu_bias_gyro) else {
+        let Some(gyro_bias) = estimate_gyro_bias(&map, &arrival_ids, &factors, self.imu_bias_gyro)
+        else {
             self.imu_bootstrap_rejections += 1;
             self.imu_rejection_counts.gyro_estimator_none += 1;
             self.imu_last_rejection = Some(DpvoImuRejectionDetail::GyroEstimatorNone);
@@ -3036,8 +3332,12 @@ impl DpvoOdometry {
                 // "Milestone M5b's gyro-bias gate".
                 self.imu_bootstrap_rejections += 1;
                 match reason {
-                    GyroGateRejection::MagnitudeTooLarge => self.imu_rejection_counts.gyro_magnitude += 1,
-                    GyroGateRejection::RmsAboveAbsoluteBound => self.imu_rejection_counts.gyro_rms_absolute += 1,
+                    GyroGateRejection::MagnitudeTooLarge => {
+                        self.imu_rejection_counts.gyro_magnitude += 1
+                    }
+                    GyroGateRejection::RmsAboveAbsoluteBound => {
+                        self.imu_rejection_counts.gyro_rms_absolute += 1
+                    }
                     GyroGateRejection::RmsNotEnoughImprovement => {
                         self.imu_rejection_counts.gyro_rms_fraction += 1
                     }
@@ -3193,7 +3493,9 @@ impl DpvoOdometry {
     /// [`Self::try_global_ba`] uses this as its "on loop acceptance" forcing
     /// trigger (`docs/dpvo_droid_port_plan.md`'s M8 task brief).
     fn try_loop_closure(&mut self) -> bool {
-        let Some(lc_cfg) = self.config.loop_closure else { return false };
+        let Some(lc_cfg) = self.config.loop_closure else {
+            return false;
+        };
         let n = self.graph.n_frames();
         let due = match self.last_loop_batch_frame {
             None => true,
@@ -3240,12 +3542,20 @@ impl DpvoOdometry {
         // only the sim3 backend's own scale-RATIO measurement needed to wait
         // for a pose to have moved at least once (see
         // [`Self::capture_pending_sim3_loop_measurements`]'s doc).
-        if self.config.global_ba.is_some_and(|gba| gba.widen_t0_with_loop_edges) {
+        if self
+            .config
+            .global_ba
+            .is_some_and(|gba| gba.widen_t0_with_loop_edges)
+        {
             for &(i, j) in &accepted {
-                self.loop_edge_arrival_pairs.push((self.graph.frames()[i].arrival_index, self.graph.frames()[j].arrival_index));
+                self.loop_edge_arrival_pairs.push((
+                    self.graph.frames()[i].arrival_index,
+                    self.graph.frames()[j].arrival_index,
+                ));
             }
         }
-        let patch_edges = expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
+        let patch_edges =
+            expand_frame_pairs_to_patch_edges(&accepted, self.graph.config().patches_per_frame);
         self.loop_patch_edges_added_total += patch_edges.len();
         self.graph.append_edges(&patch_edges, DIM);
         // Milestone M8: from this point on, `try_global_ba` is allowed to
@@ -3320,8 +3630,12 @@ impl DpvoOdometry {
     /// onto [`Self::sim3_loop_measurements`]. See `crate::dpvo_long_loop`'s
     /// module doc for the full mechanism this dispatches to.
     fn try_long_loop_closure(&mut self) {
-        let Some(runtime) = self.long_loop.as_mut() else { return };
-        let Some(current) = self.graph.frames().last() else { return };
+        let Some(runtime) = self.long_loop.as_mut() else {
+            return;
+        };
+        let Some(current) = self.graph.frames().last() else {
+            return;
+        };
         let current_arrival = current.arrival_index;
         if !runtime.index.due(current_arrival) {
             return;
@@ -3335,10 +3649,16 @@ impl DpvoOdometry {
 
         let graph_ref = &self.graph;
         let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
-            if let Some(live) = graph_ref.frames().iter().position(|f| f.arrival_index == arrival) {
+            if let Some(live) = graph_ref
+                .frames()
+                .iter()
+                .position(|f| f.arrival_index == arrival)
+            {
                 let pose = graph_ref.frames()[live].pose.clone();
                 let intrinsics = graph_ref.frames()[live].intrinsics;
-                let patches = graph_ref.patches()[live * patches_per_frame..(live + 1) * patches_per_frame].to_vec();
+                let patches = graph_ref.patches()
+                    [live * patches_per_frame..(live + 1) * patches_per_frame]
+                    .to_vec();
                 return Some((pose, intrinsics, patches));
             }
             let pose = graph_ref.retained_poses().get(&arrival)?.clone();
@@ -3358,8 +3678,13 @@ impl DpvoOdometry {
 
         self.sim3_loop_measurements.push(accepted.measurement);
         self.sim3_backend_ever_had_loop_edge = true;
-        if self.config.global_ba.is_some_and(|gba| gba.widen_t0_with_loop_edges) {
-            self.loop_edge_arrival_pairs.push((accepted.arrival_i, accepted.arrival_j));
+        if self
+            .config
+            .global_ba
+            .is_some_and(|gba| gba.widen_t0_with_loop_edges)
+        {
+            self.loop_edge_arrival_pairs
+                .push((accepted.arrival_i, accepted.arrival_j));
         }
         self.global_ba_ever_had_loop_edge = true;
     }
@@ -3430,7 +3755,11 @@ impl DpvoOdometry {
     /// [`DpvoGlobalBaConfig::widen_t0_with_loop_edges`] is `false` (the
     /// default) or no loop edge is known yet — byte-identical to the M8
     /// implementation, unchanged by the M10 split.
-    fn run_legacy_global_ba(&mut self, cfg: &DpvoGlobalBaConfig, bounds: [f64; 4]) -> Result<(), DpvoOdometryError> {
+    fn run_legacy_global_ba(
+        &mut self,
+        cfg: &DpvoGlobalBaConfig,
+        bounds: [f64; 4],
+    ) -> Result<(), DpvoOdometryError> {
         let n = self.graph.n_frames();
         let Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive)) =
             gather_global_ba_edges(&self.graph)
@@ -3443,25 +3772,47 @@ impl DpvoOdometry {
 
         let start = Instant::now();
         let poses: Vec<SE3> = self.graph.frames().iter().map(|f| f.pose.clone()).collect();
-        let intrinsics: Vec<DpvoIntrinsics> = self.graph.frames().iter().map(|f| f.intrinsics).collect();
+        let intrinsics: Vec<DpvoIntrinsics> =
+            self.graph.frames().iter().map(|f| f.intrinsics).collect();
         let patches: Vec<DpvoPatch> = self.graph.patches().to_vec();
         // Milestone M15: this pass covers every live frame in `graph.frames()`
         // order, exactly matching `poses`/`patches`' own layout above — see
         // `Self::depth_damping_for`'s own doc.
-        let arrivals: Vec<usize> = self.graph.frames().iter().map(|f| f.arrival_index).collect();
+        let arrivals: Vec<usize> = self
+            .graph
+            .frames()
+            .iter()
+            .map(|f| f.arrival_index)
+            .collect();
         let patches_per_frame = self.graph.config().patches_per_frame;
         let depth_damping = self.depth_damping_for(&arrivals, patches_per_frame);
 
         let free_pose_count = n.saturating_sub(t0);
         let edge_count = edges.len();
-        let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping };
-        let ba_cfg = DpvoBaConfig { iterations: cfg.iterations, fixedp: t0, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
+        let problem = DpvoBaProblem {
+            poses,
+            patches,
+            intrinsics,
+            edges,
+            targets,
+            weights,
+            depth_damping,
+        };
+        let ba_cfg = DpvoBaConfig {
+            iterations: cfg.iterations,
+            fixedp: t0,
+            lmbda: cfg.lmbda,
+            ep: cfg.ep,
+            bounds,
+        };
         let solved = dpvo_ba(&problem, &ba_cfg)?;
 
         let mut max_delta = 0.0_f64;
         let mut sum_delta = 0.0_f64;
         for local in t0..n {
-            let delta = (solved.poses[local].translation - self.graph.frames()[local].pose.translation).norm();
+            let delta = (solved.poses[local].translation
+                - self.graph.frames()[local].pose.translation)
+                .norm();
             max_delta = max_delta.max(delta);
             sum_delta += delta;
         }
@@ -3474,13 +3825,17 @@ impl DpvoOdometry {
 
         self.global_ba_calls += 1;
         self.global_ba_last_free_pose_count = free_pose_count;
-        self.global_ba_max_free_pose_count = self.global_ba_max_free_pose_count.max(free_pose_count);
+        self.global_ba_max_free_pose_count =
+            self.global_ba_max_free_pose_count.max(free_pose_count);
         self.global_ba_last_edge_count = edge_count;
         self.global_ba_last_resolved_inactive = resolved_inactive;
         self.global_ba_last_unresolved_inactive = unresolved_inactive;
         self.global_ba_last_pose_delta_max_m = max_delta;
-        self.global_ba_last_pose_delta_mean_m =
-            if free_pose_count > 0 { sum_delta / free_pose_count as f64 } else { 0.0 };
+        self.global_ba_last_pose_delta_mean_m = if free_pose_count > 0 {
+            sum_delta / free_pose_count as f64
+        } else {
+            0.0
+        };
         self.global_ba_last_widened = false;
         self.global_ba_last_folded_included = 0;
         self.global_ba_last_capped = false;
@@ -3494,10 +3849,16 @@ impl DpvoOdometry {
     /// mechanism (parts A/B/C/E of the M10 design). Gathers a combined
     /// live+folded problem, solves it, and writes corrected poses/patches
     /// back to BOTH the live graph and the folded-frame retention stores.
-    fn run_widened_global_ba(&mut self, cfg: &DpvoGlobalBaConfig, bounds: [f64; 4]) -> Result<(), DpvoOdometryError> {
-        let Some(gathered) =
-            gather_widened_global_ba_problem(&self.graph, &self.loop_edge_arrival_pairs, cfg.max_free_poses)
-        else {
+    fn run_widened_global_ba(
+        &mut self,
+        cfg: &DpvoGlobalBaConfig,
+        bounds: [f64; 4],
+    ) -> Result<(), DpvoOdometryError> {
+        let Some(gathered) = gather_widened_global_ba_problem(
+            &self.graph,
+            &self.loop_edge_arrival_pairs,
+            cfg.max_free_poses,
+        ) else {
             return Ok(());
         };
         if gathered.edges.is_empty() {
@@ -3531,8 +3892,13 @@ impl DpvoOdometry {
             weights: gathered.weights,
             depth_damping,
         };
-        let ba_cfg =
-            DpvoBaConfig { iterations: cfg.iterations, fixedp: gathered.fixedp, lmbda: cfg.lmbda, ep: cfg.ep, bounds };
+        let ba_cfg = DpvoBaConfig {
+            iterations: cfg.iterations,
+            fixedp: gathered.fixedp,
+            lmbda: cfg.lmbda,
+            ep: cfg.ep,
+            bounds,
+        };
         let solved = dpvo_ba(&problem, &ba_cfg)?;
 
         let mut max_delta = 0.0_f64;
@@ -3548,27 +3914,38 @@ impl DpvoOdometry {
         let patches_per_frame = self.graph.config().patches_per_frame;
         // Write back the folded prefix into the retention stores.
         for (idx, &arrival) in gathered.folded_arrivals.iter().enumerate() {
-            self.graph.retained_poses_mut().insert(arrival, solved.poses[idx].clone());
+            self.graph
+                .retained_poses_mut()
+                .insert(arrival, solved.poses[idx].clone());
             if let Some(ff) = self.graph.retained_folded_frames_mut().get_mut(&arrival) {
-                ff.patches = solved.patches[idx * patches_per_frame..(idx + 1) * patches_per_frame].to_vec();
+                ff.patches =
+                    solved.patches[idx * patches_per_frame..(idx + 1) * patches_per_frame].to_vec();
             }
         }
         // Write back the live suffix exactly like the legacy path.
         for (local, pose) in solved.poses[folded_count..].iter().enumerate() {
             self.graph.frames_mut()[local].pose = pose.clone();
         }
-        for (local, patch) in solved.patches[folded_count * patches_per_frame..].iter().enumerate() {
+        for (local, patch) in solved.patches[folded_count * patches_per_frame..]
+            .iter()
+            .enumerate()
+        {
             self.graph.patches_mut()[local] = *patch;
         }
 
         self.global_ba_calls += 1;
         self.global_ba_last_free_pose_count = free_pose_count;
-        self.global_ba_max_free_pose_count = self.global_ba_max_free_pose_count.max(free_pose_count);
+        self.global_ba_max_free_pose_count =
+            self.global_ba_max_free_pose_count.max(free_pose_count);
         self.global_ba_last_edge_count = edge_count;
         self.global_ba_last_resolved_inactive = gathered.resolved_inactive;
         self.global_ba_last_unresolved_inactive = gathered.unresolved_inactive;
         self.global_ba_last_pose_delta_max_m = max_delta;
-        self.global_ba_last_pose_delta_mean_m = if free_pose_count > 0 { sum_delta / free_pose_count as f64 } else { 0.0 };
+        self.global_ba_last_pose_delta_mean_m = if free_pose_count > 0 {
+            sum_delta / free_pose_count as f64
+        } else {
+            0.0
+        };
         self.global_ba_last_widened = gathered.t0_widened_by_loop_edge;
         self.global_ba_last_folded_included = folded_count;
         self.global_ba_last_capped = gathered.capped;
@@ -3588,12 +3965,19 @@ impl DpvoOdometry {
     /// case — `t0` cannot differ from the ordinary per-frame window bound
     /// without at least one loop edge ever having been active).
     fn try_global_ba(&mut self, loop_just_accepted: bool) -> Result<(), DpvoOdometryError> {
-        let Some(gba_cfg) = self.config.global_ba else { return Ok(()) };
+        let Some(gba_cfg) = self.config.global_ba else {
+            return Ok(());
+        };
         if !self.global_ba_ever_had_loop_edge {
             return Ok(());
         }
         let n = self.graph.n_frames();
-        if !global_ba_due(loop_just_accepted, self.last_global_ba_frame, n, gba_cfg.frequency) {
+        if !global_ba_due(
+            loop_just_accepted,
+            self.last_global_ba_frame,
+            n,
+            gba_cfg.frequency,
+        ) {
             return Ok(());
         }
         self.last_global_ba_frame = Some(n);
@@ -3609,17 +3993,26 @@ impl DpvoOdometry {
     /// because `loop_just_accepted` or because `cfg.frequency` frames have
     /// passed since the last call).
     fn try_sim3_backend(&mut self, loop_just_accepted: bool) -> Result<(), DpvoOdometryError> {
-        let Some(s3b_cfg) = self.config.sim3_backend.clone() else { return Ok(()) };
+        let Some(s3b_cfg) = self.config.sim3_backend.clone() else {
+            return Ok(());
+        };
         if !self.sim3_backend_ever_had_loop_edge {
             return Ok(());
         }
         let n = self.graph.n_frames();
-        if !global_ba_due(loop_just_accepted, self.last_sim3_backend_frame, n, s3b_cfg.frequency) {
+        if !global_ba_due(
+            loop_just_accepted,
+            self.last_sim3_backend_frame,
+            n,
+            s3b_cfg.frequency,
+        ) {
             return Ok(());
         }
         self.last_sim3_backend_frame = Some(n);
         let start = Instant::now();
-        let Some(result) = run_sim3_backend(&mut self.graph, &self.sim3_loop_measurements, &s3b_cfg) else {
+        let Some(result) =
+            run_sim3_backend(&mut self.graph, &self.sim3_loop_measurements, &s3b_cfg)
+        else {
             return Ok(());
         };
         self.sim3_backend_calls += 1;
@@ -3654,7 +4047,8 @@ impl DpvoOdometry {
     fn keyframe_dispatch(&mut self) -> Option<usize> {
         if self.config.loop_closure.is_some() {
             let optimization_window = self.graph.config().optimization_window;
-            self.graph.keyframe_with_loop_protection(optimization_window)
+            self.graph
+                .keyframe_with_loop_protection(optimization_window)
         } else {
             self.graph.keyframe()
         }
@@ -3728,7 +4122,9 @@ impl DpvoOdometry {
                 let patch = self.graph.patches()[edge.k];
                 let grid = reproject_patch_grid(&pose_i, &pose_j, &intr_i, &intr_j, &patch);
                 coords_center[idx] = grid[1][1];
-                anchor_gmap.index_axis_mut(Axis(0), local).assign(&self.patch_gmap[edge.k]);
+                anchor_gmap
+                    .index_axis_mut(Axis(0), local)
+                    .assign(&self.patch_gmap[edge.k]);
                 for py in 0..PATCH {
                     for px in 0..PATCH {
                         coords_grid_px[(local, py, px, 0)] = grid[py][px].x as f32;
@@ -3758,7 +4154,10 @@ impl DpvoOdometry {
                 .index_axis_mut(Axis(0), 0)
                 .index_axis_mut(Axis(0), idx)
                 .assign(&Array1::from_vec(edge.net.clone()));
-            inp_arr.index_axis_mut(Axis(0), 0).index_axis_mut(Axis(0), idx).assign(&self.patch_imap[edge.k]);
+            inp_arr
+                .index_axis_mut(Axis(0), 0)
+                .index_axis_mut(Axis(0), idx)
+                .assign(&self.patch_imap[edge.k]);
             kk.push(edge.k as i64);
             ii.push(edge.i as i64);
             jj.push(edge.j as i64);
@@ -3766,15 +4165,27 @@ impl DpvoOdometry {
         let corr3 = corr_flat.insert_axis(Axis(0));
 
         let update_start = Instant::now();
-        let (net_out, delta, weight) = self
-            .session
-            .update_iteration(net_arr.view(), inp_arr.view(), corr3.view(), &kk, &ii, &jj, &self.agg_kk, &self.agg_ij)?;
+        let (net_out, delta, weight) = self.session.update_iteration(
+            net_arr.view(),
+            inp_arr.view(),
+            corr3.view(),
+            &kk,
+            &ii,
+            &jj,
+            &self.agg_kk,
+            &self.agg_ij,
+        )?;
         self.stats.update_ms_total += update_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut targets = Vec::with_capacity(e_count);
         let mut weights = Vec::with_capacity(e_count);
         for idx in 0..e_count {
-            let net_row: Vec<f32> = net_out.index_axis(Axis(0), 0).index_axis(Axis(0), idx).to_owned().into_raw_vec_and_offset().0;
+            let net_row: Vec<f32> = net_out
+                .index_axis(Axis(0), 0)
+                .index_axis(Axis(0), idx)
+                .to_owned()
+                .into_raw_vec_and_offset()
+                .0;
             self.graph.edges_mut()[idx].net = net_row;
             let dx = delta[(0, idx, 0)] as f64;
             let dy = delta[(0, idx, 1)] as f64;
@@ -3787,25 +4198,40 @@ impl DpvoOdometry {
 
         // See the module doc's windowing derivation for why [frame_lo, n)
         // is guaranteed to cover every edge referenced below.
-        let global_fixedp =
-            if self.graph.is_initialized() { n.saturating_sub(optimization_window).max(1) } else { 1 };
+        let global_fixedp = if self.graph.is_initialized() {
+            n.saturating_sub(optimization_window).max(1)
+        } else {
+            1
+        };
         let local_fixedp = global_fixedp.saturating_sub(frame_lo);
         let patches_lo = frame_lo * patches_per_frame;
 
         debug_assert!(
-            edges.iter().all(|e| e.i >= frame_lo && e.j >= frame_lo && e.k >= patches_lo),
+            edges
+                .iter()
+                .all(|e| e.i >= frame_lo && e.j >= frame_lo && e.k >= patches_lo),
             "update_step's window [frame_lo,n) did not cover every active edge — Milestone M6's \
              own min-over-edges widening above should make this unconditionally true; a failure \
              here means that widening itself has a bug, not just a loose bound \
              (removal_window={removal_window}, patch_lifetime={patch_lifetime})"
         );
 
-        let window_poses: Vec<SE3> = self.graph.frames()[frame_lo..n].iter().map(|f| f.pose.clone()).collect();
-        let window_intr: Vec<DpvoIntrinsics> = self.graph.frames()[frame_lo..n].iter().map(|f| f.intrinsics).collect();
+        let window_poses: Vec<SE3> = self.graph.frames()[frame_lo..n]
+            .iter()
+            .map(|f| f.pose.clone())
+            .collect();
+        let window_intr: Vec<DpvoIntrinsics> = self.graph.frames()[frame_lo..n]
+            .iter()
+            .map(|f| f.intrinsics)
+            .collect();
         let window_patches: Vec<DpvoPatch> = self.graph.patches()[patches_lo..].to_vec();
         let ba_edges: Vec<DpvoEdge> = edges
             .iter()
-            .map(|e| DpvoEdge { i: e.i - frame_lo, j: e.j - frame_lo, k: e.k - patches_lo })
+            .map(|e| DpvoEdge {
+                i: e.i - frame_lo,
+                j: e.j - frame_lo,
+                k: e.k - patches_lo,
+            })
             .collect();
 
         // `net.py:220`'s own BA call site bounds: image extent (in `fnet`
@@ -3827,20 +4253,23 @@ impl DpvoOdometry {
         // the FREE `[global_fixedp, n)` range the edge's target `j` (or a
         // frame chained to it through ordinary temporal edges) happens to
         // pull on, not necessarily at the edge's own two endpoints.
-        let loop_correction_pre_solve: Option<Vec<SE3>> = self.config.loop_closure.as_ref().and_then(|_| {
-            edges
-                .iter()
-                .any(|e| e.j.saturating_sub(e.i) > UPSTREAM_MIN_LOOP_GAP)
-                .then(|| window_poses.clone())
-        });
+        let loop_correction_pre_solve: Option<Vec<SE3>> =
+            self.config.loop_closure.as_ref().and_then(|_| {
+                edges
+                    .iter()
+                    .any(|e| e.j.saturating_sub(e.i) > UPSTREAM_MIN_LOOP_GAP)
+                    .then(|| window_poses.clone())
+            });
 
         // Milestone M15: `window_patches` above is exactly `graph.patches()`'s
         // `[patches_lo, ...)` suffix, one contiguous block of
         // `patches_per_frame` per frame in `[frame_lo, n)` order — the SAME
         // order `window_poses`/`window_intr` use, matching
         // `Self::depth_damping_for`'s own layout contract.
-        let window_arrivals: Vec<usize> =
-            self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+        let window_arrivals: Vec<usize> = self.graph.frames()[frame_lo..n]
+            .iter()
+            .map(|f| f.arrival_index)
+            .collect();
         let depth_damping = self.depth_damping_for(&window_arrivals, patches_per_frame);
         let problem = DpvoBaProblem {
             poses: window_poses,
@@ -3864,7 +4293,11 @@ impl DpvoOdometry {
         // enabled (see `Self::scale_coupling_step`'s own doc) — checked
         // FIRST so the M5/M5b branch below is completely unreachable, not
         // merely unused, whenever `config.imu.scale_coupling` is `Some`.
-        let use_scale_coupling = self.config.imu.as_ref().is_some_and(|c| c.scale_coupling.is_some());
+        let use_scale_coupling = self
+            .config
+            .imu
+            .as_ref()
+            .is_some_and(|c| c.scale_coupling.is_some());
         // Milestone M5: once the IMU bootstrap chain has succeeded, couple
         // consecutive-window IMU factors into the SAME Gauss-Newton solve
         // (`crate::dpvo_vi_ba::dpvo_vi_ba`) instead of the plain visual-only
@@ -3892,7 +4325,11 @@ impl DpvoOdometry {
                     factor.gravity_world = self
                         .imu_gravity_world
                         .expect("imu_bootstrapped implies imu_gravity_world is Some");
-                    imu_factors.push(DpvoImuFactor { i: local, j: local + 1, factor });
+                    imu_factors.push(DpvoImuFactor {
+                        i: local,
+                        j: local + 1,
+                        factor,
+                    });
                 }
             }
             let imu_window = DpvoViWindow {
@@ -3926,7 +4363,11 @@ impl DpvoOdometry {
                 );
                 nis_count += 1;
             }
-            let mean_nis = if nis_count > 0 { nis_sum / nis_count as f64 } else { 0.0 };
+            let mean_nis = if nis_count > 0 {
+                nis_sum / nis_count as f64
+            } else {
+                0.0
+            };
             let (next_bad, should_rollback) = rollback_monitor_step(
                 mean_nis,
                 imu_cfg.rollback_mean_nis_bound,
@@ -3971,7 +4412,9 @@ impl DpvoOdometry {
         // `self.imu_bootstrapped` at all (see `Self::scale_coupling_step`'s
         // doc), so it is included here explicitly rather than relying on
         // that flag.
-        if let Some(velocities) = new_velocities.filter(|_| self.imu_bootstrapped || use_scale_coupling) {
+        if let Some(velocities) =
+            new_velocities.filter(|_| self.imu_bootstrapped || use_scale_coupling)
+        {
             for (local, v) in velocities.into_iter().enumerate() {
                 self.velocities[frame_lo + local] = v;
             }
@@ -4006,11 +4449,10 @@ impl DpvoOdometry {
         local_fixedp: usize,
         ba_config: &DpvoBaConfig,
     ) -> Result<ScaleCouplingSolution, DpvoOdometryError> {
-        let imu_cfg = self
-            .config
-            .imu
-            .clone()
-            .expect("scale_coupling_step is only called when config.imu.scale_coupling is Some");
+        let imu_cfg =
+            self.config.imu.clone().expect(
+                "scale_coupling_step is only called when config.imu.scale_coupling is Some",
+            );
         let sc_cfg = imu_cfg
             .scale_coupling
             .expect("scale_coupling_step is only called when config.imu.scale_coupling is Some");
@@ -4028,13 +4470,19 @@ impl DpvoOdometry {
         // mapping vs. plain local indices) differs enough that extracting a
         // shared function would need its own new abstraction for a single
         // ~10-line loop.
-        let window_arrivals: Vec<usize> =
-            self.graph.frames()[frame_lo..n].iter().map(|f| f.arrival_index).collect();
+        let window_arrivals: Vec<usize> = self.graph.frames()[frame_lo..n]
+            .iter()
+            .map(|f| f.arrival_index)
+            .collect();
         let mut window_factors: Vec<DpvoImuFactor> = Vec::new();
         for local in 0..window_arrivals.len().saturating_sub(1) {
             let key = (window_arrivals[local], window_arrivals[local + 1]);
             if let Some(banked) = self.imu_deltas_by_arrival.get(&key) {
-                window_factors.push(DpvoImuFactor { i: local, j: local + 1, factor: banked.clone() });
+                window_factors.push(DpvoImuFactor {
+                    i: local,
+                    j: local + 1,
+                    factor: banked.clone(),
+                });
             }
         }
 
@@ -4065,8 +4513,16 @@ impl DpvoOdometry {
             let pose = self.graph.frames()[frame_lo + idx].pose.clone();
             let body = imu_cfg.body_to_camera.compose(&pose);
             let mut frame = Frame::new(arrival as u64, 0);
-            frame.pose = Some(Pose { world_to_camera: body });
-            map.keyframes.insert(arrival as u64, Keyframe { frame, observations: Vec::new() });
+            frame.pose = Some(Pose {
+                world_to_camera: body,
+            });
+            map.keyframes.insert(
+                arrival as u64,
+                Keyframe {
+                    frame,
+                    observations: Vec::new(),
+                },
+            );
             local_poses[idx] = pose;
         }
         let arrival_ids: Vec<u64> = window_arrivals.iter().map(|&a| a as u64).collect();
@@ -4074,14 +4530,17 @@ impl DpvoOdometry {
             window_factors.iter().map(|f| f.factor.clone()).collect();
 
         let seed_bias = self.gyro_bias_estimator.mean();
-        if let Some(alignment) = estimate_gyro_bias(&map, &arrival_ids, &factors_for_gyro, seed_bias) {
+        if let Some(alignment) =
+            estimate_gyro_bias(&map, &arrival_ids, &factors_for_gyro, seed_bias)
+        {
             // Honest variance proxy (same "derive it from the LSQ's own
             // fit quality" philosophy as the scale estimator — see
             // `crate::dpvo_scale_coupling`'s module doc): the ROTATION
             // alignment's own converged residual RMS is the direct
             // empirical noise-level estimate for THIS measurement.
             let variance = alignment.rotation_residual_rms_after.max(1.0e-9).powi(2);
-            self.gyro_bias_estimator.update(alignment.bias_gyro, variance);
+            self.gyro_bias_estimator
+                .update(alignment.bias_gyro, variance);
         }
         let bias_gyro = self.gyro_bias_estimator.mean();
         self.imu_bias_gyro = bias_gyro; // diagnostics echo only — see this method's own doc.
@@ -4133,11 +4592,20 @@ impl DpvoOdometry {
         let mono_factors: Vec<DpvoImuFactor> = window_factors
             .iter()
             .filter(|f| f.i >= mono_start && f.j >= mono_start)
-            .map(|f| DpvoImuFactor { i: f.i - mono_start, j: f.j - mono_start, factor: f.factor.clone() })
+            .map(|f| DpvoImuFactor {
+                i: f.i - mono_start,
+                j: f.j - mono_start,
+                factor: f.factor.clone(),
+            })
             .collect();
 
         match estimate_mono_vi_alignment(
-            mono_poses, &mono_factors, &imu_cfg.body_to_camera, bias_gyro, self.imu_bias_accel, &gates,
+            mono_poses,
+            &mono_factors,
+            &imu_cfg.body_to_camera,
+            bias_gyro,
+            self.imu_bias_accel,
+            &gates,
         ) {
             Ok(alignment) => {
                 self.scale_coupling_measurements += 1;
@@ -4193,7 +4661,11 @@ impl DpvoOdometry {
             .map(|f| {
                 let mut factor = f.factor.clone();
                 factor.gravity_world = gravity_world;
-                DpvoImuFactor { i: f.i, j: f.j, factor }
+                DpvoImuFactor {
+                    i: f.i,
+                    j: f.j,
+                    factor,
+                }
             })
             .collect();
         let imu_window = DpvoViWindow {
@@ -4247,7 +4719,11 @@ impl DpvoOdometry {
             );
             nis_count += 1;
         }
-        let mean_nis = if nis_count > 0 { nis_sum / nis_count as f64 } else { 0.0 };
+        let mean_nis = if nis_count > 0 {
+            nis_sum / nis_count as f64
+        } else {
+            0.0
+        };
         let (next_bad, should_soft_rollback) = rollback_monitor_step(
             mean_nis,
             sc_cfg.scale.rollback_mean_nis_bound,
@@ -4262,8 +4738,13 @@ impl DpvoOdometry {
             self.scale_coupling_rollback_count += 1;
         }
 
-        let (blended_poses, blended_patches) =
-            blend_solutions(&visual_solved.poses, &visual_solved.patches, &imu_poses, &imu_patches, weight);
+        let (blended_poses, blended_patches) = blend_solutions(
+            &visual_solved.poses,
+            &visual_solved.patches,
+            &imu_poses,
+            &imu_patches,
+            weight,
+        );
         Ok((blended_poses, blended_patches, Some(coupled.velocities)))
     }
 }
@@ -4296,7 +4777,10 @@ pub enum GyroGateRejection {
 /// the specific [`GyroGateRejection`] on failure, not just a bare `bool` —
 /// the task's own "isolate which gate" acceptance requirement needs to be
 /// answerable for THIS gate too, not only `estimate_mono_vi_alignment`'s.
-fn gyro_bootstrap_gate_check(alignment: &GyroBiasAlignment, cfg: &DpvoImuConfig) -> Result<(), GyroGateRejection> {
+fn gyro_bootstrap_gate_check(
+    alignment: &GyroBiasAlignment,
+    cfg: &DpvoImuConfig,
+) -> Result<(), GyroGateRejection> {
     if alignment.bias_gyro.norm() > cfg.max_gyro_bias_magnitude_rad_s {
         return Err(GyroGateRejection::MagnitudeTooLarge);
     }
@@ -4334,7 +4818,11 @@ pub(crate) fn rollback_monitor_step(
     consecutive_bad: usize,
     threshold: usize,
 ) -> (usize, bool) {
-    let next = if mean_nis.is_finite() && mean_nis <= bound { 0 } else { consecutive_bad + 1 };
+    let next = if mean_nis.is_finite() && mean_nis <= bound {
+        0
+    } else {
+        consecutive_bad + 1
+    };
     (next, next >= threshold)
 }
 
@@ -4367,7 +4855,14 @@ fn trailing_consecutive_run_start(arrivals: &[usize]) -> usize {
 /// function's own doc for the full semantics of each element. A named alias
 /// purely to keep the function signature clippy-clean (`clippy::type_complexity`);
 /// no behavior attaches to the name itself.
-pub(crate) type GlobalBaGatheredEdges = (usize, Vec<DpvoEdge>, Vec<Vector2<f64>>, Vec<Vector2<f64>>, usize, usize);
+pub(crate) type GlobalBaGatheredEdges = (
+    usize,
+    Vec<DpvoEdge>,
+    Vec<Vector2<f64>>,
+    Vec<Vector2<f64>>,
+    usize,
+    usize,
+);
 
 /// Milestone M8 (`docs/dpvo_droid_port_plan.md`): the pure "gather" step of
 /// [`DpvoOdometry::run_global_ba`] — see that method's own doc for the full
@@ -4390,7 +4885,11 @@ pub(crate) fn gather_global_ba_edges(graph: &DpvoPatchGraph) -> Option<GlobalBaG
     let mut weights: Vec<Vector2<f64>> = Vec::new();
     for edge in graph.edges() {
         if let Some((target, weight)) = edge.target_weight {
-            edges.push(DpvoEdge { i: edge.i, j: edge.j, k: edge.k });
+            edges.push(DpvoEdge {
+                i: edge.i,
+                j: edge.j,
+                k: edge.k,
+            });
             targets.push(target);
             weights.push(weight);
         }
@@ -4400,16 +4899,27 @@ pub(crate) fn gather_global_ba_edges(graph: &DpvoPatchGraph) -> Option<GlobalBaG
     // retained inactive edges — see `crate::dpvo_patch_graph`'s own
     // "Inactive-edge retention" module doc section for why this port
     // re-resolves rather than trusting a possibly-stale stored index.
-    let arrival_to_live: HashMap<usize, usize> =
-        graph.frames().iter().enumerate().map(|(live, f)| (f.arrival_index, live)).collect();
+    let arrival_to_live: HashMap<usize, usize> = graph
+        .frames()
+        .iter()
+        .enumerate()
+        .map(|(live, f)| (f.arrival_index, live))
+        .collect();
 
     let mut resolved_inactive = 0usize;
     let mut unresolved_inactive = 0usize;
     for ie in graph.inactive_edges() {
-        match (arrival_to_live.get(&ie.arrival_i), arrival_to_live.get(&ie.arrival_j)) {
+        match (
+            arrival_to_live.get(&ie.arrival_i),
+            arrival_to_live.get(&ie.arrival_j),
+        ) {
             (Some(&live_i), Some(&live_j)) => {
                 let k = live_i * patches_per_frame + ie.local_patch_offset;
-                edges.push(DpvoEdge { i: live_i, j: live_j, k });
+                edges.push(DpvoEdge {
+                    i: live_i,
+                    j: live_j,
+                    k,
+                });
                 targets.push(ie.target);
                 weights.push(ie.weight);
                 resolved_inactive += 1;
@@ -4418,7 +4928,14 @@ pub(crate) fn gather_global_ba_edges(graph: &DpvoPatchGraph) -> Option<GlobalBaG
         }
     }
 
-    Some((t0, edges, targets, weights, resolved_inactive, unresolved_inactive))
+    Some((
+        t0,
+        edges,
+        targets,
+        weights,
+        resolved_inactive,
+        unresolved_inactive,
+    ))
 }
 
 /// Return type of [`gather_widened_global_ba_problem`] — a complete,
@@ -4544,8 +5061,12 @@ pub(crate) fn gather_widened_global_ba_problem(
     let active_t0_live = graph.edges().iter().map(|e| e.i).min().unwrap_or(n);
     let t0_arrival = loop_pairs.iter().map(|&(i, _)| i).min()?;
 
-    let arrival_to_live: HashMap<usize, usize> =
-        graph.frames().iter().enumerate().map(|(live, f)| (f.arrival_index, live)).collect();
+    let arrival_to_live: HashMap<usize, usize> = graph
+        .frames()
+        .iter()
+        .enumerate()
+        .map(|(live, f)| (f.arrival_index, live))
+        .collect();
 
     // Branch purely on whether `t0_arrival`'s OWN frame is still live — NOT
     // on whether it is older than the array's current minimum live arrival.
@@ -4592,8 +5113,11 @@ pub(crate) fn gather_widened_global_ba_problem(
     }
     let folded_count = folded_arrivals.len();
 
-    let folded_index: HashMap<usize, usize> =
-        folded_arrivals.iter().enumerate().map(|(idx, &a)| (a, idx)).collect();
+    let folded_index: HashMap<usize, usize> = folded_arrivals
+        .iter()
+        .enumerate()
+        .map(|(idx, &a)| (a, idx))
+        .collect();
     // A single resolver covering both stores: folded (this call's own
     // materialized prefix) takes priority in the unlikely event an arrival
     // somehow appears in both (never true by construction, since folded ==
@@ -4602,7 +5126,9 @@ pub(crate) fn gather_widened_global_ba_problem(
         if let Some(&idx) = folded_index.get(&arrival) {
             Some(idx)
         } else {
-            arrival_to_live.get(&arrival).map(|&live| folded_count + live)
+            arrival_to_live
+                .get(&arrival)
+                .map(|&live| folded_count + live)
         }
     };
 
@@ -4638,7 +5164,10 @@ pub(crate) fn gather_widened_global_ba_problem(
     let mut resolved_inactive = 0usize;
     let mut unresolved_inactive = 0usize;
     for ie in graph.inactive_edges() {
-        match (combined_index_of(ie.arrival_i), combined_index_of(ie.arrival_j)) {
+        match (
+            combined_index_of(ie.arrival_i),
+            combined_index_of(ie.arrival_j),
+        ) {
             (Some(ci), Some(cj)) => {
                 let k = ci * patches_per_frame + ie.local_patch_offset;
                 edges.push(DpvoEdge { i: ci, j: cj, k });
@@ -4656,7 +5185,10 @@ pub(crate) fn gather_widened_global_ba_problem(
         // No folding needed: t0_arrival's own frame is still live. Widen in
         // live-index space directly, same convention `gather_global_ba_edges`
         // uses, just taking the min against the loop-derived candidate too.
-        let loop_t0_live = arrival_to_live.get(&t0_arrival).copied().unwrap_or(active_t0_live);
+        let loop_t0_live = arrival_to_live
+            .get(&t0_arrival)
+            .copied()
+            .unwrap_or(active_t0_live);
         active_t0_live.min(loop_t0_live)
     };
     let free_pose_count = (folded_count + n).saturating_sub(fixedp);
@@ -4683,7 +5215,12 @@ pub(crate) fn gather_widened_global_ba_problem(
 /// [`DpvoOdometry::try_global_ba`]'s own throttle — see that method's doc.
 /// Extracted as a free function so the throttle logic is unit-testable
 /// without a live ONNX-backed instance.
-fn global_ba_due(loop_just_accepted: bool, last_call_frame: Option<usize>, current_frame: usize, frequency: usize) -> bool {
+fn global_ba_due(
+    loop_just_accepted: bool,
+    last_call_frame: Option<usize>,
+    current_frame: usize,
+    frequency: usize,
+) -> bool {
     loop_just_accepted
         || match last_call_frame {
             None => true,
@@ -4737,10 +5274,22 @@ mod global_ba_tests {
 
     #[test]
     fn global_ba_due_throttle_behaves_as_specified() {
-        assert!(global_ba_due(false, None, 0, 15), "first-ever call is always due");
-        assert!(!global_ba_due(false, Some(10), 20, 15), "only 10 frames since last call: not yet due");
-        assert!(global_ba_due(false, Some(5), 20, 15), "15 frames since last call: due");
-        assert!(global_ba_due(true, Some(19), 20, 15), "a fresh loop acceptance forces it regardless of frequency");
+        assert!(
+            global_ba_due(false, None, 0, 15),
+            "first-ever call is always due"
+        );
+        assert!(
+            !global_ba_due(false, Some(10), 20, 15),
+            "only 10 frames since last call: not yet due"
+        );
+        assert!(
+            global_ba_due(false, Some(5), 20, 15),
+            "15 frames since last call: due"
+        );
+        assert!(
+            global_ba_due(true, Some(19), 20, 15),
+            "a fresh loop acceptance forces it regardless of frequency"
+        );
     }
 
     /// Patches sampled per frame for the synthetic loop-closure test below —
@@ -4853,7 +5402,12 @@ mod global_ba_tests {
     #[test]
     fn global_ba_closes_a_synthetic_drifted_loop_via_retained_inactive_edges() {
         let m = LOOP_TEST_PATCHES_PER_FRAME;
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        };
         // Distinct anchor pixel + inverse depth per patch (see this test's
         // own doc for why a single repeated point is a genuine, unfixable
         // ambiguity rather than an under-powered fixture): spread across an
@@ -4863,13 +5417,22 @@ mod global_ba_tests {
         let patch_for_local = |local: usize| -> DpvoPatch {
             let col = (local % 8) as f64;
             let row = (local / 8) as f64;
-            DpvoPatch { x: 20.0 + col * 10.0, y: 15.0 + row * 8.0, inverse_depth: 0.1 + 0.02 * (local % 7) as f64 }
+            DpvoPatch {
+                x: 20.0 + col * 10.0,
+                y: 15.0 + row * 8.0,
+                inverse_depth: 0.1 + 0.02 * (local % 7) as f64,
+            }
         };
         let frame0_patches: Vec<DpvoPatch> = (0..m).map(patch_for_local).collect();
         const N_FRAMES: usize = 55;
         const DRIFTED_FRAME: usize = N_FRAMES - 1;
         let true_poses: Vec<SE3> = (0..N_FRAMES)
-            .map(|i| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0)))
+            .map(|i| {
+                SE3::new(
+                    UnitQuaternion::identity(),
+                    Vector3::new(i as f64 * 0.2, 0.0, 0.0),
+                )
+            })
             .collect();
         let drift = Vector3::new(0.15, 0.0, 0.0);
 
@@ -4878,12 +5441,16 @@ mod global_ba_tests {
             graph.enable_inactive_edge_retention(m * (N_FRAMES + 2));
             for pose in &true_poses {
                 graph.begin_frame(0.05);
-                graph.commit_frame(pose.clone(), intr, frame0_patches.clone()).unwrap();
+                graph
+                    .commit_frame(pose.clone(), intr, frame0_patches.clone())
+                    .unwrap();
             }
             // Drift the LAST frame's LIVE pose away from truth (simulating
             // accumulated monocular scale/pose drift).
-            graph.frames_mut()[DRIFTED_FRAME].pose =
-                SE3::new(true_poses[DRIFTED_FRAME].rotation, true_poses[DRIFTED_FRAME].translation + drift);
+            graph.frames_mut()[DRIFTED_FRAME].pose = SE3::new(
+                true_poses[DRIFTED_FRAME].rotation,
+                true_poses[DRIFTED_FRAME].translation + drift,
+            );
 
             // Ordinary temporal chain: every one of frame 0's `m` DISTINCT
             // patches observed in EVERY frame from 1 up to (not including)
@@ -4903,7 +5470,8 @@ mod global_ba_tests {
                 // that frame's TRUE pose, i.e. exactly the
                 // correctly-predicted-revisit a real GRU update would supply
                 // regardless of the CURRENT (drifted) pose estimate.
-                let loop_edges: Vec<(usize, usize)> = (0..m).map(|local| (local, DRIFTED_FRAME)).collect();
+                let loop_edges: Vec<(usize, usize)> =
+                    (0..m).map(|local| (local, DRIFTED_FRAME)).collect();
                 graph.append_edges(&loop_edges, 4);
             }
             for edge in graph.edges_mut() {
@@ -4912,7 +5480,14 @@ mod global_ba_tests {
                 // occupy `[0, m)` unshifted (frame 0 is the very first
                 // frame committed).
                 let owner_patch = &frame0_patches[edge.k];
-                let target = transform_point(&true_poses[edge.i], &true_poses[edge.j], &intr, &intr, owner_patch, false);
+                let target = transform_point(
+                    &true_poses[edge.i],
+                    &true_poses[edge.j],
+                    &intr,
+                    &intr,
+                    owner_patch,
+                    false,
+                );
                 edge.target_weight = Some((target, Vector2::new(1.0, 1.0)));
             }
 
@@ -4921,7 +5496,10 @@ mod global_ba_tests {
             // frame is 0, which is far below that threshold for any
             // realistic N_FRAMES).
             graph.keyframe();
-            assert!(graph.edges().is_empty(), "every injected edge should have aged into the inactive store");
+            assert!(
+                graph.edges().is_empty(),
+                "every injected edge should have aged into the inactive store"
+            );
 
             // A mathematically inert "keepalive" self-edge (`i == j`,
             // target == the patch's own anchor pixel) so
@@ -4939,30 +5517,59 @@ mod global_ba_tests {
             graph.append_edges(&[(keepalive_patch, 1)], 4);
             let patch1 = graph.patches()[keepalive_patch];
             for edge in graph.edges_mut() {
-                edge.target_weight = Some((Vector2::new(patch1.x, patch1.y), Vector2::new(1.0, 1.0)));
+                edge.target_weight =
+                    Some((Vector2::new(patch1.x, patch1.y), Vector2::new(1.0, 1.0)));
             }
 
             let (t0, edges, targets, weights, resolved_inactive, unresolved_inactive) =
                 gather_global_ba_edges(&graph).expect("at least the keepalive edge is active");
-            assert_eq!(t0, 1, "the keepalive self-edge (owner frame 1) should set the gauge");
-            assert_eq!(unresolved_inactive, 0, "every frame referenced by an inactive edge is still live");
+            assert_eq!(
+                t0, 1,
+                "the keepalive self-edge (owner frame 1) should set the gauge"
+            );
+            assert_eq!(
+                unresolved_inactive, 0,
+                "every frame referenced by an inactive edge is still live"
+            );
             let pinning_frames = DRIFTED_FRAME - 1;
-            assert_eq!(resolved_inactive, if with_loop { (pinning_frames + 1) * m } else { pinning_frames * m });
+            assert_eq!(
+                resolved_inactive,
+                if with_loop {
+                    (pinning_frames + 1) * m
+                } else {
+                    pinning_frames * m
+                }
+            );
 
             let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
             let patches: Vec<DpvoPatch> = graph.patches().to_vec();
             let intrinsics = vec![intr; poses.len()];
-            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping: None };
-            let config =
-                DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+            let problem = DpvoBaProblem {
+                poses,
+                patches,
+                intrinsics,
+                edges,
+                targets,
+                weights,
+                depth_damping: None,
+            };
+            let config = DpvoBaConfig {
+                iterations: 2,
+                fixedp: t0,
+                lmbda: 1e-4,
+                ep: 100.0,
+                bounds: [-1e6, -1e6, 1e6, 1e6],
+            };
             let solved = dpvo_ba(&problem, &config).expect("global BA solve");
             solved.poses[DRIFTED_FRAME].clone()
         };
 
         let solved_without_loop = run(false);
-        let error_without_loop = (solved_without_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
+        let error_without_loop =
+            (solved_without_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
         let solved_with_loop = run(true);
-        let error_with_loop = (solved_with_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
+        let error_with_loop =
+            (solved_with_loop.translation - true_poses[DRIFTED_FRAME].translation).norm();
 
         assert!(
             error_with_loop * 10.0 < error_without_loop,
@@ -5042,19 +5649,28 @@ mod global_ba_tests {
     #[test]
     fn widened_global_ba_closes_a_synthetic_drifted_loop_whose_old_endpoint_is_folded_away() {
         let m = LOOP_TEST_PATCHES_PER_FRAME;
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        };
         let patch_for_local = |local: usize| -> DpvoPatch {
             let col = (local % 8) as f64;
             let row = (local / 8) as f64;
-            DpvoPatch { x: 20.0 + col * 10.0, y: 15.0 + row * 8.0, inverse_depth: 0.1 + 0.02 * (local % 7) as f64 }
+            DpvoPatch {
+                x: 20.0 + col * 10.0,
+                y: 15.0 + row * 8.0,
+                inverse_depth: 0.1 + 0.02 * (local % 7) as f64,
+            }
         };
         const OLD_FRAME: usize = 2; // arrival index of the frame that gets folded away.
-        // 50 pinning frames left only a ~9.7x reduction (short of the
-        // required >10x) — matching the M8 fixture's own documented finding
-        // that pinning-frame COUNT, not baseline size or patch count, is the
-        // lever that closes a monocular depth/pose ambiguity; 90 comfortably
-        // clears the bar with margin, the same way M8's own fixture settled
-        // on more pinning frames than its first attempt.
+                                    // 50 pinning frames left only a ~9.7x reduction (short of the
+                                    // required >10x) — matching the M8 fixture's own documented finding
+                                    // that pinning-frame COUNT, not baseline size or patch count, is the
+                                    // lever that closes a monocular depth/pose ambiguity; 90 comfortably
+                                    // clears the bar with margin, the same way M8's own fixture settled
+                                    // on more pinning frames than its first attempt.
         const PINNING_COUNT: usize = 90; // arrival indices 3..=92.
         const DRIFTED_FRAME: usize = OLD_FRAME + PINNING_COUNT; // 92: last pinning frame, stays live.
         const N_BEFORE_ARCHIVE: usize = 3 + PINNING_COUNT; // 93: frame count at call A.
@@ -5062,8 +5678,12 @@ mod global_ba_tests {
         const N_AT_FOLD: usize = N_BEFORE_ARCHIVE + N_FILLER; // 103: frame count at call B.
         let keyframe_index = N_AT_FOLD - 2; // candidate = N_AT_FOLD - keyframe_index = 2 = OLD_FRAME.
 
-        let true_pose =
-            |i: usize| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0));
+        let true_pose = |i: usize| {
+            SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(i as f64 * 0.2, 0.0, 0.0),
+            )
+        };
         let drift = Vector3::new(0.15, 0.0, 0.0);
 
         let mut graph = DpvoPatchGraph::new(m10_graph_config(m, keyframe_index));
@@ -5074,12 +5694,16 @@ mod global_ba_tests {
         // indices 0/1 can never themselves be folded).
         for i in 0..OLD_FRAME {
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect()).unwrap();
+            graph
+                .commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect())
+                .unwrap();
         }
         // OLD_FRAME itself, hosting `m` distinct patches.
         graph.begin_frame(OLD_FRAME as f64 * 0.05);
         let old_frame_patches: Vec<DpvoPatch> = (0..m).map(patch_for_local).collect();
-        graph.commit_frame(true_pose(OLD_FRAME), intr, old_frame_patches.clone()).unwrap();
+        graph
+            .commit_frame(true_pose(OLD_FRAME), intr, old_frame_patches.clone())
+            .unwrap();
 
         // Many DISTINCT pinning frames observing OLD_FRAME's patches — the
         // same "one edge per patch, many distinct pinning viewpoints"
@@ -5087,14 +5711,29 @@ mod global_ba_tests {
         // depth/pose ambiguity.
         for target in (OLD_FRAME + 1)..=DRIFTED_FRAME {
             graph.begin_frame(target as f64 * 0.05);
-            graph.commit_frame(true_pose(target), intr, (0..m).map(patch_for_local).collect()).unwrap();
-            let pairs: Vec<(usize, usize)> = (0..m).map(|local| (OLD_FRAME * m + local, target)).collect();
+            graph
+                .commit_frame(
+                    true_pose(target),
+                    intr,
+                    (0..m).map(patch_for_local).collect(),
+                )
+                .unwrap();
+            let pairs: Vec<(usize, usize)> = (0..m)
+                .map(|local| (OLD_FRAME * m + local, target))
+                .collect();
             graph.append_edges(&pairs, 4);
         }
         for edge in graph.edges_mut() {
             let local = edge.k - OLD_FRAME * m;
             let owner_patch = old_frame_patches[local];
-            let target = transform_point(&true_pose(OLD_FRAME), &true_pose(edge.j), &intr, &intr, &owner_patch, false);
+            let target = transform_point(
+                &true_pose(OLD_FRAME),
+                &true_pose(edge.j),
+                &intr,
+                &intr,
+                &owner_patch,
+                false,
+            );
             edge.target_weight = Some((target, Vector2::new(1.0, 1.0)));
         }
         assert_eq!(graph.n_frames(), N_BEFORE_ARCHIVE);
@@ -5102,30 +5741,47 @@ mod global_ba_tests {
         // Call A: archive OLD_FRAME's edges into the inactive store while it
         // is still live — the fold gate cannot fire yet.
         graph.keyframe();
-        assert!(graph.edges().iter().all(|e| e.i != OLD_FRAME), "OLD_FRAME's edges should have aged into the inactive store");
+        assert!(
+            graph.edges().iter().all(|e| e.i != OLD_FRAME),
+            "OLD_FRAME's edges should have aged into the inactive store"
+        );
         assert_eq!(graph.inactive_edge_stats(), (m * PINNING_COUNT, 0));
-        assert!(graph.retained_poses().is_empty(), "OLD_FRAME must still be LIVE at this point, not yet folded");
+        assert!(
+            graph.retained_poses().is_empty(),
+            "OLD_FRAME must still be LIVE at this point, not yet folded"
+        );
 
         // Filler frames, no edges — pad `n` up to exactly `N_AT_FOLD`
         // without ever creating an (i=1, j=3) edge (so `motionmag` returns
         // the guaranteed `0.0` "no such edge" case at call B).
         for i in N_BEFORE_ARCHIVE..N_AT_FOLD {
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect()).unwrap();
+            graph
+                .commit_frame(true_pose(i), intr, (0..m).map(patch_for_local).collect())
+                .unwrap();
         }
 
         // Call B: fold OLD_FRAME away.
         graph.keyframe();
         assert_eq!(graph.retained_poses().len(), 1);
         assert_eq!(graph.retained_folded_frames().len(), 1);
-        assert!(graph.frames().iter().all(|f| f.arrival_index != OLD_FRAME), "OLD_FRAME must no longer be live");
+        assert!(
+            graph.frames().iter().all(|f| f.arrival_index != OLD_FRAME),
+            "OLD_FRAME must no longer be live"
+        );
 
         // Discover the drifted frame's now-shifted live index and apply the
         // simulated accumulated drift (same recipe as the M8 fixture above).
-        let drifted_live = graph.frames().iter().position(|f| f.arrival_index == DRIFTED_FRAME).expect("still live");
+        let drifted_live = graph
+            .frames()
+            .iter()
+            .position(|f| f.arrival_index == DRIFTED_FRAME)
+            .expect("still live");
         let true_drifted_pose = true_pose(DRIFTED_FRAME);
-        graph.frames_mut()[drifted_live].pose =
-            SE3::new(true_drifted_pose.rotation, true_drifted_pose.translation + drift);
+        graph.frames_mut()[drifted_live].pose = SE3::new(
+            true_drifted_pose.rotation,
+            true_drifted_pose.translation + drift,
+        );
 
         // A minimal keepalive self-edge (mathematically inert — see the M8
         // fixture's own doc for the algebraic cancellation) so the LEGACY
@@ -5134,25 +5790,46 @@ mod global_ba_tests {
         graph.append_edges(&[(0, 0)], 4);
         let keepalive_patch = graph.patches()[0];
         for edge in graph.edges_mut() {
-            edge.target_weight = Some((Vector2::new(keepalive_patch.x, keepalive_patch.y), Vector2::new(1.0, 1.0)));
+            edge.target_weight = Some((
+                Vector2::new(keepalive_patch.x, keepalive_patch.y),
+                Vector2::new(1.0, 1.0),
+            ));
         }
 
         let loop_pairs = vec![(OLD_FRAME, DRIFTED_FRAME)];
 
         // --- M8-style (window-pinned) legacy path: PROVABLY cannot touch the drift. ---
         let legacy = gather_global_ba_edges(&graph);
-        let error_legacy = if let Some((t0, edges, targets, weights, _resolved, unresolved)) = legacy {
-            assert!(unresolved > 0, "the loop edge's old (folded) endpoint must be unresolved under the legacy scheme");
-            let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
-            let patches: Vec<DpvoPatch> = graph.patches().to_vec();
-            let intrinsics = vec![intr; poses.len()];
-            let problem = DpvoBaProblem { poses, patches, intrinsics, edges, targets, weights, depth_damping: None };
-            let cfg = DpvoBaConfig { iterations: 2, fixedp: t0, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
-            let solved = dpvo_ba(&problem, &cfg).expect("legacy solve");
-            (solved.poses[drifted_live].translation - true_drifted_pose.translation).norm()
-        } else {
-            drift.norm()
-        };
+        let error_legacy =
+            if let Some((t0, edges, targets, weights, _resolved, unresolved)) = legacy {
+                assert!(
+                unresolved > 0,
+                "the loop edge's old (folded) endpoint must be unresolved under the legacy scheme"
+            );
+                let poses: Vec<SE3> = graph.frames().iter().map(|f| f.pose.clone()).collect();
+                let patches: Vec<DpvoPatch> = graph.patches().to_vec();
+                let intrinsics = vec![intr; poses.len()];
+                let problem = DpvoBaProblem {
+                    poses,
+                    patches,
+                    intrinsics,
+                    edges,
+                    targets,
+                    weights,
+                    depth_damping: None,
+                };
+                let cfg = DpvoBaConfig {
+                    iterations: 2,
+                    fixedp: t0,
+                    lmbda: 1e-4,
+                    ep: 100.0,
+                    bounds: [-1e6, -1e6, 1e6, 1e6],
+                };
+                let solved = dpvo_ba(&problem, &cfg).expect("legacy solve");
+                (solved.poses[drifted_live].translation - true_drifted_pose.translation).norm()
+            } else {
+                drift.norm()
+            };
         assert!(
             (error_legacy - drift.norm()).abs() < 1e-6,
             "the legacy path has no edge referencing the drifted pose at all, so it must stay exactly \
@@ -5161,15 +5838,29 @@ mod global_ba_tests {
         );
 
         // --- M10 widened path: reaches back through the fold. ---
-        let gathered = gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("widened gather");
-        assert_eq!(gathered.folded_arrivals, vec![OLD_FRAME], "the widened gather must materialize OLD_FRAME as a free pose");
+        let gathered =
+            gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("widened gather");
+        assert_eq!(
+            gathered.folded_arrivals,
+            vec![OLD_FRAME],
+            "the widened gather must materialize OLD_FRAME as a free pose"
+        );
         assert_eq!(gathered.fixedp, 0);
-        assert_eq!(gathered.unresolved_inactive, 0, "every pinning+loop edge should now resolve via the folded-frame path");
+        assert_eq!(
+            gathered.unresolved_inactive, 0,
+            "every pinning+loop edge should now resolve via the folded-frame path"
+        );
         assert_eq!(gathered.resolved_inactive, m * PINNING_COUNT);
         assert!(gathered.t0_widened_by_loop_edge);
         assert!(!gathered.capped);
 
-        let ba_cfg = DpvoBaConfig { iterations: 2, fixedp: gathered.fixedp, lmbda: 1e-4, ep: 100.0, bounds: [-1e6, -1e6, 1e6, 1e6] };
+        let ba_cfg = DpvoBaConfig {
+            iterations: 2,
+            fixedp: gathered.fixedp,
+            lmbda: 1e-4,
+            ep: 100.0,
+            bounds: [-1e6, -1e6, 1e6, 1e6],
+        };
         let problem = DpvoBaProblem {
             poses: gathered.poses,
             patches: gathered.patches,
@@ -5181,7 +5872,8 @@ mod global_ba_tests {
         };
         let solved = dpvo_ba(&problem, &ba_cfg).expect("widened solve");
         let drifted_combined = 1 + drifted_live; // 1 folded frame prepended, then the live suffix.
-        let error_widened = (solved.poses[drifted_combined].translation - true_drifted_pose.translation).norm();
+        let error_widened =
+            (solved.poses[drifted_combined].translation - true_drifted_pose.translation).norm();
 
         assert!(
             error_widened * 10.0 < error_legacy,
@@ -5198,28 +5890,50 @@ mod global_ba_tests {
     #[test]
     fn widened_global_ba_reports_when_max_free_poses_trims_the_folded_endpoint() {
         let m = 4usize; // small enough that this test's own solve isn't the point.
-        let intr = DpvoIntrinsics { fx: 200.0, fy: 200.0, cx: 64.0, cy: 48.0 };
+        let intr = DpvoIntrinsics {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 64.0,
+            cy: 48.0,
+        };
         const OLD_FRAME: usize = 2;
         const PINNING_COUNT: usize = 6;
         const N_BEFORE_ARCHIVE: usize = 3 + PINNING_COUNT; // 9
         const N_FILLER: usize = 3;
         const N_AT_FOLD: usize = N_BEFORE_ARCHIVE + N_FILLER; // 12
         let keyframe_index = N_AT_FOLD - 2;
-        let true_pose = |i: usize| SE3::new(UnitQuaternion::identity(), Vector3::new(i as f64 * 0.2, 0.0, 0.0));
-        let patch = |local: usize| DpvoPatch { x: 20.0 + local as f64, y: 15.0, inverse_depth: 0.15 };
+        let true_pose = |i: usize| {
+            SE3::new(
+                UnitQuaternion::identity(),
+                Vector3::new(i as f64 * 0.2, 0.0, 0.0),
+            )
+        };
+        let patch = |local: usize| DpvoPatch {
+            x: 20.0 + local as f64,
+            y: 15.0,
+            inverse_depth: 0.15,
+        };
 
         let mut graph = DpvoPatchGraph::new(m10_graph_config(m, keyframe_index));
         graph.enable_inactive_edge_retention(1000);
         for i in 0..OLD_FRAME {
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(true_pose(i), intr, (0..m).map(patch).collect()).unwrap();
+            graph
+                .commit_frame(true_pose(i), intr, (0..m).map(patch).collect())
+                .unwrap();
         }
         graph.begin_frame(OLD_FRAME as f64 * 0.05);
-        graph.commit_frame(true_pose(OLD_FRAME), intr, (0..m).map(patch).collect()).unwrap();
+        graph
+            .commit_frame(true_pose(OLD_FRAME), intr, (0..m).map(patch).collect())
+            .unwrap();
         for target in (OLD_FRAME + 1)..=(OLD_FRAME + PINNING_COUNT) {
             graph.begin_frame(target as f64 * 0.05);
-            graph.commit_frame(true_pose(target), intr, (0..m).map(patch).collect()).unwrap();
-            let pairs: Vec<(usize, usize)> = (0..m).map(|local| (OLD_FRAME * m + local, target)).collect();
+            graph
+                .commit_frame(true_pose(target), intr, (0..m).map(patch).collect())
+                .unwrap();
+            let pairs: Vec<(usize, usize)> = (0..m)
+                .map(|local| (OLD_FRAME * m + local, target))
+                .collect();
             graph.append_edges(&pairs, 4);
         }
         for edge in graph.edges_mut() {
@@ -5229,7 +5943,9 @@ mod global_ba_tests {
         graph.keyframe(); // archive
         for i in N_BEFORE_ARCHIVE..N_AT_FOLD {
             graph.begin_frame(i as f64 * 0.05);
-            graph.commit_frame(true_pose(i), intr, (0..m).map(patch).collect()).unwrap();
+            graph
+                .commit_frame(true_pose(i), intr, (0..m).map(patch).collect())
+                .unwrap();
         }
         graph.keyframe(); // fold OLD_FRAME
         assert_eq!(graph.retained_poses().len(), 1);
@@ -5241,15 +5957,20 @@ mod global_ba_tests {
         let loop_pairs = vec![(OLD_FRAME, OLD_FRAME + PINNING_COUNT)];
 
         // Uncapped: reaches the folded frame.
-        let uncapped = gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("uncapped gather");
+        let uncapped =
+            gather_widened_global_ba_problem(&graph, &loop_pairs, None).expect("uncapped gather");
         assert_eq!(uncapped.folded_arrivals, vec![OLD_FRAME]);
         assert!(!uncapped.capped);
 
         // Capped to exactly the live frame count: no room left for the
         // folded prefix at all.
         let live_n = graph.n_frames();
-        let capped = gather_widened_global_ba_problem(&graph, &loop_pairs, Some(live_n)).expect("capped gather");
-        assert!(capped.folded_arrivals.is_empty(), "a cap with no headroom must drop the folded prefix entirely");
+        let capped = gather_widened_global_ba_problem(&graph, &loop_pairs, Some(live_n))
+            .expect("capped gather");
+        assert!(
+            capped.folded_arrivals.is_empty(),
+            "a cap with no headroom must drop the folded prefix entirely"
+        );
         assert!(capped.capped, "the trim must be reported, never silent");
     }
 
@@ -5263,7 +5984,10 @@ mod global_ba_tests {
     #[test]
     fn default_global_ba_config_does_not_widen() {
         let cfg = DpvoGlobalBaConfig::default();
-        assert!(!cfg.widen_t0_with_loop_edges, "M8 legacy behavior must be the default");
+        assert!(
+            !cfg.widen_t0_with_loop_edges,
+            "M8 legacy behavior must be the default"
+        );
         assert_eq!(cfg.max_free_poses, Some(256));
     }
 }
@@ -5493,12 +6217,18 @@ mod tests {
         for expected_count in 1..=4 {
             let (next, tripped) = rollback_monitor_step(10_000.0, bound, consecutive, threshold);
             assert_eq!(next, expected_count);
-            assert!(!tripped, "must not roll back before {threshold} consecutive bad frames");
+            assert!(
+                !tripped,
+                "must not roll back before {threshold} consecutive bad frames"
+            );
             consecutive = next;
         }
         let (next, tripped) = rollback_monitor_step(10_000.0, bound, consecutive, threshold);
         assert_eq!(next, 5);
-        assert!(tripped, "must roll back on the {threshold}th consecutive bad frame");
+        assert!(
+            tripped,
+            "must roll back on the {threshold}th consecutive bad frame"
+        );
 
         // A single good frame resets the counter to zero, not just decrements.
         let (reset, tripped_after_good) = rollback_monitor_step(1.0, bound, next, threshold);
@@ -5549,7 +6279,12 @@ mod tests {
         let num_edges = 3000;
         // EuRoC-shaped stride-4 (`RES`) feature map: 752x480 input -> 188x120.
         let (level0_h, level0_w) = (120usize, 188usize);
-        let intr = DpvoIntrinsics { fx: 190.0, fy: 190.0, cx: 94.0, cy: 60.0 };
+        let intr = DpvoIntrinsics {
+            fx: 190.0,
+            fy: 190.0,
+            cx: 94.0,
+            cy: 60.0,
+        };
         let pose_i = SE3::identity();
         // A modest, non-degenerate baseline (small rotation + translation),
         // shared by every synthetic edge below — realistic magnitude for a
@@ -5577,7 +6312,8 @@ mod tests {
         for v in anchor_gmap.iter_mut() {
             *v = next_f64() as f32;
         }
-        let level0 = Array3::<f32>::from_shape_fn((FNET_DIM, level0_h, level0_w), |_| next_f64() as f32);
+        let level0 =
+            Array3::<f32>::from_shape_fn((FNET_DIM, level0_h, level0_w), |_| next_f64() as f32);
         let level1 = avg_pool_4x4(level0.view());
         // Built once, outside the timed section below — mirrors the real
         // per-frame steady state after the M4-perf caching change
@@ -5609,8 +6345,12 @@ mod tests {
         println!("  [perf] reproject_patch_grid x{num_edges} edges: {reproject_ms:.3} ms/call");
 
         let corr_start = std::time::Instant::now();
-        let corr_flat =
-            corr_pyramid(anchor_gmap.view(), coords_grid_px.view(), &level0_hwc, &level1_hwc);
+        let corr_flat = corr_pyramid(
+            anchor_gmap.view(),
+            coords_grid_px.view(),
+            &level0_hwc,
+            &level1_hwc,
+        );
         let corr_ms = corr_start.elapsed().as_secs_f64() * 1000.0;
         println!("  [perf] corr_pyramid (2 levels) x{num_edges} edges: {corr_ms:.3} ms/call");
         assert_eq!(corr_flat.shape(), &[num_edges, CORR_DIM]);
@@ -5648,6 +6388,8 @@ mod low_parallax_tests {
             response: LowParallaxResponse::Freeze,
             depth_damp_factor: 1000.0,
             unflag_after_commits: 16,
+            gradual_release_duration_commits: 0,
+            gradual_release_start_cap_frames: 4,
         }
     }
 
@@ -5676,7 +6418,10 @@ mod low_parallax_tests {
         // below `enter_flow` (1.0) => enters THIS frame, and this frame is
         // itself suppressed (not the next one).
         let t5 = state.update(&c, 0.1);
-        assert!(t5.suppress, "the frame that fills the window below threshold must itself be suppressed");
+        assert!(
+            t5.suppress,
+            "the frame that fills the window below threshold must itself be suppressed"
+        );
         assert!(t5.just_entered);
         assert!(!t5.just_exited);
         assert!(state.in_regime());
@@ -5707,7 +6452,10 @@ mod low_parallax_tests {
             last = Some(state.update(&c, r));
         }
         let t = last.unwrap();
-        assert!(t.suppress && t.just_entered, "one noisy high reading must not block entry when the window median is still low");
+        assert!(
+            t.suppress && t.just_entered,
+            "one noisy high reading must not block entry when the window median is still low"
+        );
     }
 
     #[test]
@@ -5720,16 +6468,25 @@ mod low_parallax_tests {
         assert!(state.in_regime());
         // A window still mostly low (median under exit_flow) must NOT exit.
         let mid = state.update(&c, 3.9); // window now [0.1,0.1,3.9] -> median 0.1.
-        assert!(mid.suppress && !mid.just_exited, "window median still below exit_flow must not exit");
+        assert!(
+            mid.suppress && !mid.just_exited,
+            "window median still below exit_flow must not exit"
+        );
         assert!(state.in_regime());
         // Push enough high readings that the window's OWN median clears
         // exit_flow.
         state.update(&c, 5.0); // [0.1,3.9,5.0] -> median 3.9, still < 4.0.
         let exited = state.update(&c, 5.0); // [3.9,5.0,5.0] -> median 5.0 >= 4.0.
-        assert!(!exited.suppress, "the frame whose window median proves the hover is over must not be suppressed");
+        assert!(
+            !exited.suppress,
+            "the frame whose window median proves the hover is over must not be suppressed"
+        );
         assert!(exited.just_exited);
         assert!(!state.in_regime());
-        assert!(state.disarmed(), "exiting must permanently disarm the one-shot guard");
+        assert!(
+            state.disarmed(),
+            "exiting must permanently disarm the one-shot guard"
+        );
     }
 
     #[test]
@@ -5755,7 +6512,10 @@ mod low_parallax_tests {
         // Many more sustained low readings, well past the window size.
         for _ in 0..50 {
             let t = state.update(&c, 0.05);
-            assert!(!t.suppress && !t.just_entered && !t.just_exited, "a disarmed detector must never re-enter");
+            assert!(
+                !t.suppress && !t.just_entered && !t.just_exited,
+                "a disarmed detector must never re-enter"
+            );
         }
         assert!(!state.in_regime());
     }
@@ -5792,19 +6552,37 @@ mod low_parallax_damp_tests {
     fn multipliers_is_none_when_nothing_has_ever_been_flagged() {
         let mut state = LowParallaxDampState::default();
         assert_eq!(state.multipliers(&[1, 2, 3], 4, 1000.0), None);
-        assert_eq!(state.damped_solve_count(), 0, "an unaffected solve must not be counted as damped");
+        assert_eq!(
+            state.damped_solve_count(),
+            0,
+            "an unaffected solve must not be counted as damped"
+        );
     }
 
     #[test]
     fn flag_then_multipliers_damps_only_the_flagged_frames_block() {
         let mut state = LowParallaxDampState::default();
         state.flag(5, 3); // arrival_index 5, patches_per_frame 3.
-        // Window [4, 5, 6): only arrival 5 (local block 1) is flagged.
-        let out = state.multipliers(&[4, 5, 6], 3, 1000.0).expect("frame 5 is live and flagged, must damp");
+                          // Window [4, 5, 6): only arrival 5 (local block 1) is flagged.
+        let out = state
+            .multipliers(&[4, 5, 6], 3, 1000.0)
+            .expect("frame 5 is live and flagged, must damp");
         assert_eq!(out.len(), 9);
-        assert_eq!(&out[0..3], &[1.0, 1.0, 1.0], "frame 4's block must be untouched");
-        assert_eq!(&out[3..6], &[1000.0, 1000.0, 1000.0], "frame 5's block must be damped");
-        assert_eq!(&out[6..9], &[1.0, 1.0, 1.0], "frame 6's block must be untouched");
+        assert_eq!(
+            &out[0..3],
+            &[1.0, 1.0, 1.0],
+            "frame 4's block must be untouched"
+        );
+        assert_eq!(
+            &out[3..6],
+            &[1000.0, 1000.0, 1000.0],
+            "frame 5's block must be damped"
+        );
+        assert_eq!(
+            &out[6..9],
+            &[1.0, 1.0, 1.0],
+            "frame 6's block must be untouched"
+        );
         assert_eq!(state.damped_solve_count(), 1);
         // A second call with the SAME (still-flagged) window must count as
         // another genuinely-damped solve.
@@ -5851,7 +6629,7 @@ mod low_parallax_damp_tests {
     fn advance_unflagging_removes_once_the_age_threshold_is_reached() {
         let mut state = LowParallaxDampState::default();
         state.flag(10, 4); // born at arrival_index 10.
-        // Age 4 (< unflag_after_commits=5): must stay flagged.
+                           // Age 4 (< unflag_after_commits=5): must stay flagged.
         state.advance_unflagging(14, 5, false);
         assert_eq!(state.currently_damped_frames(), 1);
         assert_eq!(state.unflagged_total(), 0);
@@ -5873,7 +6651,57 @@ mod low_parallax_damp_tests {
         state.flag(0, 4);
         state.flag(50, 4);
         state.advance_unflagging(60, 5, false);
-        assert_eq!(state.currently_damped_frames(), 0, "both entries are well past the age threshold");
+        assert_eq!(
+            state.currently_damped_frames(),
+            0,
+            "both entries are well past the age threshold"
+        );
         assert_eq!(state.unflagged_total(), 2);
+    }
+
+    #[test]
+    fn gradual_release_is_monotonic_and_reaches_one_without_a_cliff() {
+        let mut state = LowParallaxDampState::default();
+        state.flag(0, 1);
+        let mut values = Vec::new();
+        for now in 10..14 {
+            state.advance_gradual_release(now, 5, false, 4, 1);
+            values.push(state.multipliers(&[0], 1, 1000.0).unwrap()[0]);
+        }
+        assert_eq!(values[0], 1000.0, "release starts at full damping");
+        assert!(values.windows(2).all(|pair| pair[1] < pair[0]));
+        state.advance_gradual_release(14, 5, false, 4, 1);
+        assert_eq!(state.multipliers(&[0], 1, 1000.0), None);
+        assert_eq!(state.unflagged_total(), 1);
+    }
+
+    #[test]
+    fn gradual_release_start_count_is_bounded_and_oldest_first() {
+        let mut state = LowParallaxDampState::default();
+        for arrival in 0..10 {
+            state.flag(arrival, 3);
+        }
+        state.advance_gradual_release(20, 5, false, 8, 2);
+        assert_eq!(state.currently_releasing_frames(), 2);
+        assert!(state.release_started_at.contains_key(&0));
+        assert!(state.release_started_at.contains_key(&1));
+        assert_eq!(state.max_release_started_per_advance(), 2);
+        assert_eq!(state.release_histogram_frames(), [8, 2, 0, 0, 0]);
+
+        state.advance_gradual_release(21, 5, false, 8, 2);
+        assert_eq!(state.currently_releasing_frames(), 4);
+        assert_eq!(state.release_started_total(), 4);
+        assert_eq!(state.max_release_started_per_advance(), 2);
+        assert_eq!(state.release_histogram_frames().iter().sum::<usize>(), 10);
+    }
+
+    #[test]
+    fn gradual_release_never_starts_during_hover() {
+        let mut state = LowParallaxDampState::default();
+        state.flag(0, 4);
+        state.advance_gradual_release(1_000, 5, true, 8, 4);
+        assert_eq!(state.currently_releasing_frames(), 0);
+        assert_eq!(state.release_started_total(), 0);
+        assert_eq!(state.multipliers(&[0], 4, 1000.0).unwrap(), vec![1000.0; 4]);
     }
 }

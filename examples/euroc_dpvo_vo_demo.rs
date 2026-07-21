@@ -215,8 +215,8 @@ use visloc_rs::slam::dpvo_vo::{
     DpvoScaleCouplingConfig, LowParallaxResponse,
 };
 use visloc_rs::slam::{
-    DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig, ImuNoiseModel,
-    ScaleCouplingConfig,
+    DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig,
+    ImuNoiseModel, ScaleCouplingConfig,
 };
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
@@ -389,6 +389,10 @@ struct CliArgs {
     /// Milestone M15 (`DpvoLowParallaxConfig::unflag_after_commits`,
     /// mirrored 1:1).
     hover_unflag_after_commits: usize,
+    /// Milestone M16 gradual release duration; zero preserves M15.
+    hover_release_duration_commits: usize,
+    /// Milestone M16 maximum frame cohorts beginning release per commit.
+    hover_release_start_cap_frames: usize,
 }
 
 impl Default for CliArgs {
@@ -480,7 +484,8 @@ impl Default for CliArgs {
             ll_max_mean_residual_ratio: DpvoLongLoopConfig::default().max_mean_residual_ratio,
             ll_sp_anchored_patches: DpvoLongLoopConfig::default().sp_anchored_patches,
             ll_sp_patch_min_separation: DpvoLongLoopConfig::default().sp_patch_min_separation,
-            ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default().max_rotation_inconsistency_deg,
+            ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default()
+                .max_rotation_inconsistency_deg,
             hover_freeze: false,
             // Mirror `DpvoLowParallaxConfig::default()` exactly so omitting
             // these flags reproduces that struct's own defaults.
@@ -490,6 +495,10 @@ impl Default for CliArgs {
             hover_response: DpvoLowParallaxConfig::default().response,
             hover_depth_damp_factor: DpvoLowParallaxConfig::default().depth_damp_factor,
             hover_unflag_after_commits: DpvoLowParallaxConfig::default().unflag_after_commits,
+            hover_release_duration_commits: DpvoLowParallaxConfig::default()
+                .gradual_release_duration_commits,
+            hover_release_start_cap_frames: DpvoLowParallaxConfig::default()
+                .gradual_release_start_cap_frames,
         }
     }
 }
@@ -527,12 +536,16 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--imu-gravity-norm-deviation-ratio" => {
                 args.imu_gravity_norm_deviation_ratio = raw.remove(i + 1).parse()?
             }
-            "--imu-min-bootstrap-factors" => args.imu_min_bootstrap_factors = raw.remove(i + 1).parse()?,
+            "--imu-min-bootstrap-factors" => {
+                args.imu_min_bootstrap_factors = raw.remove(i + 1).parse()?
+            }
             "--imu-noise-scale" => args.imu_noise_scale = raw.remove(i + 1).parse()?,
             "--imu-max-gyro-bias-magnitude-rad-s" => {
                 args.imu_max_gyro_bias_magnitude_rad_s = raw.remove(i + 1).parse()?
             }
-            "--imu-gyro-bias-max-rms-after" => args.imu_gyro_bias_max_rms_after = raw.remove(i + 1).parse()?,
+            "--imu-gyro-bias-max-rms-after" => {
+                args.imu_gyro_bias_max_rms_after = raw.remove(i + 1).parse()?
+            }
             "--imu-gyro-bias-max-rms-fraction" => {
                 args.imu_gyro_bias_max_rms_fraction = raw.remove(i + 1).parse()?
             }
@@ -541,7 +554,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--imu-max-mono-alignment-condition-number" => {
                 args.imu_max_mono_alignment_condition_number = raw.remove(i + 1).parse()?
             }
-            "--imu-rollback-mean-nis-bound" => args.imu_rollback_mean_nis_bound = raw.remove(i + 1).parse()?,
+            "--imu-rollback-mean-nis-bound" => {
+                args.imu_rollback_mean_nis_bound = raw.remove(i + 1).parse()?
+            }
             "--imu-rollback-consecutive-frames" => {
                 args.imu_rollback_consecutive_frames = raw.remove(i + 1).parse()?
             }
@@ -567,7 +582,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--lc-max-edge-age" => args.lc_max_edge_age = raw.remove(i + 1).parse()?,
             "--lc-global-opt-freq" => args.lc_global_opt_freq = raw.remove(i + 1).parse()?,
             "--lc-min-loop-gap" => args.lc_min_loop_gap = raw.remove(i + 1).parse()?,
-            "--lc-max-edges-per-batch" => args.lc_max_edges_per_batch = raw.remove(i + 1).parse()?,
+            "--lc-max-edges-per-batch" => {
+                args.lc_max_edges_per_batch = raw.remove(i + 1).parse()?
+            }
             "--lc-nms-radius" => args.lc_nms_radius = raw.remove(i + 1).parse()?,
             "--lc-min-valid-fraction" => args.lc_min_valid_fraction = raw.remove(i + 1).parse()?,
             "--global-ba" => {
@@ -600,7 +617,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 continue;
             }
             "--ll-superpoint-model" => args.ll_superpoint_model = PathBuf::from(raw.remove(i + 1)),
-            "--ll-vocab-bootstrap-frames" => args.ll_vocab_bootstrap_frames = raw.remove(i + 1).parse()?,
+            "--ll-vocab-bootstrap-frames" => {
+                args.ll_vocab_bootstrap_frames = raw.remove(i + 1).parse()?
+            }
             "--ll-vocab-words" => args.ll_vocab_words = raw.remove(i + 1).parse()?,
             "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
             "--ll-top-k" => args.ll_top_k = raw.remove(i + 1).parse()?,
@@ -608,17 +627,25 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--ll-min-temporal-gap" => args.ll_min_temporal_gap = raw.remove(i + 1).parse()?,
             "--ll-max-indexed-frames" => args.ll_max_indexed_frames = raw.remove(i + 1).parse()?,
             "--ll-patch-pixel-radius" => args.ll_patch_pixel_radius = raw.remove(i + 1).parse()?,
-            "--ll-min-bridge-correspondences" => args.ll_min_bridge_correspondences = raw.remove(i + 1).parse()?,
+            "--ll-min-bridge-correspondences" => {
+                args.ll_min_bridge_correspondences = raw.remove(i + 1).parse()?
+            }
             "--ll-ransac-iterations" => args.ll_ransac_iterations = raw.remove(i + 1).parse()?,
             "--ll-min-ransac-inliers" => args.ll_min_ransac_inliers = raw.remove(i + 1).parse()?,
-            "--ll-max-mean-residual-ratio" => args.ll_max_mean_residual_ratio = raw.remove(i + 1).parse()?,
+            "--ll-max-mean-residual-ratio" => {
+                args.ll_max_mean_residual_ratio = raw.remove(i + 1).parse()?
+            }
             "--ll-sp-anchored-patches" => {
                 args.ll_sp_anchored_patches = true;
                 raw.remove(i);
                 continue;
             }
-            "--ll-sp-patch-min-separation" => args.ll_sp_patch_min_separation = raw.remove(i + 1).parse()?,
-            "--ll-max-rotation-inconsistency-deg" => args.ll_max_rotation_inconsistency_deg = raw.remove(i + 1).parse()?,
+            "--ll-sp-patch-min-separation" => {
+                args.ll_sp_patch_min_separation = raw.remove(i + 1).parse()?
+            }
+            "--ll-max-rotation-inconsistency-deg" => {
+                args.ll_max_rotation_inconsistency_deg = raw.remove(i + 1).parse()?
+            }
             "--hover-freeze" => {
                 args.hover_freeze = true;
                 raw.remove(i);
@@ -644,13 +671,29 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     }
                 };
             }
-            "--hover-depth-damp-factor" => args.hover_depth_damp_factor = raw.remove(i + 1).parse()?,
-            "--hover-unflag-after-commits" => args.hover_unflag_after_commits = raw.remove(i + 1).parse()?,
+            "--hover-depth-damp-factor" => {
+                args.hover_depth_damp_factor = raw.remove(i + 1).parse()?
+            }
+            "--hover-unflag-after-commits" => {
+                args.hover_unflag_after_commits = raw.remove(i + 1).parse()?
+            }
+            "--hover-release-duration-commits" => {
+                args.hover_release_duration_commits = raw.remove(i + 1).parse()?
+            }
+            "--hover-release-start-cap-frames" => {
+                args.hover_release_start_cap_frames = raw.remove(i + 1).parse()?
+            }
             other => return Err(format!("unknown argument: {other}").into()),
         }
         raw.remove(i);
     }
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
+    if args.hover_release_duration_commits > 0 && args.hover_release_start_cap_frames == 0 {
+        return Err(
+            "--hover-release-start-cap-frames must be positive when gradual release is enabled"
+                .into(),
+        );
+    }
     Ok(args)
 }
 
@@ -728,28 +771,37 @@ fn final_pose_of(graph: &DpvoPatchGraph, arrival_index: usize) -> Option<SE3> {
     if let Some(pose) = graph.retained_poses().get(&arrival_index) {
         return Some(pose.clone());
     }
-    graph.frames().iter().find(|f| f.arrival_index == arrival_index).map(|f| f.pose.clone())
+    graph
+        .frames()
+        .iter()
+        .find(|f| f.arrival_index == arrival_index)
+        .map(|f| f.pose.clone())
 }
 
-fn nearest_ground_truth(samples: &[EurocGroundTruthSample], target_ts: i128) -> Option<&EurocGroundTruthSample> {
+fn nearest_ground_truth(
+    samples: &[EurocGroundTruthSample],
+    target_ts: i128,
+) -> Option<&EurocGroundTruthSample> {
     if samples.is_empty() {
         return None;
     }
-    let idx = samples.binary_search_by_key(&target_ts, |s| s.timestamp_nanoseconds).unwrap_or_else(|insert| {
-        if insert == 0 {
-            0
-        } else if insert >= samples.len() {
-            samples.len() - 1
-        } else {
-            let before = samples[insert - 1].timestamp_nanoseconds;
-            let after = samples[insert].timestamp_nanoseconds;
-            if (target_ts - before).abs() <= (after - target_ts).abs() {
-                insert - 1
+    let idx = samples
+        .binary_search_by_key(&target_ts, |s| s.timestamp_nanoseconds)
+        .unwrap_or_else(|insert| {
+            if insert == 0 {
+                0
+            } else if insert >= samples.len() {
+                samples.len() - 1
             } else {
-                insert
+                let before = samples[insert - 1].timestamp_nanoseconds;
+                let after = samples[insert].timestamp_nanoseconds;
+                if (target_ts - before).abs() <= (after - target_ts).abs() {
+                    insert - 1
+                } else {
+                    insert
+                }
             }
-        }
-    });
+        });
     Some(&samples[idx])
 }
 
@@ -767,12 +819,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dataset.cam0_calibration.distortion_coefficients,
     );
 
-    let (width, height) = (dataset.cam0_calibration.resolution.0 as usize, dataset.cam0_calibration.resolution.1 as usize);
+    let (width, height) = (
+        dataset.cam0_calibration.resolution.0 as usize,
+        dataset.cam0_calibration.resolution.1 as usize,
+    );
     let intrinsics = dataset.cam0_calibration.intrinsics;
-    let distortion = RadialTangential::from_euroc_coefficients(&dataset.cam0_calibration.distortion_coefficients)
-        .unwrap_or(RadialTangential::IDENTITY);
+    let distortion = RadialTangential::from_euroc_coefficients(
+        &dataset.cam0_calibration.distortion_coefficients,
+    )
+    .unwrap_or(RadialTangential::IDENTITY);
 
-    let backend = if args.onnx_cpu { OnnxBackend::Cpu } else { OnnxBackend::default() };
+    let backend = if args.onnx_cpu {
+        OnnxBackend::Cpu
+    } else {
+        OnnxBackend::default()
+    };
     let odometry_config = DpvoOdometryConfig {
         vo: DpvoVoConfig {
             buffer_size: 4096,
@@ -786,7 +847,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         width,
         height,
-        intrinsics: DpvoIntrinsics { fx: intrinsics[0], fy: intrinsics[1], cx: intrinsics[2], cy: intrinsics[3] },
+        intrinsics: DpvoIntrinsics {
+            fx: intrinsics[0],
+            fy: intrinsics[1],
+            cx: intrinsics[2],
+            cy: intrinsics[3],
+        },
         ba_lmbda: 1.0e-4,
         ba_ep: 100.0,
         motion_probe_min_flow: 2.0,
@@ -798,8 +864,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imu: args.imu.then(|| DpvoImuConfig {
             body_to_camera: se3_from_t_bs(&dataset.cam0_calibration.t_body_sensor),
             noise: ImuNoiseModel {
-                gyroscope_noise_density: dataset.imu_calibration.gyroscope_noise_density * args.imu_noise_scale,
-                accelerometer_noise_density: dataset.imu_calibration.accelerometer_noise_density * args.imu_noise_scale,
+                gyroscope_noise_density: dataset.imu_calibration.gyroscope_noise_density
+                    * args.imu_noise_scale,
+                accelerometer_noise_density: dataset.imu_calibration.accelerometer_noise_density
+                    * args.imu_noise_scale,
             },
             gravity_magnitude: 9.81,
             gravity_norm_deviation_ratio: args.imu_gravity_norm_deviation_ratio,
@@ -909,6 +977,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             response: args.hover_response,
             depth_damp_factor: args.hover_depth_damp_factor,
             unflag_after_commits: args.hover_unflag_after_commits,
+            gradual_release_duration_commits: args.hover_release_duration_commits,
+            gradual_release_start_cap_frames: args.hover_release_start_cap_frames,
         }),
     };
 
@@ -936,7 +1006,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.gba_lmbda,
             args.gba_inactive_edge_cap,
             args.gba_widen_t0,
-            if args.gba_max_free_poses == 0 { "none".to_string() } else { args.gba_max_free_poses.to_string() },
+            if args.gba_max_free_poses == 0 {
+                "none".to_string()
+            } else {
+                args.gba_max_free_poses.to_string()
+            },
         );
     }
 
@@ -976,14 +1050,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.hover_freeze {
         println!(
-            "hover detector enabled (Milestone M14/M15): window={} enter_flow={:.3} exit_flow={:.3} \
-             response={:?} depth_damp_factor={:.3} unflag_after_commits={}",
+            "hover detector enabled (Milestone M14-M16): window={} enter_flow={:.3} exit_flow={:.3} \
+             response={:?} depth_damp_factor={:.3} unflag_after_commits={} \
+             release_duration_commits={} release_start_cap_frames={}",
             args.hover_window,
             args.hover_enter_flow,
             args.hover_exit_flow,
             args.hover_response,
             args.hover_depth_damp_factor,
             args.hover_unflag_after_commits,
+            args.hover_release_duration_commits,
+            args.hover_release_start_cap_frames,
         );
     }
 
@@ -994,9 +1071,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dataset.imu_samples.len(),
             dataset.imu_calibration.gyroscope_noise_density,
             dataset.imu_calibration.accelerometer_noise_density,
-            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.x,
-            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.y,
-            odometry_config.imu.as_ref().unwrap().body_to_camera.translation.z,
+            odometry_config
+                .imu
+                .as_ref()
+                .unwrap()
+                .body_to_camera
+                .translation
+                .x,
+            odometry_config
+                .imu
+                .as_ref()
+                .unwrap()
+                .body_to_camera
+                .translation
+                .y,
+            odometry_config
+                .imu
+                .as_ref()
+                .unwrap()
+                .body_to_camera
+                .translation
+                .z,
         );
     }
 
@@ -1023,14 +1118,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.model_dir.join("inet.onnx"),
         args.model_dir.join("dpvo_update_pre_agg.onnx"),
         args.model_dir.join("dpvo_update_post_agg.onnx"),
-        args.model_dir.join("fixtures").join("softagg_weights_fixture.npz"),
+        args.model_dir
+            .join("fixtures")
+            .join("softagg_weights_fixture.npz"),
         backend,
         superpoint_model_path,
     )?;
 
-    let frame_cap = if args.max_frames == 0 { usize::MAX } else { args.max_frames };
-    let frames: Vec<_> = dataset.cam0_images.iter().step_by(args.stride.max(1)).take(frame_cap).collect();
-    println!("processing {} frames (stride={})", frames.len(), args.stride);
+    let frame_cap = if args.max_frames == 0 {
+        usize::MAX
+    } else {
+        args.max_frames
+    };
+    let frames: Vec<_> = dataset
+        .cam0_images
+        .iter()
+        .step_by(args.stride.max(1))
+        .take(frame_cap)
+        .collect();
+    println!(
+        "processing {} frames (stride={})",
+        frames.len(),
+        args.stride
+    );
 
     // Milestone M9: `(timestamp_ns, arrival_index)` per successfully tracked
     // frame — see the main loop's own comment (right before this Vec is
@@ -1102,10 +1212,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if args.imu {
             while imu_cursor < dataset.imu_samples.len()
-                && dataset.imu_samples[imu_cursor].timestamp_nanoseconds <= entry.timestamp_nanoseconds
+                && dataset.imu_samples[imu_cursor].timestamp_nanoseconds
+                    <= entry.timestamp_nanoseconds
             {
                 let sample: &EurocImuSample = &dataset.imu_samples[imu_cursor];
-                odometry.push_imu(sample.timestamp_nanoseconds as f64 * 1.0e-9, sample.gyro, sample.accel);
+                odometry.push_imu(
+                    sample.timestamp_nanoseconds as f64 * 1.0e-9,
+                    sample.gyro,
+                    sample.accel,
+                );
                 imu_cursor += 1;
             }
         }
@@ -1154,7 +1269,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "*** frame {idx}: SCALE COUPLING SOFT ROLLBACK #{} (weight now {:.3}, \
                      measurements_taken={} measurements_rejected={})",
-                    sc_diag.soft_rollback_count, sc_diag.weight, sc_diag.measurements_taken,
+                    sc_diag.soft_rollback_count,
+                    sc_diag.weight,
+                    sc_diag.measurements_taken,
                     sc_diag.measurements_rejected,
                 );
             }
@@ -1394,6 +1511,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     hf_diag.unflagged_total,
                     hf_diag.damped_solve_count,
                 );
+                println!(
+                    "  hover_releasing_frames={} hover_release_started_total={} \
+                     hover_release_start_max={} hover_release_histogram_frames={:?}",
+                    hf_diag.currently_releasing_frames,
+                    hf_diag.release_started_total,
+                    hf_diag.max_release_started_per_advance,
+                    hf_diag.release_histogram_frames,
+                );
             }
         }
     }
@@ -1440,38 +1565,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&traj_path, &traj_csv)?;
 
     let stats = odometry.stats();
-    let ms_per_frame = if stats.frames_processed > 0 { total_elapsed_s * 1000.0 / stats.frames_processed as f64 } else { 0.0 };
-
-    let (ate_rigid_rmse, ate_rigid_max, ate_sim_rmse, ate_sim_max, ate_sim_scale) = if aligned_estimated.len() >= 3 {
-        let rigid = umeyama_similarity_transform(&aligned_estimated, &aligned_reference, false)
-            .unwrap_or_else(TrajectorySimilarityTransform::identity);
-        let similarity = umeyama_similarity_transform(&aligned_estimated, &aligned_reference, true)
-            .unwrap_or_else(TrajectorySimilarityTransform::identity);
-        let mut rmse_rigid_sq = 0.0;
-        let mut max_rigid = 0.0_f64;
-        let mut rmse_sim_sq = 0.0;
-        let mut max_sim = 0.0_f64;
-        for (est, gt) in aligned_estimated.iter().zip(aligned_reference.iter()) {
-            let rigid_err = (rigid.apply(est) - gt).norm();
-            let sim_err = (similarity.apply(est) - gt).norm();
-            rmse_rigid_sq += rigid_err * rigid_err;
-            rmse_sim_sq += sim_err * sim_err;
-            max_rigid = max_rigid.max(rigid_err);
-            max_sim = max_sim.max(sim_err);
-        }
-        let n = aligned_estimated.len() as f64;
-        (
-            (rmse_rigid_sq / n).sqrt(),
-            max_rigid,
-            (rmse_sim_sq / n).sqrt(),
-            max_sim,
-            similarity.scale,
-        )
+    let ms_per_frame = if stats.frames_processed > 0 {
+        total_elapsed_s * 1000.0 / stats.frames_processed as f64
     } else {
-        (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+        0.0
     };
 
-    let tracked_fraction = if !frames.is_empty() { tracked_frames as f64 / frames.len() as f64 } else { 0.0 };
+    let (ate_rigid_rmse, ate_rigid_max, ate_sim_rmse, ate_sim_max, ate_sim_scale) =
+        if aligned_estimated.len() >= 3 {
+            let rigid = umeyama_similarity_transform(&aligned_estimated, &aligned_reference, false)
+                .unwrap_or_else(TrajectorySimilarityTransform::identity);
+            let similarity =
+                umeyama_similarity_transform(&aligned_estimated, &aligned_reference, true)
+                    .unwrap_or_else(TrajectorySimilarityTransform::identity);
+            let mut rmse_rigid_sq = 0.0;
+            let mut max_rigid = 0.0_f64;
+            let mut rmse_sim_sq = 0.0;
+            let mut max_sim = 0.0_f64;
+            for (est, gt) in aligned_estimated.iter().zip(aligned_reference.iter()) {
+                let rigid_err = (rigid.apply(est) - gt).norm();
+                let sim_err = (similarity.apply(est) - gt).norm();
+                rmse_rigid_sq += rigid_err * rigid_err;
+                rmse_sim_sq += sim_err * sim_err;
+                max_rigid = max_rigid.max(rigid_err);
+                max_sim = max_sim.max(sim_err);
+            }
+            let n = aligned_estimated.len() as f64;
+            (
+                (rmse_rigid_sq / n).sqrt(),
+                max_rigid,
+                (rmse_sim_sq / n).sqrt(),
+                max_sim,
+                similarity.scale,
+            )
+        } else {
+            (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+        };
+
+    let tracked_fraction = if !frames.is_empty() {
+        tracked_frames as f64 / frames.len() as f64
+    } else {
+        0.0
+    };
     let imu_diag = odometry.imu_diagnostics();
     let (gravity_x, gravity_y, gravity_z) = imu_diag
         .gravity_world
@@ -1624,11 +1759,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          hover_response={hf_response:?}\n\
          hover_depth_damp_factor={hf_depth_damp_factor:.3}\n\
          hover_unflag_after_commits={hf_unflag_after_commits}\n\
+         hover_release_duration_commits={hf_release_duration_commits}\n\
+         hover_release_start_cap_frames={hf_release_start_cap_frames}\n\
          hover_currently_damped_frames={hf_currently_damped_frames}\n\
          hover_frames_flagged_total={hf_frames_flagged_total}\n\
          hover_patches_flagged_total={hf_patches_flagged_total}\n\
          hover_unflagged_total={hf_unflagged_total}\n\
-         hover_damped_solve_count={hf_damped_solve_count}\n",
+         hover_damped_solve_count={hf_damped_solve_count}\n\
+         hover_currently_releasing_frames={hf_currently_releasing_frames}\n\
+         hover_release_started_total={hf_release_started_total}\n\
+         hover_release_start_max={hf_release_start_max}\n\
+         hover_release_histogram_frames={hf_release_histogram_frames:?}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
         frame_count = frames.len(),
@@ -1754,19 +1895,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hf_frames_suppressed = hf_diag.frames_suppressed_total,
         hf_disarmed = hf_diag.disarmed,
         hf_last_flow = hf_diag.last_flow,
-        hf_last_enter_frame = hf_diag.last_enter_frame.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string()),
-        hf_last_exit_frame = hf_diag.last_exit_frame.map(|f| f.to_string()).unwrap_or_else(|| "none".to_string()),
+        hf_last_enter_frame = hf_diag
+            .last_enter_frame
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        hf_last_exit_frame = hf_diag
+            .last_exit_frame
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         hf_window = args.hover_window,
         hf_enter_flow = args.hover_enter_flow,
         hf_exit_flow = args.hover_exit_flow,
         hf_response = hf_diag.response,
         hf_depth_damp_factor = args.hover_depth_damp_factor,
         hf_unflag_after_commits = args.hover_unflag_after_commits,
+        hf_release_duration_commits = args.hover_release_duration_commits,
+        hf_release_start_cap_frames = args.hover_release_start_cap_frames,
         hf_currently_damped_frames = hf_diag.currently_damped_frames,
         hf_frames_flagged_total = hf_diag.frames_flagged_total,
         hf_patches_flagged_total = hf_diag.patches_flagged_total,
         hf_unflagged_total = hf_diag.unflagged_total,
         hf_damped_solve_count = hf_diag.damped_solve_count,
+        hf_currently_releasing_frames = hf_diag.currently_releasing_frames,
+        hf_release_started_total = hf_diag.release_started_total,
+        hf_release_start_max = hf_diag.max_release_started_per_advance,
+        hf_release_histogram_frames = hf_diag.release_histogram_frames,
     );
     println!("{summary}");
     fs::write(args.out_dir.join("summary.txt"), &summary)?;
@@ -1782,15 +1935,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut csv =
             String::from("query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg\n");
         for entry in query_log {
-            let rot = entry.rotation_disagreement_deg.map(|d| format!("{d:.3}")).unwrap_or_default();
+            let rot = entry
+                .rotation_disagreement_deg
+                .map(|d| format!("{d:.3}"))
+                .unwrap_or_default();
             csv.push_str(&format!(
                 "{},{},{},{},{:.6},{},{}\n",
-                entry.query_arrival, entry.rank, entry.candidate_arrival, entry.gap, entry.similarity, entry.accepted, rot,
+                entry.query_arrival,
+                entry.rank,
+                entry.candidate_arrival,
+                entry.gap,
+                entry.similarity,
+                entry.accepted,
+                rot,
             ));
         }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
         fs::write(&csv_path, &csv)?;
-        println!("wrote {} long-range candidate log entries to {}", query_log.len(), csv_path.display());
+        println!(
+            "wrote {} long-range candidate log entries to {}",
+            query_log.len(),
+            csv_path.display()
+        );
     }
 
     // Milestone M14: dump every frame the low-parallax detector was
@@ -1805,9 +1971,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let csv_path = args.out_dir.join("hover_flow_trace.csv");
         fs::write(&csv_path, &csv)?;
-        println!("wrote {} hover flow-trace entries to {}", flow_log.len(), csv_path.display());
+        println!(
+            "wrote {} hover flow-trace entries to {}",
+            flow_log.len(),
+            csv_path.display()
+        );
     }
 
-    println!("wrote {} and summary.txt to {}", traj_path.display(), args.out_dir.display());
+    println!(
+        "wrote {} and summary.txt to {}",
+        traj_path.display(),
+        args.out_dir.display()
+    );
     Ok(())
 }
