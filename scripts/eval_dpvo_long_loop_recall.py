@@ -65,6 +65,17 @@ axis (`+z` in the camera frame) in world coordinates is therefore
 PyYAML is not assumed to be installed; `T_BS` is parsed out of the small,
 fixed-shape `sensor.yaml` block by hand (find the `T_BS:` -> `data: [...]`
 span and parse the 16 floats), not with a YAML parser.
+
+A3 stage-1 "densify query cadence" slice (`docs/visual_slam_sequential_sfm_plan.md`):
+`examples/euroc_dpvo_vo_demo.rs` now writes one MARKER row per issued query
+that returned zero candidates (`rank=-1,candidate_arrival=-1,gap=-1,
+similarity=0.0,accepted=false`), so a densified `query_frequency` doesn't
+silently look identical to "never queried" in the CSV. This script treats a
+`rank == -1` row as NOT a real candidate (excluded from recall/near-target/
+similarity computations) but STILL as evidence the query itself was issued
+(counted in `issued_query_count`/the recall denominator's own "was this
+query_arrival ever issued" set) -- see `evaluate_run`'s own filtering and
+`build_report`'s `issued_query_count`/`empty_query_fraction` fields.
 """
 
 from __future__ import annotations
@@ -397,8 +408,16 @@ def evaluate_run(
     near_window: int,
     k_values: list[int],
 ) -> RunEvaluation:
+    # A3 stage-1: `rank == -1` rows are empty-query MARKERS (see module
+    # docstring) -- they carry no real candidate geometry
+    # (`candidate_arrival == -1`), so they must never enter
+    # `candidates_by_query`/similarity stats/near-target matching, but the
+    # query_arrival they name WAS genuinely issued, so it still belongs in
+    # `issued_queries` below. Without this split, densified cadence's own
+    # empty-query markers would look like a real (and wrong) candidate.
+    real_rows = [r for r in rows if r.rank >= 0]
     candidates_by_query: dict[int, list[CandidateRow]] = defaultdict(list)
-    for row in rows:
+    for row in real_rows:
         candidates_by_query[row.query_arrival].append(row)
     for query_rows in candidates_by_query.values():
         query_rows.sort(key=lambda r: r.rank)
@@ -410,7 +429,8 @@ def evaluate_run(
         if partners.size > 0:
             partner_map[j] = partners
 
-    issued_queries = set(candidates_by_query.keys())
+    # ALL rows (including empty-query markers) name an issued query_arrival.
+    issued_queries = {r.query_arrival for r in rows}
     denom_queries = sorted(set(partner_map) & issued_queries)
     missed_queries = sorted(set(partner_map) - issued_queries)
 
@@ -431,9 +451,9 @@ def evaluate_run(
         len(missed_queries) / len(partner_map) if partner_map else None
     )
 
-    all_sims = [r.similarity for r in rows]
+    all_sims = [r.similarity for r in real_rows]
     hit_sims: list[float] = []
-    for r in rows:
+    for r in real_rows:
         partners = partner_map.get(r.query_arrival)
         if partners is not None and np.any(np.abs(partners - r.candidate_arrival) <= near_window):
             hit_sims.append(r.similarity)
@@ -489,7 +509,13 @@ def diagnose_tightest_pair(
     found = False
     for j in near_queries:
         for r in sorted(candidates_by_query[j], key=lambda r: r.rank):
-            near_target = abs(r.candidate_arrival - target_i) <= near_window
+            # A3 stage-1: `rank == -1` empty-query markers carry a sentinel
+            # `candidate_arrival == -1` that could otherwise coincidentally
+            # fall within `near_window` of a small `target_i` (e.g. 0) and be
+            # misreported as a real near-target hit -- a marker is never a
+            # candidate at all, so it can never be "near target" by
+            # definition, regardless of the sentinel's numeric value.
+            near_target = r.rank >= 0 and abs(r.candidate_arrival - target_i) <= near_window
             found = found or near_target
             diag_rows.append(
                 DiagnosticRow(
@@ -546,8 +572,14 @@ def build_report(
     n_arrivals = num_arrivals(len(cam0_timestamps), stride, max_frames)
     positions, axes = build_arrival_poses(n_arrivals, stride, cam0_timestamps, gt, r_bc, gt_tol_ns)
 
-    observed_min_gap = min((r.gap for r in rows), default=None)
-    observed_max_rank = max((r.rank for r in rows), default=None)
+    # A3 stage-1: `rank == -1` rows are empty-query markers -- exclude them
+    # from the gap/top_k sanity stats (a real `gap`/`rank` never observed
+    # on those rows by construction), but `query_arrivals_sorted` below
+    # deliberately keeps them IN (a query_arrival is "issued" whether or not
+    # it found any real candidates).
+    real_rows = [r for r in rows if r.rank >= 0]
+    observed_min_gap = min((r.gap for r in real_rows), default=None)
+    observed_max_rank = max((r.rank for r in real_rows), default=None)
     observed_top_k = observed_max_rank + 1 if observed_max_rank is not None else None
     query_arrivals_sorted = sorted({r.query_arrival for r in rows})
     observed_query_frequency = None
@@ -556,6 +588,15 @@ def build_report(
             b - a for a, b in zip(query_arrivals_sorted, query_arrivals_sorted[1:])
         ]
         observed_query_frequency = min(deltas)
+
+    # A3 stage-1: how much of the (possibly densified) query cadence landed
+    # empty -- the metric this slice exists to surface.
+    issued_query_count = len(query_arrivals_sorted)
+    queries_with_real_candidates = {r.query_arrival for r in real_rows}
+    empty_query_count = issued_query_count - len(queries_with_real_candidates)
+    empty_query_fraction = (
+        empty_query_count / issued_query_count if issued_query_count else None
+    )
 
     evaluations = []
     for radius in (radius_m, radius_secondary_m):
@@ -591,6 +632,14 @@ def build_report(
             "expected_min_gap_default": DEFAULT_MIN_TEMPORAL_GAP,
             "expected_top_k_default": DEFAULT_TOP_K,
             "expected_query_frequency_default": DEFAULT_QUERY_FREQUENCY,
+            # A3 stage-1 ("densify query cadence" slice): `issued_query_count`
+            # counts EVERY query_arrival that appears in the CSV, whether it
+            # found real candidates or only produced an empty-query marker
+            # row (`rank == -1`); `empty_query_fraction` is the fraction of
+            # those that landed empty.
+            "issued_query_count": issued_query_count,
+            "empty_query_count": empty_query_count,
+            "empty_query_fraction": empty_query_fraction,
         },
         "evaluations": [
             {
@@ -640,6 +689,13 @@ def format_text_report(report: dict) -> str:
         f"observed_top_k={sanity['observed_top_k']} (expect == {sanity['expected_top_k_default']}) "
         f"observed_min_query_spacing={sanity['observed_min_query_spacing']} "
         f"(expect >= {sanity['expected_query_frequency_default']})"
+    )
+    empty_frac = sanity["empty_query_fraction"]
+    empty_frac_str = f"{empty_frac:.4f}" if empty_frac is not None else "n/a"
+    lines.append(
+        f"issued_query_count={sanity['issued_query_count']} "
+        f"empty_query_count={sanity['empty_query_count']} "
+        f"empty_query_fraction={empty_frac_str}"
     )
     lines.append("")
     for ev in report["evaluations"]:

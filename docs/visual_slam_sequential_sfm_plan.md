@@ -806,6 +806,41 @@ re-measure; only if issued-query recall drops materially at dense cadence does
 vocabulary/aggregation work re-enter scope. Baseline JSONs:
 `E:/visloc_archive/dpvo_a3_20260721/recall_baseline/`.
 
+Stage-1b densified-cadence A/B (2026-07-22): `query_frequency` is now the demo
+flag `--ll-query-frequency` (default 40 unchanged), issued-but-empty queries
+are counted (`queries_issued_total`, `queries_with_zero_candidates`) and
+dumped as `rank=-1` CSV rows, and the recall harness counts them as issued
+misses (23 Rust + 33 Python tests). Same-binary MH_01 800f A/B, M12
+spanchored-final mechanism flags, seed 0:
+
+- qf40 control-compat arm: byte-identical ATE/scale/tracked to the M12
+  baseline (4.0866 / 3.3224 / 16.019 / 1.0), 20 issued queries (7 empty —
+  previously invisible), corrected recall@K 6/9 = 0.667 (the earlier 1.0000
+  was conditioned on non-empty queries only).
+- qf5 dense arm: 159 issued queries, opportunity-coverage miss falls
+  97.5% -> 79.9% (5x more GT-revisit arrivals actually queried), and queries
+  finally land at arrivals {453, 458}, within +/-5 of the tightest GT revisit
+  (42,456) — but candidate 42 never enters top-3 (best-ranked candidates are
+  arrivals 199/196 at similarity 0.39/0.30). Issued-query recall drops to
+  41/72 = 0.569. Per the stage-1 trigger above, vocabulary/ranking work is
+  now formally in scope: the tightest revisit is a proven ranking miss, not a
+  cadence miss.
+- Un-tuned side effect: density surfaces 5 newly accepted long loops
+  (220->388 ... 282->443, similarity 0.78-0.84, rotation disagreement
+  15.7-19.8 degrees, all just under the 20-degree gate) which drive
+  `ate_similarity_scale` 16.0 -> 0.278 and rigid ATE 4.09 -> 9.71 (sim ATE
+  improves 3.32 -> 2.01). This reproduces M12's "passes every gate, still
+  physically wrong" failure mode at higher density and is direct evidence for
+  stage 2's prescription: loop geometry must come from stored 2D
+  keypoints/descriptors (2D-2D relative pose first), not from drifted patch
+  depths, before any Sim3 scale is applied. No gates were tuned or loosened.
+
+Runs: `E:/visloc_archive/dpvo_a3_20260721/on_800_qf{40,5}`, recall JSONs in
+`.../recall_qf_ab/`. Note: both arms ran concurrently with the long-running
+MH_03 full-sequence SfM benchmark's mapper (~1 core); ATE/scale are
+deterministic and unaffected, per-frame timing from these runs is diagnostic
+only.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

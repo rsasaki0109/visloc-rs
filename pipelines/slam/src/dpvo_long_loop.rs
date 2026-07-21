@@ -394,6 +394,25 @@ pub struct DpvoLongLoopDiagnostics {
     /// store, bytes (`descriptors + keypoints + vlad`, `f32`/`f64`-sized).
     pub estimated_index_bytes: usize,
     pub queries_attempted: usize,
+    /// A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "Stage-1
+    /// baseline" -> "densify query cadence" slice): every call to
+    /// [`DpvoLongLoopIndex::find_and_verify_long_range_loop`] counts as one
+    /// ISSUED query, regardless of outcome — the SAME count
+    /// `queries_attempted` already carries (this field mirrors it under the
+    /// name `scripts/eval_dpvo_long_loop_recall.py`'s own `issued_query_count`
+    /// metric expects), kept as its own field rather than a rename so
+    /// existing `queries_attempted` call sites are untouched.
+    pub queries_issued_total: usize,
+    /// A3 stage-1: of `queries_issued_total`, how many returned ZERO
+    /// candidates after [`DpvoLongLoopIndex::query_candidates`]'s own
+    /// similarity/gap filtering — i.e. never even reached cross-check
+    /// matching. Densifying `query_frequency` (the whole point of this
+    /// slice) was previously invisible in `query_log`/the CSV export
+    /// whenever a query landed empty (no row was ever written for it,
+    /// indistinguishable from "never issued"); this counter, plus
+    /// [`DpvoLongLoopIndex::empty_query_arrivals`], makes that case visible
+    /// without changing `query_log`'s own per-candidate contract.
+    pub queries_with_zero_candidates: usize,
     /// Total appearance candidates surfaced (summed across every query,
     /// after the similarity/gap gates, before geometric verification).
     pub candidates_considered: usize,
@@ -543,8 +562,15 @@ pub struct DpvoLongLoopIndex {
     /// silently bounded, honestly documented rather than pretending it is
     /// free.
     query_log: Vec<QueryCandidateLogEntry>,
+    /// A3 stage-1: arrivals where a query was issued (i.e. `due()` fired)
+    /// but [`Self::query_candidates`] returned zero candidates — see
+    /// [`DpvoLongLoopDiagnostics::queries_with_zero_candidates`]'s own doc
+    /// for why this is tracked separately from `query_log` rather than
+    /// mixed into it.
+    empty_query_arrivals: Vec<usize>,
 
     diag_queries_attempted: usize,
+    diag_queries_with_zero_candidates: usize,
     diag_candidates_considered: usize,
     diag_verification_attempts: usize,
     diag_bridge_sufficient: usize,
@@ -573,7 +599,9 @@ impl DpvoLongLoopIndex {
             last_query_arrival: None,
             rng: StdRng::seed_from_u64(seed),
             query_log: Vec::new(),
+            empty_query_arrivals: Vec::new(),
             diag_queries_attempted: 0,
+            diag_queries_with_zero_candidates: 0,
             diag_candidates_considered: 0,
             diag_verification_attempts: 0,
             diag_bridge_sufficient: 0,
@@ -608,6 +636,8 @@ impl DpvoLongLoopIndex {
             vocab_built: self.vocab.is_some(),
             estimated_index_bytes,
             queries_attempted: self.diag_queries_attempted,
+            queries_issued_total: self.diag_queries_attempted,
+            queries_with_zero_candidates: self.diag_queries_with_zero_candidates,
             candidates_considered: self.diag_candidates_considered,
             verification_attempts: self.diag_verification_attempts,
             bridge_sufficient_total: self.diag_bridge_sufficient,
@@ -632,6 +662,15 @@ impl DpvoLongLoopIndex {
     /// `accepted: false` does and does not mean.
     pub fn query_log(&self) -> &[QueryCandidateLogEntry] {
         &self.query_log
+    }
+
+    /// A3 stage-1: arrival indices where a query was issued but returned
+    /// zero candidates — see [`DpvoLongLoopDiagnostics::queries_with_zero_candidates`]'s
+    /// own doc. `examples/euroc_dpvo_vo_demo.rs`'s own CSV export appends one
+    /// `rank=-1,candidate_arrival=-1,gap=-1,similarity=0.0,accepted=false`
+    /// marker row per entry here.
+    pub fn empty_query_arrivals(&self) -> &[usize] {
+        &self.empty_query_arrivals
     }
 
     /// Ingest one committed frame's raw SuperPoint keypoints (already in
@@ -786,6 +825,13 @@ impl DpvoLongLoopIndex {
         let candidates = self.query_candidates(current_arrival);
         self.diag_candidates_considered += candidates.len();
         if candidates.is_empty() {
+            // A3 stage-1: an issued query that surfaced nothing at all is
+            // otherwise silent (no `query_log` row, indistinguishable from
+            // "never issued") — record it explicitly so densifying
+            // `query_frequency` doesn't hide how much of that density lands
+            // empty.
+            self.diag_queries_with_zero_candidates += 1;
+            self.empty_query_arrivals.push(current_arrival);
             self.diag_total_elapsed_ms += start.elapsed().as_secs_f64() * 1000.0;
             return None;
         }
@@ -2175,6 +2221,135 @@ mod tests {
         let pose = SE3::identity();
         let result = index.find_and_verify_long_range_loop(4, &pose, &intrinsics, &[], |_| None);
         assert!(result.is_none());
-        assert_eq!(index.diagnostics().accepted_total, 0);
+        // A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify
+        // query cadence" slice): this IS the zero-candidate case — the
+        // query was issued (`due()` was never even consulted here, but the
+        // call itself counts, per `queries_issued_total`'s own doc) and
+        // `query_candidates` returned nothing (the gap gate rejects
+        // everything), so both new counters must fire exactly once and the
+        // arrival must be recorded in `empty_query_arrivals`.
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 0);
+        assert_eq!(diagnostics.queries_issued_total, 1);
+        assert_eq!(diagnostics.queries_with_zero_candidates, 1);
+        assert_eq!(index.empty_query_arrivals(), &[4]);
+    }
+
+    #[test]
+    fn queries_issued_total_and_zero_candidates_counter_default_config_unchanged() {
+        // A3 stage-1: pins that the two NEW counters do not perturb the
+        // existing, already-pinned acceptance path — a query that finds and
+        // accepts a genuine candidate must count as issued (1) and NOT as
+        // zero-candidate (0), and `empty_query_arrivals` must stay empty,
+        // under `DpvoLongLoopConfig::default()`'s own `query_frequency`
+        // (only `min_temporal_gap`/`min_similarity`/bootstrap knobs are
+        // overridden here, exactly as the pre-existing acceptance test
+        // already does, to keep the fixture small).
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            patch_pixel_radius: 0.5,
+            ..DpvoLongLoopConfig::default()
+        };
+        assert_eq!(
+            cfg.query_frequency,
+            DpvoLongLoopConfig::default().query_frequency,
+            "this test intentionally leaves query_frequency at its committed default (40)"
+        );
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        let intrinsics = intr();
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(30, 8.0);
+        for arrival in 0..3 {
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
+        }
+        let old_descriptors = frame_descriptors(1, 30, 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, old_patches.clone()))
+            } else {
+                None
+            }
+        };
+        let accepted = index
+            .find_and_verify_long_range_loop(300, &new_pose, &intrinsics, &new_patches, resolve_old)
+            .expect("a genuine, well-posed long-range revisit should be accepted");
+        assert_eq!(accepted.arrival_i, 20);
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 1);
+        assert_eq!(
+            diagnostics.queries_issued_total, 1,
+            "one call to find_and_verify_long_range_loop => one issued query"
+        );
+        assert_eq!(
+            diagnostics.queries_with_zero_candidates, 0,
+            "candidates were found (and one accepted), so this must NOT count as zero-candidate"
+        );
+        assert!(
+            index.empty_query_arrivals().is_empty(),
+            "a non-empty query must never appear in empty_query_arrivals"
+        );
+    }
+
+    #[test]
+    fn query_frequency_one_makes_every_eligible_arrival_issue_a_query() {
+        // A3 stage-1's own densification slice: `--ll-query-frequency 1`
+        // (vs. the committed default `40`) must make `due()` fire on EVERY
+        // committed arrival, and each firing must correspond to exactly one
+        // `find_and_verify_long_range_loop` call counted in
+        // `queries_issued_total` — `min_temporal_gap` is set unreachably
+        // high so every one of these queries lands in the zero-candidate
+        // bucket, isolating the CADENCE claim from candidate-outcome noise
+        // (the sibling test above already covers a query that DOES find
+        // candidates).
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 1000, // unreachable within this fixture's arrival range.
+            query_frequency: 1,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        let intrinsics = intr();
+        let pose = SE3::identity();
+        for arrival in 0..3 {
+            index.ingest_frame(arrival, vec![], frame_descriptors(arrival as u64, 20, 16));
+        }
+        let mut issued = 0usize;
+        let mut expected_empty_arrivals = Vec::new();
+        for arrival in 3..13 {
+            index.ingest_frame(arrival, vec![], frame_descriptors(arrival as u64, 20, 16));
+            assert!(
+                index.due(arrival),
+                "query_frequency=1 must make every arrival due, arrival={arrival}"
+            );
+            let result =
+                index.find_and_verify_long_range_loop(arrival, &pose, &intrinsics, &[], |_| None);
+            assert!(
+                result.is_none(),
+                "min_temporal_gap=1000 => no candidate ever clears the gap"
+            );
+            issued += 1;
+            expected_empty_arrivals.push(arrival);
+        }
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.queries_issued_total, issued);
+        assert_eq!(diagnostics.queries_with_zero_candidates, issued);
+        assert_eq!(index.empty_query_arrivals(), &expected_empty_arrivals[..]);
     }
 }

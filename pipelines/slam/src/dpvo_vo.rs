@@ -2484,6 +2484,18 @@ impl DpvoOdometry {
             .unwrap_or(&[])
     }
 
+    /// A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify query
+    /// cadence" slice): arrival indices where a long-range query was issued
+    /// but returned zero candidates after similarity/gap filtering — see
+    /// `crate::dpvo_long_loop::DpvoLongLoopIndex::empty_query_arrivals`'s own
+    /// doc. Empty whenever `config.long_loop` is `None`.
+    pub fn long_loop_empty_query_arrivals(&self) -> &[usize] {
+        self.long_loop
+            .as_ref()
+            .map(|runtime| runtime.index.empty_query_arrivals())
+            .unwrap_or(&[])
+    }
+
     /// Snapshot of the Milestone M14 low-parallax hover-freeze state —
     /// `enabled: false` (every other field a static default) whenever
     /// `config.low_parallax` is `None`.

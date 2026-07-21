@@ -197,6 +197,30 @@
 //! `hover_frames_flagged_total`/`hover_patches_flagged_total`/
 //! `hover_unflagged_total`/`hover_damped_solve_count` alongside M14's own
 //! counters (all `0`/`freeze` whenever `depth_damp` is not selected).
+//!
+//! # A3 stage-1 densified query cadence + empty-query visibility
+//! (`docs/visual_slam_sequential_sfm_plan.md`, "A3 -- Sound long-range loop
+//! closure")
+//!
+//! `docs/visual_slam_sequential_sfm_plan.md`'s "Stage-1 baseline" measured
+//! that at the COMMITTED `query_frequency = 40`, 98.3% of labelled GT
+//! revisit query arrivals were never even queried — a cadence gap, not a
+//! ranking gap (`scripts/eval_dpvo_long_loop_recall.py` found recall@K =
+//! 1.0 CONDITIONED on a query being issued). `--ll-query-frequency` (already
+//! a 1:1 mirror of `DpvoLongLoopConfig::query_frequency`, unchanged by this
+//! slice) is the densification knob; its default (`40`) reproduces the
+//! Stage-1 baseline's exact behavior byte-for-byte. Densifying alone would
+//! be invisible in `long_loop_candidates.csv` wherever a query landed with
+//! ZERO candidates (no row was ever written for it, indistinguishable from
+//! "never issued") — this run now appends one
+//! `rank=-1,candidate_arrival=-1,gap=-1,similarity=0.0,accepted=false`
+//! marker row per such query (header unchanged; see
+//! `crate::dpvo_long_loop::DpvoLongLoopIndex::empty_query_arrivals`'s own
+//! doc), and the summary gains `long_loop_queries_issued_total`/
+//! `long_loop_queries_with_zero_candidates` alongside the existing
+//! `long_loop_queries_attempted`. `scripts/eval_dpvo_long_loop_recall.py`
+//! skips `rank=-1` rows for recall-candidate purposes but still counts them
+//! as issued queries, reporting `issued_query_count`/`empty_query_fraction`.
 
 use std::env;
 use std::fs;
@@ -1725,6 +1749,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          long_loop_vocab_built={ll_vocab_built}\n\
          long_loop_estimated_index_bytes={ll_estimated_bytes}\n\
          long_loop_queries_attempted={ll_queries_attempted}\n\
+         long_loop_queries_issued_total={ll_queries_issued_total}\n\
+         long_loop_queries_with_zero_candidates={ll_queries_zero_candidates}\n\
          long_loop_candidates_considered={ll_candidates_considered}\n\
          long_loop_verification_attempts={ll_verification_attempts}\n\
          long_loop_bridge_sufficient_total={ll_bridge_sufficient}\n\
@@ -1869,6 +1895,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ll_vocab_built = ll_diag.vocab_built,
         ll_estimated_bytes = ll_diag.estimated_index_bytes,
         ll_queries_attempted = ll_diag.queries_attempted,
+        ll_queries_issued_total = ll_diag.queries_issued_total,
+        ll_queries_zero_candidates = ll_diag.queries_with_zero_candidates,
         ll_candidates_considered = ll_diag.candidates_considered,
         ll_verification_attempts = ll_diag.verification_attempts,
         ll_bridge_sufficient = ll_diag.bridge_sufficient_total,
@@ -1950,11 +1978,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rot,
             ));
         }
+        // A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify
+        // query cadence" slice): an issued query that surfaced ZERO
+        // candidates would otherwise never appear in this CSV at all — a
+        // dense `query_frequency` looks identical to "never issued" without
+        // this. One marker row per empty query, using the sentinel values
+        // the task itself specifies; the header is unchanged, so existing
+        // consumers that only read `rank >= 0` rows are unaffected.
+        let empty_arrivals = odometry.long_loop_empty_query_arrivals();
+        for &arrival in empty_arrivals {
+            csv.push_str(&format!("{arrival},-1,-1,-1,0.000000,false,\n"));
+        }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
         fs::write(&csv_path, &csv)?;
         println!(
-            "wrote {} long-range candidate log entries to {}",
-            query_log.len(),
+            "wrote {} long-range candidate log entries ({} empty-query markers) to {}",
+            query_log.len() + empty_arrivals.len(),
+            empty_arrivals.len(),
             csv_path.display()
         );
     }

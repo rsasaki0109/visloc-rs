@@ -300,6 +300,54 @@ def test_evaluate_run_similarity_stats_separate_hits_from_all() -> None:
 
 
 # ---------------------------------------------------------------------------
+# evaluate_run: A3 stage-1 empty-query markers (rank=-1) count as issued
+# queries but never as real candidates
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_run_empty_query_marker_counts_as_issued_but_not_a_candidate() -> None:
+    # `examples/euroc_dpvo_vo_demo.rs` writes one
+    # `rank=-1,candidate_arrival=-1,gap=-1,similarity=0.0` marker row per
+    # issued-but-empty query -- densifying query_frequency without this
+    # would make an empty query indistinguishable from "never issued" (it
+    # would silently drop out of the recall denominator instead of counting
+    # as a miss).
+    mask = make_mask(6, [(0, 5)])
+    rows = [
+        MODULE.CandidateRow(
+            query_arrival=5, rank=-1, candidate_arrival=-1, gap=-1, similarity=0.0, accepted=False
+        ),
+    ]
+    ev = MODULE.evaluate_run(
+        rows, mask, min_gap=1, radius_m=1.0, max_angle_deg=30.0, near_window=0, k_values=[1]
+    )
+    assert ev.recall_at_k[0].denominator == 1  # query 5 WAS issued
+    assert ev.recall_at_k[0].hits == 0  # ...but returned no real candidate -> a miss, not excluded
+    assert ev.missed_queries == []
+    assert ev.similarity_all.count == 0  # marker rows never enter similarity stats
+
+
+def test_evaluate_run_empty_query_marker_mixed_with_a_real_hit_from_another_query() -> None:
+    # Query 5 is issued but empty (marker only); query 7 is issued and finds
+    # the real, labelled candidate at arrival 0. Both must count as issued;
+    # only query 7 counts as a hit.
+    mask = make_mask(9, [(0, 5), (0, 7)])
+    rows = [
+        MODULE.CandidateRow(
+            query_arrival=5, rank=-1, candidate_arrival=-1, gap=-1, similarity=0.0, accepted=False
+        ),
+        MODULE.CandidateRow(query_arrival=7, rank=0, candidate_arrival=0, gap=7, similarity=0.9, accepted=False),
+    ]
+    ev = MODULE.evaluate_run(
+        rows, mask, min_gap=1, radius_m=1.0, max_angle_deg=30.0, near_window=0, k_values=[1]
+    )
+    assert ev.recall_at_k[0].denominator == 2
+    assert ev.recall_at_k[0].hits == 1
+    assert ev.missed_queries == []
+    assert ev.similarity_all.count == 1
+
+
+# ---------------------------------------------------------------------------
 # load_candidates: tolerant of both header variants seen in archived runs
 # ---------------------------------------------------------------------------
 
@@ -336,6 +384,26 @@ def test_load_candidates_missing_required_column_raises(tmp_path: Path) -> None:
         MODULE.load_candidates(path)
 
 
+def test_load_candidates_parses_empty_query_marker_rows(tmp_path: Path) -> None:
+    # A3 stage-1: `rank=-1,candidate_arrival=-1,gap=-1,similarity=0.0` rows
+    # (issued-but-empty queries) must parse cleanly as plain ints/floats --
+    # no special-casing needed in `load_candidates` itself, the filtering
+    # happens downstream in `evaluate_run`/`build_report`.
+    path = tmp_path / "candidates.csv"
+    path.write_text(
+        "query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg\n"
+        "10,-1,-1,-1,0.000000,false,\n",
+        encoding="utf-8",
+    )
+    rows = MODULE.load_candidates(path)
+    assert len(rows) == 1
+    assert rows[0].rank == -1
+    assert rows[0].candidate_arrival == -1
+    assert rows[0].gap == -1
+    assert rows[0].similarity == 0.0
+    assert rows[0].accepted is False
+
+
 # ---------------------------------------------------------------------------
 # diagnose_tightest_pair
 # ---------------------------------------------------------------------------
@@ -358,6 +426,23 @@ def test_diagnose_tightest_pair_not_found_when_no_query_nearby() -> None:
     assert diag.found_near_target is False
     assert diag.query_arrivals_near_target == []
     assert diag.rows == []
+
+
+def test_diagnose_tightest_pair_empty_query_marker_near_target_is_not_a_false_hit() -> None:
+    # A3 stage-1 regression: an empty-query marker's sentinel
+    # `candidate_arrival == -1` could otherwise coincidentally fall within
+    # `near_window` of a small `target_i` (here 0) and be misreported as a
+    # genuine near-target candidate -- it must never count as one, though
+    # the query itself is still correctly listed as "issued near target j".
+    rows = [
+        MODULE.CandidateRow(
+            query_arrival=456, rank=-1, candidate_arrival=-1, gap=-1, similarity=0.0, accepted=False
+        ),
+    ]
+    diag = MODULE.diagnose_tightest_pair(rows, target_i=0, target_j=456, near_window=5)
+    assert diag.query_arrivals_near_target == [456]  # the query itself WAS issued near target j
+    assert diag.found_near_target is False  # but it is NOT a real near-target candidate
+    assert diag.rows[0].near_target_candidate is False
 
 
 # ---------------------------------------------------------------------------
@@ -479,3 +564,45 @@ def test_build_report_secondary_radius_can_exclude_the_same_pair(tmp_path: Path)
     primary, secondary = report["evaluations"]
     assert primary["labelled_pairs_total"] == 1
     assert secondary["labelled_pairs_total"] == 0
+
+
+def test_build_report_counts_issued_and_empty_queries(tmp_path: Path) -> None:
+    # A3 stage-1 end-to-end: query 5 finds the real (labelled) candidate;
+    # query 4 is issued but lands empty (marker row only). Both must be
+    # counted in `issued_query_count`; only query 4 counts toward
+    # `empty_query_count`/`empty_query_fraction`.
+    mav0_dir = tmp_path / "mav0"
+    _write_synthetic_dataset(mav0_dir)
+
+    candidates_csv = tmp_path / "long_loop_candidates.csv"
+    candidates_csv.write_text(
+        "query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg\n"
+        "5,0,0,5,0.77,false,\n"
+        "4,-1,-1,-1,0.000000,false,\n",
+        encoding="utf-8",
+    )
+
+    report = MODULE.build_report(
+        candidates_csv=candidates_csv,
+        gt_dir=mav0_dir,
+        stride=1,
+        max_frames=6,
+        min_gap=3,
+        radius_m=1.0,
+        radius_secondary_m=0.5,
+        max_angle_deg=30.0,
+        near_window=1,
+        gt_tol_ns=5_000_000,
+        k_values=[1],
+        diagnostic_i=0,
+        diagnostic_j=5,
+    )
+
+    sanity = report["csv_sanity"]
+    assert sanity["issued_query_count"] == 2  # queries 4 and 5 were both issued
+    assert sanity["empty_query_count"] == 1  # only query 4 landed empty
+    assert sanity["empty_query_fraction"] == pytest.approx(0.5)
+    # The empty-query marker (query 4) must never pollute the real gap/top_k
+    # sanity stats, which are derived only from real (rank >= 0) rows.
+    assert sanity["observed_min_gap"] == 5
+    assert sanity["observed_top_k"] == 1
