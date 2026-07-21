@@ -786,6 +786,26 @@ guards.
 Gate: >= 90% labelled-loop recall at the chosen K, zero accepted false loops on
 the development suite, and improved full-sequence ATE on at least two sequences.
 
+Stage-1 baseline (2026-07-21): `scripts/eval_dpvo_long_loop_recall.py` labels
+GT revisit pairs (position radius, camera optical-axis angle < 30 degrees,
+arrival gap >= the index's own `min_temporal_gap`) and scores the demo's
+`long_loop_candidates.csv` against them; 28 pytest tests pin the metric.
+Scoring the archived M12 MH_01 runs (stride 2, defaults `min_temporal_gap=150`,
+`top_k=3`, `query_frequency=40`, verified against source and empirically
+against all three CSVs) revises the M12 interpretation: conditioned on a query
+being issued, recall@K is 1.0000 at every K in {1,3,5,10} for both 1.0 m and
+0.5 m radii on all three runs. The failure is opportunity coverage: only 13
+(800f) / 3 (400f) distinct query arrivals appear at all, so 98.3% of
+labelled-revisit query arrivals (353/359 at r=1.0) were never queried, and no
+query ever landed within +/-5 arrivals of the tightest GT revisit (42,456).
+The M11/M12 "retrieval never surfaces the best revisit" gap is therefore a
+query-cadence/logging gap, not a vocabulary-ranking gap, on this evidence.
+Stage-1 next slice: densify query cadence (query_frequency ~1-5, plus logging
+of zero-candidate queries so issued-but-empty queries become visible), then
+re-measure; only if issued-query recall drops materially at dense cadence does
+vocabulary/aggregation work re-enter scope. Baseline JSONs:
+`E:/visloc_archive/dpvo_a3_20260721/recall_baseline/`.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:
