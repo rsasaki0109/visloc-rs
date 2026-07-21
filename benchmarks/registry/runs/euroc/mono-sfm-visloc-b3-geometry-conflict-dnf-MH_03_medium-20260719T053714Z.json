@@ -1,0 +1,109 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_20260719\\stdout.log",
+      "sha256": "414ca0ede3121c4d1735538b7797ad88a718253630ece2a535cc02aecb86b931"
+    },
+    {
+      "exists": true,
+      "kind": "debug_log",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_20260719\\stderr.log",
+      "sha256": "fdc27c6cd6c94c3e4348fc8ce5b7c5828b48e943ef146e953262c625621df7a1"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same frozen MH03-300 feature cache; planned implementation supersession before GT evaluation",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--geometry-conflict-recovery"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --geometry-conflict-recovery"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "frames": 300,
+      "sensor_mode": "monocular"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T06:14:02Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": "Stopped during normal seed growth before GT access to replace per-node edge scans with an equivalent bounded adjacency-list traversal; superseded by T060907Z success run.",
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1775
+    },
+    {
+      "implementation": null,
+      "name": "verified_correspondences",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2033967
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 54.3
+    }
+  ],
+  "models": [],
+  "notes": "Intentional DNF retained for auditability; no GT was read and no result claim is attached.",
+  "result_kind": "exploratory",
+  "run_id": "mono-sfm-visloc-b3-geometry-conflict-dnf-MH_03_medium-20260719T053714Z",
+  "schema_version": 1,
+  "status": "dnf"
+}

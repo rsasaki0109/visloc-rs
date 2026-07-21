@@ -1,0 +1,255 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "full_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\evaluation_full.json",
+      "sha256": "a5a637d1ae4b4285b7228c5412db472d205a57557eed8630e4ca34856abd9f79"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\visloc.tum",
+      "sha256": "5dbdfee0213c6e1d92b551f90ff431938d47ccc1bd47c4861b01f4b5ce674a31"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\stdout.log",
+      "sha256": "a0218b1b7414c7e655d310420f1bff45ddf393f94be1d5d9cf4602b9d53d917b"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\model\\images.txt",
+      "sha256": "ef5e2d6c5ae2acae52fd2cd95a4e581d1edf5a06f60b44c55bf65de16ecf167f"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v29_pose_guided_new_tracks_20_30_20260719\\model\\points3D.txt",
+      "sha256": "4f7db30672d2be171292b6d91ceafd686089eb9d906664abb4551c5aff5cc198"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Frozen MH05 base graph 8/12 plus separately matched 20/30 edges; trusted reconstruction first, then pose-guided fragment merge, new multi-view triangulation, observation attachment, and transactional joint BA; GT evaluated after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--pose-graph-offsets",
+      "20,30",
+      "--pose-graph-stride",
+      "2",
+      "--pose-guided-track-augmentation",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --skip-offsets 8,12 --skip-stride 2 --pose-graph-offsets 20,30 --pose-graph-stride 2 --pose-guided-track-augmentation --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "base_skip_offsets": "8,12",
+      "clean_error_increase_ratio": 0.001,
+      "frames": 300,
+      "max_reprojection_px": 2.0,
+      "min_parallax_deg": 2.0,
+      "new_track_min_views": 3,
+      "pose_guided_track_augmentation": true,
+      "sensor_mode": "monocular",
+      "wide_offsets": "20,30",
+      "wide_stride": 2
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T12:52:43Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "merged_tracks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 18
+    },
+    {
+      "implementation": null,
+      "name": "new_tracks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 798
+    },
+    {
+      "implementation": null,
+      "name": "new_track_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4901
+    },
+    {
+      "implementation": null,
+      "name": "attached_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 846
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 7421
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 69279
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.63
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 36.0
+    },
+    {
+      "implementation": null,
+      "name": "wide_matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 5.2
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 355.9
+    },
+    {
+      "implementation": null,
+      "name": "max_pose_correction",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "reconstruction_unit",
+      "value": 0.011371
+    },
+    {
+      "implementation": null,
+      "name": "reconstruction_diameter",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "reconstruction_unit",
+      "value": 17.87603
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.216569911996367
+    },
+    {
+      "implementation": null,
+      "name": "base_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.216568885739022
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0124751931732832
+    }
+  ],
+  "models": [],
+  "notes": "Controlled neutral result: safe post-convergence wide-track integration adds substantial valid structure and preserves 300/300, but ATE is unchanged. The MH05 wide-graph gain therefore depends on initialization/growth basin selection, not merely final BA constraints. This arm is not promoted.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-posttrusted-wide-tracks-neutral-MH_05_difficult-20260719T125214Z",
+  "schema_version": 1,
+  "status": "success"
+}

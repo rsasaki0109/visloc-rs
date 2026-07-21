@@ -163,7 +163,10 @@ fn binarize(projected: &[f32], thresholds: &[f32]) -> Vec<u64> {
 }
 
 fn hamming_distance(a: &[u64], b: &[u64]) -> usize {
-    a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones() as usize).sum()
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x ^ y).count_ones() as usize)
+        .sum()
 }
 
 fn median(sorted: &[f32]) -> f32 {
@@ -226,7 +229,8 @@ impl InvertedFile {
             self.squared_idf_weight = 0.0;
             return;
         }
-        let unique: std::collections::HashSet<usize> = self.entries.iter().map(|e| e.image_id).collect();
+        let unique: std::collections::HashSet<usize> =
+            self.entries.iter().map(|e| e.image_id).collect();
         let idf = (num_total_images as f64 / unique.len() as f64).ln();
         self.squared_idf_weight = (idf * idf) as f32;
     }
@@ -245,7 +249,10 @@ impl InvertedFile {
     /// (`inverted_file.h:296-355`). Requires [`Self::sort_entries`] to have
     /// run (COLMAP: `IsUsable`/`kEntriesSorted`), asserted via `debug_assert`.
     fn score_feature(&self, query_projected: &[f32], lut: &HammingWeightLut) -> Vec<(usize, f32)> {
-        debug_assert!(self.sorted, "score_feature requires sorted entries (call finalize() first)");
+        debug_assert!(
+            self.sorted,
+            "score_feature requires sorted entries (call finalize() first)"
+        );
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -369,9 +376,15 @@ impl VocabTree {
         if options.embedding_dim == 0 || options.embedding_dim > vocab.dim() {
             return None;
         }
-        let proj_matrix = generate_orthonormal_projection(vocab.dim(), options.embedding_dim, options.projection_seed);
+        let proj_matrix = generate_orthonormal_projection(
+            vocab.dim(),
+            options.embedding_dim,
+            options.projection_seed,
+        );
 
-        let mut files: Vec<InvertedFile> = (0..vocab.num_words()).map(|_| InvertedFile::new(options.embedding_dim)).collect();
+        let mut files: Vec<InvertedFile> = (0..vocab.num_words())
+            .map(|_| InvertedFile::new(options.embedding_dim))
+            .collect();
 
         // Build-time word assignment always uses num_neighbors = 1
         // (`visual_index.cc`'s local `kNumNeighbors`), independent of
@@ -428,7 +441,10 @@ impl VocabTree {
                 continue;
             }
             let proj = project(&self.proj_matrix, d);
-            for word in self.vocab.nearest_words(d, self.options.index_num_neighbors) {
+            for word in self
+                .vocab
+                .nearest_words(d, self.options.index_num_neighbors)
+            {
                 self.files[word].add_entry(image_id, &proj);
             }
         }
@@ -452,7 +468,16 @@ impl VocabTree {
         }
         self.normalization_constants = self_sim
             .into_iter()
-            .map(|(id, s)| (id, if s > 0.0 { (1.0 / s.sqrt()) as f32 } else { 0.0 }))
+            .map(|(id, s)| {
+                (
+                    id,
+                    if s > 0.0 {
+                        (1.0 / s.sqrt()) as f32
+                    } else {
+                        0.0
+                    },
+                )
+            })
             .collect();
         self.finalized = true;
     }
@@ -463,7 +488,11 @@ impl VocabTree {
     /// Results are sorted by descending score (ties broken by ascending
     /// `image_id`), truncated to `max_num_images` if given (COLMAP
     /// `QueryOptions::max_num_images`, default unlimited).
-    pub fn query(&self, descriptors: &[Vec<f32>], max_num_images: Option<usize>) -> Vec<ImageScore> {
+    pub fn query(
+        &self,
+        descriptors: &[Vec<f32>],
+        max_num_images: Option<usize>,
+    ) -> Vec<ImageScore> {
         debug_assert!(self.finalized, "query() requires finalize() to have run");
         if descriptors.is_empty() {
             return Vec::new();
@@ -477,7 +506,8 @@ impl VocabTree {
         let mut assignments: Vec<Vec<usize>> = Vec::with_capacity(descriptors.len());
         for d in descriptors {
             let words = if d.len() == self.vocab.dim() {
-                self.vocab.nearest_words(d, self.options.query_num_neighbors)
+                self.vocab
+                    .nearest_words(d, self.options.query_num_neighbors)
             } else {
                 Vec::new()
             };
@@ -486,7 +516,11 @@ impl VocabTree {
             }
             assignments.push(words);
         }
-        let normalization_weight = if self_similarity > 0.0 { (1.0 / self_similarity.sqrt()) as f32 } else { 1.0 };
+        let normalization_weight = if self_similarity > 0.0 {
+            (1.0 / self_similarity.sqrt()) as f32
+        } else {
+            1.0
+        };
 
         let mut scores: HashMap<usize, f32> = HashMap::new();
         for (d, words) in descriptors.iter().zip(assignments.iter()) {
@@ -504,7 +538,11 @@ impl VocabTree {
         let mut out: Vec<ImageScore> = scores
             .into_iter()
             .map(|(image_id, score)| {
-                let norm_const = self.normalization_constants.get(&image_id).copied().unwrap_or(0.0);
+                let norm_const = self
+                    .normalization_constants
+                    .get(&image_id)
+                    .copied()
+                    .unwrap_or(0.0);
                 ImageScore {
                     image_id,
                     score: score * normalization_weight * norm_const,
@@ -537,7 +575,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 / (1u64 << 53) as f64) as f32
         }
     }
@@ -545,7 +586,12 @@ mod tests {
     fn cluster(center: &[f32], n: usize, jitter: f32, seed: u64) -> Vec<Vec<f32>> {
         let mut rng = Lcg(seed);
         (0..n)
-            .map(|_| center.iter().map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter).collect())
+            .map(|_| {
+                center
+                    .iter()
+                    .map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter)
+                    .collect()
+            })
             .collect()
     }
 
@@ -625,7 +671,13 @@ mod tests {
         tree.finalize();
 
         let scores = tree.query(&content_a, None);
-        let score_of = |id: usize| scores.iter().find(|s| s.image_id == id).map(|s| s.score).unwrap_or(0.0);
+        let score_of = |id: usize| {
+            scores
+                .iter()
+                .find(|s| s.image_id == id)
+                .map(|s| s.score)
+                .unwrap_or(0.0)
+        };
         let (s_dup, s_b) = (score_of(1), score_of(2));
         assert!(
             s_dup > s_b,

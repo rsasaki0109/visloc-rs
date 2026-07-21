@@ -353,7 +353,9 @@ impl CorrespondenceGraph {
     /// direction-dependent payload to invert (see module doc), so unlike
     /// COLMAP's version this is a plain lookup, order-insensitive.
     pub fn edge(&self, image_id1: usize, image_id2: usize) -> Option<EdgeMetadata> {
-        self.image_pairs.get(&pair_key(image_id1, image_id2)).copied()
+        self.image_pairs
+            .get(&pair_key(image_id1, image_id2))
+            .copied()
     }
 
     /// Port of `UpdateTwoViewGeometry` (`.h:147-149`, `.cc:340-352`), reduced
@@ -410,7 +412,9 @@ impl CorrespondenceGraph {
         let key = pair_key(image_id1, image_id2);
         // `.cc:121-124`: THROW_CHECK(inserted) — a pair may only be added once.
         if self.image_pairs.contains_key(&key) {
-            return Err(CorrespondenceGraphError::DuplicatePair(image_id1, image_id2));
+            return Err(CorrespondenceGraphError::DuplicatePair(
+                image_id1, image_id2,
+            ));
         }
 
         let mut stats = IngestStats::default();
@@ -492,7 +496,11 @@ impl CorrespondenceGraph {
 
     /// Port of `ExtractCorrespondences` (`.h:117-120`, `.cc:218-228`): the
     /// owned-`Vec` variant of [`Self::find_correspondences`].
-    pub fn extract_correspondences(&self, image_id: usize, point2d_idx: usize) -> Vec<Correspondence> {
+    pub fn extract_correspondences(
+        &self,
+        image_id: usize,
+        point2d_idx: usize,
+    ) -> Vec<Correspondence> {
         self.find_correspondences(image_id, point2d_idx).to_vec()
     }
 
@@ -506,7 +514,9 @@ impl CorrespondenceGraph {
             return false;
         }
         let other = corrs[0];
-        self.find_correspondences(other.image_id, other.point2d_idx).len() == 1
+        self.find_correspondences(other.image_id, other.point2d_idx)
+            .len()
+            == 1
     }
 
     /// Port of `ExtractTransitiveCorrespondences` (`.h:130-134`,
@@ -647,38 +657,70 @@ mod tests {
             ConfigurationType::Calibrated
         );
 
-        assert_eq!(graph.extract_correspondences(0, 0), vec![Correspondence::new(1, 0)]);
+        assert_eq!(
+            graph.extract_correspondences(0, 0),
+            vec![Correspondence::new(1, 0)]
+        );
         assert!(graph.has_correspondences(0, 0));
         assert!(graph.is_two_view_observation(0, 0));
 
-        assert_eq!(graph.extract_correspondences(1, 0), vec![Correspondence::new(0, 0)]);
+        assert_eq!(
+            graph.extract_correspondences(1, 0),
+            vec![Correspondence::new(0, 0)]
+        );
         assert!(graph.is_two_view_observation(1, 0));
 
-        assert_eq!(graph.extract_correspondences(0, 1), vec![Correspondence::new(1, 2)]);
-        assert_eq!(graph.extract_correspondences(1, 2), vec![Correspondence::new(0, 1)]);
-        assert_eq!(graph.extract_correspondences(0, 4), vec![Correspondence::new(1, 8)]);
-        assert_eq!(graph.extract_correspondences(0, 3), vec![Correspondence::new(1, 7)]);
-        assert_eq!(graph.extract_correspondences(1, 7), vec![Correspondence::new(0, 3)]);
-        assert_eq!(graph.extract_correspondences(1, 8), vec![Correspondence::new(0, 4)]);
+        assert_eq!(
+            graph.extract_correspondences(0, 1),
+            vec![Correspondence::new(1, 2)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(1, 2),
+            vec![Correspondence::new(0, 1)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(0, 4),
+            vec![Correspondence::new(1, 8)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(0, 3),
+            vec![Correspondence::new(1, 7)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(1, 7),
+            vec![Correspondence::new(0, 3)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(1, 8),
+            vec![Correspondence::new(0, 4)]
+        );
 
         // Transitivity 0 finds nothing; transitivity 2 (there is no third
         // image to chain through) matches the direct one-hop set exactly.
         for point2d_idx in 0..10 {
             assert_eq!(
-                graph.extract_transitive_correspondences(0, point2d_idx, 0).len(),
+                graph
+                    .extract_transitive_correspondences(0, point2d_idx, 0)
+                    .len(),
                 0
             );
             assert_eq!(
                 graph.extract_correspondences(0, point2d_idx).len(),
-                graph.extract_transitive_correspondences(0, point2d_idx, 2).len()
+                graph
+                    .extract_transitive_correspondences(0, point2d_idx, 2)
+                    .len()
             );
             assert_eq!(
-                graph.extract_transitive_correspondences(1, point2d_idx, 0).len(),
+                graph
+                    .extract_transitive_correspondences(1, point2d_idx, 0)
+                    .len(),
                 0
             );
             assert_eq!(
                 graph.extract_correspondences(1, point2d_idx).len(),
-                graph.extract_transitive_correspondences(1, point2d_idx, 2).len()
+                graph
+                    .extract_transitive_correspondences(1, point2d_idx, 2)
+                    .len()
             );
         }
 
@@ -730,14 +772,29 @@ mod tests {
         assert_eq!(graph.num_matches_between_images(1, 2), 2);
 
         let corrs0 = graph.extract_correspondences(0, 0);
-        assert_eq!(corrs0, vec![Correspondence::new(1, 0), Correspondence::new(2, 0)]);
+        assert_eq!(
+            corrs0,
+            vec![Correspondence::new(1, 0), Correspondence::new(2, 0)]
+        );
         let corrs1 = graph.extract_correspondences(1, 0);
-        assert_eq!(corrs1, vec![Correspondence::new(0, 0), Correspondence::new(2, 0)]);
+        assert_eq!(
+            corrs1,
+            vec![Correspondence::new(0, 0), Correspondence::new(2, 0)]
+        );
         let corrs2 = graph.extract_correspondences(2, 0);
-        assert_eq!(corrs2, vec![Correspondence::new(0, 0), Correspondence::new(1, 0)]);
+        assert_eq!(
+            corrs2,
+            vec![Correspondence::new(0, 0), Correspondence::new(1, 0)]
+        );
 
-        assert_eq!(graph.extract_correspondences(1, 5), vec![Correspondence::new(2, 5)]);
-        assert_eq!(graph.extract_correspondences(2, 5), vec![Correspondence::new(1, 5)]);
+        assert_eq!(
+            graph.extract_correspondences(1, 5),
+            vec![Correspondence::new(2, 5)]
+        );
+        assert_eq!(
+            graph.extract_correspondences(2, 5),
+            vec![Correspondence::new(1, 5)]
+        );
 
         // Transitive closure of point 0 across all three images: 2 other
         // observations reachable regardless of which image you start from,
@@ -745,11 +802,15 @@ mod tests {
         // completes after 2 levels here — a third level adds nothing new).
         for image_id in [0usize, 1, 2] {
             assert_eq!(
-                graph.extract_transitive_correspondences(image_id, 0, 2).len(),
+                graph
+                    .extract_transitive_correspondences(image_id, 0, 2)
+                    .len(),
                 2
             );
             assert_eq!(
-                graph.extract_transitive_correspondences(image_id, 0, 3).len(),
+                graph
+                    .extract_transitive_correspondences(image_id, 0, 3)
+                    .len(),
                 2
             );
         }
@@ -814,17 +875,28 @@ mod tests {
         graph.add_image(0, 10);
         graph.add_image(1, 10);
         graph
-            .add_two_view_geometry(0, 1, &[(0, 0), (1, 2), (3, 7)], ConfigurationType::Calibrated)
+            .add_two_view_geometry(
+                0,
+                1,
+                &[(0, 0), (1, 2), (3, 7)],
+                ConfigurationType::Calibrated,
+            )
             .unwrap();
         graph.finalize();
 
-        assert_eq!(graph.edge(0, 1).unwrap().config, ConfigurationType::Calibrated);
+        assert_eq!(
+            graph.edge(0, 1).unwrap().config,
+            ConfigurationType::Calibrated
+        );
         assert!(graph.update_edge_config(0, 1, ConfigurationType::Planar));
         assert_eq!(graph.edge(0, 1).unwrap().config, ConfigurationType::Planar);
         // Order-insensitive, unlike COLMAP's direction-aware version (module doc).
         assert_eq!(graph.edge(1, 0).unwrap().config, ConfigurationType::Planar);
         // Matches are untouched by a config-only update.
-        assert_eq!(graph.extract_correspondences(0, 0), vec![Correspondence::new(1, 0)]);
+        assert_eq!(
+            graph.extract_correspondences(0, 0),
+            vec![Correspondence::new(1, 0)]
+        );
     }
 
     /// Self-matches are rejected, not silently ignored (this port's
@@ -904,9 +976,19 @@ mod tests {
         assert_eq!(graph.extract_transitive_correspondences(0, 0, 1).len(), 1); // just image 1
         assert_eq!(graph.extract_transitive_correspondences(0, 0, 2).len(), 2); // + image 2
         assert_eq!(graph.extract_transitive_correspondences(0, 0, 3).len(), 3); // + image 3
-        assert_eq!(graph.extract_transitive_correspondences(0, 0, usize::MAX).len(), 3);
+        assert_eq!(
+            graph
+                .extract_transitive_correspondences(0, 0, usize::MAX)
+                .len(),
+            3
+        );
         // The full closure is order-independent of which endpoint you start from.
-        assert_eq!(graph.extract_transitive_correspondences(3, 0, usize::MAX).len(), 3);
+        assert_eq!(
+            graph
+                .extract_transitive_correspondences(3, 0, usize::MAX)
+                .len(),
+            3
+        );
     }
 
     /// M2.1 acceptance (`docs/colmap_port_plan.md`): reproduces
@@ -958,7 +1040,8 @@ mod tests {
             .collect();
         assert!(correspondences.len() >= 20, "fixture sanity");
 
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
         assert_eq!(
             report.config,
@@ -996,7 +1079,10 @@ mod tests {
             graph.num_correspondences_for_image(0) > 0,
             "PANORAMIC pair's correspondences must reach the graph/track-building layer"
         );
-        assert_eq!(graph.edge(0, 1).unwrap().config, ConfigurationType::Panoramic);
+        assert_eq!(
+            graph.edge(0, 1).unwrap().config,
+            ConfigurationType::Panoramic
+        );
     }
 
     /// M2.1 acceptance, the negative case: a `DEGENERATE` classification
@@ -1036,7 +1122,11 @@ mod tests {
 
         let verifier = TwoViewGeometryVerifier::default();
         let report = verifier.classify(&correspondences, &camera);
-        assert_eq!(report.config, ConfigurationType::Degenerate, "fixture sanity");
+        assert_eq!(
+            report.config,
+            ConfigurationType::Degenerate,
+            "fixture sanity"
+        );
         assert!(report.inliers.is_empty());
 
         let keep = matches!(
@@ -1048,7 +1138,10 @@ mod tests {
                 | ConfigurationType::PlanarOrPanoramic
                 | ConfigurationType::Multiple
         );
-        assert!(!keep, "DEGENERATE must never be kept by the demo's keep-list");
+        assert!(
+            !keep,
+            "DEGENERATE must never be kept by the demo's keep-list"
+        );
 
         // Even if a caller ignored `keep` and tried to add the (empty)
         // inlier set anyway, the graph would record zero correspondences.

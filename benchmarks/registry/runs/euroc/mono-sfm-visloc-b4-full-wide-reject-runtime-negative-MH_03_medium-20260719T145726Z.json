@@ -1,0 +1,234 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "full_evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\evaluation_full.json",
+      "sha256": "404b558e4fd8f168638ff9c6e5b35b17df8a26a84d2756217f7884fd493044fc"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\visloc.tum",
+      "sha256": "863e2201c2c7d313860a2545b7a24b65c2c150c800f5df21c6669460628b33f2"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\stdout.log",
+      "sha256": "bc8443b5304821979a294c99983f04e52ad831d17b7317f6bd11bc700e76a588"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\model\\images.txt",
+      "sha256": "2c22a67a25343de064ad7b8fa4636af04b938c1f78c2dd62a37fb74791b4407b"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v31_transactional_wide_hypothesis_20_30_20260719\\model\\points3D.txt",
+      "sha256": "235445a00db9d60f9479b3b33415bff60c51985025dab44c50275e1c3e9cbceb"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Frozen MH05 final selector transferred to then-held-out MH03 before preflight existed; both trusted and wide monocular arms run fully; final selector uses no GT; GT after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--pose-graph-offsets",
+      "20,30",
+      "--pose-graph-stride",
+      "2",
+      "--wide-hypothesis",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --skip-offsets 8,12 --skip-stride 2 --pose-graph-offsets 20,30 --pose-graph-stride 2 --wide-hypothesis --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "candidate_offsets": "8,12,20,30",
+      "frames": 300,
+      "preflight": false,
+      "sensor_mode": "monocular",
+      "trusted_offsets": "8,12"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T14:58:49Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_point_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.315
+    },
+    {
+      "implementation": null,
+      "name": "candidate_observation_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.726
+    },
+    {
+      "implementation": null,
+      "name": "candidate_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.70785
+    },
+    {
+      "implementation": null,
+      "name": "candidate_accepted",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "bool",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 8254
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 131742
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.569752
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 57.8
+    },
+    {
+      "implementation": null,
+      "name": "wide_matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 9.3
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 3091.7
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.00348732279946628
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0061630604826082
+    },
+    {
+      "implementation": null,
+      "name": "colmap_mapper_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2260.6215
+    }
+  ],
+  "models": [],
+  "notes": "Controlled runtime negative and selector generalization evidence: frozen final selector correctly rejects harmful MH03 wide arm and preserves 0.3487 cm trusted ATE, but fully computing the rejected arm costs 3091.7 s and loses the COLMAP runtime gate. This run informed the later preflight, so subsequent MH03 runs are regression evidence.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-full-wide-reject-runtime-negative-MH_03_medium-20260719T145726Z",
+  "schema_version": 1,
+  "status": "success"
+}

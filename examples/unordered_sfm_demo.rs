@@ -144,14 +144,14 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Point2, Point3};
 use rayon::prelude::*;
+#[cfg(feature = "onnx-inference")]
+use visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{
     connected_components, generate_bridge_candidates, BridgeCandidateOptions, ConfigurationType,
     EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
     RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
 };
-#[cfg(feature = "onnx-inference")]
-use visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher;
 use visloc_rs::vision::vocab_tree::{
     generate_pairs, HkmBuildOptions, VocabTree, VocabTreeOptions, VocabTreePairGeneratorOptions,
 };
@@ -219,7 +219,9 @@ impl std::str::FromStr for PairSource {
         match s {
             "vlad" => Ok(Self::Vlad),
             "vocab-tree" => Ok(Self::VocabTree),
-            other => Err(format!("unknown --pair-source {other:?} (expected vlad|vocab-tree)")),
+            other => Err(format!(
+                "unknown --pair-source {other:?} (expected vlad|vocab-tree)"
+            )),
         }
     }
 }
@@ -263,7 +265,9 @@ impl std::str::FromStr for MatcherKind {
         match s {
             "nn" => Ok(Self::Nn),
             "lightglue" => Ok(Self::LightGlue),
-            other => Err(format!("unknown --matcher {other:?} (expected nn|lightglue)")),
+            other => Err(format!(
+                "unknown --matcher {other:?} (expected nn|lightglue)"
+            )),
         }
     }
 }
@@ -579,7 +583,12 @@ fn all_pairs(n: usize) -> Vec<(usize, usize)> {
 /// Candidate image pairs `(i, j)` with `i < j` from flat-VLAD top-K cosine
 /// retrieval (or all pairs when `exhaustive`) — the pre-M3 pair source,
 /// unchanged.
-fn candidate_pairs_vlad(features: &[FeatureSet], vocab_size: usize, topk: usize, exhaustive: bool) -> Vec<(usize, usize)> {
+fn candidate_pairs_vlad(
+    features: &[FeatureSet],
+    vocab_size: usize,
+    topk: usize,
+    exhaustive: bool,
+) -> Vec<(usize, usize)> {
     let n = features.len();
     if exhaustive || n <= topk + 1 {
         return all_pairs(n);
@@ -659,8 +668,13 @@ fn candidate_pairs_vocab_tree(
         tree.num_images(),
     );
 
-    let image_descriptors: Vec<Vec<Vec<f32>>> = features.iter().map(|f| f.descriptors.clone()).collect();
-    generate_pairs(&tree, &image_descriptors, &VocabTreePairGeneratorOptions { num_images })
+    let image_descriptors: Vec<Vec<Vec<f32>>> =
+        features.iter().map(|f| f.descriptors.clone()).collect();
+    generate_pairs(
+        &tree,
+        &image_descriptors,
+        &VocabTreePairGeneratorOptions { num_images },
+    )
 }
 
 /// Candidate image pairs `(i, j)` with `i < j` — dispatches on
@@ -668,7 +682,12 @@ fn candidate_pairs_vocab_tree(
 /// overrides either source, matching pre-M3 behaviour.
 fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> {
     match args.pair_source {
-        PairSource::Vlad => candidate_pairs_vlad(features, args.vocab_size, args.retrieval_topk, args.exhaustive),
+        PairSource::Vlad => candidate_pairs_vlad(
+            features,
+            args.vocab_size,
+            args.retrieval_topk,
+            args.exhaustive,
+        ),
         PairSource::VocabTree => candidate_pairs_vocab_tree(
             features,
             args.vocab_tree_branching,
@@ -767,37 +786,39 @@ impl PairMatcher {
                 }
             }
             #[cfg(feature = "onnx-inference")]
-            PairMatcher::LightGlue(matcher) => match matcher.match_features(
-                &features_i.keypoints,
-                &features_i.descriptors,
-                &features_j.keypoints,
-                &features_j.descriptors,
-            ) {
-                Ok(matches) => matches
-                    .into_iter()
-                    .map(|m| DescriptorMatch {
-                        query_index: m.query_index,
-                        train_index: m.train_index,
-                        // LightGlue's assignment matrix has no notion of an
-                        // L2 descriptor "distance" the way NN+ratio does —
-                        // its own `score` (the assignment-matrix confidence)
-                        // is carried in `confidence` instead, which is what
-                        // every downstream consumer here actually reads.
-                        // `distance = 1.0 - score` keeps this field
-                        // orderable (lower = better) for any generic caller
-                        // that still sorts on it, without claiming a false
-                        // Euclidean-distance semantics.
-                        distance: 1.0 - m.score,
-                        second_best_distance: None,
-                        ratio: None,
-                        confidence: Some(m.score),
-                    })
-                    .collect(),
-                Err(error) => {
-                    eprintln!("lightglue match error (treated as zero matches for this pair): {error}");
-                    Vec::new()
+            PairMatcher::LightGlue(matcher) => {
+                match matcher.match_features(
+                    &features_i.keypoints,
+                    &features_i.descriptors,
+                    &features_j.keypoints,
+                    &features_j.descriptors,
+                ) {
+                    Ok(matches) => matches
+                        .into_iter()
+                        .map(|m| DescriptorMatch {
+                            query_index: m.query_index,
+                            train_index: m.train_index,
+                            // LightGlue's assignment matrix has no notion of an
+                            // L2 descriptor "distance" the way NN+ratio does —
+                            // its own `score` (the assignment-matrix confidence)
+                            // is carried in `confidence` instead, which is what
+                            // every downstream consumer here actually reads.
+                            // `distance = 1.0 - score` keeps this field
+                            // orderable (lower = better) for any generic caller
+                            // that still sorts on it, without claiming a false
+                            // Euclidean-distance semantics.
+                            distance: 1.0 - m.score,
+                            second_best_distance: None,
+                            ratio: None,
+                            confidence: Some(m.score),
+                        })
+                        .collect(),
+                    Err(error) => {
+                        eprintln!("lightglue match error (treated as zero matches for this pair): {error}");
+                        Vec::new()
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -815,15 +836,18 @@ fn build_matcher(args: &Args) -> Result<PairMatcher, Box<dyn std::error::Error>>
                     .lightglue_model
                     .as_ref()
                     .ok_or("--matcher lightglue requires --lightglue-model PATH")?;
-                let matcher = LightGlueOnnxMatcher::load_from_path(path)
-                    .map_err(|error| format!("failed to load LightGlue ONNX model {path:?}: {error}"))?;
+                let matcher = LightGlueOnnxMatcher::load_from_path(path).map_err(|error| {
+                    format!("failed to load LightGlue ONNX model {path:?}: {error}")
+                })?;
                 Ok(PairMatcher::LightGlue(matcher))
             }
             #[cfg(not(feature = "onnx-inference"))]
             {
-                Err("--matcher lightglue requires rebuilding with --features onnx-inference \
+                Err(
+                    "--matcher lightglue requires rebuilding with --features onnx-inference \
                      (see docs/colmap_port_plan.md's M6 results)"
-                    .into())
+                        .into(),
+                )
             }
         }
     }
@@ -1048,8 +1072,13 @@ fn rescue_bridging(
     // if the vocabulary cannot be built — the candidate generator itself
     // still enforces "cross-component only, budget-capped" either way.
     let sample = sampled_training_descriptors(features);
-    let globals: Option<Vec<Vec<f32>>> = Vocabulary::build(&sample, args.vocab_size, 10, 0)
-        .map(|vocab| features.iter().map(|f| vlad(&f.descriptors, &vocab)).collect());
+    let globals: Option<Vec<Vec<f32>>> =
+        Vocabulary::build(&sample, args.vocab_size, 10, 0).map(|vocab| {
+            features
+                .iter()
+                .map(|f| vlad(&f.descriptors, &vocab))
+                .collect()
+        });
     let similarity = |i: usize, j: usize| -> f32 {
         match &globals {
             Some(g) => cosine_similarity(&g[i], &g[j]),
@@ -1148,7 +1177,11 @@ fn rescue_bridging(
         if let Some(pair) = &pair {
             println!(
                 "rescue-bridging: BRIDGE admitted ({}, {}) raw_matches={} inliers={} config={:?}",
-                attempt.pair.0, attempt.pair.1, attempt.raw_matches, attempt.inliers, attempt.config,
+                attempt.pair.0,
+                attempt.pair.1,
+                attempt.raw_matches,
+                attempt.inliers,
+                attempt.config,
             );
             admitted.push(pair.clone());
         }

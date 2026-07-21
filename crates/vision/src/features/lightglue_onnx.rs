@@ -405,8 +405,8 @@ mod tests {
             d0[0] = 0.25;
             d0[DESCRIPTOR_DIM - 1] = -0.75;
             let descriptors = vec![d0.clone()];
-            let array =
-                build_descriptor_tensor(&descriptors, 1, "image 0").expect("build_descriptor_tensor");
+            let array = build_descriptor_tensor(&descriptors, 1, "image 0")
+                .expect("build_descriptor_tensor");
             assert_eq!(array.shape(), &[1, 1, DESCRIPTOR_DIM]);
             assert_eq!(array[(0, 0, 0)], 0.25);
             assert_eq!(array[(0, 0, DESCRIPTOR_DIM - 1)], -0.75);

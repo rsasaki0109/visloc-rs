@@ -1,0 +1,185 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\summary.json",
+      "sha256": "93705f03a3be227617163da9f79f4076c1eccec89a9e6a9dde7dd32c3c4bc7cb"
+    },
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\evaluation.json",
+      "sha256": "2fbd07686d738ca2e9876f4125083bec27c9c4c4dfb45f7c5b4dc87077a5960f"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\visloc_model\\images.txt",
+      "sha256": "e8d938f1fa08b881fb1ac57ac1bdd9766be1d5aed7ec912ed0ab76bfdca8cc18"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\visloc_model\\points3D.txt",
+      "sha256": "e58b159c8fb00a990ca821bfce70d98dd3a1eb75b1537c415d6cd828ba1f6226"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same rectified EuRoC cam0 frames, mono-to-mono, Sim(3) camera trajectory against EuRoC ground truth; GT read only after both engines exit",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "scripts\\run_mono_sfm_headtohead.py",
+      "--mav0",
+      "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+      "--out-dir",
+      "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719",
+      "--frames",
+      "300",
+      "--python",
+      "E:\\tools\\venv-cu\\Scripts\\python.exe",
+      "--cargo",
+      "C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe",
+      "--colmap",
+      "E:\\tools\\colmap\\bin\\colmap.exe",
+      "--device",
+      "cuda",
+      "--max-keypoints",
+      "2048",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--post-refinement-registration",
+      "--geometry-conflict-recovery",
+      "--visloc-next-image-policy",
+      "visibility",
+      "--colmap-feature",
+      "SIFT",
+      "--colmap-backend",
+      "CERES",
+      "--capture-registry"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scripts\\run_mono_sfm_headtohead.py --mav0 E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0 --out-dir E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719 --frames 300 --python E:\\tools\\venv-cu\\Scripts\\python.exe --cargo C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe --colmap E:\\tools\\colmap\\bin\\colmap.exe --device cuda --max-keypoints 2048 --window 5 --skip-offsets 8,12 --skip-stride 2 --post-refinement-registration --geometry-conflict-recovery --visloc-next-image-policy visibility --colmap-feature SIFT --colmap-backend CERES --capture-registry"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "engine": "visloc",
+      "frames": 300,
+      "geometry_conflict_recovery": true,
+      "next_image_policy": "visibility",
+      "post_refinement_registration": true,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12",
+      "skip_stride": 2
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T07:22:21Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 425.8774615000002
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 276
+    },
+    {
+      "implementation": null,
+      "name": "registration_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.92
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.2196475539835266
+    },
+    {
+      "implementation": null,
+      "name": "sim3_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.02628208673177662
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.639
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6138
+    }
+  ],
+  "models": [],
+  "notes": "Held-out negative: the frozen monocular geometry-conflict configuration was 4.28x faster than COLMAP but registered only 276/300 versus 300/300 and produced 21.96 cm common-pose Sim(3) ATE versus COLMAP's 1.263 cm. Do not promote this mechanism.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-MH_05_difficult-20260719T072220Z",
+  "schema_version": 1,
+  "status": "success"
+}

@@ -90,8 +90,16 @@ pub fn fundamental_squared_sampson_error(
     fundamental: &Matrix3<f64>,
     correspondence: &TwoViewCorrespondence,
 ) -> f64 {
-    let p1 = Vector3::new(correspondence.previous_xy.x, correspondence.previous_xy.y, 1.0);
-    let p2 = Vector3::new(correspondence.current_xy.x, correspondence.current_xy.y, 1.0);
+    let p1 = Vector3::new(
+        correspondence.previous_xy.x,
+        correspondence.previous_xy.y,
+        1.0,
+    );
+    let p2 = Vector3::new(
+        correspondence.current_xy.x,
+        correspondence.current_xy.y,
+        1.0,
+    );
     let f_p1 = fundamental * p1;
     let ft_p2 = fundamental.transpose() * p2;
     let numerator = p2.dot(&f_p1).powi(2);

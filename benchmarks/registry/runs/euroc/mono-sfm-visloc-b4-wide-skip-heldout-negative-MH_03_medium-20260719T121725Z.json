@@ -1,0 +1,218 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "common_evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\evaluation_common.json",
+      "sha256": "63bb1f659bd627ab43500e999cb51861d76d2ab5fdb73218e837c90bff0b7362"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\visloc.tum",
+      "sha256": "203c88c4c863be3ac5e90801301f4dbe65c175a8c7f361cf30660398098572c9"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\stdout.log",
+      "sha256": "027e4dd91dc5e2d2411bac4ec2e82802050670124acfd70e76abd276de44bf3e"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\stderr.log",
+      "sha256": "b7f943191983df3cec6852d330aaa8eed5a68749751012b66c2c8de31e89153c"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\model\\images.txt",
+      "sha256": "21c45a21a38f61c46928e6c7e4c6ab2503a24bfba1bde7ee4a16c9fad32ea980"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh03_300_v25_frozen_wide_skip_8_12_20_30_20260719\\model\\points3D.txt",
+      "sha256": "0b6da2db73e22c5775273fe1bb191a88a29793a47ea06b7e5a131acde538f1fe"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Frozen 8/12/20/30 stride-2 configuration transferred from MH05 to MH03 without tuning; monocular first-300 independent GT evaluation after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12,20,30",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12,20,30 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "configuration_frozen_from": "MH_05_difficult",
+      "frames": 300,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12,20,30",
+      "skip_stride": 2
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T12:19:35Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2050
+    },
+    {
+      "implementation": null,
+      "name": "verified_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2050
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2602
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 95629
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.708
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 66.1
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1000.4
+    },
+    {
+      "implementation": null,
+      "name": "matching_plus_sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1066.5
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0450168314907878
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0061630604826082
+    }
+  ],
+  "models": [],
+  "notes": "Controlled held-out negative: the exact MH05-selected wide graph retains 300/300 on MH03 but degrades ATE to 4.5017 cm versus COLMAP 0.6163 cm and increases runtime. Fixed wide edges are not promoted; wide correspondences need pose-guided track compatibility gates.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-wide-skip-heldout-negative-MH_03_medium-20260719T121725Z",
+  "schema_version": 1,
+  "status": "success"
+}

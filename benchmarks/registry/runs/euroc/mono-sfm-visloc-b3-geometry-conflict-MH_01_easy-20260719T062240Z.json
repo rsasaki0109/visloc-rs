@@ -1,0 +1,272 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\evaluation_vs_legacy_colmap.json",
+      "sha256": "81577f92b629da860f2e53bd25d0f95b99f1fd45067bf88e67b2edb2b278b05f"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\visloc.tum",
+      "sha256": "ac20735be11235dc68088581a26478c6cc1bcb4817ebd76eb0eac5b6127c4189"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\stdout.log",
+      "sha256": "6bee68a654f0be82d7d6a157824d9e0c77f331e7c9edf1c6ce63f5f2a0bc5414"
+    },
+    {
+      "exists": true,
+      "kind": "debug_log",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\stderr.log",
+      "sha256": "efae66572cb36168c07936ffa0c92654a59e8dc7076d1e81768ed93ed362e915"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\model\\images.txt",
+      "sha256": "690822178ed829a58350ec756df3c74b9c5a0edbeb44faa83f1def8c470d4f5a"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh01_300_geometry_conflict_recovery_20260719\\model\\points3D.txt",
+      "sha256": "7e6f941d4f1a0961a619684cca4a398eb35d6755213e2ffea3f3d3c0041b4107"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Frozen MH03-selected geometry-conflict configuration on held-out MH01-300 feature cache; GT read only after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--geometry-conflict-recovery"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --geometry-conflict-recovery"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "conflict_recovery_max_clean_error_increase_ratio": 0.001,
+      "conflict_recovery_max_hypotheses": 32,
+      "conflict_recovery_max_mean_reprojection_px": 1.0,
+      "conflict_recovery_max_reprojection_error_px": 2.0,
+      "conflict_recovery_min_views": 3,
+      "frames": 300,
+      "geometry_guided_conflict_recovery": true,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12",
+      "skip_stride": 2,
+      "temporal_window": 5
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T06:24:15Z",
+  "dataset": {
+    "checksum": "76bc11b98099e424e03856dcd5a4f345d5f526f49c80c190eff16dd4d2287f88",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "C:\\Users\\rsasa\\Workspace\\old\\simple_visual_slam\\euroc_mav\\machine_hall\\machine_hall\\MH_01_easy\\mav0",
+    "sequence": "MH_01_easy",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1775
+    },
+    {
+      "implementation": null,
+      "name": "verified_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1759
+    },
+    {
+      "implementation": null,
+      "name": "verified_correspondences",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1285154
+    },
+    {
+      "implementation": null,
+      "name": "connected_components",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 44561
+    },
+    {
+      "implementation": null,
+      "name": "conflicting_components",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 4075
+    },
+    {
+      "implementation": null,
+      "name": "conflicting_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 212579
+    },
+    {
+      "implementation": null,
+      "name": "geometry_recovered_tracks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2280
+    },
+    {
+      "implementation": null,
+      "name": "geometry_recovered_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 66438
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "post_refinement_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 21315
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 220405
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.788
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 54.5
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 542.3
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.009398220798091439
+    },
+    {
+      "implementation": null,
+      "name": "legacy_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.009255137185700896
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.009115641223246842
+    }
+  ],
+  "models": [],
+  "notes": "Held-out negative: frozen MH03 geometry recovery retained 300/300 and increased density, but common-pose Sim3 ATE worsened 1.55% versus legacy and remained 3.10% worse than COLMAP; pose-mutating recovery is not promoted.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b3-geometry-conflict-MH_01_easy-20260719T062240Z",
+  "schema_version": 1,
+  "status": "success"
+}

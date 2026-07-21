@@ -109,8 +109,16 @@ fn check_fixture(name: &str) {
 
     let (_, expected_matches0) = archive.read_i64("matches0").unwrap();
     let (_, expected_mscores0) = archive.read_f32("mscores0").unwrap();
-    assert_eq!(expected_matches0.len(), kpts0.len(), "matches0 length should equal M");
-    assert_eq!(expected_mscores0.len(), kpts0.len(), "mscores0 length should equal M");
+    assert_eq!(
+        expected_matches0.len(),
+        kpts0.len(),
+        "matches0 length should equal M"
+    );
+    assert_eq!(
+        expected_mscores0.len(),
+        kpts0.len(),
+        "mscores0 length should equal M"
+    );
 
     let matcher =
         LightGlueOnnxMatcher::load_from_path(model_path()).expect("load lightglue ONNX model");

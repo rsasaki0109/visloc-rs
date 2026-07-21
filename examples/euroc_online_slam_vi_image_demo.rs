@@ -123,22 +123,20 @@ use visloc_rs::{
     AdaptiveMotionMode, AdaptiveVelocityGateConfig, BaConfig, BiasReleaseSchedule,
     BruteForceMatcher, ConstantPoseMotionModel, ConstantVelocityMotionModel,
     CovisibilityLocalBaConfig, CovisibilityLocalBaError, CovisibilityLocalMapConfig,
-    CrossCheckMatcher,
-    CrossSubmapAlignmentConfig, CrossSubmapAlignmentResult, CrossSubmapBoundaryFactorResult,
-    DescriptorMatch, GravityVelocityAlignment, GyroBiasAlignment, ImuPredictiveMotionModel,
-    ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy, KeyframeDecisionReason,
-    KeyframePolicyConfig, LandmarkCandidate,
-    LocalMappingPipeline, LocalMappingResult, LocalizationConfig, LocalizationPipeline,
-    LoopAppearanceCandidateConfig, LoopClosureCandidateSource, LoopClosureConfig,
-    LoopClosureVerifierConfig, LoopRefinementSolver, LoopRefinementVerifier, MapAtlas,
-    MapProviderStats, Matcher, MotionBasedViInitializerConfig, MotionModel,
-    MotionViInitializationEvent, MotionViInitializationStatus, MotionViRawResidualActivationConfig,
-    MutualSoftmaxConfig,
-    MutualSoftmaxMatcher, OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig,
-    OnlineSlamLocalBaConfig, OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig,
-    OnlineSlamPipeline, OnlineSlamRelocalizationStats, OnlineSlamViInitConfig,
-    PnPLoopClosureVerifierConfig, PoseGraphSe3Config, PosePriorVisualOverrideConfig,
-    PoseTrajectory, ProjectionGuidedTrackingConfig, RelativePoseErrorConfig, Sim3PoseGraphConfig,
+    CrossCheckMatcher, CrossSubmapAlignmentConfig, CrossSubmapAlignmentResult,
+    CrossSubmapBoundaryFactorResult, DescriptorMatch, GravityVelocityAlignment, GyroBiasAlignment,
+    ImuPredictiveMotionModel, ImuPredictiveMotionModelConfig, ImuVelocityRefreshPolicy,
+    KeyframeDecisionReason, KeyframePolicyConfig, LandmarkCandidate, LocalMappingPipeline,
+    LocalMappingResult, LocalizationConfig, LocalizationPipeline, LoopAppearanceCandidateConfig,
+    LoopClosureCandidateSource, LoopClosureConfig, LoopClosureVerifierConfig, LoopRefinementSolver,
+    LoopRefinementVerifier, MapAtlas, MapProviderStats, Matcher, MotionBasedViInitializerConfig,
+    MotionModel, MotionViInitializationEvent, MotionViInitializationStatus,
+    MotionViRawResidualActivationConfig, MutualSoftmaxConfig, MutualSoftmaxMatcher,
+    OnlineSlamConfig, OnlineSlamCovisibilityLocalBaConfig, OnlineSlamLocalBaConfig,
+    OnlineSlamLoopClosureRefinementConfig, OnlineSlamMotionViInitConfig, OnlineSlamPipeline,
+    OnlineSlamRelocalizationStats, OnlineSlamViInitConfig, PnPLoopClosureVerifierConfig,
+    PoseGraphSe3Config, PosePriorVisualOverrideConfig, PoseTrajectory,
+    ProjectionGuidedTrackingConfig, RelativePoseErrorConfig, Sim3PoseGraphConfig,
     SimpleKeyframePolicy, StereoReplenishConfig, Tracker, TrackingConfig, TrackingEvent,
     TrackingResult, TrackingState, TrajectorySimilarityTransform, ViInitFallback,
     ViInitializationEvent, Viba2Config, VisualInertialInitializerConfig,
@@ -4772,9 +4770,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             Some(BiasReleaseSchedule {
                 min_keyframes: args.vi_bias_release_min_keyframes.unwrap_or(10),
-                min_translation_meters: args
-                    .vi_bias_release_min_translation_meters
-                    .unwrap_or(2.0),
+                min_translation_meters: args.vi_bias_release_min_translation_meters.unwrap_or(2.0),
             })
         } else {
             None
@@ -6748,10 +6744,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if stats.bias_magnitude_gate_rejected {
                 local_vi_ba_bias_magnitude_gate_rejections += 1;
             }
-            local_vi_ba_max_gyro_bias_norm_rad_s = local_vi_ba_max_gyro_bias_norm_rad_s
-                .max(stats.max_refined_gyro_bias_norm_rad_s);
-            local_vi_ba_max_accel_bias_norm_mps2 = local_vi_ba_max_accel_bias_norm_mps2
-                .max(stats.max_refined_accel_bias_norm_mps2);
+            local_vi_ba_max_gyro_bias_norm_rad_s =
+                local_vi_ba_max_gyro_bias_norm_rad_s.max(stats.max_refined_gyro_bias_norm_rad_s);
+            local_vi_ba_max_accel_bias_norm_mps2 =
+                local_vi_ba_max_accel_bias_norm_mps2.max(stats.max_refined_accel_bias_norm_mps2);
             if stats.adaptive_velocity_gate_rejected {
                 local_vi_ba_adaptive_velocity_gate_rejections += 1;
             }

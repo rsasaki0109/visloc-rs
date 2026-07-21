@@ -1444,7 +1444,14 @@ pub fn run_inertial_only_vi_ba(
     initial_states: &BTreeMap<u64, KeyframeImuState>,
     ba_config: &crate::bundle::BaConfig,
 ) -> Option<InertialOnlyViBaStats> {
-    run_inertial_only_vi_ba_with_options(map, keyframe_ids, factors, initial_states, ba_config, true)
+    run_inertial_only_vi_ba_with_options(
+        map,
+        keyframe_ids,
+        factors,
+        initial_states,
+        ba_config,
+        true,
+    )
 }
 
 /// [`run_inertial_only_vi_ba`] with an explicit `solve_bias` switch.
@@ -2680,8 +2687,7 @@ mod tests {
         state_default
             .factor_history
             .push(constant_velocity_factor(20, 30, 0.1));
-        let result_default =
-            run_local_vi_ba(&mut map, &mut state_default).expect("BA should run");
+        let result_default = run_local_vi_ba(&mut map, &mut state_default).expect("BA should run");
         assert!(!result_default.quality_gate_rejected);
         assert!(!result_default.bias_magnitude_gate_rejected);
         assert_ne!(
@@ -2705,8 +2711,8 @@ mod tests {
         state_generous
             .factor_history
             .push(constant_velocity_factor(20, 30, 0.1));
-        let result_generous = run_local_vi_ba(&mut map_generous, &mut state_generous)
-            .expect("BA should run");
+        let result_generous =
+            run_local_vi_ba(&mut map_generous, &mut state_generous).expect("BA should run");
         assert!(!result_generous.quality_gate_rejected);
         assert!(!result_generous.bias_magnitude_gate_rejected);
         assert_ne!(

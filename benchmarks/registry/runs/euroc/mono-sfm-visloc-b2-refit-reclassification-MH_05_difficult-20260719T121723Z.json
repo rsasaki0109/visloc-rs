@@ -1,0 +1,243 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "common_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\evaluation_common.json",
+      "sha256": "a9dba389e16cfd9d0cfb359fe2c83e98130f49027b8f8d47960eda4f3c367332"
+    },
+    {
+      "exists": true,
+      "kind": "full_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\evaluation_full.json",
+      "sha256": "157dcb870e1e4103b18809d594b42bf8a2c7f1b57e060d1c8071b4d2dc82d327"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\visloc.tum",
+      "sha256": "331483efb762f37deb2b766d06e12f31d4e7a290cd32b4000b35d978b2a29d81"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\stdout.log",
+      "sha256": "ae7b0a9f9a30fec00f3d8e4432d57d5e7df2648b9c4e3304ff3d8ddb73a96154"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\stderr.log",
+      "sha256": "e57c5e310ad2a83662efea32996c4e1d36cca4371c8be8a46dbab12b122aacd3"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\model\\images.txt",
+      "sha256": "ccd11e4f2a58e60153e91c237472a776c662986d5ee8c04bf1a6b4c063f8edde"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v23_refit_reclassification_20260719\\model\\points3D.txt",
+      "sha256": "77ca336282ebf0b5b98030d867cdde8ee40228aea8b149564241e1ca64efc35a"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Frozen MH05 monocular feature cache; unchanged 8/12 stride-2 graph and admission gates; robust centre-line post-refit reclassification is the only estimator change; GT evaluated after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "frames": 300,
+      "post_refinement_registration": true,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12",
+      "skip_stride": 2,
+      "structureless_min_neighbors": 3,
+      "structureless_post_refit_reclassification": true,
+      "structureless_registration": true
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T12:18:53Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames_disabled",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 294
+    },
+    {
+      "implementation": null,
+      "name": "post_refinement_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 113
+    },
+    {
+      "implementation": null,
+      "name": "structureless_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6
+    },
+    {
+      "implementation": null,
+      "name": "common_pose_value_differences",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6641
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 63532
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.644
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 36.2
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 272.0
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.216568885739022
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.215235033182882
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0124751931732832
+    }
+  ],
+  "models": [],
+  "notes": "Corrected monotonic post-refit line reclassification recovers all six missing MH05 frames without loosening gates; all 294 baseline pose values remain byte-identical. Registration completeness is solved; shared-trajectory accuracy remains open.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b2-refit-reclassification-MH_05_difficult-20260719T121723Z",
+  "schema_version": 1,
+  "status": "success"
+}

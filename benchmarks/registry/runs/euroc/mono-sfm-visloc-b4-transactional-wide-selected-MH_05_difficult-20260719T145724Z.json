@@ -1,0 +1,254 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "full_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\evaluation_full.json",
+      "sha256": "4edb3959ff2b6115875fb0e7d712f86a99eb30173e1cb6cbc2864ef6a999bc9a"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\visloc.tum",
+      "sha256": "9034d228319be6ba226126e1176beab00165ea77f219086738a8bc064c859fc5"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\stdout.log",
+      "sha256": "955608fb04198ae88c5686ca5c973a29b573fa0d37a334dc4f099f4c2192dfa7"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\model\\images.txt",
+      "sha256": "54e7674e59cdb2858c87a9cdc28a955dbd807847fcbc3dc70060b9e0d9436060"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh05_300_v33_early_track_preflight_20_30_20260719\\model\\points3D.txt",
+      "sha256": "4b4391e15a1688cdd96623705ef0d970f8ac29d6ff3861da7c2ef00045e307f5"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "MH05 development sequence; independent trusted 8/12 and candidate 8/12/20/30 monocular reconstructions; candidate track preflight and GT-free final quality selector; GT evaluated only after selection and engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--pose-graph-offsets",
+      "20,30",
+      "--pose-graph-stride",
+      "2",
+      "--wide-hypothesis",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --skip-offsets 8,12 --skip-stride 2 --pose-graph-offsets 20,30 --pose-graph-stride 2 --wide-hypothesis --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "candidate_offsets": "8,12,20,30",
+      "final_min_observation_ratio": 1.25,
+      "final_min_point_ratio": 0.9,
+      "final_require_lower_reprojection": true,
+      "frames": 300,
+      "sensor_mode": "monocular",
+      "trusted_offsets": "8,12",
+      "wide_track_preflight_min_observation_ratio": 0.85,
+      "wide_track_preflight_min_track_ratio": 0.82
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T14:58:17Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "preflight_track_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.856
+    },
+    {
+      "implementation": null,
+      "name": "preflight_observation_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.905
+    },
+    {
+      "implementation": null,
+      "name": "preflight_accepted",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "bool",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "candidate_accepted",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "bool",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6513
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 101178
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.57204
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 43.5
+    },
+    {
+      "implementation": null,
+      "name": "wide_matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 5.6
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 812.5
+    },
+    {
+      "implementation": null,
+      "name": "matching_plus_sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 861.6
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0116059049842107
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0124751931732832
+    },
+    {
+      "implementation": null,
+      "name": "colmap_mapper_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1798.8
+    }
+  ],
+  "models": [],
+  "notes": "Development result: transactional preflight and final selector choose the independent wide hypothesis, yielding 300/300, 1.1606 cm ATE, and 861.6 s matching plus all mapper work versus COLMAP 1.2475 cm and 1798.8 s mapper. MH05 informed the policy, so this is not held-out promotion evidence.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-transactional-wide-selected-MH_05_difficult-20260719T145724Z",
+  "schema_version": 1,
+  "status": "success"
+}

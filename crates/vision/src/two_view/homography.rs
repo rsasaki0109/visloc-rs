@@ -295,11 +295,7 @@ pub fn decompose_homography_matrix(
     let e02 = sign_of_number(m02);
     let e01 = sign_of_number(m01);
 
-    let n_s = [
-        s[(0, 0)].abs(),
-        s[(1, 1)].abs(),
-        s[(2, 2)].abs(),
-    ];
+    let n_s = [s[(0, 0)].abs(), s[(1, 1)].abs(), s[(2, 2)].abs()];
     let idx = n_s
         .iter()
         .enumerate()
@@ -459,8 +455,7 @@ fn cheirality_and_reproj_sum(
         }
         count += 1;
         let point2 = Point3::from(point2_coords);
-        if let (Some(p1_proj), Some(p2_proj)) = (camera.project(&point1), camera.project(&point2))
-        {
+        if let (Some(p1_proj), Some(p2_proj)) = (camera.project(&point1), camera.project(&point2)) {
             let d1 = p1_proj - c.previous_xy;
             let d2 = p2_proj - c.current_xy;
             sum += d1.norm_squared() + d2.norm_squared();
@@ -494,7 +489,9 @@ pub fn pose_from_homography_matrix(
         let (count, sum) = cheirality_and_reproj_sum(motion, correspondences, camera);
         let is_better = match best {
             None => true,
-            Some((_, best_count, best_sum)) => count > best_count || (count == best_count && sum < best_sum),
+            Some((_, best_count, best_sum)) => {
+                count > best_count || (count == best_count && sum < best_sum)
+            }
         };
         if is_better {
             best = Some((i, count, sum));

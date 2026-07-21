@@ -825,8 +825,12 @@ impl MotionBasedViInitializer {
         let mut effective_bias_gyro = bias_gyro_seed;
         let mut estimated_gyro_bias: Option<Vector3<f64>> = None;
         if self.config.estimate_gyro_bias {
-            let alignment =
-                estimate_gyro_bias(&candidate_map, &kf_ids, preintegration_factors, bias_gyro_seed);
+            let alignment = estimate_gyro_bias(
+                &candidate_map,
+                &kf_ids,
+                preintegration_factors,
+                bias_gyro_seed,
+            );
             let alignment = match alignment {
                 Some(alignment) => alignment,
                 None => {
@@ -902,7 +906,9 @@ impl MotionBasedViInitializer {
             } else {
                 f64::INFINITY
             };
-            if !deviation_ratio.is_finite() || deviation_ratio > self.config.max_gravity_norm_deviation_ratio {
+            if !deviation_ratio.is_finite()
+                || deviation_ratio > self.config.max_gravity_norm_deviation_ratio
+            {
                 let err = MotionBasedViRejectionReason::GravityEstimateOutOfRange {
                     raw_norm_mps2: alignment.raw_gravity_norm,
                     expected_mps2: expected_magnitude,
@@ -1365,7 +1371,8 @@ pub fn estimate_gravity_and_velocities(
 
     let mut rows: Vec<AlignmentFactorRow> = Vec::new();
     for factor in factors {
-        if !in_window.contains(&factor.keyframe_id_from) || !in_window.contains(&factor.keyframe_id_to)
+        if !in_window.contains(&factor.keyframe_id_from)
+            || !in_window.contains(&factor.keyframe_id_to)
         {
             continue;
         }
@@ -1428,7 +1435,13 @@ pub fn estimate_gravity_and_velocities(
         return None;
     }
     let raw_velocities: Vec<Vector3<f64>> = (0..num_kf)
-        .map(|k| Vector3::new(raw_solution[3 * k], raw_solution[3 * k + 1], raw_solution[3 * k + 2]))
+        .map(|k| {
+            Vector3::new(
+                raw_solution[3 * k],
+                raw_solution[3 * k + 1],
+                raw_solution[3 * k + 2],
+            )
+        })
         .collect();
 
     // Norm-constrained refinement (VINS-Mono tangent-space iteration).
@@ -1451,7 +1464,8 @@ pub fn estimate_gravity_and_velocities(
                 a2[(base + k, 3 * num_kf)] = 0.5 * row.delta_time * row.delta_time * mag * b1[k];
                 a2[(base + k, 3 * num_kf + 1)] =
                     0.5 * row.delta_time * row.delta_time * mag * b2[k];
-                b2vec[base + k] = row.rhs_position[k] - 0.5 * row.delta_time * row.delta_time * g0[k];
+                b2vec[base + k] =
+                    row.rhs_position[k] - 0.5 * row.delta_time * row.delta_time * g0[k];
 
                 a2[(base + 3 + k, 3 * row.idx_from + k)] = -1.0;
                 a2[(base + 3 + k, 3 * row.idx_to + k)] = 1.0;
@@ -1490,9 +1504,8 @@ pub fn estimate_gravity_and_velocities(
     for row in &rows {
         let v_i = velocities_final[row.idx_from];
         let v_j = velocities_final[row.idx_to];
-        let r_pos =
-            (v_i * row.delta_time + 0.5 * row.delta_time * row.delta_time * gravity_world)
-                - row.rhs_position;
+        let r_pos = (v_i * row.delta_time + 0.5 * row.delta_time * row.delta_time * gravity_world)
+            - row.rhs_position;
         let r_vel = (-v_i + v_j - row.delta_time * gravity_world) - row.rhs_velocity;
         residual_sum_sq += r_pos.norm_squared() + r_vel.norm_squared();
     }
@@ -1632,7 +1645,8 @@ pub fn estimate_gyro_bias(
     let mut rows: Vec<GyroBiasRow> = Vec::new();
     let mut deltas: Vec<&ImuPreintegratedDelta> = Vec::new();
     for factor in factors {
-        if !in_window.contains(&factor.keyframe_id_from) || !in_window.contains(&factor.keyframe_id_to)
+        if !in_window.contains(&factor.keyframe_id_from)
+            || !in_window.contains(&factor.keyframe_id_to)
         {
             continue;
         }
@@ -1665,8 +1679,7 @@ pub fn estimate_gyro_bias(
         rows.iter()
             .map(|row| {
                 let delta = deltas[row.delta_index];
-                let (delta_rot, _, _) =
-                    delta.corrected(bias_gyro, &delta.bias_acc_linearisation);
+                let (delta_rot, _, _) = delta.corrected(bias_gyro, &delta.bias_acc_linearisation);
                 let q_rel = delta_rot.quaternion().inverse() * row.r_i.inverse() * row.r_j;
                 q_rel.scaled_axis()
             })
@@ -2741,7 +2754,12 @@ mod tests {
             let velocity = Vector3::new(1.0, 0.0, 0.0);
             let map = build_map_at_velocity(2, 1.0, velocity);
             let ids: Vec<u64> = vec![1, 2];
-            let factors = vec![no_acceleration_factor(1, 2, 1.0, Vector3::new(0.0, 9.81, 0.0))];
+            let factors = vec![no_acceleration_factor(
+                1,
+                2,
+                1.0,
+                Vector3::new(0.0, 9.81, 0.0),
+            )];
             let alignment = estimate_gravity_and_velocities(
                 &map,
                 &ids,
@@ -2819,10 +2837,34 @@ mod tests {
             let true_gravity = Vector3::new(0.0, 0.0, 9.81);
             let assumed_gravity = Vector3::new(0.0, 9.81, 0.0);
             let factors = vec![
-                no_acceleration_factor_with_assumed_gravity(1, 2, 1.0, true_gravity, assumed_gravity),
-                no_acceleration_factor_with_assumed_gravity(2, 3, 1.0, true_gravity, assumed_gravity),
-                no_acceleration_factor_with_assumed_gravity(3, 4, 1.0, true_gravity, assumed_gravity),
-                no_acceleration_factor_with_assumed_gravity(4, 5, 1.0, true_gravity, assumed_gravity),
+                no_acceleration_factor_with_assumed_gravity(
+                    1,
+                    2,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
+                no_acceleration_factor_with_assumed_gravity(
+                    2,
+                    3,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
+                no_acceleration_factor_with_assumed_gravity(
+                    3,
+                    4,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
+                no_acceleration_factor_with_assumed_gravity(
+                    4,
+                    5,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
             ];
             let seed = synthetic_seed();
 
@@ -2868,9 +2910,14 @@ mod tests {
             let mut legacy_map = build_constant_velocity_map(5);
             let err = legacy
                 .try_initialize(&mut legacy_map, &factors, &seed)
-                .expect_err("misaligned gravity assumption must be rejected by the raw-residual gate");
+                .expect_err(
+                    "misaligned gravity assumption must be rejected by the raw-residual gate",
+                );
             assert!(
-                matches!(err, MotionBasedViRejectionReason::ImuRawResidualOutOfRange { .. }),
+                matches!(
+                    err,
+                    MotionBasedViRejectionReason::ImuRawResidualOutOfRange { .. }
+                ),
                 "unexpected rejection: {err:?}"
             );
 
@@ -2923,8 +2970,20 @@ mod tests {
             let mut map = build_constant_velocity_map(3);
             let seed = synthetic_seed();
             let factors = vec![
-                no_acceleration_factor_with_assumed_gravity(1, 2, 1.0, true_gravity, assumed_gravity),
-                no_acceleration_factor_with_assumed_gravity(2, 3, 1.0, true_gravity, assumed_gravity),
+                no_acceleration_factor_with_assumed_gravity(
+                    1,
+                    2,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
+                no_acceleration_factor_with_assumed_gravity(
+                    2,
+                    3,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
             ];
             let err = init
                 .try_initialize(&mut map, &factors, &seed)
@@ -2994,8 +3053,20 @@ mod tests {
             let mut map = build_constant_velocity_map(3);
             let seed = synthetic_seed();
             let factors = vec![
-                no_acceleration_factor_with_assumed_gravity(1, 2, 1.0, true_gravity, assumed_gravity),
-                no_acceleration_factor_with_assumed_gravity(2, 3, 1.0, true_gravity, assumed_gravity),
+                no_acceleration_factor_with_assumed_gravity(
+                    1,
+                    2,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
+                no_acceleration_factor_with_assumed_gravity(
+                    2,
+                    3,
+                    1.0,
+                    true_gravity,
+                    assumed_gravity,
+                ),
             ];
             let result = init
                 .try_initialize(&mut map, &factors, &seed)
@@ -3076,7 +3147,8 @@ mod tests {
         #[test]
         fn recovers_a_known_constant_bias_through_the_real_preintegrator() {
             let bias_gyro_true = Vector3::new(0.0005, -0.0003, 0.0002);
-            let factors = real_integrated_factors_with_constant_gyro_bias(bias_gyro_true, 20, 0.001);
+            let factors =
+                real_integrated_factors_with_constant_gyro_bias(bias_gyro_true, 20, 0.001);
             let map = build_constant_velocity_map(3);
             let ids: Vec<u64> = vec![1, 2, 3];
 
@@ -3137,8 +3209,7 @@ mod tests {
             let ids: Vec<u64> = (1..=5).collect();
             let mut factors = Vec::new();
             for (from_id, to_id) in [(1u64, 2u64), (2, 3), (3, 4), (4, 5)] {
-                let mut pre =
-                    ImuPreintegrator::new_with_bias(Vector3::zeros(), Vector3::zeros());
+                let mut pre = ImuPreintegrator::new_with_bias(Vector3::zeros(), Vector3::zeros());
                 for _ in 0..steps {
                     pre.integrate_sample(bias_gyro_true, -true_gravity, dt_step);
                 }
@@ -3313,7 +3384,10 @@ mod tests {
                 .try_initialize(&mut legacy_map, &factors, &seed)
                 .expect_err("bias-fixed Stage A must be rejected by the rotation-residual gate");
             assert!(
-                matches!(err, MotionBasedViRejectionReason::ImuRawResidualOutOfRange { .. }),
+                matches!(
+                    err,
+                    MotionBasedViRejectionReason::ImuRawResidualOutOfRange { .. }
+                ),
                 "unexpected rejection: {err:?}"
             );
 

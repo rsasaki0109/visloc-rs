@@ -1,0 +1,264 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "common_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\evaluation_common.json",
+      "sha256": "7aa639dade35a3a3eb8384e0a8a425a02186354cee2c9cb4e6ecbae4b7120c89"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\visloc.tum",
+      "sha256": "8d7d6b901ec0ee2c6ca3140e3748f448632e962781a35b01a0b019aa3925a9d1"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\stdout.log",
+      "sha256": "f1169295910451640c901da8184639d979642493d183eefef714f73ee47f1b56"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\stderr.log",
+      "sha256": "f575e0298eb442189b643c2ec0ef25a9f1bcdb473c10d98d102878b23b96d460"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\model\\images.txt",
+      "sha256": "67fd2373d782757f3cb447ae5c27de0a7b6b810507ff32b6c8695614545b4ad4"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v22_adaptive_split_trust_20260719\\model\\points3D.txt",
+      "sha256": "32529a0444757e81617618fbda5d687b8750ba2943d860796c965a331cf955ca"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same cached MH05 monocular features and frozen mapper; adaptive bounded local-submap registration is the only enabled-arm change; GT read after engine exit; common timestamps with disabled arm and COLMAP",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "frames": 300,
+      "geometry_conflict_recovery": false,
+      "next_image_policy": "visibility",
+      "post_refinement_registration": true,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12",
+      "skip_stride": 2,
+      "structureless_adaptive_trust_grid": "5 percent coarse, 1 percent around best near-admissible cell",
+      "structureless_max_clean_error_increase_ratio": 0.001,
+      "structureless_max_local_tracks": 512,
+      "structureless_max_reprojection_error_px": 2.0,
+      "structureless_max_rotation_disagreement_deg": 3.0,
+      "structureless_min_local_track_views": 2,
+      "structureless_min_neighbors": 3,
+      "structureless_min_pair_inliers": 30,
+      "structureless_min_support_tracks": 20,
+      "structureless_registration": true,
+      "structureless_trust_components": "rotation and camera centre",
+      "structureless_variable_poses": "new_image_only"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T11:03:29Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 296
+    },
+    {
+      "implementation": null,
+      "name": "post_refinement_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 113
+    },
+    {
+      "implementation": null,
+      "name": "structureless_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames_disabled",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 294
+    },
+    {
+      "implementation": null,
+      "name": "common_pose_value_differences",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6237
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 60761
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.640
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 35.7
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 301.4
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.21523503318288223
+    },
+    {
+      "implementation": null,
+      "name": "disabled_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.21523503318288223
+    },
+    {
+      "implementation": null,
+      "name": "added_frame_86_sim3_error_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.128790160166686
+    },
+    {
+      "implementation": null,
+      "name": "added_frame_240_sim3_error_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.079449676482391
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.012469147657525896
+    }
+  ],
+  "models": [],
+  "notes": "Supersedes the v8 first-slice supporting result. The bounded adaptive local-submap projection safely recovers MH05 frames 86 and 240 (294->296) while all 294 pre-existing camera pose values remain byte-identical. Frame 86 passes 22-track/1.990 px/2.852-degree admission and has 12.879 cm GT error under the common-pose Sim3. Four frames and the COLMAP accuracy gap remain open.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b2-adaptive-local-submap-MH_05_difficult-20260719T110329Z",
+  "schema_version": 1,
+  "status": "success"
+}

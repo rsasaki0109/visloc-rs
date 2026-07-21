@@ -60,6 +60,31 @@ def R_to_quat_xyzw(R):
     return qx, qy, qz, qw
 
 
+def pose_lines(images_txt):
+    """Return COLMAP pose rows without relying on non-empty line parity.
+
+    POINTS2D may legitimately be empty. Filtering blank lines and then taking
+    every second row shifts all following poses; a pose row instead has exactly
+    ten fields (IMAGE_ID, quaternion, translation, CAMERA_ID, NAME).
+    """
+    rows = []
+    with open(images_txt, encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) != 10:
+                continue
+            try:
+                int(parts[0])
+                [float(value) for value in parts[1:8]]
+                int(parts[8])
+            except ValueError:
+                continue
+            rows.append(parts)
+    return rows
+
+
 def main():
     if len(sys.argv) != 4:
         print(__doc__)
@@ -74,22 +99,8 @@ def main():
                 timestamps[int(parts[0])] = int(parts[1])
 
     rows = []
-    with open(images_txt) as f:
-        lines = f.readlines()
-    # COLMAP images.txt: after the '#' comment header, each image is TWO lines —
-    # a pose line then a points2D line — strictly alternating. Walk the
-    # non-comment lines and take only the even-indexed (pose) ones; the odd
-    # (points2D) lines also parse as floats, so a content-based filter would
-    # double-count them.
-    data_lines = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
-    for idx in range(0, len(data_lines), 2):
-        parts = data_lines[idx].split()
-        if len(parts) < 10:
-            continue
-        try:
-            qw, qx, qy, qz, tx, ty, tz = map(float, parts[1:8])
-        except ValueError:
-            continue
+    for parts in pose_lines(images_txt):
+        qw, qx, qy, qz, tx, ty, tz = map(float, parts[1:8])
         # NAME may be a full path (COLMAP resolves symlinks), so take the
         # basename's numeric stem — NOT the first integer in the whole path,
         # which could match a digit in a parent directory (e.g. "MH_03").

@@ -1,0 +1,187 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719\\evaluation.json",
+      "sha256": "863b79b8d4f5b6ea2d6a937dd04e27437d4500c9bbabd1508b2925670928f8c3"
+    },
+    {
+      "exists": true,
+      "kind": "common_evaluation",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719\\evaluation_common.json",
+      "sha256": "712a2e02a26e10a40dd2f03962e54e903ed04d031e7a4c2962d585371e9e6c6f"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719\\images.txt",
+      "sha256": "b688cd5da48dec0242bf7389ddcd348acb4ce278c3728bad8376a771d32cc49d"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719\\points3D.txt",
+      "sha256": "f59e6f466bcb02cb8e89484a6ed2b2f8ad72d393918bde83937598439621180e"
+    },
+    {
+      "exists": true,
+      "kind": "debug_log",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719\\mapping.log",
+      "sha256": "ddb9626c237e22166307c3f3dbd9454e9b405999350d399757a7484412c3c4a3"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same rectified EuRoC cam0 features; GT read only after engine exit; count-policy exploratory A/B",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "--features-dir",
+      "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\visloc_features",
+      "--out-colmap",
+      "E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719",
+      "--width",
+      "752",
+      "--height",
+      "480",
+      "--fx",
+      "436.2442956471",
+      "--fy",
+      "436.2442956471",
+      "--cx",
+      "364.4412345886",
+      "--cy",
+      "256.951675415",
+      "--window",
+      "5",
+      "--min-matches",
+      "30",
+      "--colmap-style",
+      "--next-image-policy",
+      "count"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe --features-dir E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\visloc_features --out-colmap E:\\visloc_archive\\p0_mono_sfm_mh03_300_head_count_policy_20260719 --width 752 --height 480 --fx 436.2442956471 --fy 436.2442956471 --cx 364.4412345886 --cy 256.951675415 --window 5 --min-matches 30 --colmap-style --next-image-policy count"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "engine": "visloc",
+      "frames": 300,
+      "next_image_policy": "count",
+      "sensor_mode": "monocular"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-18T23:51:01Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 944.1680131
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 881.8
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 284
+    },
+    {
+      "implementation": null,
+      "name": "registration_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.9466666666666667
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0039912453385063254
+    },
+    {
+      "implementation": null,
+      "name": "sim3_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.11722649840250354
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.598
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 8809
+    }
+  ],
+  "models": [],
+  "notes": "P0.1 controlled HEAD policy A/B; count improves completeness and native ATE but remains experimental and 16 images short.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-count-MH_03_medium-20260718T235100Z",
+  "schema_version": 1,
+  "status": "success"
+}

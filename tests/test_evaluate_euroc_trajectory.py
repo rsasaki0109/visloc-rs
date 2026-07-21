@@ -31,6 +31,18 @@ class EvaluateEurocTrajectoryTests(unittest.TestCase):
         self.assertEqual(poses[0][0], 10)
         np.testing.assert_allclose(poses[0][1], [1.0, 2.0, 3.0])
 
+    def test_loads_standard_tum_seconds_when_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.tum"
+            path.write_text(
+                "1403636579.963555584 1 2 3 0 0 0 1\n",
+                encoding="utf-8",
+            )
+            poses = MODULE.load_estimate(path, tum_time_unit="s")
+        self.assertEqual(len(poses), 1)
+        self.assertEqual(poses[0][0], 1_403_636_579_963_555_584)
+        np.testing.assert_allclose(poses[0][1], [1.0, 2.0, 3.0])
+
     def test_rigidly_transformed_trajectory_has_zero_error(self) -> None:
         angle = 0.4
         align_rotation = np.asarray(
@@ -59,6 +71,21 @@ class EvaluateEurocTrajectoryTests(unittest.TestCase):
         self.assertLess(result["ate_translation_se3_m"]["rmse"], 1e-12)
         self.assertLess(result["rpe_translation_consecutive_m"]["rmse"], 1e-12)
         self.assertLess(result["rpe_rotation_consecutive_deg"]["rmse"], 1e-6)
+
+    def test_restricts_comparison_to_exact_common_timestamps(self) -> None:
+        rotation = np.eye(3)
+        first = [
+            (stamp, np.asarray([float(stamp), 0.0, 0.0]), rotation)
+            for stamp in (1, 2, 3, 4)
+        ]
+        second = [
+            (stamp, np.asarray([float(stamp), 1.0, 0.0]), rotation)
+            for stamp in (2, 3, 4, 5)
+        ]
+
+        restricted = MODULE.restrict_to_common_timestamps([first, second])
+
+        self.assertEqual([[pose[0] for pose in run] for run in restricted], [[2, 3, 4], [2, 3, 4]])
 
 
 if __name__ == "__main__":

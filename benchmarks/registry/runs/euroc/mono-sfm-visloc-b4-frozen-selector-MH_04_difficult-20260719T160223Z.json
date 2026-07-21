@@ -1,0 +1,289 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\evaluation_ceres.json",
+      "sha256": "717e8a23f272b531748a0039f5be1a3b77b48187841c5ba131f30d2c1c0a3109"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\visloc.tum",
+      "sha256": "27ba2b5933a69fb6bee1cbe144e35ac4d20f3f4d5b53bca39fa9dc62266cb16b"
+    },
+    {
+      "exists": true,
+      "kind": "mapping_log",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\logs\\visloc_mapping.log",
+      "sha256": "8f9016429cc563be6636dee0aa3024c0d5176a7d66152b6b9539301a8724dd0b"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\visloc_model\\images.txt",
+      "sha256": "09ccadf13f246fd593ac3109a2b62bb59dc537519a830deb1f82fe12fbe99168"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\visloc_model\\points3D.txt",
+      "sha256": "c9e2d45c1b812e501d650c2da52b3afc4a0869c979b25ef1af0c8ad727c8b1a6"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Fresh held-out MH04 first 300 rectified cam0 frames; frozen trusted 8/12 and candidate 8/12/20/30 policy; independent mapper arms and GT-free selectors; GT opened only after visloc and COLMAP exited",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "headline",
+  "command": {
+    "argv": [
+      "scripts\\run_mono_sfm_headtohead.py",
+      "--mav0",
+      "E:\\datasets\\euroc_mav\\machine_hall\\MH_04_difficult\\mav0",
+      "--out-dir",
+      "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719",
+      "--frames",
+      "300",
+      "--device",
+      "cuda",
+      "--max-keypoints",
+      "2048",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--pose-graph-offsets",
+      "20,30",
+      "--pose-graph-stride",
+      "2",
+      "--wide-hypothesis",
+      "--post-refinement-registration",
+      "--structureless-registration",
+      "--colmap-feature",
+      "SIFT",
+      "--colmap-backend",
+      "CASPAR"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scripts\\run_mono_sfm_headtohead.py --mav0 E:\\datasets\\euroc_mav\\machine_hall\\MH_04_difficult\\mav0 --out-dir E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719 --frames 300 --device cuda --max-keypoints 2048 --window 5 --skip-offsets 8,12 --skip-stride 2 --pose-graph-offsets 20,30 --pose-graph-stride 2 --wide-hypothesis --post-refinement-registration --structureless-registration --colmap-feature SIFT --colmap-backend CASPAR"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "candidate_offsets": "8,12,20,30",
+      "engine": "visloc",
+      "final_min_observation_ratio": 1.25,
+      "final_min_point_ratio": 0.9,
+      "final_require_lower_reprojection": true,
+      "frames": 300,
+      "heldout_frozen": true,
+      "sensor_mode": "monocular",
+      "trusted_offsets": "8,12",
+      "wide_track_preflight_min_observation_ratio": 0.85,
+      "wide_track_preflight_min_track_ratio": 0.82
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T16:03:12Z",
+  "dataset": {
+    "checksum": "ea718bdc40c01ff5e32d95fc186a80b1cf8a6ff48275e7337b8859b98be1c25f",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_04_difficult\\mav0",
+    "sequence": "MH_04_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "preflight_track_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.839
+    },
+    {
+      "implementation": null,
+      "name": "preflight_observation_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.874
+    },
+    {
+      "implementation": null,
+      "name": "preflight_accepted",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "bool",
+      "value": 1
+    },
+    {
+      "implementation": null,
+      "name": "candidate_point_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.959
+    },
+    {
+      "implementation": null,
+      "name": "candidate_observation_ratio",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.973
+    },
+    {
+      "implementation": null,
+      "name": "candidate_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.588393
+    },
+    {
+      "implementation": null,
+      "name": "candidate_accepted",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "bool",
+      "value": 0
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3634
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 78278
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.583968
+    },
+    {
+      "implementation": null,
+      "name": "feature_extraction_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 113.383
+    },
+    {
+      "implementation": null,
+      "name": "mapping_wall_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 990.982
+    },
+    {
+      "implementation": null,
+      "name": "engine_wall_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1104.365
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.010647690698013
+    },
+    {
+      "implementation": null,
+      "name": "max_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0202315467430578
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0651023206010783
+    },
+    {
+      "implementation": null,
+      "name": "colmap_engine_wall_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2315.678
+    }
+  ],
+  "models": [],
+  "notes": "Fresh held-out success: frozen GT-free policy rejects the wide candidate after full quality scoring and selects trusted 300/300. Visloc beats COLMAP 4.1 Ceres in Sim3 ATE, registration parity, and engine wall including each engine own feature stage. MH04 was not inspected before freezing this policy.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-frozen-selector-MH_04_difficult-20260719T160223Z",
+  "schema_version": 1,
+  "status": "success"
+}

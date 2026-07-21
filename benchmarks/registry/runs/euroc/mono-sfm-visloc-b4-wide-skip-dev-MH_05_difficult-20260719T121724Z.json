@@ -1,0 +1,226 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "common_evaluation",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\evaluation_common.json",
+      "sha256": "7539229ef4807841768710fb0874c45af693b7d4e30cff0836e7e14b4c25e2b4"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\visloc.tum",
+      "sha256": "9034d228319be6ba226126e1176beab00165ea77f219086738a8bc064c859fc5"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\stdout.log",
+      "sha256": "34009e7a2d47b32d0574b1bdd2f6a8fa32ef93e4238ab66b1f638940e4a9af27"
+    },
+    {
+      "exists": true,
+      "kind": "stderr_log",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\stderr.log",
+      "sha256": "18b6652a6a89ec808c15c819d4c07dfbea48297febe43d4166550fbf42468d3a"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\model\\images.txt",
+      "sha256": "54e7674e59cdb2858c87a9cdc28a955dbd807847fcbc3dc70060b9e0d9436060"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh05_300_structureless_registration_v24_wide_skip_8_12_20_30_20260719\\model\\points3D.txt",
+      "sha256": "4b4391e15a1688cdd96623705ef0d970f8ac29d6ff3861da7c2ef00045e307f5"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Development-selected MH05 monocular wide-skip graph; offsets 20/30 added to trusted 8/12 stride-2 graph; all-300 independent GT evaluation after engine exit; not held-out",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12,20,30",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--structureless-registration"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12,20,30 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --structureless-registration"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "development_selected": true,
+      "frames": 300,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12,20,30",
+      "skip_stride": 2
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T12:19:34Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2050
+    },
+    {
+      "implementation": null,
+      "name": "verified_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2050
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6513
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 101178
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.572
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 40.6
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 752.3
+    },
+    {
+      "implementation": null,
+      "name": "matching_plus_sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 792.9
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_all_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0116059049842107
+    },
+    {
+      "implementation": null,
+      "name": "colmap_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_all_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0124751931732832
+    },
+    {
+      "implementation": null,
+      "name": "colmap_mapper_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1798.8
+    }
+  ],
+  "models": [],
+  "notes": "Development upper bound: wide skips reach 1.1606 cm ATE, 300/300, and beat COLMAP 4.1 MH05 accuracy and mapper runtime. MH05 selected the offsets, so this is supporting evidence only and cannot establish generalization.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b4-wide-skip-dev-MH_05_difficult-20260719T121724Z",
+  "schema_version": 1,
+  "status": "success"
+}

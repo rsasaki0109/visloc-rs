@@ -546,9 +546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             Some(BiasReleaseSchedule {
                 min_keyframes: args.vi_bias_release_min_keyframes.unwrap_or(10),
-                min_translation_meters: args
-                    .vi_bias_release_min_translation_meters
-                    .unwrap_or(2.0),
+                min_translation_meters: args.vi_bias_release_min_translation_meters.unwrap_or(2.0),
             })
         } else {
             None
@@ -902,7 +900,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         motion_max_gravity_deviation = args.motion_vi_init_max_gravity_norm_deviation,
         motion_estimated_gravity = motion_vi_init_estimated_gravity.map(|g| g.as_slice().to_vec()),
         motion_estimate_gyro_bias = args.motion_vi_init_estimate_gyro_bias,
-        motion_estimated_gyro_bias = motion_vi_init_estimated_gyro_bias.map(|b| b.as_slice().to_vec()),
+        motion_estimated_gyro_bias =
+            motion_vi_init_estimated_gyro_bias.map(|b| b.as_slice().to_vec()),
         scale = aligned_similarity.scale,
     );
     println!("{summary}");

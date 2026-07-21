@@ -32,7 +32,10 @@ use visloc_core::types::Camera;
 
 use super::fundamental::{fundamental_ransac, FundamentalRansacConfig};
 use super::homography::{homography_ransac, pose_from_homography_matrix, HomographyRansacConfig};
-use super::{EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig, TwoViewCorrespondence};
+use super::{
+    EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
+    TwoViewCorrespondence,
+};
 
 /// Port of `TwoViewGeometry::ConfigurationType`
 /// (`src/colmap/scene/two_view_geometry.h:42-63`). COLMAP's `CALIBRATED_RIG`
@@ -460,8 +463,7 @@ impl TwoViewGeometryVerifier {
                 break;
             }
 
-            let global_inliers: Vec<usize> =
-                sub.inliers.iter().map(|&i| remaining[i]).collect();
+            let global_inliers: Vec<usize> = sub.inliers.iter().map(|&i| remaining[i]).collect();
             let inlier_set: HashSet<usize> = global_inliers.iter().copied().collect();
             remaining.retain(|i| !inlier_set.contains(i));
 
@@ -548,7 +550,8 @@ fn detect_watermark(
     }
 
     let n = inlier_points1.len();
-    let threshold_sq = opts.watermark_detection_max_error_px * opts.watermark_detection_max_error_px;
+    let threshold_sq =
+        opts.watermark_detection_max_error_px * opts.watermark_detection_max_error_px;
     let mut best_count = 0usize;
     for i in 0..n {
         let t = inlier_points2[i] - inlier_points1[i];
@@ -638,7 +641,8 @@ mod tests {
             correspondences_for(&previous, &current, &camera, &general_scene_points());
         assert!(correspondences.len() >= 20);
 
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
         assert!(
             matches!(
@@ -664,7 +668,8 @@ mod tests {
             correspondences_for(&previous, &current, &camera, &planar_scene_points());
         assert!(correspondences.len() >= 20);
 
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
         assert_eq!(report.config, ConfigurationType::Planar);
         let (_, translation) = report.relative_pose.expect("planar pose must resolve");
@@ -682,7 +687,8 @@ mod tests {
             correspondences_for(&previous, &current, &camera, &general_scene_points());
         assert!(correspondences.len() >= 20);
 
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
         assert_eq!(report.config, ConfigurationType::Panoramic);
         let (_, translation) = report.relative_pose.expect("panoramic pose must resolve");
@@ -726,7 +732,12 @@ mod tests {
             correspondences.push(TwoViewCorrespondence::new(p1, p2));
         }
         let all_inliers: Vec<usize> = (0..correspondences.len()).collect();
-        assert!(detect_watermark(&camera, &correspondences, &all_inliers, &opts));
+        assert!(detect_watermark(
+            &camera,
+            &correspondences,
+            &all_inliers,
+            &opts
+        ));
     }
 
     #[test]
@@ -745,7 +756,12 @@ mod tests {
             correspondences.push(TwoViewCorrespondence::new(p1, p2));
         }
         let all_inliers: Vec<usize> = (0..correspondences.len()).collect();
-        assert!(!detect_watermark(&camera, &correspondences, &all_inliers, &opts));
+        assert!(!detect_watermark(
+            &camera,
+            &correspondences,
+            &all_inliers,
+            &opts
+        ));
     }
 
     #[test]
@@ -773,7 +789,8 @@ mod tests {
 
         // The new verifier runs independently and does not mutate any shared
         // state the legacy path depends on.
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let _ = verifier.classify(&correspondences, &camera);
         let legacy_pose_again = legacy
             .estimate(&correspondences, &camera)

@@ -4690,9 +4690,12 @@ where
     fn vi_initialization_pending(&self) -> bool {
         self.vi_init_state.as_ref().is_some_and(|static_state| {
             static_state.completed.is_none()
-                && self.vi_motion_init_state.as_ref().is_none_or(|motion_state| {
-                    motion_state.completed.is_none() && !motion_state.velocity_stage_fired()
-                })
+                && self
+                    .vi_motion_init_state
+                    .as_ref()
+                    .is_none_or(|motion_state| {
+                        motion_state.completed.is_none() && !motion_state.velocity_stage_fired()
+                    })
         })
     }
 
@@ -5779,7 +5782,14 @@ mod bias_release_promotion_tests {
             "sink (2): config.imu.gravity_world must mirror the estimate"
         );
         assert!(
-            (slam.local_vi_ba_state.as_ref().unwrap().config.gravity_world - new_gravity).norm()
+            (slam
+                .local_vi_ba_state
+                .as_ref()
+                .unwrap()
+                .config
+                .gravity_world
+                - new_gravity)
+                .norm()
                 < 1.0e-12,
             "sink (3): local_vi_ba_state.config.gravity_world must mirror the estimate"
         );
@@ -5898,7 +5908,12 @@ mod bias_release_promotion_tests {
             estimated_gravity
         );
         assert_eq!(
-            slam.config.vi_init.as_ref().unwrap().initializer.gravity_world,
+            slam.config
+                .vi_init
+                .as_ref()
+                .unwrap()
+                .initializer
+                .gravity_world,
             estimated_gravity
         );
         assert_eq!(
@@ -6022,7 +6037,12 @@ mod bias_release_promotion_tests {
 
         // Even a `StillWaiting` rejection (no promotion at all) must leave
         // the gate engaged.
-        assert!(slam.vi_motion_init_state.as_ref().unwrap().completed.is_none());
+        assert!(slam
+            .vi_motion_init_state
+            .as_ref()
+            .unwrap()
+            .completed
+            .is_none());
         assert!(!slam
             .vi_motion_init_state
             .as_ref()

@@ -67,7 +67,11 @@ impl Default for VocabTreePairGeneratorOptions {
 /// per query image, not a mutual-nearest-neighbor filter like
 /// `place_recognition::retrieve_mutual`; the symmetric `BTreeSet` here only
 /// dedups the `(i, j)`/`(j, i)` pair identity, it does not require mutuality.
-pub fn generate_pairs(vt: &VocabTree, image_descriptors: &[Vec<Vec<f32>>], options: &VocabTreePairGeneratorOptions) -> Vec<(usize, usize)> {
+pub fn generate_pairs(
+    vt: &VocabTree,
+    image_descriptors: &[Vec<Vec<f32>>],
+    options: &VocabTreePairGeneratorOptions,
+) -> Vec<(usize, usize)> {
     let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (i, descs) in image_descriptors.iter().enumerate() {
         if descs.is_empty() {
@@ -98,14 +102,22 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 / (1u64 << 53) as f64) as f32
         }
     }
     fn cluster(center: &[f32], n: usize, jitter: f32, seed: u64) -> Vec<Vec<f32>> {
         let mut rng = Lcg(seed);
         (0..n)
-            .map(|_| center.iter().map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter).collect())
+            .map(|_| {
+                center
+                    .iter()
+                    .map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter)
+                    .collect()
+            })
             .collect()
     }
     fn word(dim: usize, i: usize) -> Vec<f32> {
@@ -126,12 +138,22 @@ mod tests {
             .flat_map(|p| {
                 let a = {
                     let mut img = cluster(&word(dim, p * 2), 20, 0.02, 100 + p as u64 * 10);
-                    img.extend(cluster(&word(dim, p * 2 + 1), 20, 0.02, 200 + p as u64 * 10));
+                    img.extend(cluster(
+                        &word(dim, p * 2 + 1),
+                        20,
+                        0.02,
+                        200 + p as u64 * 10,
+                    ));
                     img
                 };
                 let b = {
                     let mut img = cluster(&word(dim, p * 2), 20, 0.02, 300 + p as u64 * 10);
-                    img.extend(cluster(&word(dim, p * 2 + 1), 20, 0.02, 400 + p as u64 * 10));
+                    img.extend(cluster(
+                        &word(dim, p * 2 + 1),
+                        20,
+                        0.02,
+                        400 + p as u64 * 10,
+                    ));
                     img
                 };
                 vec![a, b]
@@ -156,11 +178,18 @@ mod tests {
         }
         tree.finalize();
 
-        let pairs = generate_pairs(&tree, &places, &VocabTreePairGeneratorOptions { num_images: 5 });
+        let pairs = generate_pairs(
+            &tree,
+            &places,
+            &VocabTreePairGeneratorOptions { num_images: 5 },
+        );
 
         // No self-pairs, no duplicates (BTreeSet already guarantees dedup;
         // this also checks i < j ordering held for every entry).
-        assert!(pairs.iter().all(|&(i, j)| i < j), "every pair must be normalized i<j: {pairs:?}");
+        assert!(
+            pairs.iter().all(|&(i, j)| i < j),
+            "every pair must be normalized i<j: {pairs:?}"
+        );
 
         // Each planted same-place pair should appear.
         for p in 0..3 {
@@ -198,7 +227,15 @@ mod tests {
 
         // With num_images = 1, each of the 6 images contributes at most one
         // pair, so the union can have at most 6 pairs.
-        let pairs = generate_pairs(&tree, &images, &VocabTreePairGeneratorOptions { num_images: 1 });
-        assert!(pairs.len() <= 6, "expected <=6 pairs with a 1-per-query budget, got {}", pairs.len());
+        let pairs = generate_pairs(
+            &tree,
+            &images,
+            &VocabTreePairGeneratorOptions { num_images: 1 },
+        );
+        assert!(
+            pairs.len() <= 6,
+            "expected <=6 pairs with a 1-per-query budget, got {}",
+            pairs.len()
+        );
     }
 }

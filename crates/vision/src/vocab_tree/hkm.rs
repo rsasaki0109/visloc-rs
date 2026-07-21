@@ -129,7 +129,10 @@ impl HierarchicalVocabulary {
     /// positive dimension). Returns `None` for empty input, dimension
     /// mismatches, or zero dimension — same degenerate-input contract as
     /// [`Vocabulary::build`].
-    pub fn build(descriptors: &[&[f32]], options: &HkmBuildOptions) -> Option<HierarchicalVocabulary> {
+    pub fn build(
+        descriptors: &[&[f32]],
+        options: &HkmBuildOptions,
+    ) -> Option<HierarchicalVocabulary> {
         if descriptors.is_empty() {
             return None;
         }
@@ -227,7 +230,13 @@ fn build_node(
             .iter()
             .enumerate()
             .map(|(i, c)| (i, sq_distance(c, d)))
-            .fold((0usize, f32::INFINITY), |best, cur| if cur.1 < best.1 { cur } else { best })
+            .fold((0usize, f32::INFINITY), |best, cur| {
+                if cur.1 < best.1 {
+                    cur
+                } else {
+                    best
+                }
+            })
             .0;
         buckets[idx].push(d);
     }
@@ -250,7 +259,14 @@ fn build_node(
             // after Lloyd's last iteration, is the leaf.
             leaves.push(vocab.centroids[i].clone());
         } else {
-            leaves.extend(build_node(&bucket, branching, depth - 1, iterations, sub_seed, dim));
+            leaves.extend(build_node(
+                &bucket,
+                branching,
+                depth - 1,
+                iterations,
+                sub_seed,
+                dim,
+            ));
         }
     }
     leaves
@@ -273,13 +289,21 @@ mod tests {
         struct Lcg(u64);
         impl Lcg {
             fn next(&mut self) -> f32 {
-                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((self.0 >> 11) as f64 / (1u64 << 53) as f64) as f32
             }
         }
         let mut rng = Lcg(seed);
         (0..n)
-            .map(|_| center.iter().map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter).collect())
+            .map(|_| {
+                center
+                    .iter()
+                    .map(|&c| c + (rng.next() - 0.5) * 2.0 * jitter)
+                    .collect()
+            })
             .collect()
     }
 
@@ -299,8 +323,15 @@ mod tests {
         };
         let v1 = HierarchicalVocabulary::build(&refs, &opts).unwrap();
         let v2 = HierarchicalVocabulary::build(&refs, &opts).unwrap();
-        assert_eq!(v1, v2, "same seed + same input must reproduce byte-identical leaves");
-        assert!(v1.num_words() >= 2, "expected a genuine multi-leaf split, got {}", v1.num_words());
+        assert_eq!(
+            v1, v2,
+            "same seed + same input must reproduce byte-identical leaves"
+        );
+        assert!(
+            v1.num_words() >= 2,
+            "expected a genuine multi-leaf split, got {}",
+            v1.num_words()
+        );
     }
 
     #[test]
@@ -324,7 +355,10 @@ mod tests {
             let nearest = (0..vocab.num_words())
                 .map(|i| sq_distance(c, &vocab.leaves[i]))
                 .fold(f32::INFINITY, f32::min);
-            assert!(nearest < 0.05, "centre {c:?} unmatched by any leaf (d^2={nearest})");
+            assert!(
+                nearest < 0.05,
+                "centre {c:?} unmatched by any leaf (d^2={nearest})"
+            );
         }
     }
 

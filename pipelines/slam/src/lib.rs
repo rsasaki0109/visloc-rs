@@ -28,8 +28,14 @@ pub use covisibility_ba::{
 
 pub mod incremental_sfm;
 pub use incremental_sfm::{
-    incremental_sfm, IncrementalSfmConfig, IncrementalSfmError, IncrementalSfmResult,
-    PairwiseMatches, SfmTrack, TrackSource,
+    incremental_sfm, preview_track_build_stats, IncrementalSfmConfig, IncrementalSfmError,
+    IncrementalSfmResult, NextImagePolicy, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
+};
+
+pub mod ordered_view_graph;
+pub use ordered_view_graph::{
+    generate_ordered_pairs, OrderedPairCandidate, OrderedPairGeneratorConfig, OrderedPairHints,
+    OrderedPairSource,
 };
 
 pub mod imu_preintegration;
@@ -44,14 +50,14 @@ mod block_cholesky;
 pub mod covariance;
 pub mod dpvo_patch_ba;
 pub use dpvo_patch_ba::{
-    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, flow_mag, reproject_patch_grid, reprojected_center_depth,
-    se3_from_dpvo_pose, transform_point, DpvoBaConfig, DpvoBaError, DpvoBaProblem, DpvoEdge, DpvoIntrinsics,
-    DpvoPatch,
+    dpvo_ba, dpvo_ba_step, dpvo_pose_from_se3, flow_mag, reproject_patch_grid,
+    reprojected_center_depth, se3_from_dpvo_pose, transform_point, DpvoBaConfig, DpvoBaError,
+    DpvoBaProblem, DpvoEdge, DpvoIntrinsics, DpvoPatch,
 };
 pub mod dpvo_patch_graph;
 pub use dpvo_patch_graph::{
-    active_edge_triples, DpvoGraphError, DpvoGraphEdge, DpvoGraphFrame, DpvoPatchGraph, DpvoVoConfig,
-    InactiveEdge, RetainedFoldedFrame,
+    active_edge_triples, DpvoGraphEdge, DpvoGraphError, DpvoGraphFrame, DpvoPatchGraph,
+    DpvoVoConfig, InactiveEdge, RetainedFoldedFrame,
 };
 pub mod dpvo_loop_closure;
 pub use dpvo_loop_closure::{
@@ -66,13 +72,15 @@ pub use dpvo_sim3_backend::{
 };
 pub mod dpvo_long_loop;
 pub use dpvo_long_loop::{
-    AcceptedLongLoop, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex, QueryCandidateLogEntry,
+    AcceptedLongLoop, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex,
+    QueryCandidateLogEntry,
 };
 pub mod dpvo_scale_coupling;
 pub use dpvo_scale_coupling::{
-    apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment, AnnealingWeight,
-    LogScalePosterior, RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCorrectionResult,
-    ScaleCouplingConfig, ScaleMeasurement, ScaleUpdateReport, Vector3Posterior,
+    apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment,
+    AnnealingWeight, LogScalePosterior, RecursiveGyroBiasEstimator, RecursiveScaleEstimator,
+    ScaleCorrectionResult, ScaleCouplingConfig, ScaleMeasurement, ScaleUpdateReport,
+    Vector3Posterior,
 };
 pub mod dpvo_vo;
 mod finite_difference;

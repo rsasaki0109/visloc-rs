@@ -1,0 +1,168 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\summary.json",
+      "sha256": "01669f56dbbf23cab7f1698f6b385518967c96b4d3d03ae63bf0090b7ff02c68"
+    },
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\evaluation.json",
+      "sha256": "fb82d4b987ee96e26557ac77aca6fbbf605d4d4cc3053f9e3826ee338157e1c3"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\colmap\\text_models\\0\\images.txt",
+      "sha256": "2474a2a0e4335dfee41000584fc464ff1a52f372b15dcca3c728a8e77d240bd8"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719\\colmap\\text_models\\0\\points3D.txt",
+      "sha256": "36891f4e847dfa244637955e9a0b06c70f416c43f80bd503b43533a8a425875c"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same rectified EuRoC cam0 frames, mono-to-mono, Sim(3) camera trajectory against EuRoC ground truth; GT read only after both engines exit",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "E:\\tools\\venv-cu\\Scripts\\python.exe",
+      "scripts\\run_mono_sfm_headtohead.py",
+      "--mav0",
+      "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+      "--out-dir",
+      "E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719",
+      "--frames",
+      "300",
+      "--device",
+      "cuda",
+      "--max-keypoints",
+      "2048",
+      "--window",
+      "5",
+      "--colmap-feature",
+      "SIFT",
+      "--colmap-backend",
+      "CERES"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "E:\\tools\\venv-cu\\Scripts\\python.exe scripts\\run_mono_sfm_headtohead.py --mav0 E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0 --out-dir E:\\visloc_archive\\p0_mono_sfm_mh03_300_sift_ceres_b_20260719 --frames 300 --device cuda --max-keypoints 2048 --window 5 --colmap-feature SIFT --colmap-backend CERES"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "ba_backend": "CERES",
+      "engine": "colmap",
+      "feature": "SIFT",
+      "frames": 300,
+      "sensor_mode": "monocular"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-18T22:59:34Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2290.58672989998
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "registration_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.006163060482608199
+    },
+    {
+      "implementation": null,
+      "name": "sim3_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.04066492726955953
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.5104200442743401
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 11204
+    }
+  ],
+  "models": [],
+  "notes": "P0 fresh mono-to-mono baseline; shared rectification and Rust build time excluded from engine wall time.",
+  "result_kind": "external_rerun",
+  "run_id": "mono-sfm-colmap-MH_03_medium-20260718T225823Z",
+  "schema_version": 1,
+  "status": "success"
+}

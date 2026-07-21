@@ -1,0 +1,198 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\evaluation_ceres.json",
+      "sha256": "717e8a23f272b531748a0039f5be1a3b77b48187841c5ba131f30d2c1c0a3109"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\colmap_ceres.tum",
+      "sha256": "47d877ad4a0708cf5243e69d8031578ed588fdb65452d0246185d87e9c9db50d"
+    },
+    {
+      "exists": true,
+      "kind": "feature_log",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\logs\\colmap_feature_extraction.log",
+      "sha256": "7921a994c3ab4f87c3a766c460fd104b864436ea0be67f679ad53aab6c03a777"
+    },
+    {
+      "exists": true,
+      "kind": "matching_log",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\logs\\colmap_matching.log",
+      "sha256": "e78b4181117b9e5d504bb77f01dbbffe1b78cc7d4d5b7741b537216435e71797"
+    },
+    {
+      "exists": true,
+      "kind": "mapping_log",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\logs\\colmap_mapping_ceres.stderr.log",
+      "sha256": "612cb8dbbdb3c7c40a35ac6a4fbf62c8cd44a8faa3b7a2cbfeefc6c115920799"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\colmap\\text_ceres\\images.txt",
+      "sha256": "0e22a31144b9c062cfd928a275447351ab52c1435d8b4995aaca694be0dddd83"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\colmap\\text_ceres\\points3D.txt",
+      "sha256": "b01aa8f25a13bb427405f1a456ed3797436bc38d36c86f37a68bb2a236288327"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same fresh held-out MH04 rectified cam0 images; COLMAP 4.1 SIFT sequential matcher, random seed 0, local/global Ceres after installed mapper rejected requested Caspar; GT after engine exit",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "E:\\tools\\colmap\\bin\\colmap.exe",
+      "mapper",
+      "...",
+      "--Mapper.random_seed",
+      "0",
+      "--Mapper.ba_local_backend",
+      "CERES",
+      "--Mapper.ba_global_backend",
+      "CERES",
+      "--Mapper.ba_use_gpu",
+      "0"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "E:\\tools\\colmap\\bin\\colmap.exe mapper ... --Mapper.random_seed 0 --Mapper.ba_local_backend CERES --Mapper.ba_global_backend CERES --Mapper.ba_use_gpu 0"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "ba_global_backend": "CERES",
+      "ba_global_backend_requested": "CASPAR",
+      "caspar_dnf_unsupported": true,
+      "engine": "colmap",
+      "feature": "SIFT",
+      "matcher": "sequential",
+      "sensor_mode": "monocular",
+      "version": "4.1.0 fa8e3b3"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T16:04:33Z",
+  "dataset": {
+    "checksum": "ea718bdc40c01ff5e32d95fc186a80b1cf8a6ff48275e7337b8859b98be1c25f",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_04_difficult\\mav0",
+    "sequence": "MH_04_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 6748
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.7378299687055928
+    },
+    {
+      "implementation": null,
+      "name": "feature_extraction_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 7.296
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 10.382
+    },
+    {
+      "implementation": null,
+      "name": "mapping_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2298.0
+    },
+    {
+      "implementation": null,
+      "name": "engine_wall_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2315.678
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0651023206010783
+    },
+    {
+      "implementation": null,
+      "name": "max_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.166803232669692
+    }
+  ],
+  "models": [],
+  "notes": "COLMAP 4.1 Ceres comparator on the exact MH04 input and already-built SIFT database. The requested global Caspar backend was unsupported by incremental mapper and is registered separately as DNF; Ceres completed 300/300.",
+  "result_kind": "external_rerun",
+  "run_id": "mono-sfm-colmap41-ceres-MH_04_difficult-20260719T160224Z",
+  "schema_version": 1,
+  "status": "success"
+}

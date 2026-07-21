@@ -45,7 +45,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
@@ -192,6 +192,74 @@ pub struct IncrementalSfmConfig {
     /// retried for registration (across global-refinement boundaries) before it
     /// is given up on. Only used when `colmap_style_mapper` is set.
     pub max_registration_trials: usize,
+    /// After the final iterative global refinement has tightened/re-triangulated
+    /// the committed model, give every still-unregistered image one fresh PnP
+    /// attempt against that updated structure. This is a bounded completion
+    /// pass: counters are reset exactly once, no retry cycle is possible, and a
+    /// second final refinement runs only when at least one image registers.
+    /// Experimental and off by default.
+    pub post_refinement_registration: bool,
+    /// After ordinary 2D-3D PnP completion, try to place still-missing images
+    /// from three or more registered neighbours' independently recovered
+    /// relative poses. Translation scale is recovered by intersecting the
+    /// neighbour-to-missing camera-centre direction lines in the existing
+    /// reconstruction frame; a single essential pair is never sufficient.
+    /// Experimental and off by default.
+    pub structureless_registration: bool,
+    /// Minimum registered relative-pose neighbours required to propose one
+    /// structure-less camera pose.
+    pub structureless_min_neighbors: usize,
+    /// Minimum independently re-estimated essential inliers per neighbour.
+    pub structureless_min_pair_inliers: usize,
+    /// Maximum angular disagreement between neighbour-implied missing-camera
+    /// rotations.
+    pub structureless_max_rotation_disagreement_deg: f64,
+    /// Minimum acute angle between any two camera-centre direction lines.
+    pub structureless_min_intersection_angle_deg: f64,
+    /// Maximum RMS line-intersection residual divided by the registered
+    /// neighbour-centre spread.
+    pub structureless_max_center_line_error_ratio: f64,
+    /// Minimum signed neighbour-line parameter divided by neighbour spread.
+    /// A small negative tolerance absorbs noisy intersections at an almost
+    /// coincident adjacent frame without accepting a materially reversed
+    /// essential translation direction.
+    pub structureless_min_forward_ratio: f64,
+    /// Minimum triangulated/reprojecting tracks required after tentative pose
+    /// insertion and local refinement.
+    pub structureless_min_support_tracks: usize,
+    /// Maximum independent local-submap tracks synthesized from verified
+    /// pairwise edges for one tentative structure-less insertion.
+    pub structureless_max_local_tracks: usize,
+    /// Minimum views per synthesized local-submap landmark. Two-view points
+    /// are allowed because the camera pose itself already requires a separate
+    /// multi-neighbour consensus.
+    pub structureless_min_local_track_views: usize,
+    /// Maximum mean reprojection error over the tentative image's supported
+    /// tracks after local refinement.
+    pub structureless_max_reprojection_error_px: f64,
+    /// Maximum relative increase in the pre-existing model's mean reprojection
+    /// error allowed when admitting one structure-less pose.
+    pub structureless_max_clean_error_increase_ratio: f64,
+    /// Revisit same-image-conflicted union-find components only after the normal
+    /// reconstruction has produced trustworthy poses. Candidate landmarks are
+    /// triangulated from verified edges, must agree in at least three registered
+    /// views with cycle support, and enter one guarded global BA. The recovery is
+    /// rolled back if it worsens the clean model's reprojection objective.
+    /// Experimental and off by default.
+    pub geometry_guided_conflict_recovery: bool,
+    /// Minimum registered views supporting a geometry-recovered conflict track.
+    /// Values below three are clamped to three.
+    pub conflict_recovery_min_views: usize,
+    /// Maximum verified anchor edges tested per conflicted component, ranked by
+    /// descending posed-view parallax. This bounds recovery work on large chains.
+    pub conflict_recovery_max_hypotheses: usize,
+    /// Per-observation reprojection gate for a geometry-recovered track.
+    pub conflict_recovery_max_reprojection_error_px: f64,
+    /// Maximum mean reprojection error of a recovered track before guarded BA.
+    pub conflict_recovery_max_mean_reprojection_px: f64,
+    /// Maximum relative increase allowed in the original clean tracks' mean
+    /// reprojection after the single guarded recovery BA.
+    pub conflict_recovery_max_clean_error_increase_ratio: f64,
     /// Multi-view exemption to the `min_triangulation_angle_deg` gate. A point on
     /// a forward-flying trajectory often subtends a parallax angle below the gate
     /// yet is **well-constrained** when many views observe it (each view adds a
@@ -233,6 +301,20 @@ pub struct IncrementalSfmConfig {
     /// Which algorithm builds step 1's feature tracks from `pairwise`. See
     /// [`TrackSource`]'s doc for the M2 background; `UnionFind` by default.
     pub track_source: TrackSource,
+    /// How unregistered images are ranked for the next PnP attempt. The
+    /// visibility pyramid is the safe default; correspondence count preserves
+    /// the pre-M3 ordering for controlled regression experiments.
+    pub next_image_policy: NextImagePolicy,
+}
+
+/// Ranking policy for the next image offered to incremental PnP registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NextImagePolicy {
+    /// Prefer spatially distributed 2D-3D support, then raw support count.
+    #[default]
+    VisibilityPyramid,
+    /// Prefer the largest raw 2D-3D support count (the pre-`9c35f72` policy).
+    CorrespondenceCount,
 }
 
 /// Which algorithm builds step 1's feature tracks from `pairwise` — the M2
@@ -297,12 +379,32 @@ impl Default for IncrementalSfmConfig {
             global_ba_max_refinements: 5,
             global_ba_change_rate: 0.0005,
             max_registration_trials: 3,
+            post_refinement_registration: false,
+            structureless_registration: false,
+            structureless_min_neighbors: 3,
+            structureless_min_pair_inliers: 30,
+            structureless_max_rotation_disagreement_deg: 3.0,
+            structureless_min_intersection_angle_deg: 2.0,
+            structureless_max_center_line_error_ratio: 0.25,
+            structureless_min_forward_ratio: -0.005,
+            structureless_min_support_tracks: 20,
+            structureless_max_local_tracks: 512,
+            structureless_min_local_track_views: 2,
+            structureless_max_reprojection_error_px: 2.0,
+            structureless_max_clean_error_increase_ratio: 0.001,
+            geometry_guided_conflict_recovery: false,
+            conflict_recovery_min_views: 3,
+            conflict_recovery_max_hypotheses: 32,
+            conflict_recovery_max_reprojection_error_px: 2.0,
+            conflict_recovery_max_mean_reprojection_px: 1.0,
+            conflict_recovery_max_clean_error_increase_ratio: 0.001,
             low_parallax_min_observations: None,
             low_parallax_min_angle_deg: 1.0,
             refine_intrinsics: false,
             filter_images: false,
             filter_min_image_observations: 15,
             track_source: TrackSource::default(),
+            next_image_policy: NextImagePolicy::default(),
         }
     }
 }
@@ -317,6 +419,69 @@ pub struct SfmTrack {
     pub observations: Vec<(usize, usize, Point2<f64>)>,
 }
 
+/// Diagnostics from feature-track construction before triangulation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrackBuildStats {
+    /// Verified pairwise correspondences offered to the track builder.
+    pub input_correspondences: usize,
+    /// Connected components formed before the minimum-length gate.
+    pub connected_components: usize,
+    /// Legacy components discarded because they contain one image twice.
+    pub conflicting_components: usize,
+    /// Observations contained in those discarded legacy components.
+    pub conflicting_observations: usize,
+    /// Tracks retained after conflict and minimum-length gates.
+    pub retained_tracks: usize,
+    /// Observations in retained tracks.
+    pub retained_observations: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrackBuildOutput {
+    tracks: Vec<Vec<(usize, usize)>>,
+    conflicting_components: Vec<Vec<(usize, usize)>>,
+    stats: TrackBuildStats,
+}
+
+fn build_track_output(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    config: &IncrementalSfmConfig,
+) -> TrackBuildOutput {
+    match config.track_source {
+        TrackSource::UnionFind => {
+            build_tracks_detailed(features.len(), pairwise, config.min_track_length)
+        }
+        TrackSource::CorrespondenceGraph => {
+            let tracks = build_tracks_via_graph(features, pairwise, config.min_track_length);
+            let stats = TrackBuildStats {
+                input_correspondences: pairwise.iter().map(|pair| pair.matches.len()).sum(),
+                connected_components: tracks.len(),
+                retained_tracks: tracks.len(),
+                retained_observations: tracks.iter().map(Vec::len).sum(),
+                ..TrackBuildStats::default()
+            };
+            TrackBuildOutput {
+                tracks,
+                conflicting_components: Vec::new(),
+                stats,
+            }
+        }
+    }
+}
+
+/// Build only the feature-track topology and return its diagnostics, without
+/// seed selection, triangulation, registration, or bundle adjustment. This is
+/// intended for cheap preflight rejection of a candidate view graph before an
+/// expensive independent mapper arm is launched.
+pub fn preview_track_build_stats(
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    config: &IncrementalSfmConfig,
+) -> TrackBuildStats {
+    build_track_output(features, pairwise, config).stats
+}
+
 /// Output of [`incremental_sfm`].
 #[derive(Debug, Clone)]
 pub struct IncrementalSfmResult {
@@ -324,8 +489,22 @@ pub struct IncrementalSfmResult {
     pub poses: Vec<Option<Pose>>,
     /// Reconstructed multi-view tracks (after the final BA, if enabled).
     pub tracks: Vec<SfmTrack>,
+    /// Track-construction diagnostics measured before triangulation and BA.
+    pub track_build_stats: TrackBuildStats,
     /// Number of images that registered into the reconstruction.
     pub registered_images: usize,
+    /// Images added by the optional one-shot post-refinement completion pass.
+    pub post_refinement_registered_images: usize,
+    /// Images placed by the optional multi-neighbour relative-pose recovery
+    /// after the ordinary post-refinement PnP pass.
+    pub structureless_registered_images: usize,
+    /// Conflict tracks admitted by the optional geometry-guided recovery gate.
+    pub geometry_recovered_tracks: usize,
+    /// Observations contained in admitted geometry-recovered tracks.
+    pub geometry_recovered_observations: usize,
+    /// Whether recovery was allowed to update poses through its guarded BA.
+    /// Complete models use structure-only recovery and report `false`.
+    pub geometry_recovery_pose_ba_applied: bool,
     /// Mean reprojection error (px) over every observation of every track.
     pub mean_reprojection_px: f64,
     /// Result of the final BA solve, if one ran.
@@ -380,15 +559,31 @@ pub fn incremental_sfm(
     pairwise: &[PairwiseMatches],
     config: &IncrementalSfmConfig,
 ) -> Result<IncrementalSfmResult, IncrementalSfmError> {
+    let sfm_started = std::time::Instant::now();
     let n_images = features.len();
 
     // ---- 1. Build feature tracks (M2: union-find or CorrespondenceGraph) ----
-    let mut tracks = match config.track_source {
-        TrackSource::UnionFind => build_tracks(features.len(), pairwise, config.min_track_length),
-        TrackSource::CorrespondenceGraph => {
-            build_tracks_via_graph(features, pairwise, config.min_track_length)
-        }
-    };
+    let started = std::time::Instant::now();
+    let track_build = build_track_output(features, pairwise, config);
+    let TrackBuildOutput {
+        mut tracks,
+        conflicting_components,
+        stats: track_build_stats,
+    } = track_build;
+    let track_build_seconds = started.elapsed().as_secs_f64();
+    if sfm_debug_enabled() {
+        eprintln!(
+            "sfm-debug: track build source={:?} input={} components={} \
+             conflicts={} conflict_obs={} retained_tracks={} retained_obs={}",
+            config.track_source,
+            track_build_stats.input_correspondences,
+            track_build_stats.connected_components,
+            track_build_stats.conflicting_components,
+            track_build_stats.conflicting_observations,
+            track_build_stats.retained_tracks,
+            track_build_stats.retained_observations,
+        );
+    }
 
     // For each image, which (keypoint, track) pairs it observes — drives both
     // triangulation and next-image selection.
@@ -418,6 +613,7 @@ pub fn incremental_sfm(
     // that fail the two-view baseline gate placed nothing and are skipped for
     // free, so an orbit whose highest-overlap pairs are all low-parallax adjacent
     // frames still reaches the first wide-baseline pair beyond them.
+    let seed_growth_started = std::time::Instant::now();
     let seed_order = seed_candidate_order(pairwise, config);
     let trials = config.seed_trials.max(1);
     let not_trapped = largest_connected_component(pairwise, n_images)
@@ -457,6 +653,7 @@ pub fn incremental_sfm(
         }
     }
     let (_, mut poses, mut track_point, grown_cam) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
+    let seed_growth_seconds = seed_growth_started.elapsed().as_secs_f64();
 
     // ---- 4 + 5. Final refinement ----
     // When intrinsics refinement is on, growth already co-evolved them into
@@ -464,8 +661,9 @@ pub fn incremental_sfm(
     // focal cannot be silently absorbed). The final solve continues refining from
     // there; `cam` expresses the output poses/tracks/reprojection and is returned
     // to the caller for export.
+    let final_refinement_started = std::time::Instant::now();
     let mut cam = grown_cam;
-    let ba_result = if config.colmap_style_mapper {
+    let mut ba_result = if config.colmap_style_mapper {
         // COLMAP's final pass IS an iterative global refinement (global BA →
         // complete/re-triangulate → filter, to convergence). The grow loop has
         // already run local BAs + growth-triggered refinements throughout.
@@ -543,7 +741,177 @@ pub fn incremental_sfm(
         ba_result
     };
 
+    let mut geometry_recovered_tracks = 0usize;
+    let mut geometry_recovered_observations = 0usize;
+    let mut geometry_recovery_pose_ba_applied = false;
+    let geometry_recovery_started = std::time::Instant::now();
+    if config.geometry_guided_conflict_recovery && !conflicting_components.is_empty() {
+        let recovered = recover_conflict_tracks_geometry(
+            &cam,
+            features,
+            pairwise,
+            &conflicting_components,
+            &poses,
+            config,
+        );
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: geometry conflict recovery proposed {} tracks / {} observations",
+                recovered.len(),
+                recovered
+                    .iter()
+                    .map(|track| track.observations.len())
+                    .sum::<usize>(),
+            );
+        }
+        if !recovered.is_empty() {
+            let clean_track_count = tracks.len();
+            let clean_mean_before = mean_reprojection_for_track_range(
+                &cam,
+                features,
+                &tracks,
+                &poses,
+                &track_point,
+                0,
+                clean_track_count,
+            );
+            let poses_before = poses.clone();
+            let track_point_before = track_point.clone();
+            for candidate in &recovered {
+                tracks.push(candidate.observations.clone());
+                track_point.push(Some(candidate.point));
+            }
+
+            // Once every image is already registered, conflict recovery is a
+            // structure-density operation. The held-out MH_01 A/B showed that
+            // a residual-improving extra pose BA can still worsen independent
+            // GT ATE, so a complete trajectory is immutable here. Incomplete
+            // models may use one guarded BA because recovered structure can
+            // unlock missing-image PnP and improve the development trajectory.
+            let model_complete = poses.iter().all(Option::is_some);
+            let mut accepted = model_complete;
+            if model_complete {
+                geometry_recovered_tracks = recovered.len();
+                geometry_recovered_observations =
+                    recovered.iter().map(|track| track.observations.len()).sum();
+                if sfm_debug_enabled() {
+                    eprintln!(
+                        "sfm-debug: geometry conflict recovery accepted structure-only; \
+                         complete {}/{} pose model remains byte-identical",
+                        poses.len(),
+                        poses.len(),
+                    );
+                }
+            } else if let Ok((result, _)) = run_bundle_adjustment(
+                &cam,
+                features,
+                &tracks,
+                config,
+                &mut poses,
+                &mut track_point,
+                false,
+            ) {
+                let clean_mean_after = mean_reprojection_for_track_range(
+                    &cam,
+                    features,
+                    &tracks,
+                    &poses,
+                    &track_point,
+                    0,
+                    clean_track_count,
+                );
+                let recovered_mean_after = mean_reprojection_for_track_range(
+                    &cam,
+                    features,
+                    &tracks,
+                    &poses,
+                    &track_point,
+                    clean_track_count,
+                    tracks.len(),
+                );
+                let allowed_clean_mean = clean_mean_before
+                    * (1.0
+                        + config
+                            .conflict_recovery_max_clean_error_increase_ratio
+                            .max(0.0));
+                accepted = clean_mean_before.is_finite()
+                    && clean_mean_after.is_finite()
+                    && recovered_mean_after.is_finite()
+                    && clean_mean_after <= allowed_clean_mean + 1e-12
+                    && recovered_mean_after <= config.conflict_recovery_max_mean_reprojection_px;
+                if sfm_debug_enabled() {
+                    eprintln!(
+                        "sfm-debug: geometry conflict recovery guard accepted={accepted} \
+                         clean_mean={clean_mean_before:.6}->{clean_mean_after:.6} \
+                         (allowed {allowed_clean_mean:.6}) recovered_mean={recovered_mean_after:.6}",
+                    );
+                }
+                if accepted {
+                    geometry_recovered_tracks = recovered.len();
+                    geometry_recovered_observations =
+                        recovered.iter().map(|track| track.observations.len()).sum();
+                    geometry_recovery_pose_ba_applied = true;
+                    ba_result = Some(result);
+                }
+            } else if sfm_debug_enabled() {
+                eprintln!("sfm-debug: geometry conflict recovery BA failed; rolling back");
+            }
+            if !accepted {
+                tracks.truncate(clean_track_count);
+                poses = poses_before;
+                track_point = track_point_before;
+            }
+        }
+    }
+    let geometry_recovery_seconds = geometry_recovery_started.elapsed().as_secs_f64();
+
+    let mut post_refinement_registered_images = 0usize;
+    if config.colmap_style_mapper && config.post_refinement_registration {
+        post_refinement_registered_images = post_refinement_registration_pass(
+            &cam,
+            features,
+            &tracks,
+            config,
+            &mut poses,
+            &mut track_point,
+        )
+        .map_err(IncrementalSfmError::Ba)?;
+        if post_refinement_registered_images > 0 {
+            ba_result = Some(
+                iterative_global_refinement(
+                    &mut cam,
+                    features,
+                    &mut tracks,
+                    config,
+                    &mut poses,
+                    &mut track_point,
+                )
+                .map_err(IncrementalSfmError::Ba)?,
+            );
+        }
+    }
+    let structureless_started = std::time::Instant::now();
+    let structureless_registered_images = if config.colmap_style_mapper
+        && config.structureless_registration
+        && poses.iter().any(Option::is_none)
+    {
+        structureless_registration_pass(
+            &cam,
+            features,
+            pairwise,
+            &mut tracks,
+            config,
+            &mut poses,
+            &mut track_point,
+        )
+    } else {
+        0
+    };
+    let structureless_seconds = structureless_started.elapsed().as_secs_f64();
+    let final_refinement_seconds = final_refinement_started.elapsed().as_secs_f64();
+
     // ---- Assemble output tracks (only triangulated, registered observations) ----
+    let assembly_started = std::time::Instant::now();
     let mut out_tracks = Vec::new();
     let mut reproj_sum = 0.0;
     let mut reproj_count = 0usize;
@@ -577,11 +945,27 @@ pub fn incremental_sfm(
     } else {
         f64::NAN
     };
+    if sfm_debug_enabled() {
+        eprintln!(
+            "sfm-timing: total={:.3}s track_build={track_build_seconds:.3}s \
+             seed_growth={seed_growth_seconds:.3}s final_refinement={final_refinement_seconds:.3}s \
+             geometry_recovery={geometry_recovery_seconds:.3}s \
+             structureless={structureless_seconds:.3}s assembly={:.3}s",
+            sfm_started.elapsed().as_secs_f64(),
+            assembly_started.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok(IncrementalSfmResult {
         poses,
         tracks: out_tracks,
+        track_build_stats,
         registered_images,
+        post_refinement_registered_images,
+        structureless_registered_images,
+        geometry_recovered_tracks,
+        geometry_recovered_observations,
+        geometry_recovery_pose_ba_applied,
         mean_reprojection_px,
         ba_result,
         refined_camera: config.refine_intrinsics.then_some(cam),
@@ -591,12 +975,35 @@ pub fn incremental_sfm(
 /// Union-find over `(image, keypoint)` nodes joined by pairwise matches. Returns
 /// the consistent tracks (no two keypoints from the same image) spanning at
 /// least `min_track_length` distinct images.
+#[cfg(test)]
 fn build_tracks(
     n_images: usize,
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
 ) -> Vec<Vec<(usize, usize)>> {
+    build_tracks_with_stats(n_images, pairwise, min_track_length).0
+}
+
+#[cfg(test)]
+fn build_tracks_with_stats(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> (Vec<Vec<(usize, usize)>>, TrackBuildStats) {
+    let output = build_tracks_detailed(n_images, pairwise, min_track_length);
+    (output.tracks, output.stats)
+}
+
+fn build_tracks_detailed(
+    n_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> TrackBuildOutput {
     let _ = n_images;
+    let mut stats = TrackBuildStats {
+        input_correspondences: pairwise.iter().map(|pair| pair.matches.len()).sum(),
+        ..TrackBuildStats::default()
+    };
     // Map each observed (image, keypoint) to a dense node id.
     let mut node_id: HashMap<(usize, usize), usize> = HashMap::new();
     let mut nodes: Vec<(usize, usize)> = Vec::new();
@@ -635,8 +1042,10 @@ fn build_tracks(
         let root = find(&mut parent, id);
         groups.entry(root).or_default().push((image, kp));
     }
+    stats.connected_components = groups.len();
 
     let mut tracks = Vec::new();
+    let mut conflicting_components = Vec::new();
     for (_root, mut obs) in groups {
         // Reject tracks with conflicting observations (same image twice): such
         // a component merged two distinct points through a bad match chain.
@@ -651,6 +1060,10 @@ fn build_tracks(
             }
         }
         if conflict {
+            stats.conflicting_components += 1;
+            stats.conflicting_observations += obs.len();
+            obs.sort_unstable();
+            conflicting_components.push(obs);
             continue;
         }
         if images_seen.len() >= min_track_length {
@@ -662,7 +1075,14 @@ fn build_tracks(
     // order per run): a stable order makes landmark ids — and therefore the
     // whole incremental reconstruction — reproducible.
     tracks.sort_unstable();
-    tracks
+    conflicting_components.sort_unstable();
+    stats.retained_tracks = tracks.len();
+    stats.retained_observations = tracks.iter().map(Vec::len).sum();
+    TrackBuildOutput {
+        tracks,
+        conflicting_components,
+        stats,
+    }
 }
 
 /// M2 port: build feature tracks by routing through a
@@ -685,11 +1105,11 @@ fn build_tracks(
 /// usize::MAX)` — see that method's doc for why `usize::MAX` reproduces a
 /// full connected component rather than a `num_transitivity`-bounded
 /// neighbourhood) and apply the same same-image-conflict rejection and
-/// `min_track_length` gate [`build_tracks`] does. Because both algorithms
+/// `min_track_length` gate [`build_tracks_with_stats`] does. Because both algorithms
 /// partition the exact same node set by the exact same edge set into
 /// equivalence classes, and both sort observations within a track and tracks
 /// against each other identically, this produces **byte-identical**
-/// `Vec<Vec<(usize, usize)>>` output to [`build_tracks`] on any input — the
+/// `Vec<Vec<(usize, usize)>>` output to [`build_tracks_with_stats`] on any input — the
 /// M2 acceptance bar (`docs/colmap_port_plan.md`: "byte-identical tracks — a
 /// refactor gate, not an accuracy claim"). See the
 /// `graph_tracks_match_union_find_tracks_*` tests below.
@@ -705,7 +1125,7 @@ fn build_tracks_via_graph(
 
     // `CorrespondenceGraph::add_two_view_geometry` — faithfully to COLMAP's
     // own `THROW_CHECK(inserted)` — accepts a given unordered image pair only
-    // *once* (see that method's doc). The legacy union-find `build_tracks`
+    // *once* (see that method's doc). The legacy union-find track builder
     // has no such restriction: it just unions whatever `(image, keypoint)`
     // pairs every `PairwiseMatches` entry hands it, in either direction,
     // even if the same unordered pair appears more than once (e.g. a
@@ -717,7 +1137,10 @@ fn build_tracks_via_graph(
     // call per pair.
     let mut merged: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
     for pair in pairwise {
-        let key = (pair.image_i.min(pair.image_j), pair.image_i.max(pair.image_j));
+        let key = (
+            pair.image_i.min(pair.image_j),
+            pair.image_i.max(pair.image_j),
+        );
         let entry = merged.entry(key).or_default();
         if pair.image_i <= pair.image_j {
             entry.extend(pair.matches.iter().copied());
@@ -917,6 +1340,15 @@ fn grow_from_seed(
     config: &IncrementalSfmConfig,
     seed_pair: &PairwiseMatches,
 ) -> Result<(Vec<Option<Pose>>, Vec<Option<Point3<f64>>>, usize, Camera), IncrementalSfmError> {
+    let grow_started = std::time::Instant::now();
+    let mut select_seconds = 0.0;
+    let mut pnp_seconds = 0.0;
+    let mut triangulation_seconds = 0.0;
+    let mut local_ba_seconds = 0.0;
+    let mut global_refinement_seconds = 0.0;
+    let mut pnp_attempts = 0usize;
+    let mut local_ba_calls = 0usize;
+    let mut global_refinement_calls = 0usize;
     let n_images = features.len();
     let mut poses: Vec<Option<Pose>> = vec![None; n_images];
     let mut track_point: Vec<Option<Point3<f64>>> = vec![None; tracks.len()];
@@ -928,7 +1360,9 @@ fn grow_from_seed(
     if !place_seed_pair(&cam, features, seed_pair, config, &mut poses) {
         return Ok((poses, track_point, 0, cam));
     }
+    let started = std::time::Instant::now();
     triangulate_pending(&cam, features, tracks, &poses, config, &mut track_point);
+    triangulation_seconds += started.elapsed().as_secs_f64();
 
     // `trials[i]` counts PnP attempts on image `i`. In the simple schedule one
     // failed attempt is permanent (the cap is 1); the COLMAP schedule retries up
@@ -982,23 +1416,42 @@ fn grow_from_seed(
     // — the same guarantee COLMAP's design gets from never resetting.
     let mut stalled_once = false;
     loop {
-        let Some((next_image, corrs)) = select_next_image(
+        let started = std::time::Instant::now();
+        let selection = select_next_image(
             &cam,
+            config.next_image_policy,
             features,
             obs_by_image,
             &poses,
             &trials,
             max_trials,
             &track_point,
-        ) else {
+        );
+        select_seconds += started.elapsed().as_secs_f64();
+        let Some((next_image, corrs)) = selection else {
+            let n_reg = poses.iter().filter(|p| p.is_some()).count();
+            // With image filtering disabled, a recovery refinement can only
+            // unlock an unregistered image. Once reconstruction is complete it
+            // duplicates the final iterative refinement below. Filtering is the
+            // exception: even a complete model may need this round to demote a
+            // weak pose, so preserve the recovery whenever `filter_images` is on.
+            if n_reg == n_images && !config.filter_images {
+                if sfm_debug_enabled() {
+                    eprintln!(
+                        "sfm-debug: growth complete at {n_reg}/{n_images}; \
+                         skipping redundant stall-recovery refinement",
+                    );
+                }
+                break;
+            }
             if config.colmap_style_mapper && !stalled_once {
                 if sfm_debug_enabled() {
-                    let n_reg = poses.iter().filter(|p| p.is_some()).count();
                     eprintln!(
                         "sfm-debug: growth stalled at {n_reg}/{n_images} registered — \
                          forcing one stall-recovery refinement and retrying",
                     );
                 }
+                let started = std::time::Instant::now();
                 growth_global_refinement(
                     &mut cam,
                     features,
@@ -1008,6 +1461,8 @@ fn grow_from_seed(
                     &mut track_point,
                 )
                 .map_err(IncrementalSfmError::Ba)?;
+                global_refinement_seconds += started.elapsed().as_secs_f64();
+                global_refinement_calls += 1;
                 reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
                 if config.filter_images {
                     filter_images(&cam, features, tracks, config, &mut poses, &track_point);
@@ -1016,7 +1471,6 @@ fn grow_from_seed(
                 continue;
             }
             if sfm_debug_enabled() {
-                let n_reg = poses.iter().filter(|p| p.is_some()).count();
                 eprintln!(
                     "sfm-debug: growth exhausted at {n_reg}/{n_images} registered \
                      (colmap_style_mapper={}, stalled_once={stalled_once})",
@@ -1039,6 +1493,7 @@ fn grow_from_seed(
         // P3P (Grunert) is the default minimal solver — well-posed on coplanar
         // façades where the linear DLT degenerates. Both share the Gauss-Newton
         // refiner and the config reprojection gate.
+        let started = std::time::Instant::now();
         let report = match config.pnp_solver {
             PnpSolver::P3p => PnPRansac {
                 pose_estimator: P3PGrunert,
@@ -1056,6 +1511,8 @@ fn grow_from_seed(
             }
             .estimate(&corrs, &cam),
         };
+        pnp_seconds += started.elapsed().as_secs_f64();
+        pnp_attempts += 1;
         let attempt_inliers = report.as_ref().map(|r| r.inliers.len());
         let Some(report) = report.filter(|r| r.inliers.len() >= config.min_pnp_inliers) else {
             if sfm_debug_enabled() {
@@ -1074,11 +1531,14 @@ fn grow_from_seed(
         // (see `stalled_once`'s module-level doc above).
         stalled_once = false;
         poses[next_image] = Some(report.pose);
+        let started = std::time::Instant::now();
         triangulate_pending(&cam, features, tracks, &poses, config, &mut track_point);
+        triangulation_seconds += started.elapsed().as_secs_f64();
 
         if config.colmap_style_mapper {
             // COLMAP `AdjustLocalBundle`: tighten the new image + its covisible
             // neighbourhood after every registration.
+            let started = std::time::Instant::now();
             adjust_local_bundle(
                 &cam,
                 features,
@@ -1089,6 +1549,8 @@ fn grow_from_seed(
                 next_image,
             )
             .map_err(IncrementalSfmError::Ba)?;
+            local_ba_seconds += started.elapsed().as_secs_f64();
+            local_ba_calls += 1;
 
             // Growth-ratio global refinement (COLMAP `IterativeGlobalRefinement`).
             // During the seed search `tracks` is shared read-only across trials,
@@ -1099,6 +1561,7 @@ fn grow_from_seed(
             // outliers down-weighted in the meantime.
             let n_reg = poses.iter().filter(|p| p.is_some()).count();
             if n_reg as f64 >= reg_at_last_global as f64 * config.global_ba_images_ratio {
+                let started = std::time::Instant::now();
                 growth_global_refinement(
                     &mut cam,
                     features,
@@ -1108,6 +1571,8 @@ fn grow_from_seed(
                     &mut track_point,
                 )
                 .map_err(IncrementalSfmError::Ba)?;
+                global_refinement_seconds += started.elapsed().as_secs_f64();
+                global_refinement_calls += 1;
                 reg_at_last_global = n_reg;
                 // Structure changed — give previously-failed images a fresh shot
                 // by resetting their trial counters (COLMAP retries on change).
@@ -1145,7 +1610,1215 @@ fn grow_from_seed(
     }
 
     let registered = poses.iter().filter(|p| p.is_some()).count();
+    if sfm_debug_enabled() {
+        eprintln!(
+            "sfm-timing: grow total={:.3}s select={select_seconds:.3}s \
+             pnp={pnp_seconds:.3}s/{pnp_attempts} triangulate={triangulation_seconds:.3}s \
+             local_ba={local_ba_seconds:.3}s/{local_ba_calls} \
+             global_refinement={global_refinement_seconds:.3}s/{global_refinement_calls}",
+            grow_started.elapsed().as_secs_f64(),
+        );
+    }
     Ok((poses, track_point, registered, cam))
+}
+
+/// One bounded registration sweep after final global refinement. Unlike the
+/// growth loop, this cannot cycle: every missing image receives at most one
+/// attempt, and the caller invokes the function at most once.
+fn post_refinement_registration_pass(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+) -> Result<usize, BaError> {
+    let mut obs_by_image: Vec<Vec<(usize, usize)>> = vec![Vec::new(); features.len()];
+    for (track_id, track) in tracks.iter().enumerate() {
+        for &(image, kp) in track {
+            obs_by_image[image].push((kp, track_id));
+        }
+    }
+
+    let mut trials = vec![0usize; features.len()];
+    let mut registered = 0usize;
+    while let Some((image, corrs)) = select_next_image(
+        camera,
+        config.next_image_policy,
+        features,
+        &obs_by_image,
+        poses,
+        &trials,
+        1,
+        track_point,
+    ) {
+        trials[image] = 1;
+        let report = match config.pnp_solver {
+            PnpSolver::P3p => PnPRansac {
+                pose_estimator: P3PGrunert,
+                pose_refiner: Some(GaussNewtonPoseRefiner::default()),
+                iterations: 128,
+                reprojection_threshold: config.max_reprojection_error_px,
+                seed: 7,
+                early_stop_min_iterations: 0,
+                early_stop_inlier_ratio: None,
+            }
+            .estimate(&corrs, camera),
+            PnpSolver::Dlt => PnPRansac {
+                reprojection_threshold: config.max_reprojection_error_px,
+                ..PnPRansac::default()
+            }
+            .estimate(&corrs, camera),
+        };
+        let attempt_inliers = report.as_ref().map(|r| r.inliers.len());
+        let Some(report) = report.filter(|r| r.inliers.len() >= config.min_pnp_inliers) else {
+            if sfm_debug_enabled() {
+                eprintln!(
+                    "sfm-debug: post-refinement PnP on image {image} failed \
+                     ({} corrs -> {} inliers, need >={})",
+                    corrs.len(),
+                    attempt_inliers.map_or("none".to_string(), |n| n.to_string()),
+                    config.min_pnp_inliers,
+                );
+            }
+            continue;
+        };
+
+        poses[image] = Some(report.pose);
+        triangulate_pending(camera, features, tracks, poses, config, track_point);
+        adjust_local_bundle(camera, features, tracks, config, poses, track_point, image)?;
+        registered += 1;
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: post-refinement registered image {image} \
+                 ({} corrs, {} inliers)",
+                corrs.len(),
+                report.inliers.len(),
+            );
+        }
+    }
+    Ok(registered)
+}
+
+#[derive(Debug, Clone)]
+struct StructurelessConstraint {
+    neighbor: usize,
+    neighbor_center: Point3<f64>,
+    missing_rotation: UnitQuaternion<f64>,
+    center_direction: Vector3<f64>,
+    weight: f64,
+}
+
+#[derive(Debug, Clone)]
+struct StructurelessPoseProposal {
+    pose: Pose,
+    neighbor_spread: f64,
+    line_error_ratio: f64,
+    consensus_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum StructurelessRejection {
+    TooFewNeighbors {
+        found: usize,
+        required: usize,
+    },
+    RotationDisagreement {
+        max_deg: f64,
+        allowed_deg: f64,
+    },
+    WeakCenterGeometry {
+        max_angle_deg: f64,
+        spread: f64,
+    },
+    NoCenterConsensus {
+        rotation_consensus: usize,
+    },
+    SingularCenterFit,
+    DirectionSign {
+        neighbor: usize,
+        along_ratio: f64,
+        allowed: f64,
+    },
+    CenterLineResidual {
+        ratio: f64,
+        allowed: f64,
+    },
+}
+
+/// Fit the missing camera centre to directed lines originating at registered
+/// neighbour centres. Each line direction comes from an independently
+/// recovered essential pose, while its origin carries the current model's
+/// monocular scale. This is the scale-bearing part of structure-less recovery:
+/// one line is deliberately under-constrained and is always rejected.
+fn solve_structureless_pose(
+    constraints: &[StructurelessConstraint],
+    config: &IncrementalSfmConfig,
+) -> Result<StructurelessPoseProposal, StructurelessRejection> {
+    let required_neighbors = config.structureless_min_neighbors.max(2);
+    if constraints.len() < required_neighbors {
+        return Err(StructurelessRejection::TooFewNeighbors {
+            found: constraints.len(),
+            required: required_neighbors,
+        });
+    }
+
+    let max_rotation_rad = config
+        .structureless_max_rotation_disagreement_deg
+        .max(0.0)
+        .to_radians();
+    // A single bad essential edge must not veto an otherwise coherent set.
+    // Enumerate every rotation as a deterministic consensus centre and keep
+    // the largest, then highest-support, <=threshold subset.
+    let mut consensus_indices = Vec::new();
+    let mut consensus_weight = -1.0f64;
+    let mut rotation_reference_index = None;
+    for (reference_index, reference) in constraints.iter().enumerate() {
+        let candidate: Vec<usize> = constraints
+            .iter()
+            .enumerate()
+            .filter_map(|(index, constraint)| {
+                ((reference.missing_rotation.inverse() * constraint.missing_rotation).angle()
+                    <= max_rotation_rad)
+                    .then_some(index)
+            })
+            .collect();
+        let weight: f64 = candidate
+            .iter()
+            .map(|&index| constraints[index].weight)
+            .sum();
+        if candidate.len() > consensus_indices.len()
+            || (candidate.len() == consensus_indices.len() && weight > consensus_weight)
+            || (candidate.len() == consensus_indices.len()
+                && weight.to_bits() == consensus_weight.to_bits()
+                && candidate.first().copied().unwrap_or(reference_index)
+                    < consensus_indices.first().copied().unwrap_or(usize::MAX))
+        {
+            consensus_indices = candidate;
+            consensus_weight = weight;
+            rotation_reference_index = Some(reference_index);
+        }
+    }
+    if consensus_indices.len() < required_neighbors {
+        let strongest = &constraints[0];
+        let max_rotation_disagreement = constraints
+            .iter()
+            .map(|constraint| {
+                (strongest.missing_rotation.inverse() * constraint.missing_rotation).angle()
+            })
+            .fold(0.0f64, f64::max);
+        return Err(StructurelessRejection::RotationDisagreement {
+            max_deg: max_rotation_disagreement.to_degrees(),
+            allowed_deg: max_rotation_rad.to_degrees(),
+        });
+    }
+    // Preserve the actual consensus centre. Choosing the strongest edge after
+    // finding the set is not equivalent: two members can each lie within the
+    // threshold of the centre yet be almost 2x the threshold apart.
+    let reference_index = rotation_reference_index.expect("rotation consensus has a centre");
+    let reference = &constraints[reference_index];
+
+    let min_intersection_angle = config
+        .structureless_min_intersection_angle_deg
+        .max(0.0)
+        .to_radians();
+    let mut max_intersection_angle = 0.0f64;
+    let mut rotation_consensus_spread = 0.0f64;
+    for (position, &a_index) in consensus_indices.iter().enumerate() {
+        let a = &constraints[a_index];
+        for &b_index in consensus_indices.iter().skip(position + 1) {
+            let b = &constraints[b_index];
+            let cosine = a
+                .center_direction
+                .dot(&b.center_direction)
+                .abs()
+                .clamp(0.0, 1.0);
+            max_intersection_angle = max_intersection_angle.max(cosine.acos());
+            rotation_consensus_spread =
+                rotation_consensus_spread.max((a.neighbor_center - b.neighbor_center).norm());
+        }
+    }
+    if max_intersection_angle < min_intersection_angle || rotation_consensus_spread <= 1e-9 {
+        return Err(StructurelessRejection::WeakCenterGeometry {
+            max_angle_deg: max_intersection_angle.to_degrees(),
+            spread: rotation_consensus_spread,
+        });
+    }
+
+    let identity = Matrix3::identity();
+    let fit_center = |indices: &[usize]| -> Option<Point3<f64>> {
+        let mut normal = Matrix3::zeros();
+        let mut rhs = Vector3::zeros();
+        for &index in indices {
+            let constraint = &constraints[index];
+            let direction = constraint.center_direction.try_normalize(1e-12)?;
+            let weight = constraint.weight.max(1.0);
+            let projector = identity - direction * direction.transpose();
+            normal += projector * weight;
+            rhs += projector * constraint.neighbor_center.coords * weight;
+        }
+        Some(Point3::from(normal.try_inverse()? * rhs))
+    };
+
+    // Translation directions need their own robust consensus: agreeing
+    // rotations do not imply that every essential decomposition has a reliable
+    // baseline direction. Seed from every sufficiently non-parallel line pair,
+    // score all rotation-consensus lines, then refit the largest 3+ set.
+    let max_line_ratio = config.structureless_max_center_line_error_ratio.max(0.0);
+    let mut center_consensus = Vec::new();
+    let mut center_consensus_weight = -1.0f64;
+    let mut center_consensus_error = f64::INFINITY;
+    for (position, &a_index) in consensus_indices.iter().enumerate() {
+        for &b_index in consensus_indices.iter().skip(position + 1) {
+            let a = &constraints[a_index];
+            let b = &constraints[b_index];
+            let angle = a
+                .center_direction
+                .dot(&b.center_direction)
+                .abs()
+                .clamp(0.0, 1.0)
+                .acos();
+            if angle < min_intersection_angle {
+                continue;
+            }
+            let Some(candidate_center) = fit_center(&[a_index, b_index]) else {
+                continue;
+            };
+            let mut inliers = Vec::new();
+            let mut squared_error = 0.0;
+            let mut weight = 0.0;
+            for &index in &consensus_indices {
+                let constraint = &constraints[index];
+                let displacement = candidate_center - constraint.neighbor_center;
+                let along_ratio =
+                    displacement.dot(&constraint.center_direction) / rotation_consensus_spread;
+                let perpendicular = displacement
+                    - constraint.center_direction * displacement.dot(&constraint.center_direction);
+                let line_ratio = perpendicular.norm() / rotation_consensus_spread;
+                if along_ratio >= config.structureless_min_forward_ratio
+                    && line_ratio <= max_line_ratio
+                {
+                    inliers.push(index);
+                    let edge_weight = constraint.weight.max(1.0);
+                    squared_error += edge_weight * line_ratio * line_ratio;
+                    weight += edge_weight;
+                }
+            }
+            if inliers.len() < required_neighbors {
+                continue;
+            }
+            let rms_error = (squared_error / weight.max(1.0)).sqrt();
+            if inliers.len() > center_consensus.len()
+                || (inliers.len() == center_consensus.len() && weight > center_consensus_weight)
+                || (inliers.len() == center_consensus.len()
+                    && weight.to_bits() == center_consensus_weight.to_bits()
+                    && rms_error < center_consensus_error)
+            {
+                center_consensus = inliers;
+                center_consensus_weight = weight;
+                center_consensus_error = rms_error;
+            }
+        }
+    }
+    if center_consensus.len() < required_neighbors {
+        return Err(StructurelessRejection::NoCenterConsensus {
+            rotation_consensus: consensus_indices.len(),
+        });
+    }
+    consensus_indices = center_consensus;
+    // A weighted least-squares refit can move slightly outside the inlier set
+    // that generated the winning two-line hypothesis. Reclassify after every
+    // refit and discard only the inconsistent lines instead of allowing one
+    // marginal edge to veto an otherwise valid 3+ neighbour consensus.
+    // Removal is monotonic, so this converges in at most N iterations.
+    let center = loop {
+        let fitted =
+            fit_center(&consensus_indices).ok_or(StructurelessRejection::SingularCenterFit)?;
+        let retained: Vec<usize> = consensus_indices
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let constraint = &constraints[index];
+                let displacement = fitted - constraint.neighbor_center;
+                let along_ratio =
+                    displacement.dot(&constraint.center_direction) / rotation_consensus_spread;
+                let perpendicular = displacement
+                    - constraint.center_direction * displacement.dot(&constraint.center_direction);
+                let line_ratio = perpendicular.norm() / rotation_consensus_spread;
+                along_ratio >= config.structureless_min_forward_ratio
+                    && line_ratio <= max_line_ratio
+            })
+            .collect();
+        if retained.len() < required_neighbors {
+            return Err(StructurelessRejection::NoCenterConsensus {
+                rotation_consensus: consensus_indices.len(),
+            });
+        }
+        if retained.len() == consensus_indices.len() {
+            break fitted;
+        }
+        consensus_indices = retained;
+    };
+    let mut selected_neighbor_spread = 0.0f64;
+    for (position, &a_index) in consensus_indices.iter().enumerate() {
+        for &b_index in consensus_indices.iter().skip(position + 1) {
+            selected_neighbor_spread = selected_neighbor_spread.max(
+                (constraints[a_index].neighbor_center - constraints[b_index].neighbor_center)
+                    .norm(),
+            );
+        }
+    }
+    if selected_neighbor_spread <= 1e-9 {
+        return Err(StructurelessRejection::SingularCenterFit);
+    }
+    // Use the same rotation-consensus span used while scoring RANSAC centre
+    // hypotheses. Switching to the smaller selected-subset span after refit
+    // would make an inlier fail a stricter, inconsistent normalized gate.
+    let neighbor_spread = rotation_consensus_spread;
+
+    let mut weighted_squared_error = 0.0;
+    let mut weight_sum = 0.0;
+    for &index in &consensus_indices {
+        let constraint = &constraints[index];
+        let displacement = center - constraint.neighbor_center;
+        // Essential decomposition resolves the sign through cheirality. A
+        // negative line parameter means the multi-neighbour fit contradicts
+        // that independent two-view geometry.
+        let along = displacement.dot(&constraint.center_direction);
+        let along_ratio = along / neighbor_spread;
+        if along_ratio < config.structureless_min_forward_ratio {
+            return Err(StructurelessRejection::DirectionSign {
+                neighbor: constraint.neighbor,
+                along_ratio,
+                allowed: config.structureless_min_forward_ratio,
+            });
+        }
+        let perpendicular = displacement
+            - constraint.center_direction * displacement.dot(&constraint.center_direction);
+        let weight = constraint.weight.max(1.0);
+        weighted_squared_error += weight * perpendicular.norm_squared();
+        weight_sum += weight;
+    }
+    let rms_line_error = (weighted_squared_error / weight_sum.max(1.0)).sqrt();
+    let line_error_ratio = rms_line_error / neighbor_spread;
+    if !line_error_ratio.is_finite()
+        || line_error_ratio > config.structureless_max_center_line_error_ratio.max(0.0)
+    {
+        return Err(StructurelessRejection::CenterLineResidual {
+            ratio: line_error_ratio,
+            allowed: config.structureless_max_center_line_error_ratio.max(0.0),
+        });
+    }
+
+    let rotation = reference.missing_rotation;
+    let translation = -rotation.transform_vector(&center.coords);
+    Ok(StructurelessPoseProposal {
+        pose: Pose::from_world_to_camera(rotation, translation),
+        neighbor_spread,
+        line_error_ratio,
+        consensus_indices,
+    })
+}
+
+fn estimate_structureless_constraints(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    poses: &[Option<Pose>],
+    missing: usize,
+    config: &IncrementalSfmConfig,
+) -> Vec<StructurelessConstraint> {
+    let estimator = RelativePoseEstimator::default();
+    let mut constraints = Vec::new();
+    for pair in pairwise {
+        let (neighbor, invert) = if pair.image_j == missing && poses[pair.image_i].is_some() {
+            (pair.image_i, false)
+        } else if pair.image_i == missing && poses[pair.image_j].is_some() {
+            (pair.image_j, true)
+        } else {
+            continue;
+        };
+        let Some(neighbor_pose) = poses[neighbor].as_ref() else {
+            continue;
+        };
+        let mut correspondences = Vec::with_capacity(pair.matches.len());
+        for &(keypoint_i, keypoint_j) in &pair.matches {
+            let (Some(pixel_i), Some(pixel_j)) = (
+                features[pair.image_i].keypoints.get(keypoint_i),
+                features[pair.image_j].keypoints.get(keypoint_j),
+            ) else {
+                continue;
+            };
+            correspondences.push(TwoViewCorrespondence::new(*pixel_i, *pixel_j));
+        }
+        let Some(relative) = estimator.estimate(&correspondences, camera) else {
+            continue;
+        };
+        if relative.inliers.len() < config.structureless_min_pair_inliers {
+            continue;
+        }
+        let neighbor_to_missing = if invert {
+            relative.previous_to_current.inverse()
+        } else {
+            relative.previous_to_current
+        };
+        let missing_rotation =
+            neighbor_to_missing.rotation * neighbor_pose.world_to_camera.rotation;
+        let Some(center_direction) = (-missing_rotation
+            .inverse()
+            .transform_vector(&neighbor_to_missing.translation))
+        .try_normalize(1e-12) else {
+            continue;
+        };
+        constraints.push(StructurelessConstraint {
+            neighbor,
+            neighbor_center: neighbor_pose.camera_center_world(),
+            missing_rotation,
+            center_direction,
+            weight: relative.inliers.len() as f64,
+        });
+    }
+    constraints.sort_by(|a, b| {
+        b.weight
+            .total_cmp(&a.weight)
+            .then_with(|| a.neighbor.cmp(&b.neighbor))
+    });
+    constraints
+}
+
+fn mean_reprojection_for_registered_mask(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    track_point: &[Option<Point3<f64>>],
+    registered_mask: &[bool],
+    point_mask: &[bool],
+) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for (track_id, track) in tracks.iter().enumerate() {
+        if !point_mask.get(track_id).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(point) = track_point.get(track_id).and_then(Option::as_ref) else {
+            continue;
+        };
+        for &(image, keypoint) in track {
+            if !registered_mask.get(image).copied().unwrap_or(false) {
+                continue;
+            }
+            let (Some(pose), Some(pixel)) = (
+                poses.get(image).and_then(Option::as_ref),
+                features
+                    .get(image)
+                    .and_then(|set| set.keypoints.get(keypoint)),
+            ) else {
+                continue;
+            };
+            if let Some(error) = reprojection_error_px(camera, pose, point, pixel) {
+                sum += error;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        f64::NAN
+    } else {
+        sum / count as f64
+    }
+}
+
+fn supported_tracks_for_image(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    track_point: &[Option<Point3<f64>>],
+    image: usize,
+    max_error: f64,
+) -> (usize, f64) {
+    let Some(pose) = poses.get(image).and_then(Option::as_ref) else {
+        return (0, f64::NAN);
+    };
+    let mut count = 0usize;
+    let mut sum = 0.0;
+    for (track_id, track) in tracks.iter().enumerate() {
+        let Some(point) = track_point.get(track_id).and_then(Option::as_ref) else {
+            continue;
+        };
+        let Some((_, keypoint)) = track.iter().find(|(track_image, _)| *track_image == image)
+        else {
+            continue;
+        };
+        let Some(pixel) = features[image].keypoints.get(*keypoint) else {
+            continue;
+        };
+        let Some(error) = reprojection_error_px(camera, pose, point, pixel) else {
+            continue;
+        };
+        if error <= max_error {
+            count += 1;
+            sum += error;
+        }
+    }
+    if count == 0 {
+        (0, f64::NAN)
+    } else {
+        (count, sum / count as f64)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StructurelessPoseConsistency {
+    accepted: bool,
+    max_rotation_deg: f64,
+    min_forward_ratio: f64,
+    line_error_ratio: f64,
+}
+
+#[cfg(test)]
+fn interpolate_structureless_pose(from: &Pose, to: &Pose, alpha: f64) -> Pose {
+    interpolate_structureless_pose_components(from, to, alpha, alpha)
+}
+
+fn interpolate_structureless_pose_components(
+    from: &Pose,
+    to: &Pose,
+    rotation_alpha: f64,
+    center_alpha: f64,
+) -> Pose {
+    let rotation_alpha = rotation_alpha.clamp(0.0, 1.0);
+    let center_alpha = center_alpha.clamp(0.0, 1.0);
+    if rotation_alpha <= 0.0 && center_alpha <= 0.0 {
+        return from.clone();
+    }
+    if rotation_alpha >= 1.0 && center_alpha >= 1.0 {
+        return to.clone();
+    }
+    let rotation = from
+        .world_to_camera
+        .rotation
+        .slerp(&to.world_to_camera.rotation, rotation_alpha);
+    let from_center = from.camera_center_world();
+    let to_center = to.camera_center_world();
+    let center =
+        Point3::from(from_center.coords * (1.0 - center_alpha) + to_center.coords * center_alpha);
+    let translation = -rotation.transform_vector(&center.coords);
+    Pose::from_world_to_camera(rotation, translation)
+}
+
+fn structureless_pose_consistency(
+    pose: &Pose,
+    constraints: &[StructurelessConstraint],
+    proposal: &StructurelessPoseProposal,
+    config: &IncrementalSfmConfig,
+) -> StructurelessPoseConsistency {
+    let center = pose.camera_center_world();
+    let max_rotation = config
+        .structureless_max_rotation_disagreement_deg
+        .max(0.0)
+        .to_radians();
+    let mut weighted_squared_error = 0.0;
+    let mut weight_sum = 0.0;
+    let mut max_rotation_seen = 0.0f64;
+    let mut min_forward_seen = f64::INFINITY;
+    for &index in &proposal.consensus_indices {
+        let constraint = &constraints[index];
+        let rotation_error =
+            (constraint.missing_rotation.inverse() * pose.world_to_camera.rotation).angle();
+        max_rotation_seen = max_rotation_seen.max(rotation_error);
+        let displacement = center - constraint.neighbor_center;
+        let forward_ratio =
+            displacement.dot(&constraint.center_direction) / proposal.neighbor_spread;
+        min_forward_seen = min_forward_seen.min(forward_ratio);
+        let perpendicular = displacement
+            - constraint.center_direction * displacement.dot(&constraint.center_direction);
+        let weight = constraint.weight.max(1.0);
+        weighted_squared_error += weight * perpendicular.norm_squared();
+        weight_sum += weight;
+    }
+    let ratio =
+        (weighted_squared_error / weight_sum.max(1.0)).sqrt() / proposal.neighbor_spread.max(1e-12);
+    StructurelessPoseConsistency {
+        accepted: max_rotation_seen <= max_rotation
+            && min_forward_seen >= config.structureless_min_forward_ratio
+            && ratio.is_finite()
+            && ratio <= config.structureless_max_center_line_error_ratio.max(0.0),
+        max_rotation_deg: max_rotation_seen.to_degrees(),
+        min_forward_ratio: min_forward_seen,
+        line_error_ratio: ratio,
+    }
+}
+
+/// Build an independent local submap from verified pairwise edges that were
+/// not retained by the global union-find tracks. Observations already owned by
+/// a global 3D track are never duplicated. Each new point must be seen by the
+/// missing image and the configured number of registered consensus neighbours,
+/// triangulate with sufficient parallax, and reproject within the initialization
+/// gate in every contributing view.
+fn build_structureless_local_tracks(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    tracks: &[Vec<(usize, usize)>],
+    track_point: &[Option<Point3<f64>>],
+    poses: &[Option<Pose>],
+    missing: usize,
+    constraints: &[StructurelessConstraint],
+    proposal: &StructurelessPoseProposal,
+    config: &IncrementalSfmConfig,
+) -> Vec<(Vec<(usize, usize)>, Point3<f64>)> {
+    let allowed_neighbors: HashSet<usize> = proposal
+        .consensus_indices
+        .iter()
+        .map(|&index| constraints[index].neighbor)
+        .collect();
+    let occupied: HashSet<(usize, usize)> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(track_id, _)| track_point.get(*track_id).is_some_and(Option::is_some))
+        .flat_map(|(_, track)| track.iter().copied())
+        .collect();
+    let mut by_missing_keypoint: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+    for pair in pairwise {
+        let (neighbor, missing_first) = if pair.image_i == missing
+            && allowed_neighbors.contains(&pair.image_j)
+            && poses[pair.image_j].is_some()
+        {
+            (pair.image_j, true)
+        } else if pair.image_j == missing
+            && allowed_neighbors.contains(&pair.image_i)
+            && poses[pair.image_i].is_some()
+        {
+            (pair.image_i, false)
+        } else {
+            continue;
+        };
+        for &(keypoint_i, keypoint_j) in &pair.matches {
+            let (missing_keypoint, neighbor_keypoint) = if missing_first {
+                (keypoint_i, keypoint_j)
+            } else {
+                (keypoint_j, keypoint_i)
+            };
+            if features[missing].keypoints.get(missing_keypoint).is_none()
+                || features[neighbor]
+                    .keypoints
+                    .get(neighbor_keypoint)
+                    .is_none()
+                || occupied.contains(&(missing, missing_keypoint))
+                || occupied.contains(&(neighbor, neighbor_keypoint))
+            {
+                continue;
+            }
+            by_missing_keypoint
+                .entry(missing_keypoint)
+                .or_default()
+                .push((neighbor, neighbor_keypoint));
+        }
+    }
+
+    let mut missing_keypoints: Vec<usize> = by_missing_keypoint.keys().copied().collect();
+    missing_keypoints.sort_unstable();
+    let mut local_tracks = Vec::new();
+    let mut claimed_observations = HashSet::new();
+    for missing_keypoint in missing_keypoints {
+        let mut neighbors = by_missing_keypoint.remove(&missing_keypoint).unwrap();
+        neighbors.sort_unstable();
+        neighbors.dedup_by_key(|observation| observation.0);
+        let required_registered_views = config
+            .structureless_min_local_track_views
+            .max(2)
+            .saturating_sub(1);
+        if neighbors.len() < required_registered_views {
+            continue;
+        }
+        let mut observations = vec![(missing, missing_keypoint)];
+        observations.extend(neighbors);
+        observations.sort_unstable();
+        if observations
+            .iter()
+            .any(|observation| claimed_observations.contains(observation))
+        {
+            continue;
+        }
+        let pixels: Vec<(usize, Point2<f64>)> = observations
+            .iter()
+            .map(|&(image, keypoint)| (image, features[image].keypoints[keypoint]))
+            .collect();
+        let Some(point) = triangulate_track(camera, poses, &pixels, config) else {
+            continue;
+        };
+        let mut valid = true;
+        for &(image, keypoint) in &observations {
+            let Some(error) = reprojection_error_px(
+                camera,
+                poses[image].as_ref().unwrap(),
+                &point,
+                &features[image].keypoints[keypoint],
+            ) else {
+                valid = false;
+                break;
+            };
+            // This is an initialization gate only. The point is subsequently
+            // refined in the fixed-pose local submap and must still clear the
+            // stricter structure-less admission error below.
+            if error > config.max_reprojection_error_px {
+                valid = false;
+                break;
+            }
+        }
+        if valid {
+            claimed_observations.extend(observations.iter().copied());
+            local_tracks.push((observations, point));
+            if local_tracks.len() >= config.structureless_max_local_tracks.max(1) {
+                break;
+            }
+        }
+    }
+    local_tracks
+}
+
+/// One bounded multi-neighbour recovery sweep. Each missing image is attempted
+/// at most once. Failed geometry, local BA, or admission gates restore the
+/// complete pose/point state byte-for-byte before moving on.
+fn structureless_registration_pass(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    tracks: &mut Vec<Vec<(usize, usize)>>,
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut Vec<Option<Point3<f64>>>,
+) -> usize {
+    let missing_images: Vec<usize> = poses
+        .iter()
+        .enumerate()
+        .filter_map(|(image, pose)| pose.is_none().then_some(image))
+        .collect();
+    let mut registered = 0usize;
+    for image in missing_images {
+        let constraints =
+            estimate_structureless_constraints(camera, features, pairwise, poses, image, config);
+        let proposal = match solve_structureless_pose(&constraints, config) {
+            Ok(proposal) => proposal,
+            Err(reason) => {
+                if sfm_debug_enabled() {
+                    eprintln!(
+                        "sfm-debug: structure-less image {image} rejected before insertion \
+                         ({} registered relative neighbours): {reason:?}",
+                        constraints.len(),
+                    );
+                }
+                continue;
+            }
+        };
+        let tracks_before = tracks.clone();
+        let tracks_before_len = tracks_before.len();
+        let poses_before = poses.to_vec();
+        let points_before = track_point.to_vec();
+        let registered_mask: Vec<bool> = poses_before.iter().map(Option::is_some).collect();
+        let clean_point_mask: Vec<bool> = points_before.iter().map(Option::is_some).collect();
+        let clean_mean_before = mean_reprojection_for_registered_mask(
+            camera,
+            features,
+            tracks,
+            &poses_before,
+            &points_before,
+            &registered_mask,
+            &clean_point_mask,
+        );
+        poses[image] = Some(proposal.pose.clone());
+        let local_tracks = build_structureless_local_tracks(
+            camera,
+            features,
+            pairwise,
+            tracks,
+            track_point,
+            poses,
+            image,
+            &constraints,
+            &proposal,
+            config,
+        );
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: structure-less image {image} synthesized {} independent local tracks",
+                local_tracks.len()
+            );
+        }
+        let local_observations: HashSet<(usize, usize)> = local_tracks
+            .iter()
+            .flat_map(|(track, _)| track.iter().copied())
+            .collect();
+        for (track_id, track) in tracks.iter_mut().enumerate().take(tracks_before_len) {
+            if track_point[track_id].is_none() {
+                track.retain(|observation| !local_observations.contains(observation));
+            }
+        }
+        for (track, point) in local_tracks {
+            tracks.push(track);
+            track_point.push(Some(point));
+        }
+        triangulate_pending(camera, features, tracks, poses, config, track_point);
+        let proposal_poses = poses.to_vec();
+        let proposal_points = track_point.to_vec();
+        let (proposal_support, proposal_image_mean) = supported_tracks_for_image(
+            camera,
+            features,
+            tracks,
+            &proposal_poses,
+            &proposal_points,
+            image,
+            config.max_reprojection_error_px,
+        );
+        let proposal_clean_mean = mean_reprojection_for_registered_mask(
+            camera,
+            features,
+            tracks,
+            &proposal_poses,
+            &proposal_points,
+            &registered_mask,
+            &clean_point_mask,
+        );
+        let proposal_consistency = proposal_poses[image]
+            .as_ref()
+            .map(|pose| structureless_pose_consistency(pose, &constraints, &proposal, config));
+        // A structure-less proposal is already tied to the registered map by
+        // several independently estimated relative poses.  Moving its
+        // neighbours in the ordinary growth local-BA window can trade that
+        // scale-bearing consensus for a lower pixel residual (MH_05 image 86
+        // exposed exactly that failure).  Refine only the recovered pose and
+        // its incident landmarks; every previously registered observer stays
+        // fixed and therefore acts as the local-submap alignment boundary.
+        let mut structureless_variable = HashSet::new();
+        structureless_variable.insert(image);
+        let local_result = bundle_adjust_local(
+            camera,
+            features,
+            tracks,
+            config,
+            poses,
+            track_point,
+            &structureless_variable,
+        );
+        let refined_poses = poses.to_vec();
+        let allowed_clean_mean = clean_mean_before
+            * (1.0 + config.structureless_max_clean_error_increase_ratio.max(0.0));
+        let (mut support, mut image_mean) = supported_tracks_for_image(
+            camera,
+            features,
+            tracks,
+            poses,
+            track_point,
+            image,
+            config.max_reprojection_error_px,
+        );
+        let mut clean_mean_after = mean_reprojection_for_registered_mask(
+            camera,
+            features,
+            tracks,
+            poses,
+            track_point,
+            &registered_mask,
+            &clean_point_mask,
+        );
+        let mut pose_consistency = poses[image]
+            .as_ref()
+            .map(|pose| structureless_pose_consistency(pose, &constraints, &proposal, config));
+        let local_ok = local_result.is_ok();
+        let mut support_ok = support >= config.structureless_min_support_tracks;
+        let mut image_error_ok =
+            image_mean.is_finite() && image_mean <= config.structureless_max_reprojection_error_px;
+        let mut clean_ok = clean_mean_before.is_finite()
+            && clean_mean_after.is_finite()
+            && clean_mean_after <= allowed_clean_mean + 1e-12;
+        let mut geometry_ok = pose_consistency.is_some_and(|diagnostic| diagnostic.accepted);
+        let mut accepted = local_ok && support_ok && image_error_ok && clean_ok && geometry_ok;
+        let mut trust_region_alpha = None;
+
+        // The unconstrained local BA can cross the independently measured
+        // relative-geometry boundary while greatly improving reprojection.
+        // Search back along the camera part of that BA update. For each pose
+        // inside the relative-geometry feasible region, re-solve only the new
+        // landmarks against fixed cameras, then commit the largest step that
+        // satisfies every admission gate. This is a bounded deterministic
+        // local-submap projection, not a relaxed threshold.
+        if local_ok && !accepted {
+            let proposal_pose = proposal_poses[image].as_ref().unwrap();
+            let refined_pose = refined_poses[image].as_ref().unwrap();
+            let mut trust_candidates = Vec::with_capacity(400);
+            for rotation_step in (0..20).rev() {
+                for center_step in (0..20).rev() {
+                    trust_candidates.push((rotation_step as f64 / 20.0, center_step as f64 / 20.0));
+                }
+            }
+            let mut candidate_index = 0usize;
+            let mut best_near_candidate: Option<(f64, f64, f64)> = None;
+            let mut fine_candidates_enqueued = false;
+            'trust_region: while candidate_index < trust_candidates.len() {
+                let (rotation_alpha, center_alpha) = trust_candidates[candidate_index];
+                candidate_index += 1;
+                let mut candidate_poses = proposal_poses.clone();
+                candidate_poses[image] = Some(interpolate_structureless_pose_components(
+                    proposal_pose,
+                    refined_pose,
+                    rotation_alpha,
+                    center_alpha,
+                ));
+                let candidate_consistency = structureless_pose_consistency(
+                    candidate_poses[image].as_ref().unwrap(),
+                    &constraints,
+                    &proposal,
+                    config,
+                );
+                // Local tracks triangulated at the unconstrained proposal may
+                // be invalid at the projected pose (and vice versa). Rebuild
+                // the bounded submap at each geometry-feasible trust-region
+                // pose from the pre-insertion state. This keeps landmark
+                // synthesis consistent with the camera pose being admitted.
+                let mut candidate_tracks = tracks_before.clone();
+                let mut candidate_points = points_before.clone();
+                let candidate_local_tracks = if candidate_consistency.accepted {
+                    build_structureless_local_tracks(
+                        camera,
+                        features,
+                        pairwise,
+                        &candidate_tracks,
+                        &candidate_points,
+                        &candidate_poses,
+                        image,
+                        &constraints,
+                        &proposal,
+                        config,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let candidate_local_observations: HashSet<(usize, usize)> = candidate_local_tracks
+                    .iter()
+                    .flat_map(|(track, _)| track.iter().copied())
+                    .collect();
+                for (track_id, track) in candidate_tracks.iter_mut().enumerate() {
+                    if candidate_points[track_id].is_none() {
+                        track.retain(|observation| {
+                            !candidate_local_observations.contains(observation)
+                        });
+                    }
+                }
+                for (track, point) in candidate_local_tracks {
+                    candidate_tracks.push(track);
+                    candidate_points.push(Some(point));
+                }
+                if candidate_consistency.accepted {
+                    triangulate_pending(
+                        camera,
+                        features,
+                        &candidate_tracks,
+                        &candidate_poses,
+                        config,
+                        &mut candidate_points,
+                    );
+                }
+                let submap_ok = candidate_consistency.accepted
+                    && refine_structureless_new_landmarks(
+                        camera,
+                        features,
+                        &candidate_tracks,
+                        config,
+                        &candidate_poses,
+                        &mut candidate_points,
+                        image,
+                        &clean_point_mask,
+                    )
+                    .is_ok();
+                let (candidate_support, candidate_image_mean) = supported_tracks_for_image(
+                    camera,
+                    features,
+                    &candidate_tracks,
+                    &candidate_poses,
+                    &candidate_points,
+                    image,
+                    config.max_reprojection_error_px,
+                );
+                let candidate_clean_mean = mean_reprojection_for_registered_mask(
+                    camera,
+                    features,
+                    &candidate_tracks,
+                    &candidate_poses,
+                    &candidate_points,
+                    &registered_mask,
+                    &clean_point_mask,
+                );
+                let candidate_ok = submap_ok
+                    && candidate_support >= config.structureless_min_support_tracks
+                    && candidate_image_mean.is_finite()
+                    && candidate_image_mean <= config.structureless_max_reprojection_error_px
+                    && clean_mean_before.is_finite()
+                    && candidate_clean_mean.is_finite()
+                    && candidate_clean_mean <= allowed_clean_mean + 1e-12
+                    && candidate_consistency.accepted;
+                let near_candidate = submap_ok
+                    && candidate_support >= config.structureless_min_support_tracks
+                    && candidate_image_mean.is_finite()
+                    && clean_mean_before.is_finite()
+                    && candidate_clean_mean.is_finite()
+                    && candidate_clean_mean <= allowed_clean_mean + 1e-12
+                    && candidate_consistency.accepted;
+                if near_candidate
+                    && best_near_candidate
+                        .is_none_or(|(_, _, best_mean)| candidate_image_mean < best_mean)
+                {
+                    best_near_candidate =
+                        Some((rotation_alpha, center_alpha, candidate_image_mean));
+                }
+                if sfm_debug_enabled() {
+                    eprintln!(
+                        "sfm-debug: structure-less image {image} trust rotation-alpha={rotation_alpha:.2} \
+                         center-alpha={center_alpha:.2} \
+                         tracks={} support={candidate_support} mean={candidate_image_mean:.3}px \
+                         clean={candidate_clean_mean:.6} rot={:.3}deg forward={:.4} \
+                         line={:.4} submap-ok={submap_ok} accepted={candidate_ok}",
+                        candidate_tracks.len().saturating_sub(tracks_before_len),
+                        candidate_consistency.max_rotation_deg,
+                        candidate_consistency.min_forward_ratio,
+                        candidate_consistency.line_error_ratio,
+                    );
+                }
+                if candidate_ok {
+                    poses.clone_from_slice(&candidate_poses);
+                    *tracks = candidate_tracks;
+                    *track_point = candidate_points;
+                    support = candidate_support;
+                    image_mean = candidate_image_mean;
+                    clean_mean_after = candidate_clean_mean;
+                    pose_consistency = Some(candidate_consistency);
+                    support_ok = true;
+                    image_error_ok = true;
+                    clean_ok = true;
+                    geometry_ok = true;
+                    accepted = true;
+                    trust_region_alpha = Some((rotation_alpha, center_alpha));
+                    break 'trust_region;
+                }
+                if candidate_index == trust_candidates.len() && !fine_candidates_enqueued {
+                    fine_candidates_enqueued = true;
+                    if let Some((best_rotation, best_center, _)) = best_near_candidate {
+                        let rotation_percent = (best_rotation * 100.0).round() as i32;
+                        let center_percent = (best_center * 100.0).round() as i32;
+                        for fine_rotation in
+                            ((rotation_percent - 5).max(0)..=(rotation_percent + 5).min(100)).rev()
+                        {
+                            for fine_center in
+                                ((center_percent - 5).max(0)..=(center_percent + 5).min(100)).rev()
+                            {
+                                if fine_rotation % 5 != 0 || fine_center % 5 != 0 {
+                                    trust_candidates.push((
+                                        fine_rotation as f64 / 100.0,
+                                        fine_center as f64 / 100.0,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let proposal_accepted = proposal_support >= config.structureless_min_support_tracks
+            && proposal_image_mean.is_finite()
+            && proposal_image_mean <= config.structureless_max_reprojection_error_px
+            && clean_mean_before.is_finite()
+            && proposal_clean_mean.is_finite()
+            && proposal_clean_mean <= allowed_clean_mean + 1e-12
+            && proposal_consistency.is_some_and(|diagnostic| diagnostic.accepted);
+        if accepted {
+            registered += 1;
+            if sfm_debug_enabled() {
+                if let Some((rotation_alpha, center_alpha)) = trust_region_alpha {
+                    eprintln!(
+                        "sfm-debug: structure-less image {image} projected BA step \
+                         to trust-region rotation-alpha={rotation_alpha:.2} \
+                         center-alpha={center_alpha:.2}"
+                    );
+                }
+                eprintln!(
+                    "sfm-debug: structure-less registered image {image} \
+                     (neighbors={} line-ratio={:.4} support={} mean={:.3}px \
+                     clean={:.6}->{:.6})",
+                    proposal.consensus_indices.len(),
+                    proposal.line_error_ratio,
+                    support,
+                    image_mean,
+                    clean_mean_before,
+                    clean_mean_after,
+                );
+            }
+        } else if proposal_accepted {
+            // Local BA is optional for admission: if it leaves the independent
+            // relative-pose consensus, retain the already-gated scale-bearing
+            // proposal and its newly triangulated structure, not the BA drift.
+            poses.clone_from_slice(&proposal_poses);
+            track_point.clone_from_slice(&proposal_points);
+            registered += 1;
+            if sfm_debug_enabled() {
+                eprintln!(
+                    "sfm-debug: structure-less registered image {image} pose-only \
+                     (neighbors={} line-ratio={:.4} support={} mean={:.3}px \
+                     clean={:.6}->{:.6}; local BA rejected)",
+                    proposal.consensus_indices.len(),
+                    proposal.line_error_ratio,
+                    proposal_support,
+                    proposal_image_mean,
+                    clean_mean_before,
+                    proposal_clean_mean,
+                );
+            }
+        } else {
+            *tracks = tracks_before;
+            track_point.truncate(points_before.len());
+            poses.clone_from_slice(&poses_before);
+            track_point.clone_from_slice(&points_before);
+            if sfm_debug_enabled() {
+                let (pose_rotation_deg, pose_forward_ratio, pose_line_ratio) = pose_consistency
+                    .map(|diagnostic| {
+                        (
+                            diagnostic.max_rotation_deg,
+                            diagnostic.min_forward_ratio,
+                            diagnostic.line_error_ratio,
+                        )
+                    })
+                    .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+                eprintln!(
+                    "sfm-debug: structure-less image {image} rolled back \
+                     (neighbors={} line-ratio={:.4} support={} mean={:.3}px \
+                     clean={:.6}->{:.6} allowed={:.6} local-ok={} support-ok={} \
+                     image-ok={} clean-ok={} geometry-ok={} pose-rot={:.3}deg \
+                     pose-forward={:.4} pose-line={:.4}; proposal-support={} \
+                     proposal-mean={:.3}px proposal-clean={:.6} proposal-ok={})",
+                    proposal.consensus_indices.len(),
+                    proposal.line_error_ratio,
+                    support,
+                    image_mean,
+                    clean_mean_before,
+                    clean_mean_after,
+                    allowed_clean_mean,
+                    local_ok,
+                    support_ok,
+                    image_error_ok,
+                    clean_ok,
+                    geometry_ok,
+                    pose_rotation_deg,
+                    pose_forward_ratio,
+                    pose_line_ratio,
+                    proposal_support,
+                    proposal_image_mean,
+                    proposal_clean_mean,
+                    proposal_accepted,
+                );
+            }
+        }
+    }
+    registered
 }
 
 /// Triangulate every track that has ≥2 registered observations and is not yet
@@ -1257,11 +2930,300 @@ fn triangulate_track(
     Some(point_world)
 }
 
+#[derive(Debug, Clone)]
+struct RecoveredConflictTrack {
+    observations: Vec<(usize, usize)>,
+    point: Point3<f64>,
+    registered_observations: usize,
+    mean_reprojection_px: f64,
+}
+
+/// Split dropped union-find conflict components against an already-posed model.
+///
+/// This deliberately does not trust descriptor distance or image-pair support
+/// as a global ordering (both were catastrophic on MH_03). A verified edge is
+/// only an anchor proposal. The resulting 3D hypothesis must explain a unique
+/// observation in at least three registered images, and those selected
+/// observations must contain a cycle in the verified correspondence graph.
+fn recover_conflict_tracks_geometry(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    conflicting_components: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    config: &IncrementalSfmConfig,
+) -> Vec<RecoveredConflictTrack> {
+    if conflicting_components.is_empty() || config.conflict_recovery_max_hypotheses == 0 {
+        return Vec::new();
+    }
+
+    let mut component_of = HashMap::new();
+    for (component_id, component) in conflicting_components.iter().enumerate() {
+        for &observation in component {
+            component_of.insert(observation, component_id);
+        }
+    }
+
+    type Observation = (usize, usize);
+    let mut edges_by_component: Vec<Vec<(Observation, Observation)>> =
+        vec![Vec::new(); conflicting_components.len()];
+    for pair in pairwise {
+        for &(kp_i, kp_j) in &pair.matches {
+            let a = (pair.image_i, kp_i);
+            let b = (pair.image_j, kp_j);
+            let Some(&component_id) = component_of.get(&a) else {
+                continue;
+            };
+            if component_of.get(&b) != Some(&component_id) {
+                continue;
+            }
+            let edge = if a <= b { (a, b) } else { (b, a) };
+            edges_by_component[component_id].push(edge);
+        }
+    }
+    for edges in &mut edges_by_component {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+
+    let mut triangulation_config = config.clone();
+    triangulation_config.max_reprojection_error_px =
+        config.conflict_recovery_max_reprojection_error_px;
+    triangulation_config.low_parallax_min_observations = None;
+    let min_views = config.conflict_recovery_min_views.max(3);
+    let observation_pixel = |&(image, kp): &Observation| {
+        features
+            .get(image)
+            .and_then(|feature_set| feature_set.keypoints.get(kp))
+            .copied()
+    };
+
+    let mut recovered = Vec::new();
+    for (component, edges) in conflicting_components.iter().zip(edges_by_component.iter()) {
+        let mut adjacency: HashMap<Observation, Vec<Observation>> = HashMap::new();
+        for &(a, b) in edges {
+            adjacency.entry(a).or_default().push(b);
+            adjacency.entry(b).or_default().push(a);
+        }
+        for neighbours in adjacency.values_mut() {
+            neighbours.sort_unstable();
+            neighbours.dedup();
+        }
+        let mut ranked_anchors = Vec::new();
+        for &(a, b) in edges {
+            let (Some(pose_a), Some(pose_b), Some(px_a), Some(px_b)) = (
+                poses.get(a.0).and_then(Option::as_ref),
+                poses.get(b.0).and_then(Option::as_ref),
+                observation_pixel(&a),
+                observation_pixel(&b),
+            ) else {
+                continue;
+            };
+            let Some(n_a) = camera.normalize_pixel(&px_a) else {
+                continue;
+            };
+            let Some(n_b) = camera.normalize_pixel(&px_b) else {
+                continue;
+            };
+            let ray_a =
+                pose_a.camera_to_world().rotation * Vector3::new(n_a.x, n_a.y, 1.0).normalize();
+            let ray_b =
+                pose_b.camera_to_world().rotation * Vector3::new(n_b.x, n_b.y, 1.0).normalize();
+            let angle = ray_a.dot(&ray_b).clamp(-1.0, 1.0).abs().acos();
+            if angle.is_finite() {
+                ranked_anchors.push((angle, a, b, px_a, px_b));
+            }
+        }
+        ranked_anchors.sort_unstable_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+
+        let mut best: Option<RecoveredConflictTrack> = None;
+        for &(_angle, anchor_a, anchor_b, px_a, px_b) in ranked_anchors
+            .iter()
+            .take(config.conflict_recovery_max_hypotheses)
+        {
+            let anchor_observations = [(anchor_a.0, px_a), (anchor_b.0, px_b)];
+            let Some(point) =
+                triangulate_track(camera, poses, &anchor_observations, &triangulation_config)
+            else {
+                continue;
+            };
+
+            // First retain every registered observation consistent with the 3D
+            // hypothesis. A component can contain several keypoints from one
+            // image, so keep only that image's lowest-residual observation.
+            let mut valid_errors: HashMap<Observation, f64> = HashMap::new();
+            for &observation in component {
+                let Some(pose) = poses.get(observation.0).and_then(Option::as_ref) else {
+                    continue;
+                };
+                let Some(pixel) = observation_pixel(&observation) else {
+                    continue;
+                };
+                let Some(error) = reprojection_error_px(camera, pose, &point, &pixel) else {
+                    continue;
+                };
+                if error <= config.conflict_recovery_max_reprojection_error_px {
+                    valid_errors.insert(observation, error);
+                }
+            }
+            if !valid_errors.contains_key(&anchor_a) || !valid_errors.contains_key(&anchor_b) {
+                continue;
+            }
+
+            // Restrict evidence to the verified-edge component containing the
+            // anchor, then enforce one observation per image.
+            let mut reachable = HashSet::from([anchor_a]);
+            let mut frontier = vec![anchor_a];
+            while let Some(node) = frontier.pop() {
+                for &neighbour in adjacency.get(&node).into_iter().flatten() {
+                    if valid_errors.contains_key(&neighbour) && reachable.insert(neighbour) {
+                        frontier.push(neighbour);
+                    }
+                }
+            }
+            let mut best_by_image: HashMap<usize, (usize, f64)> = HashMap::new();
+            for observation in reachable {
+                let error = valid_errors[&observation];
+                let entry = best_by_image
+                    .entry(observation.0)
+                    .or_insert((observation.1, error));
+                if error < entry.1 || (error == entry.1 && observation.1 < entry.0) {
+                    *entry = (observation.1, error);
+                }
+            }
+            let mut selected: Vec<Observation> = best_by_image
+                .iter()
+                .map(|(&image, &(kp, _))| (image, kp))
+                .collect();
+            selected.sort_unstable();
+            if selected.len() < min_views {
+                continue;
+            }
+            let selected_set: HashSet<_> = selected.iter().copied().collect();
+            let cycle_edges = edges
+                .iter()
+                .filter(|(a, b)| selected_set.contains(a) && selected_set.contains(b))
+                .count();
+            // A connected N-view tree has N-1 edges. Requiring N edges means
+            // at least one independent cycle supports the hypothesis.
+            if cycle_edges < selected.len() {
+                continue;
+            }
+            let mean_reprojection_px = selected
+                .iter()
+                .map(|observation| valid_errors[observation])
+                .sum::<f64>()
+                / selected.len() as f64;
+            if mean_reprojection_px > config.conflict_recovery_max_mean_reprojection_px {
+                continue;
+            }
+
+            let registered_observations = selected.len();
+            // An unregistered observation cannot be reprojection-checked yet.
+            // Keep one only when it has at least two verified edges into the
+            // accepted registered cycle; PnP RANSAC remains the final guard.
+            let mut unregistered_support: HashMap<Observation, usize> = HashMap::new();
+            for &(edge_a, edge_b) in edges {
+                for (candidate, supported) in [(edge_a, edge_b), (edge_b, edge_a)] {
+                    if poses.get(candidate.0).is_some_and(|pose| pose.is_none())
+                        && selected_set.contains(&supported)
+                    {
+                        *unregistered_support.entry(candidate).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut inferred_by_image: HashMap<usize, (usize, usize)> = HashMap::new();
+            for (observation, support) in unregistered_support {
+                if support < 2 {
+                    continue;
+                }
+                let entry = inferred_by_image
+                    .entry(observation.0)
+                    .or_insert((observation.1, support));
+                if support > entry.1 || (support == entry.1 && observation.1 < entry.0) {
+                    *entry = (observation.1, support);
+                }
+            }
+            selected.extend(
+                inferred_by_image
+                    .into_iter()
+                    .map(|(image, (kp, _))| (image, kp)),
+            );
+            selected.sort_unstable();
+
+            let candidate = RecoveredConflictTrack {
+                observations: selected,
+                point,
+                registered_observations,
+                mean_reprojection_px,
+            };
+            let replace = best.as_ref().is_none_or(|current| {
+                candidate.registered_observations > current.registered_observations
+                    || (candidate.registered_observations == current.registered_observations
+                        && (candidate.observations.len() > current.observations.len()
+                            || (candidate.observations.len() == current.observations.len()
+                                && candidate.mean_reprojection_px < current.mean_reprojection_px)))
+            });
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        if let Some(track) = best {
+            recovered.push(track);
+        }
+    }
+    recovered
+}
+
+fn mean_reprojection_for_track_range(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    track_point: &[Option<Point3<f64>>],
+    start: usize,
+    end: usize,
+) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for (track_id, track) in tracks.iter().enumerate().take(end).skip(start) {
+        let Some(point) = track_point.get(track_id).and_then(|point| *point) else {
+            continue;
+        };
+        for &(image, kp) in track {
+            let (Some(pose), Some(pixel)) = (
+                poses.get(image).and_then(Option::as_ref),
+                features
+                    .get(image)
+                    .and_then(|feature_set| feature_set.keypoints.get(kp)),
+            ) else {
+                continue;
+            };
+            if let Some(error) = reprojection_error_px(camera, pose, &point, pixel) {
+                sum += error;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        f64::INFINITY
+    } else {
+        sum / count as f64
+    }
+}
+
 /// Among unregistered images still under the per-image trial cap, choose the one
 /// observing the most triangulated tracks, returning it with its 2D-3D
 /// correspondences.
 fn select_next_image(
     camera: &Camera,
+    policy: NextImagePolicy,
     features: &[FeatureSet],
     obs_by_image: &[Vec<(usize, usize)>],
     poses: &[Option<Pose>],
@@ -1297,14 +3259,30 @@ fn select_next_image(
         if corrs.len() < 6 {
             continue; // DLT PnP needs ≥6
         }
-        let score =
-            visibility_pyramid_score(camera.width, camera.height, corrs.iter().map(|c| c.point2d));
-        let key = (score, corrs.len());
+        let key = next_image_rank(camera, policy, &corrs);
         if best.as_ref().is_none_or(|(_, b, _)| key > *b) {
             best = Some((image, key, corrs));
         }
     }
     best.map(|(image, _, corrs)| (image, corrs))
+}
+
+fn next_image_rank(
+    camera: &Camera,
+    policy: NextImagePolicy,
+    corrs: &[Correspondence2D3D],
+) -> (usize, usize) {
+    match policy {
+        NextImagePolicy::VisibilityPyramid => (
+            visibility_pyramid_score(
+                camera.width,
+                camera.height,
+                corrs.iter().map(|corr| corr.point2d),
+            ),
+            corrs.len(),
+        ),
+        NextImagePolicy::CorrespondenceCount => (corrs.len(), 0),
+    }
 }
 
 /// M4 diagnosis helper (`docs/colmap_port_plan.md`'s "M4 results"): classify,
@@ -1334,9 +3312,15 @@ fn diagnose_unregistered_images(
         let reason = if corr_count < 6 {
             format!("insufficient correspondences ({corr_count} < 6)")
         } else if trials[image] >= max_trials {
-            format!("trials exhausted ({}/{max_trials}, {corr_count} corrs available)", trials[image])
+            format!(
+                "trials exhausted ({}/{max_trials}, {corr_count} corrs available)",
+                trials[image]
+            )
         } else {
-            format!("eligible but not selected this round ({corr_count} corrs, {}/{max_trials} trials)", trials[image])
+            format!(
+                "eligible but not selected this round ({corr_count} corrs, {}/{max_trials} trials)",
+                trials[image]
+            )
         };
         lines.push(format!("  image {image}: {reason}"));
     }
@@ -1537,6 +3521,79 @@ fn adjust_local_bundle(
     )
 }
 
+/// With every camera and every pre-existing landmark fixed, refine only the
+/// landmarks created by a tentative structure-less insertion. This is the
+/// bounded local-submap solve used after projecting the new camera into the
+/// independent relative-geometry feasible region.
+fn refine_structureless_new_landmarks(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    config: &IncrementalSfmConfig,
+    poses: &[Option<Pose>],
+    track_point: &mut [Option<Point3<f64>>],
+    new_image: usize,
+    preexisting_points: &[bool],
+) -> Result<(), BaError> {
+    let mut landmark_ids = Vec::new();
+    let mut used_images = HashSet::new();
+    for (track_id, track) in tracks.iter().enumerate() {
+        if preexisting_points.get(track_id).copied().unwrap_or(false)
+            || track_point[track_id].is_none()
+            || !track.iter().any(|&(image, kp)| {
+                image == new_image
+                    && poses[image].is_some()
+                    && features[image].keypoints.get(kp).is_some()
+            })
+        {
+            continue;
+        }
+        let observers: Vec<usize> = track
+            .iter()
+            .filter_map(|&(image, kp)| {
+                (poses[image].is_some() && features[image].keypoints.get(kp).is_some())
+                    .then_some(image)
+            })
+            .collect();
+        if observers.len() < 2 {
+            continue;
+        }
+        used_images.extend(observers);
+        landmark_ids.push(track_id);
+    }
+    if landmark_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut ba = BundleAdjustment::new(camera.clone());
+    for image in used_images {
+        ba.add_pose(image as u64, poses[image].clone().unwrap());
+        ba.fix_pose(image as u64);
+    }
+    for &track_id in &landmark_ids {
+        ba.add_landmark(track_id as u64, track_point[track_id].unwrap());
+        for &(image, kp) in &tracks[track_id] {
+            if !ba.poses.contains_key(&(image as u64)) {
+                continue;
+            }
+            if let Some(pixel) = features[image].keypoints.get(kp).copied() {
+                ba.add_observation(BaObservation {
+                    keyframe_id: image as u64,
+                    landmark_id: track_id as u64,
+                    xy: pixel,
+                });
+            }
+        }
+    }
+    ba.optimize(&config.ba_config)?;
+    for track_id in landmark_ids {
+        if let Some(refined) = ba.landmarks.get(&(track_id as u64)) {
+            track_point[track_id] = Some(*refined);
+        }
+    }
+    Ok(())
+}
+
 /// Bundle-adjust a chosen `variable` set of poses plus every triangulated track
 /// they observe. Other registered images observing those tracks join as fixed
 /// poses (constraints). The gauge: with ≥2 fixed observers their baseline pins
@@ -1620,7 +3677,6 @@ fn bundle_adjust_local(
             }
         }
     }
-
     ba.optimize(&config.ba_config)?;
 
     for &image in &used {
@@ -2184,7 +4240,47 @@ mod tests {
             union_find_tracks, graph_tracks,
             "CorrespondenceGraph-derived tracks must byte-match the legacy union-find's"
         );
-        assert!(!union_find_tracks.is_empty(), "fixture sanity: some tracks must form");
+        assert!(
+            !union_find_tracks.is_empty(),
+            "fixture sanity: some tracks must form"
+        );
+    }
+
+    #[test]
+    fn post_refinement_pass_registers_against_tightened_structure_once() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let tracks = build_tracks(features.len(), &pairwise, 2);
+        let mut poses = vec![None; features.len()];
+        poses[0] = Some(scene.poses[0].clone());
+        poses[1] = Some(scene.poses[1].clone());
+        let mut track_point = vec![None; tracks.len()];
+        let config = IncrementalSfmConfig {
+            min_pnp_inliers: 8,
+            max_reprojection_error_px: 2.0,
+            ..IncrementalSfmConfig::default()
+        };
+        triangulate_pending(
+            &scene.camera,
+            &features,
+            &tracks,
+            &poses,
+            &config,
+            &mut track_point,
+        );
+        assert!(track_point.iter().filter(|p| p.is_some()).count() >= 8);
+
+        let added = post_refinement_registration_pass(
+            &scene.camera,
+            &features,
+            &tracks,
+            &config,
+            &mut poses,
+            &mut track_point,
+        )
+        .unwrap();
+        assert!(added > 0);
+        assert_eq!(poses.iter().filter(|p| p.is_some()).count(), 2 + added);
     }
 
     /// M2 acceptance test, end-to-end: running the *full* `incremental_sfm`
@@ -2279,10 +4375,9 @@ mod tests {
         let mut kp1 = Vec::new();
         let mut matches = Vec::new();
         for p in &points {
-            if let (Some(px0), Some(px1)) = (
-                project(&camera, &pose0, p),
-                project(&camera, &pose1, p),
-            ) {
+            if let (Some(px0), Some(px1)) =
+                (project(&camera, &pose0, p), project(&camera, &pose1, p))
+            {
                 matches.push((kp0.len(), kp1.len()));
                 kp0.push(px0);
                 kp1.push(px1);
@@ -2312,7 +4407,10 @@ mod tests {
             "a zero-baseline (panoramic) pair must never bootstrap a seed, \
              even though M2.1 now lets its correspondences reach PairwiseMatches"
         );
-        assert!(poses[0].is_none() && poses[1].is_none(), "rejected seed must leave poses untouched");
+        assert!(
+            poses[0].is_none() && poses[1].is_none(),
+            "rejected seed must leave poses untouched"
+        );
     }
 
     #[test]
@@ -2336,6 +4434,35 @@ mod tests {
     }
 
     #[test]
+    fn track_build_preview_matches_union_find_topology_without_mapping() {
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 0)],
+            },
+            PairwiseMatches {
+                image_i: 1,
+                image_j: 2,
+                matches: vec![(0, 0)],
+            },
+        ];
+        let features = vec![
+            FeatureSet {
+                keypoints: vec![Point2::new(0.0, 0.0)],
+                descriptors: vec![vec![0.0]],
+            };
+            3
+        ];
+        let stats =
+            preview_track_build_stats(&features, &pairwise, &IncrementalSfmConfig::default());
+        assert_eq!(stats.input_correspondences, 2);
+        assert_eq!(stats.connected_components, 1);
+        assert_eq!(stats.retained_tracks, 1);
+        assert_eq!(stats.retained_observations, 3);
+    }
+
+    #[test]
     fn build_tracks_drops_same_image_conflict() {
         // kp0 and kp1 of image 1 get merged into one component -> inconsistent.
         let pairwise = vec![
@@ -2350,8 +4477,250 @@ mod tests {
                 matches: vec![(0, 1)],
             },
         ];
-        let tracks = build_tracks(2, &pairwise, 2);
+        let (tracks, stats) = build_tracks_with_stats(2, &pairwise, 2);
         assert!(tracks.is_empty(), "same-image conflict track is dropped");
+        assert_eq!(stats.input_correspondences, 2);
+        assert_eq!(stats.connected_components, 1);
+        assert_eq!(stats.conflicting_components, 1);
+        assert_eq!(stats.conflicting_observations, 3);
+        assert_eq!(stats.retained_tracks, 0);
+        assert_eq!(stats.retained_observations, 0);
+    }
+
+    #[test]
+    fn geometry_recovery_splits_conflict_from_trusted_multiview_poses() {
+        let scene = build_scene();
+        let (features, mut pairwise) = render(&scene);
+        let keypoint_for_point = |image: usize, point: usize| {
+            features[image]
+                .descriptors
+                .iter()
+                .position(|descriptor| descriptor[0] == point as f32)
+                .unwrap()
+        };
+        let kp_0_image_0 = keypoint_for_point(0, 0);
+        let kp_1_image_1 = keypoint_for_point(1, 1);
+        let pair_0_1 = pairwise
+            .iter_mut()
+            .find(|pair| pair.image_i == 0 && pair.image_j == 1)
+            .unwrap();
+        // One erroneous bridge merges two otherwise-complete six-view tracks.
+        pair_0_1.matches.push((kp_0_image_0, kp_1_image_1));
+
+        let built = build_tracks_detailed(features.len(), &pairwise, 2);
+        assert_eq!(built.stats.conflicting_components, 1);
+        assert_eq!(built.conflicting_components.len(), 1);
+
+        let poses = scene.poses.iter().cloned().map(Some).collect::<Vec<_>>();
+        let config = IncrementalSfmConfig {
+            geometry_guided_conflict_recovery: true,
+            conflict_recovery_min_views: 3,
+            conflict_recovery_max_hypotheses: 32,
+            conflict_recovery_max_reprojection_error_px: 0.1,
+            conflict_recovery_max_mean_reprojection_px: 0.05,
+            ..IncrementalSfmConfig::default()
+        };
+        let recovered = recover_conflict_tracks_geometry(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &built.conflicting_components,
+            &poses,
+            &config,
+        );
+        assert_eq!(
+            recovered.len(),
+            1,
+            "first slice keeps one guarded hypothesis"
+        );
+        let track = &recovered[0];
+        assert!(track.registered_observations >= 3);
+        assert!(track.mean_reprojection_px < 1e-6);
+        let unique_images: HashSet<_> =
+            track.observations.iter().map(|&(image, _)| image).collect();
+        assert_eq!(unique_images.len(), track.observations.len());
+        let nearest_truth = scene
+            .points
+            .iter()
+            .take(2)
+            .map(|point| (track.point - point).norm())
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            nearest_truth < 1e-6,
+            "recovered point error {nearest_truth}"
+        );
+    }
+
+    #[test]
+    fn geometry_recovery_rejects_three_view_chain_without_cycle() {
+        let scene = build_scene();
+        let (features, _) = render(&scene);
+        let observation = |image: usize| {
+            let kp = features[image]
+                .descriptors
+                .iter()
+                .position(|descriptor| descriptor[0] == 0.0)
+                .unwrap();
+            (image, kp)
+        };
+        let component = vec![observation(0), observation(1), observation(2)];
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(component[0].1, component[1].1)],
+            },
+            PairwiseMatches {
+                image_i: 1,
+                image_j: 2,
+                matches: vec![(component[1].1, component[2].1)],
+            },
+        ];
+        let poses = scene.poses.iter().cloned().map(Some).collect::<Vec<_>>();
+        let recovered = recover_conflict_tracks_geometry(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &[component],
+            &poses,
+            &IncrementalSfmConfig {
+                conflict_recovery_max_reprojection_error_px: 0.1,
+                conflict_recovery_max_mean_reprojection_px: 0.05,
+                ..IncrementalSfmConfig::default()
+            },
+        );
+        assert!(
+            recovered.is_empty(),
+            "a tree is not independent multi-view evidence"
+        );
+    }
+
+    #[test]
+    fn incremental_sfm_admits_geometry_recovery_only_after_clean_model() {
+        let scene = build_scene();
+        let (features, mut pairwise) = render(&scene);
+        // Leave image 5 outside the verified component so the clean model is
+        // intentionally incomplete and recovery may exercise its guarded BA.
+        pairwise.retain(|pair| pair.image_i != 5 && pair.image_j != 5);
+        let keypoint_for_point = |image: usize, point: usize| {
+            features[image]
+                .descriptors
+                .iter()
+                .position(|descriptor| descriptor[0] == point as f32)
+                .unwrap()
+        };
+        pairwise
+            .iter_mut()
+            .find(|pair| pair.image_i == 0 && pair.image_j == 1)
+            .unwrap()
+            .matches
+            .push((keypoint_for_point(0, 0), keypoint_for_point(1, 1)));
+
+        let config = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            geometry_guided_conflict_recovery: true,
+            conflict_recovery_max_reprojection_error_px: 0.1,
+            conflict_recovery_max_mean_reprojection_px: 0.05,
+            // Noise-free BA can move at floating-point epsilon around zero.
+            conflict_recovery_max_clean_error_increase_ratio: 0.01,
+            ..IncrementalSfmConfig::default()
+        };
+        let result = incremental_sfm(&scene.camera, &features, &pairwise, &config).unwrap();
+        assert_eq!(result.track_build_stats.conflicting_components, 1);
+        assert_eq!(result.geometry_recovered_tracks, 1);
+        assert!(result.geometry_recovered_observations >= 3);
+        assert!(result.geometry_recovery_pose_ba_applied);
+        assert_eq!(result.registered_images, 5);
+        assert!(result.mean_reprojection_px < 0.1);
+    }
+
+    #[test]
+    fn complete_model_geometry_recovery_keeps_poses_byte_identical() {
+        let scene = build_scene();
+        let (features, mut pairwise) = render(&scene);
+        let keypoint_for_point = |image: usize, point: usize| {
+            features[image]
+                .descriptors
+                .iter()
+                .position(|descriptor| descriptor[0] == point as f32)
+                .unwrap()
+        };
+        pairwise
+            .iter_mut()
+            .find(|pair| pair.image_i == 0 && pair.image_j == 1)
+            .unwrap()
+            .matches
+            .push((keypoint_for_point(0, 0), keypoint_for_point(1, 1)));
+        let base = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            ..IncrementalSfmConfig::default()
+        };
+        let control = incremental_sfm(&scene.camera, &features, &pairwise, &base).unwrap();
+        let recovered = incremental_sfm(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &IncrementalSfmConfig {
+                geometry_guided_conflict_recovery: true,
+                conflict_recovery_max_reprojection_error_px: 0.1,
+                conflict_recovery_max_mean_reprojection_px: 0.05,
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(control.registered_images, features.len());
+        assert_eq!(recovered.registered_images, features.len());
+        assert_eq!(recovered.geometry_recovered_tracks, 1);
+        assert!(!recovered.geometry_recovery_pose_ba_applied);
+        assert_eq!(recovered.poses, control.poses);
+        assert_eq!(recovered.tracks.len(), control.tracks.len() + 1);
+    }
+
+    #[test]
+    fn rejected_geometry_recovery_rolls_back_byte_identical_clean_model() {
+        let scene = build_scene();
+        let (features, mut pairwise) = render(&scene);
+        let keypoint_for_point = |image: usize, point: usize| {
+            features[image]
+                .descriptors
+                .iter()
+                .position(|descriptor| descriptor[0] == point as f32)
+                .unwrap()
+        };
+        pairwise
+            .iter_mut()
+            .find(|pair| pair.image_i == 0 && pair.image_j == 1)
+            .unwrap()
+            .matches
+            .push((keypoint_for_point(0, 0), keypoint_for_point(1, 1)));
+
+        let base = IncrementalSfmConfig {
+            min_seed_matches: 8,
+            min_pnp_inliers: 6,
+            ..IncrementalSfmConfig::default()
+        };
+        let control = incremental_sfm(&scene.camera, &features, &pairwise, &base).unwrap();
+        let rejected = incremental_sfm(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &IncrementalSfmConfig {
+                geometry_guided_conflict_recovery: true,
+                conflict_recovery_max_reprojection_error_px: 0.1,
+                // Force the post-BA acceptance gate to reject every proposal.
+                conflict_recovery_max_mean_reprojection_px: -1.0,
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(rejected.geometry_recovered_tracks, 0);
+        assert_eq!(rejected.geometry_recovered_observations, 0);
+        assert_eq!(rejected.poses, control.poses);
+        assert_eq!(rejected.tracks, control.tracks);
+        assert_eq!(rejected.registered_images, control.registered_images);
+        assert_eq!(rejected.mean_reprojection_px, control.mean_reprojection_px);
     }
 
     /// Minimal `FeatureSet`s with `kp_counts[i]` dummy keypoints per image —
@@ -2470,6 +4839,38 @@ mod tests {
         assert!(
             clustered_score < clustered.len(),
             "clustered occupancy {clustered_score} must saturate below the point count"
+        );
+
+        let camera = Camera::pinhole(0, w, h, 500.0, 500.0, 320.0, 240.0);
+        let to_corrs = |points: &[Point2<f64>]| {
+            points
+                .iter()
+                .copied()
+                .map(|point2d| Correspondence2D3D {
+                    point2d,
+                    point3d: Point3::new(0.0, 0.0, 5.0),
+                    confidence: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let clustered_corrs = to_corrs(&clustered);
+        let spread_corrs = to_corrs(&spread);
+        assert!(
+            next_image_rank(&camera, NextImagePolicy::VisibilityPyramid, &spread_corrs,)
+                > next_image_rank(
+                    &camera,
+                    NextImagePolicy::VisibilityPyramid,
+                    &clustered_corrs,
+                ),
+            "visibility policy must prefer coverage"
+        );
+        assert!(
+            next_image_rank(
+                &camera,
+                NextImagePolicy::CorrespondenceCount,
+                &clustered_corrs,
+            ) > next_image_rank(&camera, NextImagePolicy::CorrespondenceCount, &spread_corrs,),
+            "count policy must reproduce the legacy ordering"
         );
     }
 
@@ -3038,7 +5439,11 @@ mod tests {
         for xi in -2..=2 {
             for yi in -1..=2 {
                 for zi in 0..=1 {
-                    points.push(Point3::new(xi as f64 * 0.25, yi as f64 * 0.25, 1.0 + zi as f64 * 0.3));
+                    points.push(Point3::new(
+                        xi as f64 * 0.25,
+                        yi as f64 * 0.25,
+                        1.0 + zi as f64 * 0.3,
+                    ));
                 }
             }
         }
@@ -3204,5 +5609,428 @@ mod tests {
             (est_ratio - gt_ratio).abs() / gt_ratio < 0.1,
             "camera geometry warped after repeated BA: {est_ratio} vs GT {gt_ratio}"
         );
+    }
+
+    #[test]
+    fn structureless_local_bundle_keeps_registered_boundary_poses_exactly_fixed() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let tracks = build_tracks(features.len(), &pairwise, 2);
+        let config = IncrementalSfmConfig::default();
+        let mut poses: Vec<Option<Pose>> = scene.poses.iter().cloned().map(Some).collect();
+        let mut track_point = vec![None; tracks.len()];
+        triangulate_pending(
+            &scene.camera,
+            &features,
+            &tracks,
+            &poses,
+            &config,
+            &mut track_point,
+        );
+
+        // Mimic a slightly inaccurate multi-neighbour structure-less proposal.
+        // Only image 2 is allowed to move during the admission refinement.
+        let truth = scene.poses[2].clone();
+        poses[2].as_mut().unwrap().world_to_camera.translation += Vector3::new(0.03, -0.02, 0.01);
+        let before = poses.clone();
+        let mut variable = HashSet::new();
+        variable.insert(2usize);
+        bundle_adjust_local(
+            &scene.camera,
+            &features,
+            &tracks,
+            &config,
+            &mut poses,
+            &mut track_point,
+            &variable,
+        )
+        .expect("fixed-boundary structure-less BA should converge");
+
+        for image in [0usize, 1, 3, 4, 5] {
+            assert_eq!(
+                poses[image], before[image],
+                "registered boundary pose {image} must remain byte-for-byte unchanged"
+            );
+        }
+        let error_before = (before[2].as_ref().unwrap().matrix() - truth.matrix()).norm();
+        let error_after = (poses[2].as_ref().unwrap().matrix() - truth.matrix()).norm();
+        assert!(
+            error_after < error_before,
+            "recovered pose should improve while its registered boundary stays fixed: \
+             {error_before} -> {error_after}"
+        );
+    }
+
+    #[test]
+    fn structureless_fixed_pose_submap_refines_only_new_landmarks() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let tracks = build_tracks(features.len(), &pairwise, 2);
+        let config = IncrementalSfmConfig::default();
+        let poses: Vec<Option<Pose>> = scene.poses.iter().cloned().map(Some).collect();
+        let mut track_point = vec![None; tracks.len()];
+        triangulate_pending(
+            &scene.camera,
+            &features,
+            &tracks,
+            &poses,
+            &config,
+            &mut track_point,
+        );
+        let new_track = tracks
+            .iter()
+            .position(|track| track.iter().any(|&(image, _)| image == 2))
+            .unwrap();
+        let truth = track_point[new_track].unwrap();
+        track_point[new_track] = Some(truth + Vector3::new(0.08, -0.05, 0.12));
+        let points_before = track_point.clone();
+        let mut preexisting = vec![true; track_point.len()];
+        preexisting[new_track] = false;
+
+        refine_structureless_new_landmarks(
+            &scene.camera,
+            &features,
+            &tracks,
+            &config,
+            &poses,
+            &mut track_point,
+            2,
+            &preexisting,
+        )
+        .expect("fixed-pose local submap should converge");
+
+        for track_id in 0..track_point.len() {
+            if track_id != new_track {
+                assert_eq!(track_point[track_id], points_before[track_id]);
+            }
+        }
+        assert!(
+            (track_point[new_track].unwrap() - truth).norm()
+                < (points_before[new_track].unwrap() - truth).norm()
+        );
+    }
+
+    #[test]
+    fn structureless_local_tracks_use_consensus_edges_and_unowned_observations() {
+        let scene = build_scene();
+        let (features, pairwise) = render(&scene);
+        let poses: Vec<Option<Pose>> = scene.poses.iter().cloned().map(Some).collect();
+        let missing = 0usize;
+        let missing_center = scene.poses[missing].camera_center_world();
+        let missing_rotation = scene.poses[missing].world_to_camera.rotation;
+        let constraints: Vec<_> = [1usize, 2, 3]
+            .into_iter()
+            .map(|neighbor| {
+                structureless_constraint(
+                    neighbor,
+                    scene.poses[neighbor].camera_center_world(),
+                    missing_center,
+                    missing_rotation,
+                )
+            })
+            .collect();
+        let proposal = StructurelessPoseProposal {
+            pose: scene.poses[missing].clone(),
+            neighbor_spread: 1.0,
+            line_error_ratio: 0.0,
+            consensus_indices: vec![0, 1, 2],
+        };
+        let local = build_structureless_local_tracks(
+            &scene.camera,
+            &features,
+            &pairwise,
+            &[],
+            &[],
+            &poses,
+            missing,
+            &constraints,
+            &proposal,
+            &IncrementalSfmConfig::default(),
+        );
+        assert!(!local.is_empty());
+        for (track, point) in local {
+            assert!(track.len() >= 2);
+            assert_eq!(
+                track.iter().filter(|(image, _)| *image == missing).count(),
+                1
+            );
+            let unique_images: HashSet<_> = track.iter().map(|(image, _)| *image).collect();
+            assert_eq!(unique_images.len(), track.len());
+            for &(image, keypoint) in &track {
+                let error = reprojection_error_px(
+                    &scene.camera,
+                    poses[image].as_ref().unwrap(),
+                    &point,
+                    &features[image].keypoints[keypoint],
+                )
+                .unwrap();
+                assert!(error <= 2.0);
+            }
+        }
+    }
+
+    fn structureless_constraint(
+        neighbor: usize,
+        neighbor_center: Point3<f64>,
+        missing_center: Point3<f64>,
+        missing_rotation: UnitQuaternion<f64>,
+    ) -> StructurelessConstraint {
+        StructurelessConstraint {
+            neighbor,
+            neighbor_center,
+            missing_rotation,
+            center_direction: (missing_center - neighbor_center).normalize(),
+            weight: 100.0 - neighbor as f64,
+        }
+    }
+
+    #[test]
+    fn structureless_multineighbor_lines_recover_scaled_camera_pose() {
+        let missing_center = Point3::new(1.2, -0.4, 3.5);
+        let rotation = UnitQuaternion::from_euler_angles(0.05, -0.12, 0.08);
+        let constraints = vec![
+            structureless_constraint(0, Point3::new(-1.0, 0.0, 0.0), missing_center, rotation),
+            structureless_constraint(1, Point3::new(2.0, 0.5, 0.2), missing_center, rotation),
+            structureless_constraint(2, Point3::new(0.0, -2.0, 0.4), missing_center, rotation),
+        ];
+        let config = IncrementalSfmConfig {
+            structureless_min_intersection_angle_deg: 1.0,
+            structureless_max_center_line_error_ratio: 1e-8,
+            ..IncrementalSfmConfig::default()
+        };
+        let proposal = solve_structureless_pose(&constraints, &config).unwrap();
+        assert!((proposal.pose.camera_center_world() - missing_center).norm() < 1e-9);
+        assert!((proposal.pose.world_to_camera.rotation.inverse() * rotation).angle() < 1e-12);
+        assert!(proposal.line_error_ratio < 1e-9);
+    }
+
+    #[test]
+    fn structureless_pose_interpolation_uses_camera_centers_and_slerp() {
+        let from_center = Point3::new(-1.0, 0.5, 2.0);
+        let to_center = Point3::new(3.0, -0.5, 4.0);
+        let from_rotation = UnitQuaternion::identity();
+        let to_rotation = UnitQuaternion::from_euler_angles(0.0, 0.4, 0.0);
+        let from = Pose::from_world_to_camera(
+            from_rotation,
+            -from_rotation.transform_vector(&from_center.coords),
+        );
+        let to = Pose::from_world_to_camera(
+            to_rotation,
+            -to_rotation.transform_vector(&to_center.coords),
+        );
+        let midpoint = interpolate_structureless_pose(&from, &to, 0.5);
+        let expected_center = Point3::from((from_center.coords + to_center.coords) * 0.5);
+        assert!((midpoint.camera_center_world() - expected_center).norm() < 1e-12);
+        let expected_rotation = from_rotation.slerp(&to_rotation, 0.5);
+        assert!((midpoint.world_to_camera.rotation.inverse() * expected_rotation).angle() < 1e-12);
+        assert_eq!(interpolate_structureless_pose(&from, &to, 0.0), from);
+        assert_eq!(interpolate_structureless_pose(&from, &to, 1.0), to);
+    }
+
+    #[test]
+    fn structureless_pose_rejects_single_neighbor_arbitrary_scale() {
+        let missing_center = Point3::new(0.0, 0.0, 3.0);
+        let constraints = vec![structureless_constraint(
+            0,
+            Point3::origin(),
+            missing_center,
+            UnitQuaternion::identity(),
+        )];
+        assert!(solve_structureless_pose(&constraints, &IncrementalSfmConfig::default()).is_err());
+    }
+
+    #[test]
+    fn structureless_pose_rejects_rotation_disagreement() {
+        let missing_center = Point3::new(0.5, 0.2, 3.0);
+        let constraints = vec![
+            structureless_constraint(
+                0,
+                Point3::new(-1.0, 0.0, 0.0),
+                missing_center,
+                UnitQuaternion::identity(),
+            ),
+            structureless_constraint(
+                1,
+                Point3::new(1.0, 0.0, 0.0),
+                missing_center,
+                UnitQuaternion::from_euler_angles(0.0, 0.2, 0.0),
+            ),
+        ];
+        assert!(solve_structureless_pose(&constraints, &IncrementalSfmConfig::default()).is_err());
+    }
+
+    #[test]
+    fn structureless_pose_uses_largest_rotation_consensus() {
+        let missing_center = Point3::new(0.5, 0.2, 3.0);
+        let good_rotation = UnitQuaternion::from_euler_angles(0.01, -0.02, 0.03);
+        let mut constraints = vec![
+            structureless_constraint(
+                0,
+                Point3::new(-1.0, 0.0, 0.0),
+                missing_center,
+                good_rotation,
+            ),
+            structureless_constraint(1, Point3::new(1.0, 0.0, 0.0), missing_center, good_rotation),
+            structureless_constraint(
+                2,
+                Point3::new(0.0, -1.0, 0.0),
+                missing_center,
+                good_rotation,
+            ),
+            structureless_constraint(
+                3,
+                Point3::new(0.0, 1.0, 0.0),
+                missing_center,
+                UnitQuaternion::from_euler_angles(0.0, 0.8, 0.0),
+            ),
+        ];
+        constraints[3].weight = 1000.0;
+        let proposal = solve_structureless_pose(&constraints, &IncrementalSfmConfig::default())
+            .expect("three coherent rotations must outvote one high-support outlier");
+        assert_eq!(proposal.consensus_indices.len(), 3);
+        assert!((proposal.pose.camera_center_world() - missing_center).norm() < 1e-9);
+        assert!((proposal.pose.world_to_camera.rotation.inverse() * good_rotation).angle() < 1e-12);
+    }
+
+    #[test]
+    fn structureless_pose_keeps_rotation_consensus_centre_not_strongest_edge() {
+        let missing_center = Point3::new(0.5, 0.2, 3.0);
+        let centre_rotation = UnitQuaternion::identity();
+        let positive_edge = UnitQuaternion::from_euler_angles(0.0, 2.5f64.to_radians(), 0.0);
+        let negative_edge = UnitQuaternion::from_euler_angles(0.0, -2.5f64.to_radians(), 0.0);
+        let mut constraints = vec![
+            structureless_constraint(
+                0,
+                Point3::new(-1.0, 0.0, 0.0),
+                missing_center,
+                centre_rotation,
+            ),
+            structureless_constraint(1, Point3::new(1.0, 0.0, 0.0), missing_center, positive_edge),
+            structureless_constraint(
+                2,
+                Point3::new(0.0, -1.0, 0.0),
+                missing_center,
+                negative_edge,
+            ),
+        ];
+        constraints[1].weight = 1000.0;
+        let proposal = solve_structureless_pose(&constraints, &IncrementalSfmConfig::default())
+            .expect("the centre edge supports a valid three-rotation consensus");
+        assert!(
+            (proposal.pose.world_to_camera.rotation.inverse() * centre_rotation).angle() < 1e-12,
+            "the high-weight +2.5deg edge would be 5deg from the negative edge"
+        );
+        let consistency = structureless_pose_consistency(
+            &proposal.pose,
+            &constraints,
+            &proposal,
+            &IncrementalSfmConfig::default(),
+        );
+        assert!(consistency.accepted);
+        assert!(consistency.max_rotation_deg <= 3.0);
+    }
+
+    #[test]
+    fn structureless_pose_uses_robust_translation_consensus() {
+        let missing_center = Point3::new(0.5, 0.2, 3.0);
+        let rotation = UnitQuaternion::identity();
+        let mut constraints = vec![
+            structureless_constraint(0, Point3::new(-1.0, 0.0, 0.0), missing_center, rotation),
+            structureless_constraint(1, Point3::new(1.0, 0.0, 0.0), missing_center, rotation),
+            structureless_constraint(2, Point3::new(0.0, -1.0, 0.0), missing_center, rotation),
+            StructurelessConstraint {
+                neighbor: 3,
+                neighbor_center: Point3::new(0.0, 1.0, 0.0),
+                missing_rotation: rotation,
+                center_direction: Vector3::x(),
+                weight: 1000.0,
+            },
+        ];
+        constraints.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+        let config = IncrementalSfmConfig {
+            structureless_max_center_line_error_ratio: 0.01,
+            ..IncrementalSfmConfig::default()
+        };
+        let proposal = solve_structureless_pose(&constraints, &config)
+            .expect("three coherent directions must reject one high-support translation outlier");
+        assert_eq!(proposal.consensus_indices.len(), 3);
+        assert!((proposal.pose.camera_center_world() - missing_center).norm() < 1e-9);
+    }
+
+    #[test]
+    fn structureless_pose_reclassifies_lines_after_weighted_refit() {
+        let rotation = UnitQuaternion::identity();
+        let mut constraints = vec![
+            StructurelessConstraint {
+                neighbor: 0,
+                neighbor_center: Point3::new(-1.0, 0.0, 0.0),
+                missing_rotation: rotation,
+                center_direction: Vector3::x(),
+                weight: 100.0,
+            },
+            StructurelessConstraint {
+                neighbor: 1,
+                neighbor_center: Point3::new(0.0, -1.0, 0.0),
+                missing_rotation: rotation,
+                center_direction: Vector3::y(),
+                weight: 100.0,
+            },
+            StructurelessConstraint {
+                neighbor: 2,
+                neighbor_center: Point3::new(0.0, 1.0, 0.0),
+                missing_rotation: rotation,
+                center_direction: Vector3::new(0.1, -1.0, 0.0).normalize(),
+                weight: 1000.0,
+            },
+            // This short directed baseline agrees with the winning pairwise
+            // hypothesis at the origin, but the high-weight tilted line moves
+            // the least-squares refit behind it. It must be reclassified as an
+            // outlier instead of vetoing the other three consistent lines.
+            StructurelessConstraint {
+                neighbor: 3,
+                neighbor_center: Point3::new(0.01, 0.0, 0.0),
+                missing_rotation: rotation,
+                center_direction: -Vector3::x(),
+                weight: 100.0,
+            },
+        ];
+        constraints.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+        let proposal = solve_structureless_pose(&constraints, &IncrementalSfmConfig::default())
+            .expect("a marginal directed line must not veto a stable 3-line refit");
+        assert_eq!(proposal.consensus_indices.len(), 3);
+        assert!(proposal
+            .consensus_indices
+            .iter()
+            .all(|&index| constraints[index].neighbor != 3));
+        assert!(
+            structureless_pose_consistency(
+                &proposal.pose,
+                &constraints,
+                &proposal,
+                &IncrementalSfmConfig::default(),
+            )
+            .accepted
+        );
+    }
+
+    #[test]
+    fn structureless_pose_rejects_parallel_center_directions() {
+        let constraints = vec![
+            StructurelessConstraint {
+                neighbor: 0,
+                neighbor_center: Point3::new(0.0, 0.0, 0.0),
+                missing_rotation: UnitQuaternion::identity(),
+                center_direction: Vector3::z(),
+                weight: 100.0,
+            },
+            StructurelessConstraint {
+                neighbor: 1,
+                neighbor_center: Point3::new(1.0, 0.0, 0.0),
+                missing_rotation: UnitQuaternion::identity(),
+                center_direction: Vector3::z(),
+                weight: 90.0,
+            },
+        ];
+        assert!(solve_structureless_pose(&constraints, &IncrementalSfmConfig::default()).is_err());
     }
 }

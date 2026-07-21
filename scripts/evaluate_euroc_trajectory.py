@@ -59,7 +59,15 @@ def load_ground_truth(path):
     return poses
 
 
-def load_estimate(path):
+def trajectory_timestamp_ns(token, unit):
+    if unit == "ns":
+        return timestamp_ns(token)
+    if unit == "s":
+        return int(round(float(token) * 1e9))
+    raise ValueError(f"unsupported trajectory timestamp unit: {unit}")
+
+
+def load_estimate(path, tum_time_unit="ns"):
     with path.open("r", encoding="utf-8", errors="replace", newline="") as stream:
         first = next(
             (line.strip() for line in stream if line.strip() and not line.lstrip().startswith("#")),
@@ -80,7 +88,7 @@ def load_estimate(path):
             tx, ty, tz, qx, qy, qz, qw = values
             poses.append(
                 (
-                    timestamp_ns(fields[0]),
+                    trajectory_timestamp_ns(fields[0], tum_time_unit),
                     np.asarray([tx, ty, tz]),
                     quaternion_matrix(qx, qy, qz, qw),
                 )
@@ -119,6 +127,18 @@ def load_visloc_estimate(path):
         raise ValueError("estimated trajectory is empty")
     poses.sort(key=lambda pose: pose[0])
     return poses
+
+
+def restrict_to_common_timestamps(estimates):
+    """Keep only estimate timestamps present in every compared trajectory."""
+    if not estimates:
+        return estimates
+    common = set(pose[0] for pose in estimates[0])
+    for estimate in estimates[1:]:
+        common.intersection_update(pose[0] for pose in estimate)
+    if len(common) < 3:
+        raise ValueError("fewer than 3 common estimate timestamps")
+    return [[pose for pose in estimate if pose[0] in common] for estimate in estimates]
 
 
 def associate(ground_truth, estimate, max_diff_ns):
@@ -218,14 +238,35 @@ def main():
     parser.add_argument("--ground-truth-csv", type=Path, required=True)
     parser.add_argument("--trajectory", type=Path, action="append", required=True)
     parser.add_argument("--max-diff-ns", type=int, default=10_000_000)
+    parser.add_argument(
+        "--tum-time-unit",
+        choices=("ns", "s"),
+        default="ns",
+        help="timestamp unit for whitespace/TUM trajectories (default: ns)",
+    )
+    parser.add_argument(
+        "--common-estimate-timestamps",
+        action="store_true",
+        help="score every trajectory on their exact common timestamp subset",
+    )
     parser.add_argument("--out-json", type=Path, required=True)
     args = parser.parse_args()
     if args.max_diff_ns < 0:
         parser.error("--max-diff-ns must be non-negative")
     ground_truth = load_ground_truth(args.ground_truth_csv)
+    estimates = [
+        load_estimate(trajectory, tum_time_unit=args.tum_time_unit)
+        for trajectory in args.trajectory
+    ]
+    if args.common_estimate_timestamps:
+        estimates = restrict_to_common_timestamps(estimates)
     results = []
-    for trajectory in args.trajectory:
-        result = evaluate(ground_truth, load_estimate(trajectory), args.max_diff_ns)
+    for trajectory, estimate in zip(args.trajectory, estimates):
+        result = evaluate(
+            ground_truth,
+            estimate,
+            args.max_diff_ns,
+        )
         result["trajectory"] = str(trajectory.resolve())
         results.append(result)
     payload = {
@@ -234,6 +275,8 @@ def main():
             "ground_truth_used_after_engine_exit": True,
             "association": "nearest_timestamp_one_to_one",
             "max_diff_ns": args.max_diff_ns,
+            "tum_time_unit": args.tum_time_unit,
+            "common_estimate_timestamps": args.common_estimate_timestamps,
             "alignment": "SE(3) Umeyama; Sim(3) diagnostic only",
             "rpe_delta": "consecutive associated poses",
         },

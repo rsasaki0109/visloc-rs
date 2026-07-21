@@ -1,0 +1,280 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\evaluation_vs_legacy.json",
+      "sha256": "ef8a8be0485dee6712e47e169e71f9339a01aaccf54044791e910477173008c8"
+    },
+    {
+      "exists": true,
+      "kind": "trajectory",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\visloc.tum",
+      "sha256": "ed466f243fc93e233eb05be141a63e0e3d2a195cb9a9a3d271cc3f6db27d5b15"
+    },
+    {
+      "exists": true,
+      "kind": "stdout_log",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\stdout.log",
+      "sha256": "9fdb1e0d4d99f05ebf460288c232d6e3dd567c6a5324f0380aee450cde6725dd"
+    },
+    {
+      "exists": true,
+      "kind": "debug_log",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\stderr.log",
+      "sha256": "f1c7c2b2414148bdc3ba2eec84121036b3d2c1e7b449db0667ca04eec4dc5fa9"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\model\\images.txt",
+      "sha256": "3b488be7057b96d1166b85b1bb7693c596f9fefb19383281a705a7218afbbb77"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\ab_mh03_300_geometry_conflict_recovery_v2_20260719\\model\\points3D.txt",
+      "sha256": "823beda5b254ffbec58ebc9c25b60c21ad92bdce7bf3e31dcd3ba67e252a3adf"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same frozen MH03-300 feature cache; ordered window 5 plus skip offsets 8,12 stride 2; clean model first; GT read only after engine exit",
+    "script": "examples/sequential_sfm_demo.rs"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [
+      "image-io",
+      "onnx-inference"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": "sequential_sfm_demo"
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [
+      "target\\release\\examples\\sequential_sfm_demo.exe",
+      "...",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--colmap-style",
+      "--next-image-policy",
+      "visibility",
+      "--post-refinement-registration",
+      "--geometry-conflict-recovery"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "target\\release\\examples\\sequential_sfm_demo.exe ... --window 5 --skip-offsets 8,12 --skip-stride 2 --colmap-style --next-image-policy visibility --post-refinement-registration --geometry-conflict-recovery"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "conflict_recovery_max_clean_error_increase_ratio": 0.001,
+      "conflict_recovery_max_hypotheses": 32,
+      "conflict_recovery_max_mean_reprojection_px": 1.0,
+      "conflict_recovery_max_reprojection_error_px": 2.0,
+      "conflict_recovery_min_views": 3,
+      "frames": 300,
+      "geometry_guided_conflict_recovery": true,
+      "sensor_mode": "monocular",
+      "skip_offsets": "8,12",
+      "skip_stride": 2,
+      "temporal_window": 5
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T06:12:24Z",
+  "dataset": {
+    "checksum": "ed4f9723ef45d23ca22049bb571e545146eb4a5b59d485e50ce34021b3a90cad",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_03_medium\\mav0",
+    "sequence": "MH_03_medium",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "candidate_pairs",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 1775
+    },
+    {
+      "implementation": null,
+      "name": "verified_correspondences",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2033967
+    },
+    {
+      "implementation": null,
+      "name": "connected_components",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 26390
+    },
+    {
+      "implementation": null,
+      "name": "conflicting_components",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 2352
+    },
+    {
+      "implementation": null,
+      "name": "conflicting_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 255974
+    },
+    {
+      "implementation": null,
+      "name": "proposed_geometry_tracks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 992
+    },
+    {
+      "implementation": null,
+      "name": "geometry_recovered_tracks",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 992
+    },
+    {
+      "implementation": null,
+      "name": "geometry_recovered_observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 65522
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "post_refinement_registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 3
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 9251
+    },
+    {
+      "implementation": null,
+      "name": "observations",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 197433
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.579
+    },
+    {
+      "implementation": null,
+      "name": "matching_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 54.1
+    },
+    {
+      "implementation": null,
+      "name": "sfm_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1534.1
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0033636605847896157
+    },
+    {
+      "implementation": null,
+      "name": "legacy_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0034873227994662776
+    },
+    {
+      "implementation": null,
+      "name": "colmap_ate_sim3_common_m",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.006163060482608199
+    },
+    {
+      "implementation": null,
+      "name": "colmap_mapper_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 2260.6215111999772
+    }
+  ],
+  "models": [],
+  "notes": "B3 geometry-guided recovery passed the MH03 development gate: 300/300 retained; common-pose Sim3 ATE improved 3.55% from 0.3487cm to 0.3364cm; 992 cycle-supported tracks admitted; runtime remained below COLMAP mapper. Held-out MH01 pending.",
+  "result_kind": "visloc_run",
+  "run_id": "mono-sfm-visloc-b3-geometry-conflict-MH_03_medium-20260719T060907Z",
+  "schema_version": 1,
+  "status": "success"
+}

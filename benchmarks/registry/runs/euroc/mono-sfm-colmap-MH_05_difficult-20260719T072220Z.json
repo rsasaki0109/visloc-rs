@@ -1,0 +1,180 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "summary",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\summary.json",
+      "sha256": "93705f03a3be227617163da9f79f4076c1eccec89a9e6a9dde7dd32c3c4bc7cb"
+    },
+    {
+      "exists": true,
+      "kind": "evaluation",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\evaluation.json",
+      "sha256": "2fbd07686d738ca2e9876f4125083bec27c9c4c4dfb45f7c5b4dc87077a5960f"
+    },
+    {
+      "exists": true,
+      "kind": "images",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\colmap\\text_models\\0\\images.txt",
+      "sha256": "8f0da79a01d1e83f3b5e404e3c80801f0e13efec6f985b78e8bdb6e937f3d81d"
+    },
+    {
+      "exists": true,
+      "kind": "points3d",
+      "path": "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719\\colmap\\text_models\\0\\points3D.txt",
+      "sha256": "2d0b725af4e65250b074e2fadeace8921fdcf2a5a5f9eff48458c0497c2d6d1f"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same rectified EuRoC cam0 frames, mono-to-mono, Sim(3) camera trajectory against EuRoC ground truth; GT read only after both engines exit",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "exploratory",
+  "command": {
+    "argv": [
+      "scripts\\run_mono_sfm_headtohead.py",
+      "--mav0",
+      "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+      "--out-dir",
+      "E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719",
+      "--frames",
+      "300",
+      "--python",
+      "E:\\tools\\venv-cu\\Scripts\\python.exe",
+      "--cargo",
+      "C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe",
+      "--colmap",
+      "E:\\tools\\colmap\\bin\\colmap.exe",
+      "--device",
+      "cuda",
+      "--max-keypoints",
+      "2048",
+      "--window",
+      "5",
+      "--skip-offsets",
+      "8,12",
+      "--skip-stride",
+      "2",
+      "--post-refinement-registration",
+      "--geometry-conflict-recovery",
+      "--visloc-next-image-policy",
+      "visibility",
+      "--colmap-feature",
+      "SIFT",
+      "--colmap-backend",
+      "CERES",
+      "--capture-registry"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "scripts\\run_mono_sfm_headtohead.py --mav0 E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0 --out-dir E:\\visloc_archive\\heldout_mh05_300_geometry_conflict_recovery_20260719 --frames 300 --python E:\\tools\\venv-cu\\Scripts\\python.exe --cargo C:\\Users\\rsasa\\.cargo\\bin\\cargo.exe --colmap E:\\tools\\colmap\\bin\\colmap.exe --device cuda --max-keypoints 2048 --window 5 --skip-offsets 8,12 --skip-stride 2 --post-refinement-registration --geometry-conflict-recovery --visloc-next-image-policy visibility --colmap-feature SIFT --colmap-backend CERES --capture-registry"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "engine": "colmap",
+      "frames": 300,
+      "sensor_mode": "monocular"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T07:23:25Z",
+  "dataset": {
+    "checksum": "31464884db35ac842e55e9c8207753d65c90c0f046f9fd9266e07efb2d333d94",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_05_difficult\\mav0",
+    "sequence": "MH_05_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "wall_clock_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "s",
+      "value": 1820.6601072999765
+    },
+    {
+      "implementation": null,
+      "name": "registered_frames",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 300
+    },
+    {
+      "implementation": null,
+      "name": "registration_rate",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "ate_sim3_m",
+      "primary": true,
+      "source_artifact": null,
+      "unit": "m",
+      "value": 0.0126343233636283
+    },
+    {
+      "implementation": null,
+      "name": "sim3_scale",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "ratio",
+      "value": 0.05057106604935307
+    },
+    {
+      "implementation": null,
+      "name": "mean_reprojection_px",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "px",
+      "value": 0.4133994985344955
+    },
+    {
+      "implementation": null,
+      "name": "points3d",
+      "primary": false,
+      "source_artifact": null,
+      "unit": "count",
+      "value": 11958
+    }
+  ],
+  "models": [],
+  "notes": "Same-input monocular head-to-head; shared rectification and Rust build time excluded from engine wall time.",
+  "result_kind": "external_rerun",
+  "run_id": "mono-sfm-colmap-MH_05_difficult-20260719T072220Z",
+  "schema_version": 1,
+  "status": "success"
+}

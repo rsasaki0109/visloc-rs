@@ -236,10 +236,13 @@ mod tests {
         // Uniform similarity: with no ranking signal, every cross-component
         // pair should still appear exactly once, and no within-component
         // pair ever should.
-        let candidates =
-            generate_bridge_candidates(&components, |_, _| 1.0, &BridgeCandidateOptions {
+        let candidates = generate_bridge_candidates(
+            &components,
+            |_, _| 1.0,
+            &BridgeCandidateOptions {
                 max_candidates: usize::MAX,
-            });
+            },
+        );
         assert_eq!(candidates.len(), 9, "3x3 cross-component pairs expected");
         for &(i, j) in &candidates {
             let comp_of = |x: usize| components.iter().position(|c| c.contains(&x)).unwrap();
@@ -466,9 +469,12 @@ mod tests {
         // coordinates and classify.
         let correspondences: Vec<TwoViewCorrespondence> = relaxed_matches
             .iter()
-            .map(|m| TwoViewCorrespondence::new(previous_xy[m.query_index], current_xy[m.train_index]))
+            .map(|m| {
+                TwoViewCorrespondence::new(previous_xy[m.query_index], current_xy[m.train_index])
+            })
             .collect();
-        let verifier = TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
+        let verifier =
+            TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
         assert!(
             matches!(

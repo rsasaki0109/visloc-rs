@@ -1,0 +1,82 @@
+{
+  "artifacts": [
+    {
+      "exists": true,
+      "kind": "failure_log",
+      "path": "E:\\visloc_archive\\heldout_mh04_300_v34_frozen_transactional_wide_vs_colmap41_caspar_20260719\\logs\\colmap_mapping.log",
+      "sha256": "29c4d54e1d1ac66ce5623e362fd18bc4b33d5909bf2171007994fbe2e313a764"
+    }
+  ],
+  "benchmark": {
+    "docs": [
+      "docs/visual_slam_sequential_sfm_plan.md"
+    ],
+    "id": "mono-sequential-sfm-vs-colmap",
+    "name": "Monocular Sequential SfM vs COLMAP 4.1",
+    "protocol": "Same MH04 SIFT database and images; requested COLMAP 4.1 incremental mapper global Caspar backend",
+    "script": "scripts/run_mono_sfm_headtohead.py"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "f229dde2ba2bc2cfca5b95808e8babd8598b02ded2d96a88481067a694db339f",
+    "features": [],
+    "profile": null,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "negative",
+  "command": {
+    "argv": [
+      "E:\\tools\\colmap\\bin\\colmap.exe",
+      "mapper",
+      "...",
+      "--Mapper.ba_local_backend",
+      "CERES",
+      "--Mapper.ba_global_backend",
+      "CASPAR",
+      "--Mapper.ba_use_gpu",
+      "1"
+    ],
+    "cwd": "C:\\Users\\rsasa\\Workspace\\visloc-rs",
+    "raw": "E:\\tools\\colmap\\bin\\colmap.exe mapper ... --Mapper.ba_local_backend CERES --Mapper.ba_global_backend CASPAR --Mapper.ba_use_gpu 1"
+  },
+  "config": {
+    "config_files": [],
+    "params": {
+      "ba_global_backend": "CASPAR",
+      "engine": "colmap",
+      "version": "4.1.0 fa8e3b3"
+    },
+    "seed": null
+  },
+  "created_utc": "2026-07-19T16:05:02Z",
+  "dataset": {
+    "checksum": "ea718bdc40c01ff5e32d95fc186a80b1cf8a6ff48275e7337b8859b98be1c25f",
+    "checksum_method": "sha256_tree_v1",
+    "name": "EuRoC MAV",
+    "path": "E:\\datasets\\euroc_mav\\machine_hall\\MH_04_difficult\\mav0",
+    "sequence": "MH_04_difficult",
+    "version": "first 300 synchronized cam0 frames"
+  },
+  "failure_reason": "Installed COLMAP 4.1 incremental mapper rejects global Caspar before reconstruction: Check failed: ba_global_backend != BundleAdjustmentBackend::CASPAR",
+  "git": {
+    "branch": "agent/tight-vi-tracking-cliff",
+    "commit": "37d98974d4b26d135a3d4330efbf5375db13030a",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "DESKTOP-PTSK105",
+    "machine": "AMD64",
+    "notes": null,
+    "os": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "metrics": [],
+  "models": [],
+  "notes": "Controlled backend DNF. No reconstruction was attempted. The runner now falls back only on this exact unsupported-Caspar invariant and records requested/effective backend.",
+  "result_kind": "external_rerun",
+  "run_id": "mono-sfm-colmap41-caspar-dnf-MH_04_difficult-20260719T160225Z",
+  "schema_version": 1,
+  "status": "dnf"
+}

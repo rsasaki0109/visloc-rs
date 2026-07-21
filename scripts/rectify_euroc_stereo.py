@@ -83,12 +83,19 @@ def main() -> int:
     ap.add_argument("--alpha", type=float, default=0.0,
                     help="stereoRectify free-scaling: 0=crop to valid pixels "
                          "(no black border, recommended for VO), 1=keep all")
+    ap.add_argument("--frames", type=int, default=None,
+                    help="rectify only the first N synchronized frames")
+    ap.add_argument("--left-only", action="store_true",
+                    help="write only rectified cam0 images (monocular benchmarks)")
     args = ap.parse_args()
+    if args.frames is not None and args.frames <= 0:
+        ap.error("--frames must be positive")
 
     m = args.mav0
     out = args.out_dir
     os.makedirs(f"{out}/image_0", exist_ok=True)
-    os.makedirs(f"{out}/image_1", exist_ok=True)
+    if not args.left_only:
+        os.makedirs(f"{out}/image_1", exist_ok=True)
 
     k0, d0, t0, size = _load_cam(f"{m}/cam0/sensor.yaml")
     k1, d1, t1, _ = _load_cam(f"{m}/cam1/sensor.yaml")
@@ -96,7 +103,10 @@ def main() -> int:
     # T_BS is sensor->body; point_cam1 = T_S1_S0 @ point_cam0.
     t_s1_s0 = np.linalg.inv(t1) @ t0
     rot = t_s1_s0[:3, :3]
-    trans = t_s1_s0[:3, 3]
+    # OpenCV 4 accepted a flat `(3,)` vector here, while OpenCV 5's Python
+    # binding reaches a GEMM shape assertion on that form. A 3x1 vector is the
+    # canonical stereoCalibrate/stereoRectify representation and works on both.
+    trans = t_s1_s0[:3, 3].reshape(3, 1)
 
     r0, r1, p0, p1, _q, _, _ = cv2.stereoRectify(
         k0, d0, k1, d1, size, rot, trans,
@@ -124,21 +134,25 @@ def main() -> int:
         print(f"NOTE cam0/cam1 frame counts differ ({len(left_set)} vs "
               f"{len(right_set)}); using {len(common)} timestamp-matched pairs "
               f"(dropped {dropped} unpaired frames)", flush=True)
+    if args.frames is not None:
+        common = common[: args.frames]
     left = right = common
 
     with open(f"{out}/timestamps.txt", "w") as ts:
         for i, (a, b) in enumerate(zip(left, right)):
             ia = cv2.imread(f"{m}/cam0/data/{a}", cv2.IMREAD_GRAYSCALE)
-            ib = cv2.imread(f"{m}/cam1/data/{b}", cv2.IMREAD_GRAYSCALE)
             cv2.imwrite(f"{out}/image_0/{i:06d}.png",
                         cv2.remap(ia, m0x, m0y, cv2.INTER_LINEAR))
-            cv2.imwrite(f"{out}/image_1/{i:06d}.png",
-                        cv2.remap(ib, m1x, m1y, cv2.INTER_LINEAR))
+            if not args.left_only:
+                ib = cv2.imread(f"{m}/cam1/data/{b}", cv2.IMREAD_GRAYSCALE)
+                cv2.imwrite(f"{out}/image_1/{i:06d}.png",
+                            cv2.remap(ib, m1x, m1y, cv2.INTER_LINEAR))
             ts.write(f"{i:06d} {os.path.splitext(a)[0]}\n")
             if (i + 1) % 500 == 0:
                 print(f"  rectified {i + 1}/{len(left)}", flush=True)
 
-    print(f"DONE rectified {len(left)} stereo pairs -> {out}", flush=True)
+    mode = "cam0 frames" if args.left_only else "stereo pairs"
+    print(f"DONE rectified {len(left)} {mode} -> {out}", flush=True)
     return 0
 
 
