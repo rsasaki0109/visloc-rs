@@ -107,6 +107,10 @@ impl HierarchicalSubmapGraph {
         self.nodes.get(&id)
     }
 
+    pub(crate) fn nodes_mut(&mut self) -> impl Iterator<Item = &mut HierarchicalSubmapNode> {
+        self.nodes.values_mut()
+    }
+
     pub fn scale_constraints(&self) -> &[SubmapSim3Constraint] {
         &self.scale_constraints
     }

@@ -72,6 +72,12 @@ pub use hierarchical_sfm::{
     HierarchicalSfmError, HierarchicalSfmResult, HierarchicalSfmSeam,
 };
 
+mod hierarchical_seam_ba;
+pub use hierarchical_seam_ba::{
+    HierarchicalSeamBaConfig, HierarchicalSeamBaError, HierarchicalSeamBaResult,
+};
+pub(crate) use hierarchical_seam_ba::HierarchicalSeamLandmarkLink;
+
 pub mod ordered_view_graph;
 pub use ordered_view_graph::{
     generate_ordered_pairs, OrderedPairCandidate, OrderedPairGeneratorConfig, OrderedPairHints,

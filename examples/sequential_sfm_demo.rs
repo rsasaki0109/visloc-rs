@@ -83,8 +83,8 @@ use nalgebra::{Point2, Point3, SMatrix, UnitQuaternion};
 use rayon::prelude::*;
 use visloc_rs::slam::{
     hierarchical_sfm, partition_ordered_submaps, AdaptiveSubmapPartitionHints,
-    CameraCentreScaleRefinementConfig, HierarchicalSfmConfig, HierarchicalSfmResult,
-    PairRotationEvidence,
+    CameraCentreScaleRefinementConfig, HierarchicalSeamBaConfig, HierarchicalSfmConfig,
+    HierarchicalSfmResult, PairRotationEvidence,
 };
 use visloc_rs::vision::stereo_bootstrap::triangulate_two_view_left_frame;
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
@@ -144,6 +144,7 @@ struct Args {
     submap_min_shared_observations: usize,
     submap_build_threads: usize,
     submap_camera_scale_refinement: bool,
+    submap_seam_ba: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -184,6 +185,7 @@ fn parse_args() -> Result<Args, String> {
     let mut submap_min_shared_observations = 2usize;
     let mut submap_build_threads = 2usize;
     let mut submap_camera_scale_refinement = false;
+    let mut submap_seam_ba = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -293,6 +295,7 @@ fn parse_args() -> Result<Args, String> {
                 submap_build_threads = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--submap-camera-scale-refinement" => submap_camera_scale_refinement = true,
+            "--submap-seam-ba" => submap_seam_ba = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -362,6 +365,7 @@ fn parse_args() -> Result<Args, String> {
         submap_min_shared_observations,
         submap_build_threads,
         submap_camera_scale_refinement,
+        submap_seam_ba,
     })
 }
 
@@ -1541,6 +1545,18 @@ fn export_hierarchical_result(
         poses_out.len(),
         features.len()
     );
+    if let Some(ba) = &result.atlas.seam_bundle_adjustment {
+        println!(
+            "  seam BA: poses={} (fixed={}) landmarks={} observations={} cost={:.3}->{:.3} iterations={}",
+            ba.pose_count,
+            ba.fixed_pose_count,
+            ba.landmark_count,
+            ba.observation_count,
+            ba.initial_cost,
+            ba.final_cost,
+            ba.iterations,
+        );
+    }
     for (index, window) in result.windows.iter().enumerate() {
         println!(
             "  submap {index}: images {:?}, seam_support={}",
@@ -1720,6 +1736,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.submap_camera_scale_refinement {
             hierarchical_config.camera_centre_refinement =
                 Some(CameraCentreScaleRefinementConfig::default());
+        }
+        if args.submap_seam_ba {
+            hierarchical_config.seam_bundle_adjustment = Some(HierarchicalSeamBaConfig::default());
         }
         hierarchical_config.local_submap.sfm = config.clone();
         let source_frame_ids = (0..features.len())

@@ -16,11 +16,13 @@ use crate::{
     collect_submap_overlap_evidence, estimate_submap_sim3_constraint, partition_ordered_submaps,
     refine_submap_sim3_from_camera_centres, remap_pairs_to_submap, shared_camera_center_matches,
     AdaptiveSubmapPartitionConfig, AdaptiveSubmapPartitionHints, CameraCentreScaleRefinementConfig,
-    CameraCentreScaleRefinementRejection, HierarchicalSubmapGraph, HierarchicalSubmapGraphError,
-    HierarchicalSubmapOptimizationResult, LocalSubmap, LocalSubmapBuildError, LocalSubmapBuilder,
-    LocalSubmapConfig, PairRotationEvidence, PairwiseMatches, Sim3PoseGraphConfig,
-    SubmapOverlapConfig, SubmapOverlapError, SubmapPartitionError, SubmapSim3AlignmentConfig,
-    SubmapSim3Rejection, SubmapWindow, VerifiedSubmapConstraint,
+    CameraCentreScaleRefinementRejection, HierarchicalSeamBaConfig, HierarchicalSeamBaError,
+    HierarchicalSeamBaResult, HierarchicalSeamLandmarkLink, HierarchicalSubmapGraph,
+    HierarchicalSubmapGraphError, HierarchicalSubmapOptimizationResult, LocalSubmap,
+    LocalSubmapBuildError, LocalSubmapBuilder, LocalSubmapConfig, PairRotationEvidence,
+    PairwiseMatches, Sim3PoseGraphConfig, SubmapOverlapConfig, SubmapOverlapError,
+    SubmapPartitionError, SubmapSim3AlignmentConfig, SubmapSim3Rejection, SubmapWindow,
+    VerifiedSubmapConstraint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +33,7 @@ pub struct HierarchicalSfmConfig {
     pub alignment: SubmapSim3AlignmentConfig,
     pub pose_graph: Sim3PoseGraphConfig,
     pub camera_centre_refinement: Option<CameraCentreScaleRefinementConfig>,
+    pub seam_bundle_adjustment: Option<HierarchicalSeamBaConfig>,
     /// Maximum independent local reconstructions evaluated concurrently.
     pub max_parallel_local_builds: usize,
 }
@@ -44,6 +47,7 @@ impl Default for HierarchicalSfmConfig {
             alignment: SubmapSim3AlignmentConfig::default(),
             pose_graph: Sim3PoseGraphConfig::default(),
             camera_centre_refinement: None,
+            seam_bundle_adjustment: None,
             max_parallel_local_builds: 2,
         }
     }
@@ -79,6 +83,7 @@ pub struct HierarchicalSfmAtlas {
     pub seams: Vec<HierarchicalSfmSeam>,
     /// `None` for a single-submap sequence, which has no global gauge variables.
     pub optimization: Option<HierarchicalSubmapOptimizationResult>,
+    pub seam_bundle_adjustment: Option<HierarchicalSeamBaResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +117,7 @@ pub enum HierarchicalSfmError {
     },
     Hierarchy(HierarchicalSubmapGraphError),
     ParallelBuild(String),
+    SeamBundleAdjustment(HierarchicalSeamBaError),
     NoSubmaps,
 }
 
@@ -150,6 +156,9 @@ impl fmt::Display for HierarchicalSfmError {
             ),
             Self::Hierarchy(error) => write!(f, "hierarchical graph failed: {error}"),
             Self::ParallelBuild(error) => write!(f, "local submap worker pool failed: {error}"),
+            Self::SeamBundleAdjustment(error) => {
+                write!(f, "seam bundle adjustment failed: {error}")
+            }
             Self::NoSubmaps => write!(f, "hierarchical SfM received no submaps"),
         }
     }
@@ -166,6 +175,12 @@ impl From<SubmapPartitionError> for HierarchicalSfmError {
 impl From<HierarchicalSubmapGraphError> for HierarchicalSfmError {
     fn from(value: HierarchicalSubmapGraphError) -> Self {
         Self::Hierarchy(value)
+    }
+}
+
+impl From<HierarchicalSeamBaError> for HierarchicalSfmError {
+    fn from(value: HierarchicalSeamBaError) -> Self {
+        Self::SeamBundleAdjustment(value)
     }
 }
 
@@ -249,10 +264,12 @@ pub fn optimize_independent_submaps(
             hierarchy: HierarchicalSubmapGraph::new(0, root),
             seams: Vec::new(),
             optimization: None,
+            seam_bundle_adjustment: None,
         });
     }
 
     let mut constraints = Vec::with_capacity(submaps.len() - 1);
+    let mut seam_links = Vec::new();
     let mut seams = Vec::with_capacity(submaps.len() - 1);
     for index in 0..submaps.len() - 1 {
         let source_id = index as u64;
@@ -350,6 +367,15 @@ pub fn optimize_independent_submaps(
             camera_refinement_abs_log_scale_change: refinement_scale_change,
             camera_refinement_mean_residual_ratio: refinement_residual,
         });
+        for &match_index in &constraint.inlier_match_indices {
+            let point_match = &overlap.point_matches[match_index];
+            seam_links.push(HierarchicalSeamLandmarkLink {
+                source_submap_id: source_id,
+                target_submap_id: target_id,
+                source_landmark_id: point_match.source_landmark_id,
+                target_landmark_id: point_match.target_landmark_id,
+            });
+        }
         constraints.push(constraint);
     }
 
@@ -363,10 +389,22 @@ pub fn optimize_independent_submaps(
         hierarchy.add_constraint(VerifiedSubmapConstraint::Sim3(constraint))?;
     }
     let optimization = hierarchy.optimize(&config.pose_graph)?;
+    let seam_bundle_adjustment = config
+        .seam_bundle_adjustment
+        .as_ref()
+        .map(|ba_config| {
+            crate::hierarchical_seam_ba::refine_hierarchical_seams(
+                &mut hierarchy,
+                &seam_links,
+                ba_config,
+            )
+        })
+        .transpose()?;
     Ok(HierarchicalSfmAtlas {
         hierarchy,
         seams,
         optimization: Some(optimization),
+        seam_bundle_adjustment,
     })
 }
 

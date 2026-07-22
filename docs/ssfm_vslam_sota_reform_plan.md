@@ -390,6 +390,31 @@ speed target, but the accuracy gate remains open. S2c must jointly refine the
 overlap poses/points (and selectively retriangulate/weld seam tracks) before a
 full MH_03 claim; the camera-only degeneracy may not be bypassed or relaxed.
 
+S2d selective seam BA (2026-07-22):
+the accepted R2 inlier landmark identities now form explicit cross-submap
+unions for an opt-in transactional BA. Root-only prefix poses remain fixed to
+anchor gauge and preserve trusted history; poses repeated in the overlap and
+all target-side poses/points are jointly optimized with sparse Schur BA. A
+candidate writes back to both local gauges only when its robust reprojection
+cost does not worsen. Structure observed exclusively by fixed poses is omitted
+because its Schur blocks are exactly disconnected from every pose update.
+
+On the same 120-frame development smoke, fixing the 16-frame root-only prefix
+and running five seam-BA iterations reduced 56,363-observation cost from
+1,182,171 to 53,763. It retained 120/120 registration and achieved Sim(3) ATE
+0.4641 cm versus dense-control 0.4681 cm. The deterministic rerun took 163.57 s
+versus dense 336.47 s (48.61%) and produced a byte-identical `images.txt`
+SHA-256 `5de383041e322e262ddecf91e0282036de5fd118621c9775ae0a69bd4592c29e`.
+Four BA iterations were faster (160.14 s) but missed accuracy at 0.4742 cm, and
+an 80-frame root window was independently rejected by the unchanged R2 mean
+residual gate (0.01658 > 0.015). Thus the frozen smoke choice is the verified
+88/104 windows, 72-frame overlap, four shared observations, two local workers,
+and five selective BA iterations.
+
+This satisfies the S2 gate only on the 120-frame development smoke. Full MH_03
+must still confirm peak RAM, every seam RPE, registration/ATE, and <=50% wall
+time without further tuning; seam landmark welding in export also remains open.
+
 ### S3 — Hard-video robustness
 
 - Add motion/blur/dynamic-region quality scores to edge selection, not to the
