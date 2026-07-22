@@ -80,6 +80,7 @@ pub type UpdateCellOutput = (Array3<f32>, Array3<f32>, Array3<f32>);
 /// e.g., stereo cam0/cam1 callers.
 #[derive(Clone)]
 pub struct DpvoOnnxSession {
+    backend: OnnxBackend,
     fnet: Arc<Mutex<Session>>,
     inet: Arc<Mutex<Session>>,
     update_pre_agg: Arc<Mutex<Session>>,
@@ -120,6 +121,7 @@ impl DpvoOnnxSession {
         backend: OnnxBackend,
     ) -> Result<Self, DpvoOnnxError> {
         Ok(Self {
+            backend,
             fnet: Arc::new(Mutex::new(build_session(fnet_path.as_ref(), backend)?)),
             inet: Arc::new(Mutex::new(build_session(inet_path.as_ref(), backend)?)),
             update_pre_agg: Arc::new(Mutex::new(build_session(
@@ -146,6 +148,28 @@ impl DpvoOnnxSession {
     /// `(1, 384, H/4, W/4)` context map out.
     pub fn run_inet(&self, image: ArrayView4<'_, f32>) -> Result<Array4<f32>, DpvoOnnxError> {
         run_encoder(&self.inet, image, "imap")
+    }
+
+    /// Run the independent feature and context encoders concurrently.
+    ///
+    /// The graphs consume the same immutable input and own separate ORT
+    /// sessions, so there is no dependency that requires serial execution.
+    /// Concurrency is limited to strict CUDA: CPU and fallback-capable
+    /// sessions retain their legacy serial behavior because thread dispatch
+    /// can cost more than it saves for small CPU inputs.
+    pub fn run_encoders(
+        &self,
+        image: ArrayView4<'_, f32>,
+    ) -> Result<(Array4<f32>, Array4<f32>), DpvoOnnxError> {
+        if self.backend == OnnxBackend::Cuda {
+            let (fmap, imap) = rayon::join(
+                || self.run_fnet(image.view()),
+                || self.run_inet(image.view()),
+            );
+            Ok((fmap?, imap?))
+        } else {
+            Ok((self.run_fnet(image.view())?, self.run_inet(image)?))
+        }
     }
 
     /// Run `dpvo_update_pre_agg.onnx`: `Update.forward` up to (but

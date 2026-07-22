@@ -675,6 +675,14 @@ Thus CUDA ONNX inference alone is not close to V4's 50 ms/frame gate; the
 native CPU correlation and update paths are the measured primary bottlenecks.
 The previous ORT 1.23.2 CPU distribution now fails honestly under the same
 strict flag instead of silently producing CPU-labelled-as-CUDA evidence.
+Reducing the diagnostic graph to 16 patches/frame and smaller 8/4/7 windows
+still took 287.32 ms/frame and produced a short-prefix Sim(3) scale of 2.46,
+so graph starvation is not an acceptable route to the gate. Running the
+independent fnet/inet CUDA sessions concurrently preserved the exact same
+trajectory and reduced that matched probe to 243.56 ms/frame (encoder 42.60
+ms), a useful but insufficient 15.2% end-to-end improvement. The next runtime
+architecture step must keep correlation/update tensors on GPU rather than
+relying on further queue shrinkage or encoder-only tuning.
 
 ## 6. Execution order and resource split
 

@@ -416,4 +416,21 @@ fn fnet_inet_sessions_load_and_produce_finite_output_of_the_documented_shape() {
         imap.iter().all(|v| v.is_finite()),
         "inet produced a non-finite value"
     );
+
+    let (parallel_fmap, parallel_imap) =
+        time_repeated("run_encoders concurrent (64x96 input)", 20, || {
+            session.run_encoders(image.view()).expect("run_encoders")
+        });
+    let fmap_diff = max_abs_diff(
+        &fmap.iter().copied().collect::<Vec<_>>(),
+        &parallel_fmap.iter().copied().collect::<Vec<_>>(),
+    );
+    let imap_diff = max_abs_diff(
+        &imap.iter().copied().collect::<Vec<_>>(),
+        &parallel_imap.iter().copied().collect::<Vec<_>>(),
+    );
+    assert!(
+        fmap_diff <= PASS_THRESHOLD && imap_diff <= PASS_THRESHOLD,
+        "concurrent encoders changed outputs: fmap={fmap_diff:.3e}, imap={imap_diff:.3e}"
+    );
 }

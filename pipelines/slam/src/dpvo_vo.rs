@@ -2652,8 +2652,7 @@ impl DpvoOdometry {
 
         let encode_start = Instant::now();
         let input = grayscale_to_input_tensor(image);
-        let fmap4 = self.session.run_fnet(input.view())?;
-        let imap4 = self.session.run_inet(input.view())?;
+        let (fmap4, imap4) = self.session.run_encoders(input.view())?;
         self.stats.encode_ms_total += encode_start.elapsed().as_secs_f64() * 1000.0;
 
         let fmap = fmap4.index_axis(Axis(0), 0).to_owned();
