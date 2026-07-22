@@ -277,6 +277,22 @@ cross-submap test.
 Gate: near-linear empirical growth from 300 to full EuRoC length, bounded VSLAM
 memory, and no accuracy/completeness regression relative to the dense control.
 
+R3a typed hierarchy foundation (2026-07-22):
+`pipelines/slam/src/hierarchical_submap_graph.rs` now owns independent
+`LocalSubmap` nodes and stores node state as `local_from_atlas`. Under that
+convention R2's measured `target_from_source` composes directly as a graph
+edge, avoiding an easy inverse/order bug. Initialization propagates only over
+verified scale-bearing constraints from a fixed root and rejects every
+disconnected node. `RotationOnlyConstraint` values remain in a separate typed
+collection and cannot enter the scale solver. Tests prove shared points from
+two gauges materialize to the same atlas point, a connected three-node scale
+chain optimizes, and disconnected/rotation-only hierarchies fail explicitly.
+
+This is an architecture milestone, not the R3 gate: the current submap graph
+delegates to the existing deterministic Sim3 optimizer, whose normal equations
+are dense. It provides the stable boundary for a block-sparse submap solve and
+S2 mapper, but no near-linear/full-sequence claim is made yet.
+
 ## 4. Sequential SfM campaign
 
 ### S1 — Freeze and measure full-sequence scaling

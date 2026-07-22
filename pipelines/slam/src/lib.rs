@@ -46,6 +46,12 @@ pub use submap_alignment::{
     SubmapSim3RejectionReason, VerifiedSubmapConstraint,
 };
 
+pub mod hierarchical_submap_graph;
+pub use hierarchical_submap_graph::{
+    HierarchicalSubmapGraph, HierarchicalSubmapGraphError, HierarchicalSubmapId,
+    HierarchicalSubmapNode, HierarchicalSubmapOptimizationResult,
+};
+
 pub mod ordered_view_graph;
 pub use ordered_view_graph::{
     generate_ordered_pairs, OrderedPairCandidate, OrderedPairGeneratorConfig, OrderedPairHints,

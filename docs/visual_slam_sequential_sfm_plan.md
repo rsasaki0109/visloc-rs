@@ -1294,6 +1294,15 @@ Profile first, then optimize the largest measured stages:
 Gate: beat the fresh best COLMAP 4.1 wall time on MH_03 300 while retaining its
 accuracy/registration gate; then demonstrate scaling on a full EuRoC sequence.
 
+Hierarchical-map foundation (2026-07-22): the shared SLAM library now has a
+typed `HierarchicalSubmapGraph` over independent `LocalSubmap` nodes. R2
+`target_from_source` Sim3 measurements compose directly because nodes store
+`local_from_atlas`; root connectivity is mandatory, and rotation-only evidence
+is retained separately instead of acquiring a scale. Three directionality,
+connected-chain, and honest-rejection tests pass. The graph still uses the
+existing dense-normal-equation Sim3 optimizer internally, so this is the S2/R3
+integration boundary—not a runtime-scaling result.
+
 ### A4/B5 — Generalization and release candidate (2-4 weeks)
 
 - Freeze one configuration per sensor/dataset family before held-out runs.
