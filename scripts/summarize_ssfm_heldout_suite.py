@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-ENGINES = ("visloc_hierarchical", "colmap_incremental", "colmap_global")
+ENGINES = (
+    "visloc_hierarchical",
+    "colmap_incremental",
+    "colmap_global",
+    "gluemap",
+    "instantsfm",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -206,9 +212,21 @@ def main() -> int:
             and aggregate["visloc_hierarchical"]["frontier_sequence_count"] == len(sequences),
             "scope": "Only the reproduced COLMAP incremental/global baselines in this artifact.",
         },
+        "external_baseline_completeness_gate": {
+            "passed": all(
+                aggregate[engine]["success_count"]
+                + len(aggregate[engine]["failures"])
+                == len(sequences)
+                for engine in ("gluemap", "instantsfm")
+            ),
+            "scope": (
+                "Both external engines have a success or explicit DNF cell "
+                "for every frozen sequence."
+            ),
+        },
         "claimable_sota_gate": {
             "passed": False,
-            "reason": "GLUEMAP, InstantSfM, ORBIT, and remaining release requirements are separate mandatory evidence.",
+            "reason": "ORBIT and remaining release requirements are separate mandatory evidence.",
         },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

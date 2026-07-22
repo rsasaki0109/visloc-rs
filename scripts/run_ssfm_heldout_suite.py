@@ -18,6 +18,8 @@ REPO = Path(__file__).resolve().parents[1]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
+    parser.add_argument("--external-protocol", type=Path, required=True)
+    parser.add_argument("--external-setup-manifest", type=Path, required=True)
     parser.add_argument("--extracted-root", type=Path, required=True)
     parser.add_argument("--download-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
@@ -134,6 +136,9 @@ def main() -> int:
     protocol_bytes = args.protocol.read_bytes()
     protocol = json.loads(protocol_bytes)
     protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+    external_protocol = json.loads(args.external_protocol.read_text(encoding="utf-8"))
+    if external_protocol["heldout_protocol"]["sha256"] != protocol_sha256:
+        raise ValueError("external protocol does not bind held-out protocol")
     sequences = protocol["selection"]["held_out_sequences"]
     if len(sequences) != 3 or len(set(sequences)) != 3:
         raise ValueError("protocol must bind exactly three unique sequences")
@@ -144,6 +149,8 @@ def main() -> int:
             raise FileNotFoundError(executable)
     if not args.download_dir.is_dir():
         raise FileNotFoundError(args.download_dir)
+    if not args.external_setup_manifest.is_file():
+        raise FileNotFoundError(args.external_setup_manifest)
     extraction = validate_extraction(
         args.extracted_root,
         sequences,
@@ -154,6 +161,8 @@ def main() -> int:
     summarizer = REPO / "scripts" / "summarize_ssfm_heldout_suite.py"
     frozen_paths = {
         "protocol": args.protocol,
+        "external_protocol": args.external_protocol,
+        "external_setup_manifest": args.external_setup_manifest,
         "extraction_manifest": Path(extraction["path"]),
         "download_manifest": args.download_dir / "download_manifest.json",
         "hierarchical_executable": args.hierarchical_exe,
@@ -169,6 +178,12 @@ def main() -> int:
         "feature_exporter": REPO / "scripts" / "export_superpoint_lightglue.py",
         "hierarchical_runner": REPO / "scripts" / "run_hierarchical_sfm_frozen.py",
         "colmap_runner": REPO / "scripts" / "run_colmap_ssfm_frozen.py",
+        "external_runner": (
+            REPO / "scripts" / "run_external_ssfm_baselines_frozen.py"
+        ),
+        "external_evidence_schema": (
+            REPO / "scripts" / "ssfm_external_baseline_evidence.py"
+        ),
         "gt_materializer": (
             REPO / "scripts" / "materialize_ssfm_heldout_ground_truth.py"
         ),
@@ -258,6 +273,10 @@ def main() -> int:
             str(sequence_runner),
             "--protocol",
             str(args.protocol),
+            "--external-protocol",
+            str(args.external_protocol),
+            "--external-setup-manifest",
+            str(args.external_setup_manifest),
             "--sequence",
             sequence,
             "--mav0",

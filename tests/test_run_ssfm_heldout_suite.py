@@ -12,11 +12,15 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+EXTERNAL_PROTOCOL = (
+    REPO_ROOT / "benchmarks" / "protocols" / "ssfm_external_baselines_v1.json"
+)
+
 from run_ssfm_heldout_suite import main  # noqa: E402
 
 
 class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
-    def test_three_preparation_failures_still_produce_complete_suite_summary(self) -> None:
+    def test_three_sequence_failures_still_produce_five_engine_summary(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             protocol_path = (
@@ -53,6 +57,8 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
             )
             output = root / "suite"
             python = Path(sys.executable)
+            external_setup = root / "external_setup.json"
+            external_setup.write_text("{}", encoding="utf-8")
 
             with patch(
                 "sys.argv",
@@ -60,6 +66,10 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                     "run_ssfm_heldout_suite.py",
                     "--protocol",
                     str(protocol_path),
+                    "--external-protocol",
+                    str(EXTERNAL_PROTOCOL),
+                    "--external-setup-manifest",
+                    str(external_setup),
                     "--extracted-root",
                     str(extracted),
                     "--download-dir",
@@ -167,7 +177,14 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw_root:
             sequence_root = Path(raw_root)
-            for name in ("prepared", "hierarchical", "colmap", "ground_truth", "final"):
+            for name in (
+                "prepared",
+                "hierarchical",
+                "colmap",
+                "external",
+                "ground_truth",
+                "final",
+            ):
                 (sequence_root / name).mkdir()
             prepared_path = sequence_root / "prepared" / "manifest.json"
             prepared_path.write_text("{}", encoding="utf-8")
@@ -191,6 +208,31 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            external_protocol_sha256 = "e" * 64
+            external_path = sequence_root / "external" / "manifest.json"
+            external_path.write_text(
+                json.dumps(
+                    {
+                        "sequence": "V1_02_medium",
+                        "heldout_protocol_sha256": "d" * 64,
+                        "external_protocol_sha256": external_protocol_sha256,
+                        "ground_truth_read": False,
+                        "all_engine_processes_exited": True,
+                        "finished_utc": "2026-07-22T00:00:01.500000+00:00",
+                        "results": {
+                            engine: {
+                                "status": "dnf",
+                                "reason": "fixture",
+                                "source_revision": "fixture",
+                                "attempt": {"command": ["fixture"], "returncode": 1},
+                                "trajectory": None,
+                            }
+                            for engine in ("gluemap", "instantsfm")
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             gt_csv = sequence_root / "ground_truth" / "data.csv"
             gt_csv.write_text("#timestamp\n", encoding="utf-8")
             protocol_sha256 = "d" * 64
@@ -203,6 +245,7 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                         "engine_exit_evidence": {
                             "hierarchical": evidence(hierarchical_path),
                             "colmap": evidence(colmap_path),
+                            "external": evidence(external_path),
                         },
                     }
                 ),
@@ -220,6 +263,7 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                             "prepared": evidence(prepared_path),
                             "hierarchical": evidence(hierarchical_path),
                             "colmap": evidence(colmap_path),
+                            "external": evidence(external_path),
                             "ground_truth_materializer": evidence(gt_manifest_path),
                         },
                         "ground_truth": evidence(gt_csv),
@@ -232,12 +276,15 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                 for stage in (
                     "hierarchical",
                     "colmap",
+                    "external",
                     "materialize_ground_truth",
                     "finalize",
                 )
             }
             runner = {
                 "status": "success",
+                "sequence": "V1_02_medium",
+                "external_protocol": {"sha256": external_protocol_sha256},
                 "ground_truth_materialized_only_after_timed_engines_exited": True,
                 "commands": stages,
                 "returncodes": {stage: 0 for stage in stages},

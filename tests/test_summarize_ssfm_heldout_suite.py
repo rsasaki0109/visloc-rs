@@ -74,7 +74,7 @@ class HeldoutSsfmSuiteSummaryTests(unittest.TestCase):
                 self.assertEqual(aggregate["worst_outcome"], "dnf")
             self.assertFalse(summary["internal_colmap_frontier_gate"]["passed"])
 
-    def test_runner_failure_becomes_three_explicit_dnf_cells(self) -> None:
+    def test_runner_failure_becomes_five_explicit_dnf_cells(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             sequence = "V1_02_medium"

@@ -11,14 +11,18 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from ssfm_external_baseline_evidence import validate_external_baseline_manifest
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--download-dir", type=Path, required=True)
+    parser.add_argument("--external-protocol", type=Path, required=True)
     parser.add_argument("--hierarchical-manifest", type=Path, required=True)
     parser.add_argument("--colmap-manifest", type=Path, required=True)
+    parser.add_argument("--external-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -39,13 +43,29 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def engine_exit_evidence(hierarchical_path: Path, colmap_path: Path) -> dict:
+def engine_exit_evidence(
+    hierarchical_path: Path,
+    colmap_path: Path,
+    external_path: Path,
+    *,
+    sequence: str,
+    heldout_protocol_sha256: str,
+    external_protocol_sha256: str,
+) -> dict:
     hierarchical = read_json(hierarchical_path)
     colmap = read_json(colmap_path)
     if hierarchical.get("protocol", {}).get("ground_truth_read") is not False:
         raise ValueError("hierarchical manifest does not prove GT isolation")
     if colmap.get("ground_truth_read") is not False:
         raise ValueError("COLMAP manifest does not prove GT isolation")
+    external = read_json(external_path)
+    validate_external_baseline_manifest(
+        external,
+        sequence=sequence,
+        heldout_protocol_sha256=heldout_protocol_sha256,
+        external_protocol_sha256=external_protocol_sha256,
+        manifest_dir=external_path.parent,
+    )
     return {
         "hierarchical": {
             "path": str(hierarchical_path.resolve()),
@@ -54,6 +74,10 @@ def engine_exit_evidence(hierarchical_path: Path, colmap_path: Path) -> dict:
         "colmap": {
             "path": str(colmap_path.resolve()),
             "sha256": sha256(colmap_path),
+        },
+        "external": {
+            "path": str(external_path.resolve()),
+            "sha256": sha256(external_path),
         },
     }
 
@@ -83,12 +107,21 @@ def main() -> int:
     protocol_bytes = args.protocol.read_bytes()
     protocol = json.loads(protocol_bytes)
     protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+    external_protocol_bytes = args.external_protocol.read_bytes()
+    external_protocol = json.loads(external_protocol_bytes)
+    external_protocol_sha256 = hashlib.sha256(external_protocol_bytes).hexdigest()
+    if external_protocol["heldout_protocol"]["sha256"] != protocol_sha256:
+        raise ValueError("external protocol does not bind held-out protocol")
     if args.sequence not in protocol["selection"]["held_out_sequences"]:
         raise ValueError(f"not a frozen held-out sequence: {args.sequence}")
 
     engines = engine_exit_evidence(
         args.hierarchical_manifest,
         args.colmap_manifest,
+        args.external_manifest,
+        sequence=args.sequence,
+        heldout_protocol_sha256=protocol_sha256,
+        external_protocol_sha256=external_protocol_sha256,
     )
     download_manifest_path = args.download_dir / "download_manifest.json"
     download = read_json(download_manifest_path)

@@ -29,6 +29,8 @@
         "is_sequential": true,
         "sample_frequency": 1,
         "intrinsics_mode": "SHARED",
+        "use_gt_intrinsics": true,
+        "gt_intrinsics_source": "prepared/rect/calib.txt (calibration only; never pose ground truth)",
         "skip_doppelgangers": false,
         "coarse_only": false,
         "post_result_tuning_allowed": false

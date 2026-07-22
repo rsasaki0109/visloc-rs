@@ -69,6 +69,16 @@ class HeldoutGroundTruthIsolationTests(unittest.TestCase):
             }
             protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
             protocol_sha256 = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
+            external_protocol_path = root / "external_protocol.json"
+            external_protocol_path.write_text(
+                json.dumps(
+                    {"heldout_protocol": {"sha256": protocol_sha256}}
+                ),
+                encoding="utf-8",
+            )
+            external_protocol_sha256 = hashlib.sha256(
+                external_protocol_path.read_bytes()
+            ).hexdigest()
             download_root = root / "downloads"
             download_root.mkdir()
             (download_root / "download_manifest.json").write_text(
@@ -99,6 +109,29 @@ class HeldoutGroundTruthIsolationTests(unittest.TestCase):
             colmap_path.write_text(
                 json.dumps({"ground_truth_read": False}), encoding="utf-8"
             )
+            external_path = root / "external.json"
+            external_path.write_text(
+                json.dumps(
+                    {
+                        "sequence": SEQUENCE,
+                        "heldout_protocol_sha256": protocol_sha256,
+                        "external_protocol_sha256": external_protocol_sha256,
+                        "ground_truth_read": False,
+                        "all_engine_processes_exited": True,
+                        "results": {
+                            engine: {
+                                "status": "dnf",
+                                "reason": "fixture",
+                                "source_revision": "fixture",
+                                "attempt": {"command": ["fixture"], "returncode": 1},
+                                "trajectory": None,
+                            }
+                            for engine in ("gluemap", "instantsfm")
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = root / "ground_truth"
 
             with patch(
@@ -111,10 +144,14 @@ class HeldoutGroundTruthIsolationTests(unittest.TestCase):
                     SEQUENCE,
                     "--download-dir",
                     str(download_root),
+                    "--external-protocol",
+                    str(external_protocol_path),
                     "--hierarchical-manifest",
                     str(hierarchical_path),
                     "--colmap-manifest",
                     str(colmap_path),
+                    "--external-manifest",
+                    str(external_path),
                     "--out-dir",
                     str(output),
                 ],
@@ -145,7 +182,14 @@ class HeldoutGroundTruthIsolationTests(unittest.TestCase):
             from materialize_ssfm_heldout_ground_truth import engine_exit_evidence
 
             with self.assertRaisesRegex(ValueError, "hierarchical manifest"):
-                engine_exit_evidence(hierarchical, colmap)
+                engine_exit_evidence(
+                    hierarchical,
+                    colmap,
+                    root / "external.json",
+                    sequence=SEQUENCE,
+                    heldout_protocol_sha256="a" * 64,
+                    external_protocol_sha256="b" * 64,
+                )
 
 
 if __name__ == "__main__":

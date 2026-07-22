@@ -517,8 +517,15 @@ return repository-not-found and the redirected codeload archive returns 404.
 This is recorded as a source outage, not yet a DNF; it must be rechecked just
 before setup. Critically, external baselines cannot be run later after labels
 are visible: their success/DNF manifests must join the per-sequence transaction
-before GT materialization. The frozen held-out suite has not started, and its
-launcher must be extended with these two cells before it is allowed to run.
+before GT materialization. `run_external_ssfm_baselines_frozen.py` now executes
+hash-bound official adapters or emits command/return-code/resource-backed DNF
+cells, and the sequence transaction is fixed as prepare, hierarchical, COLMAP,
+external pair, GT materialization, then finalization. The materializer,
+finalizer, five-engine aggregator, and release verifier all reject a missing,
+unattempted, or GT-reading external cell. Success/DNF adapters and the complete
+five-engine failure path have synthetic regression coverage. The frozen
+held-out suite has not started; real GLUEMAP/InstantSfM setup evidence and
+adapters remain required after the clean S2 timing run.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain

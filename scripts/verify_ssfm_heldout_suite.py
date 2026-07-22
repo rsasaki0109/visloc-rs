@@ -12,9 +12,17 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ssfm_external_baseline_evidence import validate_external_baseline_manifest
+
 
 REPO = Path(__file__).resolve().parents[1]
-ENGINES = ("visloc_hierarchical", "colmap_incremental", "colmap_global")
+ENGINES = (
+    "visloc_hierarchical",
+    "colmap_incremental",
+    "colmap_global",
+    "gluemap",
+    "instantsfm",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +72,13 @@ def verify_success_sequence(
         raise ValueError("successful runner lacks deferred-GT proof")
     if runner.get("status") != "success":
         raise ValueError("finalized sequence runner is not successful")
-    for stage in ("hierarchical", "colmap", "materialize_ground_truth", "finalize"):
+    for stage in (
+        "hierarchical",
+        "colmap",
+        "external",
+        "materialize_ground_truth",
+        "finalize",
+    ):
         if stage not in runner["commands"] or stage not in runner["returncodes"]:
             raise ValueError(f"successful runner is missing stage {stage}")
     if any(runner["returncodes"][stage] != 0 for stage in runner["returncodes"]):
@@ -72,10 +86,12 @@ def verify_success_sequence(
 
     hierarchical_path = sequence_root / "hierarchical" / "manifest.json"
     colmap_path = sequence_root / "colmap" / "manifest.json"
+    external_path = sequence_root / "external" / "manifest.json"
     ground_truth_path = sequence_root / "ground_truth" / "manifest.json"
     final_path = sequence_root / "final" / "manifest.json"
     hierarchical = read_json(hierarchical_path)
     colmap = read_json(colmap_path)
+    external = read_json(external_path)
     ground_truth = read_json(ground_truth_path)
     final = read_json(final_path)
     if ground_truth["protocol_sha256"] != protocol_sha256:
@@ -88,6 +104,13 @@ def verify_success_sequence(
         raise ValueError("hierarchical engine read GT")
     if colmap.get("ground_truth_read") is not False:
         raise ValueError("COLMAP engine read GT")
+    validate_external_baseline_manifest(
+        external,
+        sequence=runner["sequence"],
+        heldout_protocol_sha256=protocol_sha256,
+        external_protocol_sha256=runner["external_protocol"]["sha256"],
+        manifest_dir=external_path.parent,
+    )
 
     engine_evidence = ground_truth["engine_exit_evidence"]
     if verify_file_evidence(
@@ -98,8 +121,16 @@ def verify_success_sequence(
         engine_evidence["colmap"], "GT COLMAP exit evidence"
     ).resolve() != colmap_path.resolve():
         raise ValueError("GT COLMAP exit evidence path mismatch")
+    if verify_file_evidence(
+        engine_evidence["external"], "GT external exit evidence"
+    ).resolve() != external_path.resolve():
+        raise ValueError("GT external exit evidence path mismatch")
     materialized_utc = parse_timestamp(ground_truth["materialized_utc"])
-    for label, manifest in (("hierarchical", hierarchical), ("colmap", colmap)):
+    for label, manifest in (
+        ("hierarchical", hierarchical),
+        ("colmap", colmap),
+        ("external", external),
+    ):
         if materialized_utc < parse_timestamp(manifest["finished_utc"]):
             raise ValueError(f"GT materialized before {label} exited")
 

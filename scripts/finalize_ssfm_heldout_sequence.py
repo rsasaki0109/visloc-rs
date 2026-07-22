@@ -12,6 +12,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ssfm_external_baseline_evidence import validate_external_baseline_manifest
+
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -23,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--hierarchical-dir", type=Path, required=True)
     parser.add_argument("--colmap-dir", type=Path, required=True)
+    parser.add_argument("--external-protocol", type=Path, required=True)
+    parser.add_argument("--external-dir", type=Path, required=True)
     parser.add_argument("--ground-truth-csv", type=Path, required=True)
     parser.add_argument("--ground-truth-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
@@ -84,6 +88,10 @@ def main() -> int:
     protocol_bytes = args.protocol.read_bytes()
     protocol = json.loads(protocol_bytes)
     protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+    external_protocol = read_json(args.external_protocol)
+    external_protocol_sha256 = sha256(args.external_protocol)
+    if external_protocol["heldout_protocol"]["sha256"] != protocol_sha256:
+        raise ValueError("external protocol does not bind held-out protocol")
     if args.sequence not in protocol["selection"]["held_out_sequences"]:
         raise ValueError(f"not a frozen held-out sequence: {args.sequence}")
     if not args.ground_truth_csv.is_file():
@@ -92,15 +100,24 @@ def main() -> int:
     prepared_path = args.prepared_dir / "manifest.json"
     hierarchical_path = args.hierarchical_dir / "manifest.json"
     colmap_path = args.colmap_dir / "manifest.json"
+    external_path = args.external_dir / "manifest.json"
     ground_truth_manifest_path = args.ground_truth_manifest
     prepared = read_json(prepared_path)
     hierarchical = read_json(hierarchical_path)
     colmap = read_json(colmap_path)
+    external = read_json(external_path)
     ground_truth_manifest = read_json(ground_truth_manifest_path)
     if prepared["protocol_sha256"] != protocol_sha256:
         raise ValueError("prepared input protocol mismatch")
     if colmap["protocol_sha256"] != protocol_sha256:
         raise ValueError("COLMAP protocol mismatch")
+    external_results = validate_external_baseline_manifest(
+        external,
+        sequence=args.sequence,
+        heldout_protocol_sha256=protocol_sha256,
+        external_protocol_sha256=external_protocol_sha256,
+        manifest_dir=args.external_dir,
+    )
     if ground_truth_manifest["protocol_sha256"] != protocol_sha256:
         raise ValueError("ground-truth materializer protocol mismatch")
     if any(
@@ -122,6 +139,8 @@ def main() -> int:
         raise ValueError("hierarchical exit evidence changed after GT materialization")
     if engine_evidence["colmap"]["sha256"] != sha256(colmap_path):
         raise ValueError("COLMAP exit evidence changed after GT materialization")
+    if engine_evidence["external"]["sha256"] != sha256(external_path):
+        raise ValueError("external exit evidence changed after GT materialization")
     policy = protocol["policy"]
     if hierarchical["config_id"] != policy["config_id"]:
         raise ValueError("hierarchical policy mismatch")
@@ -206,6 +225,14 @@ def main() -> int:
                 / expected_frames,
             }
 
+    for engine, source in external_results.items():
+        if source["status"] == "success":
+            trajectory = Path(source["trajectory"]["path"])
+            trajectories[engine] = trajectory
+            results[engine] = source
+        else:
+            results[engine] = source
+
     args.out_dir.mkdir(parents=True)
     if trajectories:
         individual = evaluate(
@@ -240,6 +267,10 @@ def main() -> int:
                 "sha256": sha256(hierarchical_path),
             },
             "colmap": {"path": str(colmap_path.resolve()), "sha256": sha256(colmap_path)},
+            "external": {
+                "path": str(external_path.resolve()),
+                "sha256": sha256(external_path),
+            },
             "ground_truth_materializer": {
                 "path": str(ground_truth_manifest_path.resolve()),
                 "sha256": sha256(ground_truth_manifest_path),

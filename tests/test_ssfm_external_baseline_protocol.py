@@ -4,11 +4,17 @@ import hashlib
 import json
 import unittest
 from pathlib import Path
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 PROTOCOL_PATH = (
     REPO_ROOT / "benchmarks" / "protocols" / "ssfm_external_baselines_v1.json"
+)
+
+from ssfm_external_baseline_evidence import (  # noqa: E402
+    validate_external_baseline_manifest,
 )
 
 
@@ -47,6 +53,81 @@ class ExternalSsfmBaselineProtocolTests(unittest.TestCase):
             protocol["engines"]["gluemap"]["revision"],
             "adc9e4bb5f41014d3f7c157a879edc278588c829",
         )
+        self.assertTrue(
+            protocol["engines"]["gluemap"]["configuration"]["use_gt_intrinsics"]
+        )
+
+    def test_external_manifest_requires_two_honest_pre_gt_cells(self) -> None:
+        manifest = {
+            "sequence": "V1_02_medium",
+            "heldout_protocol_sha256": "a" * 64,
+            "external_protocol_sha256": "b" * 64,
+            "ground_truth_read": False,
+            "all_engine_processes_exited": True,
+            "results": {
+                engine: {
+                    "status": "dnf",
+                    "reason": "fixture source/install failure",
+                    "source_revision": "unavailable-at-2026-07-22",
+                    "attempt": {"command": ["fixture"], "returncode": 1},
+                    "trajectory": None,
+                }
+                for engine in ("gluemap", "instantsfm")
+            },
+        }
+        results = validate_external_baseline_manifest(
+            manifest,
+            sequence="V1_02_medium",
+            heldout_protocol_sha256="a" * 64,
+            external_protocol_sha256="b" * 64,
+            manifest_dir=Path("."),
+        )
+        self.assertEqual(set(results), {"gluemap", "instantsfm"})
+
+        manifest["results"].pop("instantsfm")
+        with self.assertRaisesRegex(ValueError, "missing or unexpected"):
+            validate_external_baseline_manifest(
+                manifest,
+                sequence="V1_02_medium",
+                heldout_protocol_sha256="a" * 64,
+                external_protocol_sha256="b" * 64,
+                manifest_dir=Path("."),
+            )
+
+    def test_external_manifest_rejects_gt_read_or_unattempted_dnf(self) -> None:
+        cell = {
+            "status": "dnf",
+            "reason": "fixture",
+            "source_revision": "fixture",
+            "attempt": {"command": ["fixture"], "returncode": 1},
+            "trajectory": None,
+        }
+        manifest = {
+            "sequence": "V2_02_medium",
+            "heldout_protocol_sha256": "a" * 64,
+            "external_protocol_sha256": "b" * 64,
+            "ground_truth_read": True,
+            "all_engine_processes_exited": True,
+            "results": {"gluemap": dict(cell), "instantsfm": dict(cell)},
+        }
+        with self.assertRaisesRegex(ValueError, "GT isolation"):
+            validate_external_baseline_manifest(
+                manifest,
+                sequence="V2_02_medium",
+                heldout_protocol_sha256="a" * 64,
+                external_protocol_sha256="b" * 64,
+                manifest_dir=Path("."),
+            )
+        manifest["ground_truth_read"] = False
+        manifest["results"]["gluemap"]["attempt"] = {"returncode": 1}
+        with self.assertRaisesRegex(ValueError, "attempted command"):
+            validate_external_baseline_manifest(
+                manifest,
+                sequence="V2_02_medium",
+                heldout_protocol_sha256="a" * 64,
+                external_protocol_sha256="b" * 64,
+                manifest_dir=Path("."),
+            )
 
 
 if __name__ == "__main__":

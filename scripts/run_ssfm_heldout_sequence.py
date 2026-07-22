@@ -18,6 +18,8 @@ REPO = Path(__file__).resolve().parents[1]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
+    parser.add_argument("--external-protocol", type=Path, required=True)
+    parser.add_argument("--external-setup-manifest", type=Path, required=True)
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--mav0", type=Path, required=True)
     parser.add_argument("--download-dir", type=Path, required=True)
@@ -70,12 +72,18 @@ def main() -> int:
     args = parse_args()
     protocol_bytes = args.protocol.read_bytes()
     protocol = json.loads(protocol_bytes)
+    external_protocol_bytes = args.external_protocol.read_bytes()
+    external_protocol = json.loads(external_protocol_bytes)
     if args.sequence not in protocol["selection"]["held_out_sequences"]:
         raise ValueError(f"not a frozen held-out sequence: {args.sequence}")
     if args.mav0.parent.name != args.sequence:
         raise ValueError("mav0/sequence mismatch")
     if args.hierarchical_build_revision != protocol["policy"]["source_revision"]:
         raise ValueError("hierarchical build revision does not match frozen policy")
+    if external_protocol["heldout_protocol"]["sha256"] != hashlib.sha256(
+        protocol_bytes
+    ).hexdigest():
+        raise ValueError("external protocol does not bind held-out protocol")
     if args.out_dir.exists():
         raise FileExistsError(f"refusing to overwrite {args.out_dir}")
     for path in (args.python, args.hierarchical_exe, args.colmap):
@@ -83,6 +91,8 @@ def main() -> int:
             raise FileNotFoundError(path)
     if not args.download_dir.is_dir():
         raise FileNotFoundError(args.download_dir)
+    if not args.external_setup_manifest.is_file():
+        raise FileNotFoundError(args.external_setup_manifest)
 
     args.out_dir.mkdir(parents=True)
     logs = args.out_dir / "logs"
@@ -90,12 +100,14 @@ def main() -> int:
     prepared = args.out_dir / "prepared"
     hierarchical = args.out_dir / "hierarchical"
     colmap = args.out_dir / "colmap"
+    external = args.out_dir / "external"
     ground_truth = args.out_dir / "ground_truth"
     final = args.out_dir / "final"
     scripts = {
         "prepare": REPO / "scripts" / "prepare_ssfm_heldout_euroc_inputs.py",
         "hierarchical": REPO / "scripts" / "run_hierarchical_sfm_frozen.py",
         "colmap": REPO / "scripts" / "run_colmap_ssfm_frozen.py",
+        "external": REPO / "scripts" / "run_external_ssfm_baselines_frozen.py",
         "materialize_ground_truth": (
             REPO / "scripts" / "materialize_ssfm_heldout_ground_truth.py"
         ),
@@ -128,6 +140,14 @@ def main() -> int:
             "schema_version": 1,
             "protocol_id": protocol["protocol_id"],
             "protocol_sha256": hashlib.sha256(protocol_bytes).hexdigest(),
+            "external_protocol": {
+                "path": str(args.external_protocol.resolve()),
+                "sha256": hashlib.sha256(external_protocol_bytes).hexdigest(),
+            },
+            "external_setup_manifest": {
+                "path": str(args.external_setup_manifest.resolve()),
+                "sha256": sha256(args.external_setup_manifest),
+            },
             "sequence": args.sequence,
             "status": status,
             "failure_reason": failure_reason,
@@ -251,6 +271,29 @@ def main() -> int:
             returncodes["colmap"],
         )
 
+    commands["external"] = [
+        str(args.python),
+        str(scripts["external"]),
+        "--protocol",
+        str(args.protocol),
+        "--external-protocol",
+        str(args.external_protocol),
+        "--sequence",
+        args.sequence,
+        "--prepared-dir",
+        str(prepared),
+        "--setup-manifest",
+        str(args.external_setup_manifest),
+        "--out-dir",
+        str(external),
+    ]
+    returncodes["external"] = run(commands["external"], logs / "external.log")
+    if not (external / "manifest.json").is_file():
+        return fail(
+            "external baseline runner exited without a success/DNF manifest",
+            returncodes["external"],
+        )
+
     # This is deliberately the first command that opens the archive member
     # containing GT. Every timed mapper process above has exited, including
     # failed/DNF engines.
@@ -263,10 +306,14 @@ def main() -> int:
         args.sequence,
         "--download-dir",
         str(args.download_dir),
+        "--external-protocol",
+        str(args.external_protocol),
         "--hierarchical-manifest",
         str(hierarchical / "manifest.json"),
         "--colmap-manifest",
         str(colmap / "manifest.json"),
+        "--external-manifest",
+        str(external / "manifest.json"),
         "--out-dir",
         str(ground_truth),
     ]
@@ -295,6 +342,10 @@ def main() -> int:
         str(hierarchical),
         "--colmap-dir",
         str(colmap),
+        "--external-protocol",
+        str(args.external_protocol),
+        "--external-dir",
+        str(external),
         "--ground-truth-csv",
         str(ground_truth / "data.csv"),
         "--ground-truth-manifest",
