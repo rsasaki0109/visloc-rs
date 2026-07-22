@@ -812,6 +812,18 @@ development evidence, but not the runtime gate: the 400-frame run takes
 V3 must next preserve this exact contract while fusing/removing the remaining
 GPU-host round trips; only then may the configuration be frozen for V4.
 
+A one-variable 400-frame workset sweep then located the current accuracy/
+runtime cliff without changing windows, seed, or any learned component.
+Reducing patches per frame from 48 to 24 retained 0.0042 m Sim(3) ATE and cut
+runtime from 268.02 to 160.10 ms/frame; 12 patches retained 0.0043 m and cut
+runtime again to 128.30 ms/frame. Six patches crossed the geometric-support
+cliff (0.0790 m, 132.26 ms/frame) and is closed as an accuracy failure. Thus
+12 patches is the smallest development-supported workset, but patch thinning
+alone cannot reach 50 ms: even that run spends 31.27 ms in the encoders and
+17.87 ms in decode/undistortion before correlation, update, or BA. The next
+runtime slice must overlap or move preprocessing and eliminate ONNX/native
+GPU-host synchronization rather than shrinking the graph further.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
