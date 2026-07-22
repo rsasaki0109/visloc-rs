@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--mav0", type=Path, required=True)
+    parser.add_argument("--download-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--hierarchical-exe", type=Path, required=True)
     parser.add_argument("--hierarchical-build-revision", required=True)
@@ -80,6 +81,8 @@ def main() -> int:
     for path in (args.python, args.hierarchical_exe, args.colmap):
         if not path.is_file():
             raise FileNotFoundError(path)
+    if not args.download_dir.is_dir():
+        raise FileNotFoundError(args.download_dir)
 
     args.out_dir.mkdir(parents=True)
     logs = args.out_dir / "logs"
@@ -87,11 +90,15 @@ def main() -> int:
     prepared = args.out_dir / "prepared"
     hierarchical = args.out_dir / "hierarchical"
     colmap = args.out_dir / "colmap"
+    ground_truth = args.out_dir / "ground_truth"
     final = args.out_dir / "final"
     scripts = {
         "prepare": REPO / "scripts" / "prepare_ssfm_heldout_euroc_inputs.py",
         "hierarchical": REPO / "scripts" / "run_hierarchical_sfm_frozen.py",
         "colmap": REPO / "scripts" / "run_colmap_ssfm_frozen.py",
+        "materialize_ground_truth": (
+            REPO / "scripts" / "materialize_ssfm_heldout_ground_truth.py"
+        ),
         "finalize": REPO / "scripts" / "finalize_ssfm_heldout_sequence.py",
     }
     hierarchical_executable = {
@@ -126,8 +133,8 @@ def main() -> int:
             "failure_reason": failure_reason,
             "started_utc": started_utc,
             "finished_utc": timestamp(),
-            "ground_truth_path_disclosed_only_to_finalizer": (
-                "finalize" in commands
+            "ground_truth_materialized_only_after_timed_engines_exited": (
+                "materialize_ground_truth" in commands
             ),
             "hierarchical_executable": hierarchical_executable,
             "colmap_executable": colmap_executable,
@@ -244,8 +251,37 @@ def main() -> int:
             returncodes["colmap"],
         )
 
-    # This is deliberately the first command that receives a GT path. Every
-    # timed mapper process above has exited, including failed/DNF engines.
+    # This is deliberately the first command that opens the archive member
+    # containing GT. Every timed mapper process above has exited, including
+    # failed/DNF engines.
+    commands["materialize_ground_truth"] = [
+        str(args.python),
+        str(scripts["materialize_ground_truth"]),
+        "--protocol",
+        str(args.protocol),
+        "--sequence",
+        args.sequence,
+        "--download-dir",
+        str(args.download_dir),
+        "--hierarchical-manifest",
+        str(hierarchical / "manifest.json"),
+        "--colmap-manifest",
+        str(colmap / "manifest.json"),
+        "--out-dir",
+        str(ground_truth),
+    ]
+    returncodes["materialize_ground_truth"] = run(
+        commands["materialize_ground_truth"],
+        logs / "materialize_ground_truth.log",
+    )
+    if returncodes["materialize_ground_truth"] != 0:
+        return fail(
+            "held-out ground-truth materialization failed",
+            returncodes["materialize_ground_truth"],
+        )
+    if not (ground_truth / "manifest.json").is_file():
+        return fail("ground-truth materializer exited without a manifest")
+
     commands["finalize"] = [
         str(args.python),
         str(scripts["finalize"]),
@@ -260,7 +296,9 @@ def main() -> int:
         "--colmap-dir",
         str(colmap),
         "--ground-truth-csv",
-        str(args.mav0 / "state_groundtruth_estimate0" / "data.csv"),
+        str(ground_truth / "data.csv"),
+        "--ground-truth-manifest",
+        str(ground_truth / "manifest.json"),
         "--out-dir",
         str(final),
     ]

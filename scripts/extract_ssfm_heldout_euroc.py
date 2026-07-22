@@ -56,10 +56,14 @@ def extract_archive(archive: Path, sequences: list[str], out_dir: Path) -> dict:
     member_count = 0
     file_count = 0
     extracted_bytes = 0
+    deferred_ground_truth_members = 0
     with zipfile.ZipFile(archive) as source:
         for info in source.infolist():
             relative = selected_relative_path(info.filename, selected)
             if relative is None:
+                continue
+            if "state_groundtruth_estimate0" in relative.parts:
+                deferred_ground_truth_members += 1
                 continue
             member_count += 1
             destination = (out_dir / relative).resolve()
@@ -80,12 +84,16 @@ def extract_archive(archive: Path, sequences: list[str], out_dir: Path) -> dict:
             extracted_bytes += info.file_size
     if member_count == 0:
         raise ValueError(f"no selected sequences found in {archive}")
+    if deferred_ground_truth_members == 0:
+        raise ValueError(f"no deferred ground-truth members found in {archive}")
     return {
         "archive": str(archive.resolve()),
         "selected_sequences": sequences,
         "selected_members": member_count,
         "extracted_files": file_count,
         "extracted_bytes": extracted_bytes,
+        "deferred_ground_truth_members": deferred_ground_truth_members,
+        "ground_truth_materialized": False,
     }
 
 
@@ -96,7 +104,6 @@ def validate_sequence(root: Path, sequence: str) -> dict:
         sequence_root / "mav0" / "cam1" / "sensor.yaml",
         sequence_root / "mav0" / "cam0" / "data.csv",
         sequence_root / "mav0" / "cam1" / "data.csv",
-        sequence_root / "mav0" / "state_groundtruth_estimate0" / "data.csv",
     ]
     for path in required:
         if not path.is_file():
@@ -113,7 +120,8 @@ def validate_sequence(root: Path, sequence: str) -> dict:
         "cam1_sensor_sha256": sha256(required[1]),
         "cam0_index_sha256": sha256(required[2]),
         "cam1_index_sha256": sha256(required[3]),
-        "ground_truth_sha256": sha256(required[4]),
+        "ground_truth_materialized": False,
+        "ground_truth_read": False,
     }
 
 
@@ -144,6 +152,11 @@ def main() -> int:
         "protocol_id": protocol["protocol_id"],
         "protocol_sha256": protocol_sha256,
         "started_utc": timestamp(),
+        "ground_truth_policy": (
+            "Ground truth members are not extracted or read until all timed "
+            "engines for that sequence have exited."
+        ),
+        "ground_truth_read": False,
         "download_manifest": {
             "path": str(download_manifest_path.resolve()),
             "sha256": sha256(download_manifest_path),

@@ -480,14 +480,21 @@ feature-set hashes. `run_colmap_ssfm_frozen.py` runs COLMAP 4.1 incremental and
 global mappers from one same-input SIFT/sequential-match database, preserves
 explicit DNF cells, and monitors wall/RAM/global-VRAM. Held-out execution uses
 `run_ssfm_heldout_sequence.py`: neither the hierarchical nor COLMAP runner is
-given a GT path, and `finalize_ssfm_heldout_sequence.py` receives it only after
-all three timed mapper processes have exited. Both success and all-DNF synthetic
-finalization tests pass. These runners are prepared; no held-out result has
-been observed yet. Frontend RAM/global-VRAM is now sampled alongside mapping
-RAM, and `summarize_ssfm_heldout_suite.py` requires all three frozen sequence
-cells, carries DNF outcomes into the aggregate, reports median/worst plus the
-per-sequence reproduced Pareto frontier, and deliberately leaves the claimable
-SOTA gate false while GLUEMAP, InstantSfM, ORBIT, or release evidence is absent.
+given a GT path. The initial safe extractor omits every
+`state_groundtruth_estimate0` member rather than reading or hashing labels.
+Only after both timed engine manifests prove `ground_truth_read=false`,
+`materialize_ssfm_heldout_ground_truth.py` extracts that sequence's exact GT
+CSV and binds it to both exit-manifest hashes; the finalizer verifies this
+chain before evaluation. Synthetic ZIP tests prove that initial extraction
+emits no GT bytes and that materialization rejects missing isolation evidence.
+These runners are prepared; no held-out result has been observed yet. Frontend
+RAM/global-VRAM is now sampled alongside mapping RAM. Expected runner failures
+also write immutable top-level manifests, and `summarize_ssfm_heldout_suite.py`
+turns a pre-finalization failure into three explicit DNF cells instead of
+omitting the sequence. It requires all three frozen sequences, reports
+median/worst plus the per-sequence reproduced Pareto frontier, and deliberately
+leaves the claimable SOTA gate false while GLUEMAP, InstantSfM, ORBIT, or
+release evidence is absent.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain

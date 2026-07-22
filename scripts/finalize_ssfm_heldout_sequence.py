@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hierarchical-dir", type=Path, required=True)
     parser.add_argument("--colmap-dir", type=Path, required=True)
     parser.add_argument("--ground-truth-csv", type=Path, required=True)
+    parser.add_argument("--ground-truth-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -91,18 +92,36 @@ def main() -> int:
     prepared_path = args.prepared_dir / "manifest.json"
     hierarchical_path = args.hierarchical_dir / "manifest.json"
     colmap_path = args.colmap_dir / "manifest.json"
+    ground_truth_manifest_path = args.ground_truth_manifest
     prepared = read_json(prepared_path)
     hierarchical = read_json(hierarchical_path)
     colmap = read_json(colmap_path)
+    ground_truth_manifest = read_json(ground_truth_manifest_path)
     if prepared["protocol_sha256"] != protocol_sha256:
         raise ValueError("prepared input protocol mismatch")
     if colmap["protocol_sha256"] != protocol_sha256:
         raise ValueError("COLMAP protocol mismatch")
+    if ground_truth_manifest["protocol_sha256"] != protocol_sha256:
+        raise ValueError("ground-truth materializer protocol mismatch")
     if any(
         manifest.get("sequence", args.sequence) != args.sequence
-        for manifest in (prepared, colmap)
+        for manifest in (prepared, colmap, ground_truth_manifest)
     ):
         raise ValueError("sequence mismatch")
+    if not ground_truth_manifest.get(
+        "ground_truth_first_read_after_all_timed_engines_exited"
+    ):
+        raise ValueError("ground truth was not materialized after engine exit")
+    ground_truth_evidence = ground_truth_manifest["ground_truth"]
+    if Path(ground_truth_evidence["path"]).resolve() != args.ground_truth_csv.resolve():
+        raise ValueError("ground-truth materializer path mismatch")
+    if ground_truth_evidence["sha256"] != sha256(args.ground_truth_csv):
+        raise ValueError("ground-truth materializer hash mismatch")
+    engine_evidence = ground_truth_manifest["engine_exit_evidence"]
+    if engine_evidence["hierarchical"]["sha256"] != sha256(hierarchical_path):
+        raise ValueError("hierarchical exit evidence changed after GT materialization")
+    if engine_evidence["colmap"]["sha256"] != sha256(colmap_path):
+        raise ValueError("COLMAP exit evidence changed after GT materialization")
     policy = protocol["policy"]
     if hierarchical["config_id"] != policy["config_id"]:
         raise ValueError("hierarchical policy mismatch")
@@ -211,8 +230,8 @@ def main() -> int:
         "protocol_sha256": protocol_sha256,
         "sequence": args.sequence,
         "finalized_utc": timestamp(),
-        "ground_truth_first_read_after_all_timed_engines_exited": bool(trajectories),
-        "ground_truth_read": bool(trajectories),
+        "ground_truth_first_read_after_all_timed_engines_exited": True,
+        "ground_truth_read": True,
         "expected_frames": expected_frames,
         "input_manifests": {
             "prepared": {"path": str(prepared_path.resolve()), "sha256": sha256(prepared_path)},
@@ -221,6 +240,14 @@ def main() -> int:
                 "sha256": sha256(hierarchical_path),
             },
             "colmap": {"path": str(colmap_path.resolve()), "sha256": sha256(colmap_path)},
+            "ground_truth_materializer": {
+                "path": str(ground_truth_manifest_path.resolve()),
+                "sha256": sha256(ground_truth_manifest_path),
+            },
+        },
+        "ground_truth": {
+            "path": str(args.ground_truth_csv.resolve()),
+            "sha256": sha256(args.ground_truth_csv),
         },
         "results": results,
     }
