@@ -1119,6 +1119,48 @@ multi-model false candidates may it replace (not merely bypass) the invalid
 long-span trusted-rotation comparison. Homography-classified candidates must
 remain rotation-only and must never emit a scale edge.
 
+Acceptance-neutral E-vs-Umeyama continuation probe (2026-07-22): extended
+the same default-off diagnostic so an E-vs-trusted rejection may continue
+through the existing 3D-3D bridge/RANSAC only to log Umeyama scale/inliers
+and E-vs-Umeyama rotation; it is unconditionally rejected before any
+`Sim3LoopMeasurement` is constructed. Artifact:
+`E:/visloc_archive/dpvo_a3_20260721/on_800_qf1_mp_2d2d_hdiag_bridge/`.
+The run completed in 1345.8 s with zero accepted loops and the same control
+trajectory. (Its archived summary double-counts 22 continued candidates in
+both rotation and subsequently-discovered high-residual buckets; the code
+was immediately corrected to keep the funnel partition disjoint before
+commit. Candidate CSV outcomes and all conclusions below are unaffected.)
+
+The result is a decisive **negative for the current 3D-3D scale bridge**.
+Within the 129 GT-labelled true pre/post candidates, 49 reach a valid
+Umeyama fit, but **0/49** agree with E within the existing 10-degree gate:
+E-vs-Umeyama is 63.695/76.706/94.690 degrees (min/median/max). Their fitted
+scales span the physically meaningless range 0.002904-207.605 (median
+1.0230); another 48 fail bridge yield and 13 fail Umeyama RANSAC. The 541
+non-labelled pre/post candidates produce zero valid Umeyama fits. Thus the
+guard is doing its job: old/current DPVO patch geometry carries the same
+broken long-span orientation/scale state as the trusted trajectory and
+cannot supply the independent scale measurement A3 needs. This 3D-3D
+mechanism is closed; do not tune its gates or accept its scale.
+
+The 2D E rotation itself remains a sound rotation-only signal. Across all
+qf1 candidates, 461 pass E inliers/coverage/residual despite failing the
+drifted trusted-rotation comparison: 458 are inside the recall harness's
+1 m / 30-degree label, and the only three outside it are near-boundary
+overlapping views at GT distances 1.026/1.409/1.752 m whose E-vs-GT rotation
+errors are still only 1.117/2.145/1.366 degrees. Therefore a future explicit
+rotation-only edge (zero translation information, no scale edge) is
+geometrically supportable, but it cannot repair MH_01's scale-16 cliff and
+is not promoted as an A3 acceptance win here.
+
+Next scale-bearing mechanism: replace the closed symmetric 3D-3D bridge,
+not its thresholds. The most direct existing-data route is old-side retained
+3D patches matched to current-side 2D SP observations (PnP/relocalization),
+which can express the current camera in the old pre-hover map's metric and
+be cross-checked against the already-verified E rotation. It must be
+measured acceptance-neutral first; homography-dominant/low-parallax pairs
+remain rotation-only and may never produce scale.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

@@ -2261,7 +2261,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg,\
              stage2_2d2d_inliers,stage2_e_rotation_disagreement_deg,stage2_e_rotation_qw,\
              stage2_e_rotation_qx,stage2_e_rotation_qy,stage2_e_rotation_qz,stage2_model,\
-             stage2_h_inliers,stage2_h_rotation_disagreement_deg,stage_reached,final_accepted\n",
+             stage2_h_inliers,stage2_h_rotation_disagreement_deg,stage2_diagnostic_umeyama_scale,\
+             stage2_diagnostic_umeyama_inliers,stage2_umeyama_vs_e_rotation_deg,stage_reached,final_accepted\n",
         );
         for entry in query_log {
             let rot = entry
@@ -2292,8 +2293,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .stage2_h_rotation_disagreement_deg
                 .map(|d| format!("{d:.3}"))
                 .unwrap_or_default();
+            let diagnostic_scale = entry
+                .stage2_diagnostic_umeyama_scale
+                .map(|scale| format!("{scale:.9}"))
+                .unwrap_or_default();
+            let diagnostic_inliers = entry
+                .stage2_diagnostic_umeyama_inliers
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let umeyama_vs_e = entry
+                .stage2_umeyama_vs_e_rotation_deg
+                .map(|d| format!("{d:.3}"))
+                .unwrap_or_default();
             csv.push_str(&format!(
-                "{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 entry.query_arrival,
                 entry.rank,
                 entry.candidate_arrival,
@@ -2310,6 +2323,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 entry.stage2_model,
                 stage2_h_inliers,
                 stage2_h_rot,
+                diagnostic_scale,
+                diagnostic_inliers,
+                umeyama_vs_e,
                 entry.stage_reached,
                 entry.final_accepted,
             ));
@@ -2324,7 +2340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let empty_arrivals = odometry.long_loop_empty_query_arrivals();
         for &arrival in empty_arrivals {
             csv.push_str(&format!(
-                "{arrival},-1,-1,-1,0.000000,false,,,,,,,,not_run,,,no_candidates,false\n"
+                "{arrival},-1,-1,-1,0.000000,false,,,,,,,,not_run,,,,,,no_candidates,false\n"
             ));
         }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");

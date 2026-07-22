@@ -771,6 +771,14 @@ pub struct QueryCandidateLogEntry {
     /// Homography-decomposed previous-to-current rotation disagreement from
     /// DPVO's trusted relative rotation, when decomposition succeeded.
     pub stage2_h_rotation_disagreement_deg: Option<f64>,
+    /// Acceptance-neutral continuation diagnostic: Umeyama fit scale after
+    /// an E-vs-trusted rejection was deliberately carried forward solely
+    /// for measurement. Never becomes a `Sim3LoopMeasurement`.
+    pub stage2_diagnostic_umeyama_scale: Option<f64>,
+    pub stage2_diagnostic_umeyama_inliers: Option<usize>,
+    /// Rotation disagreement between the independent 2D-2D E fit and 3D-3D
+    /// Umeyama fit in the acceptance-neutral continuation diagnostic.
+    pub stage2_umeyama_vs_e_rotation_deg: Option<f64>,
     /// The furthest verification stage this candidate reached this query —
     /// see [`CandidateOutcome`]'s own doc for the full list of values. Kept
     /// as a plain string (not an enum) since this is purely a diagnostic/CSV
@@ -803,6 +811,9 @@ struct CandidateOutcome {
     stage2_model: &'static str,
     stage2_h_inliers: Option<usize>,
     stage2_h_rotation_disagreement_deg: Option<f64>,
+    stage2_diagnostic_umeyama_scale: Option<f64>,
+    stage2_diagnostic_umeyama_inliers: Option<usize>,
+    stage2_umeyama_vs_e_rotation_deg: Option<f64>,
     rotation_disagreement_deg: Option<f64>,
     stage_reached: &'static str,
 }
@@ -816,6 +827,9 @@ impl Default for CandidateOutcome {
             stage2_model: "not_run",
             stage2_h_inliers: None,
             stage2_h_rotation_disagreement_deg: None,
+            stage2_diagnostic_umeyama_scale: None,
+            stage2_diagnostic_umeyama_inliers: None,
+            stage2_umeyama_vs_e_rotation_deg: None,
             rotation_disagreement_deg: None,
             stage_reached: "not_attempted",
         }
@@ -1259,6 +1273,12 @@ impl DpvoLongLoopIndex {
             // recovered rotation forward to step (d)'s gate, below the
             // bridge.
             let mut stage2_e_rotation: Option<UnitQuaternion<f64>> = None;
+            // True only in the opt-in acceptance-neutral diagnostic: carry
+            // an E-vs-trusted rejection through the existing bridge solely
+            // to measure independent E-vs-Umeyama agreement. Such a
+            // candidate is unconditionally rejected before measurement
+            // construction below.
+            let mut diagnostic_stage2_rotation_failure = false;
             if self.config.stage2_2d2d_geometry {
                 self.diag_stage2_attempts += 1;
                 // (a) Match stored SP descriptors 2D-2D: mutual
@@ -1406,21 +1426,39 @@ impl DpvoLongLoopIndex {
                     if e_rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
                         self.diag_stage2_rejected_rotation += 1;
                         outcome.stage_reached = "2d2d_rotation_inconsistent";
-                        break 'stage2;
+                        if self.config.stage2_low_baseline_diagnostic {
+                            diagnostic_stage2_rotation_failure = true;
+                            stage2_e_rotation = Some(e_rotation);
+                        } else {
+                            break 'stage2;
+                        }
                     }
 
                     // (c) Gate: epipolar residual sane.
                     if !rel.mean_sampson_error.is_finite()
                         || rel.mean_sampson_error > self.config.stage2_max_mean_sampson_error
                     {
+                        if diagnostic_stage2_rotation_failure {
+                            // The diagnostic continuation discovered a
+                            // later residual failure after this candidate
+                            // had already been provisionally counted in the
+                            // rotation bucket. Keep the documented stage-2
+                            // funnel partition disjoint.
+                            self.diag_stage2_rejected_rotation =
+                                self.diag_stage2_rejected_rotation.saturating_sub(1);
+                            diagnostic_stage2_rotation_failure = false;
+                        }
                         self.diag_stage2_rejected_residual += 1;
                         outcome.stage_reached = "2d2d_high_residual";
+                        stage2_e_rotation = None;
                         break 'stage2;
                     }
 
-                    self.diag_stage2_passed += 1;
-                    outcome.stage_reached = "stage2_passed";
-                    stage2_e_rotation = Some(e_rotation);
+                    if !diagnostic_stage2_rotation_failure {
+                        self.diag_stage2_passed += 1;
+                        outcome.stage_reached = "stage2_passed";
+                        stage2_e_rotation = Some(e_rotation);
+                    }
                 }
                 if stage2_e_rotation.is_none() {
                     // (a)-(c) failed: per this slice's own task brief, do
@@ -1478,15 +1516,21 @@ impl DpvoLongLoopIndex {
             // see `GeometricFit::rotation`'s and
             // `DpvoLongLoopConfig::max_rotation_inconsistency_deg`'s own doc.
             let fit_rotation_uq = UnitQuaternion::from_rotation_matrix(&fit.rotation);
+            if diagnostic_stage2_rotation_failure {
+                outcome.stage2_diagnostic_umeyama_scale = Some(fit.scale);
+                outcome.stage2_diagnostic_umeyama_inliers = Some(fit.inlier_count);
+            }
             let rotation_disagreement_deg = fit_rotation_uq
                 .angle_to(&relative_pose.rotation)
                 .to_degrees();
             outcome.rotation_disagreement_deg = Some(rotation_disagreement_deg);
             if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
-                self.diag_rejected_rotation_inconsistent += 1;
-                outcome.stage_reached = "rotation_inconsistent";
-                outcomes.push((old_arrival, outcome));
-                continue;
+                if !diagnostic_stage2_rotation_failure {
+                    self.diag_rejected_rotation_inconsistent += 1;
+                    outcome.stage_reached = "rotation_inconsistent";
+                    outcomes.push((old_arrival, outcome));
+                    continue;
+                }
             }
 
             // A3 stage 2 step (d): ADDITIONALLY require the Umeyama
@@ -1497,12 +1541,25 @@ impl DpvoLongLoopIndex {
             // independent E-matrix rotation to compare against otherwise).
             if let Some(e_rotation) = stage2_e_rotation {
                 let umeyama_vs_e_deg = fit_rotation_uq.angle_to(&e_rotation).to_degrees();
+                outcome.stage2_umeyama_vs_e_rotation_deg = Some(umeyama_vs_e_deg);
                 if umeyama_vs_e_deg > self.config.stage2_umeyama_vs_e_rotation_max_deg {
-                    self.diag_stage2_rejected_umeyama_vs_e_rotation += 1;
-                    outcome.stage_reached = "umeyama_vs_e_rotation_inconsistent";
+                    if !diagnostic_stage2_rotation_failure {
+                        self.diag_stage2_rejected_umeyama_vs_e_rotation += 1;
+                        outcome.stage_reached = "umeyama_vs_e_rotation_inconsistent";
+                    } else {
+                        outcome.stage_reached = "diagnostic_umeyama_vs_e_inconsistent";
+                    }
                     outcomes.push((old_arrival, outcome));
                     continue;
                 }
+            }
+
+            if diagnostic_stage2_rotation_failure {
+                // Measurement-only continuation: even an E/Umeyama-consistent
+                // candidate is never accepted in this diagnostic slice.
+                outcome.stage_reached = "diagnostic_umeyama_vs_e_consistent";
+                outcomes.push((old_arrival, outcome));
+                continue;
             }
 
             let measurement = Sim3LoopMeasurement {
@@ -1559,6 +1616,9 @@ impl DpvoLongLoopIndex {
                 stage2_h_inliers: outcome.stage2_h_inliers,
                 stage2_h_rotation_disagreement_deg: outcome
                     .stage2_h_rotation_disagreement_deg,
+                stage2_diagnostic_umeyama_scale: outcome.stage2_diagnostic_umeyama_scale,
+                stage2_diagnostic_umeyama_inliers: outcome.stage2_diagnostic_umeyama_inliers,
+                stage2_umeyama_vs_e_rotation_deg: outcome.stage2_umeyama_vs_e_rotation_deg,
                 stage_reached: outcome.stage_reached,
                 final_accepted: is_accepted,
             });
