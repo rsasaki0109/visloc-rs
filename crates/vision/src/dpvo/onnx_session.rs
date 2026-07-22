@@ -221,6 +221,16 @@ impl DpvoOnnxSession {
         }
     }
 
+    /// Run the two independent encoders serially. Bounded frame-ahead
+    /// pipelines use this variant to avoid submitting fnet, inet, and the
+    /// previous frame's update graph to a small GPU at the same instant.
+    pub fn run_encoders_serial(
+        &self,
+        image: ArrayView4<'_, f32>,
+    ) -> Result<(Array4<f32>, Array4<f32>), DpvoOnnxError> {
+        Ok((self.run_fnet(image.view())?, self.run_inet(image)?))
+    }
+
     /// Run `dpvo_update_pre_agg.onnx`: `Update.forward` up to (but
     /// excluding) the two `SoftAgg` calls.
     ///

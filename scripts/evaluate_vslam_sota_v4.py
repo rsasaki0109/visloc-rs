@@ -111,6 +111,8 @@ def validate_protocol(protocol: dict[str, Any]) -> None:
         raise ValueError("V4 protocol must require native CUDA correlation ABI 3")
     if gates.get("required_final_refinement_iterations") != 12:
         raise ValueError("V4 protocol must require 12 final refinement iterations")
+    if gates.get("required_pipeline_prefetch") is not True:
+        raise ValueError("V4 protocol must require bounded pipeline prefetch")
 
 
 def public_frontier_verdict(path: Path | None) -> tuple[bool, list[str]]:
@@ -221,6 +223,8 @@ def evaluate(
             row["reasons"].append("run requested the forbidden grouped ONNX correlation graph")
         if values.get("native_cuda_correlation_enabled") != "true":
             row["reasons"].append("run did not enable native CUDA correlation")
+        if values.get("pipeline_prefetch") != "true":
+            row["reasons"].append("run did not enable bounded pipeline prefetch")
         try:
             ate = finite_float(values, "ate_similarity_rmse_m")
             tracked_fraction = finite_float(values, "tracked_fraction")

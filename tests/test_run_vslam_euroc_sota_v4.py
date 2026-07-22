@@ -31,6 +31,7 @@ REQUIRED = [
     "--gba-widen-t0",
     "--sim3-backend",
     "--long-loop",
+    "--pipeline-prefetch",
     "--gba-inactive-edge-cap",
     "4096",
     "--gba-max-free-poses",
@@ -49,6 +50,7 @@ GATES = {
     "required_native_cuda_correlation": True,
     "required_native_cuda_correlation_abi": 3,
     "required_final_refinement_iterations": 12,
+    "required_pipeline_prefetch": True,
 }
 
 

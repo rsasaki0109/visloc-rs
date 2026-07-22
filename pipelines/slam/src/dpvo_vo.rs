@@ -1953,6 +1953,52 @@ pub struct DpvoOdometryStats {
     pub ba_ms_total: f64,
 }
 
+/// Encoder output for one input frame, prepared independently of the
+/// stateful patch graph. Keeping this boundary explicit lets streaming
+/// callers use a bounded one-frame look-ahead queue: frame N+1's independent
+/// CNN work can overlap frame N's correlation/update/BA without dropping or
+/// reordering any camera sample.
+pub struct DpvoEncodedFrame {
+    fmap: Array3<f32>,
+    imap: Array3<f32>,
+    encode_ms: f64,
+}
+
+/// Cheaply cloned, thread-safe handle to DPVO's two image encoders.
+#[derive(Clone)]
+pub struct DpvoFrameEncoder {
+    session: DpvoOnnxSession,
+    width: usize,
+    height: usize,
+    concurrent_pair: bool,
+}
+
+impl DpvoFrameEncoder {
+    pub fn encode(&self, image: ArrayView2<'_, u8>) -> Result<DpvoEncodedFrame, DpvoOdometryError> {
+        let (h, w) = image.dim();
+        if (w, h) != (self.width, self.height) {
+            return Err(DpvoOdometryError::ImageShapeMismatch {
+                expected: (self.width, self.height),
+                actual: (w, h),
+            });
+        }
+        let started = Instant::now();
+        let input = grayscale_to_input_tensor(image);
+        let (fmap4, imap4) = if self.concurrent_pair {
+            self.session.run_encoders(input.view())?
+        } else {
+            self.session.run_encoders_serial(input.view())?
+        };
+        Ok(DpvoEncodedFrame {
+            // Encoder outputs own their allocations already; move away the
+            // singleton batch axis instead of copying either feature map.
+            fmap: fmap4.index_axis_move(Axis(0), 0),
+            imap: imap4.index_axis_move(Axis(0), 0),
+            encode_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
 /// One live frame's cached `fnet` feature pyramid (`DPVO.pyramid`,
 /// `dpvo.py:72-76`): `level0` is the full-stride-4 feature map
 /// (`avg_pool2d(fmap, 1, 1)` — a no-op, kept only for naming symmetry with
@@ -2455,6 +2501,30 @@ impl DpvoOdometry {
         self.stats
     }
 
+    /// Return a thread-safe encoder handle for bounded streaming prefetch.
+    /// It shares the already-loaded ORT sessions; no model or weights are
+    /// duplicated.
+    pub fn frame_encoder(&self) -> DpvoFrameEncoder {
+        DpvoFrameEncoder {
+            session: self.session.clone(),
+            width: self.config.width,
+            height: self.config.height,
+            concurrent_pair: true,
+        }
+    }
+
+    /// Encoder handle tuned for a frame-ahead producer: fnet and inet run
+    /// serially while their combined work overlaps the previous frame's
+    /// tracking backend.
+    pub fn serial_frame_encoder(&self) -> DpvoFrameEncoder {
+        DpvoFrameEncoder {
+            session: self.session.clone(),
+            width: self.config.width,
+            height: self.config.height,
+            concurrent_pair: false,
+        }
+    }
+
     pub fn full_update_graph_enabled(&self) -> bool {
         self.session.full_update_enabled()
     }
@@ -2717,6 +2787,19 @@ impl DpvoOdometry {
         image: ArrayView2<'_, u8>,
         timestamp: f64,
     ) -> Result<Option<SE3>, DpvoOdometryError> {
+        let encoded = self.frame_encoder().encode(image)?;
+        self.process_encoded_frame(image, timestamp, encoded)
+    }
+
+    /// Process a frame whose independent CNN encoders have already run.
+    /// This is semantically identical to [`Self::process_frame`]; only the
+    /// scheduling boundary differs.
+    pub fn process_encoded_frame(
+        &mut self,
+        image: ArrayView2<'_, u8>,
+        timestamp: f64,
+        encoded: DpvoEncodedFrame,
+    ) -> Result<Option<SE3>, DpvoOdometryError> {
         let (h, w) = image.dim();
         if (w, h) != (self.config.width, self.config.height) {
             return Err(DpvoOdometryError::ImageShapeMismatch {
@@ -2726,17 +2809,10 @@ impl DpvoOdometry {
         }
         self.trajectory_finalized = false;
         self.stats.frames_processed += 1;
+        self.stats.encode_ms_total += encoded.encode_ms;
 
-        let encode_start = Instant::now();
-        let input = grayscale_to_input_tensor(image);
-        let (fmap4, imap4) = self.session.run_encoders(input.view())?;
-        self.stats.encode_ms_total += encode_start.elapsed().as_secs_f64() * 1000.0;
-
-        // Encoder outputs own their allocation already. Removing the
-        // singleton batch axis by move avoids copying ~46 MB/frame at EuRoC
-        // resolution (128- plus 384-channel stride-4 maps).
-        let fmap = fmap4.index_axis_move(Axis(0), 0);
-        let imap_full = imap4.index_axis_move(Axis(0), 0);
+        let fmap = encoded.fmap;
+        let imap_full = encoded.imap;
         let (_, hs, ws) = fmap.dim();
 
         // Milestone M12 (`docs/dpvo_droid_port_plan.md`, `crate::dpvo_long_loop`'s
@@ -4369,7 +4445,14 @@ impl DpvoOdometry {
         let corr_flat = if self.native_correlation.is_some() {
             let mut anchor_gmap = Array4::<f32>::zeros((e_count, FNET_DIM, PATCH, PATCH));
             let mut coords_grid_px = Array4::<f32>::zeros((e_count, PATCH, PATCH, 2));
-            let mut targets = Vec::with_capacity(e_count);
+            // Only frames referenced as correlation targets belong in this
+            // invocation. The graph may retain hundreds of keyframes on a
+            // full sequence while PATCH_LIFETIME bounds the active target
+            // set to a small suffix. Passing every retained pyramid made
+            // the native stable-slot wrapper scan/copy an ever-growing set
+            // and caused full-sequence latency to grow roughly linearly.
+            let edge_targets: Vec<usize> = edges.iter().map(|edge| edge.j).collect();
+            let (target_frames, targets) = compact_target_indices(&edge_targets);
             for (idx, edge) in edges.iter().enumerate() {
                 let pose_i = self.graph.frames()[edge.i].pose.clone();
                 let pose_j = self.graph.frames()[edge.j].pose.clone();
@@ -4387,35 +4470,34 @@ impl DpvoOdometry {
                         coords_grid_px[(idx, py, px, 1)] = grid[py][px].y as f32;
                     }
                 }
-                targets.push(edge.j as i32);
             }
-            let level0_frames: Result<Vec<&Array3<f32>>, _> = self
-                .frame_pyramids
+            let level0_frames: Result<Vec<&Array3<f32>>, _> = target_frames
                 .iter()
-                .map(|pyramid| {
-                    pyramid.level0_chw.as_ref().ok_or_else(|| {
-                        DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
-                            "missing cached level0 CHW map".into(),
-                        ))
+                .map(|&frame| {
+                    self.frame_pyramids[frame].level0_chw.as_ref().ok_or_else(|| {
+                        DpvoOdometryError::NativeCudaCorrelation(
+                            NativeCudaCorrelationError::Shape(
+                                "missing cached level0 CHW map".into(),
+                            ),
+                        )
                     })
                 })
                 .collect();
-            let level1_frames: Result<Vec<&Array3<f32>>, _> = self
-                .frame_pyramids
+            let level1_frames: Result<Vec<&Array3<f32>>, _> = target_frames
                 .iter()
-                .map(|pyramid| {
-                    pyramid.level1_chw.as_ref().ok_or_else(|| {
-                        DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
-                            "missing cached level1 CHW map".into(),
-                        ))
+                .map(|&frame| {
+                    self.frame_pyramids[frame].level1_chw.as_ref().ok_or_else(|| {
+                        DpvoOdometryError::NativeCudaCorrelation(
+                            NativeCudaCorrelationError::Shape(
+                                "missing cached level1 CHW map".into(),
+                            ),
+                        )
                     })
                 })
                 .collect();
-            let frame_ids: Vec<u64> = self
-                .graph
-                .frames()
+            let frame_ids: Vec<u64> = target_frames
                 .iter()
-                .map(|frame| frame.arrival_index as u64)
+                .map(|&frame| self.graph.frames()[frame].arrival_index as u64)
                 .collect();
             let (correlation, device_ms) = self
                 .native_correlation
@@ -6426,6 +6508,24 @@ fn torch_quantile_50(sorted: &[f64]) -> f64 {
     }
 }
 
+/// Compact arbitrary frame indices into a deterministic dense target list
+/// plus one remapped index per edge. Native correlation only needs these
+/// referenced pyramids, not every frame retained by the trajectory graph.
+fn compact_target_indices(edge_targets: &[usize]) -> (Vec<usize>, Vec<i32>) {
+    let mut frames = edge_targets.to_vec();
+    frames.sort_unstable();
+    frames.dedup();
+    let remapped = edge_targets
+        .iter()
+        .map(|target| {
+            frames
+                .binary_search(target)
+                .expect("edge target was collected") as i32
+        })
+        .collect();
+    (frames, remapped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6444,6 +6544,13 @@ mod tests {
     #[test]
     fn torch_quantile_50_empty_is_zero() {
         assert_eq!(torch_quantile_50(&[]), 0.0);
+    }
+
+    #[test]
+    fn native_target_compaction_is_sorted_dense_and_order_preserving() {
+        let (frames, remapped) = compact_target_indices(&[310, 7, 310, 42, 7]);
+        assert_eq!(frames, vec![7, 42, 310]);
+        assert_eq!(remapped, vec![2, 0, 2, 1, 0]);
     }
 
     #[test]

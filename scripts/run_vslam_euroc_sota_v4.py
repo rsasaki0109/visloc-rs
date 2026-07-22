@@ -125,6 +125,7 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
         "--gba-widen-t0",
         "--sim3-backend",
         "--long-loop",
+        "--pipeline-prefetch",
     }
     missing = required_switches.difference(arguments)
     if missing:
@@ -145,6 +146,8 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
         raise ValueError("frozen V4 protocol must require native CUDA correlation ABI 3")
     if gates.get("required_final_refinement_iterations") != 12:
         raise ValueError("frozen V4 protocol must require 12 final refinement iterations")
+    if gates.get("required_pipeline_prefetch") is not True:
+        raise ValueError("frozen V4 protocol must require bounded pipeline prefetch")
     queue_bounds = gates["queue_bounds"]
     if configuration.get("queue_bounds") != queue_bounds:
         raise ValueError("configuration queue bounds differ from the frozen V4 protocol")

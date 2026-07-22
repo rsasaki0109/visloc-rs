@@ -854,6 +854,43 @@ slower on this installed CUDA/ORT stack, so the flag was not retained. The
 remaining accepted runtime work must target FP32 encoder scheduling/device
 residency or the correlation-to-update boundary, not lower precision.
 
+The lifetime boundary is now explicitly closed rather than inferred. At 12
+patches, lifetime 4 reached 48.10 ms/frame but failed accuracy at 0.1378 m
+Sim(3) ATE; lifetime 5 took 70.05 ms/frame and narrowly failed at 0.0230 m;
+lifetime 6 is the smallest sequentially scheduled accuracy-safe setting. A
+bounded streaming pipeline was therefore added instead of discarding input
+frames: capacity-one preprocessing and encoding queues overlap frame N+1's
+decode/remap/independent CNNs with frame N's stateful correlation/update/BA.
+The already-loaded ORT sessions are shared, fnet and inet run serially inside
+the encoder stage to avoid three-way GPU contention, all camera timestamps are
+still processed in order, and the summary records `pipeline_prefetch=true`.
+The V4 protocol, runner, and evaluator now require and audit that flag.
+
+On the matched MH_03 400-frame development prefix, the three-stage pipeline
+with 11 patches and lifetime 6 produced 400/400 poses at 46.56 ms/frame and
+0.0090 m Sim(3) ATE. Ten patches/lifetime 5 reached 46.05 ms but only 0.0199 m
+ATE, while 12 patches/lifetime 5 varied from 0.0055 to 0.0212 m under different
+CUDA overlap schedules; both are rejected as insufficiently robust margins.
+The first full-2700 run then exposed a separate full-sequence defect: native
+correlation was passed every retained `frame_pyramids` entry even though the
+active edge set referenced only a small lifetime-bounded target subset. As the
+retained graph grew past 300 frames, correlation rose from about 16 to 111
+ms/frame, encoder contention rose to 108 ms/frame, and total latency reached
+138.91 ms/frame. Compacting unique edge targets and remapping edge indices
+before the ABI call removed that linear growth. The repeated full MH_03 run
+held correlation at 12.71 ms/frame and completed all 2700 inputs at **43.77
+ms/frame**, versus 138.91 before compaction. This clears the sustained input
+rate with bounded queues on the full sequence, not merely a prefix.
+
+Accuracy does not yet clear V3: both full visual-only runs drifted to about
+2.46 m Sim(3) ATE despite the corrected run remaining real-time. That
+near-identical failure before/after the 3.17x runtime correction isolates the
+next problem as long-horizon estimation rather than overload. Do not run or
+freeze the 11-sequence V4 matrix from this visual-only result. The next
+accuracy run must use V4's required IMU, proximity loop, global BA, Sim(3), and
+long-range loop stack on full MH_03/MH_01, then freeze only if both development
+sequences clear the 0.020 m policy without losing the new full-sequence timing.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

@@ -225,6 +225,8 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{mpsc, Arc};
+use std::thread;
 use std::time::Instant;
 
 use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
@@ -236,8 +238,8 @@ use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, Euroc
 use visloc_rs::io::images::read_common_image;
 use visloc_rs::slam::dpvo_patch_graph::{DpvoPatchGraph, DpvoVoConfig};
 use visloc_rs::slam::dpvo_vo::{
-    DpvoGlobalBaConfig, DpvoImuConfig, DpvoLowParallaxConfig, DpvoOdometry, DpvoOdometryConfig,
-    DpvoScaleCouplingConfig, LowParallaxResponse,
+    DpvoEncodedFrame, DpvoGlobalBaConfig, DpvoImuConfig, DpvoLowParallaxConfig, DpvoOdometry,
+    DpvoOdometryConfig, DpvoScaleCouplingConfig, LowParallaxResponse,
 };
 use visloc_rs::slam::{
     DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig,
@@ -297,6 +299,9 @@ struct CliArgs {
     onnx_cuda: bool,
     onnx_correlation: bool,
     native_cuda_correlation_dll: Option<PathBuf>,
+    /// Bounded queue (capacity one) that overlaps frame N+1 image
+    /// preparation/encoding with frame N's stateful tracking backend.
+    pipeline_prefetch: bool,
     /// Milestone M5 (`docs/dpvo_droid_port_plan.md`): feed `mav0/imu0/data.csv`
     /// into `DpvoOdometry::push_imu` and enable the IMU-coupled joint solve
     /// once its bootstrap chain succeeds. Default off — visual-only, exactly
@@ -522,6 +527,7 @@ impl Default for CliArgs {
             onnx_cuda: false,
             onnx_correlation: false,
             native_cuda_correlation_dll: None,
+            pipeline_prefetch: false,
             imu: false,
             imu_gravity_norm_deviation_ratio: 0.3,
             imu_min_bootstrap_factors: 10,
@@ -669,6 +675,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--native-cuda-correlation-dll" => {
                 args.native_cuda_correlation_dll = Some(PathBuf::from(raw.remove(i + 1)))
+            }
+            "--pipeline-prefetch" => {
+                args.pipeline_prefetch = true;
+                raw.remove(i);
+                continue;
             }
             "--imu" => {
                 args.imu = true;
@@ -887,6 +898,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         return Err(
             "--native-cuda-correlation-dll and --onnx-correlation are mutually exclusive".into(),
         );
+    }
+    if args.pipeline_prefetch && !args.onnx_cuda {
+        return Err("--pipeline-prefetch requires --onnx-cuda".into());
     }
     if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
         return Err(
@@ -1182,7 +1196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &dataset.cam0_calibration.distortion_coefficients,
     )
     .unwrap_or(RadialTangential::IDENTITY);
-    let undistort_map = UndistortMap::new(width, height, intrinsics, &distortion);
+    let undistort_map = Arc::new(UndistortMap::new(width, height, intrinsics, &distortion));
 
     let (backend, onnx_backend_requested) = if args.onnx_cpu {
         (OnnxBackend::Cpu, "cpu")
@@ -1556,6 +1570,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.stride
     );
 
+    // Start before any prefetch worker can do useful work so the reported
+    // input-rate timing cannot hide the first queued frame's preparation.
+    let run_start = Instant::now();
+    type PreparedFrame = Result<(Array2<u8>, DpvoEncodedFrame, f64, f64), String>;
+    type PreprocessedFrame = Result<(Array2<u8>, f64, f64), String>;
+    let mut prefetch_joins = Vec::new();
+    let mut prefetch_rx = None;
+    if args.pipeline_prefetch {
+        let jobs: Vec<PathBuf> = frames
+            .iter()
+            .map(|entry| dataset.cam0_image_dir.join(&entry.filename))
+            .collect();
+        let map = Arc::clone(&undistort_map);
+        let encoder = odometry.serial_frame_encoder();
+        let (preprocess_tx, preprocess_rx) = mpsc::sync_channel::<PreprocessedFrame>(1);
+        let (tx, rx) = mpsc::sync_channel::<PreparedFrame>(1);
+        prefetch_joins.push(thread::spawn(move || {
+            for image_path in jobs {
+                let prepared = (|| -> PreprocessedFrame {
+                    let io_start = Instant::now();
+                    let grayscale = read_common_image(&image_path)
+                        .map_err(|error| format!("read {}: {error}", image_path.display()))?;
+                    let mut raw = Array2::<u8>::zeros((grayscale.height(), grayscale.width()));
+                    for y in 0..grayscale.height() {
+                        for x in 0..grayscale.width() {
+                            let normalized = grayscale.get(x, y).unwrap_or(0.0);
+                            raw[(y, x)] = (normalized * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                    let io_ms = io_start.elapsed().as_secs_f64() * 1000.0;
+                    let undistort_start = Instant::now();
+                    let undistorted = map.apply(&raw);
+                    let undistort_ms = undistort_start.elapsed().as_secs_f64() * 1000.0;
+                    Ok((undistorted, io_ms, undistort_ms))
+                })();
+                let failed = prepared.is_err();
+                if preprocess_tx.send(prepared).is_err() || failed {
+                    break;
+                }
+            }
+        }));
+        prefetch_joins.push(thread::spawn(move || {
+            while let Ok(preprocessed) = preprocess_rx.recv() {
+                let prepared = preprocessed.and_then(|(image, io_ms, undistort_ms)| {
+                    let encoded = encoder
+                        .encode(image.view())
+                        .map_err(|error| format!("encode prefetched frame: {error}"))?;
+                    Ok((image, encoded, io_ms, undistort_ms))
+                });
+                let failed = prepared.is_err();
+                if tx.send(prepared).is_err() || failed {
+                    break;
+                }
+            }
+        }));
+        prefetch_rx = Some(rx);
+    }
+
     // Every input timestamp belongs in the final trajectory, including a
     // candidate rejected by upstream's pre-initialization motion filter.
     // `reject_pending_frame` records that arrival's identity delta to its
@@ -1613,27 +1685,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_sc_converged = false;
     let mut prev_sc_rollback_count = 0usize;
 
-    let run_start = Instant::now();
     for (idx, entry) in frames.iter().enumerate() {
-        let image_path = dataset.cam0_image_dir.join(&entry.filename);
-        let io_start = Instant::now();
-        let grayscale = read_common_image(&image_path)?;
-        // `GrayscaleImage` stores normalized `[0,1]` f32 samples
-        // (`crates/vision/src/features/mod.rs`); DPVO's own contract is raw
-        // `[0,255]` pixels (`dpvo_vo.rs`'s `grayscale_to_input_tensor` doc),
-        // so convert back to `u8` here at the loader boundary.
-        let mut raw = Array2::<u8>::zeros((grayscale.height(), grayscale.width()));
-        for y in 0..grayscale.height() {
-            for x in 0..grayscale.width() {
-                let normalized = grayscale.get(x, y).unwrap_or(0.0);
-                raw[(y, x)] = (normalized * 255.0).round().clamp(0.0, 255.0) as u8;
+        let (undistorted, encoded) = if let Some(rx) = prefetch_rx.as_ref() {
+            let (image, encoded, io_ms, undistort_ms) = rx
+                .recv()
+                .map_err(|error| format!("prefetch worker stopped before frame {idx}: {error}"))?
+                .map_err(|error| format!("prefetch frame {idx}: {error}"))?;
+            io_ms_total += io_ms;
+            undistort_ms_total += undistort_ms;
+            (image, Some(encoded))
+        } else {
+            let image_path = dataset.cam0_image_dir.join(&entry.filename);
+            let io_start = Instant::now();
+            let grayscale = read_common_image(&image_path)?;
+            // `GrayscaleImage` stores normalized `[0,1]` f32 samples;
+            // DPVO consumes raw `[0,255]` pixels.
+            let mut raw = Array2::<u8>::zeros((grayscale.height(), grayscale.width()));
+            for y in 0..grayscale.height() {
+                for x in 0..grayscale.width() {
+                    let normalized = grayscale.get(x, y).unwrap_or(0.0);
+                    raw[(y, x)] = (normalized * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
             }
-        }
-        io_ms_total += io_start.elapsed().as_secs_f64() * 1000.0;
-
-        let undistort_start = Instant::now();
-        let undistorted = undistort_map.apply(&raw);
-        undistort_ms_total += undistort_start.elapsed().as_secs_f64() * 1000.0;
+            io_ms_total += io_start.elapsed().as_secs_f64() * 1000.0;
+            let undistort_start = Instant::now();
+            let undistorted = undistort_map.apply(&raw);
+            undistort_ms_total += undistort_start.elapsed().as_secs_f64() * 1000.0;
+            (undistorted, None)
+        };
 
         let timestamp_seconds = entry.timestamp_nanoseconds as f64 * 1.0e-9;
 
@@ -1652,7 +1731,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let pose = odometry.process_frame(undistorted.view(), timestamp_seconds)?;
+        let pose = if let Some(encoded) = encoded {
+            odometry.process_encoded_frame(undistorted.view(), timestamp_seconds, encoded)?
+        } else {
+            odometry.process_frame(undistorted.view(), timestamp_seconds)?
+        };
         // `begin_frame` increments the graph counter once for every input,
         // accepted or rejected, so this loop index is the stable arrival
         // index used by the graph's delta chain.
@@ -1837,7 +1920,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             debug_assert_eq!(arrival_index, idx);
         }
 
-        if idx % 10 == 0 || idx + 1 == frames.len() {
+        let progress_interval = if args.pipeline_prefetch { 100 } else { 10 };
+        if idx % progress_interval == 0 || idx + 1 == frames.len() {
             let stats = odometry.stats();
             let n = stats.frames_processed.max(1) as f64;
             let imu_diag = odometry.imu_diagnostics();
@@ -1970,6 +2054,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    for join in prefetch_joins {
+        join.join()
+            .map_err(|_| "pipeline prefetch worker panicked")?;
+    }
     odometry.finalize_trajectory()?;
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
 
@@ -2075,6 +2163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let summary = format!(
         "euroc_dir={}\n\
          model_dir={}\n\
+         pipeline_prefetch={pipeline_prefetch}\n\
          onnx_backend_requested={onnx_backend_requested}\n\
          onnx_full_update_graph_enabled={full_update_graph_enabled}\n\
          onnx_correlation_graph_enabled={correlation_graph_enabled}\n\
@@ -2259,6 +2348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "none".into()),
         stats.final_refinement_iterations,
+        pipeline_prefetch = args.pipeline_prefetch,
         frame_count = frames.len(),
         io_ms = io_ms_total / stats.frames_processed.max(1) as f64,
         undistort_ms = undistort_ms_total / stats.frames_processed.max(1) as f64,
