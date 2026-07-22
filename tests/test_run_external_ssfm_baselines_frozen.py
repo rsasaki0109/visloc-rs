@@ -147,6 +147,33 @@ class ExternalSsfmBaselineRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not an evidence-backed DNF"):
                 self.run_fixture(Path(raw_root), setup)
 
+    def test_ready_adapter_dependency_hash_is_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            adapter = root / "adapter.py"
+            dependency = root / "inner.py"
+            adapter.write_text("pass\n", encoding="utf-8")
+            dependency.write_text("pass\n", encoding="utf-8")
+            setup = {
+                "engines": {
+                    engine: {
+                        "status": "ready",
+                        "source_revision": "fixture",
+                        "adapter": {
+                            "path": str(adapter),
+                            "sha256": hashlib.sha256(adapter.read_bytes()).hexdigest(),
+                            "dependencies": [
+                                {"path": str(dependency), "sha256": "0" * 64}
+                            ],
+                            "command_template": [sys.executable, "{adapter}"],
+                        },
+                    }
+                    for engine in ("gluemap", "instantsfm")
+                }
+            }
+            with self.assertRaisesRegex(ValueError, "dependency hash mismatch"):
+                self.run_fixture(root, setup)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,6 +100,12 @@ def run_ready_engine(
         raise FileNotFoundError(f"{engine} adapter: {adapter_path}")
     if sha256(adapter_path) != adapter.get("sha256"):
         raise ValueError(f"{engine} adapter hash mismatch")
+    for dependency in adapter.get("dependencies", []):
+        dependency_path = Path(dependency.get("path", ""))
+        if not dependency_path.is_file():
+            raise FileNotFoundError(f"{engine} adapter dependency: {dependency_path}")
+        if sha256(dependency_path) != dependency.get("sha256"):
+            raise ValueError(f"{engine} adapter dependency hash mismatch")
     template = adapter.get("command_template")
     if not isinstance(template, list) or not template:
         raise ValueError(f"{engine} adapter command template is empty")
@@ -149,7 +155,10 @@ def run_ready_engine(
     registered = int(result["registered_images"])
     if registered <= 0 or registered > expected_frames:
         raise ValueError(f"invalid {engine} registered image count: {registered}")
-    adapter_peak_rss = int(result.get("peak_process_tree_rss_bytes", 0))
+    adapter_peak_rss_value = result.get("peak_process_tree_rss_bytes")
+    adapter_peak_rss = (
+        int(adapter_peak_rss_value) if adapter_peak_rss_value is not None else 0
+    )
     adapter_peak_gpu = result.get("peak_global_gpu_memory_mib")
     return {
         "status": "success",
