@@ -919,6 +919,37 @@ k=1024 bag-of-words+TF-IDF scheme the lab validated. Then re-run
 qf5 + 2d2d-geometry + improved-retrieval and check whether real-baseline
 post-to-pre-hover loops finally reach stage 2 and pass on their merits.
 
+Vocab-size A/B (2026-07-22, zero code changes — honest negative): same-binary
+qf5 arms at `--ll-vocab-words` 128/256/1024 versus the 32-word control.
+Raising k monotonically WORSENS live recall@1: 0.5694 (32) -> 0.4444 (128) ->
+0.4306 (256) -> 0.3333 (1024), with empty-query fraction climbing
+0.38 -> 0.62 -> 0.78 -> 0.85. Mechanism: the vocabulary is k-means-trained
+exactly once on the pooled descriptors of only `vocab_bootstrap_frames=40`
+committed frames (`place_recognition::Vocabulary::build`), so larger k
+starves each cluster and VLAD blocks go sparse/noisy — a data-starvation
+failure, not a code bug. (42,456) stays invisible at every k. All accepted
+loops in every arm remain short-cycle borderline passes (rot 15.7-19.8 deg);
+without the stage-2 gate the V256 arm suffered a catastrophic accepted-loop
+scale event (rigid ATE 283.5 m, similarity scale 0.00129) — further evidence
+that `--ll-2d2d-geometry` must be on for any acceptance work. V1024's one-time
+vocab build cost ~10 min mid-run but per-frame cost stayed ~1.3 s/frame.
+Verdict: the live-vs-offline recall gap is NOT a vocabulary-size problem.
+Artifacts: `.../on_800_qf5_v{128,256,1024}/`, scorer JSONs
+`.../recall_qf_ab/qf5_v{128,256,1024}.json`.
+
+Decisive implication from the lab + this negative: offline mean-pooled cosine
+needs NO vocabulary at all and reached recall@1 0.989 on the same
+descriptors, with per-frame storage of 256 floats (vs VLAD-32's 8192).
+The next slice is therefore an opt-in `--ll-retrieval-scorer mean-pool`
+alternative in the live index (frame signature = L2-normalized mean SP
+descriptor; cosine ranking; same top_k/min-gap plumbing; method-appropriate
+similarity floor calibrated from the lab distributions), A/B'd at qf5, then
+the acceptance A/B qf5 + 2d2d + mean-pool. Caveat recorded: mean-pool ranks
+the hard pair (42,456) at 72 offline — general recall will not by itself
+surface the tightest pre/post-hover bridge; the lab's secondary finding
+(near-target candidates rank #1 at query arrivals 457/459/461) says
+query-arrival placement is the remaining lever for that specific pair.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:
