@@ -229,6 +229,7 @@ use std::time::Instant;
 
 use nalgebra::{Matrix4, Point2, Point3, UnitQuaternion, Vector3};
 use ndarray::Array2;
+use rayon::prelude::*;
 
 use visloc_rs::core::geometry::SE3;
 use visloc_rs::io::euroc::{read_euroc_dataset_dir, EurocGroundTruthSample, EurocImuSample};
@@ -921,13 +922,111 @@ fn se3_from_t_bs(t_bs: &Matrix4<f64>) -> SE3 {
     SE3::new(rotation, translation)
 }
 
-/// Undistort a full grayscale image at the *same* intrinsics (matching
-/// `cv2.undistort(image, K, dist)` — `dpvo/stream.py::image_stream`'s own
-/// preprocessing): for every output (pinhole) pixel, map forward through
-/// the distortion model to find the corresponding source pixel, then
-/// bilinearly sample the original (distorted) image. Zero-pads samples
-/// that land outside the source image.
-fn undistort_image(
+#[derive(Debug, Clone, Copy)]
+struct UndistortSample {
+    source_index: usize,
+    w00: f64,
+    w01: f64,
+    w10: f64,
+    w11: f64,
+}
+
+/// Sequence-constant inverse remap matching
+/// `cv2.undistort(image, K, dist)`. EuRoC intrinsics and distortion are
+/// fixed for the whole camera stream, so normalized distortion, floor, and
+/// bilinear weights are computed once instead of for all 360k pixels on
+/// every frame. Sampling remains full-resolution and zero-padded.
+#[derive(Debug)]
+enum UndistortMap {
+    Identity,
+    Bilinear {
+        height: usize,
+        width: usize,
+        samples: Vec<Option<UndistortSample>>,
+    },
+}
+
+impl UndistortMap {
+    fn new(
+        width: usize,
+        height: usize,
+        intrinsics: [f64; 4],
+        distortion: &RadialTangential,
+    ) -> Self {
+        if distortion.is_identity() {
+            return Self::Identity;
+        }
+        let (fx, fy, cx, cy) = (intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]);
+        let mut samples = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let normalized = Point2::new((x as f64 - cx) / fx, (y as f64 - cy) / fy);
+                let distorted_normalized = distortion.distort_normalized(normalized);
+                let src_x = fx * distorted_normalized.x + cx;
+                let src_y = fy * distorted_normalized.y + cy;
+                if src_x < 0.0
+                    || src_y < 0.0
+                    || src_x >= (width - 1) as f64
+                    || src_y >= (height - 1) as f64
+                {
+                    samples.push(None);
+                    continue;
+                }
+                let x0 = src_x.floor() as usize;
+                let y0 = src_y.floor() as usize;
+                let dx = src_x - x0 as f64;
+                let dy = src_y - y0 as f64;
+                samples.push(Some(UndistortSample {
+                    source_index: y0 * width + x0,
+                    w00: (1.0 - dx) * (1.0 - dy),
+                    w01: dx * (1.0 - dy),
+                    w10: (1.0 - dx) * dy,
+                    w11: dx * dy,
+                }));
+            }
+        }
+        Self::Bilinear {
+            height,
+            width,
+            samples,
+        }
+    }
+
+    fn apply(&self, source: &Array2<u8>) -> Array2<u8> {
+        let Self::Bilinear {
+            height,
+            width,
+            samples,
+        } = self
+        else {
+            return source.clone();
+        };
+        assert_eq!(source.dim(), (*height, *width));
+        let source = source
+            .as_slice()
+            .expect("EuRoC input image is contiguous row-major");
+        let mut output = vec![0_u8; height * width];
+        output
+            .par_iter_mut()
+            .zip(samples.par_iter())
+            .for_each(|(pixel, sample)| {
+                let Some(sample) = sample else {
+                    return;
+                };
+                let i = sample.source_index;
+                let value = source[i] as f64 * sample.w00
+                    + source[i + 1] as f64 * sample.w01
+                    + source[i + width] as f64 * sample.w10
+                    + source[i + width + 1] as f64 * sample.w11;
+                *pixel = value.round().clamp(0.0, 255.0) as u8;
+            });
+        Array2::from_shape_vec((*height, *width), output)
+            .expect("remap output length matches image dimensions")
+    }
+}
+
+#[cfg(test)]
+fn undistort_image_reference(
     source: &Array2<u8>,
     intrinsics: [f64; 4],
     distortion: &RadialTangential,
@@ -950,6 +1049,7 @@ fn undistort_image(
     out
 }
 
+#[cfg(test)]
 fn bilinear_sample_u8(image: &Array2<u8>, x: f64, y: f64) -> u8 {
     let (h, w) = image.dim();
     if x < 0.0 || y < 0.0 || x >= (w - 1) as f64 || y >= (h - 1) as f64 {
@@ -1082,6 +1182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &dataset.cam0_calibration.distortion_coefficients,
     )
     .unwrap_or(RadialTangential::IDENTITY);
+    let undistort_map = UndistortMap::new(width, height, intrinsics, &distortion);
 
     let (backend, onnx_backend_requested) = if args.onnx_cpu {
         (OnnxBackend::Cpu, "cpu")
@@ -1531,7 +1632,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         io_ms_total += io_start.elapsed().as_secs_f64() * 1000.0;
 
         let undistort_start = Instant::now();
-        let undistorted = undistort_image(&raw, intrinsics, &distortion);
+        let undistorted = undistort_map.apply(&raw);
         undistort_ms_total += undistort_start.elapsed().as_secs_f64() * 1000.0;
 
         let timestamp_seconds = entry.timestamp_nanoseconds as f64 * 1.0e-9;
@@ -2559,4 +2660,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.out_dir.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn precomputed_undistort_map_is_pixel_exact_with_reference() {
+        let (width, height) = (32, 24);
+        let source = Array2::from_shape_fn((height, width), |(y, x)| {
+            ((x * 17 + y * 29 + x * y) % 256) as u8
+        });
+        let intrinsics = [25.0, 24.0, 15.5, 11.5];
+        let distortion =
+            RadialTangential::from_euroc_coefficients(&[-0.22, 0.07, 0.001, -0.0005])
+                .expect("four EuRoC coefficients");
+        let reference = undistort_image_reference(&source, intrinsics, &distortion);
+        let remapped = UndistortMap::new(width, height, intrinsics, &distortion).apply(&source);
+        assert_eq!(remapped, reference);
+    }
+
+    #[test]
+    fn identity_undistort_map_preserves_every_pixel() {
+        let source = Array2::from_shape_fn((7, 9), |(y, x)| (y * 9 + x) as u8);
+        let remapped = UndistortMap::new(
+            9,
+            7,
+            [10.0, 10.0, 4.0, 3.0],
+            &RadialTangential::IDENTITY,
+        )
+        .apply(&source);
+        assert_eq!(remapped, source);
+    }
 }

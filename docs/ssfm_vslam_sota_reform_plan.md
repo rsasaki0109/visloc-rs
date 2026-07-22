@@ -824,6 +824,17 @@ alone cannot reach 50 ms: even that run spends 31.27 ms in the encoders and
 runtime slice must overlap or move preprocessing and eliminate ONNX/native
 GPU-host synchronization rather than shrinking the graph further.
 
+The first base-cost slice precomputes EuRoC's sequence-constant inverse
+undistortion map once and applies its bilinear samples in parallel. A unit
+test proves every output byte matches the former per-frame distortion/
+floor/reference implementation. On the same 12-patch 400-frame run,
+undistortion fell from 14.20 to 0.86 ms/frame, total latency from 128.30 to
+110.35 ms/frame, and accuracy stayed 0.0043 m Sim(3) ATE with the same
+0.0157 m maximum. This is a real 14% end-to-end gain, but encoder (29.76),
+correlation (20.40), and update (19.23 ms/frame) now dominate; the next
+workset dimension is edge lifetime/window length, followed by device-resident
+correlation-to-update transfer if the accuracy cliff prevents enough pruning.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
