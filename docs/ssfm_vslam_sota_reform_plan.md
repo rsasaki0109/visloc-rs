@@ -551,7 +551,9 @@ three DNF rows per engine rather than disappearing from the report.
 `verify_ssfm_heldout_suite.py` is the release audit: it rehashes every frozen
 input, rejects overlapping sequence intervals, verifies the deferred-GT
 engine-exit hash/timestamp chain for successful runs, and regenerates the suite
-summary to detect edited aggregate results. Both explicit-failure and
+summary to detect edited aggregate results. The audit records its own SHA-256
+and refuses to emit `verified` if its code changes during verification, so the
+published artifact identifies the exact audit logic. Both explicit-failure and
 successful deferred-GT evidence chains have regression coverage.
 
 Held-out resource-evidence hardening (2026-07-23): SuperPoint preparation,

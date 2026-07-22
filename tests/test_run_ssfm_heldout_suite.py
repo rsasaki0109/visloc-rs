@@ -119,6 +119,11 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                 self.assertEqual(verify_main(), 0)
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             self.assertEqual(audit["status"], "verified")
+            verifier_path = Path(audit["verifier"]["path"])
+            self.assertEqual(
+                audit["verifier"]["sha256"],
+                hashlib.sha256(verifier_path.read_bytes()).hexdigest(),
+            )
             self.assertTrue(
                 all(
                     cell["kind"] == "runner_failure"

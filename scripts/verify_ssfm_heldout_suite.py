@@ -245,6 +245,8 @@ def main() -> int:
     args = parse_args()
     if args.out.exists():
         raise FileExistsError(f"refusing to overwrite {args.out}")
+    verifier_path = Path(__file__).resolve()
+    verifier_sha256 = sha256(verifier_path)
     protocol_bytes = args.protocol.read_bytes()
     protocol = json.loads(protocol_bytes)
     protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
@@ -319,6 +321,10 @@ def main() -> int:
         "schema_version": 1,
         "status": "verified",
         "verified_utc": timestamp(),
+        "verifier": {
+            "path": str(verifier_path),
+            "sha256": verifier_sha256,
+        },
         "protocol_id": protocol["protocol_id"],
         "protocol_sha256": protocol_sha256,
         "suite_manifest": {
@@ -328,6 +334,8 @@ def main() -> int:
         "summary": {"path": str(summary_path.resolve()), "sha256": sha256(summary_path)},
         "sequence_audit": sequence_audit,
     }
+    if sha256(verifier_path) != verifier_sha256:
+        raise ValueError("release verifier changed during verification")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
     print(args.out)
