@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "name": "visloc-rs calibrated mono VSLAM EuRoC SOTA V4",
+  "dataset": "EuRoC MAV official ASL release",
+  "sensor_mode": "calibrated monocular camera plus IMU",
+  "sequences": [
+    "MH_01_easy",
+    "MH_02_easy",
+    "MH_03_medium",
+    "MH_04_difficult",
+    "MH_05_difficult",
+    "V1_01_easy",
+    "V1_02_medium",
+    "V1_03_difficult",
+    "V2_01_easy",
+    "V2_02_medium",
+    "V2_03_difficult"
+  ],
+  "full_sequence_frame_counts": {
+    "MH_01_easy": 3682,
+    "MH_02_easy": 3040,
+    "MH_03_medium": 2700,
+    "MH_04_difficult": 2033,
+    "MH_05_difficult": 2273,
+    "V1_01_easy": 2912,
+    "V1_02_medium": 1710,
+    "V1_03_difficult": 2149,
+    "V2_01_easy": 2280,
+    "V2_02_medium": 2348,
+    "V2_03_difficult": 1922
+  },
+  "repetitions": 3,
+  "failure_policy": "Missing, failed, partial, non-finite, or policy-mismatched runs remain in the 33-run denominator.",
+  "aggregation": "Mean each sequence across three repetitions, then report mean, median, and worst over the 11 sequence means.",
+  "gates": {
+    "mean_sequence_sim3_ate_rmse_m_max": 0.02,
+    "min_tracked_fraction": 0.9,
+    "max_committed_abs_log_scale": 4.0,
+    "max_ms_per_frame_total": 50.0,
+    "max_sampled_peak_working_set_bytes": 8589934592,
+    "max_sampled_peak_gpu_memory_bytes": 6442450944,
+    "queue_bounds": {
+      "inactive_edge_cap": 4096,
+      "max_free_poses": 256,
+      "long_loop_max_indexed_frames": 1000
+    }
+  },
+  "claim_policy": "EuRoC engineering success is necessary but not sufficient. Claimable SOTA additionally requires verified public ETH3D SLAM or ORBIT frontier evidence and a released-artifact SHA-256."
+}

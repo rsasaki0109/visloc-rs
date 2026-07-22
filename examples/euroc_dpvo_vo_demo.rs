@@ -380,6 +380,10 @@ struct CliArgs {
     s3b_frequency: usize,
     s3b_node_stride: usize,
     s3b_loop_edge_weight: f64,
+    /// Transactional scale-cliff threshold, mirrored 1:1 from
+    /// `DpvoSim3BackendConfig::max_abs_log_scale_correction` so frozen
+    /// evaluation manifests can prove the threshold used by the run.
+    s3b_max_abs_log_scale_correction: f64,
     /// Milestone M11 (`docs/dpvo_droid_port_plan.md`): enable the long-range,
     /// appearance-based loop-candidate source (`DpvoOdometryConfig::long_loop`)
     /// feeding M9's Sim3 backend and M10's widened global BA. Requires
@@ -561,6 +565,8 @@ impl Default for CliArgs {
             s3b_frequency: DpvoSim3BackendConfig::default().frequency,
             s3b_node_stride: DpvoSim3BackendConfig::default().node_stride,
             s3b_loop_edge_weight: DpvoSim3BackendConfig::default().loop_edge_weight,
+            s3b_max_abs_log_scale_correction: DpvoSim3BackendConfig::default()
+                .max_abs_log_scale_correction,
             long_loop: false,
             ll_superpoint_model: PathBuf::new(),
             // Mirror `DpvoLongLoopConfig::default()` exactly so omitting
@@ -724,6 +730,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--s3b-frequency" => args.s3b_frequency = raw.remove(i + 1).parse()?,
             "--s3b-node-stride" => args.s3b_node_stride = raw.remove(i + 1).parse()?,
             "--s3b-loop-edge-weight" => args.s3b_loop_edge_weight = raw.remove(i + 1).parse()?,
+            "--s3b-max-abs-log-scale-correction" => {
+                args.s3b_max_abs_log_scale_correction = raw.remove(i + 1).parse()?
+            }
             "--long-loop" => {
                 args.long_loop = true;
                 raw.remove(i);
@@ -1157,6 +1166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frequency: args.s3b_frequency,
             node_stride: args.s3b_node_stride,
             loop_edge_weight: args.s3b_loop_edge_weight,
+            max_abs_log_scale_correction: args.s3b_max_abs_log_scale_correction,
             ..DpvoSim3BackendConfig::default()
         }),
         // Milestone M11 (`docs/dpvo_droid_port_plan.md`): `--long-loop`
@@ -2022,6 +2032,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          sim3_backend_last_pose_delta_mean_m={s3b_last_pose_delta_mean:.6}\n\
          sim3_backend_last_scale_min={s3b_last_scale_min:.6}\n\
          sim3_backend_last_scale_max={s3b_last_scale_max:.6}\n\
+         sim3_backend_max_abs_log_scale_correction={s3b_max_abs_log_scale_correction:.6}\n\
          sim3_backend_max_committed_abs_log_scale={s3b_max_committed_abs_log_scale:.6}\n\
          sim3_backend_scale_jump_rejections_total={s3b_scale_jump_rejections_total}\n\
          sim3_backend_last_committed={s3b_last_committed}\n\
@@ -2181,6 +2192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3b_last_pose_delta_mean = s3b_diag.last_pose_delta_mean_m,
         s3b_last_scale_min = s3b_diag.last_scale_min,
         s3b_last_scale_max = s3b_diag.last_scale_max,
+        s3b_max_abs_log_scale_correction = args.s3b_max_abs_log_scale_correction,
         s3b_max_committed_abs_log_scale = s3b_diag.max_committed_abs_log_scale,
         s3b_scale_jump_rejections_total = s3b_diag.scale_jump_rejections_total,
         s3b_last_committed = s3b_diag.last_committed,

@@ -627,6 +627,21 @@ events and with a single configuration.
 Gate: meet the target in section 1.1, place on a public benchmark frontier, and
 release all artifacts required for the claim.
 
+Implementation status (2026-07-23):
+`benchmarks/protocols/vslam_euroc_sota_v4.json` now freezes the exact 11-sequence,
+three-repetition, failure-inclusive matrix before any V4 result. It requires
+full camera streams, at least 90% tracking coverage, all 33 successful runs,
+mean per-sequence Sim(3) ATE <= 0.020 m, sustained 20 Hz input, bounded CPU/GPU
+memory and queues, and no committed correction beyond the Sim(3) backend's
+frozen `4.0` absolute-log-scale transaction gate. The runner summary records
+both that configured threshold and the cumulative committed scale maximum;
+rejected scale-jump proposals are counted separately. The evaluator
+`scripts/evaluate_vslam_sota_v4.py` reports mean, median, and worst sequence
+ATE and deliberately leaves `claimable_sota=false` unless separate verified
+public ETH3D SLAM or ORBIT frontier evidence and a released-artifact SHA-256
+are supplied. No EuRoC result or public-frontier result has been claimed by
+this protocol yet.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
