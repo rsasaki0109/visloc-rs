@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "protocol_id": "ssfm-heldout-euroc-v1",
+  "frozen_utc": "2026-07-22T14:12:55Z",
+  "task": "calibrated monocular ordered-video Sequential SfM",
+  "policy": {
+    "config_id": "s2-mh03-smoke-w88-104-o72-shared4-workers2-seamba5-v1",
+    "source_revision": "03973813ac564135e6ee8d5e21d99452963f7e92",
+    "single_policy_for_all_sequences": true,
+    "post_freeze_tuning_allowed": false
+  },
+  "selection": {
+    "method": "Chosen before download or evaluation from exact sequence names absent from the repository and E:/visloc_archive experiment artifacts; all previously used development sequences are excluded.",
+    "held_out_sequences": [
+      "V1_02_medium",
+      "V1_03_difficult",
+      "V2_02_medium"
+    ],
+    "excluded_development_sequences": [
+      "MH_01_easy",
+      "MH_02_easy",
+      "MH_03_medium",
+      "MH_04_difficult",
+      "MH_05_difficult",
+      "V1_01_easy",
+      "V2_01_easy",
+      "V2_03_difficult"
+    ]
+  },
+  "inputs": {
+    "dataset": "EuRoC MAV",
+    "official_landing_page": "https://www.research-collection.ethz.ch/entities/researchdata/bcaf173e-5dac-484b-bc37-faf97a594f1f",
+    "doi": "10.3929/ethz-b-000690084",
+    "official_archives": [
+      {
+        "name": "vicon_room1.zip",
+        "size_bytes": 6042263426,
+        "checksum_algorithm": "MD5",
+        "checksum": "5ce06b405827e453a82523d3ca9c2fd0",
+        "content_url": "https://www.research-collection.ethz.ch/server/api/core/bitstreams/02ecda9a-298f-498b-970c-b7c44334d880/content",
+        "selected_sequences": [
+          "V1_02_medium",
+          "V1_03_difficult"
+        ]
+      },
+      {
+        "name": "vicon_room2.zip",
+        "size_bytes": 6013384949,
+        "checksum_algorithm": "MD5",
+        "checksum": "c6347f4e0476aaa9a43a919c163c49c5",
+        "content_url": "https://www.research-collection.ethz.ch/server/api/core/bitstreams/ea12bc01-3677-4b4c-853d-87c7870b8c44/content",
+        "selected_sequences": [
+          "V2_02_medium"
+        ]
+      }
+    ],
+    "camera": "cam0",
+    "sensor_mode": "monocular",
+    "ordered": true,
+    "full_sequence": true,
+    "rectification": "scripts/rectify_euroc_stereo.py --left-only",
+    "feature_frontend": "SuperPoint max_keypoints=2048",
+    "ground_truth_policy": "Ground truth may not be opened until every timed engine process for that sequence has exited."
+  },
+  "required_outputs_per_engine_sequence_run": [
+    "immutable command and executable/source hashes",
+    "trajectory and reconstruction",
+    "success or explicit DNF reason",
+    "registered frame count and rate",
+    "Sim(3) ATE and RPE",
+    "mean reprojection error and 3D point count",
+    "wall time and peak process-tree RAM/VRAM where applicable"
+  ],
+  "baselines": {
+    "reproduced_required": [
+      "COLMAP incremental",
+      "COLMAP global"
+    ],
+    "attempt_required_when_platform_supported": [
+      "GLUEMAP",
+      "InstantSfM"
+    ],
+    "unsupported_policy": "Record an explicit DNF with source revision, attempted command, and exact platform/dependency failure; never omit the cell."
+  },
+  "reporting": {
+    "include_failures": true,
+    "deterministic_engines_runs": 1,
+    "nondeterministic_engines_runs": 3,
+    "aggregate": [
+      "per-sequence",
+      "median",
+      "worst"
+    ],
+    "pareto_axes": [
+      "Sim(3) ATE",
+      "registration rate",
+      "wall time",
+      "peak memory"
+    ]
+  },
+  "stop_rules": [
+    "Any policy or threshold change after the first held-out engine result invalidates the entire suite and requires a new protocol version with three newly untouched sequences.",
+    "A failed or partial sequence remains in all aggregate tables.",
+    "No result from these sequences may be used to tune the frozen policy.",
+    "ORBIT remains a separate required S4 gate and cannot be substituted by EuRoC."
+  ]
+}

@@ -461,6 +461,16 @@ and the unordered guards. Compare against current COLMAP global/incremental,
 GLUEMAP, and InstantSfM on supported equal hardware. Publish the full registry,
 not just wins.
 
+Held-out freeze (2026-07-22): before downloading or evaluating any remaining
+EuRoC Vicon sequence, `V1_02_medium`, `V1_03_difficult`, and `V2_02_medium`
+were fixed as the three full ordered held-out sequences in
+`benchmarks/protocols/ssfm_heldout_euroc_v1.json`. Exact-name searches found
+no prior repository or `E:/visloc_archive` experiment artifacts for these
+sequences. All five Machine Hall sequences plus previously used V1_01, V2_01,
+and V2_03 are explicitly excluded as development data. The manifest binds the
+already-frozen S2 policy/source revision, forbids post-result tuning, requires
+failure/DNF cells, and requires per-sequence plus median/worst reporting.
+
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
 the literal placeholder `anon`, and the official supplemental ZIP contains no
