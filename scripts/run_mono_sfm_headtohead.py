@@ -312,6 +312,9 @@ def capture_registry(
             f"frames={frames}",
             "--config",
             'sensor_mode="monocular"',
+            "--config",
+            "resource_poll_seconds="
+            f"{summary['resource_sampling']['poll_seconds']}",
             "--metric",
             f"wall_clock_s={result['wall_seconds']}:s",
             "--metric",
@@ -435,6 +438,12 @@ def main() -> int:
     )
     parser.add_argument("--colmap-feature", choices=("SIFT", "ALIKED"), default="SIFT")
     parser.add_argument("--colmap-backend", choices=("CERES", "CASPAR"), default="CERES")
+    parser.add_argument(
+        "--resource-poll-seconds",
+        type=float,
+        default=0.5,
+        help="process-tree working-set sampling interval",
+    )
     parser.add_argument("--capture-registry", action="store_true")
     parser.add_argument(
         "--registry-dir",
@@ -449,6 +458,8 @@ def main() -> int:
         parser.error("--skip-stride must be at least 1")
     if args.pose_graph_stride < 1:
         parser.error("--pose-graph-stride must be at least 1")
+    if not 0.1 <= args.resource_poll_seconds <= 10.0:
+        parser.error("--resource-poll-seconds must be in [0.1, 10.0]")
     if args.wide_hypothesis and not args.pose_graph_offsets:
         parser.error("--wide-hypothesis requires --pose-graph-offsets")
     if args.out_dir.drive.upper() != "E:":
@@ -512,6 +523,7 @@ def main() -> int:
             str(args.max_keypoints),
         ],
         logs / "visloc_feature_extraction.log",
+        poll_seconds=args.resource_poll_seconds,
     )
     run_logged(
         [
@@ -575,7 +587,9 @@ def main() -> int:
         stage_seconds["visloc_mapping"],
         stage_peak_process_tree_rss_bytes["visloc_mapping"],
     ) = run_logged_measured(
-        visloc_mapping_command, logs / "visloc_mapping.log"
+        visloc_mapping_command,
+        logs / "visloc_mapping.log",
+        poll_seconds=args.resource_poll_seconds,
     )
 
     colmap_root.mkdir()
@@ -604,6 +618,7 @@ def main() -> int:
             "1",
         ],
         logs / "colmap_feature_extraction.log",
+        poll_seconds=args.resource_poll_seconds,
     )
     match_type = "SIFT_BRUTEFORCE" if args.colmap_feature == "SIFT" else "ALIKED_LIGHTGLUE"
     (
@@ -621,6 +636,7 @@ def main() -> int:
             "1",
         ],
         logs / "colmap_matching.log",
+        poll_seconds=args.resource_poll_seconds,
     )
     colmap_backend_requested = args.colmap_backend
     colmap_backend_effective = args.colmap_backend
@@ -655,6 +671,7 @@ def main() -> int:
         ) = run_logged_measured(
             mapper_command(sparse, args.colmap_backend),
             logs / "colmap_mapping.log",
+            poll_seconds=args.resource_poll_seconds,
         )
     except RuntimeError:
         caspar_log = logs / "colmap_mapping.log"
@@ -673,6 +690,7 @@ def main() -> int:
         ) = run_logged_measured(
             mapper_command(sparse, colmap_backend_effective),
             logs / "colmap_mapping_ceres_fallback.log",
+            poll_seconds=args.resource_poll_seconds,
         )
     colmap_model = select_colmap_model(
         args.colmap, sparse, colmap_root / "text_models", logs
@@ -723,6 +741,11 @@ def main() -> int:
         "frames": args.frames,
         "camera": {"fx": fx, "fy": fy, "cx": cx, "cy": cy, "width": 752, "height": 480},
         "stage_seconds": stage_seconds,
+        "resource_sampling": {
+            "metric": "process_tree_working_set_bytes",
+            "poll_seconds": args.resource_poll_seconds,
+            "platform_supported": os.name == "nt",
+        },
         "stage_peak_process_tree_rss_bytes": stage_peak_process_tree_rss_bytes,
         "engines": {
             "visloc": {
