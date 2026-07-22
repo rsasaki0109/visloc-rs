@@ -1,3 +1,5 @@
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +7,7 @@ from pathlib import Path
 from scripts.run_mono_sfm_headtohead import (
     is_unsupported_caspar_failure,
     reported_mean_reprojection,
+    run_logged_measured,
 )
 
 
@@ -37,6 +40,27 @@ class ReportedMeanReprojectionTests(unittest.TestCase):
             self.assertFalse(is_unsupported_caspar_failure("CERES", log))
             log.write_text("unrelated mapper failure\n", encoding="utf-8")
             self.assertFalse(is_unsupported_caspar_failure("CASPAR", log))
+
+    def test_measured_runner_captures_child_working_set_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "child.log"
+            elapsed, peak_rss = run_logged_measured(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; x=bytearray(8*1024*1024); "
+                    "print(len(x), flush=True); time.sleep(0.4)",
+                ],
+                log,
+                poll_seconds=0.1,
+            )
+            self.assertGreaterEqual(elapsed, 0.3)
+            self.assertIn("8388608", log.read_text(encoding="utf-8"))
+            if os.name == "nt":
+                self.assertIsNotNone(peak_rss)
+                self.assertGreater(peak_rss, 8 * 1024 * 1024)
+            else:
+                self.assertIsNone(peak_rss)
 
 
 if __name__ == "__main__":

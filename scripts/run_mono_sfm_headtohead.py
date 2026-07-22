@@ -9,11 +9,14 @@ large enough for generated image/features/models.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
+import os
 import re
 import subprocess
 import sys
 import time
+from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,27 +24,142 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+class ProcessMemoryCounters(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("PageFaultCount", wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+def windows_process_table() -> dict[int, tuple[int, int]]:
+    """Return PID -> (parent PID, current working-set bytes)."""
+    if os.name != "nt":
+        return {}
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessMemoryCounters),
+        wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if snapshot == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    table: dict[int, tuple[int, int]] = {}
+    entry = ProcessEntry32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    try:
+        present = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while present:
+            pid = int(entry.th32ProcessID)
+            rss = 0
+            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
+            if handle:
+                counters = ProcessMemoryCounters()
+                counters.cb = ctypes.sizeof(counters)
+                if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                    rss = int(counters.WorkingSetSize)
+                kernel32.CloseHandle(handle)
+            table[pid] = (int(entry.th32ParentProcessID), rss)
+            present = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return table
+
+
+def process_tree_rss(root_pid: int) -> int | None:
+    table = windows_process_table()
+    if not table:
+        return None
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (parent, _) in table.items():
+            if parent in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    return sum(table.get(pid, (0, 0))[1] for pid in descendants)
+
+
 def run_logged(argv: list[str], log: Path, *, cwd: Path = REPO) -> float:
+    elapsed, _ = run_logged_measured(argv, log, cwd=cwd, sample_rss=False)
+    return elapsed
+
+
+def run_logged_measured(
+    argv: list[str],
+    log: Path,
+    *,
+    cwd: Path = REPO,
+    sample_rss: bool = True,
+    poll_seconds: float = 0.5,
+) -> tuple[float, int | None]:
     log.parent.mkdir(parents=True, exist_ok=True)
     start = time.perf_counter()
+    peak_rss: int | None = 0 if sample_rss and os.name == "nt" else None
     with log.open("w", encoding="utf-8") as stream:
         stream.write("COMMAND: " + subprocess.list2cmdline(argv) + "\n\n")
         stream.flush()
-        completed = subprocess.run(
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
             stdout=stream,
             stderr=subprocess.STDOUT,
             text=True,
-            check=False,
         )
+        while True:
+            if peak_rss is not None:
+                sampled = process_tree_rss(process.pid)
+                if sampled is not None:
+                    peak_rss = max(peak_rss, sampled)
+            try:
+                returncode = process.wait(timeout=max(poll_seconds, 0.1))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     elapsed = time.perf_counter() - start
-    if completed.returncode != 0:
+    if returncode != 0:
         raise RuntimeError(
-            f"command failed ({completed.returncode}); see {log}: "
+            f"command failed ({returncode}); see {log}: "
             f"{subprocess.list2cmdline(argv)}"
         )
-    return elapsed
+    return elapsed, peak_rss
 
 
 def is_unsupported_caspar_failure(requested_backend: str, log: Path) -> bool:
@@ -217,6 +335,14 @@ def capture_registry(
             "--notes",
             "Same-input monocular head-to-head; shared rectification and Rust build time excluded from engine wall time.",
         ]
+        if result["peak_process_tree_rss_bytes"] is not None:
+            argv.extend(
+                [
+                    "--metric",
+                    "peak_process_tree_rss_bytes="
+                    f"{result['peak_process_tree_rss_bytes']}:bytes",
+                ]
+            )
         if engine == "visloc":
             argv.extend(
                 [
@@ -347,6 +473,7 @@ def main() -> int:
     logs.mkdir()
 
     stage_seconds: dict[str, float] = {}
+    stage_peak_process_tree_rss_bytes: dict[str, int | None] = {}
     stage_seconds["shared_rectify"] = run_logged(
         [
             str(args.python),
@@ -366,7 +493,10 @@ def main() -> int:
         raise RuntimeError("rectification did not produce the requested frame count")
     fx, fy, cx, cy = parse_pinhole(rect / "calib.txt")
 
-    stage_seconds["visloc_feature_extraction"] = run_logged(
+    (
+        stage_seconds["visloc_feature_extraction"],
+        stage_peak_process_tree_rss_bytes["visloc_feature_extraction"],
+    ) = run_logged_measured(
         [
             str(args.python),
             str(REPO / "scripts" / "export_superpoint_lightglue.py"),
@@ -441,14 +571,20 @@ def main() -> int:
         visloc_mapping_command.append("--geometry-conflict-recovery")
     if args.structureless_registration:
         visloc_mapping_command.append("--structureless-registration")
-    stage_seconds["visloc_mapping"] = run_logged(
+    (
+        stage_seconds["visloc_mapping"],
+        stage_peak_process_tree_rss_bytes["visloc_mapping"],
+    ) = run_logged_measured(
         visloc_mapping_command, logs / "visloc_mapping.log"
     )
 
     colmap_root.mkdir()
     sparse.mkdir()
     database = colmap_root / "database.db"
-    stage_seconds["colmap_feature_extraction"] = run_logged(
+    (
+        stage_seconds["colmap_feature_extraction"],
+        stage_peak_process_tree_rss_bytes["colmap_feature_extraction"],
+    ) = run_logged_measured(
         [
             str(args.colmap),
             "feature_extractor",
@@ -470,7 +606,10 @@ def main() -> int:
         logs / "colmap_feature_extraction.log",
     )
     match_type = "SIFT_BRUTEFORCE" if args.colmap_feature == "SIFT" else "ALIKED_LIGHTGLUE"
-    stage_seconds["colmap_matching"] = run_logged(
+    (
+        stage_seconds["colmap_matching"],
+        stage_peak_process_tree_rss_bytes["colmap_matching"],
+    ) = run_logged_measured(
         [
             str(args.colmap),
             "sequential_matcher",
@@ -510,7 +649,10 @@ def main() -> int:
         ]
 
     try:
-        stage_seconds["colmap_mapping"] = run_logged(
+        (
+            stage_seconds["colmap_mapping"],
+            stage_peak_process_tree_rss_bytes["colmap_mapping"],
+        ) = run_logged_measured(
             mapper_command(sparse, args.colmap_backend),
             logs / "colmap_mapping.log",
         )
@@ -525,7 +667,10 @@ def main() -> int:
         colmap_backend_effective = "CERES"
         sparse = colmap_root / "sparse_ceres"
         sparse.mkdir()
-        stage_seconds["colmap_mapping"] = run_logged(
+        (
+            stage_seconds["colmap_mapping"],
+            stage_peak_process_tree_rss_bytes["colmap_mapping"],
+        ) = run_logged_measured(
             mapper_command(sparse, colmap_backend_effective),
             logs / "colmap_mapping_ceres_fallback.log",
         )
@@ -578,6 +723,7 @@ def main() -> int:
         "frames": args.frames,
         "camera": {"fx": fx, "fy": fy, "cx": cx, "cy": cy, "width": 752, "height": 480},
         "stage_seconds": stage_seconds,
+        "stage_peak_process_tree_rss_bytes": stage_peak_process_tree_rss_bytes,
         "engines": {
             "visloc": {
                 "next_image_policy": args.visloc_next_image_policy,
@@ -593,6 +739,16 @@ def main() -> int:
                 "points3d": visloc_points,
                 "mean_reprojection_px": visloc_reproj,
                 "wall_seconds": stage_seconds["visloc_feature_extraction"] + stage_seconds["visloc_mapping"],
+                "peak_process_tree_rss_bytes": max(
+                    value
+                    for value in (
+                        stage_peak_process_tree_rss_bytes["visloc_feature_extraction"],
+                        stage_peak_process_tree_rss_bytes["visloc_mapping"],
+                    )
+                    if value is not None
+                )
+                if os.name == "nt"
+                else None,
                 "evaluation": evaluated[0],
             },
             "colmap": {
@@ -606,6 +762,17 @@ def main() -> int:
                 "points3d": colmap_points,
                 "mean_reprojection_px": colmap_reproj,
                 "wall_seconds": stage_seconds["colmap_feature_extraction"] + stage_seconds["colmap_matching"] + stage_seconds["colmap_mapping"],
+                "peak_process_tree_rss_bytes": max(
+                    value
+                    for value in (
+                        stage_peak_process_tree_rss_bytes["colmap_feature_extraction"],
+                        stage_peak_process_tree_rss_bytes["colmap_matching"],
+                        stage_peak_process_tree_rss_bytes["colmap_mapping"],
+                    )
+                    if value is not None
+                )
+                if os.name == "nt"
+                else None,
                 "evaluation": evaluated[1],
             },
         },

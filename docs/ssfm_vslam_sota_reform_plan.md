@@ -383,6 +383,15 @@ already-running frozen S1 control predates this diagnostic and remains
 untouched; future full controls must enable it so a multi-hour BA cannot again
 be mistaken for a hung process or yield only one aggregate timing number.
 
+The same future-control runner now samples the complete child-process tree at
+0.5 s during SuperPoint extraction, visloc mapping, COLMAP extraction,
+matching, and mapping. It records each stage peak and the maximum per engine in
+`summary.json`, and carries the engine peak into the benchmark registry. This
+closes S1's previously missing peak-RAM field; unsupported non-Windows hosts
+record `null` rather than fabricating a value. A child-process test allocates
+8 MiB, remains alive across multiple samples, and verifies a greater-than-8-MiB
+tree peak plus unchanged command logging and wall timing.
+
 ### S2 — Hierarchical mapper
 
 - Partition the sequence into overlapping, motion-adaptive submaps rather than
