@@ -392,6 +392,19 @@ struct CliArgs {
     /// mirrored 1:1 — the physical-consistency gate added after a real 800f
     /// corruption run (see `docs/dpvo_droid_port_plan.md`'s "M12 results").
     ll_max_rotation_inconsistency_deg: f64,
+    /// A3 stage 2, first slice (`docs/visual_slam_sequential_sfm_plan.md`):
+    /// `DpvoLongLoopConfig::stage2_2d2d_geometry` — require 2D-2D-first loop
+    /// geometry (essential-matrix RANSAC over cross-checked SuperPoint
+    /// keypoints) to pass BEFORE the existing 3D-3D bridge ever runs.
+    /// Requires `--long-loop`. Default off — every prior milestone's
+    /// behavior (M1-M12) unaffected.
+    ll_2d2d_geometry: bool,
+    /// A3 stage 2: `DpvoLongLoopConfig`'s new fields, mirrored 1:1.
+    ll_2d2d_match_ratio: f32,
+    ll_2d2d_min_inliers: usize,
+    ll_2d2d_min_coverage_fraction: f64,
+    ll_2d2d_max_mean_sampson_error: f64,
+    ll_2d2d_umeyama_vs_e_rotation_max_deg: f64,
     /// Milestone M14 (`docs/dpvo_droid_port_plan.md`): enable the
     /// low-parallax ("hover") freeze (`DpvoOdometryConfig::low_parallax`).
     /// Default off — every prior milestone's behavior unaffected (the
@@ -510,6 +523,17 @@ impl Default for CliArgs {
             ll_sp_patch_min_separation: DpvoLongLoopConfig::default().sp_patch_min_separation,
             ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default()
                 .max_rotation_inconsistency_deg,
+            ll_2d2d_geometry: DpvoLongLoopConfig::default().stage2_2d2d_geometry,
+            ll_2d2d_match_ratio: DpvoLongLoopConfig::default()
+                .stage2_match_ratio
+                .unwrap_or(0.9),
+            ll_2d2d_min_inliers: DpvoLongLoopConfig::default().stage2_min_inliers,
+            ll_2d2d_min_coverage_fraction: DpvoLongLoopConfig::default()
+                .stage2_min_coverage_fraction,
+            ll_2d2d_max_mean_sampson_error: DpvoLongLoopConfig::default()
+                .stage2_max_mean_sampson_error,
+            ll_2d2d_umeyama_vs_e_rotation_max_deg: DpvoLongLoopConfig::default()
+                .stage2_umeyama_vs_e_rotation_max_deg,
             hover_freeze: false,
             // Mirror `DpvoLowParallaxConfig::default()` exactly so omitting
             // these flags reproduces that struct's own defaults.
@@ -669,6 +693,22 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--ll-max-rotation-inconsistency-deg" => {
                 args.ll_max_rotation_inconsistency_deg = raw.remove(i + 1).parse()?
+            }
+            "--ll-2d2d-geometry" => {
+                args.ll_2d2d_geometry = true;
+                raw.remove(i);
+                continue;
+            }
+            "--ll-2d2d-match-ratio" => args.ll_2d2d_match_ratio = raw.remove(i + 1).parse()?,
+            "--ll-2d2d-min-inliers" => args.ll_2d2d_min_inliers = raw.remove(i + 1).parse()?,
+            "--ll-2d2d-min-coverage-fraction" => {
+                args.ll_2d2d_min_coverage_fraction = raw.remove(i + 1).parse()?
+            }
+            "--ll-2d2d-max-mean-sampson-error" => {
+                args.ll_2d2d_max_mean_sampson_error = raw.remove(i + 1).parse()?
+            }
+            "--ll-2d2d-umeyama-vs-e-rotation-max-deg" => {
+                args.ll_2d2d_umeyama_vs_e_rotation_max_deg = raw.remove(i + 1).parse()?
             }
             "--hover-freeze" => {
                 args.hover_freeze = true;
@@ -986,6 +1026,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sp_anchored_patches: args.ll_sp_anchored_patches,
             sp_patch_min_separation: args.ll_sp_patch_min_separation,
             max_rotation_inconsistency_deg: args.ll_max_rotation_inconsistency_deg,
+            // A3 stage 2, first slice: `--ll-2d2d-geometry` is the actual
+            // on/off switch; omitting it reproduces M1-M12's exact behavior
+            // byte-for-byte even with `--long-loop` itself on.
+            stage2_2d2d_geometry: args.ll_2d2d_geometry,
+            stage2_match_ratio: Some(args.ll_2d2d_match_ratio),
+            stage2_min_inliers: args.ll_2d2d_min_inliers,
+            stage2_min_coverage_fraction: args.ll_2d2d_min_coverage_fraction,
+            stage2_max_mean_sampson_error: args.ll_2d2d_max_mean_sampson_error,
+            stage2_umeyama_vs_e_rotation_max_deg: args.ll_2d2d_umeyama_vs_e_rotation_max_deg,
             ..DpvoLongLoopConfig::default()
         }),
         // Milestone M14 (`docs/dpvo_droid_port_plan.md`): `--hover-freeze`
@@ -1070,6 +1119,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.ll_sp_patch_min_separation,
             args.ll_max_rotation_inconsistency_deg,
         );
+        if args.ll_2d2d_geometry {
+            println!(
+                "  A3 stage 2 (2D-2D-first loop geometry) enabled: match_ratio={:.2} \
+                 min_inliers={} min_coverage_fraction={:.3} max_mean_sampson_error={:.4} \
+                 umeyama_vs_e_rotation_max_deg={:.1}",
+                args.ll_2d2d_match_ratio,
+                args.ll_2d2d_min_inliers,
+                args.ll_2d2d_min_coverage_fraction,
+                args.ll_2d2d_max_mean_sampson_error,
+                args.ll_2d2d_umeyama_vs_e_rotation_max_deg,
+            );
+        }
     }
 
     if args.hover_freeze {
@@ -1770,6 +1831,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          long_loop_sp_patch_min_separation={ll_sp_min_separation:.2}\n\
          long_loop_max_rotation_inconsistency_deg={ll_max_rot_inconsistency:.1}\n\
          long_loop_query_log_entries={ll_query_log_len}\n\
+         long_loop_stage2_enabled={ll_stage2_enabled}\n\
+         long_loop_stage2_attempts_total={ll_stage2_attempts}\n\
+         long_loop_stage2_passed_total={ll_stage2_passed}\n\
+         long_loop_stage2_rejected_insufficient_matches_total={ll_stage2_rej_matches}\n\
+         long_loop_stage2_rejected_insufficient_inliers_total={ll_stage2_rej_inliers}\n\
+         long_loop_stage2_rejected_insufficient_coverage_total={ll_stage2_rej_coverage}\n\
+         long_loop_stage2_rejected_rotation_inconsistent_total={ll_stage2_rej_rotation}\n\
+         long_loop_stage2_rejected_high_residual_total={ll_stage2_rej_residual}\n\
+         long_loop_stage2_rejected_umeyama_vs_e_rotation_total={ll_stage2_rej_umeyama_vs_e}\n\
          hover_freeze_enabled={hf_enabled}\n\
          hover_regime_active={hf_regime_active}\n\
          hover_times_entered={hf_times_entered}\n\
@@ -1916,6 +1986,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ll_sp_min_separation = args.ll_sp_patch_min_separation,
         ll_max_rot_inconsistency = args.ll_max_rotation_inconsistency_deg,
         ll_query_log_len = odometry.long_loop_query_log().len(),
+        ll_stage2_enabled = ll_diag.stage2_enabled,
+        ll_stage2_attempts = ll_diag.stage2_attempts_total,
+        ll_stage2_passed = ll_diag.stage2_passed_total,
+        ll_stage2_rej_matches = ll_diag.stage2_rejected_insufficient_matches_total,
+        ll_stage2_rej_inliers = ll_diag.stage2_rejected_insufficient_inliers_total,
+        ll_stage2_rej_coverage = ll_diag.stage2_rejected_insufficient_coverage_total,
+        ll_stage2_rej_rotation = ll_diag.stage2_rejected_rotation_inconsistent_total,
+        ll_stage2_rej_residual = ll_diag.stage2_rejected_high_residual_total,
+        ll_stage2_rej_umeyama_vs_e = ll_diag.stage2_rejected_umeyama_vs_e_rotation_total,
         hf_enabled = hf_diag.enabled,
         hf_regime_active = hf_diag.regime_active,
         hf_times_entered = hf_diag.times_entered,
@@ -1960,15 +2039,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // diagnostics (last-accepted-only) could not answer.
     if args.long_loop {
         let query_log = odometry.long_loop_query_log();
-        let mut csv =
-            String::from("query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg\n");
+        // A3 stage 2, first slice (`docs/visual_slam_sequential_sfm_plan.md`):
+        // 4 new columns APPENDED AT THE END — `stage2_2d2d_inliers`,
+        // `stage2_e_rotation_disagreement_deg`, `stage_reached`,
+        // `final_accepted` — per the task's own explicit instruction, so
+        // `scripts/eval_dpvo_long_loop_recall.py`'s existing `csv.DictReader`-
+        // based loader (which only checks its own required column SUBSET is
+        // present, ignoring anything extra) keeps working unmodified.
+        let mut csv = String::from(
+            "query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg,\
+             stage2_2d2d_inliers,stage2_e_rotation_disagreement_deg,stage_reached,final_accepted\n",
+        );
         for entry in query_log {
             let rot = entry
                 .rotation_disagreement_deg
                 .map(|d| format!("{d:.3}"))
                 .unwrap_or_default();
+            let stage2_inliers = entry
+                .stage2_2d2d_inliers
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let stage2_e_rot = entry
+                .stage2_e_rotation_disagreement_deg
+                .map(|d| format!("{d:.3}"))
+                .unwrap_or_default();
             csv.push_str(&format!(
-                "{},{},{},{},{:.6},{},{}\n",
+                "{},{},{},{},{:.6},{},{},{},{},{},{}\n",
                 entry.query_arrival,
                 entry.rank,
                 entry.candidate_arrival,
@@ -1976,6 +2072,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 entry.similarity,
                 entry.accepted,
                 rot,
+                stage2_inliers,
+                stage2_e_rot,
+                entry.stage_reached,
+                entry.final_accepted,
             ));
         }
         // A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify
@@ -1987,7 +2087,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // consumers that only read `rank >= 0` rows are unaffected.
         let empty_arrivals = odometry.long_loop_empty_query_arrivals();
         for &arrival in empty_arrivals {
-            csv.push_str(&format!("{arrival},-1,-1,-1,0.000000,false,\n"));
+            csv.push_str(&format!("{arrival},-1,-1,-1,0.000000,false,,,,no_candidates,false\n"));
         }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
         fs::write(&csv_path, &csv)?;

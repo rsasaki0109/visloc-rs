@@ -188,6 +188,47 @@
 //!   same physical place); the geometric gates (min inliers, max residual
 //!   ratio, scale sanity bounds) are the actual correctness backstop, not the
 //!   retrieval score.
+//!
+//! # A3 stage 2, first slice: 2D-2D-first loop geometry (opt-in)
+//!
+//! `docs/visual_slam_sequential_sfm_plan.md`'s "A3 — Sound long-range loop
+//! closure" section splits the problem into retrieval recall (stage 1,
+//! covered above) and geometric precision (stage 2). Stage-1b's own
+//! densified-cadence A/B found 5 newly-accepted long loops that passed EVERY
+//! existing M11/M12 gate (bridge yield, RANSAC inliers/residual, the
+//! existing rotation-vs-trusted-pose gate) yet were still physically wrong —
+//! direct evidence that loop geometry sourced from the DRIFTED 3D-3D bridge
+//! is not enough; a genuinely independent signal is needed. When
+//! [`DpvoLongLoopConfig::stage2_2d2d_geometry`] is `true` (default `false`,
+//! every prior milestone's behavior unchanged), each retrieval candidate is
+//! additionally required to pass, BEFORE the existing 3D-3D bridge ever
+//! runs:
+//!
+//! (a) a 2D-2D cross-check match of the two frames' raw SuperPoint
+//!     descriptors (mutual nearest-neighbor + Lowe ratio, separate from the
+//!     existing bridge's own match — [`DpvoLongLoopConfig::stage2_match_ratio`]);
+//! (b) a calibrated relative pose from that match, via
+//!     [`visloc_vision::two_view::RelativePoseEstimator`] (essential-matrix
+//!     RANSAC + cheirality-checked decomposition) — reused wholesale, not
+//!     reimplemented;
+//! (c) three gates on that fit: minimum inlier count
+//!     ([`DpvoLongLoopConfig::stage2_min_inliers`]), inlier spatial coverage
+//!     ([`DpvoLongLoopConfig::stage2_min_coverage_fraction`],
+//!     [`inlier_bbox_area_fraction`]), and rotation agreement with DPVO's
+//!     trusted relative rotation — reusing
+//!     [`DpvoLongLoopConfig::max_rotation_inconsistency_deg`]'s EXISTING
+//!     threshold/comparison, not a new, looser one;
+//! (d) only once (a)-(c) pass does the existing 3D-3D bridge + Umeyama
+//!     Sim(3) fit run, with ONE additional gate: the Umeyama fit's own
+//!     recovered rotation must agree with step (b)'s E-derived rotation
+//!     within [`DpvoLongLoopConfig::stage2_umeyama_vs_e_rotation_max_deg`]
+//!     (default `10.0°`, tighter than, and in addition to, the existing
+//!     `20.0°` gate).
+//!
+//! Every candidate's own outcome (furthest stage reached, 2D-2D inlier
+//! count, E-vs-trusted rotation disagreement) is logged unconditionally into
+//! [`DpvoLongLoopIndex::query_log`] — see [`QueryCandidateLogEntry`]'s new
+//! fields.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -197,9 +238,11 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use visloc_core::geometry::SE3;
+use visloc_core::types::Camera;
 use visloc_tracking::{umeyama_similarity_transform, TrajectorySimilarityTransform};
-use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, Matcher};
+use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, DescriptorMatch, Matcher};
 use visloc_vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
+use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
 use crate::dpvo_patch_ba::{DpvoIntrinsics, DpvoPatch};
 use crate::dpvo_sim3_backend::Sim3LoopMeasurement;
@@ -349,6 +392,65 @@ pub struct DpvoLongLoopConfig {
     /// ordinary VO rotation uncertainty over a `~150`-`450`-frame gap, tight
     /// enough to catch a grossly wrong correspondence set.
     pub max_rotation_inconsistency_deg: f64,
+    /// A3 stage 2, first slice (`docs/visual_slam_sequential_sfm_plan.md`,
+    /// "A3 — Sound long-range loop closure"): when `true`, every retrieval
+    /// candidate that clears the appearance/gap filter is additionally
+    /// required to pass a 2D-2D-FIRST geometric check (see the module doc's
+    /// "A3 stage 2" section) BEFORE the existing M11/M12 3D-3D bridge
+    /// ([`bridge_matches_to_3d3d`]) ever runs. Motivation: Stage-1b's own
+    /// densified-cadence A/B (`docs/visual_slam_sequential_sfm_plan.md`'s
+    /// "Stage-1b" block) found 5 newly-accepted long loops (`220->388` ..
+    /// `282->443`, rotation disagreement `15.7`-`19.8°`, all just under the
+    /// existing `20°` gate) that passed EVERY existing M11/M12 gate (bridge
+    /// yield, RANSAC inliers/residual, `max_rotation_inconsistency_deg`) yet
+    /// were still physically wrong — the M12 rotation gate compares the
+    /// DRIFTED 3D-3D bridge's own recovered rotation against DPVO's own
+    /// (also monocular, also drift-prone) trusted pose, so a candidate whose
+    /// bridge AND trusted pose are both subtly wrong in a mutually
+    /// consistent way slips through. Loop geometry sourced from a
+    /// CALIBRATED essential-matrix fit over cross-checked 2D keypoints is a
+    /// genuinely independent signal (no DPVO patch depth or trusted pose
+    /// involved at all in the fit itself). Default `false`: every prior
+    /// milestone's behavior (M1-M12) is reproduced byte-for-byte when this
+    /// stays off — see `--ll-2d2d-geometry`.
+    pub stage2_2d2d_geometry: bool,
+    /// Lowe ratio-test threshold for the STAGE-2 2D-2D cross-check match —
+    /// separate from `match_ratio`, which still governs the EXISTING 3D-3D
+    /// bridge's own cross-check match, unchanged. Default `Some(0.9)`, per
+    /// this slice's own task brief ("Lowe ratio ~0.9, symmetric").
+    pub stage2_match_ratio: Option<f32>,
+    /// Minimum essential-matrix RANSAC inlier count for the 2D-2D fit
+    /// ([`visloc_vision::two_view::RelativePoseEstimator`]). Default `30`.
+    pub stage2_min_inliers: usize,
+    /// Minimum fraction of the frame's own patch-grid area the 2D-2D
+    /// inliers' own pixel bounding box must cover, checked on BOTH the OLD
+    /// and NEW side independently (the tighter of the two must still clear
+    /// this bound) — see [`inlier_bbox_area_fraction`]. Default `0.25`
+    /// (25%).
+    pub stage2_min_coverage_fraction: f64,
+    /// Maximum acceptable mean Sampson error (normalized bearing units, the
+    /// SAME patch-grid-space intrinsics [`DpvoIntrinsics`] already uses) for
+    /// the 2D-2D essential-matrix fit — a final "residual is sane" backstop
+    /// on top of [`visloc_vision::two_view::EssentialRansac`]'s own
+    /// per-correspondence inlier threshold (`EssentialRansacConfig::default()`'s
+    /// `sampson_threshold = 5.0e-3`). Default `1.0e-2` (`2x` that
+    /// per-inlier threshold).
+    pub stage2_max_mean_sampson_error: f64,
+    /// Step (d) of this slice's own task brief: an ADDITIONAL, TIGHTER gate
+    /// (never looser than `max_rotation_inconsistency_deg`) comparing
+    /// [`ransac_umeyama_scale`]'s own recovered rotation against the 2D-2D
+    /// essential-matrix fit's own recovered rotation (NOT DPVO's trusted
+    /// pose, which `max_rotation_inconsistency_deg` already checks
+    /// independently) — the two INDEPENDENT rotation estimates (one from
+    /// calibrated 2D-2D epipolar geometry, one from the 3D-3D bridge) must
+    /// themselves agree, catching exactly the "bridge and trusted pose are
+    /// both wrong in a mutually consistent way" failure mode
+    /// `stage2_2d2d_geometry`'s own doc describes. Default `10.0` degrees —
+    /// tighter than `max_rotation_inconsistency_deg`'s `20.0`, never looser
+    /// (this port's own standing rule: never loosen a loop-verification
+    /// gate). Only evaluated when `stage2_2d2d_geometry` is `true` (there is
+    /// no independent E-matrix rotation to compare against otherwise).
+    pub stage2_umeyama_vs_e_rotation_max_deg: f64,
 }
 
 impl Default for DpvoLongLoopConfig {
@@ -376,6 +478,12 @@ impl Default for DpvoLongLoopConfig {
             sp_anchored_patches: false,
             sp_patch_min_separation: 2.0,
             max_rotation_inconsistency_deg: 20.0,
+            stage2_2d2d_geometry: false,
+            stage2_match_ratio: Some(0.9),
+            stage2_min_inliers: 30,
+            stage2_min_coverage_fraction: 0.25,
+            stage2_max_mean_sampson_error: 1.0e-2,
+            stage2_umeyama_vs_e_rotation_max_deg: 10.0,
         }
     }
 }
@@ -457,6 +565,49 @@ pub struct DpvoLongLoopDiagnostics {
     pub last_accepted_inliers: usize,
     pub last_accepted_mean_residual_ratio: f64,
     pub total_elapsed_ms: f64,
+    /// A3 stage 2, first slice: whether [`DpvoLongLoopConfig::stage2_2d2d_geometry`]
+    /// is on for this index.
+    pub stage2_enabled: bool,
+    /// Candidates for which the stage-2 2D-2D-first check was actually
+    /// attempted (i.e. reached after `resolve_old` succeeded). Own funnel,
+    /// independent of `verification_attempts`/`bridge_sufficient_total`
+    /// (which now only count the EXISTING 3D-3D bridge, reached only after
+    /// stage 2 passes when stage 2 is on):
+    /// `stage2_passed_total + stage2_rejected_insufficient_matches_total +
+    /// stage2_rejected_insufficient_inliers_total +
+    /// stage2_rejected_insufficient_coverage_total +
+    /// stage2_rejected_rotation_inconsistent_total +
+    /// stage2_rejected_high_residual_total == stage2_attempts_total`.
+    pub stage2_attempts_total: usize,
+    /// Candidates that cleared every stage-2 gate (a-c) and proceeded to the
+    /// existing 3D-3D bridge.
+    pub stage2_passed_total: usize,
+    /// Rejected: too few raw 2D-2D matches, or the essential-matrix RANSAC
+    /// itself found no model.
+    pub stage2_rejected_insufficient_matches_total: usize,
+    /// Rejected: essential-matrix RANSAC found a model but its own inlier
+    /// count is below `stage2_min_inliers`.
+    pub stage2_rejected_insufficient_inliers_total: usize,
+    /// Rejected: the 2D-2D inliers' own pixel bounding box (on the tighter
+    /// of the OLD/NEW side) covers less than `stage2_min_coverage_fraction`
+    /// of the frame's own patch-grid area.
+    pub stage2_rejected_insufficient_coverage_total: usize,
+    /// Rejected: the 2D-2D essential-matrix fit's own recovered rotation
+    /// disagrees with DPVO's trusted relative rotation by more than
+    /// `max_rotation_inconsistency_deg` (step (c) of this slice's own task
+    /// brief — the SAME threshold/comparison the existing M12 3D-3D gate
+    /// uses, reused rather than loosened).
+    pub stage2_rejected_rotation_inconsistent_total: usize,
+    /// Rejected: the 2D-2D essential-matrix fit's own mean Sampson error
+    /// exceeds `stage2_max_mean_sampson_error`.
+    pub stage2_rejected_high_residual_total: usize,
+    /// Milestone A3 stage 2 step (d): candidates that passed EVERY prior
+    /// gate (stage 2 a-c, the existing 3D-3D bridge/RANSAC/residual gates,
+    /// and the existing M12 rotation-vs-trusted-pose gate) but were
+    /// rejected because [`ransac_umeyama_scale`]'s own recovered rotation
+    /// disagreed with the 2D-2D essential-matrix fit's own recovered
+    /// rotation by more than `stage2_umeyama_vs_e_rotation_max_deg`.
+    pub stage2_rejected_umeyama_vs_e_rotation_total: usize,
 }
 
 /// One accepted long-range loop — the module's own output, consumed by
@@ -514,6 +665,63 @@ pub struct QueryCandidateLogEntry {
     /// results" needed to state, not merely infer, why each rejected
     /// candidate was rejected.
     pub rotation_disagreement_deg: Option<f64>,
+    /// A3 stage 2, first slice: essential-matrix RANSAC inlier count for
+    /// this candidate's own 2D-2D fit — `Some(..)` whenever
+    /// `stage2_2d2d_geometry` is on AND this candidate's raw 2D-2D matches
+    /// were sufficient for [`visloc_vision::two_view::RelativePoseEstimator`]
+    /// to return a fit at all (regardless of whether it then passed
+    /// `stage2_min_inliers`); `None` when stage 2 is off, or the fit itself
+    /// failed, or this candidate was never attempted (ranked below an
+    /// earlier acceptance this query).
+    pub stage2_2d2d_inliers: Option<usize>,
+    /// A3 stage 2, first slice: disagreement, in DEGREES, between the 2D-2D
+    /// essential-matrix fit's own recovered rotation and DPVO's
+    /// already-trusted relative rotation — `Some(..)` whenever this
+    /// candidate's 2D-2D fit reached the rotation check (i.e.
+    /// `stage2_2d2d_inliers` cleared `stage2_min_inliers` and the coverage
+    /// gate), regardless of whether it then passed `max_rotation_inconsistency_deg`.
+    pub stage2_e_rotation_disagreement_deg: Option<f64>,
+    /// The furthest verification stage this candidate reached this query —
+    /// see [`CandidateOutcome`]'s own doc for the full list of values. Kept
+    /// as a plain string (not an enum) since this is purely a diagnostic/CSV
+    /// field, never matched on downstream.
+    pub stage_reached: &'static str,
+    /// Alias for `accepted` under this slice's own CSV schema (the task's
+    /// own "final accepted" column name) — always equal to `accepted`,
+    /// kept as a separate field only so the new CSV columns this slice adds
+    /// are self-describing without requiring a reader to already know the
+    /// pre-existing `accepted` column's own name/semantics.
+    pub final_accepted: bool,
+}
+
+/// Per-candidate outcome accumulated while [`DpvoLongLoopIndex::find_and_verify_long_range_loop`]
+/// walks its own top-`K` candidate list — the source [`QueryCandidateLogEntry`]'s
+/// new A3-stage-2 fields are built from. `stage_reached` is one of (in
+/// funnel order): `"not_attempted"` (ranked below an earlier acceptance,
+/// never reached at all), `"insufficient_2d2d_matches"`,
+/// `"insufficient_2d2d_inliers"`, `"insufficient_2d2d_coverage"`,
+/// `"2d2d_rotation_inconsistent"`, `"2d2d_high_residual"`,
+/// `"insufficient_bridge"`, `"ransac_rejected"`, `"rotation_inconsistent"`
+/// (the existing M12 gate, 3D-3D fit vs trusted pose),
+/// `"umeyama_vs_e_rotation_inconsistent"` (A3 stage 2 step (d)), or
+/// `"accepted"`.
+#[derive(Debug, Clone, Copy)]
+struct CandidateOutcome {
+    stage2_2d2d_inliers: Option<usize>,
+    stage2_e_rotation_disagreement_deg: Option<f64>,
+    rotation_disagreement_deg: Option<f64>,
+    stage_reached: &'static str,
+}
+
+impl Default for CandidateOutcome {
+    fn default() -> Self {
+        Self {
+            stage2_2d2d_inliers: None,
+            stage2_e_rotation_disagreement_deg: None,
+            rotation_disagreement_deg: None,
+            stage_reached: "not_attempted",
+        }
+    }
 }
 
 /// One committed frame's retrieval+verification material. Images are never
@@ -586,6 +794,14 @@ pub struct DpvoLongLoopIndex {
     diag_last_inliers: usize,
     diag_last_mean_residual_ratio: f64,
     diag_total_elapsed_ms: f64,
+    diag_stage2_attempts: usize,
+    diag_stage2_passed: usize,
+    diag_stage2_rejected_matches: usize,
+    diag_stage2_rejected_inliers: usize,
+    diag_stage2_rejected_coverage: usize,
+    diag_stage2_rejected_rotation: usize,
+    diag_stage2_rejected_residual: usize,
+    diag_stage2_rejected_umeyama_vs_e_rotation: usize,
 }
 
 impl DpvoLongLoopIndex {
@@ -617,6 +833,14 @@ impl DpvoLongLoopIndex {
             diag_last_inliers: 0,
             diag_last_mean_residual_ratio: 0.0,
             diag_total_elapsed_ms: 0.0,
+            diag_stage2_attempts: 0,
+            diag_stage2_passed: 0,
+            diag_stage2_rejected_matches: 0,
+            diag_stage2_rejected_inliers: 0,
+            diag_stage2_rejected_coverage: 0,
+            diag_stage2_rejected_rotation: 0,
+            diag_stage2_rejected_residual: 0,
+            diag_stage2_rejected_umeyama_vs_e_rotation: 0,
         }
     }
 
@@ -653,6 +877,16 @@ impl DpvoLongLoopIndex {
             last_accepted_inliers: self.diag_last_inliers,
             last_accepted_mean_residual_ratio: self.diag_last_mean_residual_ratio,
             total_elapsed_ms: self.diag_total_elapsed_ms,
+            stage2_enabled: self.config.stage2_2d2d_geometry,
+            stage2_attempts_total: self.diag_stage2_attempts,
+            stage2_passed_total: self.diag_stage2_passed,
+            stage2_rejected_insufficient_matches_total: self.diag_stage2_rejected_matches,
+            stage2_rejected_insufficient_inliers_total: self.diag_stage2_rejected_inliers,
+            stage2_rejected_insufficient_coverage_total: self.diag_stage2_rejected_coverage,
+            stage2_rejected_rotation_inconsistent_total: self.diag_stage2_rejected_rotation,
+            stage2_rejected_high_residual_total: self.diag_stage2_rejected_residual,
+            stage2_rejected_umeyama_vs_e_rotation_total: self
+                .diag_stage2_rejected_umeyama_vs_e_rotation,
         }
     }
 
@@ -811,12 +1045,22 @@ impl DpvoLongLoopIndex {
     /// rejection reason) if no candidate passes every gate; accepts the FIRST
     /// (highest-similarity) candidate that does, per the module doc's own
     /// "stopping at the first accepted one" design.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_and_verify_long_range_loop(
         &mut self,
         current_arrival: usize,
         current_pose: &SE3,
         current_intrinsics: &DpvoIntrinsics,
         current_patches: &[DpvoPatch],
+        // A3 stage 2, first slice: the frame's own patch-grid extent (the
+        // SAME stride-`RES` space `DpvoPatch::x`/`y` and this module's own
+        // keypoints already live in — `crate::dpvo_vo::DpvoOdometry`'s own
+        // `self.config.width/height / RES`), used ONLY by the stage-2
+        // coverage gate (`stage2_min_coverage_fraction`) to turn an inlier
+        // bounding box into a FRACTION of the image area; unused (any finite
+        // value is fine) when `stage2_2d2d_geometry` is `false`.
+        grid_width: f64,
+        grid_height: f64,
         mut resolve_old: impl FnMut(usize) -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)>,
     ) -> Option<AcceptedLongLoop> {
         let start = Instant::now();
@@ -852,11 +1096,12 @@ impl DpvoLongLoopIndex {
 
         let mut accepted = None;
         let mut winning_arrival: Option<usize> = None;
-        // Milestone M12: every candidate that reached the rotation-consistency
-        // check, and its own measured disagreement in degrees — logged
-        // unconditionally (pass or fail) so `QueryCandidateLogEntry::rotation_disagreement_deg`
-        // can report the CONCRETE number, not just the pass/fail outcome.
-        let mut rotation_checks: Vec<(usize, f64)> = Vec::new();
+        // A3 stage 2 (first slice): per-candidate outcome, keyed by
+        // `old_arrival` — see `CandidateOutcome`'s own doc. Replaces M12's
+        // narrower `rotation_checks: Vec<(usize, f64)>` (still covers that
+        // exact same field, `rotation_disagreement_deg`, plus the new
+        // stage-2 fields).
+        let mut outcomes: Vec<(usize, CandidateOutcome)> = Vec::new();
         for &(old_arrival, similarity) in &candidates {
             let Some(old_idx) = self
                 .frames
@@ -870,7 +1115,150 @@ impl DpvoLongLoopIndex {
             let Some((old_pose, old_intr, old_patches)) = resolve_old(old_arrival) else {
                 continue;
             };
+            let mut outcome = CandidateOutcome::default();
 
+            // DPVO's own trusted relative rotation — used by the EXISTING
+            // M12 3D-3D gate below AND (when stage 2 is on) the NEW 2D-2D
+            // gate (c), computed once and shared by both.
+            let relative_pose = current_pose.compose(&old_pose.inverse());
+
+            // A3 stage 2 (`docs/visual_slam_sequential_sfm_plan.md`, "A3 —
+            // Sound long-range loop closure", stage 2): 2D-2D-FIRST loop
+            // geometry, BEFORE the existing 3D-3D bridge ever runs — see
+            // `DpvoLongLoopConfig::stage2_2d2d_geometry`'s own doc for the
+            // motivation. `stage2_e_rotation` carries the fit's own
+            // recovered rotation forward to step (d)'s gate, below the
+            // bridge.
+            let mut stage2_e_rotation: Option<UnitQuaternion<f64>> = None;
+            if self.config.stage2_2d2d_geometry {
+                self.diag_stage2_attempts += 1;
+                // (a) Match stored SP descriptors 2D-2D: mutual
+                // nearest-neighbor + Lowe ratio (`stage2_match_ratio`,
+                // default `0.9`) — a SEPARATE cross-check match from the
+                // existing 3D-3D bridge's own `matcher` above (different
+                // ratio), per this slice's own task brief.
+                let stage2_matcher = CrossCheckMatcher::new(BruteForceMatcher {
+                    ratio: self.config.stage2_match_ratio,
+                });
+                let stage2_matches: Vec<DescriptorMatch> =
+                    stage2_matcher.match_descriptors(&old_descriptors, &current_descriptors);
+                // Keep a parallel `kept` slice so `RelativePose::inliers`
+                // (indices into `correspondences`) stay 1:1 addressable back
+                // into the ORIGINAL match (`query_index`/`train_index`),
+                // mirroring `bridge_matches_to_3d3d`'s own "skip an
+                // unresolvable match, keep going" style rather than assuming
+                // every raw match index resolves.
+                let mut stage2_kept: Vec<&DescriptorMatch> = Vec::new();
+                let mut correspondences: Vec<TwoViewCorrespondence> = Vec::new();
+                for m in &stage2_matches {
+                    let (Some(&kp_o), Some(&kp_n)) = (
+                        old_keypoints.get(m.query_index),
+                        current_keypoints.get(m.train_index),
+                    ) else {
+                        continue;
+                    };
+                    correspondences.push(TwoViewCorrespondence::new(kp_o, kp_n));
+                    stage2_kept.push(m);
+                }
+
+                // (b) Calibrated relative pose: reuse
+                // `visloc_vision::two_view`'s own essential-matrix RANSAC +
+                // cheirality-checked decomposition wholesale (this port's
+                // existing fundamental/essential machinery already supports
+                // the calibrated case directly — no reimplementation
+                // needed). `current_intrinsics` is used for BOTH sides: DPVO
+                // runs a single static camera for the whole sequence, so
+                // `old_intr`/`current_intrinsics` are the same values by
+                // construction (both derived once from
+                // `DpvoOdometryConfig::intrinsics` at `DpvoOdometry::new`).
+                let camera = Camera::pinhole(
+                    0,
+                    grid_width.max(1.0) as u32,
+                    grid_height.max(1.0) as u32,
+                    current_intrinsics.fx,
+                    current_intrinsics.fy,
+                    current_intrinsics.cx,
+                    current_intrinsics.cy,
+                );
+                let stage2_result =
+                    RelativePoseEstimator::default().estimate(&correspondences, &camera);
+                'stage2: {
+                    let Some(rel) = stage2_result else {
+                        self.diag_stage2_rejected_matches += 1;
+                        outcome.stage_reached = "insufficient_2d2d_matches";
+                        break 'stage2;
+                    };
+                    outcome.stage2_2d2d_inliers = Some(rel.inliers.len());
+                    if rel.inliers.len() < self.config.stage2_min_inliers {
+                        self.diag_stage2_rejected_inliers += 1;
+                        outcome.stage_reached = "insufficient_2d2d_inliers";
+                        break 'stage2;
+                    }
+
+                    // (c) Gate: inlier spatial coverage — the tighter of the
+                    // OLD/NEW side's own inlier bounding box must still
+                    // cover >= `stage2_min_coverage_fraction` of the frame's
+                    // own patch-grid area.
+                    let old_inlier_idx = rel.inliers.iter().map(|&k| stage2_kept[k].query_index);
+                    let new_inlier_idx = rel.inliers.iter().map(|&k| stage2_kept[k].train_index);
+                    let coverage_old = inlier_bbox_area_fraction(
+                        &old_keypoints,
+                        old_inlier_idx,
+                        grid_width,
+                        grid_height,
+                    );
+                    let coverage_new = inlier_bbox_area_fraction(
+                        &current_keypoints,
+                        new_inlier_idx,
+                        grid_width,
+                        grid_height,
+                    );
+                    if coverage_old.min(coverage_new) < self.config.stage2_min_coverage_fraction {
+                        self.diag_stage2_rejected_coverage += 1;
+                        outcome.stage_reached = "insufficient_2d2d_coverage";
+                        break 'stage2;
+                    }
+
+                    // (c) Gate: relative rotation from E must agree with the
+                    // EXISTING DPVO-trusted-rotation gate — SAME threshold
+                    // (`max_rotation_inconsistency_deg`) and SAME comparison
+                    // shape (`UnitQuaternion::angle_to`) the pre-existing
+                    // M12 3D-3D gate below already uses; not a new, looser
+                    // threshold.
+                    let e_rotation = rel.previous_to_current.rotation;
+                    let e_rotation_disagreement_deg =
+                        e_rotation.angle_to(&relative_pose.rotation).to_degrees();
+                    outcome.stage2_e_rotation_disagreement_deg = Some(e_rotation_disagreement_deg);
+                    if e_rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
+                        self.diag_stage2_rejected_rotation += 1;
+                        outcome.stage_reached = "2d2d_rotation_inconsistent";
+                        break 'stage2;
+                    }
+
+                    // (c) Gate: epipolar residual sane.
+                    if !rel.mean_sampson_error.is_finite()
+                        || rel.mean_sampson_error > self.config.stage2_max_mean_sampson_error
+                    {
+                        self.diag_stage2_rejected_residual += 1;
+                        outcome.stage_reached = "2d2d_high_residual";
+                        break 'stage2;
+                    }
+
+                    self.diag_stage2_passed += 1;
+                    outcome.stage_reached = "stage2_passed";
+                    stage2_e_rotation = Some(e_rotation);
+                }
+                if stage2_e_rotation.is_none() {
+                    // (a)-(c) failed: per this slice's own task brief, do
+                    // NOT proceed to the existing 3D-3D bridge at all.
+                    outcomes.push((old_arrival, outcome));
+                    continue;
+                }
+            }
+
+            // (d) Only if stage 2 is off, or on AND (a)-(c) passed: proceed
+            // to the EXISTING 3D-3D bridge + Umeyama Sim(3) scale estimate,
+            // byte-identical to M11/M12.
             self.diag_verification_attempts += 1;
             let matches = matcher.match_descriptors(&old_descriptors, &current_descriptors);
             let raw_pairs: Vec<(usize, usize)> = matches
@@ -891,16 +1279,19 @@ impl DpvoLongLoopIndex {
             );
             if bridged.len() < self.config.min_bridge_correspondences {
                 self.diag_rejected_insufficient_bridge += 1;
+                outcome.stage_reached = "insufficient_bridge";
+                outcomes.push((old_arrival, outcome));
                 continue;
             }
             self.diag_bridge_sufficient += 1;
 
             let Some(fit) = ransac_umeyama_scale(&bridged, &self.config, &mut self.rng) else {
                 self.diag_rejected_ransac += 1;
+                outcome.stage_reached = "ransac_rejected";
+                outcomes.push((old_arrival, outcome));
                 continue;
             };
 
-            let relative_pose = current_pose.compose(&old_pose.inverse());
             // Milestone M12 (post-mortem on a real 800f corruption):
             // RANSAC's own inlier-count/residual-ratio gates check only the
             // bridged sample's own internal self-consistency — they cannot
@@ -916,11 +1307,30 @@ impl DpvoLongLoopIndex {
             let rotation_disagreement_deg = fit_rotation_uq
                 .angle_to(&relative_pose.rotation)
                 .to_degrees();
-            rotation_checks.push((old_arrival, rotation_disagreement_deg));
+            outcome.rotation_disagreement_deg = Some(rotation_disagreement_deg);
             if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
                 self.diag_rejected_rotation_inconsistent += 1;
+                outcome.stage_reached = "rotation_inconsistent";
+                outcomes.push((old_arrival, outcome));
                 continue;
             }
+
+            // A3 stage 2 step (d): ADDITIONALLY require the Umeyama
+            // rotation to agree with the 2D-2D E-derived rotation, within a
+            // TIGHTER bound (`stage2_umeyama_vs_e_rotation_max_deg`, default
+            // `10.0°`) than `max_rotation_inconsistency_deg`'s `20.0°` —
+            // only evaluated when stage 2 actually ran (there is no
+            // independent E-matrix rotation to compare against otherwise).
+            if let Some(e_rotation) = stage2_e_rotation {
+                let umeyama_vs_e_deg = fit_rotation_uq.angle_to(&e_rotation).to_degrees();
+                if umeyama_vs_e_deg > self.config.stage2_umeyama_vs_e_rotation_max_deg {
+                    self.diag_stage2_rejected_umeyama_vs_e_rotation += 1;
+                    outcome.stage_reached = "umeyama_vs_e_rotation_inconsistent";
+                    outcomes.push((old_arrival, outcome));
+                    continue;
+                }
+            }
+
             let measurement = Sim3LoopMeasurement {
                 arrival_i: old_arrival,
                 arrival_j: current_arrival,
@@ -935,6 +1345,8 @@ impl DpvoLongLoopIndex {
             self.diag_last_scale = fit.scale;
             self.diag_last_inliers = fit.inlier_count;
             self.diag_last_mean_residual_ratio = fit.mean_residual_ratio;
+            outcome.stage_reached = "accepted";
+            outcomes.push((old_arrival, outcome));
             accepted = Some(AcceptedLongLoop {
                 arrival_i: old_arrival,
                 arrival_j: current_arrival,
@@ -949,20 +1361,27 @@ impl DpvoLongLoopIndex {
         // see `QueryCandidateLogEntry`'s own doc for what `accepted: false`
         // does and does not mean (a candidate ranked below the winner is
         // never even attempted, per this function's own "stop at first
-        // accepted" design, and is still logged as `accepted: false`).
+        // accepted" design, and is still logged as `accepted: false`,
+        // `stage_reached: "not_attempted"`).
         for (rank, &(candidate_arrival, similarity)) in candidates.iter().enumerate() {
-            let rotation_disagreement_deg = rotation_checks
+            let outcome = outcomes
                 .iter()
                 .find(|&&(arrival, _)| arrival == candidate_arrival)
-                .map(|&(_, deg)| deg);
+                .map(|&(_, o)| o)
+                .unwrap_or_default();
+            let is_accepted = winning_arrival == Some(candidate_arrival);
             self.query_log.push(QueryCandidateLogEntry {
                 query_arrival: current_arrival,
                 candidate_arrival,
                 gap: current_arrival.saturating_sub(candidate_arrival),
                 similarity,
                 rank,
-                accepted: winning_arrival == Some(candidate_arrival),
-                rotation_disagreement_deg,
+                accepted: is_accepted,
+                rotation_disagreement_deg: outcome.rotation_disagreement_deg,
+                stage2_2d2d_inliers: outcome.stage2_2d2d_inliers,
+                stage2_e_rotation_disagreement_deg: outcome.stage2_e_rotation_disagreement_deg,
+                stage_reached: outcome.stage_reached,
+                final_accepted: is_accepted,
             });
         }
 
@@ -1124,6 +1543,42 @@ fn nearest_patch_within<'a>(
         }
     }
     best.map(|(p, _)| p)
+}
+
+/// A3 stage 2, first slice: bounding-box area of the keypoints at `indices`,
+/// as a FRACTION of `grid_w * grid_h` (the frame's own patch-grid area,
+/// SAME coordinate space `keypoints` already live in) — the stage-2
+/// coverage gate's own core measurement (see
+/// [`DpvoLongLoopConfig::stage2_min_coverage_fraction`]'s own doc). Returns
+/// `0.0` for fewer than 2 points, or a non-positive grid extent (a
+/// degenerate/zero-area box, always fails the gate rather than panicking or
+/// dividing by zero).
+fn inlier_bbox_area_fraction(
+    keypoints: &[Point2<f64>],
+    indices: impl Iterator<Item = usize>,
+    grid_w: f64,
+    grid_h: f64,
+) -> f64 {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    for index in indices {
+        let Some(p) = keypoints.get(index) else {
+            continue;
+        };
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+        count += 1;
+    }
+    if count < 2 || grid_w <= 0.0 || grid_h <= 0.0 {
+        return 0.0;
+    }
+    let area = (max_x - min_x).max(0.0) * (max_y - min_y).max(0.0);
+    (area / (grid_w * grid_h)).clamp(0.0, 1.0)
 }
 
 /// Bridge every raw 2D-2D `(old_keypoint_index, new_keypoint_index)` match to
@@ -1982,6 +2437,8 @@ mod tests {
             &new_pose,
             &intrinsics,
             &new_patches,
+            188.0,
+            120.0,
             resolve_old,
         );
         assert!(
@@ -2069,7 +2526,15 @@ mod tests {
         };
 
         let accepted = index
-            .find_and_verify_long_range_loop(300, &new_pose, &intrinsics, &new_patches, resolve_old)
+            .find_and_verify_long_range_loop(
+                300,
+                &new_pose,
+                &intrinsics,
+                &new_patches,
+                188.0,
+                120.0,
+                resolve_old,
+            )
             .expect("a genuine, well-posed long-range revisit should be accepted");
         assert_eq!(accepted.arrival_i, 20);
         assert_eq!(accepted.arrival_j, 300);
@@ -2178,7 +2643,7 @@ mod tests {
             }
         };
         let result =
-            index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], resolve_old);
+            index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], 188.0, 120.0, resolve_old);
         assert!(
             result.is_none(),
             "no owned patches on either side => bridging must fail => no acceptance"
@@ -2219,7 +2684,8 @@ mod tests {
         }
         let intrinsics = intr();
         let pose = SE3::identity();
-        let result = index.find_and_verify_long_range_loop(4, &pose, &intrinsics, &[], |_| None);
+        let result =
+            index.find_and_verify_long_range_loop(4, &pose, &intrinsics, &[], 188.0, 120.0, |_| None);
         assert!(result.is_none());
         // A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify
         // query cadence" slice): this IS the zero-candidate case — the
@@ -2286,7 +2752,15 @@ mod tests {
             }
         };
         let accepted = index
-            .find_and_verify_long_range_loop(300, &new_pose, &intrinsics, &new_patches, resolve_old)
+            .find_and_verify_long_range_loop(
+                300,
+                &new_pose,
+                &intrinsics,
+                &new_patches,
+                188.0,
+                120.0,
+                resolve_old,
+            )
             .expect("a genuine, well-posed long-range revisit should be accepted");
         assert_eq!(accepted.arrival_i, 20);
 
@@ -2339,7 +2813,15 @@ mod tests {
                 "query_frequency=1 must make every arrival due, arrival={arrival}"
             );
             let result =
-                index.find_and_verify_long_range_loop(arrival, &pose, &intrinsics, &[], |_| None);
+                index.find_and_verify_long_range_loop(
+                    arrival,
+                    &pose,
+                    &intrinsics,
+                    &[],
+                    188.0,
+                    120.0,
+                    |_| None,
+                );
             assert!(
                 result.is_none(),
                 "min_temporal_gap=1000 => no candidate ever clears the gap"
@@ -2351,5 +2833,528 @@ mod tests {
         assert_eq!(diagnostics.queries_issued_total, issued);
         assert_eq!(diagnostics.queries_with_zero_candidates, issued);
         assert_eq!(index.empty_query_arrivals(), &expected_empty_arrivals[..]);
+    }
+
+    // ---- A3 stage 2, first slice: 2D-2D-first loop geometry ----
+
+    /// A3 stage-2 test helper: build a genuinely RIGID 2D-2D correspondence
+    /// set (`old_keypoints[i]`/`new_keypoints[i]` are TRUE projections of
+    /// the SAME world point `world_points[i]` through `old_pose`/`new_pose`
+    /// — so essential-matrix RANSAC recovers `new_pose`'s own actual
+    /// relative rotation, up to noise-free numerical precision) PLUS a
+    /// bridgeable, INDEPENDENTLY-scaled 3D-3D patch pair:
+    /// `old_patches[i]` decodes to `world_points[i]` itself (a "real",
+    /// trustworthy old-side reconstruction), while `new_patches[i]` decodes
+    /// to `new_pose`'s own optical center plus `alpha` times the vector from
+    /// that center to `world_points[i]` — i.e. a PURE, ROTATION-FREE scale
+    /// of `world_points[i]` about `new_pose`'s own camera center. This is
+    /// GEOMETRICALLY EXACT, not an approximation: scaling a point along its
+    /// own camera ray never changes which pixel it projects to, so
+    /// `new_patches[i]`'s own pixel is EXACTLY `new_keypoints[i]` — no
+    /// `patch_pixel_radius` fudging required. The resulting Umeyama fit
+    /// relating `world_points` to the decoded new-side points is therefore
+    /// EXACTLY `scale=alpha, rotation=IDENTITY` (zero residual),
+    /// INDEPENDENT of `new_pose`'s own rotation — letting the tests below
+    /// choose `new_pose`'s rotation to control whether that IDENTITY
+    /// Umeyama rotation agrees or disagrees with the (real, accurate)
+    /// E-matrix rotation.
+    #[allow(clippy::type_complexity)]
+    fn rigid_2d2d_with_pure_scale_bridge(
+        old_pose: &SE3,
+        new_pose: &SE3,
+        intr: &DpvoIntrinsics,
+        world_points: &[Point3<f64>],
+        alpha: f64,
+    ) -> (Vec<Point2<f64>>, Vec<DpvoPatch>, Vec<Point2<f64>>, Vec<DpvoPatch>) {
+        let c_new = new_pose.inverse().transform_point(&Point3::origin());
+        let mut old_keypoints = Vec::with_capacity(world_points.len());
+        let mut old_patches = Vec::with_capacity(world_points.len());
+        let mut new_keypoints = Vec::with_capacity(world_points.len());
+        let mut new_patches = Vec::with_capacity(world_points.len());
+        for &world in world_points {
+            let op = patch_from_world_point(old_pose, intr, world);
+            old_keypoints.push(Point2::new(op.x, op.y));
+            old_patches.push(op);
+
+            let decoded_new_world =
+                Point3::from(c_new.coords + alpha * (world.coords - c_new.coords));
+            let np = patch_from_world_point(new_pose, intr, decoded_new_world);
+            new_keypoints.push(Point2::new(np.x, np.y));
+            new_patches.push(np);
+        }
+        (old_keypoints, old_patches, new_keypoints, new_patches)
+    }
+
+    /// A spread of 15 world points in front of both `old_pose` (identity)
+    /// and any `new_pose` with a modest rotation/translation — wide enough
+    /// in `(x, y)` to clear `stage2_min_coverage_fraction` comfortably at
+    /// the `188x120` test grid used throughout this module's fixtures.
+    fn spread_world_points(n: usize) -> Vec<Point3<f64>> {
+        // Explicit, independently-varied (x, y, z) spread — mirrors
+        // `crates/vision/src/two_view/mod.rs`'s own `synthetic_world_points`
+        // fixture shape (already proven to work with `EssentialRansac`
+        // there), scaled to this module's own smaller `intr()` test
+        // intrinsics/depth range. A low-discrepancy formula (golden-ratio
+        // jitter) was tried first here and produced an occasionally
+        // ill-conditioned 8-point sample for large (~60 degree) synthetic
+        // rotations; this explicit list is deliberately non-collinear,
+        // non-coplanar, and reused (not re-derived) across every stage-2
+        // test in this module for that reason.
+        let base = [
+            (-1.5, -1.0, 5.0),
+            (1.5, -1.0, 5.2),
+            (-1.5, 1.0, 5.4),
+            (1.5, 1.0, 5.6),
+            (0.0, 0.0, 5.8),
+            (0.7, -0.3, 6.0),
+            (-0.9, 0.5, 5.1),
+            (0.8, 0.9, 6.3),
+            (-0.4, -0.7, 5.5),
+            (0.3, 0.2, 6.6),
+            (-1.2, 0.2, 5.9),
+            (1.1, -0.8, 6.2),
+            (-0.6, 1.0, 5.3),
+            (0.9, -1.0, 5.7),
+            (-1.0, -0.4, 6.4),
+            (0.2, 0.8, 5.2),
+            (1.3, 0.4, 6.1),
+            (-0.3, -1.0, 5.6),
+            (0.5, 0.6, 6.5),
+            (-1.4, -0.6, 5.0),
+            (1.0, 1.0, 6.7),
+            (-0.8, -0.9, 5.8),
+            (0.4, -0.5, 6.9),
+            (-0.1, 0.9, 5.4),
+            (1.4, -0.2, 6.0),
+        ];
+        base.into_iter()
+            .cycle()
+            .take(n.max(1))
+            .map(|(x, y, z)| Point3::new(x, y, z))
+            .collect()
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_stage2_default_off_matches_existing_behavior() {
+        // Default-off contract: `stage2_2d2d_geometry` defaults to `false`,
+        // and running the EXISTING (pre-A3-stage-2) acceptance fixture with
+        // it explicitly left off must reproduce the exact M11/M12 outcome —
+        // accepted, with every new stage-2 diagnostic/log field at its
+        // "never ran" zero/`None` value.
+        assert!(!DpvoLongLoopConfig::default().stage2_2d2d_geometry);
+
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            patch_pixel_radius: 0.5,
+            stage2_2d2d_geometry: false,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        let intrinsics = intr();
+        let DriftedPairFixture {
+            old_pose,
+            old_patches,
+            old_keypoints,
+            new_pose,
+            new_patches,
+            new_keypoints,
+        } = synthetic_drifted_pair(30, 8.0);
+        for arrival in 0..3 {
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
+        }
+        let old_descriptors = frame_descriptors(1, 30, 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, old_patches.clone()))
+            } else {
+                None
+            }
+        };
+
+        let accepted = index
+            .find_and_verify_long_range_loop(
+                300,
+                &new_pose,
+                &intrinsics,
+                &new_patches,
+                188.0,
+                120.0,
+                resolve_old,
+            )
+            .expect("stage2 off must reproduce the existing M11/M12 acceptance");
+        assert_eq!(accepted.arrival_i, 20);
+        let measured_scale = accepted.measurement.measured_scale.expect("scale carried");
+        assert!((measured_scale - 8.0).abs() / 8.0 < 0.05);
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 1);
+        assert!(!diagnostics.stage2_enabled);
+        assert_eq!(diagnostics.stage2_attempts_total, 0);
+        assert_eq!(diagnostics.stage2_passed_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_matches_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_inliers_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_coverage_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_rotation_inconsistent_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_high_residual_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_umeyama_vs_e_rotation_total, 0);
+
+        let winner = index
+            .query_log()
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be logged");
+        assert!(winner.accepted);
+        assert!(winner.final_accepted);
+        assert_eq!(winner.stage_reached, "accepted");
+        assert!(winner.stage2_2d2d_inliers.is_none());
+        assert!(winner.stage2_e_rotation_disagreement_deg.is_none());
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_stage2_accepts_a_correct_loop_through_all_gates() {
+        // A synthetic two-frame geometry where a CORRECT loop passes EVERY
+        // stage-2 gate (a)-(c) AND the existing 3D-3D bridge/RANSAC/rotation
+        // gates AND the new step-(d) Umeyama-vs-E rotation gate: `new_pose`
+        // carries ONLY a translation (zero rotation), so the trusted pose,
+        // the 2D-2D essential-matrix fit, and the 3D-3D Umeyama fit (which
+        // is exactly IDENTITY rotation by `rigid_2d2d_with_pure_scale_bridge`'s
+        // own construction) all agree at ~0 degrees.
+        let intrinsics = intr();
+        let old_pose = SE3::identity();
+        let new_pose = SE3::new(UnitQuaternion::identity(), Vector3::new(0.6, 0.0, 0.2));
+        let world_points = spread_world_points(15);
+        let alpha = 2.0_f64;
+        let (old_keypoints, old_patches, new_keypoints, new_patches) =
+            rigid_2d2d_with_pure_scale_bridge(&old_pose, &new_pose, &intrinsics, &world_points, alpha);
+
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            patch_pixel_radius: 0.5,
+            stage2_2d2d_geometry: true,
+            // Kept small so a 15-point fixture can clear it while still
+            // exercising the real inlier-count/coverage gate CODE PATHS —
+            // not the shipped production defaults (30 / 0.25), mirroring
+            // this module's own established style of overriding non-
+            // load-bearing thresholds to keep fixtures small (e.g.
+            // `patch_pixel_radius` above).
+            stage2_min_inliers: 10,
+            stage2_min_coverage_fraction: 0.05,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        for arrival in 0..3 {
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
+        }
+        let old_descriptors = frame_descriptors(1, world_points.len(), 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, old_patches.clone()))
+            } else {
+                None
+            }
+        };
+        let accepted = index
+            .find_and_verify_long_range_loop(
+                300,
+                &new_pose,
+                &intrinsics,
+                &new_patches,
+                188.0,
+                120.0,
+                resolve_old,
+            )
+            .expect("a correct loop should pass every stage-2 AND existing gate");
+        assert_eq!(accepted.arrival_i, 20);
+        let measured_scale = accepted.measurement.measured_scale.expect("scale carried");
+        assert!(
+            (measured_scale - alpha).abs() / alpha < 0.05,
+            "expected measured_scale near {alpha}, got {measured_scale}"
+        );
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 1);
+        assert!(diagnostics.stage2_enabled);
+        assert_eq!(diagnostics.stage2_attempts_total, 1);
+        assert_eq!(diagnostics.stage2_passed_total, 1);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_matches_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_inliers_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_insufficient_coverage_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_rotation_inconsistent_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_high_residual_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_umeyama_vs_e_rotation_total, 0);
+        assert_eq!(diagnostics.bridge_sufficient_total, 1);
+        assert_eq!(diagnostics.rejected_rotation_inconsistent_total, 0);
+
+        let winner = index
+            .query_log()
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be logged");
+        assert!(winner.final_accepted);
+        assert_eq!(winner.stage_reached, "accepted");
+        let stage2_inliers = winner
+            .stage2_2d2d_inliers
+            .expect("a stage-2-passing candidate must log its own inlier count");
+        assert!(
+            stage2_inliers >= 10,
+            "expected >= stage2_min_inliers, got {stage2_inliers}"
+        );
+        let e_rot_deg = winner
+            .stage2_e_rotation_disagreement_deg
+            .expect("a stage-2-passing candidate must log its own E-vs-trusted disagreement");
+        assert!(
+            e_rot_deg < 5.0,
+            "expected near-zero E-vs-trusted disagreement (zero true rotation), got {e_rot_deg}"
+        );
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_stage2_rejects_rotation_inconsistent_2d2d_candidate() {
+        // A3 stage-2 gate (c): the 2D-2D correspondences are generated from
+        // a GENUINE ~15-degree relative rotation (`gen_new_pose` — the SAME
+        // rotation/translation magnitude the sibling "accepts"/"dies at (d)"
+        // tests below already prove `EssentialRansac` recovers reliably;
+        // much larger synthetic rotations were tried first here and made
+        // the noise-free 8-point DLT solve numerically unstable, an
+        // unrelated pre-existing property of the reused library code this
+        // task does not touch), but the pose actually passed to the
+        // function as "current" (hence DPVO's own trusted relative
+        // rotation) carries a DIFFERENT, much larger rotation — a ~35-degree
+        // disagreement, past `max_rotation_inconsistency_deg`'s default
+        // `20.0`. Must be rejected at stage 2 BEFORE the existing 3D-3D
+        // bridge ever runs (patches are intentionally empty/unused).
+        let intrinsics = intr();
+        let old_pose = SE3::identity();
+        let gen_new_pose = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 15f64.to_radians()),
+            Vector3::new(0.5, 0.0, 0.1),
+        );
+        // Deliberately WRONG vs `gen_new_pose` (a ~35-degree rotation gap).
+        let trusted_new_pose = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 50f64.to_radians()),
+            Vector3::new(0.5, 0.0, 0.1),
+        );
+        let world_points = spread_world_points(15);
+
+        let mut old_keypoints = Vec::with_capacity(world_points.len());
+        let mut new_keypoints = Vec::with_capacity(world_points.len());
+        for &world in &world_points {
+            let op = patch_from_world_point(&old_pose, &intrinsics, world);
+            old_keypoints.push(Point2::new(op.x, op.y));
+            let np = patch_from_world_point(&gen_new_pose, &intrinsics, world);
+            new_keypoints.push(Point2::new(np.x, np.y));
+        }
+
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            stage2_2d2d_geometry: true,
+            stage2_min_inliers: 10,
+            stage2_min_coverage_fraction: 0.05,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        for arrival in 0..3 {
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
+        }
+        let old_descriptors = frame_descriptors(1, world_points.len(), 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, vec![]))
+            } else {
+                None
+            }
+        };
+        let result = index.find_and_verify_long_range_loop(
+            300,
+            &trusted_new_pose,
+            &intrinsics,
+            &[],
+            188.0,
+            120.0,
+            resolve_old,
+        );
+        assert!(
+            result.is_none(),
+            "a 2D-2D-vs-trusted rotation-inconsistent candidate must be rejected at stage 2"
+        );
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 0);
+        assert_eq!(diagnostics.stage2_attempts_total, 1);
+        assert_eq!(diagnostics.stage2_passed_total, 0);
+        assert_eq!(diagnostics.stage2_rejected_rotation_inconsistent_total, 1);
+        assert_eq!(
+            diagnostics.verification_attempts, 0,
+            "must be rejected BEFORE the existing 3D-3D bridge is ever attempted"
+        );
+        assert_eq!(diagnostics.bridge_sufficient_total, 0);
+
+        let entry = index
+            .query_log()
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be logged");
+        assert_eq!(entry.stage_reached, "2d2d_rotation_inconsistent");
+        assert!(!entry.final_accepted);
+        let e_rot_deg = entry
+            .stage2_e_rotation_disagreement_deg
+            .expect("a candidate that reached the rotation check must log its disagreement");
+        assert!(
+            e_rot_deg > 25.0,
+            "expected a large (~35 degree) disagreement, got {e_rot_deg}"
+        );
+    }
+
+    #[test]
+    fn find_and_verify_long_range_loop_stage2_dies_at_umeyama_vs_e_rotation_gate() {
+        // A3 stage-2 step (d): construct a candidate that passes EVERY prior
+        // gate — stage-2 (a)-(c) (the 2D-2D essential-matrix fit's own
+        // rotation agrees with the TRUSTED pose, since both come from the
+        // SAME genuine ~15-degree `new_pose` rotation) AND the existing
+        // 3D-3D bridge/RANSAC gates AND the existing rotation-vs-trusted-pose
+        // gate (the bridge's own Umeyama fit is EXACTLY IDENTITY rotation by
+        // `rigid_2d2d_with_pure_scale_bridge`'s own construction, and
+        // `0 - 15 = 15 degrees < 20.0` still clears
+        // `max_rotation_inconsistency_deg`) — but FAILS the NEW, tighter
+        // step-(d) gate: Umeyama (IDENTITY, ~0 degrees) disagrees with the
+        // 2D-2D E-matrix fit (~15 degrees, matching the genuine rotation)
+        // by ~15 degrees, which exceeds `stage2_umeyama_vs_e_rotation_max_deg`'s
+        // default `10.0`. This is precisely the "bridge and trusted pose are
+        // both wrong in a mutually consistent way" failure mode this gate
+        // exists to catch — a scale-corrupt 3D-3D correspondence set that
+        // nonetheless agrees with the (also-drifting) trusted pose closely
+        // enough to fool the EXISTING M12 gate alone.
+        let intrinsics = intr();
+        let old_pose = SE3::identity();
+        let new_pose = SE3::new(
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 15f64.to_radians()),
+            Vector3::new(0.5, 0.0, 0.1),
+        );
+        let world_points = spread_world_points(15);
+        let alpha = 2.0_f64; // pure-scale "drift" — see the helper's own doc.
+        let (old_keypoints, old_patches, new_keypoints, new_patches) =
+            rigid_2d2d_with_pure_scale_bridge(&old_pose, &new_pose, &intrinsics, &world_points, alpha);
+
+        let cfg = DpvoLongLoopConfig {
+            vocab_bootstrap_frames: 3,
+            vocab_words: 4,
+            min_temporal_gap: 50,
+            min_similarity: -1.0,
+            patch_pixel_radius: 0.5,
+            stage2_2d2d_geometry: true,
+            stage2_min_inliers: 10,
+            stage2_min_coverage_fraction: 0.05,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        for arrival in 0..3 {
+            index.ingest_frame(
+                arrival,
+                vec![],
+                frame_descriptors(1000 + arrival as u64, 20, 16),
+            );
+        }
+        let old_descriptors = frame_descriptors(1, world_points.len(), 16);
+        index.ingest_frame(20, old_keypoints, old_descriptors.clone());
+        index.ingest_frame(300, new_keypoints, old_descriptors);
+
+        let resolve_old = |arrival: usize| -> Option<(SE3, DpvoIntrinsics, Vec<DpvoPatch>)> {
+            if arrival == 20 {
+                Some((old_pose.clone(), intrinsics, old_patches.clone()))
+            } else {
+                None
+            }
+        };
+        let result = index.find_and_verify_long_range_loop(
+            300,
+            &new_pose,
+            &intrinsics,
+            &new_patches,
+            188.0,
+            120.0,
+            resolve_old,
+        );
+        assert!(
+            result.is_none(),
+            "a scale-corrupt 3D-3D set (Umeyama rotation disagreeing with the independent \
+             2D-2D E-matrix rotation) must be rejected even though it agrees with the \
+             ALSO-drifting trusted pose closely enough to pass the existing M12 gate"
+        );
+
+        let diagnostics = index.diagnostics();
+        assert_eq!(diagnostics.accepted_total, 0);
+        assert_eq!(
+            diagnostics.stage2_passed_total, 1,
+            "stage 2 (a)-(c) must all pass — the E fit itself is accurate"
+        );
+        assert_eq!(
+            diagnostics.bridge_sufficient_total, 1,
+            "the 3D-3D bridge must succeed (patches sit exactly at the matched keypoints)"
+        );
+        assert_eq!(
+            diagnostics.rejected_ransac_total, 0,
+            "the pure-scale correspondence set is a perfect, zero-residual fit"
+        );
+        assert_eq!(
+            diagnostics.rejected_rotation_inconsistent_total, 0,
+            "the EXISTING gate (vs the also-~15-degree trusted pose) must still pass"
+        );
+        assert_eq!(
+            diagnostics.stage2_rejected_umeyama_vs_e_rotation_total, 1,
+            "the NEW step-(d) gate (vs the independent E rotation) must be what rejects it"
+        );
+
+        let entry = index
+            .query_log()
+            .iter()
+            .find(|e| e.candidate_arrival == 20)
+            .expect("arrival 20 must be logged");
+        assert_eq!(entry.stage_reached, "umeyama_vs_e_rotation_inconsistent");
+        assert!(!entry.final_accepted);
+        let e_rot_vs_trusted = entry
+            .stage2_e_rotation_disagreement_deg
+            .expect("a stage-2-passing candidate must log its own E-vs-trusted disagreement");
+        assert!(
+            e_rot_vs_trusted < 5.0,
+            "the E fit itself should closely match the genuine ~15-degree trusted rotation, \
+             got {e_rot_vs_trusted}"
+        );
+        let umeyama_vs_trusted = entry
+            .rotation_disagreement_deg
+            .expect("a bridge+RANSAC-passing candidate must log its own Umeyama-vs-trusted disagreement");
+        assert!(
+            (5.0..20.0).contains(&umeyama_vs_trusted),
+            "expected Umeyama (~0 deg) vs trusted (~15 deg) disagreement inside the OLD gate's \
+             own tolerance, got {umeyama_vs_trusted}"
+        );
     }
 }

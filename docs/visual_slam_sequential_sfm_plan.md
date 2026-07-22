@@ -841,6 +841,51 @@ MH_03 full-sequence SfM benchmark's mapper (~1 core); ATE/scale are
 deterministic and unaffected, per-frame timing from these runs is diagnostic
 only.
 
+Stage-2 first slice (2026-07-22): 2D-2D-first loop geometry is implemented as
+opt-in `--ll-2d2d-geometry` (default off, existing path bit-for-bit
+unchanged). Before the M11/M12 3D-3D bridge may run, a candidate must now
+survive: mutual-NN/ratio matching of the stored per-frame SP descriptors,
+essential-matrix RANSAC relative pose (reuses
+`visloc_vision::two_view::RelativePoseEstimator` wholesale), >=30 inliers,
+>=25% inlier bbox coverage on both frames, E-rotation agreement with the
+trusted DPVO rotation delta under the EXISTING 20-degree gate, epipolar
+residual sanity, and finally Umeyama-vs-E rotation agreement within 10
+degrees. 27 Rust + 33 Python tests green.
+
+MH_01 800f qf5 + stage-2 arm: `stage2_attempts_total=281`,
+`stage2_passed_total=0` (159 insufficient matches / 28 insufficient inliers /
+9 insufficient coverage / 85 rotation-inconsistent / 0 high-residual); the
+3D-3D bridge never ran. All 5 stage-1b bad loops are killed at the 2D-2D
+rotation gate — each with 200+ confident inliers but 175.0-179.6 degrees of
+E-vs-trusted rotation disagreement — and the trajectory is restored
+byte-identical to the qf40 control (rigid 4.0866 / sim 3.3224 / scale 16.019
+/ tracked 1.0): the loop mechanism is now inert rather than corrupting.
+
+Interpretation (recorded for the next slice, not yet independently proven):
+all five killed pairs lie INSIDE the M13 hover span (arrivals ~216-461), so
+their 2D-2D matches are abundant (near-identical views) but their true
+baseline is near zero — exactly the regime where essential-matrix estimation
+is ill-posed and its recovered rotation is meaningless. The near-180-degree
+clustering is consistent with E-degeneracy (twisted-pair ambiguity under
+vanishing translation), and such loops carry no sound scale information in
+the first place — rejecting them is the correct outcome even though the
+rejection reason is "degenerate geometry", not "wrong place". The next slice
+must add a homography/pure-rotation model check to distinguish (i)
+low-baseline genuine revisits (usable as rotation-only constraints, never
+scale) from (ii) true geometric mismatches, and must verify the E-decomposition
+convention on a known-good wide-baseline pair before any loop is allowed to
+pass stage 2.
+
+Honest scope statement: this slice trades recall for precision by
+construction — zero long loops now pass on MH_01 800f, so the A3 gate
+(>=90% recall, zero false loops, improved ATE on two sequences) is not met.
+The two open fronts are unchanged and now precisely measured: (1) retrieval
+ranking (the tightest revisit (42,456) is a proven top-3 ranking miss), and
+(2) sound geometry for the loops that matter — post-hover-to-pre-hover
+revisits with real baseline, which retrieval currently never surfaces.
+Run: `E:/visloc_archive/dpvo_a3_20260721/on_800_qf5_2d2d/`, recall JSON
+`.../recall_qf_ab/qf5_2d2d.json`.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

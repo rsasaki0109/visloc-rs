@@ -3678,11 +3678,22 @@ impl DpvoOdometry {
             Some((pose, folded.intrinsics, folded.patches.clone()))
         };
 
+        // A3 stage 2, first slice (`crate::dpvo_long_loop`'s module doc):
+        // the stage-2 coverage gate needs the frame's own patch-grid extent
+        // — the SAME `ws`/`hs` bound `run_global_ba`'s own visibility gate
+        // already derives from `self.config.width`/`height` — passed as a
+        // plain `f64` pair since `dpvo_long_loop` stays `onnx-inference`-
+        // feature-agnostic (mirrors `RES`'s own "pass as a parameter, not an
+        // import" precedent, `sp_anchored_patch_centers`'s own doc).
+        let grid_width = self.config.width as f64 / RES as f64;
+        let grid_height = self.config.height as f64 / RES as f64;
         let Some(accepted) = runtime.index.find_and_verify_long_range_loop(
             current_arrival,
             &current_pose,
             &current_intrinsics,
             &current_patches,
+            grid_width,
+            grid_height,
             resolve_old,
         ) else {
             return;
