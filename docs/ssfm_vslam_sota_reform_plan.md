@@ -372,6 +372,17 @@ regression against the dense control.
 
 Exit: a reproducible full-sequence baseline and a measured complexity budget.
 
+S1 observability fix (2026-07-23): `VISLOC_SFM_DEBUG=1` now brackets the
+otherwise silent final iterative-global-refinement stage with the registered
+image, triangulated-point, and observation counts; each global BA reports its
+round and wall time; each intervening filter/retriangulation reports changed
+observations, rate, and convergence threshold. A synthetic COLMAP-style ring
+run records round-0 BA completion and the 0/450 convergence decision before
+round 1. This does not alter the solver, thresholds, or default output. The
+already-running frozen S1 control predates this diagnostic and remains
+untouched; future full controls must enable it so a multi-hour BA cannot again
+be mistaken for a hung process or yield only one aggregate timing number.
+
 ### S2 — Hierarchical mapper
 
 - Partition the sequence into overlapping, motion-adaptive submaps rather than

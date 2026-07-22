@@ -3761,8 +3761,25 @@ fn iterative_global_refinement(
         Ok(res)
     };
 
+    if sfm_debug_enabled() {
+        eprintln!(
+            "sfm-debug: final global refinement begin registered={} points={} observations={} max_followup_rounds={}",
+            poses.iter().filter(|pose| pose.is_some()).count(),
+            track_point.iter().filter(|point| point.is_some()).count(),
+            count_observations(tracks, poses, track_point),
+            config.global_ba_max_refinements,
+        );
+    }
+    let mut ba_started = std::time::Instant::now();
     let mut result = run_ba(camera, tracks, poses, track_point)?;
-    for _ in 0..config.global_ba_max_refinements {
+    if sfm_debug_enabled() {
+        eprintln!(
+            "sfm-debug: final global BA round=0 completed seconds={:.3}",
+            ba_started.elapsed().as_secs_f64(),
+        );
+    }
+    for followup in 0..config.global_ba_max_refinements {
+        let round = followup + 1;
         let total_obs = count_observations(tracks, poses, track_point).max(1);
         // Filter outlier observations, then complete/re-triangulate tracks the
         // tightened frame can now place. Completing between solves is integral to
@@ -3773,10 +3790,30 @@ fn iterative_global_refinement(
         let mut changed =
             filter_outlier_observations(camera, features, tracks, config, poses, track_point);
         changed += retriangulate_tracks(camera, features, tracks, config, poses, track_point);
-        if (changed as f64 / total_obs as f64) < config.global_ba_change_rate {
+        let change_rate = changed as f64 / total_obs as f64;
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: final global refinement round={round} changed={changed}/{total_obs} rate={change_rate:.6} threshold={:.6}",
+                config.global_ba_change_rate,
+            );
+        }
+        if change_rate < config.global_ba_change_rate {
+            if sfm_debug_enabled() {
+                eprintln!("sfm-debug: final global refinement converged before BA round={round}");
+            }
             break;
         }
+        if sfm_debug_enabled() {
+            eprintln!("sfm-debug: final global BA round={round} begin");
+        }
+        ba_started = std::time::Instant::now();
         result = run_ba(camera, tracks, poses, track_point)?;
+        if sfm_debug_enabled() {
+            eprintln!(
+                "sfm-debug: final global BA round={round} completed seconds={:.3}",
+                ba_started.elapsed().as_secs_f64(),
+            );
+        }
     }
     Ok(result)
 }
