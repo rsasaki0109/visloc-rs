@@ -13,6 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from benchmark_process_metrics import run_monitored
+
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -44,21 +46,6 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def run_logged(command: list[str], log: Path) -> float:
-    started = time.perf_counter()
-    with log.open("w", encoding="utf-8") as stream:
-        stream.write("COMMAND: " + subprocess.list2cmdline(command) + "\n\n")
-        stream.flush()
-        subprocess.run(
-            command,
-            cwd=REPO,
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-            check=True,
-        )
-    return time.perf_counter() - started
 
 
 def synchronized_image_names(mav0: Path) -> list[str]:
@@ -127,8 +114,8 @@ def main() -> int:
     feature_script = REPO / "scripts" / "export_superpoint_lightglue.py"
 
     started_utc = timestamp()
-    stage_seconds = {}
-    stage_seconds["rectification"] = run_logged(
+    stages = {}
+    stages["rectification"] = run_monitored(
         [
             str(args.python),
             str(rectify_script),
@@ -141,8 +128,11 @@ def main() -> int:
             "--left-only",
         ],
         logs / "rectification.log",
+        cwd=REPO,
     )
-    stage_seconds["superpoint"] = run_logged(
+    if stages["rectification"]["returncode"] != 0:
+        raise RuntimeError("rectification failed")
+    stages["superpoint"] = run_monitored(
         [
             str(args.python),
             str(feature_script),
@@ -158,7 +148,10 @@ def main() -> int:
             str(args.max_keypoints),
         ],
         logs / "superpoint.log",
+        cwd=REPO,
     )
+    if stages["superpoint"]["returncode"] != 0:
+        raise RuntimeError("SuperPoint extraction failed")
 
     rectified_frames = len(list((rect / "image_0").glob("*.png")))
     timestamp_rows = len((rect / "timestamps.txt").read_text(encoding="utf-8").splitlines())
@@ -190,7 +183,10 @@ def main() -> int:
         "rectified_frames": rectified_frames,
         "feature_frames": feature_frames,
         "timestamp_rows": timestamp_rows,
-        "stage_seconds": stage_seconds,
+        "stage_seconds": {
+            name: stage["wall_seconds"] for name, stage in stages.items()
+        },
+        "stages": stages,
         "post_timing_validation_seconds": validation_seconds,
         "configuration": {
             "device": args.device,

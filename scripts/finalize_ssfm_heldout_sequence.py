@@ -152,6 +152,13 @@ def main() -> int:
             "peak_mapper_rss_bytes": hierarchical["mapper"][
                 "peak_process_tree_rss_bytes"
             ],
+            "peak_process_tree_rss_bytes": max(
+                hierarchical["mapper"]["peak_process_tree_rss_bytes"],
+                prepared["stages"]["superpoint"]["peak_process_tree_rss_bytes"],
+            ),
+            "peak_global_gpu_memory_mib": prepared["stages"]["superpoint"][
+                "peak_global_gpu_memory_mib"
+            ],
         }
     else:
         results["visloc_hierarchical"] = {

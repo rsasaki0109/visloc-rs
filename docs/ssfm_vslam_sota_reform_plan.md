@@ -483,7 +483,11 @@ explicit DNF cells, and monitors wall/RAM/global-VRAM. Held-out execution uses
 given a GT path, and `finalize_ssfm_heldout_sequence.py` receives it only after
 all three timed mapper processes have exited. Both success and all-DNF synthetic
 finalization tests pass. These runners are prepared; no held-out result has
-been observed yet.
+been observed yet. Frontend RAM/global-VRAM is now sampled alongside mapping
+RAM, and `summarize_ssfm_heldout_suite.py` requires all three frozen sequence
+cells, carries DNF outcomes into the aggregate, reports median/worst plus the
+per-sequence reproduced Pareto frontier, and deliberately leaves the claimable
+SOTA gate false while GLUEMAP, InstantSfM, ORBIT, or release evidence is absent.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
