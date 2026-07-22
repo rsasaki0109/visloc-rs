@@ -478,9 +478,12 @@ isolated in `prepare_ssfm_heldout_euroc_inputs.py`, which never opens GT and
 records calibration/index, frontend source, SuperPoint weight, protocol, and
 feature-set hashes. `run_colmap_ssfm_frozen.py` runs COLMAP 4.1 incremental and
 global mappers from one same-input SIFT/sequential-match database, preserves
-explicit DNF cells, monitors wall/RAM/global-VRAM, and opens GT only after both
-timed mapper processes exit. These runners are prepared and synthetically
-verified; no held-out result has been observed yet.
+explicit DNF cells, and monitors wall/RAM/global-VRAM. Held-out execution uses
+`run_ssfm_heldout_sequence.py`: neither the hierarchical nor COLMAP runner is
+given a GT path, and `finalize_ssfm_heldout_sequence.py` receives it only after
+all three timed mapper processes have exited. Both success and all-DNF synthetic
+finalization tests pass. These runners are prepared; no held-out result has
+been observed yet.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain

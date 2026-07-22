@@ -110,7 +110,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--features-dir", type=Path, required=True)
     parser.add_argument("--timestamps", type=Path, required=True)
-    parser.add_argument("--ground-truth-csv", type=Path, required=True)
+    parser.add_argument(
+        "--ground-truth-csv",
+        type=Path,
+        help="optional; omit for held-out runs and evaluate only after every engine exits",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--expected-frames", type=int, required=True)
     parser.add_argument("--build-git-revision", required=True)
@@ -186,7 +190,10 @@ def point_count(points_txt: Path) -> int:
 
 def main() -> int:
     args = parse_args()
-    for path in [args.exe, args.features_dir, args.timestamps, args.ground_truth_csv]:
+    required_paths = [args.exe, args.features_dir, args.timestamps]
+    if args.ground_truth_csv is not None:
+        required_paths.append(args.ground_truth_csv)
+    for path in required_paths:
         if not path.exists():
             raise FileNotFoundError(path)
     if args.expected_frames <= 0:
@@ -303,8 +310,10 @@ def main() -> int:
             "logical_cpu_count": os.cpu_count(),
         },
         "protocol": {
-            "ground_truth_used_after_engine_exit": True,
+            "ground_truth_used_after_engine_exit": args.ground_truth_csv is not None,
+            "ground_truth_read": False,
             "features_dir": str(args.features_dir.resolve()),
+            "timestamps": str(args.timestamps.resolve()),
             "input_feature_frames": input_frames,
             "timestamp_rows": timestamp_rows,
             "expected_frames": args.expected_frames,
@@ -332,7 +341,6 @@ def main() -> int:
         )
 
     trajectory = args.out_dir / "trajectory.tum"
-    evaluation = args.out_dir / "evaluation.json"
     subprocess.run(
         [
             sys.executable,
@@ -344,31 +352,34 @@ def main() -> int:
         cwd=REPO,
         check=True,
     )
-    # First ground-truth read occurs inside this subprocess, after mapper exit.
-    subprocess.run(
-        [
-            sys.executable,
-            str(REPO / "scripts" / "evaluate_euroc_trajectory.py"),
-            "--ground-truth-csv",
-            str(args.ground_truth_csv),
-            "--trajectory",
-            str(trajectory),
-            "--tum-time-unit",
-            "s",
-            "--out-json",
-            str(evaluation),
-        ],
-        cwd=REPO,
-        check=True,
-    )
-    evaluated = json.loads(evaluation.read_text(encoding="utf-8"))
     base_manifest["mapper"].update(
         {
             "registered_images": registered,
             "points3d": point_count(points_txt),
         }
     )
-    base_manifest["evaluation"] = evaluated["runs"][0]
+    if args.ground_truth_csv is not None:
+        evaluation = args.out_dir / "evaluation.json"
+        # First ground-truth read occurs inside this subprocess, after mapper exit.
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO / "scripts" / "evaluate_euroc_trajectory.py"),
+                "--ground-truth-csv",
+                str(args.ground_truth_csv),
+                "--trajectory",
+                str(trajectory),
+                "--tum-time-unit",
+                "s",
+                "--out-json",
+                str(evaluation),
+            ],
+            cwd=REPO,
+            check=True,
+        )
+        evaluated = json.loads(evaluation.read_text(encoding="utf-8"))
+        base_manifest["protocol"]["ground_truth_read"] = True
+        base_manifest["evaluation"] = evaluated["runs"][0]
     manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
     print(manifest_path)
     return 0

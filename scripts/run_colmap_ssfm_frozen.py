@@ -58,7 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--expected-frames", type=int, required=True)
-    parser.add_argument("--ground-truth-csv", type=Path, required=True)
+    parser.add_argument(
+        "--ground-truth-csv",
+        type=Path,
+        help="optional; omit for held-out runs and evaluate only after every engine exits",
+    )
     parser.add_argument("--colmap", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=float, default=0.5)
     return parser.parse_args()
@@ -269,7 +273,10 @@ def main() -> int:
         raise ValueError("prepared inputs use a different frozen protocol")
     if prepared_manifest["expected_frames"] != args.expected_frames:
         raise ValueError("prepared frame count mismatch")
-    for path in (args.colmap, args.ground_truth_csv):
+    required_paths = [args.colmap]
+    if args.ground_truth_csv is not None:
+        required_paths.append(args.ground_truth_csv)
+    for path in required_paths:
         if not path.is_file():
             raise FileNotFoundError(path)
 
@@ -453,28 +460,29 @@ def main() -> int:
         trajectories[engine] = trajectory
 
     evaluations = {}
-    for engine, trajectory in trajectories.items():
-        output = args.out_dir / f"evaluation_{engine}.json"
-        subprocess.run(
-            [
-                sys.executable,
-                str(REPO / "scripts" / "evaluate_euroc_trajectory.py"),
-                "--ground-truth-csv",
-                str(args.ground_truth_csv),
-                "--trajectory",
-                str(trajectory),
-                "--tum-time-unit",
-                "s",
-                "--out-json",
-                str(output),
-            ],
-            cwd=REPO,
-            check=True,
-        )
-        evaluations[engine] = json.loads(output.read_text(encoding="utf-8"))["runs"][0]
-
     common_evaluations = {}
-    if len(trajectories) == 2:
+    if args.ground_truth_csv is not None:
+        for engine, trajectory in trajectories.items():
+            output = args.out_dir / f"evaluation_{engine}.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO / "scripts" / "evaluate_euroc_trajectory.py"),
+                    "--ground-truth-csv",
+                    str(args.ground_truth_csv),
+                    "--trajectory",
+                    str(trajectory),
+                    "--tum-time-unit",
+                    "s",
+                    "--out-json",
+                    str(output),
+                ],
+                cwd=REPO,
+                check=True,
+            )
+            evaluations[engine] = json.loads(output.read_text(encoding="utf-8"))["runs"][0]
+
+    if args.ground_truth_csv is not None and len(trajectories) == 2:
         output = args.out_dir / "evaluation_common_frames.json"
         command = [
             sys.executable,
@@ -521,14 +529,19 @@ def main() -> int:
                 stage["peak_process_tree_rss_bytes"] for stage in engine_stages
             ),
             "peak_global_gpu_memory_mib": max(gpu_peaks) if gpu_peaks else None,
-            "evaluation": evaluations[engine],
-            "common_frame_evaluation": common_evaluations.get(engine),
             "model": str(models[engine].resolve()),
         }
+        if engine in evaluations:
+            results[engine]["evaluation"] = evaluations[engine]
+            results[engine]["common_frame_evaluation"] = common_evaluations.get(engine)
     suite_status = "success" if all(
         result["status"] == "success" for result in results.values()
     ) else "partial_or_dnf"
-    return finish(suite_status, results, ground_truth_read=bool(trajectories))
+    return finish(
+        suite_status,
+        results,
+        ground_truth_read=args.ground_truth_csv is not None and bool(trajectories),
+    )
 
 
 if __name__ == "__main__":
