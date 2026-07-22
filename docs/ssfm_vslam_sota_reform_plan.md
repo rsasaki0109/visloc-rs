@@ -565,7 +565,12 @@ chain, and now requires all successful stages to use the same 0.5 s cadence
 (the external runner previously defaulted to a less comparable 1.0 s). The
 shared wait uses timeout-aware process completion, removing the
 previous up-to-one-poll wall-time bias. Static checks and 18 held-out/external
-transaction tests pass, including deterministic summary regeneration.
+transaction tests pass, including deterministic summary regeneration. The
+suite freeze includes that shared sampler as well as every runner, checkpoint,
+manifest, protocol, and executable. It rehashes the complete set both before
+and after each sequence and before and after summary generation; any mid-suite
+mutation atomically invalidates the suite instead of allowing a mixed-revision
+result to become complete.
 
 External-baseline pre-freeze (2026-07-22):
 `benchmarks/protocols/ssfm_external_baselines_v1.json` binds GLUEMAP official

@@ -320,6 +320,8 @@ def main() -> int:
             },
         }
         write_json_atomic(suite_manifest_path, suite_manifest)
+        if reject_if_frozen_files_changed(f"after:{sequence}"):
+            return 2
 
     if reject_if_frozen_files_changed("before:summary"):
         return 2
@@ -341,6 +343,8 @@ def main() -> int:
         "path": str(summary_path.resolve()) if summary_path.is_file() else None,
         "sha256": sha256(summary_path) if summary_path.is_file() else None,
     }
+    if reject_if_frozen_files_changed("after:summary"):
+        return 2
     suite_manifest["status"] = (
         "complete" if summary_returncode == 0 and summary_path.is_file() else "failed"
     )
