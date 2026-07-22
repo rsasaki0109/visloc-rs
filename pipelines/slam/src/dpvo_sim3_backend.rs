@@ -176,6 +176,7 @@ use visloc_core::geometry::{Sim3, Sim3Tangent, SE3};
 use crate::dpvo_patch_ba::{reprojected_center_depth, transform_point};
 use crate::dpvo_patch_graph::DpvoPatchGraph;
 use crate::sim3_pose_graph::{Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig};
+use crate::submap_alignment::{RotationOnlyConstraint, SubmapSim3Constraint};
 
 /// Configuration for the Milestone M9 Sim(3) pose-graph backend. `None` on
 /// [`crate::dpvo_vo::DpvoOdometryConfig::sim3_backend`] (every prior
@@ -314,11 +315,154 @@ pub enum Sim3BackendRejection {
     ActiveReprojectionWorsened,
 }
 
+/// One DPVO arrival anchored in an independently reconstructed local submap.
+/// The pose is `T_camera<-submap`; it must come from R1, never the live DPVO
+/// trajectory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DpvoSubmapAnchor {
+    pub submap_id: u64,
+    pub arrival_index: usize,
+    pub local_world_to_camera: SE3,
+}
+
+/// Backend factors whose type preserves R2 observability. A rotation-only
+/// constraint has no translation or scale field to accidentally promote.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerifiedDpvoLoopFactor {
+    RotationOnly {
+        constraint: RotationOnlyConstraint,
+        source_anchor: DpvoSubmapAnchor,
+        target_anchor: DpvoSubmapAnchor,
+    },
+    Sim3 {
+        constraint: SubmapSim3Constraint,
+        source_anchor: DpvoSubmapAnchor,
+        target_anchor: DpvoSubmapAnchor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedDpvoLoopFactorError {
+    SourceSubmapMismatch,
+    TargetSubmapMismatch,
+    SameArrival,
+    InvalidInformation,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedLoopEdge {
+    from: usize,
+    to: usize,
+    measurement: Sim3,
+    information: Sim3Information,
+}
+
 /// Embed a rigid `SE(3)` pose as a `Sim(3)` value at scale `1.0` — the same
 /// convention `crate::online_slam::sim3_at_unit_scale` (private there) uses
 /// to seed its own `Sim3PoseGraph` mirror.
 fn sim3_at_unit_scale(pose: &SE3) -> Sim3 {
     Sim3::new(pose.rotation, pose.translation, 1.0)
+}
+
+impl VerifiedDpvoLoopFactor {
+    fn anchors(&self) -> (&DpvoSubmapAnchor, &DpvoSubmapAnchor) {
+        match self {
+            Self::RotationOnly {
+                source_anchor,
+                target_anchor,
+                ..
+            }
+            | Self::Sim3 {
+                source_anchor,
+                target_anchor,
+                ..
+            } => (source_anchor, target_anchor),
+        }
+    }
+
+    fn validate(&self) -> Result<(), VerifiedDpvoLoopFactorError> {
+        let (source_anchor, target_anchor) = self.anchors();
+        if source_anchor.arrival_index == target_anchor.arrival_index {
+            return Err(VerifiedDpvoLoopFactorError::SameArrival);
+        }
+        let (source_submap_id, target_submap_id) = match self {
+            Self::RotationOnly { constraint, .. } => {
+                (constraint.source_submap_id, constraint.target_submap_id)
+            }
+            Self::Sim3 { constraint, .. } => {
+                (constraint.source_submap_id, constraint.target_submap_id)
+            }
+        };
+        if source_anchor.submap_id != source_submap_id {
+            return Err(VerifiedDpvoLoopFactorError::SourceSubmapMismatch);
+        }
+        if target_anchor.submap_id != target_submap_id {
+            return Err(VerifiedDpvoLoopFactorError::TargetSubmapMismatch);
+        }
+        Ok(())
+    }
+
+    fn prepare(&self) -> Result<PreparedLoopEdge, VerifiedDpvoLoopFactorError> {
+        self.validate()?;
+        let (source_anchor, target_anchor) = self.anchors();
+        let mut information = Sim3Information::zeros();
+        let measurement = match self {
+            Self::RotationOnly { constraint, .. } => {
+                let support = (constraint.inlier_count as f64 * constraint.spatial_coverage)
+                    .clamp(1.0e-3, 1.0e6);
+                for axis in 3..6 {
+                    information[(axis, axis)] = support;
+                }
+                let rotation = target_anchor.local_world_to_camera.rotation
+                    * constraint.target_from_source_rotation
+                    * source_anchor.local_world_to_camera.rotation.inverse();
+                Sim3::new(rotation, Vector3::zeros(), 1.0)
+            }
+            Self::Sim3 { constraint, .. } => {
+                let support = (constraint.inlier_match_indices.len() as f64
+                    * constraint.inlier_ratio.max(1.0e-6))
+                .max(1.0);
+                let scene_scale = constraint.target_scene_scale.max(1.0e-9);
+                let translation_sigma =
+                    (constraint.mean_residual_ratio * scene_scale).max(scene_scale * 1.0e-3);
+                let rotation_sigma = constraint
+                    .rotation_disagreement_deg
+                    .to_radians()
+                    .max(1.0_f64.to_radians());
+                let log_scale_sigma = constraint.leave_one_out_log_scale_mad.max(5.0e-3);
+                let translation_information =
+                    (support / translation_sigma.powi(2)).clamp(1.0e-3, 1.0e6);
+                let rotation_information = (support / rotation_sigma.powi(2)).clamp(1.0e-3, 1.0e6);
+                let scale_information = (support / log_scale_sigma.powi(2)).clamp(1.0e-3, 1.0e6);
+                for axis in 0..3 {
+                    information[(axis, axis)] = translation_information;
+                }
+                for axis in 3..6 {
+                    information[(axis, axis)] = rotation_information;
+                }
+                information[(6, 6)] = scale_information;
+                sim3_at_unit_scale(&target_anchor.local_world_to_camera)
+                    .compose(&constraint.target_from_source)
+                    .compose(&sim3_at_unit_scale(&source_anchor.local_world_to_camera).inverse())
+            }
+        };
+        if !measurement.scale.is_finite()
+            || measurement.scale <= 0.0
+            || !measurement
+                .translation
+                .iter()
+                .all(|value| value.is_finite())
+            || !information.iter().all(|value| value.is_finite())
+        {
+            return Err(VerifiedDpvoLoopFactorError::InvalidInformation);
+        }
+        Ok(PreparedLoopEdge {
+            from: source_anchor.arrival_index,
+            to: target_anchor.arrival_index,
+            measurement,
+            information,
+        })
+    }
 }
 
 /// Estimate a loop pair's relative `Sim(3)` SCALE — see the module doc's
@@ -508,6 +652,18 @@ fn select_nodes(
     stride: usize,
     loop_measurements: &[Sim3LoopMeasurement],
 ) -> Vec<usize> {
+    let endpoints: Vec<_> = loop_measurements
+        .iter()
+        .map(|measurement| (measurement.arrival_i, measurement.arrival_j))
+        .collect();
+    select_nodes_from_endpoints(ordered, stride, &endpoints)
+}
+
+fn select_nodes_from_endpoints(
+    ordered: &[usize],
+    stride: usize,
+    endpoints: &[(usize, usize)],
+) -> Vec<usize> {
     let stride = stride.max(1);
     let mut nodes: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     for (position, &arrival) in ordered.iter().enumerate() {
@@ -522,15 +678,108 @@ fn select_nodes(
         nodes.insert(last);
     }
     let present: std::collections::BTreeSet<usize> = ordered.iter().copied().collect();
-    for measurement in loop_measurements {
-        if present.contains(&measurement.arrival_i) {
-            nodes.insert(measurement.arrival_i);
+    for &(from, to) in endpoints {
+        if present.contains(&from) {
+            nodes.insert(from);
         }
-        if present.contains(&measurement.arrival_j) {
-            nodes.insert(measurement.arrival_j);
+        if present.contains(&to) {
+            nodes.insert(to);
         }
     }
     nodes.into_iter().collect()
+}
+
+fn solve_prepared_backend(
+    graph: &mut DpvoPatchGraph,
+    all_poses: &BTreeMap<usize, SE3>,
+    nodes: &[usize],
+    prepared: &[PreparedLoopEdge],
+    loop_factor_count: usize,
+    config: &DpvoSim3BackendConfig,
+) -> Option<Sim3BackendResult> {
+    if nodes.len() < 2 || prepared.is_empty() || loop_factor_count == 0 {
+        return None;
+    }
+    let mut sim3_graph = Sim3PoseGraph::new();
+    for &arrival in nodes {
+        sim3_graph.add_pose(arrival as u64, sim3_at_unit_scale(&all_poses[&arrival]));
+    }
+    sim3_graph.anchor(nodes[0] as u64);
+    for pair in nodes.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let relative = all_poses[&b].compose(&all_poses[&a].inverse());
+        sim3_graph.add_edge(a as u64, b as u64, sim3_at_unit_scale(&relative), 1.0);
+    }
+    for edge in prepared {
+        if !sim3_graph.poses.contains_key(&(edge.from as u64))
+            || !sim3_graph.poses.contains_key(&(edge.to as u64))
+        {
+            continue;
+        }
+        sim3_graph.add_edge_with_information(
+            edge.from as u64,
+            edge.to as u64,
+            edge.measurement.clone(),
+            edge.information,
+        );
+    }
+    if sim3_graph.edges.len() == nodes.len() - 1 {
+        return None;
+    }
+    let result = sim3_graph.optimize(&config.pose_graph).ok()?;
+    let mut node_correction: BTreeMap<usize, Sim3> = BTreeMap::new();
+    for &arrival in nodes {
+        let old = sim3_at_unit_scale(&all_poses[&arrival]);
+        let new = sim3_graph.poses[&(arrival as u64)].clone();
+        node_correction.insert(arrival, new.compose(&old.inverse()));
+    }
+    let mut corrected: BTreeMap<usize, (SE3, f64)> = BTreeMap::new();
+    for pair in nodes.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let span = (b - a).max(1) as f64;
+        for (&arrival, old_pose) in all_poses.range(a..b) {
+            let alpha = (arrival - a) as f64 / span;
+            let correction =
+                interpolate_correction(&node_correction[&a], &node_correction[&b], alpha);
+            let corrected_sim3 = correction.compose(&sim3_at_unit_scale(old_pose));
+            corrected.insert(
+                arrival,
+                (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
+            );
+        }
+    }
+    let last_node = *nodes.last()?;
+    let corrected_sim3 =
+        node_correction[&last_node].compose(&sim3_at_unit_scale(&all_poses[&last_node]));
+    corrected.insert(
+        last_node,
+        (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
+    );
+
+    let before = active_reprojection_quality(graph);
+    let mut candidate = graph.clone();
+    let outcome = apply_corrections(&mut candidate, &corrected);
+    let after = active_reprojection_quality(&candidate);
+    let rejection = transactional_rejection(&outcome, before, after, config);
+    let committed = rejection.is_none();
+    if committed {
+        *graph = candidate;
+    }
+    Some(Sim3BackendResult {
+        node_count: nodes.len(),
+        edge_count: sim3_graph.edges.len(),
+        loop_edge_count: loop_factor_count,
+        corrected_pose_count: outcome.corrected_pose_count,
+        pose_delta_max_m: outcome.pose_delta_max_m,
+        pose_delta_mean_m: outcome.pose_delta_mean_m,
+        scale_min: outcome.scale_min,
+        scale_max: outcome.scale_max,
+        converged: result.converged,
+        committed,
+        rejection,
+        active_reprojection_mean_before_px: before.mean_error_px,
+        active_reprojection_mean_after_px: after.mean_error_px,
+    })
 }
 
 /// Build the (subsampled) `Sim3PoseGraph`, solve it, and apply the resulting
@@ -555,23 +804,7 @@ pub fn run_sim3_backend(
     }
 
     let nodes = select_nodes(&ordered, config.node_stride, loop_measurements);
-    if nodes.len() < 2 {
-        return None;
-    }
-
-    let mut sim3_graph = Sim3PoseGraph::new();
-    for &arrival in &nodes {
-        sim3_graph.add_pose(arrival as u64, sim3_at_unit_scale(&all_poses[&arrival]));
-    }
-    sim3_graph.anchor(nodes[0] as u64);
-    for pair in nodes.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let pose_a = &all_poses[&a];
-        let pose_b = &all_poses[&b];
-        let relative = pose_b.compose(&pose_a.inverse());
-        sim3_graph.add_edge(a as u64, b as u64, sim3_at_unit_scale(&relative), 1.0);
-    }
-
+    let mut prepared = Vec::new();
     let mut loop_edge_count = 0usize;
     for measurement in loop_measurements {
         let (Some(pose_i), Some(pose_j)) = (
@@ -583,12 +816,16 @@ pub fn run_sim3_backend(
         // The ordinary rotation+translation edge (scale fixed at 1 — see the
         // module doc's "The loop-edge scale question" for why this half
         // alone is not the scale-correcting mechanism).
-        sim3_graph.add_edge(
-            measurement.arrival_i as u64,
-            measurement.arrival_j as u64,
-            sim3_at_unit_scale(&measurement.relative_pose),
-            config.loop_edge_weight,
-        );
+        let mut pose_information = Sim3Information::zeros();
+        for axis in 0..6 {
+            pose_information[(axis, axis)] = config.loop_edge_weight;
+        }
+        prepared.push(PreparedLoopEdge {
+            from: measurement.arrival_i,
+            to: measurement.arrival_j,
+            measurement: sim3_at_unit_scale(&measurement.relative_pose),
+            information: pose_information,
+        });
         // A SECOND, scale-ONLY edge on the SAME pair (zero information on
         // every dimension except σ) — see [`estimate_loop_scale_ratio`]'s own
         // doc for the estimator and why it must be isolated from the
@@ -609,79 +846,53 @@ pub fn run_sim3_backend(
             .unwrap_or_else(|| estimate_loop_scale_ratio(measurement, pose_i, pose_j));
         let mut scale_information = Sim3Information::zeros();
         scale_information[(6, 6)] = config.loop_edge_weight * 1000.0;
-        sim3_graph.add_edge_with_information(
-            measurement.arrival_i as u64,
-            measurement.arrival_j as u64,
-            Sim3::new(UnitQuaternion::identity(), Vector3::zeros(), scale_ratio),
-            scale_information,
-        );
+        prepared.push(PreparedLoopEdge {
+            from: measurement.arrival_i,
+            to: measurement.arrival_j,
+            measurement: Sim3::new(UnitQuaternion::identity(), Vector3::zeros(), scale_ratio),
+            information: scale_information,
+        });
         loop_edge_count += 1;
     }
-    if loop_edge_count == 0 {
-        return None; // No new geometric information beyond the rigid chain.
-    }
-
-    let result = sim3_graph.optimize(&config.pose_graph).ok()?;
-
-    // Per-node world-frame LEFT correction `L = S_new ∘ S_old⁻¹` (see the
-    // module doc, "Interpolating corrections") — computed before any
-    // write-back so every lookup below sees the PRE-solve `all_poses`.
-    let mut node_correction: BTreeMap<usize, Sim3> = BTreeMap::new();
-    for &arrival in &nodes {
-        let old = sim3_at_unit_scale(&all_poses[&arrival]);
-        let new = sim3_graph.poses[&(arrival as u64)].clone();
-        node_correction.insert(arrival, new.compose(&old.inverse()));
-    }
-
-    let mut corrected: BTreeMap<usize, (SE3, f64)> = BTreeMap::new();
-    for pair in nodes.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let correction_a = &node_correction[&a];
-        let correction_b = &node_correction[&b];
-        let span = (b - a).max(1) as f64;
-        for (&arrival, old_pose) in all_poses.range(a..b) {
-            let alpha = (arrival - a) as f64 / span;
-            let correction = interpolate_correction(correction_a, correction_b, alpha);
-            let corrected_sim3 = correction.compose(&sim3_at_unit_scale(old_pose));
-            corrected.insert(
-                arrival,
-                (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
-            );
-        }
-    }
-    let last_node = *nodes.last().unwrap();
-    let correction_last = &node_correction[&last_node];
-    let corrected_sim3 = correction_last.compose(&sim3_at_unit_scale(&all_poses[&last_node]));
-    corrected.insert(
-        last_node,
-        (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
-    );
-
-    let before = active_reprojection_quality(graph);
-    let mut candidate = graph.clone();
-    let outcome = apply_corrections(&mut candidate, &corrected);
-    let after = active_reprojection_quality(&candidate);
-    let rejection = transactional_rejection(&outcome, before, after, config);
-    let committed = rejection.is_none();
-    if committed {
-        *graph = candidate;
-    }
-
-    Some(Sim3BackendResult {
-        node_count: nodes.len(),
-        edge_count: sim3_graph.edges.len(),
+    solve_prepared_backend(
+        graph,
+        &all_poses,
+        &nodes,
+        &prepared,
         loop_edge_count,
-        corrected_pose_count: outcome.corrected_pose_count,
-        pose_delta_max_m: outcome.pose_delta_max_m,
-        pose_delta_mean_m: outcome.pose_delta_mean_m,
-        scale_min: outcome.scale_min,
-        scale_max: outcome.scale_max,
-        converged: result.converged,
-        committed,
-        rejection,
-        active_reprojection_mean_before_px: before.mean_error_px,
-        active_reprojection_mean_after_px: after.mean_error_px,
-    })
+        config,
+    )
+}
+
+/// Run only R2-typed independent-submap loop factors. This entry point never
+/// accepts [`Sim3LoopMeasurement`], so a legacy live-pose/depth loop cannot be
+/// mistaken for independent scale evidence. Rotation-only factors contribute
+/// exactly three rotational information entries; full factors contribute the
+/// observability-weighted seven-dimensional `Sim(3)` measurement.
+pub fn run_verified_submap_backend(
+    graph: &mut DpvoPatchGraph,
+    factors: &[VerifiedDpvoLoopFactor],
+    config: &DpvoSim3BackendConfig,
+) -> Result<Option<Sim3BackendResult>, VerifiedDpvoLoopFactorError> {
+    let all_poses = full_pose_history(graph);
+    let ordered: Vec<usize> = all_poses.keys().copied().collect();
+    if ordered.len() < 2 || factors.is_empty() {
+        return Ok(None);
+    }
+    let prepared: Vec<PreparedLoopEdge> = factors
+        .iter()
+        .map(VerifiedDpvoLoopFactor::prepare)
+        .collect::<Result<_, _>>()?;
+    let endpoints: Vec<_> = prepared.iter().map(|edge| (edge.from, edge.to)).collect();
+    let nodes = select_nodes_from_endpoints(&ordered, config.node_stride, &endpoints);
+    Ok(solve_prepared_backend(
+        graph,
+        &all_poses,
+        &nodes,
+        &prepared,
+        factors.len(),
+        config,
+    ))
 }
 
 /// Aggregate stats from one [`apply_corrections`] call.
@@ -776,6 +987,7 @@ mod tests {
     use crate::dpvo_patch_ba::{DpvoIntrinsics, DpvoPatch};
     use crate::dpvo_patch_graph::DpvoVoConfig;
     use crate::pose_graph::{PoseGraph, PoseGraphEdgeKind, PoseGraphSe3Config};
+    use crate::submap_alignment::RotationConstraintGeometry;
     use visloc_core::geometry::Pose;
 
     fn intr() -> DpvoIntrinsics {
@@ -1190,6 +1402,166 @@ mod tests {
         }];
         let config = DpvoSim3BackendConfig::default();
         assert!(run_sim3_backend(&mut graph, &measurements, &config).is_none());
+    }
+
+    fn submap_anchor(submap_id: u64, arrival_index: usize, pose: SE3) -> DpvoSubmapAnchor {
+        DpvoSubmapAnchor {
+            submap_id,
+            arrival_index,
+            local_world_to_camera: pose,
+        }
+    }
+
+    #[test]
+    fn rotation_only_factor_has_exactly_rotation_information() {
+        let rotation = UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3);
+        let factor = VerifiedDpvoLoopFactor::RotationOnly {
+            constraint: RotationOnlyConstraint {
+                source_submap_id: 4,
+                target_submap_id: 9,
+                target_from_source_rotation: rotation,
+                inlier_count: 40,
+                spatial_coverage: 0.5,
+                geometry: RotationConstraintGeometry::Essential,
+            },
+            source_anchor: submap_anchor(4, 5, SE3::identity()),
+            target_anchor: submap_anchor(9, 25, SE3::identity()),
+        };
+        let prepared = factor.prepare().unwrap();
+        for axis in 0..3 {
+            assert_eq!(prepared.information[(axis, axis)], 0.0);
+        }
+        for axis in 3..6 {
+            assert_eq!(prepared.information[(axis, axis)], 20.0);
+        }
+        assert_eq!(prepared.information[(6, 6)], 0.0);
+        assert_eq!(prepared.measurement.rotation, rotation);
+        assert_eq!(prepared.measurement.scale, 1.0);
+    }
+
+    #[test]
+    fn full_submap_factor_preserves_sim3_and_observes_all_dofs() {
+        let target_from_source = Sim3::new(
+            UnitQuaternion::from_euler_angles(-0.1, 0.2, 0.05),
+            Vector3::new(1.0, -2.0, 0.5),
+            2.5,
+        );
+        let factor = VerifiedDpvoLoopFactor::Sim3 {
+            constraint: SubmapSim3Constraint {
+                source_submap_id: 2,
+                target_submap_id: 3,
+                target_from_source: target_from_source.clone(),
+                correspondence_count: 20,
+                inlier_match_indices: (0..16).collect(),
+                inlier_ratio: 0.8,
+                mean_residual_ratio: 0.01,
+                rotation_disagreement_deg: 2.0,
+                leave_one_out_log_scale_mad: 0.01,
+                target_scene_scale: 4.0,
+            },
+            source_anchor: submap_anchor(2, 4, SE3::identity()),
+            target_anchor: submap_anchor(3, 20, SE3::identity()),
+        };
+        let prepared = factor.prepare().unwrap();
+        assert_eq!(prepared.measurement, target_from_source);
+        for axis in 0..7 {
+            assert!(prepared.information[(axis, axis)] > 0.0);
+        }
+    }
+
+    #[test]
+    fn verified_backend_rejects_mismatched_provenance_without_writeback() {
+        let (mut graph, _) = build_drifted_chain(20, 0.2, 1.0);
+        let before = graph.clone();
+        let factor = VerifiedDpvoLoopFactor::RotationOnly {
+            constraint: RotationOnlyConstraint {
+                source_submap_id: 1,
+                target_submap_id: 2,
+                target_from_source_rotation: UnitQuaternion::identity(),
+                inlier_count: 20,
+                spatial_coverage: 0.5,
+                geometry: RotationConstraintGeometry::Essential,
+            },
+            source_anchor: submap_anchor(99, 3, SE3::identity()),
+            target_anchor: submap_anchor(2, 18, SE3::identity()),
+        };
+        assert_eq!(
+            run_verified_submap_backend(&mut graph, &[factor], &DpvoSim3BackendConfig::default()),
+            Err(VerifiedDpvoLoopFactorError::SourceSubmapMismatch)
+        );
+        assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn verified_rotation_only_backend_cannot_change_scale() {
+        let (mut graph, _) = build_drifted_chain(30, 0.2, 1.0);
+        let factor = VerifiedDpvoLoopFactor::RotationOnly {
+            constraint: RotationOnlyConstraint {
+                source_submap_id: 1,
+                target_submap_id: 2,
+                target_from_source_rotation: UnitQuaternion::identity(),
+                inlier_count: 40,
+                spatial_coverage: 0.8,
+                geometry: RotationConstraintGeometry::Essential,
+            },
+            source_anchor: submap_anchor(1, 5, SE3::identity()),
+            target_anchor: submap_anchor(2, 29, SE3::identity()),
+        };
+        let result = run_verified_submap_backend(
+            &mut graph,
+            &[factor],
+            &DpvoSim3BackendConfig {
+                node_stride: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(result.committed);
+        assert!((result.scale_min - 1.0).abs() < 1.0e-9);
+        assert!((result.scale_max - 1.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn verified_full_sim3_backend_can_apply_independent_scale() {
+        let (mut graph, _) = build_drifted_chain(30, 0.2, 1.0);
+        let source = 5;
+        let target = 29;
+        let relative = graph.frames()[target]
+            .pose
+            .compose(&graph.frames()[source].pose.inverse());
+        let factor = VerifiedDpvoLoopFactor::Sim3 {
+            constraint: SubmapSim3Constraint {
+                source_submap_id: 1,
+                target_submap_id: 2,
+                target_from_source: Sim3::new(relative.rotation, relative.translation, 1.5),
+                correspondence_count: 30,
+                inlier_match_indices: (0..24).collect(),
+                inlier_ratio: 0.8,
+                mean_residual_ratio: 0.01,
+                rotation_disagreement_deg: 1.0,
+                leave_one_out_log_scale_mad: 0.01,
+                target_scene_scale: 5.0,
+            },
+            source_anchor: submap_anchor(1, source, SE3::identity()),
+            target_anchor: submap_anchor(2, target, SE3::identity()),
+        };
+        let result = run_verified_submap_backend(
+            &mut graph,
+            &[factor],
+            &DpvoSim3BackendConfig {
+                node_stride: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(result.committed, "rejection={:?}", result.rejection);
+        assert!(
+            result.scale_min.ln().abs().max(result.scale_max.ln().abs()) > 1.0e-3,
+            "a full independent Sim3 factor should activate scale: {:?}",
+            (result.scale_min, result.scale_max)
+        );
     }
 
     #[test]

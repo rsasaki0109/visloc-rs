@@ -489,6 +489,23 @@ the rejected V1/R1d scale sources valid, does not admit a new scale edge, and
 does not change the conclusion that a jointly optimized independent dense
 submap measurement is still required before MH_01 correction may be enabled.
 
+V2b typed-factor slice (2026-07-22): `VerifiedDpvoLoopFactor` and
+`run_verified_submap_backend` form a second backend entry point that cannot
+accept legacy `Sim3LoopMeasurement`. Its anchors carry both R1 submap identity
+and an independent local world-to-camera pose; source/target ID mismatches are
+rejected before solve or write-back. `RotationOnlyConstraint` produces a
+factor whose information matrix has exactly the three rotation diagonals
+nonzero. `SubmapSim3Constraint` preserves the complete independently measured
+similarity and derives bounded translation, rotation, and log-scale
+information from R2 residual, rotation-consensus, leave-one-out scale, scene
+scale, and inlier support. Both use the same sparse Sim3 solve and V2a
+transaction gates after their deliberately distinct measurement paths.
+Synthetic tests prove that rotation-only execution cannot alter scale, a full
+typed factor activates scale correction, full Sim3 gauge conversion is
+preserved, and bad submap provenance leaves the graph byte-identical. The 12
+focused backend tests pass. This path remains unwired by default until an R1
+dense-submap source clears the frozen V1 acceptance gate.
+
 ### V3 — Full-sequence robustness and relocalization
 
 - Run full MH_01 and MH_03 development sequences; require ATE improvement on

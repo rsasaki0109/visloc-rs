@@ -114,8 +114,9 @@ pub mod dpvo_vi_ba;
 pub use dpvo_vi_ba::{dpvo_vi_ba, dpvo_vi_ba_step, DpvoImuFactor, DpvoViBaSolution, DpvoViWindow};
 pub mod dpvo_sim3_backend;
 pub use dpvo_sim3_backend::{
-    run_sim3_backend, DpvoSim3BackendConfig, Sim3BackendRejection, Sim3BackendResult,
-    Sim3LoopMeasurement,
+    run_sim3_backend, run_verified_submap_backend, DpvoSim3BackendConfig, DpvoSubmapAnchor,
+    Sim3BackendRejection, Sim3BackendResult, Sim3LoopMeasurement, VerifiedDpvoLoopFactor,
+    VerifiedDpvoLoopFactorError,
 };
 pub mod dpvo_long_loop;
 pub use dpvo_long_loop::{
