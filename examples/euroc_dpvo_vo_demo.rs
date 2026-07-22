@@ -2022,6 +2022,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          sim3_backend_last_pose_delta_mean_m={s3b_last_pose_delta_mean:.6}\n\
          sim3_backend_last_scale_min={s3b_last_scale_min:.6}\n\
          sim3_backend_last_scale_max={s3b_last_scale_max:.6}\n\
+         sim3_backend_max_committed_abs_log_scale={s3b_max_committed_abs_log_scale:.6}\n\
+         sim3_backend_scale_jump_rejections_total={s3b_scale_jump_rejections_total}\n\
          sim3_backend_last_committed={s3b_last_committed}\n\
          sim3_backend_last_rejection={s3b_last_rejection:?}\n\
          sim3_backend_last_elapsed_ms={s3b_last_elapsed_ms:.3}\n\
@@ -2179,6 +2181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3b_last_pose_delta_mean = s3b_diag.last_pose_delta_mean_m,
         s3b_last_scale_min = s3b_diag.last_scale_min,
         s3b_last_scale_max = s3b_diag.last_scale_max,
+        s3b_max_committed_abs_log_scale = s3b_diag.max_committed_abs_log_scale,
+        s3b_scale_jump_rejections_total = s3b_diag.scale_jump_rejections_total,
         s3b_last_committed = s3b_diag.last_committed,
         s3b_last_rejection = s3b_diag.last_rejection,
         s3b_last_elapsed_ms = s3b_diag.last_elapsed_ms,

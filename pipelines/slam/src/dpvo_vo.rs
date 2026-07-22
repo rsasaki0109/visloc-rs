@@ -1383,6 +1383,12 @@ pub struct DpvoSim3BackendDiagnostics {
     /// corrected).
     pub last_scale_min: f64,
     pub last_scale_max: f64,
+    /// Largest absolute log-scale correction that was ever COMMITTED during
+    /// this run. Rejected proposals never contribute, so this is the direct
+    /// trajectory scale-cliff diagnostic rather than a proposal diagnostic.
+    pub max_committed_abs_log_scale: f64,
+    /// Number of proposals rejected transactionally by the scale-jump gate.
+    pub scale_jump_rejections_total: usize,
     /// Whether the most recent solved proposal passed all transactional
     /// write-back gates.
     pub last_committed: bool,
@@ -1391,6 +1397,23 @@ pub struct DpvoSim3BackendDiagnostics {
     pub last_elapsed_ms: f64,
     /// Cumulative wall-clock cost across every call, milliseconds.
     pub total_elapsed_ms: f64,
+}
+
+fn update_sim3_scale_cliff_diagnostics(
+    max_committed_abs_log_scale: &mut f64,
+    scale_jump_rejections_total: &mut usize,
+    committed: bool,
+    rejection: Option<Sim3BackendRejection>,
+    scale_min: f64,
+    scale_max: f64,
+) {
+    if committed {
+        let max_abs_log_scale = scale_min.ln().abs().max(scale_max.ln().abs());
+        *max_committed_abs_log_scale = (*max_committed_abs_log_scale).max(max_abs_log_scale);
+    }
+    if rejection == Some(Sim3BackendRejection::ScaleJump) {
+        *scale_jump_rejections_total += 1;
+    }
 }
 
 /// IMU coupling configuration — Milestone M5. See [`DpvoOdometry`]'s module
@@ -2154,6 +2177,8 @@ pub struct DpvoOdometry {
     sim3_backend_last_pose_delta_mean_m: f64,
     sim3_backend_last_scale_min: f64,
     sim3_backend_last_scale_max: f64,
+    sim3_backend_max_committed_abs_log_scale: f64,
+    sim3_backend_scale_jump_rejections_total: usize,
     sim3_backend_last_committed: bool,
     sim3_backend_last_rejection: Option<Sim3BackendRejection>,
 
@@ -2366,6 +2391,8 @@ impl DpvoOdometry {
             sim3_backend_last_pose_delta_mean_m: 0.0,
             sim3_backend_last_scale_min: 1.0,
             sim3_backend_last_scale_max: 1.0,
+            sim3_backend_max_committed_abs_log_scale: 0.0,
+            sim3_backend_scale_jump_rejections_total: 0,
             sim3_backend_last_committed: false,
             sim3_backend_last_rejection: None,
             long_loop,
@@ -2490,6 +2517,8 @@ impl DpvoOdometry {
             last_pose_delta_mean_m: self.sim3_backend_last_pose_delta_mean_m,
             last_scale_min: self.sim3_backend_last_scale_min,
             last_scale_max: self.sim3_backend_last_scale_max,
+            max_committed_abs_log_scale: self.sim3_backend_max_committed_abs_log_scale,
+            scale_jump_rejections_total: self.sim3_backend_scale_jump_rejections_total,
             last_committed: self.sim3_backend_last_committed,
             last_rejection: self.sim3_backend_last_rejection,
             last_elapsed_ms: self.sim3_backend_last_ms,
@@ -4119,6 +4148,14 @@ impl DpvoOdometry {
         self.sim3_backend_last_scale_max = result.scale_max;
         self.sim3_backend_last_committed = result.committed;
         self.sim3_backend_last_rejection = result.rejection;
+        update_sim3_scale_cliff_diagnostics(
+            &mut self.sim3_backend_max_committed_abs_log_scale,
+            &mut self.sim3_backend_scale_jump_rejections_total,
+            result.committed,
+            result.rejection,
+            result.scale_min,
+            result.scale_max,
+        );
         self.sim3_backend_last_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.sim3_backend_ms_total += self.sim3_backend_last_ms;
         Ok(())
@@ -6209,6 +6246,45 @@ mod tests {
     #[test]
     fn torch_quantile_50_empty_is_zero() {
         assert_eq!(torch_quantile_50(&[]), 0.0);
+    }
+
+    #[test]
+    fn scale_cliff_diagnostics_ignore_rejected_proposals_and_keep_run_maximum() {
+        let mut max_committed = 0.0;
+        let mut scale_jump_rejections = 0;
+        update_sim3_scale_cliff_diagnostics(
+            &mut max_committed,
+            &mut scale_jump_rejections,
+            false,
+            Some(Sim3BackendRejection::ScaleJump),
+            0.01,
+            100.0,
+        );
+        assert_eq!(
+            max_committed, 0.0,
+            "a rolled-back proposal is not a cliff event"
+        );
+        assert_eq!(scale_jump_rejections, 1);
+
+        update_sim3_scale_cliff_diagnostics(
+            &mut max_committed,
+            &mut scale_jump_rejections,
+            true,
+            None,
+            0.8,
+            1.1,
+        );
+        assert!((max_committed - 0.8_f64.ln().abs()).abs() < 1.0e-12);
+        update_sim3_scale_cliff_diagnostics(
+            &mut max_committed,
+            &mut scale_jump_rejections,
+            true,
+            None,
+            0.9,
+            1.05,
+        );
+        assert!((max_committed - 0.8_f64.ln().abs()).abs() < 1.0e-12);
+        assert_eq!(scale_jump_rejections, 1);
     }
 
     /// Milestone M5b: [`gyro_bootstrap_gate_check`] must reject a
