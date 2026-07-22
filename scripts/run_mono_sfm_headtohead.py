@@ -9,117 +9,26 @@ large enough for generated image/features/models.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    from benchmark_process_metrics import run_monitored
+except ModuleNotFoundError:  # Imported as `scripts.run_mono_sfm_headtohead` in tests.
+    from scripts.benchmark_process_metrics import run_monitored
 
 
 REPO = Path(__file__).resolve().parents[1]
 
 
-class ProcessEntry32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", wintypes.DWORD),
-        ("cntUsage", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-        ("th32ModuleID", wintypes.DWORD),
-        ("cntThreads", wintypes.DWORD),
-        ("th32ParentProcessID", wintypes.DWORD),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", wintypes.DWORD),
-        ("szExeFile", wintypes.WCHAR * 260),
-    ]
-
-
-class ProcessMemoryCounters(ctypes.Structure):
-    _fields_ = [
-        ("cb", wintypes.DWORD),
-        ("PageFaultCount", wintypes.DWORD),
-        ("PeakWorkingSetSize", ctypes.c_size_t),
-        ("WorkingSetSize", ctypes.c_size_t),
-        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-        ("PagefileUsage", ctypes.c_size_t),
-        ("PeakPagefileUsage", ctypes.c_size_t),
-    ]
-
-
-def windows_process_table() -> dict[int, tuple[int, int]]:
-    """Return PID -> (parent PID, current working-set bytes)."""
-    if os.name != "nt":
-        return {}
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
-    kernel32.Process32FirstW.restype = wintypes.BOOL
-    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
-    kernel32.Process32NextW.restype = wintypes.BOOL
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    psapi.GetProcessMemoryInfo.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(ProcessMemoryCounters),
-        wintypes.DWORD,
-    ]
-    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-    invalid_handle = ctypes.c_void_p(-1).value
-    if snapshot == invalid_handle:
-        raise ctypes.WinError(ctypes.get_last_error())
-    table: dict[int, tuple[int, int]] = {}
-    entry = ProcessEntry32W()
-    entry.dwSize = ctypes.sizeof(entry)
-    try:
-        present = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while present:
-            pid = int(entry.th32ProcessID)
-            rss = 0
-            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
-            if handle:
-                counters = ProcessMemoryCounters()
-                counters.cb = ctypes.sizeof(counters)
-                if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
-                    rss = int(counters.WorkingSetSize)
-                kernel32.CloseHandle(handle)
-            table[pid] = (int(entry.th32ParentProcessID), rss)
-            present = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-    return table
-
-
-def process_tree_rss(root_pid: int) -> int | None:
-    table = windows_process_table()
-    if not table:
-        return None
-    descendants = {root_pid}
-    changed = True
-    while changed:
-        changed = False
-        for pid, (parent, _) in table.items():
-            if parent in descendants and pid not in descendants:
-                descendants.add(pid)
-                changed = True
-    return sum(table.get(pid, (0, 0))[1] for pid in descendants)
-
-
 def run_logged(argv: list[str], log: Path, *, cwd: Path = REPO) -> float:
-    elapsed, _ = run_logged_measured(argv, log, cwd=cwd, sample_rss=False)
-    return elapsed
+    return run_logged_measured(argv, log, cwd=cwd, sample_rss=False)["wall_seconds"]
 
 
 def run_logged_measured(
@@ -129,37 +38,38 @@ def run_logged_measured(
     cwd: Path = REPO,
     sample_rss: bool = True,
     poll_seconds: float = 0.5,
-) -> tuple[float, int | None]:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    start = time.perf_counter()
-    peak_rss: int | None = 0 if sample_rss and os.name == "nt" else None
-    with log.open("w", encoding="utf-8") as stream:
-        stream.write("COMMAND: " + subprocess.list2cmdline(argv) + "\n\n")
-        stream.flush()
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        while True:
-            if peak_rss is not None:
-                sampled = process_tree_rss(process.pid)
-                if sampled is not None:
-                    peak_rss = max(peak_rss, sampled)
-            try:
-                returncode = process.wait(timeout=max(poll_seconds, 0.1))
-                break
-            except subprocess.TimeoutExpired:
-                continue
-    elapsed = time.perf_counter() - start
-    if returncode != 0:
+) -> dict:
+    if not sample_rss:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        start = time.perf_counter()
+        with log.open("w", encoding="utf-8") as stream:
+            stream.write("COMMAND: " + subprocess.list2cmdline(argv) + "\n\n")
+            stream.flush()
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        measured = {
+            "command": argv,
+            "returncode": completed.returncode,
+            "wall_seconds": time.perf_counter() - start,
+            "peak_process_tree_rss_bytes": None,
+            "idle_gpu_memory_mib": None,
+            "peak_global_gpu_memory_mib": None,
+            "resource_poll_seconds": None,
+        }
+    else:
+        measured = run_monitored(argv, log, cwd=cwd, poll_seconds=poll_seconds)
+    if measured["returncode"] != 0:
         raise RuntimeError(
-            f"command failed ({returncode}); see {log}: "
+            f"command failed ({measured['returncode']}); see {log}: "
             f"{subprocess.list2cmdline(argv)}"
         )
-    return elapsed, peak_rss
+    return measured
 
 
 def is_unsupported_caspar_failure(requested_backend: str, log: Path) -> bool:
@@ -346,6 +256,14 @@ def capture_registry(
                     f"{result['peak_process_tree_rss_bytes']}:bytes",
                 ]
             )
+        if result["peak_global_gpu_memory_mib"] is not None:
+            argv.extend(
+                [
+                    "--metric",
+                    "peak_global_gpu_memory_mib="
+                    f"{result['peak_global_gpu_memory_mib']}:MiB",
+                ]
+            )
         if engine == "visloc":
             argv.extend(
                 [
@@ -485,6 +403,19 @@ def main() -> int:
 
     stage_seconds: dict[str, float] = {}
     stage_peak_process_tree_rss_bytes: dict[str, int | None] = {}
+    stage_resource_metrics: dict[str, dict] = {}
+
+    def run_measured_stage(key: str, command: list[str], log: Path) -> None:
+        measured = run_logged_measured(
+            command,
+            log,
+            poll_seconds=args.resource_poll_seconds,
+        )
+        stage_seconds[key] = measured["wall_seconds"]
+        stage_peak_process_tree_rss_bytes[key] = measured[
+            "peak_process_tree_rss_bytes"
+        ]
+        stage_resource_metrics[key] = measured
     stage_seconds["shared_rectify"] = run_logged(
         [
             str(args.python),
@@ -504,10 +435,8 @@ def main() -> int:
         raise RuntimeError("rectification did not produce the requested frame count")
     fx, fy, cx, cy = parse_pinhole(rect / "calib.txt")
 
-    (
-        stage_seconds["visloc_feature_extraction"],
-        stage_peak_process_tree_rss_bytes["visloc_feature_extraction"],
-    ) = run_logged_measured(
+    run_measured_stage(
+        "visloc_feature_extraction",
         [
             str(args.python),
             str(REPO / "scripts" / "export_superpoint_lightglue.py"),
@@ -523,7 +452,6 @@ def main() -> int:
             str(args.max_keypoints),
         ],
         logs / "visloc_feature_extraction.log",
-        poll_seconds=args.resource_poll_seconds,
     )
     run_logged(
         [
@@ -583,22 +511,17 @@ def main() -> int:
         visloc_mapping_command.append("--geometry-conflict-recovery")
     if args.structureless_registration:
         visloc_mapping_command.append("--structureless-registration")
-    (
-        stage_seconds["visloc_mapping"],
-        stage_peak_process_tree_rss_bytes["visloc_mapping"],
-    ) = run_logged_measured(
+    run_measured_stage(
+        "visloc_mapping",
         visloc_mapping_command,
         logs / "visloc_mapping.log",
-        poll_seconds=args.resource_poll_seconds,
     )
 
     colmap_root.mkdir()
     sparse.mkdir()
     database = colmap_root / "database.db"
-    (
-        stage_seconds["colmap_feature_extraction"],
-        stage_peak_process_tree_rss_bytes["colmap_feature_extraction"],
-    ) = run_logged_measured(
+    run_measured_stage(
+        "colmap_feature_extraction",
         [
             str(args.colmap),
             "feature_extractor",
@@ -618,13 +541,10 @@ def main() -> int:
             "1",
         ],
         logs / "colmap_feature_extraction.log",
-        poll_seconds=args.resource_poll_seconds,
     )
     match_type = "SIFT_BRUTEFORCE" if args.colmap_feature == "SIFT" else "ALIKED_LIGHTGLUE"
-    (
-        stage_seconds["colmap_matching"],
-        stage_peak_process_tree_rss_bytes["colmap_matching"],
-    ) = run_logged_measured(
+    run_measured_stage(
+        "colmap_matching",
         [
             str(args.colmap),
             "sequential_matcher",
@@ -636,7 +556,6 @@ def main() -> int:
             "1",
         ],
         logs / "colmap_matching.log",
-        poll_seconds=args.resource_poll_seconds,
     )
     colmap_backend_requested = args.colmap_backend
     colmap_backend_effective = args.colmap_backend
@@ -665,13 +584,10 @@ def main() -> int:
         ]
 
     try:
-        (
-            stage_seconds["colmap_mapping"],
-            stage_peak_process_tree_rss_bytes["colmap_mapping"],
-        ) = run_logged_measured(
+        run_measured_stage(
+            "colmap_mapping",
             mapper_command(sparse, args.colmap_backend),
             logs / "colmap_mapping.log",
-            poll_seconds=args.resource_poll_seconds,
         )
     except RuntimeError:
         caspar_log = logs / "colmap_mapping.log"
@@ -684,13 +600,10 @@ def main() -> int:
         colmap_backend_effective = "CERES"
         sparse = colmap_root / "sparse_ceres"
         sparse.mkdir()
-        (
-            stage_seconds["colmap_mapping"],
-            stage_peak_process_tree_rss_bytes["colmap_mapping"],
-        ) = run_logged_measured(
+        run_measured_stage(
+            "colmap_mapping",
             mapper_command(sparse, colmap_backend_effective),
             logs / "colmap_mapping_ceres_fallback.log",
-            poll_seconds=args.resource_poll_seconds,
         )
     colmap_model = select_colmap_model(
         args.colmap, sparse, colmap_root / "text_models", logs
@@ -736,6 +649,21 @@ def main() -> int:
     visloc_points, _ = point_statistics(visloc_model / "points3D.txt")
     visloc_reproj = reported_mean_reprojection(logs / "visloc_mapping.log")
     colmap_points, colmap_reproj = point_statistics(colmap_model / "points3D.txt")
+
+    def max_stage_metric(stage_keys: tuple[str, ...], metric: str) -> int | None:
+        values = [
+            stage_resource_metrics[key].get(metric)
+            for key in stage_keys
+            if stage_resource_metrics[key].get(metric) is not None
+        ]
+        return max(values) if values else None
+
+    visloc_stages = ("visloc_feature_extraction", "visloc_mapping")
+    colmap_stages = (
+        "colmap_feature_extraction",
+        "colmap_matching",
+        "colmap_mapping",
+    )
     summary = {
         "protocol": "same rectified EuRoC cam0 frames; mono-to-mono; GT read after engine exit",
         "frames": args.frames,
@@ -747,6 +675,7 @@ def main() -> int:
             "platform_supported": os.name == "nt",
         },
         "stage_peak_process_tree_rss_bytes": stage_peak_process_tree_rss_bytes,
+        "stage_resource_metrics": stage_resource_metrics,
         "engines": {
             "visloc": {
                 "next_image_policy": args.visloc_next_image_policy,
@@ -762,16 +691,15 @@ def main() -> int:
                 "points3d": visloc_points,
                 "mean_reprojection_px": visloc_reproj,
                 "wall_seconds": stage_seconds["visloc_feature_extraction"] + stage_seconds["visloc_mapping"],
-                "peak_process_tree_rss_bytes": max(
-                    value
-                    for value in (
-                        stage_peak_process_tree_rss_bytes["visloc_feature_extraction"],
-                        stage_peak_process_tree_rss_bytes["visloc_mapping"],
-                    )
-                    if value is not None
-                )
-                if os.name == "nt"
-                else None,
+                "peak_process_tree_rss_bytes": max_stage_metric(
+                    visloc_stages, "peak_process_tree_rss_bytes"
+                ),
+                "peak_global_gpu_memory_mib": max_stage_metric(
+                    visloc_stages, "peak_global_gpu_memory_mib"
+                ),
+                "peak_global_gpu_memory_delta_mib": max_stage_metric(
+                    visloc_stages, "peak_global_gpu_memory_delta_mib"
+                ),
                 "evaluation": evaluated[0],
             },
             "colmap": {
@@ -785,17 +713,15 @@ def main() -> int:
                 "points3d": colmap_points,
                 "mean_reprojection_px": colmap_reproj,
                 "wall_seconds": stage_seconds["colmap_feature_extraction"] + stage_seconds["colmap_matching"] + stage_seconds["colmap_mapping"],
-                "peak_process_tree_rss_bytes": max(
-                    value
-                    for value in (
-                        stage_peak_process_tree_rss_bytes["colmap_feature_extraction"],
-                        stage_peak_process_tree_rss_bytes["colmap_matching"],
-                        stage_peak_process_tree_rss_bytes["colmap_mapping"],
-                    )
-                    if value is not None
-                )
-                if os.name == "nt"
-                else None,
+                "peak_process_tree_rss_bytes": max_stage_metric(
+                    colmap_stages, "peak_process_tree_rss_bytes"
+                ),
+                "peak_global_gpu_memory_mib": max_stage_metric(
+                    colmap_stages, "peak_global_gpu_memory_mib"
+                ),
+                "peak_global_gpu_memory_delta_mib": max_stage_metric(
+                    colmap_stages, "peak_global_gpu_memory_delta_mib"
+                ),
                 "evaluation": evaluated[1],
             },
         },

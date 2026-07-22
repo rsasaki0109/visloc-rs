@@ -44,7 +44,7 @@ class ReportedMeanReprojectionTests(unittest.TestCase):
     def test_measured_runner_captures_child_working_set_on_windows(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "child.log"
-            elapsed, peak_rss = run_logged_measured(
+            measured = run_logged_measured(
                 [
                     sys.executable,
                     "-c",
@@ -54,13 +54,16 @@ class ReportedMeanReprojectionTests(unittest.TestCase):
                 log,
                 poll_seconds=0.1,
             )
-            self.assertGreaterEqual(elapsed, 0.3)
+            self.assertGreaterEqual(measured["wall_seconds"], 0.3)
             self.assertIn("8388608", log.read_text(encoding="utf-8"))
             if os.name == "nt":
-                self.assertIsNotNone(peak_rss)
-                self.assertGreater(peak_rss, 8 * 1024 * 1024)
+                self.assertIsNotNone(measured["peak_process_tree_rss_bytes"])
+                self.assertGreater(
+                    measured["peak_process_tree_rss_bytes"], 8 * 1024 * 1024
+                )
+                self.assertEqual(measured["resource_poll_seconds"], 0.1)
             else:
-                self.assertIsNone(peak_rss)
+                self.assertIsNone(measured["peak_process_tree_rss_bytes"])
 
 
 if __name__ == "__main__":

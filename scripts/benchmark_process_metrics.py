@@ -132,13 +132,16 @@ def run_monitored(
             stderr=subprocess.STDOUT,
             text=True,
         )
-        while process.poll() is None:
+        while True:
             peak_rss = max(peak_rss, process_tree_rss(process.pid))
             used = gpu_memory_mib()
             if used is not None:
                 peak_gpu = used if peak_gpu is None else max(peak_gpu, used)
-            time.sleep(max(poll_seconds, 0.1))
-        returncode = process.returncode
+            try:
+                returncode = process.wait(timeout=max(poll_seconds, 0.1))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     result = {
         "command": command,
         "returncode": returncode,
@@ -146,6 +149,7 @@ def run_monitored(
         "peak_process_tree_rss_bytes": peak_rss,
         "idle_gpu_memory_mib": idle_gpu,
         "peak_global_gpu_memory_mib": peak_gpu,
+        "resource_poll_seconds": max(poll_seconds, 0.1),
     }
     if idle_gpu is not None and peak_gpu is not None:
         result["peak_global_gpu_memory_delta_mib"] = max(peak_gpu - idle_gpu, 0)
