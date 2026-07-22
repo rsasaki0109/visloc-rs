@@ -524,8 +524,15 @@ external pair, GT materialization, then finalization. The materializer,
 finalizer, five-engine aggregator, and release verifier all reject a missing,
 unattempted, or GT-reading external cell. Success/DNF adapters and the complete
 five-engine failure path have synthetic regression coverage. The frozen
-held-out suite has not started; real GLUEMAP/InstantSfM setup evidence and
-adapters remain required after the clean S2 timing run.
+held-out suite has not started. The pre-GT GLUEMAP adapter is now implemented
+in `run_gluemap_ssfm_adapter.py`: because the official CLI requires a COLMAP
+reconstruction at `gt_intrinsics_path`, it converts only `rect/calib.txt` and
+ordered image names into a calibration-only reconstruction with explicit
+identity dummy poses, never pose GT. It runs Pi3, sequential sampling 1,
+SHARED known intrinsics, Doppelgangers++, and full refinement, then converts
+the final `gluemap_aba` model to TUM with the frozen input timestamps. Real
+GLUEMAP installation/setup evidence and an InstantSfM success or fresh
+source-outage DNF remain required after the clean S2 timing run.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain

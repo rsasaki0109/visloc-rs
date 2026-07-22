@@ -112,6 +112,7 @@ def run_ready_engine(
             "adapter": str(adapter_path.resolve()),
             "images_path": str((prepared_dir / "rect" / "image_0").resolve()),
             "calibration_path": str((prepared_dir / "rect" / "calib.txt").resolve()),
+            "timestamps_path": str((prepared_dir / "rect" / "timestamps.txt").resolve()),
             "output_path": str(engine_out.resolve()),
             "expected_frames": str(expected_frames),
         },
