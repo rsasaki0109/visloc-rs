@@ -835,6 +835,25 @@ correlation (20.40), and update (19.23 ms/frame) now dominate; the next
 workset dimension is edge lifetime/window length, followed by device-resident
 correlation-to-update transfer if the accuracy cliff prevents enough pruning.
 
+With 12 patches fixed, reducing only `PATCH_LIFETIME` from 11 to 6 retained
+0.0051 m Sim(3) ATE and reduced correlation+update from 39.63 to 30.13
+ms/frame; total timing was initially noisy at 109.13 ms/frame. Removing
+unnecessary feature-map copies was decisive: singleton encoder batch axes now
+move their owned allocations instead of copying roughly 46 MB/frame, CHW
+pyramids move into their cache instead of cloning another 13 MB/frame, and a
+native-CUDA run no longer constructs the HWC copies that only the CPU
+correlator reads. The matched 400-frame run then reached **67.99 ms/frame**
+(encoder 29.59, correlation 14.21, update 9.42, BA 1.38), while retaining
+0.0048 m Sim(3) ATE and 400/400 poses. This is the first configuration within
+1.36x of the 50 ms input-rate gate.
+
+An exporter-controlled FP16-encoder probe is a closed negative: it retained
+0.0045 m ATE but made encoder time 50.73 ms/frame and total time 88.68
+ms/frame, versus 29.59/67.99 for FP32. The Cast/half-convolution path is
+slower on this installed CUDA/ORT stack, so the flag was not retained. The
+remaining accepted runtime work must target FP32 encoder scheduling/device
+residency or the correlation-to-update boundary, not lower precision.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

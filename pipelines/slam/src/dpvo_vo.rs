@@ -1961,8 +1961,8 @@ pub struct DpvoOdometryStats {
 ///
 /// # M4-perf: cached CPU and optional fused-CUDA layouts
 ///
-/// Both levels are stored as [`ChannelLastImage`] — already transposed into
-/// the layout [`corr_cpu_prebuilt_target`] needs — rather than the raw
+/// On the CPU path both levels are stored as [`ChannelLastImage`] — already
+/// transposed into the layout [`corr_cpu_prebuilt_target`] needs — rather than the raw
 /// `(channels, height, width)` `ort`/`avg_pool_4x4` output. A frame's pyramid
 /// is built exactly once (`process_frame`, when the frame arrives) but read
 /// by [`corr_pyramid`] once per active edge group per `update_step`/
@@ -1972,13 +1972,14 @@ pub struct DpvoOdometryStats {
 /// feature map from scratch on every one of those reads was a real,
 /// avoidable cost, not just a theoretical one. Nothing outside this module
 /// reads `level0`/`level1` in channel-first form on the legacy path. A model
-/// bundle containing `dpvo_corr_pyramid.onnx` additionally retains the two
-/// channel-first tensors so each target-group call can use the fused CUDA
-/// graph without transposing them back on every update.
+/// bundle containing `dpvo_corr_pyramid.onnx`, or a native CUDA runtime,
+/// stores only the two channel-first tensors. Keeping both layouts used to
+/// copy and transpose another ~13 MB for every EuRoC frame even though the
+/// CUDA path never read the HWC copies.
 #[derive(Debug, Clone)]
 struct FramePyramid {
-    level0: ChannelLastImage,
-    level1: ChannelLastImage,
+    level0: Option<ChannelLastImage>,
+    level1: Option<ChannelLastImage>,
     level0_chw: Option<Array3<f32>>,
     level1_chw: Option<Array3<f32>>,
 }
@@ -2731,8 +2732,11 @@ impl DpvoOdometry {
         let (fmap4, imap4) = self.session.run_encoders(input.view())?;
         self.stats.encode_ms_total += encode_start.elapsed().as_secs_f64() * 1000.0;
 
-        let fmap = fmap4.index_axis(Axis(0), 0).to_owned();
-        let imap_full = imap4.index_axis(Axis(0), 0).to_owned();
+        // Encoder outputs own their allocation already. Removing the
+        // singleton batch axis by move avoids copying ~46 MB/frame at EuRoC
+        // resolution (128- plus 384-channel stride-4 maps).
+        let fmap = fmap4.index_axis_move(Axis(0), 0);
+        let imap_full = imap4.index_axis_move(Axis(0), 0);
         let (_, hs, ws) = fmap.dim();
 
         // Milestone M12 (`docs/dpvo_droid_port_plan.md`, `crate::dpvo_long_loop`'s
@@ -2826,19 +2830,19 @@ impl DpvoOdometry {
             cx: self.config.intrinsics.cx / RES as f64,
             cy: self.config.intrinsics.cy / RES as f64,
         };
-        // M4-perf (`docs/dpvo_droid_port_plan.md`): transpose both pyramid
-        // levels to channel-last exactly once here, at the point the
-        // pyramid is built — see `FramePyramid`'s doc for why this replaces
-        // storing (and repeatedly re-transposing) the raw channel-first
-        // arrays.
+        // M4-perf (`docs/dpvo_droid_port_plan.md`): cache only the layout
+        // consumed by the selected correlation backend (see
+        // `FramePyramid`), rather than building both CPU-HWC and CUDA-CHW.
         let level1_chw = avg_pool_4x4(fmap.view());
         let retain_chw = self.native_correlation.is_some()
             || (self.config.fused_correlation && self.session.correlation_graph_enabled());
         let candidate_pyramid = FramePyramid {
-            level0: ChannelLastImage::from_chw(fmap.view()),
-            level1: ChannelLastImage::from_chw(level1_chw.view()),
-            level0_chw: retain_chw.then(|| fmap.clone()),
-            level1_chw: retain_chw.then(|| level1_chw.clone()),
+            level0: (!retain_chw).then(|| ChannelLastImage::from_chw(fmap.view())),
+            level1: (!retain_chw).then(|| ChannelLastImage::from_chw(level1_chw.view())),
+            // Transfer ownership into the native/ONNX backing store instead
+            // of cloning another ~13 MB/frame.
+            level0_chw: retain_chw.then_some(fmap),
+            level1_chw: retain_chw.then_some(level1_chw),
         };
 
         // Milestone M15: `true` only under `LowParallaxResponse::DepthDamp`
@@ -3068,11 +3072,21 @@ impl DpvoOdometry {
                 )
                 .map_err(DpvoOdometryError::Onnx);
         }
+        let level0 = target.level0.as_ref().ok_or_else(|| {
+            DpvoOdometryError::Onnx(DpvoOnnxError::InputShapeMismatch {
+                message: "missing cached level0 HWC map on CPU correlation path".into(),
+            })
+        })?;
+        let level1 = target.level1.as_ref().ok_or_else(|| {
+            DpvoOdometryError::Onnx(DpvoOnnxError::InputShapeMismatch {
+                message: "missing cached level1 HWC map on CPU correlation path".into(),
+            })
+        })?;
         Ok(corr_pyramid(
             anchor_gmap,
             coords_grid_px,
-            &target.level0,
-            &target.level1,
+            level0,
+            level1,
         ))
     }
 
