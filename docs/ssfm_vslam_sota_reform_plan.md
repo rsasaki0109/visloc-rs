@@ -554,6 +554,17 @@ engine-exit hash/timestamp chain for successful runs, and regenerates the suite
 summary to detect edited aggregate results. Both explicit-failure and
 successful deferred-GT evidence chains have regression coverage.
 
+Held-out resource-evidence hardening (2026-07-23): SuperPoint preparation,
+hierarchical mapping, both COLMAP mappers, and external adapters now share the
+same dependency-free process-tree RAM/global-GPU sampler instead of carrying
+three subtly different Win32 loops. Every timed stage records its effective
+poll cadence; successful engine cells propagate that cadence into the final
+manifest. The release verifier rejects a missing, non-numeric, or out-of-range
+cadence in the prepared, hierarchical, COLMAP, external, or final evidence
+chain. The shared wait uses timeout-aware process completion, removing the
+previous up-to-one-poll wall-time bias. Static checks and 17 held-out/external
+transaction tests pass, including deterministic summary regeneration.
+
 External-baseline pre-freeze (2026-07-22):
 `benchmarks/protocols/ssfm_external_baselines_v1.json` binds GLUEMAP official
 HEAD `adc9e4bb5f41014d3f7c157a879edc278588c829`, its full default Pi3 pipeline,

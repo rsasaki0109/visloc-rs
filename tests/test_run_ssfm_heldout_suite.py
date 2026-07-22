@@ -187,13 +187,24 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
             ):
                 (sequence_root / name).mkdir()
             prepared_path = sequence_root / "prepared" / "manifest.json"
-            prepared_path.write_text("{}", encoding="utf-8")
+            prepared_path.write_text(
+                json.dumps(
+                    {
+                        "stages": {
+                            "rectification": {"resource_poll_seconds": 0.5},
+                            "superpoint": {"resource_poll_seconds": 0.5},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             hierarchical_path = sequence_root / "hierarchical" / "manifest.json"
             hierarchical_path.write_text(
                 json.dumps(
                     {
                         "finished_utc": "2026-07-22T00:00:00+00:00",
                         "protocol": {"ground_truth_read": False},
+                        "mapper": {"resource_poll_seconds": 0.5},
                     }
                 ),
                 encoding="utf-8",
@@ -204,6 +215,12 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                     {
                         "finished_utc": "2026-07-22T00:00:01+00:00",
                         "ground_truth_read": False,
+                        "stages": {
+                            "feature_extraction": {"resource_poll_seconds": 0.5},
+                            "sequential_matching": {"resource_poll_seconds": 0.5},
+                            "incremental_mapping": {"resource_poll_seconds": 0.5},
+                            "global_mapping": {"resource_poll_seconds": 0.5},
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -257,7 +274,15 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                     {
                         "protocol_sha256": protocol_sha256,
                         "results": {
-                            engine: {"status": "success"} for engine in ENGINES
+                            engine: {
+                                "status": "success",
+                                "resource_poll_seconds": (
+                                    {"frontend": 0.5, "mapper": 0.5}
+                                    if engine == "visloc_hierarchical"
+                                    else 0.5
+                                ),
+                            }
+                            for engine in ENGINES
                         },
                         "input_manifests": {
                             "prepared": evidence(prepared_path),

@@ -9,7 +9,6 @@ contaminated by a concurrently running dense control.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
@@ -17,92 +16,16 @@ import platform
 import subprocess
 import sys
 import time
-from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from benchmark_process_metrics import run_monitored, windows_process_table
+except ModuleNotFoundError:
+    from scripts.benchmark_process_metrics import run_monitored, windows_process_table
+
 REPO = Path(__file__).resolve().parents[1]
 FROZEN_CONFIG_ID = "s2-mh03-smoke-w88-104-o72-shared4-workers2-seamba5-v1"
-
-
-class ProcessEntry32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", wintypes.DWORD),
-        ("cntUsage", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.c_size_t),
-        ("th32ModuleID", wintypes.DWORD),
-        ("cntThreads", wintypes.DWORD),
-        ("th32ParentProcessID", wintypes.DWORD),
-        ("pcPriClassBase", wintypes.LONG),
-        ("dwFlags", wintypes.DWORD),
-        ("szExeFile", wintypes.WCHAR * 260),
-    ]
-
-
-class ProcessMemoryCounters(ctypes.Structure):
-    _fields_ = [
-        ("cb", wintypes.DWORD),
-        ("PageFaultCount", wintypes.DWORD),
-        ("PeakWorkingSetSize", ctypes.c_size_t),
-        ("WorkingSetSize", ctypes.c_size_t),
-        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-        ("PagefileUsage", ctypes.c_size_t),
-        ("PeakPagefileUsage", ctypes.c_size_t),
-    ]
-
-
-def windows_process_table() -> dict[int, tuple[int, int]]:
-    """Return PID -> (parent PID, working-set bytes), using only Win32 APIs."""
-    if os.name != "nt":
-        raise RuntimeError("this frozen benchmark runner currently requires Windows")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
-    kernel32.Process32FirstW.restype = wintypes.BOOL
-    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
-    kernel32.Process32NextW.restype = wintypes.BOOL
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    psapi.GetProcessMemoryInfo.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(ProcessMemoryCounters),
-        wintypes.DWORD,
-    ]
-    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-    invalid_handle = ctypes.c_void_p(-1).value
-    if snapshot == invalid_handle:
-        raise ctypes.WinError(ctypes.get_last_error())
-    table: dict[int, tuple[int, int]] = {}
-    entry = ProcessEntry32W()
-    entry.dwSize = ctypes.sizeof(entry)
-    try:
-        present = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while present:
-            pid = int(entry.th32ProcessID)
-            rss = 0
-            handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
-            if handle:
-                counters = ProcessMemoryCounters()
-                counters.cb = ctypes.sizeof(counters)
-                if psapi.GetProcessMemoryInfo(
-                    handle, ctypes.byref(counters), counters.cb
-                ):
-                    rss = int(counters.WorkingSetSize)
-                kernel32.CloseHandle(handle)
-            table[pid] = (int(entry.th32ParentProcessID), rss)
-            present = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-    return table
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,19 +60,6 @@ def wait_for_pid(pid: int) -> None:
     print(f"waiting for PID {pid} to exit before frozen S2 timing", flush=True)
     while pid in windows_process_table():
         time.sleep(15.0)
-
-
-def process_tree_rss(root_pid: int) -> int:
-    table = windows_process_table()
-    descendants = {root_pid}
-    changed = True
-    while changed:
-        changed = False
-        for pid, (parent, _) in table.items():
-            if parent in descendants and pid not in descendants:
-                descendants.add(pid)
-                changed = True
-    return sum(table.get(pid, (0, 0))[1] for pid in descendants)
 
 
 def sha256(path: Path) -> str:
@@ -275,24 +185,13 @@ def main() -> int:
         "--submap-seam-ba",
     ]
     started_utc = datetime.now(timezone.utc).isoformat()
-    started = time.perf_counter()
-    peak_rss = 0
-    with log.open("w", encoding="utf-8") as stream:
-        stream.write("COMMAND: " + subprocess.list2cmdline(command) + "\n\n")
-        stream.flush()
-        process = subprocess.Popen(
-            command,
-            cwd=REPO,
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        while process.poll() is None:
-            peak_rss = max(peak_rss, process_tree_rss(process.pid))
-            time.sleep(max(args.poll_seconds, 0.1))
-        peak_rss = max(peak_rss, process_tree_rss(process.pid))
-        returncode = process.returncode
-    wall_seconds = time.perf_counter() - started
+    mapper_metrics = run_monitored(
+        command,
+        log,
+        cwd=REPO,
+        poll_seconds=args.poll_seconds,
+    )
+    returncode = mapper_metrics["returncode"]
     mapper_finished_utc = datetime.now(timezone.utc).isoformat()
 
     base_manifest = {
@@ -322,11 +221,7 @@ def main() -> int:
             "wait_pid": args.wait_pid,
         },
         "command": command,
-        "mapper": {
-            "returncode": returncode,
-            "wall_seconds": wall_seconds,
-            "peak_process_tree_rss_bytes": peak_rss,
-        },
+        "mapper": mapper_metrics,
     }
     if returncode != 0:
         manifest_path.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")

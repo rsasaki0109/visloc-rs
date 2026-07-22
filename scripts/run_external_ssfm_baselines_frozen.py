@@ -181,6 +181,7 @@ def run_ready_engine(
             stage.get("peak_global_gpu_memory_mib"),
             adapter_peak_gpu,
         ),
+        "resource_poll_seconds": stage["resource_poll_seconds"],
         "adapter_result": {
             "path": str(result_path.resolve()),
             "sha256": sha256(result_path),

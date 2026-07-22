@@ -197,6 +197,12 @@ def main() -> int:
             "peak_global_gpu_memory_mib": prepared["stages"]["superpoint"][
                 "peak_global_gpu_memory_mib"
             ],
+            "resource_poll_seconds": {
+                "frontend": prepared["stages"]["superpoint"][
+                    "resource_poll_seconds"
+                ],
+                "mapper": hierarchical["mapper"]["resource_poll_seconds"],
+            },
         }
     else:
         results["visloc_hierarchical"] = {

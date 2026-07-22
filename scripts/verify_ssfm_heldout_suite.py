@@ -63,6 +63,16 @@ def parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def require_sampling_cadence(record: dict, label: str) -> float:
+    value = record.get("resource_poll_seconds")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{label} lacks numeric resource_poll_seconds")
+    value = float(value)
+    if not 0.1 <= value <= 10.0:
+        raise ValueError(f"{label} has invalid resource_poll_seconds={value}")
+    return value
+
+
 def verify_success_sequence(
     sequence_root: Path,
     runner: dict,
@@ -84,11 +94,13 @@ def verify_success_sequence(
     if any(runner["returncodes"][stage] != 0 for stage in runner["returncodes"]):
         raise ValueError("successful runner contains a nonzero stage")
 
+    prepared_path = sequence_root / "prepared" / "manifest.json"
     hierarchical_path = sequence_root / "hierarchical" / "manifest.json"
     colmap_path = sequence_root / "colmap" / "manifest.json"
     external_path = sequence_root / "external" / "manifest.json"
     ground_truth_path = sequence_root / "ground_truth" / "manifest.json"
     final_path = sequence_root / "final" / "manifest.json"
+    prepared = read_json(prepared_path)
     hierarchical = read_json(hierarchical_path)
     colmap = read_json(colmap_path)
     external = read_json(external_path)
@@ -104,6 +116,26 @@ def verify_success_sequence(
         raise ValueError("hierarchical engine read GT")
     if colmap.get("ground_truth_read") is not False:
         raise ValueError("COLMAP engine read GT")
+    for stage_name, stage in prepared["stages"].items():
+        require_sampling_cadence(stage, f"prepared stage {stage_name}")
+    require_sampling_cadence(hierarchical["mapper"], "hierarchical mapper")
+    for stage_name, stage in colmap["stages"].items():
+        require_sampling_cadence(stage, f"COLMAP stage {stage_name}")
+    for engine, result in external["results"].items():
+        if result["status"] == "success":
+            require_sampling_cadence(result, f"external engine {engine}")
+    for engine, result in final["results"].items():
+        if result["status"] != "success":
+            continue
+        cadence = result.get("resource_poll_seconds")
+        if isinstance(cadence, dict):
+            for stage_name, value in cadence.items():
+                require_sampling_cadence(
+                    {"resource_poll_seconds": value},
+                    f"final engine {engine} stage {stage_name}",
+                )
+        else:
+            require_sampling_cadence(result, f"final engine {engine}")
     validate_external_baseline_manifest(
         external,
         sequence=runner["sequence"],
