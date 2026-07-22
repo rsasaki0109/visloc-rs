@@ -1334,6 +1334,17 @@ telemetry; pursue an independently conditioned multi-view constraint or fix
 the front-end's long stationary-transition drift without detector-specific
 hover tuning.
 
+High-density ceiling check (2026-07-23): restoring the post-contract
+48-patch/removal-16/optimization-7/lifetime-11 configuration and extending it
+to MH_03 800 frames improved Sim3 ATE to 0.0775 m versus roughly 0.32 m for
+the 11-patch long-loop probes, but still failed the 0.020 m gate; recovered
+scale was only 0.15785. It also took 178.27 ms/frame (timing diagnostic only,
+because S1 was concurrently consuming CPU). Thus sparse patch count is a
+material error amplifier, but not the complete cause of the long-horizon
+failure. Do not redirect B4 into high-density kernel optimization until the
+remaining stationary-transition/gauge defect is identified on this accuracy-
+ceiling configuration.
+
 ### A4/B5 — Generalization and release candidate (2-4 weeks)
 
 - Freeze one configuration per sensor/dataset family before held-out runs.

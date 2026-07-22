@@ -942,6 +942,18 @@ budget to 16 was also negative (56.38 ms/frame, 0.3875 m ATE). The retained
 result is therefore a real retrieval/cadence repair and stronger telemetry,
 not a claimed long-horizon accuracy repair.
 
+A post-contract high-density accuracy ceiling rules out sparse-budget tuning
+as the whole explanation. The previously accurate 48-patch, removal-16,
+optimization-7, lifetime-11 configuration was extended from 400 to 800 MH_03
+frames. It tracked 800/800 and improved Sim3 ATE relative to the 11-patch
+long-loop probes, but still failed at 0.0775 m (scale 0.15785), while taking
+178.27 ms/frame (correlation 57.40, update 72.64, BA 12.16). Timing is
+diagnostic because S1's CPU baseline was concurrently active, but the 3.9x
+rate miss and accuracy failure are too large to be ambiguous. Patch starvation
+is one contributor, not the root cause; even the high-density front end needs
+a long-horizon/stationary-transition repair before backend optimization alone
+can reach V3/V4.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
