@@ -46,6 +46,7 @@ def protocol() -> dict:
             "mean_sequence_sim3_ate_rmse_m_max": 0.02,
             "min_tracked_fraction": 0.9,
             "max_committed_abs_log_scale": 4.0,
+            "required_onnx_backend": "cuda",
             "max_ms_per_frame_total": 50.0,
             "max_sampled_peak_working_set_bytes": 8 * 1024**3,
             "max_sampled_peak_gpu_memory_bytes": 6 * 1024**3,
@@ -85,6 +86,7 @@ class VslamSotaV4Tests(unittest.TestCase):
                 run.mkdir()
                 summary = "\n".join(
                     [
+                        "onnx_backend_requested=cuda",
                         f"frames_requested={FRAME_COUNTS[sequence]}",
                         f"ate_similarity_rmse_m={ate}",
                         "tracked_fraction=0.99",
@@ -185,6 +187,27 @@ class VslamSotaV4Tests(unittest.TestCase):
             self.assertEqual(report["successful_runs"], 32)
             failed = [row for row in report["runs"] if not row["success"]]
             self.assertIn("input-rate budget exceeded", failed[0]["reasons"])
+
+    def test_non_strict_backend_is_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            matrix, protocol_path = self.make_matrix(Path(raw))
+            run = matrix / "MH_01_easy_r1"
+            summary_path = run / "summary.txt"
+            summary_path.write_text(
+                summary_path.read_text(encoding="utf-8").replace(
+                    "onnx_backend_requested=cuda",
+                    "onnx_backend_requested=cuda_then_cpu",
+                ),
+                encoding="utf-8",
+            )
+            manifest_path = run / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["summary_sha256"] = digest(summary_path)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            report = MODULE.evaluate(matrix, protocol_path, None)
+            failed = [row for row in report["runs"] if not row["success"]]
+            self.assertEqual(report["successful_runs"], 32)
+            self.assertIn("strict CUDA backend", failed[0]["reasons"][0])
 
 
 if __name__ == "__main__":

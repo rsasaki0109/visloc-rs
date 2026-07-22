@@ -24,6 +24,7 @@ BOUNDS = {
     "long_loop_max_indexed_frames": 1000,
 }
 REQUIRED = [
+    "--onnx-cuda",
     "--imu",
     "--loop-closure",
     "--global-ba",
@@ -39,7 +40,11 @@ REQUIRED = [
     "--s3b-max-abs-log-scale-correction",
     "4.0",
 ]
-GATES = {"queue_bounds": BOUNDS, "max_committed_abs_log_scale": 4.0}
+GATES = {
+    "queue_bounds": BOUNDS,
+    "max_committed_abs_log_scale": 4.0,
+    "required_onnx_backend": "cuda",
+}
 
 
 class VslamSotaV4RunnerTests(unittest.TestCase):
@@ -68,6 +73,16 @@ class VslamSotaV4RunnerTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "arguments": [*REQUIRED, "--seed", "99"],
+                    "queue_bounds": BOUNDS,
+                    "long_loop_superpoint_model": "superpoint.onnx",
+                },
+                GATES,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot combine strict CUDA"):
+            MODULE.validate_configuration(
+                {
+                    "schema_version": 1,
+                    "arguments": [*REQUIRED, "--onnx-cpu"],
                     "queue_bounds": BOUNDS,
                     "long_loop_superpoint_model": "superpoint.onnx",
                 },

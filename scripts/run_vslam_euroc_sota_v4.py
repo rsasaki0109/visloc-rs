@@ -117,6 +117,7 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
     if forbidden.intersection(arguments):
         raise ValueError("configuration contains runner-owned arguments")
     required_switches = {
+        "--onnx-cuda",
         "--imu",
         "--loop-closure",
         "--global-ba",
@@ -127,6 +128,10 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
     missing = required_switches.difference(arguments)
     if missing:
         raise ValueError("configuration is missing " + ", ".join(sorted(missing)))
+    if "--onnx-cpu" in arguments:
+        raise ValueError("configuration cannot combine strict CUDA with --onnx-cpu")
+    if gates.get("required_onnx_backend") != "cuda":
+        raise ValueError("frozen V4 protocol must require the strict CUDA backend")
     queue_bounds = gates["queue_bounds"]
     if configuration.get("queue_bounds") != queue_bounds:
         raise ValueError("configuration queue bounds differ from the frozen V4 protocol")

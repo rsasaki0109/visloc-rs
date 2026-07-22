@@ -647,7 +647,10 @@ three-repetition, failure-inclusive matrix before any V4 result. It requires
 full camera streams, at least 90% tracking coverage, all 33 successful runs,
 mean per-sequence Sim(3) ATE <= 0.020 m, sustained 20 Hz input, bounded CPU/GPU
 memory and queues, and no committed correction beyond the Sim(3) backend's
-frozen `4.0` absolute-log-scale transaction gate. The runner summary records
+frozen `4.0` absolute-log-scale transaction gate. It also requires
+`--onnx-cuda`: CUDA execution-provider registration is strict, CPU fallback is
+an error, and the requested backend is recorded in and revalidated from each
+run summary. The runner summary records
 both that configured threshold and the cumulative committed scale maximum;
 rejected scale-jump proposals are counted separately. The evaluator
 `scripts/evaluate_vslam_sota_v4.py` reports mean, median, and worst sequence
@@ -662,6 +665,16 @@ working-set and per-process GPU memory, and preserves every failed run. The
 algorithm configuration remains a separate mandatory hashed input until V3
 development selects the single policy; this avoids freezing an unfinished
 configuration while preventing mixed-policy V4 matrices.
+
+The first strict-CUDA MH_01 probe used the locally installed CUDA-enabled ORT
+1.24.2 plus its cuDNN 9 dependencies (30 frames, stride 2, 48 patches/frame).
+It completed 30/30 frames and proved that the CUDA provider can load, but took
+844.13 ms/frame: encoder 90.89 ms, correlation 388.59 ms, update 273.98 ms,
+and BA 9.94 ms. Sim(3) ATE over this short diagnostic prefix was 0.1073 m.
+Thus CUDA ONNX inference alone is not close to V4's 50 ms/frame gate; the
+native CPU correlation and update paths are the measured primary bottlenecks.
+The previous ORT 1.23.2 CPU distribution now fails honestly under the same
+strict flag instead of silently producing CPU-labelled-as-CUDA evidence.
 
 ## 6. Execution order and resource split
 

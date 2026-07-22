@@ -290,6 +290,10 @@ struct CliArgs {
     keyframe_thresh: f64,
     motion_damping: f64,
     onnx_cpu: bool,
+    /// Require CUDA execution-provider registration. Unlike the default
+    /// `CudaThenCpu` policy, this must fail instead of silently falling back
+    /// to CPU, which makes V4 runtime evidence auditable.
+    onnx_cuda: bool,
     /// Milestone M5 (`docs/dpvo_droid_port_plan.md`): feed `mav0/imu0/data.csv`
     /// into `DpvoOdometry::push_imu` and enable the IMU-coupled joint solve
     /// once its bootstrap chain succeeds. Default off — visual-only, exactly
@@ -512,6 +516,7 @@ impl Default for CliArgs {
             keyframe_thresh: 15.0,
             motion_damping: 0.5,
             onnx_cpu: false,
+            onnx_cuda: false,
             imu: false,
             imu_gravity_norm_deviation_ratio: 0.3,
             imu_min_bootstrap_factors: 10,
@@ -647,6 +652,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 raw.remove(i);
                 continue;
             }
+            "--onnx-cuda" => {
+                args.onnx_cuda = true;
+                raw.remove(i);
+                continue;
+            }
             "--imu" => {
                 args.imu = true;
                 raw.remove(i);
@@ -752,10 +762,12 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 args.ll_retrieval_scorer = match raw_value.as_str() {
                     "vlad" => RetrievalScorer::Vlad,
                     "mean-pool" => RetrievalScorer::MeanPool,
-                    other => return Err(format!(
+                    other => {
+                        return Err(format!(
                         "--ll-retrieval-scorer: expected \"vlad\" or \"mean-pool\", got {other:?}"
                     )
-                    .into()),
+                        .into())
+                    }
                 };
             }
             "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
@@ -849,6 +861,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         raw.remove(i);
     }
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
+    if args.onnx_cpu && args.onnx_cuda {
+        return Err("--onnx-cpu and --onnx-cuda are mutually exclusive".into());
+    }
     if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
         return Err(
             "--ll-dump-frame-descriptors requires --long-loop (it dumps exactly what \
@@ -1049,10 +1064,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .unwrap_or(RadialTangential::IDENTITY);
 
-    let backend = if args.onnx_cpu {
-        OnnxBackend::Cpu
+    let (backend, onnx_backend_requested) = if args.onnx_cpu {
+        (OnnxBackend::Cpu, "cpu")
+    } else if args.onnx_cuda {
+        (OnnxBackend::Cuda, "cuda")
     } else {
-        OnnxBackend::default()
+        (OnnxBackend::default(), "cuda_then_cpu")
     };
     // A3 ranking slice B: resolve the scorer-appropriate `min_similarity`
     // floor UNLESS the caller explicitly passed `--ll-min-similarity` — see
@@ -1936,6 +1953,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let summary = format!(
         "euroc_dir={}\n\
          model_dir={}\n\
+         onnx_backend_requested={onnx_backend_requested}\n\
          frames_requested={frame_count}\n\
          frames_tracked={tracked_frames}\n\
          tracked_fraction={tracked_fraction:.4}\n\

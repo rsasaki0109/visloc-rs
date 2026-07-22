@@ -99,6 +99,8 @@ def validate_protocol(protocol: dict[str, Any]) -> None:
     for key in ("inactive_edge_cap", "max_free_poses", "long_loop_max_indexed_frames"):
         if not isinstance(bounds.get(key), int) or bounds[key] < 1:
             raise ValueError(f"V4 protocol has invalid queue bound {key}")
+    if gates.get("required_onnx_backend") != "cuda":
+        raise ValueError("V4 protocol must require the strict CUDA ONNX backend")
 
 
 def public_frontier_verdict(path: Path | None) -> tuple[bool, list[str]]:
@@ -195,6 +197,8 @@ def evaluate(
         if sha256(summary_path) != str(expected_summary_hash).lower():
             raise ValueError(f"{summary_path}: SHA-256 differs from run manifest")
         values = parse_summary(summary_path)
+        if values.get("onnx_backend_requested") != gates["required_onnx_backend"]:
+            row["reasons"].append("run did not request the frozen strict CUDA backend")
         try:
             ate = finite_float(values, "ate_similarity_rmse_m")
             tracked_fraction = finite_float(values, "tracked_fraction")
