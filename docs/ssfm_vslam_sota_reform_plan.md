@@ -223,6 +223,26 @@ scale-observable at the required reliability. The next initializer comparison
 should be a correspondence-grounded 3D model such as MASt3R/MASt3R-SLAM, not a
 looser R2 threshold or another sparse matcher sweep.
 
+R1c MASt3R result (2026-07-22):
+`scripts/export_mast3r_submap_anchor_points.py` runs the official
+`naver/mast3r` implementation (revision `f5209af`, DUSt3R `3cc8c88`) as two
+separate pair-conditioned reconstructions. Each inference keeps the relevant
+loop anchor as view 1 and uses arrival -8 or +8 only from the same temporal
+side; the exported anchor point map is therefore independent of the opposite
+side and all live trajectory state. Official ViT-L metric weights produced
+finite 512x320 geometry at 3.11 GiB peak VRAM. With the same 49
+LightGlue+Essential correspondences, partner -8 yielded 10/49 = 0.204 Sim3
+inliers and partner +8 yielded 11/49 = 0.224. Both failed the unchanged 0.60
+gate and were rejected. Artifacts are under
+`E:/visloc_archive/dpvo_a3_20260721/{mast3r_submap_pair_m8_20260722,mast3r_submap_pair_p8_retry_20260722,independent_submap_probe_r16_mast3r_*_20260722}`.
+
+Verdict: independently inferred metric point maps are not mutually rigid enough
+on this extreme foreground/occlusion change. A next learned-scale experiment
+must align a metric prior to each same-side multi-view local map separately and
+transfer the two independently estimated gauges; directly joint-inferring the
+loop pair would put both sides in one model-created gauge and is not by itself
+evidence that the tracker/submap scale cliff was measured.
+
 ### R3 — Sparse hierarchical optimization
 
 - Replace dense whole-history Sim(3) solving with a sparse submap graph.

@@ -1253,6 +1253,19 @@ under `E:/visloc_archive/dpvo_a3_20260721/*vggt*20260722` and
 depth/point prior is insufficient on this cliff; evaluate correspondence-
 grounded MASt3R geometry next while preserving the same typed gate.
 
+R1c MASt3R follow-up (2026-07-22): official MASt3R ViT-L metric point maps were
+inferred independently as `(anchor, anchor-8)` and `(anchor, anchor+8)` on each
+temporal side. The pure-PyTorch path was finite at 512x320 and 3.11 GiB peak
+VRAM. Reusing the identical 49 LightGlue+Essential bridge correspondences,
+the -8 arm achieved 10/49 = 0.204 Sim3 inliers and the +8 arm 11/49 = 0.224;
+both were safely rejected by the unchanged 0.60 gate. The reproducible exporter
+is `scripts/export_mast3r_submap_anchor_points.py`, with artifacts under
+`E:/visloc_archive/dpvo_a3_20260721/*mast3r*20260722`. This closes direct
+independent point-map alignment for the tested sparse, VGGT, and MASt3R
+initializers. A future metric-prior route must estimate each same-side submap
+gauge separately before transferring scale; a joint loop-pair prediction is
+not sufficient evidence of tracker-scale observability.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

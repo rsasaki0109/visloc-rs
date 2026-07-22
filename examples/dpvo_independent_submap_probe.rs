@@ -74,8 +74,12 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
         match flag.as_str() {
             "--dump-dir" => args.dump_dir = PathBuf::from(value),
             "--lightglue-dir" => args.lightglue_dir = Some(PathBuf::from(value)),
-            "--vggt-old-points" => args.vggt_old_points = Some(PathBuf::from(value)),
-            "--vggt-new-points" => args.vggt_new_points = Some(PathBuf::from(value)),
+            "--vggt-old-points" | "--learned-old-points" => {
+                args.vggt_old_points = Some(PathBuf::from(value))
+            }
+            "--vggt-new-points" | "--learned-new-points" => {
+                args.vggt_new_points = Some(PathBuf::from(value))
+            }
             "--old-anchor" => args.old_anchor = value.parse()?,
             "--new-anchor" => args.new_anchor = value.parse()?,
             "--radius" => args.radius = value.parse()?,
@@ -230,7 +234,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &anchor_verification.inlier_matches,
         );
         println!(
-            "vggt_anchor_bridge essential_inliers={} old_points={} new_points={} lifted_matches={}",
+                "learned_anchor_bridge essential_inliers={} old_points={} new_points={} lifted_matches={}",
             anchor_verification.inlier_matches.len(),
             old_points.len(),
             new_points.len(),
