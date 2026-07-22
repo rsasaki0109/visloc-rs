@@ -18,6 +18,14 @@ from ssfm_external_baseline_evidence import (
 )
 
 
+ALLOWED_DNF_SETUP_STATUSES = {
+    "source_unavailable",
+    "install_failed",
+    "unsupported",
+    "resource_incompatible",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
@@ -59,6 +67,11 @@ def max_optional(*values: float | int | None) -> float | int | None:
 
 
 def dnf_cell(engine: str, setup: dict) -> dict:
+    status = setup.get("status")
+    if status not in ALLOWED_DNF_SETUP_STATUSES:
+        raise ValueError(
+            f"{engine} setup status {status!r} is not an evidence-backed DNF"
+        )
     attempt = setup.get("attempt")
     if not isinstance(attempt, dict):
         raise ValueError(f"{engine} unavailable setup lacks attempt evidence")

@@ -131,6 +131,22 @@ class ExternalSsfmBaselineRunnerTests(unittest.TestCase):
                 self.assertEqual(cell["registration_rate"], 1.0)
                 self.assertTrue(Path(cell["trajectory"]["path"]).is_file())
 
+    def test_unattempted_setup_is_not_accepted_as_benchmark_dnf(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            setup = {
+                "engines": {
+                    engine: {
+                        "status": "setup_incomplete",
+                        "reason": "not installed yet",
+                        "source_identity": "fixture",
+                        "attempt": {"command": ["fixture"], "returncode": 1},
+                    }
+                    for engine in ("gluemap", "instantsfm")
+                }
+            }
+            with self.assertRaisesRegex(ValueError, "not an evidence-backed DNF"):
+                self.run_fixture(Path(raw_root), setup)
+
 
 if __name__ == "__main__":
     unittest.main()
