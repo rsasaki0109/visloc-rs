@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -19,6 +20,10 @@ from run_mast3r_slam_submap_gate import (  # noqa: E402
     scale_gate_passes,
     validate_export_manifest,
     validate_probe_source_revision,
+)
+from verify_mast3r_slam_submap_gate import (  # noqa: E402
+    main as verify_main,
+    verify_gate_manifest,
 )
 
 
@@ -65,6 +70,69 @@ class Mast3rSlamSubmapGateTests(unittest.TestCase):
         path = root / "manifest.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
         return path
+
+    def make_gate_manifest(self, root: Path, *, weak: bool = False) -> tuple[Path, dict]:
+        export_path = self.make_export_manifest(root)
+        export = json.loads(export_path.read_text(encoding="utf-8"))
+        probe = root / "probe.exe"
+        probe.write_bytes(b"probe")
+        log = root / "probe.log"
+        old_inliers = 11 if weak else 12
+        log.write_text(
+            "same_side_scale_transfer_status=pass "
+            f"old_matches=20 old_inliers={old_inliers} old_metric_per_local=0.2 "
+            "new_matches=25 new_inliers=16 new_metric_per_local=0.25 "
+            "new_from_old_scale=0.8\n",
+            encoding="utf-8",
+        )
+        metrics = parse_pass_metrics(log.read_text(encoding="utf-8"))
+        source = {
+            "build_revision": "a" * 40,
+            "source": str((root / "probe.rs").resolve()),
+            "source_sha256": "b" * 64,
+        }
+        old_points = export["sides"]["old"]["anchor_points"]
+        new_points = export["sides"]["new"]["anchor_points"]
+        gate = {
+            "schema_version": 1,
+            "status": "success",
+            "ground_truth_read": False,
+            "backend_writeback": False,
+            "export_manifest": evidence(export_path),
+            "probe_executable": evidence(probe),
+            "probe_source": source,
+            "lightglue_directory": str((root / "lightglue").resolve()),
+            "frozen_inputs": [evidence(export_path), evidence(probe)],
+            "command": [
+                str(probe),
+                "--dump-dir",
+                str(root / "descriptors"),
+                "--lightglue-dir",
+                str(root / "lightglue"),
+                "--learned-old-points",
+                old_points,
+                "--learned-new-points",
+                new_points,
+                "--old-anchor",
+                "2",
+                "--new-anchor",
+                "5",
+                "--radius",
+                "1",
+            ],
+            "returncode": 0,
+            "probe_log": evidence(log),
+            "changed_inputs": [],
+            "same_side_scale_transfer_gate": {
+                "passed": scale_gate_passes(metrics),
+                "minimum_inlier_ratio": 0.60,
+                "metrics": metrics,
+                "reason": None,
+            },
+        }
+        path = root / "gate_manifest.json"
+        path.write_text(json.dumps(gate), encoding="utf-8")
+        return path, source
 
     def test_accepts_complete_independent_export(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -158,6 +226,92 @@ class Mast3rSlamSubmapGateTests(unittest.TestCase):
             rendered = path_for_probe(source, Path("probe.exe"))
         self.assertEqual(rendered, "E:\\probe\\points.txt")
         self.assertEqual(convert.call_args.args[0][0], "wslpath")
+
+    def test_release_verifier_recomputes_positive_and_negative_gates(self) -> None:
+        for weak, expected in ((False, True), (True, False)):
+            with self.subTest(weak=weak), tempfile.TemporaryDirectory() as raw_root:
+                path, source = self.make_gate_manifest(Path(raw_root), weak=weak)
+                with patch(
+                    "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                    return_value=source,
+                ):
+                    audit = verify_gate_manifest(path)
+                self.assertIs(audit["gate_passed"], expected)
+
+    def test_release_verifier_rejects_edited_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            path, source = self.make_gate_manifest(Path(raw_root))
+            gate = json.loads(path.read_text(encoding="utf-8"))
+            gate["same_side_scale_transfer_gate"]["metrics"]["old_inliers"] = 19
+            path.write_text(json.dumps(gate), encoding="utf-8")
+            with patch(
+                "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                return_value=source,
+            ), self.assertRaisesRegex(ValueError, "metrics differ"):
+                verify_gate_manifest(path)
+
+    def test_release_verifier_rejects_mutated_log_or_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            path, source = self.make_gate_manifest(root)
+            (root / "probe.log").write_text("changed\n", encoding="utf-8")
+            with patch(
+                "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                return_value=source,
+            ), self.assertRaisesRegex(ValueError, "hash mismatch"):
+                verify_gate_manifest(path)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            path, source = self.make_gate_manifest(Path(raw_root))
+            gate = json.loads(path.read_text(encoding="utf-8"))
+            anchor = gate["command"].index("--old-anchor") + 1
+            gate["command"][anchor] = "3"
+            path.write_text(json.dumps(gate), encoding="utf-8")
+            with patch(
+                "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                return_value=source,
+            ), self.assertRaisesRegex(ValueError, "old-anchor differs"):
+                verify_gate_manifest(path)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            path, source = self.make_gate_manifest(root)
+            gate = json.loads(path.read_text(encoding="utf-8"))
+            points = gate["command"].index("--learned-old-points") + 1
+            gate["command"][points] = str(root / "other" / "old_anchor_points.txt")
+            path.write_text(json.dumps(gate), encoding="utf-8")
+            with patch(
+                "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                return_value=source,
+            ), self.assertRaisesRegex(ValueError, "old-points differs"):
+                verify_gate_manifest(path)
+
+    def test_release_verifier_emits_self_bound_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            path, source = self.make_gate_manifest(root)
+            output = root / "release_audit.json"
+            with patch(
+                "verify_mast3r_slam_submap_gate.validate_probe_source_revision",
+                return_value=source,
+            ), patch(
+                "sys.argv",
+                [
+                    "verify_mast3r_slam_submap_gate.py",
+                    "--gate-manifest",
+                    str(path),
+                    "--out",
+                    str(output),
+                ],
+            ):
+                self.assertEqual(verify_main(), 0)
+            audit = json.loads(output.read_text(encoding="utf-8"))
+            verifier = Path(audit["verifier"]["path"])
+            self.assertEqual(audit["status"], "verified")
+            self.assertEqual(
+                audit["verifier"]["sha256"],
+                hashlib.sha256(verifier.read_bytes()).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

@@ -321,9 +321,13 @@ printed `pass` is insufficient by itself; the runner independently requires
 at least 12 matches,
 10 inliers, 0.60 inlier ratio, and finite positive scale on both same-side
 alignments. Direct old-to-new pointmap alignment remains diagnostic because
-the two processes do not share a gauge. Seven transaction/parser regression
+the two processes do not share a gauge. `verify_mast3r_slam_submap_gate.py`
+rehashes the complete transaction, reparses the immutable probe log, recomputes
+positive or honest-negative verdicts, checks command/anchor binding, and emits
+a self-hash-bound release audit. Eleven transaction/parser/release regression
 tests cover independent/export-only provenance, mutation, weak consensus,
-duplicate pass records, non-finite scale, and source-revision binding.
+duplicate pass records, non-finite scale, source-revision binding, edited
+metrics/commands, and verifier provenance.
 Run this transaction inside the same WSL environment that produced the export
 manifest so its `/home` source evidence remains addressable. When the probe is
 a Windows `.exe`, only the four data-path arguments are converted through

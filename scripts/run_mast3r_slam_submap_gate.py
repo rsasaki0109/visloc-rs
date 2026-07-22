@@ -290,6 +290,7 @@ def main() -> int:
         "export_manifest": evidence(args.export_manifest),
         "probe_executable": evidence(args.probe_exe),
         "probe_source": probe_source,
+        "lightglue_directory": str(args.lightglue_dir.resolve()),
         "frozen_inputs": frozen,
         "command": command,
         "returncode": completed.returncode,
