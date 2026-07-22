@@ -98,6 +98,50 @@ def main() -> int:
     returncodes = {}
     started_utc = timestamp()
 
+    def write_manifest(status: str, failure_reason: str | None = None) -> Path:
+        final_manifest = final / "manifest.json"
+        manifest = {
+            "schema_version": 1,
+            "protocol_id": protocol["protocol_id"],
+            "protocol_sha256": hashlib.sha256(protocol_bytes).hexdigest(),
+            "sequence": args.sequence,
+            "status": status,
+            "failure_reason": failure_reason,
+            "started_utc": started_utc,
+            "finished_utc": timestamp(),
+            "ground_truth_path_disclosed_only_to_finalizer": (
+                "finalize" in commands
+            ),
+            "hierarchical_executable": {
+                "path": str(args.hierarchical_exe.resolve()),
+                "sha256": sha256(args.hierarchical_exe),
+                "build_revision": args.hierarchical_build_revision,
+            },
+            "runner_scripts": {
+                name: {"path": str(path.resolve()), "sha256": sha256(path)}
+                for name, path in scripts.items()
+            },
+            "commands": commands,
+            "returncodes": returncodes,
+            "final_manifest": (
+                str(final_manifest.resolve()) if final_manifest.is_file() else None
+            ),
+            "final_manifest_sha256": (
+                sha256(final_manifest) if final_manifest.is_file() else None
+            ),
+        }
+        manifest_path = args.out_dir / "manifest.json"
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(manifest_path)
+        return manifest_path
+
+    def fail(reason: str, returncode: int = 1) -> int:
+        manifest_path = write_manifest("failed", reason)
+        print(f"ERROR: {reason}", file=sys.stderr)
+        print(manifest_path)
+        return returncode if returncode != 0 else 1
+
     commands["prepare"] = [
         str(args.python),
         str(scripts["prepare"]),
@@ -116,12 +160,21 @@ def main() -> int:
     ]
     returncodes["prepare"] = run(commands["prepare"], logs / "prepare.log")
     if returncodes["prepare"] != 0:
-        raise RuntimeError("held-out input preparation failed")
-    prepared_manifest = json.loads(
-        (prepared / "manifest.json").read_text(encoding="utf-8")
-    )
-    expected_frames = int(prepared_manifest["expected_frames"])
-    fx, fy, cx, cy = parse_pinhole(prepared / "rect" / "calib.txt")
+        return fail(
+            "held-out input preparation failed",
+            returncodes["prepare"],
+        )
+    prepared_manifest_path = prepared / "manifest.json"
+    if not prepared_manifest_path.is_file():
+        return fail("input preparation exited without a manifest")
+    try:
+        prepared_manifest = json.loads(
+            prepared_manifest_path.read_text(encoding="utf-8")
+        )
+        expected_frames = int(prepared_manifest["expected_frames"])
+        fx, fy, cx, cy = parse_pinhole(prepared / "rect" / "calib.txt")
+    except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
+        return fail(f"invalid prepared input evidence: {error}")
 
     commands["hierarchical"] = [
         str(args.python),
@@ -151,7 +204,10 @@ def main() -> int:
         commands["hierarchical"], logs / "hierarchical.log"
     )
     if not (hierarchical / "manifest.json").is_file():
-        raise RuntimeError("hierarchical runner exited without a DNF/success manifest")
+        return fail(
+            "hierarchical runner exited without a DNF/success manifest",
+            returncodes["hierarchical"],
+        )
 
     commands["colmap"] = [
         str(args.python),
@@ -171,7 +227,10 @@ def main() -> int:
     ]
     returncodes["colmap"] = run(commands["colmap"], logs / "colmap.log")
     if not (colmap / "manifest.json").is_file():
-        raise RuntimeError("COLMAP runner exited without a DNF/success manifest")
+        return fail(
+            "COLMAP runner exited without a DNF/success manifest",
+            returncodes["colmap"],
+        )
 
     # This is deliberately the first command that receives a GT path. Every
     # timed mapper process above has exited, including failed/DNF engines.
@@ -195,32 +254,14 @@ def main() -> int:
     ]
     returncodes["finalize"] = run(commands["finalize"], logs / "finalize.log")
     if returncodes["finalize"] != 0:
-        raise RuntimeError("held-out suite finalization failed")
+        return fail(
+            "held-out suite finalization failed",
+            returncodes["finalize"],
+        )
+    if not (final / "manifest.json").is_file():
+        return fail("finalizer exited without a manifest")
 
-    manifest = {
-        "schema_version": 1,
-        "protocol_id": protocol["protocol_id"],
-        "protocol_sha256": hashlib.sha256(protocol_bytes).hexdigest(),
-        "sequence": args.sequence,
-        "started_utc": started_utc,
-        "finished_utc": timestamp(),
-        "ground_truth_path_disclosed_only_to_finalizer": True,
-        "hierarchical_executable": {
-            "path": str(args.hierarchical_exe.resolve()),
-            "sha256": sha256(args.hierarchical_exe),
-            "build_revision": args.hierarchical_build_revision,
-        },
-        "runner_scripts": {
-            name: {"path": str(path.resolve()), "sha256": sha256(path)}
-            for name, path in scripts.items()
-        },
-        "commands": commands,
-        "returncodes": returncodes,
-        "final_manifest": str((final / "manifest.json").resolve()),
-        "final_manifest_sha256": sha256(final / "manifest.json"),
-    }
-    manifest_path = args.out_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_path = write_manifest("success")
     print(manifest_path)
     return 0
 
