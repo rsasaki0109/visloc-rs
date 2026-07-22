@@ -2242,7 +2242,10 @@ impl DpvoOdometry {
     /// need to load weights from an npz at all?"; this is the *same*
     /// checkpoint-derived artifact M2 produced, reused here as-is rather
     /// than re-exported under a new name, since the weights it carries are
-    /// already real, just fixture-shaped file-naming).
+    /// already real, just fixture-shaped file-naming). When the same model
+    /// directory also contains `dpvo_update_full.onnx`, the session uses
+    /// that fused graph and retains the split artifacts as compatibility
+    /// fallback.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: DpvoOdometryConfig,
@@ -2411,6 +2414,10 @@ impl DpvoOdometry {
 
     pub fn stats(&self) -> DpvoOdometryStats {
         self.stats
+    }
+
+    pub fn full_update_graph_enabled(&self) -> bool {
+        self.session.full_update_enabled()
     }
 
     pub fn graph(&self) -> &DpvoPatchGraph {

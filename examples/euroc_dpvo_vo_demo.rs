@@ -1949,11 +1949,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let s3b_diag = odometry.sim3_backend_diagnostics();
     let ll_diag = odometry.long_loop_diagnostics();
     let hf_diag = odometry.low_parallax_diagnostics();
+    let full_update_graph_enabled = odometry.full_update_graph_enabled();
 
     let summary = format!(
         "euroc_dir={}\n\
          model_dir={}\n\
          onnx_backend_requested={onnx_backend_requested}\n\
+         onnx_full_update_graph_enabled={full_update_graph_enabled}\n\
          frames_requested={frame_count}\n\
          frames_tracked={tracked_frames}\n\
          tracked_fraction={tracked_fraction:.4}\n\

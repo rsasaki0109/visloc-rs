@@ -684,6 +684,17 @@ ms), a useful but insufficient 15.2% end-to-end improvement. The next runtime
 architecture step must keep correlation/update tensors on GPU rather than
 relying on further queue shrinkage or encoder-only tuning.
 
+The update half of that architecture step is now implemented. The exporter
+uses host-computed compact group IDs and an E-row scratch tensor to fuse both
+SoftAgg reductions between the pre/post update networks into
+`dpvo_update_full.onnx`; model bundles without it retain the legacy split
+path. CPU and strict-CUDA fixture parity pass at <=3.624e-5 max absolute
+error. On the matched 48-patch probe, fused update time fell from 273.98 to
+65.56 ms/frame (76.1%) and total time from 844.13 to 679.88 ms/frame. The
+remaining dominant stage is CPU correlation at 469.48 ms/frame, so the next
+GPU-residency slice is the batched two-level correlation volume, not further
+update-cell or encoder tuning.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

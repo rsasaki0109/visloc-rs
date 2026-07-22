@@ -1,11 +1,13 @@
-//! `ort`-backed session wrapper around the four ONNX graphs
+//! `ort`-backed session wrapper around the four legacy ONNX graphs
 //! `scripts/export_dpvo_onnx.py` produces (`fnet.onnx`, `inet.onnx`,
 //! `dpvo_update_pre_agg.onnx`, `dpvo_update_post_agg.onnx` — see
 //! `docs/dpvo_droid_port_plan.md`'s M1 results for the exact contract each
 //! graph was exported with), plus [`DpvoOnnxSession::update_iteration`],
 //! which stitches the pre-agg graph, the host-side [`SoftAgg`] step, and
 //! the post-agg graph together into one full GRU update-cell call — the
-//! "two-graph update split" the plan doc's M1 section describes.
+//! "two-graph update split" the plan doc's M1 section describes. New model
+//! bundles additionally contain `dpvo_update_full.onnx`, which keeps both
+//! SoftAgg reductions inside one graph and is selected automatically.
 //!
 //! Mirrors [`crate::features::superpoint_onnx`]'s session-loading pattern
 //! (builder + execution-provider selection + `Arc<Mutex<Session>>` sharing)
@@ -15,6 +17,7 @@
 
 use ndarray::{Array3, Array4, ArrayView3, ArrayView4, Axis};
 use ort::session::Session;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -85,6 +88,7 @@ pub struct DpvoOnnxSession {
     inet: Arc<Mutex<Session>>,
     update_pre_agg: Arc<Mutex<Session>>,
     update_post_agg: Arc<Mutex<Session>>,
+    update_full: Option<Arc<Mutex<Session>>>,
 }
 
 impl fmt::Debug for DpvoOnnxSession {
@@ -120,19 +124,28 @@ impl DpvoOnnxSession {
         update_post_agg_path: impl AsRef<Path>,
         backend: OnnxBackend,
     ) -> Result<Self, DpvoOnnxError> {
+        let update_pre_agg_path = update_pre_agg_path.as_ref();
+        let full_path = update_pre_agg_path.with_file_name("dpvo_update_full.onnx");
         Ok(Self {
             backend,
             fnet: Arc::new(Mutex::new(build_session(fnet_path.as_ref(), backend)?)),
             inet: Arc::new(Mutex::new(build_session(inet_path.as_ref(), backend)?)),
-            update_pre_agg: Arc::new(Mutex::new(build_session(
-                update_pre_agg_path.as_ref(),
-                backend,
-            )?)),
+            update_pre_agg: Arc::new(Mutex::new(build_session(update_pre_agg_path, backend)?)),
             update_post_agg: Arc::new(Mutex::new(build_session(
                 update_post_agg_path.as_ref(),
                 backend,
             )?)),
+            update_full: full_path
+                .is_file()
+                .then(|| build_session(&full_path, backend))
+                .transpose()?
+                .map(|session| Arc::new(Mutex::new(session))),
         })
+    }
+
+    /// Whether this model bundle supplies the fused update graph.
+    pub fn full_update_enabled(&self) -> bool {
+        self.update_full.is_some()
     }
 
     /// Run `fnet`: raw `[0, 255]`-range pixels in `(1, 3, H, W)`, matching
@@ -259,6 +272,49 @@ impl DpvoOnnxSession {
         Ok((net_out, delta, weight))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn run_update_full(
+        &self,
+        net: ArrayView3<'_, f32>,
+        inp: ArrayView3<'_, f32>,
+        corr: ArrayView3<'_, f32>,
+        ix: &[i64],
+        jx: &[i64],
+        group_kk: &[i64],
+        group_ij: &[i64],
+    ) -> Result<UpdateCellOutput, DpvoOnnxError> {
+        let session = self
+            .update_full
+            .as_ref()
+            .expect("run_update_full is only called when the fused graph exists");
+        let net_tensor =
+            ort::value::Tensor::from_array(net.to_owned()).map_err(DpvoOnnxError::from_ort)?;
+        let inp_tensor =
+            ort::value::Tensor::from_array(inp.to_owned()).map_err(DpvoOnnxError::from_ort)?;
+        let corr_tensor =
+            ort::value::Tensor::from_array(corr.to_owned()).map_err(DpvoOnnxError::from_ort)?;
+        let vector = |values: &[i64]| {
+            ort::value::Tensor::from_array(ndarray::Array1::from_vec(values.to_vec()))
+                .map_err(DpvoOnnxError::from_ort)
+        };
+        let mut session = session.lock().map_err(lock_poisoned)?;
+        let mut outputs = session
+            .run(ort::inputs![
+                net_tensor,
+                inp_tensor,
+                corr_tensor,
+                vector(ix)?,
+                vector(jx)?,
+                vector(group_kk)?,
+                vector(group_ij)?
+            ])
+            .map_err(DpvoOnnxError::from_ort)?;
+        let net_out = extract_array3(&mut outputs, "net_out")?;
+        let delta = extract_array3(&mut outputs, "delta")?;
+        let weight = extract_array3(&mut outputs, "weight")?;
+        Ok((net_out, delta, weight))
+    }
+
     /// One full GRU update-cell iteration: `dpvo_update_pre_agg.onnx` →
     /// host-side `SoftAgg` (both `agg_kk` and `agg_ij`) →
     /// `dpvo_update_post_agg.onnx`. This is the "two-graph update split"
@@ -292,6 +348,16 @@ impl DpvoOnnxSession {
         agg_ij: &SoftAgg,
     ) -> Result<UpdateCellOutput, DpvoOnnxError> {
         let (ix, jx) = neighbors_cpu(kk, jj);
+        if self.update_full.is_some() {
+            let group_kk = compact_group_ids(kk);
+            let pair_key: Vec<i64> = ii
+                .iter()
+                .zip(jj.iter())
+                .map(|(&i, &j)| i * 12345 + j)
+                .collect();
+            let group_ij = compact_group_ids(&pair_key);
+            return self.run_update_full(net, inp, corr, &ix, &jx, &group_kk, &group_ij);
+        }
         let net_pre_agg = self.run_update_pre_agg(net, inp, corr, &ix, &jx)?;
 
         // Squeeze the batch dim (always 1) to feed `SoftAgg`'s 2-D
@@ -315,6 +381,20 @@ impl DpvoOnnxSession {
 
         self.run_update_post_agg(net_post_agg.view())
     }
+}
+
+fn compact_group_ids(keys: &[i64]) -> Vec<i64> {
+    let mut groups = HashMap::new();
+    let mut next = 0_i64;
+    keys.iter()
+        .map(|&key| {
+            *groups.entry(key).or_insert_with(|| {
+                let id = next;
+                next += 1;
+                id
+            })
+        })
+        .collect()
 }
 
 fn build_session(path: &Path, backend: OnnxBackend) -> Result<Session, DpvoOnnxError> {
@@ -399,4 +479,15 @@ fn extract_array4(
 
 fn lock_poisoned<T>(error: std::sync::PoisonError<T>) -> DpvoOnnxError {
     DpvoOnnxError::OnnxRuntime(format!("session mutex poisoned: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_group_ids;
+
+    #[test]
+    fn compact_groups_preserve_equality_and_first_occurrence_order() {
+        assert_eq!(compact_group_ids(&[9, 3, 9, 7, 3]), [0, 1, 0, 2, 1]);
+        assert!(compact_group_ids(&[]).is_empty());
+    }
 }

@@ -46,24 +46,25 @@ cheap, exact, native-Rust-friendly integer arithmetic (see
 `neighbors()`), and belongs on the host for M2, same as fnet/inet's patch
 extraction was already scoped to stay host-side per the plan doc.
 
-(B) `SoftAgg` (`torch_scatter.scatter_softmax` + `scatter_sum`, grouped by a
-*data-dependent* number of distinct groups per call) is exactly the op the
-plan doc's risk register flagged ("softmax-aggregation may need host-side
-handling"): a static ONNX graph cannot allocate a `(num_groups, DIM)`
-scratch tensor whose `num_groups` is itself a traced *value*, not a shape.
-This DOES resist export. `SoftAggReference` below reimplements it faithfully
-in pure PyTorch (`torch.unique` + `scatter_reduce_(reduce='amax')` +
-`scatter_add_`, mathematically identical to `torch_scatter.scatter_softmax`/
-`scatter_sum`) for host-side use.
+(B) `SoftAgg` (`torch_scatter.scatter_softmax` + `scatter_sum`) was the op the
+plan doc's risk register flagged. The original M1 export used host-side
+aggregation because the distinct-group count is data-dependent. The fused
+export now passes compact group IDs computed on the host and allocates E
+scratch rows for E edges; at most E groups can exist, and unused rows cannot
+affect the gather back to edges. This is mathematically identical while
+remaining dynamically shaped and ONNX-exportable.
 
-Consequence: the "one GRU update iteration" graph is exported as **two**
-static sub-graphs with the SoftAgg step sandwiched between them on the host
+The legacy two-graph contract remains exported for compatibility:
 (Python here; native Rust in M2):
   1. `dpvo_update_pre_agg.onnx`  : (net, inp, corr, ix, jx) -> net_pre_agg
   2. host (this script / future Rust): net_post_agg = net_pre_agg
                                         + SoftAgg_kk(net_pre_agg, kk)
                                         + SoftAgg_ij(net_pre_agg, ii*12345+jj)
   3. `dpvo_update_post_agg.onnx` : net_post_agg -> (net_out, delta, weight)
+
+The preferred fifth artifact, `dpvo_update_full.onnx`, combines all three
+steps. It additionally consumes `group_kk` and `group_ij`, compact int64 IDs
+in `[0,E)`, and removes the intermediate GPU/host round trips.
 
 Both sub-graphs use a **dynamic** "num_edges" axis rather than the
 pad-to-fixed-max trick anticipated in the plan doc's risk register: unlike
@@ -105,6 +106,11 @@ dpvo_update_post_agg.onnx:
   outputs net_out : (1, E, 384) float32
           delta    : (1, E, 2) float32   (patch target-pixel correction)
           weight   : (1, E, 2) float32   (sigmoid confidence, in [0, 1])
+
+dpvo_update_full.onnx:
+  inputs  net, inp, corr, ix, jx as above
+          group_kk, group_ij : (E,) int64 compact group IDs
+  outputs net_out, delta, weight as above
 
 Usage
 -----
@@ -234,6 +240,48 @@ class SoftAggReference(nn.Module):
             return self.h(y)[:, jx]
         return self.h(y)
 
+    def forward_grouped(self, x, group_index):
+        """ONNX-friendly equivalent with host-provided compact group IDs.
+
+        A scratch tensor with E group slots is sufficient because an E-edge
+        input can contain at most E distinct groups. Unused trailing slots do
+        not affect the gather back to edges. This removes the data-dependent
+        allocation that forced the original pre/post graph split.
+        """
+        _, edge_count, channels = x.shape
+        idx = group_index.view(1, edge_count, 1).expand(1, edge_count, channels)
+        logits = self.g(x)
+        group_max = torch.full_like(x, float("-inf"))
+        group_max.scatter_reduce_(1, idx, logits, reduce="amax", include_self=True)
+        exp_x = (logits - group_max.gather(1, idx)).exp()
+        group_sum = torch.zeros_like(x)
+        group_sum.scatter_add_(1, idx, exp_x)
+        weights = exp_x / group_sum.gather(1, idx)
+        values = torch.zeros_like(x)
+        values.scatter_add_(1, idx, self.f(x) * weights)
+        transformed = self.h(values)
+        return transformed.gather(1, idx) if self.expand else transformed
+
+
+class UpdateFull(nn.Module):
+    """One update iteration with both SoftAgg reductions inside ONNX."""
+
+    def __init__(self, pre_agg, post_agg, agg_kk, agg_ij):
+        super().__init__()
+        self.pre_agg = pre_agg
+        self.post_agg = post_agg
+        self.agg_kk = agg_kk
+        self.agg_ij = agg_ij
+
+    def forward(self, net, inp, corr, ix, jx, group_kk, group_ij):
+        net_pre = self.pre_agg(net, inp, corr, ix, jx)
+        net_post = (
+            net_pre
+            + self.agg_kk.forward_grouped(net_pre, group_kk)
+            + self.agg_ij.forward_grouped(net_pre, group_ij)
+        )
+        return self.post_agg(net_post)
+
 
 def neighbors_cpu(ii: torch.Tensor, jj: torch.Tensor):
     """Pure-Python/CPU reimplementation of `fastba/ba.cpp`'s `neighbors()`.
@@ -259,6 +307,17 @@ def neighbors_cpu(ii: torch.Tensor, jj: torch.Tensor):
             ix[orig_i] = idx[pos - 1] if pos > 0 else -1
             jx[orig_i] = idx[pos + 1] if pos < len(idx) - 1 else -1
     return (torch.as_tensor(ix, dtype=torch.int64), torch.as_tensor(jx, dtype=torch.int64))
+
+
+def compact_group_ids(keys: torch.Tensor):
+    """Stable first-occurrence compact IDs, equivalent for grouped reduces."""
+    mapping = {}
+    ids = []
+    for key in keys.tolist():
+        if key not in mapping:
+            mapping[key] = len(mapping)
+        ids.append(mapping[key])
+    return torch.as_tensor(ids, dtype=torch.int64)
 
 
 class UpdatePreAgg(nn.Module):
@@ -1001,6 +1060,8 @@ def export_update_graphs(pre_agg, post_agg, agg_kk, agg_ij, out_dir, num_edges, 
     jj = torch.randint(0, 8, (E,))
     ii = torch.randint(0, 8, (E,))
     ix, jx = neighbors_cpu(kk, jj)
+    group_kk = compact_group_ids(kk)
+    group_ij = compact_group_ids(ii * 12345 + jj)
 
     with torch.no_grad():
         net_pre_agg = pre_agg(net, inp, corr, ix, jx)
@@ -1046,19 +1107,56 @@ def export_update_graphs(pre_agg, post_agg, agg_kk, agg_ij, out_dir, num_edges, 
     consolidate_onnx(post_path)
     print(f"  wrote {post_path} ({os.path.getsize(post_path) // 1024} KB)")
 
+    full = UpdateFull(pre_agg, post_agg, agg_kk, agg_ij).eval()
+    with torch.no_grad():
+        full_net, full_delta, full_weight = full(
+            net, inp, corr, ix, jx, group_kk, group_ij
+        )
+    for name, expected, actual in (
+        ("net", net_out, full_net),
+        ("delta", delta, full_delta),
+        ("weight", weight, full_weight),
+    ):
+        max_diff = (expected - actual).abs().max().item()
+        # Group-reduction order differs from the compact reference by a few
+        # float32 ulps; use the same 1e-4 tolerance as Rust's frozen update
+        # parity suite.
+        if max_diff > 1.0e-4:
+            raise RuntimeError(f"full update {name} differs from split path: {max_diff}")
+
+    full_path = os.path.join(out_dir, "dpvo_update_full.onnx")
+    torch.onnx.export(
+        full,
+        (net, inp, corr, ix, jx, group_kk, group_ij),
+        full_path,
+        input_names=["net", "inp", "corr", "ix", "jx", "group_kk", "group_ij"],
+        output_names=["net_out", "delta", "weight"],
+        dynamic_axes={
+            "net": {1: "num_edges"}, "inp": {1: "num_edges"},
+            "corr": {1: "num_edges"}, "ix": {0: "num_edges"},
+            "jx": {0: "num_edges"}, "group_kk": {0: "num_edges"},
+            "group_ij": {0: "num_edges"}, "net_out": {1: "num_edges"},
+            "delta": {1: "num_edges"}, "weight": {1: "num_edges"},
+        },
+        opset_version=opset,
+    )
+    consolidate_onnx(full_path)
+    print(f"  wrote {full_path} ({os.path.getsize(full_path) // 1024} KB)")
+
     fixture = dict(
         net=net.numpy(), inp=inp.numpy(), corr=corr.numpy(), ix=ix.numpy(), jx=jx.numpy(),
         kk=kk.numpy(), ii=ii.numpy(), jj=jj.numpy(),
+        group_kk=group_kk.numpy(), group_ij=group_ij.numpy(),
         net_pre_agg=net_pre_agg.numpy(),
         net_post_agg=net_post_agg.numpy(),
         net_out=net_out.numpy(), delta=delta.numpy(), weight=weight.numpy(),
     )
-    return pre_path, post_path, fixture
+    return pre_path, post_path, full_path, fixture
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", required=True, help="directory to write the 4 .onnx graphs into")
+    ap.add_argument("--out-dir", required=True, help="directory to write the 5 .onnx graphs into")
     ap.add_argument("--checkpoint", default=None,
                     help="path to DPVO's dpvo.pth (download per E:/tools/DPVO/download_models_and_data.sh); "
                          "omit to export with random weights (still a valid export-correctness test)")
@@ -1088,8 +1186,8 @@ def main():
     print("exporting inet...")
     export_encoder(inet, "inet", args.out_dir, args.height, args.width, args.opset)
 
-    print("exporting update cell (pre-agg / post-agg split, see module docstring)...")
-    _, _, update_fixture = export_update_graphs(
+    print("exporting update cell (legacy split plus fused graph)...")
+    _, _, _, update_fixture = export_update_graphs(
         pre_agg, post_agg, agg_kk, agg_ij, args.out_dir, args.num_edges, args.opset, seed=args.seed)
 
     manifest = {
@@ -1098,6 +1196,7 @@ def main():
         "opset": args.opset,
         "num_edges_traced": args.num_edges,
         "fnet_dim": FNET_DIM, "inet_dim": DIM, "corr_dim": CORR_DIM, "res": RES,
+        "fused_update_graph": True,
     }
     with open(os.path.join(args.out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
