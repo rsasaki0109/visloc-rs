@@ -1024,9 +1024,19 @@ pub enum DpvoMonoViAlignmentRejection {
     },
     /// Scale-plausibility gate (module doc, "Observability gates" #3b).
     ScaleOutOfRange {
+        /// Magnitude-constrained refinement result that tripped the gate.
         scale: f64,
+        /// Unconstrained linear solve's scale before tangent refinement.
+        raw_scale: f64,
         min_scale: f64,
         max_scale: f64,
+        /// Observability context from the same rejected solve. These fields
+        /// are diagnostic only; adding them does not alter gate ordering or
+        /// acceptance.
+        raw_gravity_norm: f64,
+        condition_number: f64,
+        min_singular_value: f64,
+        window_frames: usize,
     },
 }
 
@@ -1308,8 +1318,13 @@ pub fn estimate_mono_vi_alignment(
         // Scale-plausibility gate (module doc, "Observability gates" #3b).
         return Err(DpvoMonoViAlignmentRejection::ScaleOutOfRange {
             scale,
+            raw_scale,
             min_scale: gates.min_scale,
             max_scale: gates.max_scale,
+            raw_gravity_norm,
+            condition_number,
+            min_singular_value: min_sv,
+            window_frames: n,
         });
     }
 
@@ -2146,6 +2161,41 @@ mod tests {
             "expected gravity within 1%, got error {gravity_error} ({:?})",
             alignment.gravity_world
         );
+
+        // Rejection must retain the solve context needed to distinguish a
+        // genuinely unobservable window from a well-conditioned estimate
+        // that merely lies outside a configured physical range.
+        let rejecting_gates = DpvoMonoViAlignmentGates {
+            max_scale: 1.5,
+            ..gates
+        };
+        let rejected = estimate_mono_vi_alignment(
+            &poses,
+            &factors,
+            &SE3::identity(),
+            Vector3::zeros(),
+            Vector3::zeros(),
+            &rejecting_gates,
+        );
+        match rejected {
+            Err(DpvoMonoViAlignmentRejection::ScaleOutOfRange {
+                scale,
+                raw_scale,
+                raw_gravity_norm,
+                condition_number,
+                min_singular_value,
+                window_frames,
+                ..
+            }) => {
+                assert!(scale > rejecting_gates.max_scale);
+                assert!(raw_scale.is_finite());
+                assert!(raw_gravity_norm.is_finite());
+                assert!(condition_number.is_finite());
+                assert!(min_singular_value > 0.0);
+                assert_eq!(window_frames, poses.len());
+            }
+            other => panic!("expected diagnostic-rich scale rejection, got {other:?}"),
+        }
     }
 
     /// Degenerate case (mirrors this file's own coupled-BA degeneracy note

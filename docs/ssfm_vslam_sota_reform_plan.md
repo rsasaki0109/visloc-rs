@@ -979,6 +979,22 @@ than repair the measurement. The next VSLAM slice must diagnose why the live
 mono-VI alignment becomes out-of-range after motion resumes; this change only
 fixes independent-evidence accounting.
 
+Acceptance-neutral rejection telemetry then isolated that failure to window
+construction. `ScaleOutOfRange` now carries the same solve's raw/refined scale,
+raw gravity norm, condition number, minimum singular value, and pose count.
+On a 650-frame probe, frame 401 briefly used nine poses (`sigma_min=0.0091`),
+but frames 501/601/650 used only 4/4/5 poses because folded arrival gaps are
+trimmed away. Their raw scales were -0.0010/0.0035/0.0027 even though gravity
+norm remained plausible. Condition numbers of 929/1644/602 passed the very
+loose `1e8` gate, so that gate does not recognize the short-window scale
+nullspace. Reusing the existing fold-independent pose-snapshot history is also
+closed as a fix: a diagnostic 250-frame one-shot probe (gyro thresholds loosened
+only to expose the downstream estimator) accepted scale 0.2466, rolled back
+once, and corrupted Sim(3) ATE to 0.1351 m. The next mechanism must preserve
+current visually refined endpoint poses while constructing IMU factors across
+folded gaps (composition or re-integration); neither a lower scale gate nor
+stale pose snapshots is admissible.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
