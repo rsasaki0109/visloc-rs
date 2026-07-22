@@ -293,6 +293,7 @@ def main() -> int:
         peak_rss = max(peak_rss, process_tree_rss(process.pid))
         returncode = process.returncode
     wall_seconds = time.perf_counter() - started
+    mapper_finished_utc = datetime.now(timezone.utc).isoformat()
 
     base_manifest = {
         "schema_version": 1,
@@ -304,6 +305,7 @@ def main() -> int:
             "sha256": executable_sha256,
         },
         "started_utc": started_utc,
+        "finished_utc": mapper_finished_utc,
         "host": {
             "platform": platform.platform(),
             "processor": platform.processor(),

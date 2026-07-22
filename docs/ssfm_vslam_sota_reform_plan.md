@@ -501,6 +501,11 @@ order, preserves a synthetic failure manifest if a child crashes before
 writing one, and always attempts the failure-inclusive aggregate. Its
 end-to-end failure-path test confirms that three preparation failures remain
 three DNF rows per engine rather than disappearing from the report.
+`verify_ssfm_heldout_suite.py` is the release audit: it rehashes every frozen
+input, rejects overlapping sequence intervals, verifies the deferred-GT
+engine-exit hash/timestamp chain for successful runs, and regenerates the suite
+summary to detect edited aggregate results. Both explicit-failure and
+successful deferred-GT evidence chains have regression coverage.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain

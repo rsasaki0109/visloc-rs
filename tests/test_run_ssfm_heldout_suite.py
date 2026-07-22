@@ -91,6 +91,31 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
                 self.assertEqual(len(aggregate["failures"]), 3)
                 self.assertEqual(aggregate["worst_outcome"], "dnf")
 
+            from verify_ssfm_heldout_suite import main as verify_main
+
+            audit_path = root / "release_audit.json"
+            with patch(
+                "sys.argv",
+                [
+                    "verify_ssfm_heldout_suite.py",
+                    "--protocol",
+                    str(protocol_path),
+                    "--suite-root",
+                    str(output),
+                    "--out",
+                    str(audit_path),
+                ],
+            ):
+                self.assertEqual(verify_main(), 0)
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(audit["status"], "verified")
+            self.assertTrue(
+                all(
+                    cell["kind"] == "runner_failure"
+                    for cell in audit["sequence_audit"].values()
+                )
+            )
+
     def test_preflight_rejects_materialized_ground_truth(self) -> None:
         from run_ssfm_heldout_suite import validate_extraction
 
@@ -130,6 +155,103 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
             self.assertEqual(changed_frozen_files(evidence), [])
             path.write_text("after", encoding="utf-8")
             self.assertEqual(changed_frozen_files(evidence), ["fixture"])
+
+    def test_release_verifier_accepts_deferred_gt_success_chain(self) -> None:
+        from verify_ssfm_heldout_suite import ENGINES, verify_success_sequence
+
+        def evidence(path: Path) -> dict:
+            return {
+                "path": str(path.resolve()),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            sequence_root = Path(raw_root)
+            for name in ("prepared", "hierarchical", "colmap", "ground_truth", "final"):
+                (sequence_root / name).mkdir()
+            prepared_path = sequence_root / "prepared" / "manifest.json"
+            prepared_path.write_text("{}", encoding="utf-8")
+            hierarchical_path = sequence_root / "hierarchical" / "manifest.json"
+            hierarchical_path.write_text(
+                json.dumps(
+                    {
+                        "finished_utc": "2026-07-22T00:00:00+00:00",
+                        "protocol": {"ground_truth_read": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            colmap_path = sequence_root / "colmap" / "manifest.json"
+            colmap_path.write_text(
+                json.dumps(
+                    {
+                        "finished_utc": "2026-07-22T00:00:01+00:00",
+                        "ground_truth_read": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gt_csv = sequence_root / "ground_truth" / "data.csv"
+            gt_csv.write_text("#timestamp\n", encoding="utf-8")
+            protocol_sha256 = "d" * 64
+            gt_manifest_path = sequence_root / "ground_truth" / "manifest.json"
+            gt_manifest_path.write_text(
+                json.dumps(
+                    {
+                        "protocol_sha256": protocol_sha256,
+                        "materialized_utc": "2026-07-22T00:00:02+00:00",
+                        "engine_exit_evidence": {
+                            "hierarchical": evidence(hierarchical_path),
+                            "colmap": evidence(colmap_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            final_path = sequence_root / "final" / "manifest.json"
+            final_path.write_text(
+                json.dumps(
+                    {
+                        "protocol_sha256": protocol_sha256,
+                        "results": {
+                            engine: {"status": "success"} for engine in ENGINES
+                        },
+                        "input_manifests": {
+                            "prepared": evidence(prepared_path),
+                            "hierarchical": evidence(hierarchical_path),
+                            "colmap": evidence(colmap_path),
+                            "ground_truth_materializer": evidence(gt_manifest_path),
+                        },
+                        "ground_truth": evidence(gt_csv),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stages = {
+                stage: ["fixture"]
+                for stage in (
+                    "hierarchical",
+                    "colmap",
+                    "materialize_ground_truth",
+                    "finalize",
+                )
+            }
+            runner = {
+                "status": "success",
+                "ground_truth_materialized_only_after_timed_engines_exited": True,
+                "commands": stages,
+                "returncodes": {stage: 0 for stage in stages},
+                "final_manifest_sha256": hashlib.sha256(final_path.read_bytes()).hexdigest(),
+            }
+
+            audit = verify_success_sequence(
+                sequence_root,
+                runner,
+                protocol_sha256,
+            )
+
+            self.assertEqual(audit["kind"], "success")
+            self.assertEqual(set(audit["result_statuses"]), set(ENGINES))
 
 
 if __name__ == "__main__":
