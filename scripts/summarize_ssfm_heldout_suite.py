@@ -69,6 +69,55 @@ def dominates(left: dict, right: dict) -> bool:
     return no_worse and strictly_better
 
 
+def load_sequence_results(
+    suite_root: Path,
+    sequence: str,
+    protocol_sha256: str,
+) -> tuple[dict, dict]:
+    sequence_root = suite_root / sequence
+    final_path = sequence_root / "final" / "manifest.json"
+    runner_path = sequence_root / "manifest.json"
+    if final_path.is_file():
+        path = final_path
+        kind = "final"
+    elif runner_path.is_file():
+        path = runner_path
+        kind = "runner_failure"
+    else:
+        raise FileNotFoundError(
+            f"missing final or explicit runner-failure manifest for {sequence}"
+        )
+
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest["sequence"] != sequence:
+        raise ValueError(f"sequence mismatch in {path}")
+    if manifest["protocol_sha256"] != protocol_sha256:
+        raise ValueError(f"protocol mismatch in {path}")
+
+    evidence = {
+        "path": str(path.resolve()),
+        "sha256": sha256(path),
+        "kind": kind,
+    }
+    if kind == "final":
+        if set(manifest["results"]) != set(ENGINES):
+            raise ValueError(f"missing or unexpected engine cells in {path}")
+        return evidence, manifest["results"]
+
+    if manifest.get("status") != "failed":
+        raise ValueError(f"runner manifest without final result is not failed: {path}")
+    reason = manifest.get("failure_reason") or "unspecified sequence-runner failure"
+    return evidence, {
+        engine: {
+            "status": "dnf",
+            "reason": f"sequence runner failed before finalization: {reason}",
+            "registered_images": 0,
+            "registration_rate": 0.0,
+        }
+        for engine in ENGINES
+    }
+
+
 def main() -> int:
     args = parse_args()
     if args.out.exists():
@@ -84,20 +133,15 @@ def main() -> int:
     cells = {}
     frontier = {}
     for sequence in sequences:
-        path = args.suite_root / sequence / "final" / "manifest.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        if manifest["sequence"] != sequence:
-            raise ValueError(f"sequence mismatch in {path}")
-        if manifest["protocol_sha256"] != protocol_sha256:
-            raise ValueError(f"protocol mismatch in {path}")
-        if set(manifest["results"]) != set(ENGINES):
-            raise ValueError(f"missing or unexpected engine cells in {path}")
-        manifests[sequence] = {"path": str(path.resolve()), "sha256": sha256(path)}
-        cells[sequence] = manifest["results"]
+        manifests[sequence], cells[sequence] = load_sequence_results(
+            args.suite_root,
+            sequence,
+            protocol_sha256,
+        )
 
         successful = {
             engine: success_metrics(cell)
-            for engine, cell in manifest["results"].items()
+            for engine, cell in cells[sequence].items()
             if cell["status"] == "success"
         }
         frontier[sequence] = [
