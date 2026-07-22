@@ -5,10 +5,13 @@
 // PyTorch or copy upstream DPVO's extension source.
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <vector>
 
 #ifdef _WIN32
 #define VISLOC_EXPORT extern "C" __declspec(dllexport)
@@ -44,6 +47,7 @@ struct Context {
   int resident_width0 = 0;
   int resident_height1 = 0;
   int resident_width1 = 0;
+  std::vector<uint64_t> slot_ids;
   char error[512] = {};
 };
 
@@ -208,7 +212,7 @@ void release(Context* context) {
 
 }  // namespace
 
-VISLOC_EXPORT uint32_t visloc_dpvo_corr_abi_version() { return 2; }
+VISLOC_EXPORT uint32_t visloc_dpvo_corr_abi_version() { return 3; }
 
 VISLOC_EXPORT void* visloc_dpvo_corr_create() { return new Context(); }
 
@@ -227,18 +231,19 @@ VISLOC_EXPORT const char* visloc_dpvo_corr_last_error(void* opaque) {
 VISLOC_EXPORT int visloc_dpvo_corr_run(
     void* opaque, const float* anchors, const float* const* level0_frames,
     const float* const* level1_frames, const float* coords,
-    const int32_t* targets, float* output, int edges, int frames, int channels,
-    int patch, int height0, int width0, int height1, int width1, int radius,
-    int upload_frames, float* device_elapsed_ms) {
+    const int32_t* targets, const uint64_t* frame_ids, float* output, int edges,
+    int frames, int channels, int patch, int height0, int width0, int height1,
+    int width1, int radius, int cache_mode, float* device_elapsed_ms) {
   if (!opaque || !anchors || !level0_frames || !level1_frames || !coords ||
       !targets || !output || edges <= 0 || frames <= 0 || channels != 128 ||
       patch != 3 || height0 <= 1 || width0 <= 1 || height1 <= 1 ||
-      width1 <= 1 || radius < 0) {
+      width1 <= 1 || radius < 0 || cache_mode < 0 || cache_mode > 2 ||
+      (cache_mode == 2 && !frame_ids)) {
     return 1;
   }
   Context* context = static_cast<Context*>(opaque);
   context->error[0] = '\0';
-  if (!upload_frames &&
+  if (cache_mode == 1 &&
       (!context->maps_uploaded || context->resident_frames != frames ||
        context->resident_channels != channels ||
        context->resident_height0 != height0 ||
@@ -263,6 +268,15 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
   const size_t targets_bytes = static_cast<size_t>(edges) * sizeof(int32_t);
   const size_t output_bytes = static_cast<size_t>(edges) * patch * patch *
                               taps * taps * 2 * sizeof(float);
+  const bool dimensions_changed =
+      context->resident_channels != channels ||
+      context->resident_height0 != height0 || context->resident_width0 != width0 ||
+      context->resident_height1 != height1 || context->resident_width1 != width1;
+  const bool map_capacity_grows =
+      context->level0_capacity < level0_bytes ||
+      context->level1_capacity < level1_bytes ||
+      context->level0_hwc_capacity < level0_bytes ||
+      context->level1_hwc_capacity < level1_bytes;
 
   if (!reserve(reinterpret_cast<void**>(&context->anchors),
                &context->anchors_capacity, anchors_bytes, context, "anchors") ||
@@ -296,35 +310,62 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
   if (!copy_to_device(context->anchors, anchors, anchors_bytes, context,
                       "anchors") ||
       !copy_to_device(context->coords, coords, coords_bytes, context,
-                      "coords") ||
-      !copy_to_device(context->targets, targets, targets_bytes, context,
-                      "targets")) {
+                      "coords")) {
     cudaEventDestroy(begin);
     cudaEventDestroy(end);
     return 3;
   }
-  if (upload_frames) {
+
+  const size_t level0_frame_elements = level0_frame_bytes / sizeof(float);
+  const size_t level1_frame_elements = level1_frame_bytes / sizeof(float);
+  const size_t slot_capacity =
+      std::min(context->level0_hwc_capacity / level0_frame_bytes,
+               context->level1_hwc_capacity / level1_frame_bytes);
+  const uint64_t empty_id = std::numeric_limits<uint64_t>::max();
+  if (map_capacity_grows || dimensions_changed ||
+      context->slot_ids.size() != slot_capacity) {
+    context->slot_ids.assign(slot_capacity, empty_id);
+    context->maps_uploaded = false;
+  }
+
+  auto upload_frame_to_slot = [&](int frame, int slot) -> bool {
+    if (!copy_to_device(context->level0 + static_cast<size_t>(slot) *
+                                              level0_frame_elements,
+                        level0_frames[frame], level0_frame_bytes, context,
+                        "level0 frame") ||
+        !copy_to_device(context->level1 + static_cast<size_t>(slot) *
+                                              level1_frame_elements,
+                        level1_frames[frame], level1_frame_bytes, context,
+                        "level1 frame")) {
+      return false;
+    }
+    transpose_chw_to_hwc<<<(level0_frame_elements + 255) / 256, 256>>>(
+        context->level0 + static_cast<size_t>(slot) * level0_frame_elements,
+        context->level0_hwc + static_cast<size_t>(slot) * level0_frame_elements,
+        1, channels, height0, width0);
+    transpose_chw_to_hwc<<<(level1_frame_elements + 255) / 256, 256>>>(
+        context->level1 + static_cast<size_t>(slot) * level1_frame_elements,
+        context->level1_hwc + static_cast<size_t>(slot) * level1_frame_elements,
+        1, channels, height1, width1);
+    return true;
+  };
+
+  std::vector<int32_t> remapped_targets(targets, targets + edges);
+  int kernel_frames = frames;
+  if (cache_mode == 0) {
     for (int frame = 0; frame < frames; ++frame) {
-      if (!copy_to_device(context->level0 + static_cast<size_t>(frame) *
-                                                level0_frame_bytes / sizeof(float),
-                          level0_frames[frame], level0_frame_bytes, context,
-                          "level0 frame") ||
-          !copy_to_device(context->level1 + static_cast<size_t>(frame) *
-                                                level1_frame_bytes / sizeof(float),
-                          level1_frames[frame], level1_frame_bytes, context,
-                          "level1 frame")) {
+      if (!upload_frame_to_slot(frame, frame)) {
         context->maps_uploaded = false;
         cudaEventDestroy(begin);
         cudaEventDestroy(end);
         return 4;
       }
+      context->slot_ids[frame] = frame_ids ? frame_ids[frame]
+                                           : static_cast<uint64_t>(frame);
     }
-    const size_t level0_elements = level0_bytes / sizeof(float);
-    const size_t level1_elements = level1_bytes / sizeof(float);
-    transpose_chw_to_hwc<<<(level0_elements + 255) / 256, 256>>>(
-        context->level0, context->level0_hwc, frames, channels, height0, width0);
-    transpose_chw_to_hwc<<<(level1_elements + 255) / 256, 256>>>(
-        context->level1, context->level1_hwc, frames, channels, height1, width1);
+    for (size_t slot = frames; slot < context->slot_ids.size(); ++slot) {
+      context->slot_ids[slot] = empty_id;
+    }
     context->maps_uploaded = true;
     context->resident_frames = frames;
     context->resident_channels = channels;
@@ -332,6 +373,65 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
     context->resident_width0 = width0;
     context->resident_height1 = height1;
     context->resident_width1 = width1;
+  } else if (cache_mode == 2) {
+    std::vector<int32_t> frame_slots(frames, -1);
+    std::vector<bool> used(slot_capacity, false);
+    for (int frame = 0; frame < frames; ++frame) {
+      for (size_t slot = 0; slot < slot_capacity; ++slot) {
+        if (context->slot_ids[slot] == frame_ids[frame]) {
+          if (used[slot]) {
+            std::snprintf(context->error, sizeof(context->error),
+                          "duplicate stable frame id %llu",
+                          static_cast<unsigned long long>(frame_ids[frame]));
+            cudaEventDestroy(begin);
+            cudaEventDestroy(end);
+            return 8;
+          }
+          frame_slots[frame] = static_cast<int32_t>(slot);
+          used[slot] = true;
+          break;
+        }
+      }
+    }
+    for (int frame = 0; frame < frames; ++frame) {
+      if (frame_slots[frame] >= 0) continue;
+      size_t slot = 0;
+      while (slot < slot_capacity && used[slot]) ++slot;
+      if (slot == slot_capacity || !upload_frame_to_slot(frame, static_cast<int>(slot))) {
+        context->maps_uploaded = false;
+        cudaEventDestroy(begin);
+        cudaEventDestroy(end);
+        return 4;
+      }
+      context->slot_ids[slot] = frame_ids[frame];
+      frame_slots[frame] = static_cast<int32_t>(slot);
+      used[slot] = true;
+    }
+    for (int edge = 0; edge < edges; ++edge) {
+      const int target = targets[edge];
+      if (target < 0 || target >= frames) {
+        std::snprintf(context->error, sizeof(context->error),
+                      "target %d is outside stable frame set", target);
+        cudaEventDestroy(begin);
+        cudaEventDestroy(end);
+        return 8;
+      }
+      remapped_targets[edge] = frame_slots[target];
+    }
+    context->maps_uploaded = true;
+    context->resident_frames = frames;
+    context->resident_channels = channels;
+    context->resident_height0 = height0;
+    context->resident_width0 = width0;
+    context->resident_height1 = height1;
+    context->resident_width1 = width1;
+    kernel_frames = static_cast<int>(slot_capacity);
+  }
+  if (!copy_to_device(context->targets, remapped_targets.data(), targets_bytes,
+                      context, "targets")) {
+    cudaEventDestroy(begin);
+    cudaEventDestroy(end);
+    return 3;
   }
 
   const size_t anchor_elements = anchors_bytes / sizeof(float);
@@ -343,7 +443,7 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
   correlation_warp_kernel<<<(items + warps_per_block - 1) / warps_per_block,
                             correlation_threads>>>(
       context->anchors_hwc, context->level0_hwc, context->level1_hwc, context->coords,
-      context->targets, context->output, edges, frames, channels, patch,
+      context->targets, context->output, edges, kernel_frames, channels, patch,
       height0, width0, height1, width1, radius);
   cudaError_t status = cudaGetLastError();
   if (status != cudaSuccess) {

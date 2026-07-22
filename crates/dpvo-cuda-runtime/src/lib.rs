@@ -29,6 +29,7 @@ type RunFn = unsafe extern "C" fn(
     *const *const c_float,
     *const c_float,
     *const i32,
+    *const u64,
     *mut c_float,
     c_int,
     c_int,
@@ -63,7 +64,7 @@ impl fmt::Display for NativeCudaCorrelationError {
                 )
             }
             Self::AbiVersion(version) => {
-                write!(f, "native CUDA correlation ABI {version}, expected 2")
+                write!(f, "native CUDA correlation ABI {version}, expected 3")
             }
             Self::NullContext => write!(f, "native CUDA correlation returned a null context"),
             Self::Shape(message) => write!(f, "native CUDA correlation shape: {message}"),
@@ -129,7 +130,7 @@ impl NativeCudaCorrelation {
             )
         };
         let version = unsafe { abi_version() };
-        if version != 2 {
+        if version != 3 {
             return Err(NativeCudaCorrelationError::AbiVersion(version));
         }
         let context =
@@ -152,7 +153,15 @@ impl NativeCudaCorrelation {
         coords: ArrayView4<'_, f32>,
         targets: &[i32],
     ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
-        self.run_impl(anchors, level0_frames, level1_frames, coords, targets, None)
+        self.run_impl(
+            anchors,
+            level0_frames,
+            level1_frames,
+            coords,
+            targets,
+            None,
+            None,
+        )
     }
 
     /// Run while retaining feature maps on the device across calls carrying
@@ -174,6 +183,30 @@ impl NativeCudaCorrelation {
             coords,
             targets,
             Some(map_version),
+            None,
+        )
+    }
+
+    /// Retain immutable frame pyramids in stable device slots identified by
+    /// caller-owned IDs. Reordering or removing IDs does not re-upload the
+    /// retained maps; a previously unseen ID uploads exactly that frame.
+    pub fn run_stable(
+        &mut self,
+        anchors: ArrayView4<'_, f32>,
+        level0_frames: &[&Array3<f32>],
+        level1_frames: &[&Array3<f32>],
+        coords: ArrayView4<'_, f32>,
+        targets: &[i32],
+        frame_ids: &[u64],
+    ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
+        self.run_impl(
+            anchors,
+            level0_frames,
+            level1_frames,
+            coords,
+            targets,
+            None,
+            Some(frame_ids),
         )
     }
 
@@ -185,6 +218,7 @@ impl NativeCudaCorrelation {
         coords: ArrayView4<'_, f32>,
         targets: &[i32],
         map_version: Option<u64>,
+        frame_ids: Option<&[u64]>,
     ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
         let (edges, channels, patch_y, patch_x) = anchors.dim();
         if channels != FNET_DIM || patch_y != PATCH || patch_x != PATCH {
@@ -204,6 +238,13 @@ impl NativeCudaCorrelation {
             return Err(NativeCudaCorrelationError::Shape(
                 "pyramid frame lists are empty or differ in length".into(),
             ));
+        }
+        if frame_ids.is_some_and(|ids| ids.len() != level0_frames.len()) {
+            return Err(NativeCudaCorrelationError::Shape(format!(
+                "frame IDs {}, pyramid frames {}",
+                frame_ids.map_or(0, <[u64]>::len),
+                level0_frames.len()
+            )));
         }
         if let Some((edge, target)) = targets
             .iter()
@@ -267,9 +308,14 @@ impl NativeCudaCorrelation {
         let width1_c = checked_c_int("width1", width1)?;
         let mut output = Array2::<f32>::zeros((edges, CORR_DIM));
         let mut device_elapsed_ms = 0.0_f32;
-        let upload_frames = map_version
-            .map(|version| self.resident_map_version != Some(version))
-            .unwrap_or(true);
+        let cache_mode = if frame_ids.is_some() {
+            2
+        } else if map_version.is_some_and(|version| self.resident_map_version == Some(version)) {
+            1
+        } else {
+            0
+        };
+        let frame_ids_pointer = frame_ids.map_or(std::ptr::null(), <[u64]>::as_ptr);
         let code = unsafe {
             (self.run)(
                 self.context.as_ptr(),
@@ -278,6 +324,7 @@ impl NativeCudaCorrelation {
                 level1_pointers.as_ptr(),
                 coords.as_ptr(),
                 targets.as_ptr(),
+                frame_ids_pointer,
                 output
                     .as_slice_mut()
                     .expect("owned Array2 is contiguous")
@@ -291,7 +338,7 @@ impl NativeCudaCorrelation {
                 height1_c,
                 width1_c,
                 3,
-                c_int::from(upload_frames),
+                cache_mode,
                 &mut device_elapsed_ms,
             )
         };
@@ -306,7 +353,11 @@ impl NativeCudaCorrelation {
             };
             return Err(NativeCudaCorrelationError::Runtime { code, message });
         }
-        self.resident_map_version = map_version;
+        self.resident_map_version = if frame_ids.is_some() {
+            None
+        } else {
+            map_version
+        };
         Ok((output, device_elapsed_ms))
     }
 }

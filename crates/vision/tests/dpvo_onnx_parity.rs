@@ -658,6 +658,50 @@ fn native_cuda_correlation_matches_frozen_fixture() {
         "resident reuse should avoid map upload: first={first_ms:.3}ms second={second_ms:.3}ms"
     );
 
+    let (_, stable_first_ms) = runtime
+        .run_stable(
+            anchor.view(),
+            &[&target0, &target0_scaled],
+            &[&target1, &target1_scaled],
+            coords.view(),
+            &indexed_targets,
+            &[10, 20],
+        )
+        .expect("first stable-slot call succeeds");
+    let target0_new = target0.mapv(|value| value * 0.25);
+    let (stable_second, stable_second_ms) = runtime
+        .run_stable(
+            anchor.view(),
+            &[&target0_scaled, &target0_new],
+            &[&target1, &target1_scaled],
+            coords.view(),
+            &indexed_targets,
+            &[20, 30],
+        )
+        .expect("stable slots retain ID 20 and upload only ID 30");
+    let mut stable_diff = 0.0_f32;
+    for edge in 0..anchor_shape[0] {
+        let target = if indexed_targets[edge] == 0 {
+            &target0_scaled
+        } else {
+            &target0_new
+        };
+        let expected = corr_cpu(
+            anchor.slice(ndarray::s![edge..edge + 1, .., .., ..]),
+            target.view(),
+            coords.slice(ndarray::s![edge..edge + 1, .., .., ..]),
+            3,
+        );
+        for (tap, expected_value) in expected.iter().enumerate() {
+            stable_diff =
+                stable_diff.max((stable_second[(edge, tap * 2)] - expected_value).abs());
+        }
+    }
+    assert!(stable_diff <= PASS_THRESHOLD);
+    println!(
+        "native CUDA stable slots initial={stable_first_ms:.3}ms one-new={stable_second_ms:.3}ms"
+    );
+
     let invalid_targets = vec![1_i32; anchor_shape[0]];
     let error = runtime
         .run(

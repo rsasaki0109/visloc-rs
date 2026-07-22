@@ -752,6 +752,20 @@ failure. Next profiling must separate map upload/transpose from the warp
 kernel, then preserve stable per-frame device slots rather than retransferring
 all retained maps after each arrival.
 
+ABI v3 now keys fixed device slots by the graph frame's immutable arrival ID.
+After the live window reaches capacity, removing/reordering a keyframe keeps
+every surviving pyramid in place and uploads/transposes only the newly encoded
+frame; edge target indices are remapped to slots inside the native boundary.
+A transition test from IDs `[10,20]` to `[20,30]` proves retained/new-slot
+selection against the CPU reference. In two 100-frame MH_03 repetitions,
+correlation measured 40.47 and 36.21 ms/frame (native device time 27.50 and
+24.17), versus 54.73/43.40 before stable slots. End-to-end time was noisy at
+211.84 and 191.44 ms/frame versus the preceding 199.19, so the best repeat is
+a modest 3.9% improvement rather than a headline real-time result. The
+remaining measured floor is distributed across correlation, the fused update
+cell, encoder, undistortion/I/O, and BA; reaching 50 ms requires eliminating
+host round trips between these stages, not another map-copy-only tweak.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
