@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -105,6 +106,29 @@ class VslamSotaV4RunnerTests(unittest.TestCase):
             path.write_text("12, 100\n99, 200\n12, 150\n", encoding="utf-8")
             self.assertEqual(MODULE.parse_gpu_peak(path, 12), 150 * 1024 * 1024)
             self.assertIsNone(MODULE.parse_gpu_peak(path, 77))
+
+    def test_run_one_preserves_summary_and_exit_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw)
+            summary = run_dir / "summary.txt"
+            command = (
+                "from pathlib import Path; import time; "
+                f"Path({str(summary)!r}).write_text('ok=true\\n', encoding='utf-8'); "
+                "time.sleep(0.1)"
+            )
+            manifest = {
+                "sequence": "fixture",
+                "repetition": 1,
+                "exit_code": None,
+            }
+            result = MODULE.run_one(
+                Path(sys.executable), ["-c", command], run_dir, manifest, 0.02
+            )
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(
+                result["summary_sha256"], hashlib.sha256(summary.read_bytes()).hexdigest()
+            )
+            self.assertTrue((run_dir / "run_manifest.json").is_file())
 
 
 if __name__ == "__main__":
