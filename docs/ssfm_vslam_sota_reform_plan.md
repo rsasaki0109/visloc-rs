@@ -533,6 +533,13 @@ SHARED known intrinsics, Doppelgangers++, and full refinement, then converts
 the final `gluemap_aba` model to TUM with the frozen input timestamps. Real
 GLUEMAP installation/setup evidence and an InstantSfM success or fresh
 source-outage DNF remain required after the clean S2 timing run.
+`prepare_external_ssfm_setup.py` performs that one-time audit: exact main and
+recursive-submodule revisions, a clean tracked tree, all four official
+checkpoint hashes, `gluemap`/`pygluemap` imports, CUDA availability, and the
+official CLI must pass before it emits a hash-bound ready adapter. It also
+repeats both published/redirected InstantSfM `ls-remote` attempts; any newly
+available source stops setup for revision binding and adapter implementation
+instead of being mislabeled as an outage DNF.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
