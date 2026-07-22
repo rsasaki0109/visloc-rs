@@ -470,6 +470,25 @@ two-view/multi-view geometry prior only as an alternative R1 initializer.
 Gate: MH_01 800f returns to scale 1.0-1.3, Sim(3) ATE <1.5 m, tracking >=0.98,
 zero false loops, and no material 400f regression.
 
+V2a backend-safety slice (2026-07-22): the opt-in DPVO Sim(3) backend no
+longer writes a solved proposal directly into live state. It applies every
+pose/depth correction to a cloned patch graph, scores the already-materialized
+learned target reprojections before and after, checks valid-edge retention and
+the maximum absolute log-scale jump, and swaps the clone into the live graph
+only when every gate passes. A rejection reports exactly one of
+`NonFiniteCorrection`, `ScaleJump`, `ActiveReprojectionValidityLoss`, or
+`ActiveReprojectionWorsened`; diagnostics and the EuRoC runner distinguish a
+solved proposal from an actually committed correction. Folded-frame patch
+depths now receive the same scale as their retained pose, closing a state
+consistency hole in exported/full-history geometry. Seven focused backend
+tests, the complete 446-test no-default `visloc-slam` library suite, and the
+ONNX EuRoC example check pass.
+
+This is a rollback/write-back positive, not the V2 data gate. It does not make
+the rejected V1/R1d scale sources valid, does not admit a new scale edge, and
+does not change the conclusion that a jointly optimized independent dense
+submap measurement is still required before MH_01 correction may be enabled.
+
 ### V3 — Full-sequence robustness and relocalization
 
 - Run full MH_01 and MH_03 development sequences; require ATE improvement on

@@ -743,12 +743,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 args.ll_retrieval_scorer = match raw_value.as_str() {
                     "vlad" => RetrievalScorer::Vlad,
                     "mean-pool" => RetrievalScorer::MeanPool,
-                    other => {
-                        return Err(format!(
-                            "--ll-retrieval-scorer: expected \"vlad\" or \"mean-pool\", got {other:?}"
-                        )
-                        .into())
-                    }
+                    other => return Err(format!(
+                        "--ll-retrieval-scorer: expected \"vlad\" or \"mean-pool\", got {other:?}"
+                    )
+                    .into()),
                 };
             }
             "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
@@ -843,14 +841,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     }
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
     if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
-        return Err("--ll-dump-frame-descriptors requires --long-loop (it dumps exactly what \
+        return Err(
+            "--ll-dump-frame-descriptors requires --long-loop (it dumps exactly what \
                      the long-loop index ingests)"
-            .into());
+                .into(),
+        );
     }
     if args.ll_2d2d_low_baseline_diagnostic && !args.ll_2d2d_geometry {
-        return Err(
-            "--ll-2d2d-low-baseline-diagnostic requires --ll-2d2d-geometry".into(),
-        );
+        return Err("--ll-2d2d-low-baseline-diagnostic requires --ll-2d2d-geometry".into());
     }
     if args.hover_release_duration_commits > 0 && args.hover_release_start_cap_frames == 0 {
         return Err(
@@ -1051,10 +1049,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // floor UNLESS the caller explicitly passed `--ll-min-similarity` — see
     // `CliArgs::ll_min_similarity`'s own doc and
     // `DEFAULT_MIN_SIMILARITY_MEAN_POOL`'s own doc for the calibration.
-    let ll_min_similarity = args.ll_min_similarity.unwrap_or(match args.ll_retrieval_scorer {
-        RetrievalScorer::Vlad => DEFAULT_MIN_SIMILARITY_VLAD,
-        RetrievalScorer::MeanPool => DEFAULT_MIN_SIMILARITY_MEAN_POOL,
-    });
+    let ll_min_similarity = args
+        .ll_min_similarity
+        .unwrap_or(match args.ll_retrieval_scorer {
+            RetrievalScorer::Vlad => DEFAULT_MIN_SIMILARITY_VLAD,
+            RetrievalScorer::MeanPool => DEFAULT_MIN_SIMILARITY_MEAN_POOL,
+        });
     let odometry_config = DpvoOdometryConfig {
         vo: DpvoVoConfig {
             buffer_size: 4096,
@@ -1625,7 +1625,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "*** frame {idx}: SIM3 BACKEND — call #{} (node_count={} edge_count={} \
                      loop_edges_used={} corrections_applied={} pose_delta_max_m={:.4} \
-                     pose_delta_mean_m={:.4} scale_min={:.4} scale_max={:.4} elapsed_ms={:.2})",
+                     pose_delta_mean_m={:.4} scale_min={:.4} scale_max={:.4} committed={} \
+                     rejection={:?} elapsed_ms={:.2})",
                     s3b_diag.calls,
                     s3b_diag.last_node_count,
                     s3b_diag.last_edge_count,
@@ -1635,6 +1636,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s3b_diag.last_pose_delta_mean_m,
                     s3b_diag.last_scale_min,
                     s3b_diag.last_scale_max,
+                    s3b_diag.last_committed,
+                    s3b_diag.last_rejection,
                     s3b_diag.last_elapsed_ms,
                 );
             }
@@ -1773,7 +1776,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "  s3b_calls={} s3b_loop_edges_total={} s3b_last_node_count={} s3b_last_edge_count={} \
                      s3b_last_corrections_applied={} s3b_last_pose_delta_max_m={:.4} \
-                     s3b_last_scale_min={:.4} s3b_last_scale_max={:.4} s3b_total_elapsed_ms={:.2}",
+                     s3b_last_scale_min={:.4} s3b_last_scale_max={:.4} s3b_last_committed={} \
+                     s3b_last_rejection={:?} s3b_total_elapsed_ms={:.2}",
                     s3b_diag.calls,
                     s3b_diag.loop_edges_total,
                     s3b_diag.last_node_count,
@@ -1782,6 +1786,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s3b_diag.last_pose_delta_max_m,
                     s3b_diag.last_scale_min,
                     s3b_diag.last_scale_max,
+                    s3b_diag.last_committed,
+                    s3b_diag.last_rejection,
                     s3b_diag.total_elapsed_ms,
                 );
             }
@@ -2016,6 +2022,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          sim3_backend_last_pose_delta_mean_m={s3b_last_pose_delta_mean:.6}\n\
          sim3_backend_last_scale_min={s3b_last_scale_min:.6}\n\
          sim3_backend_last_scale_max={s3b_last_scale_max:.6}\n\
+         sim3_backend_last_committed={s3b_last_committed}\n\
+         sim3_backend_last_rejection={s3b_last_rejection:?}\n\
          sim3_backend_last_elapsed_ms={s3b_last_elapsed_ms:.3}\n\
          sim3_backend_total_elapsed_ms={s3b_total_elapsed_ms:.3}\n\
          long_loop_enabled={ll_enabled}\n\
@@ -2171,6 +2179,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3b_last_pose_delta_mean = s3b_diag.last_pose_delta_mean_m,
         s3b_last_scale_min = s3b_diag.last_scale_min,
         s3b_last_scale_max = s3b_diag.last_scale_max,
+        s3b_last_committed = s3b_diag.last_committed,
+        s3b_last_rejection = s3b_diag.last_rejection,
         s3b_last_elapsed_ms = s3b_diag.last_elapsed_ms,
         s3b_total_elapsed_ms = s3b_diag.total_elapsed_ms,
         ll_enabled = ll_diag.enabled,

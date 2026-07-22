@@ -73,10 +73,10 @@ pub use hierarchical_sfm::{
 };
 
 mod hierarchical_seam_ba;
+pub(crate) use hierarchical_seam_ba::HierarchicalSeamLandmarkLink;
 pub use hierarchical_seam_ba::{
     HierarchicalSeamBaConfig, HierarchicalSeamBaError, HierarchicalSeamBaResult,
 };
-pub(crate) use hierarchical_seam_ba::HierarchicalSeamLandmarkLink;
 
 pub mod ordered_view_graph;
 pub use ordered_view_graph::{
@@ -114,7 +114,8 @@ pub mod dpvo_vi_ba;
 pub use dpvo_vi_ba::{dpvo_vi_ba, dpvo_vi_ba_step, DpvoImuFactor, DpvoViBaSolution, DpvoViWindow};
 pub mod dpvo_sim3_backend;
 pub use dpvo_sim3_backend::{
-    run_sim3_backend, DpvoSim3BackendConfig, Sim3BackendResult, Sim3LoopMeasurement,
+    run_sim3_backend, DpvoSim3BackendConfig, Sim3BackendRejection, Sim3BackendResult,
+    Sim3LoopMeasurement,
 };
 pub mod dpvo_long_loop;
 pub use dpvo_long_loop::{

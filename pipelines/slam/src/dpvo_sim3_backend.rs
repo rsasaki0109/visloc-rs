@@ -173,6 +173,7 @@ use std::collections::BTreeMap;
 use nalgebra::{UnitQuaternion, Vector3};
 use visloc_core::geometry::{Sim3, Sim3Tangent, SE3};
 
+use crate::dpvo_patch_ba::{reprojected_center_depth, transform_point};
 use crate::dpvo_patch_graph::DpvoPatchGraph;
 use crate::sim3_pose_graph::{Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig};
 
@@ -210,6 +211,17 @@ pub struct DpvoSim3BackendConfig {
     /// same qualitative reason, not because the two solves are otherwise
     /// comparable).
     pub loop_edge_weight: f64,
+    /// Transactional write-back gate on the largest proposed multiplicative
+    /// correction. Expressed in log scale so reciprocal corrections are
+    /// treated symmetrically.
+    pub max_abs_log_scale_correction: f64,
+    /// Maximum allowed growth of the mean active learned-target reprojection
+    /// residual. The gate is evaluated on a cloned graph before commit.
+    pub max_active_reprojection_increase_ratio: f64,
+    /// Do not let a correction invalidate more than this fraction of the
+    /// active target-bearing patch edges that were geometrically valid before
+    /// the proposal.
+    pub min_active_reprojection_valid_ratio: f64,
     /// The reused solver's own iteration/convergence/damping knobs — see
     /// [`Sim3PoseGraphConfig`]'s own doc for each field's meaning. Default
     /// mirrors [`Sim3PoseGraphConfig::default`] exactly.
@@ -222,6 +234,9 @@ impl Default for DpvoSim3BackendConfig {
             frequency: 15,
             node_stride: 20,
             loop_edge_weight: 10.0,
+            max_abs_log_scale_correction: 4.0,
+            max_active_reprojection_increase_ratio: 1.05,
+            min_active_reprojection_valid_ratio: 0.95,
             pose_graph: Sim3PoseGraphConfig::default(),
         }
     }
@@ -282,6 +297,21 @@ pub struct Sim3BackendResult {
     pub scale_min: f64,
     pub scale_max: f64,
     pub converged: bool,
+    /// `true` only when every transactional gate passed and the cloned graph
+    /// was swapped into the live state.
+    pub committed: bool,
+    /// Exactly one primary rejection reason when `committed == false`.
+    pub rejection: Option<Sim3BackendRejection>,
+    pub active_reprojection_mean_before_px: Option<f64>,
+    pub active_reprojection_mean_after_px: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sim3BackendRejection {
+    NonFiniteCorrection,
+    ScaleJump,
+    ActiveReprojectionValidityLoss,
+    ActiveReprojectionWorsened,
 }
 
 /// Embed a rigid `SE(3)` pose as a `Sim(3)` value at scale `1.0` — the same
@@ -370,6 +400,89 @@ fn interpolate_correction(a: &Sim3, b: &Sim3, alpha: f64) -> Sim3 {
     let log_b = b.log();
     let blended: Sim3Tangent = log_a * (1.0 - alpha) + log_b * alpha;
     Sim3::exp(&blended)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveReprojectionQuality {
+    valid_count: usize,
+    mean_error_px: Option<f64>,
+}
+
+/// Score materialized learned patch targets without running the update
+/// network. This is a post-proposal safety monitor, not loop evidence.
+fn active_reprojection_quality(graph: &DpvoPatchGraph) -> ActiveReprojectionQuality {
+    let mut valid_count = 0usize;
+    let mut error_sum = 0.0;
+    for edge in graph.edges() {
+        let Some((target, _weight)) = edge.target_weight else {
+            continue;
+        };
+        let (Some(frame_i), Some(frame_j), Some(patch)) = (
+            graph.frames().get(edge.i),
+            graph.frames().get(edge.j),
+            graph.patches().get(edge.k),
+        ) else {
+            continue;
+        };
+        let depth =
+            reprojected_center_depth(&frame_i.pose, &frame_j.pose, &frame_i.intrinsics, patch);
+        let projected = transform_point(
+            &frame_i.pose,
+            &frame_j.pose,
+            &frame_i.intrinsics,
+            &frame_j.intrinsics,
+            patch,
+            false,
+        );
+        let error = (projected - target).norm();
+        if depth > 0.2 && error.is_finite() {
+            valid_count += 1;
+            error_sum += error;
+        }
+    }
+    ActiveReprojectionQuality {
+        valid_count,
+        mean_error_px: (valid_count > 0).then_some(error_sum / valid_count as f64),
+    }
+}
+
+fn transactional_rejection(
+    outcome: &ApplyOutcome,
+    before: ActiveReprojectionQuality,
+    after: ActiveReprojectionQuality,
+    config: &DpvoSim3BackendConfig,
+) -> Option<Sim3BackendRejection> {
+    if !outcome.scale_min.is_finite()
+        || !outcome.scale_max.is_finite()
+        || outcome.scale_min <= 0.0
+        || !outcome.pose_delta_max_m.is_finite()
+        || !outcome.pose_delta_mean_m.is_finite()
+    {
+        return Some(Sim3BackendRejection::NonFiniteCorrection);
+    }
+    let max_abs_log_scale = outcome
+        .scale_min
+        .ln()
+        .abs()
+        .max(outcome.scale_max.ln().abs());
+    if max_abs_log_scale > config.max_abs_log_scale_correction {
+        return Some(Sim3BackendRejection::ScaleJump);
+    }
+    if before.valid_count > 0 {
+        let minimum_valid = (before.valid_count as f64 * config.min_active_reprojection_valid_ratio)
+            .ceil() as usize;
+        if after.valid_count < minimum_valid {
+            return Some(Sim3BackendRejection::ActiveReprojectionValidityLoss);
+        }
+        if let (Some(mean_before), Some(mean_after)) = (before.mean_error_px, after.mean_error_px) {
+            let allowed = (mean_before * config.max_active_reprojection_increase_ratio)
+                .max(mean_before + 1.0e-9);
+            if mean_after > allowed {
+                return Some(Sim3BackendRejection::ActiveReprojectionWorsened);
+            }
+        }
+    }
+    None
 }
 
 /// Every retained + live pose, keyed by `arrival_index`, ascending — the
@@ -544,7 +657,15 @@ pub fn run_sim3_backend(
         (se3_from_sim3(&corrected_sim3), corrected_sim3.scale),
     );
 
-    let outcome = apply_corrections(graph, &corrected);
+    let before = active_reprojection_quality(graph);
+    let mut candidate = graph.clone();
+    let outcome = apply_corrections(&mut candidate, &corrected);
+    let after = active_reprojection_quality(&candidate);
+    let rejection = transactional_rejection(&outcome, before, after, config);
+    let committed = rejection.is_none();
+    if committed {
+        *graph = candidate;
+    }
 
     Some(Sim3BackendResult {
         node_count: nodes.len(),
@@ -556,6 +677,10 @@ pub fn run_sim3_backend(
         scale_min: outcome.scale_min,
         scale_max: outcome.scale_max,
         converged: result.converged,
+        committed,
+        rejection,
+        active_reprojection_mean_before_px: before.mean_error_px,
+        active_reprojection_mean_after_px: after.mean_error_px,
     })
 }
 
@@ -618,6 +743,11 @@ fn apply_corrections(
         scale_max = scale_max.max(scale);
         let new_pose = new_pose.clone();
         graph.retained_poses_mut().insert(arrival, new_pose);
+        if let Some(frame) = graph.retained_folded_frames_mut().get_mut(&arrival) {
+            for patch in &mut frame.patches {
+                patch.inverse_depth *= scale;
+            }
+        }
     }
 
     let pose_delta_mean_m = if corrected_pose_count > 0 {
@@ -907,6 +1037,11 @@ mod tests {
             result.converged,
             "expected the Sim3 solve to converge on this well-posed fixture"
         );
+        assert!(
+            result.committed,
+            "well-posed proposal should pass transaction gates: {:?}",
+            result.rejection
+        );
 
         // HONEST FINDING (not the originally-targeted >10x — see the module
         // doc's "The loop-edge scale question" section and
@@ -979,6 +1114,69 @@ mod tests {
         let config = DpvoSim3BackendConfig::default();
         let result = run_sim3_backend(&mut graph, &[], &config);
         assert!(result.is_none(), "no loop measurement => nothing to solve");
+    }
+
+    #[test]
+    fn scale_jump_gate_rolls_back_the_entire_graph() {
+        let n = 40;
+        let (mut graph, true_poses) = build_drifted_chain(n, 0.2, 1.04);
+        let before = graph.clone();
+        let source = 10;
+        let target = n - 1;
+        let measurements = vec![Sim3LoopMeasurement {
+            arrival_i: graph.frames()[source].arrival_index,
+            arrival_j: graph.frames()[target].arrival_index,
+            relative_pose: true_poses[target].compose(&true_poses[source].inverse()),
+            measured_scale: Some(2.0),
+        }];
+        let config = DpvoSim3BackendConfig {
+            node_stride: 5,
+            max_abs_log_scale_correction: 0.0,
+            ..Default::default()
+        };
+        let result = run_sim3_backend(&mut graph, &measurements, &config)
+            .expect("proposal should solve before the transaction gate");
+        assert!(!result.committed);
+        assert_eq!(result.rejection, Some(Sim3BackendRejection::ScaleJump));
+        assert_eq!(
+            graph, before,
+            "a rejected proposal must change no graph state"
+        );
+    }
+
+    #[test]
+    fn folded_patch_depths_follow_their_retained_pose_scale() {
+        let mut config = cfg();
+        config.keyframe_index = 2;
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        for i in 0..5 {
+            graph.begin_frame(i as f64 * 0.05);
+            graph
+                .commit_frame(
+                    SE3::new(
+                        UnitQuaternion::identity(),
+                        Vector3::new(i as f64 * 0.2, 0.0, 0.0),
+                    ),
+                    intr(),
+                    patches(m),
+                )
+                .unwrap();
+            let forward = graph.edges_forw();
+            let backward = graph.edges_back();
+            graph.append_edges(&forward, 4);
+            graph.append_edges(&backward, 4);
+        }
+        assert_eq!(graph.keyframe(), Some(3));
+        let arrival = *graph.retained_poses().keys().next().unwrap();
+        let original_depth = graph.retained_folded_frames()[&arrival].patches[0].inverse_depth;
+        let mut corrected = BTreeMap::new();
+        corrected.insert(arrival, (graph.retained_poses()[&arrival].clone(), 2.0));
+        apply_corrections(&mut graph, &corrected);
+        assert_eq!(
+            graph.retained_folded_frames()[&arrival].patches[0].inverse_depth,
+            original_depth * 2.0
+        );
     }
 
     #[test]

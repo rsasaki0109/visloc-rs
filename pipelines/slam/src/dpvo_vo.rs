@@ -449,7 +449,9 @@ use crate::dpvo_scale_coupling::{
     apply_gentle_scale_correction, blend_solutions, scale_measurement_from_alignment,
     AnnealingWeight, RecursiveGyroBiasEstimator, RecursiveScaleEstimator, ScaleCouplingConfig,
 };
-use crate::dpvo_sim3_backend::{run_sim3_backend, DpvoSim3BackendConfig, Sim3LoopMeasurement};
+use crate::dpvo_sim3_backend::{
+    run_sim3_backend, DpvoSim3BackendConfig, Sim3BackendRejection, Sim3LoopMeasurement,
+};
 use crate::dpvo_vi_ba::{
     dpvo_vi_ba, estimate_mono_vi_alignment, imu_factor_nis, DpvoImuFactor,
     DpvoMonoViAlignmentGates, DpvoMonoViAlignmentRejection, DpvoViWindow,
@@ -1381,6 +1383,10 @@ pub struct DpvoSim3BackendDiagnostics {
     /// corrected).
     pub last_scale_min: f64,
     pub last_scale_max: f64,
+    /// Whether the most recent solved proposal passed all transactional
+    /// write-back gates.
+    pub last_committed: bool,
+    pub last_rejection: Option<Sim3BackendRejection>,
     /// Wall-clock cost of the most recent call, milliseconds.
     pub last_elapsed_ms: f64,
     /// Cumulative wall-clock cost across every call, milliseconds.
@@ -2148,6 +2154,8 @@ pub struct DpvoOdometry {
     sim3_backend_last_pose_delta_mean_m: f64,
     sim3_backend_last_scale_min: f64,
     sim3_backend_last_scale_max: f64,
+    sim3_backend_last_committed: bool,
+    sim3_backend_last_rejection: Option<Sim3BackendRejection>,
 
     // ---- Milestone M11 (long-range appearance loop candidate source) state
     // — see `crate::dpvo_long_loop`'s module doc. `None` whenever
@@ -2358,6 +2366,8 @@ impl DpvoOdometry {
             sim3_backend_last_pose_delta_mean_m: 0.0,
             sim3_backend_last_scale_min: 1.0,
             sim3_backend_last_scale_max: 1.0,
+            sim3_backend_last_committed: false,
+            sim3_backend_last_rejection: None,
             long_loop,
             low_parallax_regime: LowParallaxRegimeState::default(),
             low_parallax_times_entered: 0,
@@ -2480,6 +2490,8 @@ impl DpvoOdometry {
             last_pose_delta_mean_m: self.sim3_backend_last_pose_delta_mean_m,
             last_scale_min: self.sim3_backend_last_scale_min,
             last_scale_max: self.sim3_backend_last_scale_max,
+            last_committed: self.sim3_backend_last_committed,
+            last_rejection: self.sim3_backend_last_rejection,
             last_elapsed_ms: self.sim3_backend_last_ms,
             total_elapsed_ms: self.sim3_backend_ms_total,
         }
@@ -2525,7 +2537,9 @@ impl DpvoOdometry {
     /// once per `process_frame` call; see `DpvoOdometryConfig::long_loop_dump_enabled`'s
     /// own doc for exactly what "ingested" means and why this is never
     /// perturbing the odometry solve itself).
-    pub fn long_loop_last_ingested(&self) -> Option<(usize, &[nalgebra::Point2<f64>], &[Vec<f32>])> {
+    pub fn long_loop_last_ingested(
+        &self,
+    ) -> Option<(usize, &[nalgebra::Point2<f64>], &[Vec<f32>])> {
         self.long_loop_last_ingested
             .as_ref()
             .map(|(arrival, keypoints, descriptors)| {
@@ -2792,8 +2806,11 @@ impl DpvoOdometry {
                 // frame is never actually indexed, so it should not be
                 // reported as "ingested" by this dump either.
                 if self.config.long_loop_dump_enabled && !features.descriptors.is_empty() {
-                    self.long_loop_last_ingested =
-                        Some((arrival_index, keypoints.clone(), features.descriptors.clone()));
+                    self.long_loop_last_ingested = Some((
+                        arrival_index,
+                        keypoints.clone(),
+                        features.descriptors.clone(),
+                    ));
                 }
                 runtime
                     .index
@@ -4091,11 +4108,17 @@ impl DpvoOdometry {
         self.sim3_backend_last_node_count = result.node_count;
         self.sim3_backend_last_edge_count = result.edge_count;
         self.sim3_backend_last_loop_edges_used = result.loop_edge_count;
-        self.sim3_backend_last_corrected_pose_count = result.corrected_pose_count;
+        self.sim3_backend_last_corrected_pose_count = if result.committed {
+            result.corrected_pose_count
+        } else {
+            0
+        };
         self.sim3_backend_last_pose_delta_max_m = result.pose_delta_max_m;
         self.sim3_backend_last_pose_delta_mean_m = result.pose_delta_mean_m;
         self.sim3_backend_last_scale_min = result.scale_min;
         self.sim3_backend_last_scale_max = result.scale_max;
+        self.sim3_backend_last_committed = result.committed;
+        self.sim3_backend_last_rejection = result.rejection;
         self.sim3_backend_last_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.sim3_backend_ms_total += self.sim3_backend_last_ms;
         Ok(())
