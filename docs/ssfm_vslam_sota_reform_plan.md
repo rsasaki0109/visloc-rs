@@ -313,6 +313,21 @@ diff, patched source files, config, camera index, descriptor manifest and
 keypoints, every source image, exact per-side command/log, optimized state,
 and exported anchor points. `--extract-only` is explicitly labeled as such and
 cannot claim independent per-side execution or overwrite existing evidence.
+`run_mast3r_slam_submap_gate.py` is the only claim-bearing R1e consumer: it
+rejects extract-only or hash-incomplete exports, records the probe executable
+hash alongside the exact committed Rust source revision, freezes the LightGlue
+and exporter transactions before launch, and rehashes them after exit. A
+printed `pass` is insufficient by itself; the runner independently requires
+at least 12 matches,
+10 inliers, 0.60 inlier ratio, and finite positive scale on both same-side
+alignments. Direct old-to-new pointmap alignment remains diagnostic because
+the two processes do not share a gauge. Seven transaction/parser regression
+tests cover independent/export-only provenance, mutation, weak consensus,
+duplicate pass records, non-finite scale, and source-revision binding.
+Run this transaction inside the same WSL environment that produced the export
+manifest so its `/home` source evidence remains addressable. When the probe is
+a Windows `.exe`, only the four data-path arguments are converted through
+`wslpath -w`; native Linux probes retain native paths.
 
 The real R1e gate has not run yet. Ubuntu currently has neither the requested
 Python 3.11 environment nor CUDA `nvcc`; installing and compiling the official
