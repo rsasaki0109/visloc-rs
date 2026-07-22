@@ -1028,6 +1028,50 @@ disambiguation work (§2's open front (b), homography/pure-rotation check +
 E-convention verification, is unchanged by this slice). Recall JSONs:
 `.../recall_qf_ab/qf5_mp_2d2d.json`, `.../recall_qf_ab/qf5_mp_noguard.json`.
 
+Query-arrival placement probe — qf1 + mean-pool + 2D-2D guard (2026-07-22):
+the zero-code probe requested by ranking slice A is complete. Same frozen
+MH_01 800f configuration as the qf5 mean-pool guarded arm, changing ONLY
+`--ll-query-frequency 5 -> 1`; artifact
+`E:/visloc_archive/dpvo_a3_20260721/on_800_qf1_mp_2d2d/`, recall JSON
+`.../recall_qf_ab/qf1_mp_2d2d.json`. It issued 792 queries (142 empty,
+17.93%) and completely closes the cadence coverage hole: opportunity coverage
+missed = 0/359 at radius 1.0 m (qf5: 287/359 missed). Recall@{1,3,5,10} is
+355/359 = 0.9889 at radius 1.0 m and 344/349 = 0.9857 at radius 0.5 m.
+The tight-pair diagnostic flips from false to **`found_near_target: true`**:
+near-arrival-42 candidates enter top-3 at queries 454, 455, 460, and 461
+(for example candidate 38 ranks #1 at query 461, similarity 0.9383).
+
+More importantly, the exact pre/post-hover bridge condition from the probe
+(`candidate < 216`, `query > 461`) now reaches the live stage-2 funnel in
+quantity: 670 candidates across 232 query arrivals. Direct GT labelling finds
+129 of those candidates (43 distinct queries) are true revisits at radius
+1.0 m / optical-axis angle <30 degrees. The first post-hover query alone
+surfaces `(21,462)` at rank 0 (GT distance 0.210 m, axis angle 9.83 degrees,
+84 E-RANSAC inliers) and `(38,462)` at rank 1 (0.229 m, 11.92 degrees, 65
+inliers). Thus this probe decisively answers the ranking question **yes**:
+the sought temporal bridges now enter top-3 and reach stage 2.
+
+Acceptance remains honestly zero, for a now sharply isolated reason. Across
+all 1,945 stage-2 attempts: 700 fail match count / 614 inlier count / 148
+coverage / 483 trusted-vs-E rotation, zero pass. Among the 129 GT-labelled
+true pre/post bridges specifically, 122 fail ONLY the rotation-consistency
+gate, four fail inlier count, and three fail coverage. Their trusted-vs-E
+rotation disagreements are 51.938 / 81.186 / 108.104 degrees
+(min/median/max), despite dozens to >100 RANSAC inliers in the early bridge
+examples. No loop is accepted and the trajectory remains byte-identical to
+the qf5 guarded control (rigid ATE 4.0866 m / similarity ATE 3.3224 m /
+scale 16.018960 / tracked 1.0). Total wall time is 1224.81 s; do not compare
+it directly with the qf5 arms, which ran under the unrelated full-SfM mapper
+contention documented above.
+
+Verdict: **query-arrival placement positive; acceptance still an honest
+negative.** Retrieval and cadence are no longer the blocker on this 800f
+probe. The remaining A3 slice is exactly the already-scoped open front (b):
+distinguish low-baseline/pure-rotation geometry (rotation-only constraints,
+never scale) and independently verify the essential-decomposition convention
+on a known-good real wide-baseline pair before interpreting these 52-108
+degree rejections or allowing any candidate through stage 2.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:
