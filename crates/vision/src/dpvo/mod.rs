@@ -119,6 +119,7 @@
 #![cfg(feature = "onnx-inference")]
 
 pub mod correlation;
+pub mod native_cuda_correlation;
 pub mod npz;
 pub mod onnx_session;
 pub mod patchify;

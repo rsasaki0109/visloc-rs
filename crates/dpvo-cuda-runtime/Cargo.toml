@@ -1,0 +1,15 @@
+[package]
+name = "visloc-dpvo-cuda-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe runtime boundary for optional visloc-rs DPVO CUDA kernels."
+readme.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+libloading = "0.8"
+ndarray = "0.17"

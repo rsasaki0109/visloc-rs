@@ -410,7 +410,7 @@
 #![cfg(feature = "onnx-inference")]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use nalgebra::{Vector2, Vector3};
@@ -421,6 +421,9 @@ use rand::{Rng, SeedableRng};
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::{Frame, Keyframe, VisualMap};
 use visloc_vision::dpvo::correlation::{corr_cpu_prebuilt_target, ChannelLastImage};
+use visloc_vision::dpvo::native_cuda_correlation::{
+    NativeCudaCorrelation, NativeCudaCorrelationError,
+};
 use visloc_vision::dpvo::npz::{NpzArchive, NpzError};
 use visloc_vision::dpvo::onnx_session::{DpvoOnnxError, DpvoOnnxSession};
 use visloc_vision::dpvo::patchify::patchify_cpu;
@@ -472,6 +475,7 @@ pub enum DpvoOdometryError {
     Npz(NpzError),
     Graph(DpvoGraphError),
     Ba(DpvoBaError),
+    NativeCudaCorrelation(NativeCudaCorrelationError),
     /// `image.dim()` did not match [`DpvoOdometryConfig::width`]/`height`.
     ImageShapeMismatch {
         expected: (usize, usize),
@@ -494,6 +498,9 @@ impl std::fmt::Display for DpvoOdometryError {
             Self::Npz(e) => write!(f, "dpvo odometry: npz error: {e}"),
             Self::Graph(e) => write!(f, "dpvo odometry: graph error: {e}"),
             Self::Ba(e) => write!(f, "dpvo odometry: bundle adjustment error: {e}"),
+            Self::NativeCudaCorrelation(e) => {
+                write!(f, "dpvo odometry: native CUDA correlation error: {e}")
+            }
             Self::ImageShapeMismatch { expected, actual } => {
                 write!(
                     f,
@@ -528,6 +535,11 @@ impl From<NpzError> for DpvoOdometryError {
 impl From<DpvoGraphError> for DpvoOdometryError {
     fn from(value: DpvoGraphError) -> Self {
         Self::Graph(value)
+    }
+}
+impl From<NativeCudaCorrelationError> for DpvoOdometryError {
+    fn from(value: NativeCudaCorrelationError) -> Self {
+        Self::NativeCudaCorrelation(value)
     }
 }
 impl From<DpvoBaError> for DpvoOdometryError {
@@ -570,6 +582,9 @@ pub struct DpvoOdometryConfig {
     /// seed, matching how this codebase already threads RNG seeds through
     /// other ONNX-adjacent demos.
     pub seed: u64,
+    /// Optional versioned runtime DLL for the single-call indexed CUDA
+    /// correlation backend. `None` preserves the CPU correlation path.
+    pub native_cuda_correlation_dll: Option<PathBuf>,
     /// Experimental grouped ONNX correlation graph. Default callers keep
     /// this false because the first target-by-target CUDA implementation is
     /// slower than the optimized CPU path due to repeated session and host
@@ -1926,6 +1941,9 @@ pub struct DpvoOdometryStats {
     /// dominate this naive CPU port's per-frame cost (see the plan doc's
     /// M4 results, "timing breakdown").
     pub correlation_ms_total: f64,
+    /// CUDA event time reported by the native correlation DLL, including
+    /// its H2D/D2H copies and kernel, but excluding Rust-side assembly.
+    pub native_correlation_device_ms_total: f64,
     /// Time spent inside the ONNX GRU update-cell call
     /// (`DpvoOnnxSession::update_iteration`) only.
     pub update_ms_total: f64,
@@ -1973,6 +1991,7 @@ type ScaleCouplingSolution = (Vec<SE3>, Vec<DpvoPatch>, Option<Vec<Vector3<f64>>
 pub struct DpvoOdometry {
     config: DpvoOdometryConfig,
     session: DpvoOnnxSession,
+    native_correlation: Option<NativeCudaCorrelation>,
     agg_kk: SoftAgg,
     agg_ij: SoftAgg,
     graph: DpvoPatchGraph,
@@ -2325,9 +2344,15 @@ impl DpvoOdometry {
             .and_then(|imu| imu.scale_coupling)
             .map(|sc| sc.scale)
             .unwrap_or_default();
+        let native_correlation = config
+            .native_cuda_correlation_dll
+            .as_ref()
+            .map(NativeCudaCorrelation::load)
+            .transpose()?;
         Ok(Self {
             config,
             session,
+            native_correlation,
             agg_kk,
             agg_ij,
             graph,
@@ -2430,6 +2455,10 @@ impl DpvoOdometry {
 
     pub fn correlation_graph_enabled(&self) -> bool {
         self.session.correlation_graph_enabled()
+    }
+
+    pub fn native_cuda_correlation_enabled(&self) -> bool {
+        self.native_correlation.is_some()
     }
 
     pub fn graph(&self) -> &DpvoPatchGraph {
@@ -2775,7 +2804,8 @@ impl DpvoOdometry {
         // storing (and repeatedly re-transposing) the raw channel-first
         // arrays.
         let level1_chw = avg_pool_4x4(fmap.view());
-        let retain_chw = self.config.fused_correlation && self.session.correlation_graph_enabled();
+        let retain_chw = self.native_correlation.is_some()
+            || (self.config.fused_correlation && self.session.correlation_graph_enabled());
         let candidate_pyramid = FramePyramid {
             level0: ChannelLastImage::from_chw(fmap.view()),
             level1: ChannelLastImage::from_chw(level1_chw.view()),
@@ -2974,11 +3004,31 @@ impl DpvoOdometry {
     }
 
     fn correlate_group(
-        &self,
+        &mut self,
         anchor_gmap: ArrayView4<'_, f32>,
         coords_grid_px: ArrayView4<'_, f32>,
         target: &FramePyramid,
     ) -> Result<Array2<f32>, DpvoOdometryError> {
+        if self.native_correlation.is_some() {
+            let level0 = target.level0_chw.as_ref().ok_or_else(|| {
+                DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
+                    "missing cached level0 CHW map".into(),
+                ))
+            })?;
+            let level1 = target.level1_chw.as_ref().ok_or_else(|| {
+                DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
+                    "missing cached level1 CHW map".into(),
+                ))
+            })?;
+            let targets = vec![0_i32; anchor_gmap.dim().0];
+            let (correlation, device_ms) = self
+                .native_correlation
+                .as_mut()
+                .expect("checked above")
+                .run(anchor_gmap, &[level0], &[level1], coords_grid_px, &targets)?;
+            self.stats.native_correlation_device_ms_total += device_ms as f64;
+            return Ok(correlation);
+        }
         if let (Some(level0), Some(level1)) = (&target.level0_chw, &target.level1_chw) {
             return self
                 .session
@@ -4273,22 +4323,13 @@ impl DpvoOdometry {
             frame_lo = frame_lo.min(min_edge_frame);
         }
 
-        let mut by_target: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (idx, edge) in edges.iter().enumerate() {
-            by_target.entry(edge.j).or_default().push(idx);
-        }
-
         let mut coords_center = vec![Vector2::new(0.0_f64, 0.0_f64); e_count];
-        let mut corr_flat = Array2::<f32>::zeros((e_count, CORR_DIM));
-
         let corr_start = Instant::now();
-        for (j, idxs) in &by_target {
-            let target_pyramid = self.frame_pyramids[*j].clone();
-            let group_len = idxs.len();
-            let mut anchor_gmap = Array4::<f32>::zeros((group_len, FNET_DIM, PATCH, PATCH));
-            let mut coords_grid_px = Array4::<f32>::zeros((group_len, PATCH, PATCH, 2));
-            for (local, &idx) in idxs.iter().enumerate() {
-                let edge = &edges[idx];
+        let corr_flat = if self.native_correlation.is_some() {
+            let mut anchor_gmap = Array4::<f32>::zeros((e_count, FNET_DIM, PATCH, PATCH));
+            let mut coords_grid_px = Array4::<f32>::zeros((e_count, PATCH, PATCH, 2));
+            let mut targets = Vec::with_capacity(e_count);
+            for (idx, edge) in edges.iter().enumerate() {
                 let pose_i = self.graph.frames()[edge.i].pose.clone();
                 let pose_j = self.graph.frames()[edge.j].pose.clone();
                 let intr_i = self.graph.frames()[edge.i].intrinsics;
@@ -4297,21 +4338,92 @@ impl DpvoOdometry {
                 let grid = reproject_patch_grid(&pose_i, &pose_j, &intr_i, &intr_j, &patch);
                 coords_center[idx] = grid[1][1];
                 anchor_gmap
-                    .index_axis_mut(Axis(0), local)
+                    .index_axis_mut(Axis(0), idx)
                     .assign(&self.patch_gmap[edge.k]);
                 for py in 0..PATCH {
                     for px in 0..PATCH {
-                        coords_grid_px[(local, py, px, 0)] = grid[py][px].x as f32;
-                        coords_grid_px[(local, py, px, 1)] = grid[py][px].y as f32;
+                        coords_grid_px[(idx, py, px, 0)] = grid[py][px].x as f32;
+                        coords_grid_px[(idx, py, px, 1)] = grid[py][px].y as f32;
                     }
                 }
+                targets.push(edge.j as i32);
             }
-            let group_corr =
-                self.correlate_group(anchor_gmap.view(), coords_grid_px.view(), &target_pyramid)?;
-            for (local, &idx) in idxs.iter().enumerate() {
-                corr_flat.row_mut(idx).assign(&group_corr.row(local));
+            let level0_frames: Result<Vec<&Array3<f32>>, _> = self
+                .frame_pyramids
+                .iter()
+                .map(|pyramid| {
+                    pyramid.level0_chw.as_ref().ok_or_else(|| {
+                        DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
+                            "missing cached level0 CHW map".into(),
+                        ))
+                    })
+                })
+                .collect();
+            let level1_frames: Result<Vec<&Array3<f32>>, _> = self
+                .frame_pyramids
+                .iter()
+                .map(|pyramid| {
+                    pyramid.level1_chw.as_ref().ok_or_else(|| {
+                        DpvoOdometryError::NativeCudaCorrelation(NativeCudaCorrelationError::Shape(
+                            "missing cached level1 CHW map".into(),
+                        ))
+                    })
+                })
+                .collect();
+            let (correlation, device_ms) = self
+                .native_correlation
+                .as_mut()
+                .expect("checked above")
+                .run(
+                    anchor_gmap.view(),
+                    &level0_frames?,
+                    &level1_frames?,
+                    coords_grid_px.view(),
+                    &targets,
+                )?;
+            self.stats.native_correlation_device_ms_total += device_ms as f64;
+            correlation
+        } else {
+            let mut by_target: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (idx, edge) in edges.iter().enumerate() {
+                by_target.entry(edge.j).or_default().push(idx);
             }
-        }
+            let mut corr_flat = Array2::<f32>::zeros((e_count, CORR_DIM));
+            for (j, idxs) in &by_target {
+                let target_pyramid = self.frame_pyramids[*j].clone();
+                let group_len = idxs.len();
+                let mut anchor_gmap = Array4::<f32>::zeros((group_len, FNET_DIM, PATCH, PATCH));
+                let mut coords_grid_px = Array4::<f32>::zeros((group_len, PATCH, PATCH, 2));
+                for (local, &idx) in idxs.iter().enumerate() {
+                    let edge = &edges[idx];
+                    let pose_i = self.graph.frames()[edge.i].pose.clone();
+                    let pose_j = self.graph.frames()[edge.j].pose.clone();
+                    let intr_i = self.graph.frames()[edge.i].intrinsics;
+                    let intr_j = self.graph.frames()[edge.j].intrinsics;
+                    let patch = self.graph.patches()[edge.k];
+                    let grid = reproject_patch_grid(&pose_i, &pose_j, &intr_i, &intr_j, &patch);
+                    coords_center[idx] = grid[1][1];
+                    anchor_gmap
+                        .index_axis_mut(Axis(0), local)
+                        .assign(&self.patch_gmap[edge.k]);
+                    for py in 0..PATCH {
+                        for px in 0..PATCH {
+                            coords_grid_px[(local, py, px, 0)] = grid[py][px].x as f32;
+                            coords_grid_px[(local, py, px, 1)] = grid[py][px].y as f32;
+                        }
+                    }
+                }
+                let group_corr = self.correlate_group(
+                    anchor_gmap.view(),
+                    coords_grid_px.view(),
+                    &target_pyramid,
+                )?;
+                for (local, &idx) in idxs.iter().enumerate() {
+                    corr_flat.row_mut(idx).assign(&group_corr.row(local));
+                }
+            }
+            corr_flat
+        };
         self.stats.correlation_ms_total += corr_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut net_arr = Array3::<f32>::zeros((1, e_count, DIM));

@@ -295,6 +295,7 @@ struct CliArgs {
     /// to CPU, which makes V4 runtime evidence auditable.
     onnx_cuda: bool,
     onnx_correlation: bool,
+    native_cuda_correlation_dll: Option<PathBuf>,
     /// Milestone M5 (`docs/dpvo_droid_port_plan.md`): feed `mav0/imu0/data.csv`
     /// into `DpvoOdometry::push_imu` and enable the IMU-coupled joint solve
     /// once its bootstrap chain succeeds. Default off — visual-only, exactly
@@ -519,6 +520,7 @@ impl Default for CliArgs {
             onnx_cpu: false,
             onnx_cuda: false,
             onnx_correlation: false,
+            native_cuda_correlation_dll: None,
             imu: false,
             imu_gravity_norm_deviation_ratio: 0.3,
             imu_min_bootstrap_factors: 10,
@@ -663,6 +665,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 args.onnx_correlation = true;
                 raw.remove(i);
                 continue;
+            }
+            "--native-cuda-correlation-dll" => {
+                args.native_cuda_correlation_dll = Some(PathBuf::from(raw.remove(i + 1)))
             }
             "--imu" => {
                 args.imu = true;
@@ -873,6 +878,14 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     }
     if args.onnx_correlation && !args.onnx_cuda {
         return Err("--onnx-correlation requires --onnx-cuda".into());
+    }
+    if args.native_cuda_correlation_dll.is_some() && !args.onnx_cuda {
+        return Err("--native-cuda-correlation-dll requires --onnx-cuda".into());
+    }
+    if args.native_cuda_correlation_dll.is_some() && args.onnx_correlation {
+        return Err(
+            "--native-cuda-correlation-dll and --onnx-correlation are mutually exclusive".into(),
+        );
     }
     if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
         return Err(
@@ -1114,6 +1127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ba_ep: 100.0,
         motion_probe_min_flow: 2.0,
         seed: args.seed,
+        native_cuda_correlation_dll: args.native_cuda_correlation_dll.clone(),
         fused_correlation: args.onnx_correlation,
         // Milestone M5 (`docs/dpvo_droid_port_plan.md`): `--imu` couples
         // `mav0/imu0/data.csv` into the joint solve via
@@ -1962,6 +1976,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hf_diag = odometry.low_parallax_diagnostics();
     let full_update_graph_enabled = odometry.full_update_graph_enabled();
     let correlation_graph_enabled = odometry.correlation_graph_enabled();
+    let native_cuda_correlation_enabled = odometry.native_cuda_correlation_enabled();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -1970,6 +1985,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          onnx_full_update_graph_enabled={full_update_graph_enabled}\n\
          onnx_correlation_graph_enabled={correlation_graph_enabled}\n\
          onnx_correlation_requested={}\n\
+         native_cuda_correlation_enabled={native_cuda_correlation_enabled}\n\
+         native_cuda_correlation_dll={}\n\
          frames_requested={frame_count}\n\
          frames_tracked={tracked_frames}\n\
          tracked_fraction={tracked_fraction:.4}\n\
@@ -1979,6 +1996,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          ms_per_frame_undistort={undistort_ms:.2}\n\
          ms_per_frame_encode={encode_ms:.2}\n\
          ms_per_frame_correlation={corr_ms:.2}\n\
+         ms_per_frame_native_correlation_device={native_corr_device_ms:.2}\n\
          ms_per_frame_update={update_ms:.2}\n\
          ms_per_frame_ba={ba_ms:.2}\n\
          ate_rigid_rmse_m={ate_rigid_rmse:.4}\n\
@@ -2137,11 +2155,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.euroc_dir.display(),
         args.model_dir.display(),
         args.onnx_correlation,
+        args.native_cuda_correlation_dll
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".into()),
         frame_count = frames.len(),
         io_ms = io_ms_total / stats.frames_processed.max(1) as f64,
         undistort_ms = undistort_ms_total / stats.frames_processed.max(1) as f64,
         encode_ms = stats.encode_ms_total / stats.frames_processed.max(1) as f64,
         corr_ms = stats.correlation_ms_total / stats.frames_processed.max(1) as f64,
+        native_corr_device_ms =
+            stats.native_correlation_device_ms_total / stats.frames_processed.max(1) as f64,
         update_ms = stats.update_ms_total / stats.frames_processed.max(1) as f64,
         ba_ms = stats.ba_ms_total / stats.frames_processed.max(1) as f64,
         matched = aligned_estimated.len(),

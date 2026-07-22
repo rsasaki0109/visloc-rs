@@ -31,6 +31,7 @@
 use std::path::PathBuf;
 
 use visloc_vision::dpvo::correlation::corr_cpu;
+use visloc_vision::dpvo::native_cuda_correlation::NativeCudaCorrelation;
 use visloc_vision::dpvo::npz::NpzArchive;
 use visloc_vision::dpvo::onnx_session::DpvoOnnxSession;
 use visloc_vision::dpvo::patchify::patchify_cpu;
@@ -506,4 +507,114 @@ fn fused_correlation_level0_matches_frozen_fixture_under_strict_cuda() {
         diff <= PASS_THRESHOLD,
         "fused CUDA correlation level 0 differs from fixture: {diff:.3e}"
     );
+}
+
+#[test]
+#[ignore = "reads the external correlation fixture and runtime CUDA DLL"]
+fn native_cuda_correlation_matches_frozen_fixture() {
+    let dll = std::env::var("DPVO_NATIVE_CUDA_DLL").unwrap_or_else(|_| {
+        "E:/visloc_archive/dpvo_cuda_kernel_probe_20260723/visloc_dpvo_cuda.dll".into()
+    });
+    let mut runtime = NativeCudaCorrelation::load(dll).expect("load native CUDA DLL");
+    let fixture = NpzArchive::open(fixtures_dir().join("correlation_fixture.npz")).unwrap();
+    let (anchor_shape, anchor_data) = fixture.read_f32("anchor_patch_feats").unwrap();
+    let (target_shape, target_data) = fixture.read_f32("target_fmap").unwrap();
+    let (coords_shape, coords_data) = fixture.read_f32("coords_center").unwrap();
+    let (_, expected_data) = fixture.read_f32("corr_out").unwrap();
+    let anchor = ndarray::Array4::from_shape_vec(
+        (
+            anchor_shape[0],
+            anchor_shape[1],
+            anchor_shape[2],
+            anchor_shape[3],
+        ),
+        anchor_data,
+    )
+    .unwrap();
+    let target0 = ndarray::Array3::from_shape_vec(
+        (target_shape[1], target_shape[2], target_shape[3]),
+        target_data,
+    )
+    .unwrap();
+    let target1 =
+        ndarray::Array3::<f32>::zeros((target_shape[1], target_shape[2] / 4, target_shape[3] / 4));
+    let coords = ndarray::Array4::from_shape_vec(
+        (
+            coords_shape[0],
+            coords_shape[1],
+            coords_shape[2],
+            coords_shape[3],
+        ),
+        coords_data,
+    )
+    .unwrap();
+    let targets = vec![0_i32; anchor_shape[0]];
+    let (got, device_ms) = runtime
+        .run(
+            anchor.view(),
+            &[&target0],
+            &[&target1],
+            coords.view(),
+            &targets,
+        )
+        .expect("native CUDA correlation succeeds");
+    let got_level0: Vec<f32> = got
+        .rows()
+        .into_iter()
+        .flat_map(|row| row.iter().step_by(2).copied().collect::<Vec<_>>())
+        .collect();
+    let diff = max_abs_diff(&got_level0, &expected_data);
+    println!("native CUDA correlation device_ms={device_ms:.3}, max_abs={diff:.3e}");
+    assert!(diff <= PASS_THRESHOLD);
+
+    // Exercise the indexed multi-frame contract too: the original frozen
+    // fixture has only one target, so alternate its original map with a
+    // scaled copy and compare every selected row against the CPU primitive.
+    let target0_scaled = target0.mapv(|value| value * 0.5);
+    let target1_scaled = target1.clone();
+    let indexed_targets: Vec<i32> = (0..anchor_shape[0])
+        .map(|edge| (edge % 2) as i32)
+        .collect();
+    let (indexed, _) = runtime
+        .run(
+            anchor.view(),
+            &[&target0, &target0_scaled],
+            &[&target1, &target1_scaled],
+            coords.view(),
+            &indexed_targets,
+        )
+        .expect("indexed native CUDA correlation succeeds");
+    let mut indexed_diff = 0.0_f32;
+    for edge in 0..anchor_shape[0] {
+        let target = if indexed_targets[edge] == 0 {
+            &target0
+        } else {
+            &target0_scaled
+        };
+        let expected = corr_cpu(
+            anchor.slice(ndarray::s![edge..edge + 1, .., .., ..]),
+            target.view(),
+            coords.slice(ndarray::s![edge..edge + 1, .., .., ..]),
+            3,
+        );
+        for (tap, expected_value) in expected.iter().enumerate() {
+            indexed_diff = indexed_diff.max((indexed[(edge, tap * 2)] - expected_value).abs());
+        }
+    }
+    assert!(
+        indexed_diff <= PASS_THRESHOLD,
+        "indexed native CUDA correlation differs from CPU: {indexed_diff:.3e}"
+    );
+
+    let invalid_targets = vec![1_i32; anchor_shape[0]];
+    let error = runtime
+        .run(
+            anchor.view(),
+            &[&target0],
+            &[&target1],
+            coords.view(),
+            &invalid_targets,
+        )
+        .expect_err("an out-of-range target index must fail before FFI");
+    assert!(error.to_string().contains("outside 0..1"));
 }

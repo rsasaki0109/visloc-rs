@@ -27,7 +27,7 @@ default = []
 # build-time cost. See docs/superpoint_onnx_runtime_plan.md for the
 # validation gate and crates/vision/src/features/superpoint_onnx.rs for
 # the implementation.
-onnx-inference = ["dep:ort", "dep:ndarray", "dep:rayon"]
+onnx-inference = ["dep:ort", "dep:ndarray", "dep:rayon", "dep:visloc-dpvo-cuda-runtime"]
 # Adds the CUDA execution provider: pulls the CUDA-enabled ONNX Runtime
 # binaries so `OnnxBackend::CudaThenCpu` runs SuperPoint on the GPU. Requires a
 # CUDA 12 runtime + cuDNN 9 at run time (add cuDNN to `LD_LIBRARY_PATH` if it is
@@ -48,3 +48,4 @@ ndarray = { version = "0.17", optional = true }
 # gated the same way `ort`/`ndarray` are (only pulled in under
 # `onnx-inference`, since that is the only feature that compiles `dpvo/`).
 rayon = { workspace = true, optional = true }
+visloc-dpvo-cuda-runtime = { path = "../dpvo-cuda-runtime", version = "0.1.0", optional = true }

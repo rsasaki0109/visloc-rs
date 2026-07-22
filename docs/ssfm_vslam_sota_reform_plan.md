@@ -705,6 +705,27 @@ V4 speed path. The next implementation must batch across target frames while
 keeping the feature-map pyramid resident on device (or call a native indexed
 CUDA kernel); repeating target-by-target ORT calls is experimentally closed.
 
+The native indexed-CUDA alternative is now a measured positive. A separately
+built, versioned C ABI (`native/dpvo_cuda/dpvo_corr.cu`) uploads the live
+two-level feature-map set once per update, indexes the destination frame for
+every edge inside one launch, and returns the interleaved 882-value volume.
+The Rust unsafe boundary is isolated in `visloc-dpvo-cuda-runtime`; the vision
+and SLAM crates consume only its checked safe API. The frozen single-target
+fixture passes at 2.515e-7 max absolute error. On a matched MH_03 30-frame,
+stride-2, 48-patch diagnostic, native correlation reduced correlation time
+from 324.92 to 57.94 ms/frame (82.2%) and total time from 493.08 to
+229.95 ms/frame (53.4%). CPU/native trajectories differ by at most 2.06e-4
+in any exported pose scalar, while both report 0.0036 m Sim(3) ATE. The
+16-patch diagnostic fell from 250.03 to 118.64 ms/frame and its exported
+trajectory was identical at CSV precision. These short prefixes prove the
+boundary and speed direction, not sustained real time or full-sequence
+accuracy: 48-patch latency remains 4.6x above the 50 ms gate, and feature maps
+are still recopied on every update instead of remaining resident across
+updates. The next latency slice is persistent per-frame device storage plus a
+longer steady-state profile. V4 packaging must hash the native DLL and all
+three CUDA ORT runtime/provider DLLs beside the executable; a probe exposed
+that Windows otherwise preferred an unrelated `System32/onnxruntime.dll`.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
