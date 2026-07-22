@@ -75,12 +75,17 @@
 //! when registration is not lower, at least 90% of landmarks survive, valid
 //! observations grow by at least 25%, and mean reprojection strictly improves.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Point2, Point3, SMatrix};
+use nalgebra::{Point2, Point3, SMatrix, UnitQuaternion};
 use rayon::prelude::*;
+use visloc_rs::slam::{
+    hierarchical_sfm, partition_ordered_submaps, AdaptiveSubmapPartitionHints,
+    CameraCentreScaleRefinementConfig, HierarchicalSfmConfig, HierarchicalSfmResult,
+    PairRotationEvidence,
+};
 use visloc_rs::vision::stereo_bootstrap::triangulate_two_view_left_frame;
 use visloc_rs::vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 use visloc_rs::{
@@ -95,6 +100,12 @@ use visloc_rs::{
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
 type ExportLandmark = (Point3<f64>, Vec<(usize, usize, Point2<f64>)>);
+
+#[derive(Debug, Clone)]
+struct VerifiedPair {
+    pairwise: PairwiseMatches,
+    image_j_from_i: UnitQuaternion<f64>,
+}
 
 struct Args {
     features_dir: PathBuf,
@@ -124,6 +135,15 @@ struct Args {
     structureless_registration: bool,
     geometry_guided_conflict_recovery: bool,
     track_source: TrackSource,
+    hierarchical: bool,
+    submap_min_images: usize,
+    submap_target_images: usize,
+    submap_max_images: usize,
+    submap_overlap_images: usize,
+    submap_boundary_search_radius: usize,
+    submap_min_shared_observations: usize,
+    submap_build_threads: usize,
+    submap_camera_scale_refinement: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -155,6 +175,15 @@ fn parse_args() -> Result<Args, String> {
     let mut structureless_registration = false;
     let mut geometry_guided_conflict_recovery = false;
     let mut track_source = TrackSource::UnionFind;
+    let mut hierarchical = false;
+    let mut submap_min_images = 24usize;
+    let mut submap_target_images = 64usize;
+    let mut submap_max_images = 96usize;
+    let mut submap_overlap_images = 16usize;
+    let mut submap_boundary_search_radius = 16usize;
+    let mut submap_min_shared_observations = 2usize;
+    let mut submap_build_threads = 2usize;
+    let mut submap_camera_scale_refinement = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -239,6 +268,31 @@ fn parse_args() -> Result<Args, String> {
                     }
                 }
             }
+            "--hierarchical" => hierarchical = true,
+            "--submap-min-images" => {
+                submap_min_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-target-images" => {
+                submap_target_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-max-images" => {
+                submap_max_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-overlap-images" => {
+                submap_overlap_images = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-boundary-search-radius" => {
+                submap_boundary_search_radius =
+                    a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-min-shared-observations" => {
+                submap_min_shared_observations =
+                    a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-build-threads" => {
+                submap_build_threads = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-camera-scale-refinement" => submap_camera_scale_refinement = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -299,6 +353,15 @@ fn parse_args() -> Result<Args, String> {
         structureless_registration,
         geometry_guided_conflict_recovery,
         track_source,
+        hierarchical,
+        submap_min_images,
+        submap_target_images,
+        submap_max_images,
+        submap_overlap_images,
+        submap_boundary_search_radius,
+        submap_min_shared_observations,
+        submap_build_threads,
+        submap_camera_scale_refinement,
     })
 }
 
@@ -331,7 +394,8 @@ fn load_images(
     Ok((features, names))
 }
 
-/// Match and geometrically verify each candidate pair into `PairwiseMatches`.
+/// Match and geometrically verify each candidate pair, retaining both the
+/// inlier correspondences and the independently estimated essential rotation.
 /// Candidate pairs are independent, so the (descriptor-matching dominated) loop
 /// is run across cores with rayon.
 fn verify_pairs(
@@ -340,7 +404,7 @@ fn verify_pairs(
     candidates: &[(usize, usize)],
     match_ratio: f32,
     min_matches: usize,
-) -> Vec<PairwiseMatches> {
+) -> Vec<VerifiedPair> {
     candidates
         .par_iter()
         .filter_map(|&(i, j)| {
@@ -370,10 +434,13 @@ fn verify_pairs(
                 .iter()
                 .map(|&idx| (dm[idx].query_index, dm[idx].train_index))
                 .collect();
-            Some(PairwiseMatches {
-                image_i: i,
-                image_j: j,
-                matches,
+            Some(VerifiedPair {
+                pairwise: PairwiseMatches {
+                    image_i: i,
+                    image_j: j,
+                    matches,
+                },
+                image_j_from_i: rel.previous_to_current.rotation,
             })
         })
         .collect()
@@ -1345,6 +1412,151 @@ fn merge_pairwise_graphs(
     graph
 }
 
+fn export_hierarchical_result(
+    args: &Args,
+    features: &[FeatureSet],
+    image_names: &[String],
+    result: &HierarchicalSfmResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Export every overlap image exactly once, from the earliest submap that
+    // registered it, so COLMAP image/keypoint identity stays unambiguous.
+    let mut owner = BTreeMap::<u64, u64>::new();
+    let mut poses_by_frame = BTreeMap::<u64, Pose>::new();
+    for node in result.atlas.hierarchy.nodes() {
+        let local_from_atlas = node
+            .local_from_atlas
+            .as_ref()
+            .expect("successful hierarchy leaves every node aligned");
+        let atlas_from_local = local_from_atlas.inverse();
+        for frame in &node.submap.frames {
+            if owner.contains_key(&frame.source_frame_id) {
+                continue;
+            }
+            let rotation = frame.pose.world_to_camera.rotation * local_from_atlas.rotation;
+            let centre_atlas = atlas_from_local.transform_point(&frame.pose.camera_center_world());
+            let translation = -(rotation * centre_atlas.coords);
+            owner.insert(frame.source_frame_id, node.id);
+            poses_by_frame.insert(
+                frame.source_frame_id,
+                Pose::from_world_to_camera(rotation, translation),
+            );
+        }
+    }
+
+    let registered = poses_by_frame.keys().copied().collect::<Vec<_>>();
+    let remap = registered
+        .iter()
+        .enumerate()
+        .map(|(index, &frame_id)| (frame_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let poses_out = registered
+        .iter()
+        .map(|frame_id| poses_by_frame[frame_id].clone())
+        .collect::<Vec<_>>();
+    let features_out = registered
+        .iter()
+        .map(|&frame_id| features[frame_id as usize].clone())
+        .collect::<Vec<_>>();
+    let names_out = registered
+        .iter()
+        .map(|&frame_id| image_names[frame_id as usize].clone())
+        .collect::<Vec<_>>();
+
+    // S2c will weld/retriangulate seam points. Until then, retain observations
+    // only from the submap that owns each exported image; no keypoint is emitted
+    // into two different COLMAP tracks.
+    let mut landmarks_out = Vec::<ExportLandmark>::new();
+    for node in result.atlas.hierarchy.nodes() {
+        let atlas_from_local = node
+            .atlas_from_local()
+            .expect("successful hierarchy leaves every node aligned");
+        for landmark in &node.submap.landmarks {
+            let observations = landmark
+                .observations
+                .iter()
+                .filter_map(|observation| {
+                    if owner.get(&observation.source_frame_id) != Some(&node.id) {
+                        return None;
+                    }
+                    remap.get(&observation.source_frame_id).map(|&image_index| {
+                        (image_index, observation.keypoint_index, observation.pixel)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if observations.len() >= 2 {
+                landmarks_out.push((
+                    atlas_from_local.transform_point(&landmark.position),
+                    observations,
+                ));
+            }
+        }
+    }
+
+    let summary = write_colmap_reconstruction_for_3dgs(
+        &args.out_colmap,
+        &args.camera,
+        &poses_out,
+        &features_out,
+        &landmarks_out,
+        |index| names_out[index].clone(),
+    )?;
+    let mut seam_csv = String::from(
+        "source_submap,target_submap,shared_matches,sim3_inliers,sim3_inlier_ratio,mean_residual_ratio,rotation_candidates,rotation_consensus,rotation_support,rotation_max_disagreement_deg,shared_camera_centres,camera_sim3_inliers,camera_sim3_inlier_ratio,camera_mean_residual_ratio,camera_landmark_log_scale_disagreement,camera_landmark_rotation_disagreement_deg,camera_refinement_applied,camera_refinement_rejection,camera_refinement_abs_log_scale_change,camera_refinement_mean_residual_ratio\n",
+    );
+    for seam in &result.atlas.seams {
+        let optional = |value: Option<f64>| value.map(|v| format!("{v:.9}")).unwrap_or_default();
+        seam_csv.push_str(&format!(
+            "{},{},{},{},{:.6},{:.9},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{}\n",
+            seam.source_submap_id,
+            seam.target_submap_id,
+            seam.shared_point_matches,
+            seam.sim3_inliers,
+            seam.sim3_inlier_ratio,
+            seam.mean_residual_ratio,
+            seam.essential_rotation_candidates,
+            seam.essential_rotation_consensus,
+            seam.essential_rotation_support,
+            seam.essential_rotation_max_disagreement_deg,
+            seam.shared_camera_centres,
+            seam.camera_sim3_inliers
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            optional(seam.camera_sim3_inlier_ratio),
+            optional(seam.camera_mean_residual_ratio),
+            optional(seam.camera_landmark_log_scale_disagreement),
+            optional(seam.camera_landmark_rotation_disagreement_deg),
+            seam.camera_refinement_applied,
+            seam.camera_refinement_rejection
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_default(),
+            optional(seam.camera_refinement_abs_log_scale_change),
+            optional(seam.camera_refinement_mean_residual_ratio),
+        ));
+    }
+    std::fs::write(args.out_colmap.join("hierarchical_seams.csv"), seam_csv)?;
+    println!(
+        "hierarchical reconstruction: {} submaps, {} seams, {} / {} unique images registered",
+        result.atlas.hierarchy.nodes().count(),
+        result.atlas.seams.len(),
+        poses_out.len(),
+        features.len()
+    );
+    for (index, window) in result.windows.iter().enumerate() {
+        println!(
+            "  submap {index}: images {:?}, seam_support={}",
+            window.image_range, window.outgoing_seam_support
+        );
+    }
+    println!(
+        "wrote hierarchical COLMAP model to {} ({} images, {} points, {} observations)",
+        args.out_colmap.display(),
+        summary.frame_count,
+        summary.landmark_count,
+        summary.observation_count,
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match parse_args() {
         Ok(a) => a,
@@ -1399,13 +1611,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let t_match = std::time::Instant::now();
-    let pairwise = verify_pairs(
+    let verified_pairs = verify_pairs(
         &features,
         &args.camera,
         &candidates,
         args.match_ratio,
         args.min_matches,
     );
+    let pairwise = verified_pairs
+        .iter()
+        .map(|verified| verified.pairwise.clone())
+        .collect::<Vec<_>>();
+    let pair_rotations = verified_pairs
+        .iter()
+        .map(|verified| PairRotationEvidence {
+            image_i: verified.pairwise.image_i as u64,
+            image_j: verified.pairwise.image_j as u64,
+            image_j_from_i: verified.image_j_from_i,
+            inlier_count: verified.pairwise.matches.len(),
+        })
+        .collect::<Vec<_>>();
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
     println!(
         "verified {} / {} pairs, {} inlier correspondences [match {:.1}s]",
@@ -1423,13 +1648,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.pose_graph_stride,
     );
     let t_pose_graph_match = std::time::Instant::now();
-    let pose_graph_pairwise = verify_pairs(
+    let pose_graph_verified = verify_pairs(
         &features,
         &args.camera,
         &pose_graph_candidates,
         args.match_ratio,
         args.min_matches,
     );
+    let pose_graph_pairwise = pose_graph_verified
+        .iter()
+        .map(|verified| verified.pairwise.clone())
+        .collect::<Vec<_>>();
     if !pose_graph_candidates.is_empty() {
         println!(
             "pose-only graph: verified {} / {} candidates at offsets {:?} stride={} [match {:.1}s]",
@@ -1465,6 +1694,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // not forward video. See `docs/sfm_vs_colmap_benchmark.md`.
         ..IncrementalSfmConfig::default()
     };
+    if args.hierarchical {
+        if args.refine_intrinsics {
+            return Err(
+                "--hierarchical currently requires fixed shared intrinsics; omit --refine-intrinsics"
+                    .into(),
+            );
+        }
+        if args.wide_hypothesis || args.pose_guided_track_augmentation {
+            return Err(
+                "--hierarchical does not yet compose the trusted/wide transaction; omit --wide-hypothesis and --pose-guided-track-augmentation"
+                    .into(),
+            );
+        }
+        let mut hierarchical_config = HierarchicalSfmConfig::default();
+        hierarchical_config.partition.min_images = args.submap_min_images;
+        hierarchical_config.partition.target_images = args.submap_target_images;
+        hierarchical_config.partition.max_images = args.submap_max_images;
+        hierarchical_config.partition.overlap_images = args.submap_overlap_images;
+        hierarchical_config.partition.boundary_search_radius = args.submap_boundary_search_radius;
+        hierarchical_config
+            .overlap
+            .min_shared_observations_per_landmark = args.submap_min_shared_observations;
+        hierarchical_config.max_parallel_local_builds = args.submap_build_threads;
+        if args.submap_camera_scale_refinement {
+            hierarchical_config.camera_centre_refinement =
+                Some(CameraCentreScaleRefinementConfig::default());
+        }
+        hierarchical_config.local_submap.sfm = config.clone();
+        let source_frame_ids = (0..features.len())
+            .map(|index| index as u64)
+            .collect::<Vec<_>>();
+        let partition_hints = AdaptiveSubmapPartitionHints::default();
+        let planned_windows = partition_ordered_submaps(
+            features.len(),
+            &pairwise,
+            &hierarchical_config.partition,
+            &partition_hints,
+        )?;
+        println!("hierarchical plan: {} submaps", planned_windows.len());
+        for (index, window) in planned_windows.iter().enumerate() {
+            println!(
+                "  planned submap {index}: images {:?}, seam_support={}",
+                window.image_range, window.outgoing_seam_support
+            );
+        }
+        let started = std::time::Instant::now();
+        let result = hierarchical_sfm(
+            &args.camera,
+            &source_frame_ids,
+            &features,
+            &pairwise,
+            &pair_rotations,
+            &partition_hints,
+            &hierarchical_config,
+        )?;
+        println!(
+            "hierarchical SfM completed in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        export_hierarchical_result(&args, &features, &image_names, &result)?;
+        return Ok(());
+    }
     let t_sfm = std::time::Instant::now();
     let mut result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
     if args.wide_hypothesis && !pose_graph_pairwise.is_empty() {

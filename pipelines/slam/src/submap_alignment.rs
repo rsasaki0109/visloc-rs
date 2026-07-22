@@ -98,6 +98,52 @@ pub enum VerifiedSubmapConstraint {
     Sim3(SubmapSim3Constraint),
 }
 
+/// Guarded post-R2 refinement using camera centres shared by overlapping
+/// independently reconstructed submaps. Rotation remains fixed to the
+/// landmark+essential verified value; only scale and translation are proposed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraCentreScaleRefinementConfig {
+    pub min_camera_centres: usize,
+    pub max_abs_log_scale_change: f64,
+    pub max_mean_camera_residual_ratio: f64,
+    /// Candidate landmark mean may grow only by this factor and must still pass
+    /// the original absolute R2 gate.
+    pub max_landmark_mean_increase_ratio: f64,
+}
+
+impl Default for CameraCentreScaleRefinementConfig {
+    fn default() -> Self {
+        Self {
+            min_camera_centres: 12,
+            max_abs_log_scale_change: 0.1,
+            max_mean_camera_residual_ratio: 0.03,
+            max_landmark_mean_increase_ratio: 1.02,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraCentreScaleRefinementRejection {
+    TooFewCameraCentres,
+    DegenerateCameraMotion,
+    InvalidScale,
+    ScaleChangeTooLarge,
+    HighCameraResidual,
+    TooFewLandmarkInliers,
+    LowLandmarkInlierRatio,
+    HighLandmarkResidual,
+    LandmarkResidualWorsened,
+    UnstableLeaveOneOutScale,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraCentreScaleRefinementResult {
+    pub constraint: SubmapSim3Constraint,
+    pub camera_centre_count: usize,
+    pub mean_camera_residual_ratio: f64,
+    pub abs_log_scale_change: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmapSim3RejectionReason {
     TooFewCorrespondences,
@@ -382,6 +428,158 @@ pub fn estimate_submap_sim3_constraint(
     })
 }
 
+/// Refine an already verified landmark constraint with a fixed-rotation
+/// scale/translation fit to shared camera centres. The candidate is returned
+/// only after the original landmark inlier/residual gates and an independent
+/// leave-one-camera-out scale-stability check pass again.
+pub fn refine_submap_sim3_from_camera_centres(
+    verified: &SubmapSim3Constraint,
+    landmark_matches: &[SubmapPointMatch],
+    camera_matches: &[SubmapPointMatch],
+    alignment: &SubmapSim3AlignmentConfig,
+    config: &CameraCentreScaleRefinementConfig,
+) -> Result<CameraCentreScaleRefinementResult, CameraCentreScaleRefinementRejection> {
+    if camera_matches.len() < config.min_camera_centres.max(3) {
+        return Err(CameraCentreScaleRefinementRejection::TooFewCameraCentres);
+    }
+    let rotation = verified.target_from_source.rotation;
+    let (scale, translation) = fit_scale_translation_fixed_rotation(camera_matches, &rotation)
+        .ok_or(CameraCentreScaleRefinementRejection::DegenerateCameraMotion)?;
+    if !valid_scale(scale, alignment) {
+        return Err(CameraCentreScaleRefinementRejection::InvalidScale);
+    }
+    let abs_log_scale_change = (scale / verified.target_from_source.scale).ln().abs();
+    if abs_log_scale_change > config.max_abs_log_scale_change {
+        return Err(CameraCentreScaleRefinementRejection::ScaleChangeTooLarge);
+    }
+    let candidate = Sim3::new(rotation, translation, scale);
+    let camera_target = camera_matches
+        .iter()
+        .map(|point_match| point_match.target_point)
+        .collect::<Vec<_>>();
+    let camera_scene_scale = median_pairwise_distance(&camera_target);
+    if !camera_scene_scale.is_finite() || camera_scene_scale <= 1.0e-12 {
+        return Err(CameraCentreScaleRefinementRejection::DegenerateCameraMotion);
+    }
+    let mean_camera_residual_ratio = camera_matches
+        .iter()
+        .map(|point_match| {
+            (candidate.transform_point(&point_match.source_point) - point_match.target_point).norm()
+        })
+        .sum::<f64>()
+        / camera_matches.len() as f64
+        / camera_scene_scale;
+    if !mean_camera_residual_ratio.is_finite()
+        || mean_camera_residual_ratio > config.max_mean_camera_residual_ratio
+    {
+        return Err(CameraCentreScaleRefinementRejection::HighCameraResidual);
+    }
+
+    let landmark_threshold =
+        (verified.target_scene_scale * alignment.max_inlier_residual_ratio).max(1.0e-9);
+    let inlier_match_indices = landmark_matches
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point_match)| {
+            ((candidate.transform_point(&point_match.source_point) - point_match.target_point)
+                .norm()
+                <= landmark_threshold)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if inlier_match_indices.len() < alignment.min_inliers.max(3) {
+        return Err(CameraCentreScaleRefinementRejection::TooFewLandmarkInliers);
+    }
+    let inlier_ratio = inlier_match_indices.len() as f64 / landmark_matches.len().max(1) as f64;
+    if inlier_ratio < alignment.min_inlier_ratio {
+        return Err(CameraCentreScaleRefinementRejection::LowLandmarkInlierRatio);
+    }
+    let mean_residual_ratio = inlier_match_indices
+        .iter()
+        .map(|&index| {
+            let point_match = &landmark_matches[index];
+            (candidate.transform_point(&point_match.source_point) - point_match.target_point).norm()
+        })
+        .sum::<f64>()
+        / inlier_match_indices.len() as f64
+        / verified.target_scene_scale;
+    if !mean_residual_ratio.is_finite() || mean_residual_ratio > alignment.max_mean_residual_ratio {
+        return Err(CameraCentreScaleRefinementRejection::HighLandmarkResidual);
+    }
+    if mean_residual_ratio
+        > verified.mean_residual_ratio * config.max_landmark_mean_increase_ratio.max(1.0)
+    {
+        return Err(CameraCentreScaleRefinementRejection::LandmarkResidualWorsened);
+    }
+
+    let mut scale_deviations = Vec::with_capacity(camera_matches.len());
+    for omitted in 0..camera_matches.len() {
+        let kept = camera_matches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, point_match)| (index != omitted).then_some(*point_match))
+            .collect::<Vec<_>>();
+        let (leave_one_out_scale, _) = fit_scale_translation_fixed_rotation(&kept, &rotation)
+            .ok_or(CameraCentreScaleRefinementRejection::UnstableLeaveOneOutScale)?;
+        if leave_one_out_scale <= 0.0 || !leave_one_out_scale.is_finite() {
+            return Err(CameraCentreScaleRefinementRejection::UnstableLeaveOneOutScale);
+        }
+        scale_deviations.push((leave_one_out_scale / scale).ln().abs());
+    }
+    let leave_one_out_log_scale_mad = median(scale_deviations)
+        .ok_or(CameraCentreScaleRefinementRejection::UnstableLeaveOneOutScale)?;
+    if leave_one_out_log_scale_mad > alignment.max_leave_one_out_log_scale_mad {
+        return Err(CameraCentreScaleRefinementRejection::UnstableLeaveOneOutScale);
+    }
+
+    Ok(CameraCentreScaleRefinementResult {
+        constraint: SubmapSim3Constraint {
+            source_submap_id: verified.source_submap_id,
+            target_submap_id: verified.target_submap_id,
+            target_from_source: candidate,
+            correspondence_count: landmark_matches.len(),
+            inlier_match_indices,
+            inlier_ratio,
+            mean_residual_ratio,
+            rotation_disagreement_deg: verified.rotation_disagreement_deg,
+            leave_one_out_log_scale_mad,
+            target_scene_scale: verified.target_scene_scale,
+        },
+        camera_centre_count: camera_matches.len(),
+        mean_camera_residual_ratio,
+        abs_log_scale_change,
+    })
+}
+
+fn fit_scale_translation_fixed_rotation(
+    matches: &[SubmapPointMatch],
+    rotation: &UnitQuaternion<f64>,
+) -> Option<(f64, Vector3<f64>)> {
+    if matches.len() < 2 {
+        return None;
+    }
+    let source_mean = matches.iter().fold(Vector3::zeros(), |sum, point_match| {
+        sum + point_match.source_point.coords
+    }) / matches.len() as f64;
+    let target_mean = matches.iter().fold(Vector3::zeros(), |sum, point_match| {
+        sum + point_match.target_point.coords
+    }) / matches.len() as f64;
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for point_match in matches {
+        let source = rotation * (point_match.source_point.coords - source_mean);
+        let target = point_match.target_point.coords - target_mean;
+        numerator += source.dot(&target);
+        denominator += source.norm_squared();
+    }
+    if denominator <= 1.0e-12 {
+        return None;
+    }
+    let scale = numerator / denominator;
+    let translation = target_mean - scale * (rotation * source_mean);
+    Some((scale, translation))
+}
+
 fn valid_scale(scale: f64, config: &SubmapSim3AlignmentConfig) -> bool {
     scale.is_finite() && scale >= config.min_scale && scale <= config.max_scale
 }
@@ -513,6 +711,51 @@ mod tests {
             matches[index].target_point += Vector3::new(4.0 + index as f64, -3.0, 2.0);
         }
         (matches, truth)
+    }
+
+    #[test]
+    fn guarded_camera_centres_refine_scale_with_verified_rotation() {
+        let (landmarks, truth) = fixture();
+        let mut verified = estimate_submap_sim3_constraint(
+            0,
+            1,
+            &landmarks,
+            &truth.rotation,
+            &SubmapSim3AlignmentConfig::default(),
+        )
+        .unwrap();
+        verified.target_from_source.scale *= 1.03;
+        verified.target_from_source.translation += Vector3::new(0.02, -0.01, 0.015);
+        verified.mean_residual_ratio = 0.014;
+        let cameras = (0..20)
+            .map(|index| {
+                let source = Point3::new(
+                    index as f64 * 0.1,
+                    (index as f64 * 0.17).sin() * 0.03,
+                    (index as f64 * 0.11).cos() * 0.02,
+                );
+                SubmapPointMatch {
+                    source_landmark_id: index,
+                    target_landmark_id: index,
+                    source_point: source,
+                    target_point: truth.transform_point(&source),
+                }
+            })
+            .collect::<Vec<_>>();
+        let refined = refine_submap_sim3_from_camera_centres(
+            &verified,
+            &landmarks,
+            &cameras,
+            &SubmapSim3AlignmentConfig::default(),
+            &CameraCentreScaleRefinementConfig::default(),
+        )
+        .unwrap();
+        assert!((refined.constraint.target_from_source.scale - truth.scale).abs() < 1e-12);
+        assert!(
+            (refined.constraint.target_from_source.translation - truth.translation).norm() < 1e-12
+        );
+        assert!(refined.mean_camera_residual_ratio < 1e-12);
+        assert!(refined.abs_log_scale_change > 0.02);
     }
 
     #[test]

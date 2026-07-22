@@ -362,6 +362,34 @@ reject absent independent rotation evidence, and handle a one-submap sequence
 without inventing a scale edge. Real-data frontend/export wiring and the MH_03
 S2 gate remain open.
 
+S2c real-data frontend smoke (2026-07-22):
+`sequential_sfm_demo --hierarchical` now retains each essential-verified pair
+rotation from the existing matching pass, exposes bounded submap partition/build
+controls, runs independent local maps in a capped Rayon pool, and exports a
+unique-image COLMAP atlas plus per-seam diagnostics. On the frozen first 120
+MH_03 frames, a 35-frame window correctly failed `NoSeedPair`; 64-frame windows
+then reconstructed but the unchanged R2 gate rejected 845/1471 = 0.5744. The
+accepted configuration used windows 0..88 and 16..120 (72-frame overlap), at
+least four shared observations per point match, and produced 120/120 registered,
+3658 points, 39058 observations. Its seam passed with 676/946 = 0.7146 inliers,
+mean normalized residual 0.014526, and 864/864 essential-rotation consensus.
+
+Two concurrent local builds reduced the same hierarchical run from 294.2 s to
+140.8 s total versus 336.5 s for the frozen dense control: 41.8% of dense wall
+time, satisfying the S2 speed ratio on this smoke. Accuracy does not pass yet:
+Sim(3)-aligned ATE is 1.432 cm versus dense 0.468 cm (both 120/120 registered;
+73 timestamp-associated GT poses). A guarded fixed-rotation camera-centre
+scale/translation proposal was added behind explicit opt-in; it must re-pass
+the original landmark gates, camera residual, scale-change, and leave-one-out
+checks. The real seam rejected it as `HighCameraResidual`, so no correction was
+committed. Artifacts are under
+`E:/visloc_archive/sota_s2_hierarchical_smoke_mh03_120_20260722`.
+
+Verdict: S2 now has a real, transactionally safe frontend and meets its smoke
+speed target, but the accuracy gate remains open. S2c must jointly refine the
+overlap poses/points (and selectively retriangulate/weld seam tracks) before a
+full MH_03 claim; the camera-only degeneracy may not be bypassed or relaxed.
+
 ### S3 — Hard-video robustness
 
 - Add motion/blur/dynamic-region quality scores to edge selection, not to the

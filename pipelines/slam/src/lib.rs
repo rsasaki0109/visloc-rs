@@ -47,13 +47,15 @@ pub use submap_partition::{
 
 pub mod submap_overlap;
 pub use submap_overlap::{
-    collect_submap_overlap_evidence, shared_landmark_point_matches, PairRotationEvidence,
-    SubmapOverlapConfig, SubmapOverlapError, SubmapOverlapEvidence,
+    collect_submap_overlap_evidence, shared_camera_center_matches, shared_landmark_point_matches,
+    PairRotationEvidence, SubmapOverlapConfig, SubmapOverlapError, SubmapOverlapEvidence,
 };
 
 pub mod submap_alignment;
 pub use submap_alignment::{
-    estimate_submap_sim3_constraint, RotationConstraintGeometry, RotationOnlyConstraint,
+    estimate_submap_sim3_constraint, refine_submap_sim3_from_camera_centres,
+    CameraCentreScaleRefinementConfig, CameraCentreScaleRefinementRejection,
+    CameraCentreScaleRefinementResult, RotationConstraintGeometry, RotationOnlyConstraint,
     SubmapPointMatch, SubmapSim3AlignmentConfig, SubmapSim3Constraint, SubmapSim3Rejection,
     SubmapSim3RejectionReason, VerifiedSubmapConstraint,
 };

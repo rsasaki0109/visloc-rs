@@ -190,6 +190,33 @@ pub fn shared_landmark_point_matches(
         .collect()
 }
 
+/// Corresponding camera centres for frames registered independently in both
+/// submaps. They stay separate from landmark matches so trajectory consistency
+/// can be audited without silently changing R2's landmark weighting.
+pub fn shared_camera_center_matches(
+    source: &LocalSubmap,
+    target: &LocalSubmap,
+) -> Vec<SubmapPointMatch> {
+    let target_centres = target
+        .frames
+        .iter()
+        .map(|frame| (frame.source_frame_id, frame.pose.camera_center_world()))
+        .collect::<BTreeMap<_, _>>();
+    source
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            let target_point = target_centres.get(&frame.source_frame_id)?;
+            Some(SubmapPointMatch {
+                source_landmark_id: frame.source_frame_id,
+                target_landmark_id: frame.source_frame_id,
+                source_point: frame.pose.camera_center_world(),
+                target_point: *target_point,
+            })
+        })
+        .collect()
+}
+
 fn update_best(best: &mut BTreeMap<u64, (u64, usize)>, key: u64, candidate: u64, count: usize) {
     let replace = best.get(&key).is_none_or(|&(current, current_count)| {
         count > current_count || (count == current_count && candidate < current)
@@ -461,5 +488,33 @@ mod tests {
                 found: 1
             }
         );
+    }
+
+    #[test]
+    fn shared_camera_centres_keep_source_frame_identity() {
+        let source = submap(
+            vec![LocalSubmapFrame {
+                local_frame_index: 0,
+                source_frame_id: 7,
+                pose: Pose::identity(),
+            }],
+            Vec::new(),
+        );
+        let target = submap(
+            vec![LocalSubmapFrame {
+                local_frame_index: 0,
+                source_frame_id: 7,
+                pose: Pose::from_world_to_camera(
+                    UnitQuaternion::identity(),
+                    Vector3::new(-1.0, 0.0, 0.0),
+                ),
+            }],
+            Vec::new(),
+        );
+        let matches = shared_camera_center_matches(&source, &target);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source_landmark_id, 7);
+        assert_eq!(matches[0].source_point, Point3::origin());
+        assert_eq!(matches[0].target_point, Point3::new(1.0, 0.0, 0.0));
     }
 }
