@@ -1,0 +1,21 @@
+inherit: "config/base.yaml"
+
+# Frozen V1 probe configuration. Each 33-frame side is reconstructed in an
+# independent process and every input frame is retained as a keyframe so the
+# loop anchor has an optimized canonical pointmap.
+use_calib: true
+single_thread: true
+keyframe_buffer: 40
+
+dataset:
+  subsample: 1
+  img_downsample: 1
+  center_principle_point: false
+
+tracking:
+  # Fractions are at most one, so this deliberately retains every accepted
+  # frame. This is a local-submap measurement probe, not a runtime baseline.
+  match_frac_thresh: 1.01
+
+local_opt:
+  window_size: 1000000

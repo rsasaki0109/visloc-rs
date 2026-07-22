@@ -265,6 +265,28 @@ a genuinely jointly optimized dense submap representation (MASt3R-SLAM-style)
 whose poses and geometry share one objective, followed by the same independent
 cross-submap test.
 
+R1e MASt3R-SLAM preparation (2026-07-22): the official `windows` branch is
+pinned at revision `6717231a`, as recommended upstream for WSL. The host has
+WSL2 Ubuntu 22.04 and a GTX 1660 Ti with 6 GiB VRAM. The official default
+512-keyframe CUDA buffer alone is approximately 4.4 GiB at a 512x384 input, so
+it cannot coexist safely with the ViT-L model on this GPU. The reproducible
+probe therefore fixes two independent 33-frame processes, a 40-keyframe buffer,
+and retention of every accepted frame as a keyframe; this is a scale-source
+probe, not a runtime baseline. `scripts/export_mast3r_slam_submap_anchor_points.py`
+prepares the old/new windows separately, invokes the two processes, extracts
+only each central anchor's jointly maintained canonical pointmap, and records
+source/config/output SHA-256 hashes. The exact minimal upstream patch is
+`scripts/patches/mast3r_slam_windows_6717231_submap_export.patch`; the frozen
+configuration is `scripts/configs/mast3r_slam_v1_calib.yaml`. Apply the
+zero-context patch with `git apply --unidiff-zero <patch>`. Patch reversal,
+Python static checks, and synthetic pointmap-coordinate extraction pass.
+
+The real R1e gate has not run yet. Ubuntu currently has neither the requested
+Python 3.11 environment nor CUDA `nvcc`; installing and compiling the official
+backend is deferred until the already-running frozen S1/S2 timing controls are
+finished, so their resource measurements are not contaminated. No MASt3R-SLAM
+measurement, R2 edge, or backend writeback is claimed from this preparation.
+
 ### R3 — Sparse hierarchical optimization
 
 - Replace dense whole-history Sim(3) solving with a sparse submap graph.

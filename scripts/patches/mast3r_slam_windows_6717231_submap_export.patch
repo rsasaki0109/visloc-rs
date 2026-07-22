@@ -1,0 +1,71 @@
+diff --git a/main.py b/main.py
+index 7004a4c..536a31a 100644
+--- a/main.py
++++ b/main.py
+@@ -147,0 +148,3 @@ if __name__ == "__main__":
++    parser.add_argument("--export-state", default="")
++    parser.add_argument("--export-frame-id", action="append", type=int)
++    parser.add_argument("--no-save-results", action="store_true")
+@@ -160,0 +164,2 @@ if __name__ == "__main__":
++    if args.no_save_results:
++        dataset.save_results = False
+@@ -175 +180,3 @@ if __name__ == "__main__":
+-    keyframes = SharedKeyframes(manager, h, w)
++    keyframes = SharedKeyframes(
++        manager, h, w, buffer=int(config.get("keyframe_buffer", 512))
++    )
+@@ -302,0 +310,2 @@ if __name__ == "__main__":
++    if args.export_state:
++        eval.save_state_npz(args.export_state, keyframes, args.export_frame_id)
+diff --git a/mast3r_slam/evaluate.py b/mast3r_slam/evaluate.py
+index c5605b1..3bb02d7 100644
+--- a/mast3r_slam/evaluate.py
++++ b/mast3r_slam/evaluate.py
+@@ -87,0 +88,47 @@ def save_keyframes(savedir, timestamps, keyframes: SharedKeyframes):
++def save_state_npz(filename, keyframes: SharedKeyframes, selected_frame_ids=None):
++    """Export optimized poses and selected canonical pointmaps for auditing."""
++    selected = None if selected_frame_ids is None else set(selected_frame_ids)
++    frame_ids = []
++    sim3_data = []
++    pointmap_frame_ids = []
++    pointmaps = []
++    confidences = []
++    image_shapes = []
++    for i in range(len(keyframes)):
++        keyframe = keyframes[i]
++        frame_ids.append(keyframe.frame_id)
++        sim3_data.append(keyframe.T_WC.data.detach().cpu().numpy().reshape(-1))
++        if selected is not None and keyframe.frame_id not in selected:
++            continue
++        X_canon = keyframe.X_canon
++        if config["use_calib"]:
++            X_canon = constrain_points_to_ray(
++                keyframe.img_shape.flatten()[:2], X_canon[None], keyframe.K
++            ).squeeze(0)
++        pointmap_frame_ids.append(keyframe.frame_id)
++        pointmaps.append(X_canon.detach().cpu().numpy())
++        confidences.append(keyframe.get_average_conf().detach().cpu().numpy())
++        image_shapes.append(keyframe.img_shape.detach().cpu().numpy().reshape(-1))
++
++    if selected is not None and set(pointmap_frame_ids) != selected:
++        missing = sorted(selected - set(pointmap_frame_ids))
++        raise RuntimeError(f"requested export frames were not keyframes: {missing}")
++
++    filename = pathlib.Path(filename)
++    filename.parent.mkdir(exist_ok=True, parents=True)
++    np.savez_compressed(
++        filename,
++        frame_ids=np.asarray(frame_ids, dtype=np.int64),
++        sim3=np.asarray(sim3_data, dtype=np.float32),
++        pointmap_frame_ids=np.asarray(pointmap_frame_ids, dtype=np.int64),
++        pointmaps=np.asarray(pointmaps, dtype=np.float32),
++        confidences=np.asarray(confidences, dtype=np.float32),
++        image_shapes=np.asarray(image_shapes, dtype=np.int64),
++        intrinsics=(
++            keyframes.get_intrinsics().detach().cpu().numpy()
++            if config["use_calib"]
++            else np.empty((0, 0), dtype=np.float32)
++        ),
++    )
++
++
