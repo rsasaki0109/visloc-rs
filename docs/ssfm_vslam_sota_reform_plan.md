@@ -1100,15 +1100,25 @@ time.
 
 ## 7. Immediate next three slices
 
-1. **S1:** rerun the dead MH_03 2700f head-to-head in a fresh archive directory,
-   with process-safe monitoring and complete manifests.
-2. **R1a:** specify and test the local-submap data model, track builder,
-   triangulation quality record, and gauge conventions; reuse existing
-   two-view, track, BA, and Sim(3) primitives before adding dependencies.
-3. **V1a (measured negative):** the 16/24/32-radius MH_01 probe rejected every
-   scale bridge without backend write-back. Proceed to **R1b**: compare a
-   stronger learned geometry initializer against the frozen sparse-SfM result;
-   do not weaken R2's consensus gate.
+1. **S1/S2 terminal evidence:** leave the protected frozen MH_03 2700-frame S1
+   process untouched, validate its complete manifest, accuracy, registration,
+   stage time, and sampled resources at exit, then allow the already-queued
+   clean `03973813` S2 build/run to execute alone. Compare S2 against S1 only
+   after both terminal artifacts pass completeness checks; do not treat the
+   concurrently contaminated S1 wall clock as a pristine headline timing.
+2. **Frozen held-out SSfM:** after S2 exits, allow the queued official archive
+   download and GT-free extraction to finish, then execute the hash-frozen
+   three-sequence serial suite once. Preserve every COLMAP, GLUEMAP, and
+   InstantSfM failure as a DNF cell, verify the deferred-GT transaction and
+   release audit, and keep the SOTA claim false until the independent ORBIT
+   gate and public-release requirements exist.
+3. **R1e then VSLAM:** only after the timing-sensitive S1/S2 controls finish,
+   install the pinned MASt3R-SLAM backend and run the prepared two-process
+   dense-submap gate. Feed a scale edge to R2 only if independent held-out
+   support clears the frozen 0.60 consensus criterion. If it passes, use that
+   independent source (or a visual-only shadow state) for continuous metric
+   coupling before any 11-sequence V4 freeze; if it fails, record the negative
+   and replace the measurement source rather than weakening the gate.
 
 ## 8. Stop rules
 
