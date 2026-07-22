@@ -439,6 +439,14 @@ and the unordered guards. Compare against current COLMAP global/incremental,
 GLUEMAP, and InstantSfM on supported equal hardware. Publish the full registry,
 not just wins.
 
+ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
+the 100-clip protocol and success thresholds, but its Code/Dataset links remain
+the literal placeholder `anon`, and the official supplemental ZIP contains no
+dataset, trajectories, or evaluator. See
+[`orbit_benchmark_protocol.md`](orbit_benchmark_protocol.md). Do not replace
+the missing official release with sample videos or an inferred metric; rerun
+the audit before S4 freeze and preserve the exact released evaluator revision.
+
 ## 5. Visual SLAM campaign
 
 ### V1 — Acceptance-neutral dual-submap scale probe
