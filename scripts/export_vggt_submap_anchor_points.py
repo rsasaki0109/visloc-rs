@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--new-anchor", type=int, default=462)
     parser.add_argument("--offsets", default="-16,-8,0,8,16")
     parser.add_argument("--precision", choices=("fp16", "fp32"), default="fp16")
-    parser.add_argument("--geometry", choices=("depth", "point"), default="depth")
+    parser.add_argument("--geometry", choices=("depth", "point", "camera"), default="depth")
     return parser.parse_args()
 
 
@@ -38,12 +38,20 @@ def load_model(vggt_root: Path, weights: Path, geometry: str):
     sys.path.insert(0, str(vggt_root))
     from vggt.models.vggt import VGGT
 
-    model = VGGT(enable_point=geometry == "point", enable_depth=geometry == "depth", enable_track=False)
+    model = VGGT(
+        enable_point=geometry == "point",
+        enable_depth=geometry == "depth",
+        enable_track=False,
+    )
     wanted = {}
     with safe_open(weights, framework="pt", device="cpu") as archive:
         for key in archive.keys():
-            disabled_heads = ("track_head.", "point_head." if geometry == "depth" else "depth_head.")
-            if not key.startswith(disabled_heads):
+            disabled_heads = ["track_head."]
+            if geometry != "point":
+                disabled_heads.append("point_head.")
+            if geometry != "depth":
+                disabled_heads.append("depth_head.")
+            if not key.startswith(tuple(disabled_heads)):
                 wanted[key] = archive.get_tensor(key)
     missing, unexpected = model.load_state_dict(wanted, strict=False)
     if missing or unexpected:
@@ -94,6 +102,7 @@ def infer_side(
     output: Path,
     precision: str,
     geometry: str,
+    arrivals: list[int],
 ) -> None:
     from vggt.utils.load_fn import load_and_preprocess_images
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -113,7 +122,7 @@ def infer_side(
             geometry_map, confidence = model.depth_head(
                 tokens, images=images[None], patch_start_idx=patch_start
             )
-        else:
+        elif geometry == "point":
             geometry_map, confidence = model.point_head(
                 tokens, images=images[None], patch_start_idx=patch_start
             )
@@ -123,6 +132,24 @@ def infer_side(
         flush=True,
     )
     extrinsics, intrinsics = pose_encoding_to_extri_intri(pose_enc.float(), (height, width))
+    if geometry == "camera":
+        extrinsics_np = extrinsics[0].float().cpu().numpy()
+        anchor_extrinsic = extrinsics_np[anchor_slot]
+        with output.open("w", encoding="utf-8") as handle:
+            handle.write("# ARRIVAL X Y Z CONFIDENCE\n")
+            for arrival, extrinsic in zip(arrivals, extrinsics_np):
+                center = -(extrinsic[:, :3].T @ extrinsic[:, 3])
+                center = anchor_extrinsic[:, :3] @ center + anchor_extrinsic[:, 3]
+                handle.write(
+                    f"{arrival} {float(center[0]):.9g} {float(center[1]):.9g} "
+                    f"{float(center[2]):.9g} 1\n"
+                )
+        print(
+            f"output={output} views={len(image_paths)} geometry=camera "
+            f"peak_vram_mib={torch.cuda.max_memory_allocated() / 1048576:.1f}",
+            flush=True,
+        )
+        return
     geometry_map = geometry_map[0, anchor_slot].float().cpu().numpy()
     confidence = confidence[0, anchor_slot].float().cpu().numpy()
     intrinsic = intrinsics[0, anchor_slot].float().cpu().numpy()
@@ -188,9 +215,11 @@ def main() -> int:
             paths,
             offsets.index(0),
             descriptor_keypoints(args.descriptor_dump, anchor),
-            args.out_dir / f"{side}_anchor_points.txt",
+            args.out_dir
+            / (f"{side}_camera_centers.txt" if args.geometry == "camera" else f"{side}_anchor_points.txt"),
             args.precision,
             args.geometry,
+            arrivals,
         )
     return 0
 

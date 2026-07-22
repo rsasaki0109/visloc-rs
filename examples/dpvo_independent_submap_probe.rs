@@ -26,6 +26,8 @@ struct Args {
     lightglue_dir: Option<PathBuf>,
     vggt_old_points: Option<PathBuf>,
     vggt_new_points: Option<PathBuf>,
+    learned_old_cameras: Option<PathBuf>,
+    learned_new_cameras: Option<PathBuf>,
     old_anchor: u64,
     new_anchor: u64,
     radius: u64,
@@ -45,6 +47,8 @@ impl Default for Args {
             lightglue_dir: None,
             vggt_old_points: None,
             vggt_new_points: None,
+            learned_old_cameras: None,
+            learned_new_cameras: None,
             old_anchor: 38,
             new_anchor: 462,
             radius: 16,
@@ -80,6 +84,8 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--vggt-new-points" | "--learned-new-points" => {
                 args.vggt_new_points = Some(PathBuf::from(value))
             }
+            "--learned-old-cameras" => args.learned_old_cameras = Some(PathBuf::from(value)),
+            "--learned-new-cameras" => args.learned_new_cameras = Some(PathBuf::from(value)),
             "--old-anchor" => args.old_anchor = value.parse()?,
             "--new-anchor" => args.new_anchor = value.parse()?,
             "--radius" => args.radius = value.parse()?,
@@ -100,6 +106,11 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     }
     if args.vggt_old_points.is_some() != args.vggt_new_points.is_some() {
         return Err("--vggt-old-points and --vggt-new-points must be supplied together".into());
+    }
+    if args.learned_old_cameras.is_some() != args.learned_new_cameras.is_some() {
+        return Err(
+            "--learned-old-cameras and --learned-new-cameras must be supplied together".into(),
+        );
     }
     Ok(args)
 }
@@ -222,12 +233,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         anchor_verification.inlier_matches.len()
     );
 
+    if let (Some(old_path), Some(new_path)) = (
+        args.learned_old_cameras.as_deref(),
+        args.learned_new_cameras.as_deref(),
+    ) {
+        measure_camera_center_scale_transfer(
+            &old_submap,
+            &new_submap,
+            args.old_anchor,
+            args.new_anchor,
+            &load_anchor_points(old_path)?,
+            &load_anchor_points(new_path)?,
+        );
+    }
+
     let (point_matches, target_from_source_rotation) = if let (Some(old_path), Some(new_path)) = (
         args.vggt_old_points.as_deref(),
         args.vggt_new_points.as_deref(),
     ) {
         let old_points = load_anchor_points(old_path)?;
         let new_points = load_anchor_points(new_path)?;
+        measure_same_side_scale_transfer(
+            &old_submap,
+            &new_submap,
+            args.old_anchor,
+            args.new_anchor,
+            &old_points,
+            &new_points,
+        );
         let matches = indexed_anchor_point_matches(
             &old_points,
             &new_points,
@@ -571,6 +604,175 @@ fn indexed_anchor_point_matches(
             })
         })
         .collect()
+}
+
+fn same_side_point_matches(
+    submap: &LocalSubmap,
+    anchor: u64,
+    learned_points: &HashMap<usize, Point3<f64>>,
+) -> Vec<SubmapPointMatch> {
+    let mut used_keypoints = HashSet::new();
+    let mut matches = Vec::new();
+    for landmark in &submap.landmarks {
+        let Some(observation) = landmark
+            .observations
+            .iter()
+            .find(|observation| observation.source_frame_id == anchor)
+        else {
+            continue;
+        };
+        let Some(&learned_point) = learned_points.get(&observation.keypoint_index) else {
+            continue;
+        };
+        if !used_keypoints.insert(observation.keypoint_index) {
+            continue;
+        }
+        matches.push(SubmapPointMatch {
+            source_landmark_id: landmark.local_landmark_id,
+            target_landmark_id: observation.keypoint_index as u64,
+            source_point: landmark.position,
+            target_point: learned_point,
+        });
+    }
+    matches
+}
+
+fn measure_same_side_scale_transfer(
+    old_submap: &LocalSubmap,
+    new_submap: &LocalSubmap,
+    old_anchor: u64,
+    new_anchor: u64,
+    old_points: &HashMap<usize, Point3<f64>>,
+    new_points: &HashMap<usize, Point3<f64>>,
+) {
+    let old_matches = same_side_point_matches(old_submap, old_anchor, old_points);
+    let new_matches = same_side_point_matches(new_submap, new_anchor, new_points);
+    let old_pose = submap_pose(old_submap, old_anchor);
+    let new_pose = submap_pose(new_submap, new_anchor);
+    let old_result = old_pose.and_then(|pose| {
+        estimate_submap_sim3_constraint(
+            0,
+            10,
+            &old_matches,
+            &pose.world_to_camera.rotation,
+            &SubmapSim3AlignmentConfig::default(),
+        )
+        .map_err(|error| format!("{error:?}").into())
+    });
+    let new_result = new_pose.and_then(|pose| {
+        estimate_submap_sim3_constraint(
+            1,
+            11,
+            &new_matches,
+            &pose.world_to_camera.rotation,
+            &SubmapSim3AlignmentConfig::default(),
+        )
+        .map_err(|error| format!("{error:?}").into())
+    });
+
+    match (&old_result, &new_result) {
+        (Ok(old), Ok(new)) => println!(
+            "same_side_scale_transfer_status=pass old_matches={} old_inliers={} old_metric_per_local={:.9} new_matches={} new_inliers={} new_metric_per_local={:.9} new_from_old_scale={:.9}",
+            old_matches.len(),
+            old.inlier_match_indices.len(),
+            old.target_from_source.scale,
+            new_matches.len(),
+            new.inlier_match_indices.len(),
+            new.target_from_source.scale,
+            old.target_from_source.scale / new.target_from_source.scale,
+        ),
+        _ => println!(
+            "same_side_scale_transfer_status=rejected old_matches={} old_result={:?} new_matches={} new_result={:?}",
+            old_matches.len(),
+            old_result,
+            new_matches.len(),
+            new_result,
+        ),
+    }
+}
+
+fn camera_center_matches(
+    submap: &LocalSubmap,
+    anchor: u64,
+    learned_centers: &HashMap<usize, Point3<f64>>,
+) -> Result<Vec<SubmapPointMatch>, Box<dyn Error>> {
+    let anchor_pose = submap_pose(submap, anchor)?;
+    let mut matches = Vec::new();
+    for frame in &submap.frames {
+        let Some(&target_point) = learned_centers.get(&(frame.source_frame_id as usize)) else {
+            continue;
+        };
+        matches.push(SubmapPointMatch {
+            source_landmark_id: frame.source_frame_id,
+            target_landmark_id: frame.source_frame_id,
+            source_point: anchor_pose.transform_world_point(&frame.pose.camera_center_world()),
+            target_point,
+        });
+    }
+    Ok(matches)
+}
+
+fn measure_camera_center_scale_transfer(
+    old_submap: &LocalSubmap,
+    new_submap: &LocalSubmap,
+    old_anchor: u64,
+    new_anchor: u64,
+    old_centers: &HashMap<usize, Point3<f64>>,
+    new_centers: &HashMap<usize, Point3<f64>>,
+) {
+    let old_matches = camera_center_matches(old_submap, old_anchor, old_centers);
+    let new_matches = camera_center_matches(new_submap, new_anchor, new_centers);
+    let identity = UnitQuaternion::identity();
+    let old_result = old_matches
+        .as_ref()
+        .map_err(|error| error.to_string())
+        .and_then(|matches| {
+            estimate_submap_sim3_constraint(
+                0,
+                20,
+                matches,
+                &identity,
+                &SubmapSim3AlignmentConfig::default(),
+            )
+            .map_err(|error| format!("{error:?}"))
+        });
+    let new_result = new_matches
+        .as_ref()
+        .map_err(|error| error.to_string())
+        .and_then(|matches| {
+            estimate_submap_sim3_constraint(
+                1,
+                21,
+                matches,
+                &identity,
+                &SubmapSim3AlignmentConfig::default(),
+            )
+            .map_err(|error| format!("{error:?}"))
+        });
+    let old_count = old_matches
+        .as_ref()
+        .map(|matches| matches.len())
+        .unwrap_or(0);
+    let new_count = new_matches
+        .as_ref()
+        .map(|matches| matches.len())
+        .unwrap_or(0);
+    match (&old_result, &new_result) {
+        (Ok(old), Ok(new)) => println!(
+            "camera_center_scale_transfer_status=pass old_matches={} old_inliers={} old_metric_per_local={:.9} new_matches={} new_inliers={} new_metric_per_local={:.9} new_from_old_scale={:.9}",
+            old_count,
+            old.inlier_match_indices.len(),
+            old.target_from_source.scale,
+            new_count,
+            new.inlier_match_indices.len(),
+            new.target_from_source.scale,
+            old.target_from_source.scale / new.target_from_source.scale,
+        ),
+        _ => println!(
+            "camera_center_scale_transfer_status=rejected old_matches={} old_result={:?} new_matches={} new_result={:?}",
+            old_count, old_result, new_count, new_result,
+        ),
+    }
 }
 
 fn load_external_matches(

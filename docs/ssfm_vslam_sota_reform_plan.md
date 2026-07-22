@@ -243,6 +243,28 @@ transfer the two independently estimated gauges; directly joint-inferring the
 loop pair would put both sides in one model-created gauge and is not by itself
 evidence that the tracker/submap scale cliff was measured.
 
+R1d same-side metric scale-transfer result (2026-07-22): the probe now aligns
+each sparse local map to its own learned metric geometry before any cross-loop
+comparison. A scale is printed only if both same-side Sim3 estimates pass the
+unchanged typed gate. MASt3R -8 point maps produced 39/171 = 0.228 old-side
+and 20/153 = 0.131 new-side consensus. VGGT depth produced 28/171 = 0.164 and
+29/153 = 0.190; VGGT point maps produced 34/171 = 0.199 and 27/153 = 0.176.
+All were rejected. A depth-independent VGGT camera-head arm inferred 13 views
+per side in fp32 at 5.22 GiB peak VRAM and expressed both trajectories in their
+own anchor-camera frames. The old target centres were geometrically degenerate;
+the new sparse map registered only 10 of the selected views, below the 12-point
+gate. No gauge ratio was emitted. Artifacts are under
+`E:/visloc_archive/dpvo_a3_20260721/{same_side_scale_transfer_*,vggt_submap_13view_camera_fp32_20260722,camera_center_scale_transfer_vggt13_20260722}`.
+
+Verdict: direct sparse-map-to-metric-prior transfer is closed for these three
+tested geometry products. The sparse local reconstructions are not rigidly
+compatible with either learned depth/point geometry, while the short camera
+trajectory is not a full-Sim3-observable point set. Do not combine their
+minority consensuses or relax the 0.60 gate. Further VSLAM scale work requires
+a genuinely jointly optimized dense submap representation (MASt3R-SLAM-style)
+whose poses and geometry share one objective, followed by the same independent
+cross-submap test.
+
 ### R3 — Sparse hierarchical optimization
 
 - Replace dense whole-history Sim(3) solving with a sparse submap graph.

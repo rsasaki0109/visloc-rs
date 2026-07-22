@@ -1266,6 +1266,19 @@ initializers. A future metric-prior route must estimate each same-side submap
 gauge separately before transferring scale; a joint loop-pair prediction is
 not sufficient evidence of tracker-scale observability.
 
+R1d same-side scale transfer (2026-07-22): aligning each sparse local map to
+its own metric prior did not rescue observability. MASt3R point maps achieved
+old/new consensus 39/171 and 20/153; VGGT depth 28/171 and 29/153; VGGT point
+maps 34/171 and 27/153. Every side failed the frozen 0.60 gate, so no ratio of
+metric-per-local scales was emitted. A separate 13-view VGGT camera-head probe
+(finite fp32, 5.22 GiB peak) avoided depth entirely, but the old learned camera
+centres were degenerate for full Sim3 and the new sparse map supplied only 10
+registered matching cameras. Logs are under
+`E:/visloc_archive/dpvo_a3_20260721/{same_side_scale_transfer_*,camera_center_scale_transfer_vggt13_20260722}`.
+Verdict: sparse-map-to-prior transfer is also closed; the next scale-bearing
+representation must jointly optimize dense geometry and poses within each
+submap before independent cross-submap verification.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:
