@@ -176,6 +176,32 @@ Verification: full `visloc-slam` library suite with `onnx-inference` passes
 448 tests (7 ignored). This is an architectural positive, not an R1/R2 gate
 pass; no constraint is wired to the backend and all defaults remain unchanged.
 
+R1 leave-one-view-out conditioning slice (2026-07-23): the shared
+`LocalSubmapBuilder` now closes item R1.4 rather than treating final all-view
+BA reprojection as independent support. For every observation in every
+three-or-more-view track, it removes that view, rebuilds the landmark from the
+remaining registered views using the mapper's existing parallax, cheirality,
+and anchor-reprojection gates, then tests the rebuilt point against the held-out
+pixel. The quality record exposes attempted/supported counts, support fraction,
+and median held-out reprojection. Fixed policy thresholds emit the distinct
+`InsufficientLeaveOneOutSupport` or `HighLeaveOneOutReprojection` rejection;
+there is still exactly one ordered rejection reason. When BA refines
+intrinsics, this audit now correctly uses the refined camera shared by the
+output poses and tracks. A synthetic clean multi-view reconstruction passes,
+while corrupting one held-out observation reduces support. This is shared R1
+infrastructure for both hierarchical SSfM and VSLAM, not a real EuRoC R1 gate
+pass and not authorization to wire a scale edge.
+
+The bounded VSLAM-consumer gate replayed the frozen MH_01 radius-16 descriptor
+dump around arrivals 38 and 462 with the release binary in 4.569 s wall time
+(33 frames per side, no live/GT state). The old submap supported 3547/3633
+leave-one-out attempts (0.976328; 0.885588 px median held-out reprojection), and
+the new submap supported 4837/5003 (0.966820; 0.895799 px). Both therefore pass
+the new fixed local-conditioning policy. This does **not** overturn the V1a
+negative: only 7/33 independently triangulated cross-submap matches fit one
+Sim3, so R2 again rejected `TooFewInliers` and emitted no scale edge. The slice
+validates the shared R1 audit on real input while preserving the typed R2 stop.
+
 V1a real-data result (2026-07-22):
 `examples/dpvo_independent_submap_probe.rs` now reconstructs two fresh local
 maps directly from the 800-frame MH_01 SuperPoint dump, with no DPVO pose,

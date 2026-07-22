@@ -2873,7 +2873,7 @@ fn parallax_angle_ok(angle: f64, num_obs: usize, config: &IncrementalSfmConfig) 
 /// Triangulate one track from its registered observations: choose the
 /// widest-parallax view pair, DLT-triangulate, and validate cheirality,
 /// parallax, and reprojection in both views.
-fn triangulate_track(
+pub(crate) fn triangulate_track(
     camera: &Camera,
     poses: &[Option<Pose>],
     obs: &[(usize, Point2<f64>)],
@@ -4088,7 +4088,7 @@ fn track_max_parallax(
 
 /// Reprojection error (px) of `point_world` against pixel `px` in a camera.
 /// `None` if the point is behind the camera or projection is degenerate.
-fn reprojection_error_px(
+pub(crate) fn reprojection_error_px(
     camera: &Camera,
     pose: &Pose,
     point_world: &Point3<f64>,

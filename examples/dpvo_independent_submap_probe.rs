@@ -180,6 +180,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             min_median_track_length: 3.0,
             min_median_max_parallax_deg: 2.0,
             max_mean_reprojection_px: 2.0,
+            min_leave_one_out_support_fraction: 0.5,
+            max_median_leave_one_out_reprojection_px: 2.0,
         },
     });
     let old_ids = old_frames
@@ -319,7 +321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn print_submap_quality(side: &str, submap: &LocalSubmap) {
     let quality = submap.quality;
     println!(
-        "{side}_quality registered={}/{} fraction={:.6} landmarks={} observations={} median_track={:.3} median_parallax_deg={:.6} camera_diameter={:.6} mean_reprojection_px={:.6}",
+        "{side}_quality registered={}/{} fraction={:.6} landmarks={} observations={} median_track={:.3} median_parallax_deg={:.6} camera_diameter={:.6} mean_reprojection_px={:.6} loo_supported={}/{} loo_fraction={:.6} loo_median_reprojection_px={:.6}",
         quality.registered_images,
         quality.requested_images,
         quality.registration_fraction,
@@ -329,6 +331,10 @@ fn print_submap_quality(side: &str, submap: &LocalSubmap) {
         quality.median_max_parallax_deg,
         quality.camera_center_diameter,
         quality.mean_reprojection_px,
+        quality.leave_one_out_supported,
+        quality.leave_one_out_attempts,
+        quality.leave_one_out_support_fraction,
+        quality.median_leave_one_out_reprojection_px,
     );
 }
 

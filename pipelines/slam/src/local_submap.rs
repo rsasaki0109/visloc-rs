@@ -31,6 +31,11 @@ pub struct LocalSubmapQualityConfig {
     pub min_median_track_length: f64,
     pub min_median_max_parallax_deg: f64,
     pub max_mean_reprojection_px: f64,
+    /// Minimum fraction of held-out observations explained after rebuilding
+    /// their landmark from the other views in the same track.
+    pub min_leave_one_out_support_fraction: f64,
+    /// Maximum median held-out reprojection error over successful rebuilds.
+    pub max_median_leave_one_out_reprojection_px: f64,
 }
 
 impl Default for LocalSubmapQualityConfig {
@@ -43,6 +48,8 @@ impl Default for LocalSubmapQualityConfig {
             min_median_track_length: 3.0,
             min_median_max_parallax_deg: 2.0,
             max_mean_reprojection_px: 2.0,
+            min_leave_one_out_support_fraction: 0.5,
+            max_median_leave_one_out_reprojection_px: 2.0,
         }
     }
 }
@@ -102,6 +109,13 @@ pub struct LocalSubmapQuality {
     /// Largest distance between reconstructed camera centres in local gauge.
     pub camera_center_diameter: f64,
     pub mean_reprojection_px: f64,
+    /// Number of observations in tracks long enough for leave-one-view-out.
+    pub leave_one_out_attempts: usize,
+    /// Attempts whose remaining views triangulate a point that explains the
+    /// held-out pixel within the mapper's reprojection gate.
+    pub leave_one_out_supported: usize,
+    pub leave_one_out_support_fraction: f64,
+    pub median_leave_one_out_reprojection_px: f64,
 }
 
 /// A reconstruction with no inherited pose/depth state from the live tracker.
@@ -126,6 +140,8 @@ pub enum LocalSubmapRejectionReason {
     ShortTracks,
     LowParallax,
     HighReprojectionError,
+    InsufficientLeaveOneOutSupport,
+    HighLeaveOneOutReprojection,
     NonFiniteGeometry,
 }
 
@@ -233,20 +249,22 @@ impl LocalSubmapBuilder {
     ) -> Result<LocalSubmap, LocalSubmapBuildError> {
         validate_inputs(source_frame_ids, features, pairwise)?;
         let result = incremental_sfm(camera, features, pairwise, &self.config.sfm)?;
+        let camera = result
+            .refined_camera
+            .clone()
+            .unwrap_or_else(|| camera.clone());
         let quality = measure_quality(
             features.len(),
+            &camera,
             &result.poses,
             &result.tracks,
             result.mean_reprojection_px,
+            &self.config.sfm,
         );
         if let Some(reason) = rejection_reason(&quality, &self.config.quality) {
             return Err(LocalSubmapBuildError::QualityRejected { reason, quality });
         }
 
-        let camera = result
-            .refined_camera
-            .clone()
-            .unwrap_or_else(|| camera.clone());
         let frames = result
             .poses
             .iter()
@@ -347,9 +365,11 @@ fn validate_inputs(
 
 fn measure_quality(
     requested_images: usize,
+    camera: &Camera,
     poses: &[Option<Pose>],
     tracks: &[crate::SfmTrack],
     mean_reprojection_px: f64,
+    sfm_config: &IncrementalSfmConfig,
 ) -> LocalSubmapQuality {
     let registered_images = poses.iter().filter(|pose| pose.is_some()).count();
     let registration_fraction = if requested_images == 0 {
@@ -380,6 +400,14 @@ fn measure_quality(
             camera_center_diameter = camera_center_diameter.max((centres[i] - centres[j]).norm());
         }
     }
+    let (leave_one_out_attempts, leave_one_out_supported, leave_one_out_errors) =
+        leave_one_out_support(camera, poses, tracks, sfm_config);
+    let leave_one_out_support_fraction = if leave_one_out_attempts == 0 {
+        0.0
+    } else {
+        leave_one_out_supported as f64 / leave_one_out_attempts as f64
+    };
+    let median_leave_one_out_reprojection_px = median(leave_one_out_errors);
     LocalSubmapQuality {
         requested_images,
         registered_images,
@@ -390,7 +418,52 @@ fn measure_quality(
         median_max_parallax_deg,
         camera_center_diameter,
         mean_reprojection_px,
+        leave_one_out_attempts,
+        leave_one_out_supported,
+        leave_one_out_support_fraction,
+        median_leave_one_out_reprojection_px,
     }
+}
+
+fn leave_one_out_support(
+    camera: &Camera,
+    poses: &[Option<Pose>],
+    tracks: &[crate::SfmTrack],
+    config: &IncrementalSfmConfig,
+) -> (usize, usize, Vec<f64>) {
+    let mut attempts = 0;
+    let mut supported = 0;
+    let mut errors = Vec::new();
+    for track in tracks.iter().filter(|track| track.observations.len() >= 3) {
+        for held_out in 0..track.observations.len() {
+            attempts += 1;
+            let remaining = track
+                .observations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &(image, _, pixel))| {
+                    (index != held_out).then_some((image, pixel))
+                })
+                .collect::<Vec<_>>();
+            let Some(point) = incremental_sfm::triangulate_track(camera, poses, &remaining, config)
+            else {
+                continue;
+            };
+            let (image, _, pixel) = track.observations[held_out];
+            let Some(pose) = poses.get(image).and_then(Option::as_ref) else {
+                continue;
+            };
+            let Some(error) = incremental_sfm::reprojection_error_px(camera, pose, &point, &pixel)
+            else {
+                continue;
+            };
+            errors.push(error);
+            if error <= config.max_reprojection_error_px {
+                supported += 1;
+            }
+        }
+    }
+    (attempts, supported, errors)
 }
 
 fn track_max_parallax_deg(track: &crate::SfmTrack, poses: &[Option<Pose>]) -> Option<f64> {
@@ -436,6 +509,8 @@ fn rejection_reason(
         || !quality.median_max_parallax_deg.is_finite()
         || !quality.camera_center_diameter.is_finite()
         || !quality.mean_reprojection_px.is_finite()
+        || !quality.leave_one_out_support_fraction.is_finite()
+        || !quality.median_leave_one_out_reprojection_px.is_finite()
     {
         return Some(LocalSubmapRejectionReason::NonFiniteGeometry);
     }
@@ -459,6 +534,14 @@ fn rejection_reason(
     }
     if quality.mean_reprojection_px > config.max_mean_reprojection_px {
         return Some(LocalSubmapRejectionReason::HighReprojectionError);
+    }
+    if quality.leave_one_out_support_fraction < config.min_leave_one_out_support_fraction {
+        return Some(LocalSubmapRejectionReason::InsufficientLeaveOneOutSupport);
+    }
+    if quality.median_leave_one_out_reprojection_px
+        > config.max_median_leave_one_out_reprojection_px
+    {
+        return Some(LocalSubmapRejectionReason::HighLeaveOneOutReprojection);
     }
     None
 }
@@ -577,6 +660,8 @@ mod tests {
                 min_median_track_length: 3.0,
                 min_median_max_parallax_deg: 2.0,
                 max_mean_reprojection_px: 0.1,
+                min_leave_one_out_support_fraction: 0.5,
+                max_median_leave_one_out_reprojection_px: 0.1,
             },
         };
         let submap = LocalSubmapBuilder::new(config)
@@ -589,6 +674,9 @@ mod tests {
         assert!(submap.quality.observations >= 180);
         assert!(submap.quality.median_max_parallax_deg >= 2.0);
         assert!(submap.quality.mean_reprojection_px < 0.1);
+        assert!(submap.quality.leave_one_out_attempts >= 180);
+        assert!(submap.quality.leave_one_out_support_fraction >= 0.5);
+        assert!(submap.quality.median_leave_one_out_reprojection_px < 0.1);
         assert_eq!(submap.frames[0].source_frame_id, 100);
         assert!(submap
             .landmarks
@@ -647,10 +735,90 @@ mod tests {
             median_max_parallax_deg: 0.0,
             camera_center_diameter: 0.0,
             mean_reprojection_px: 0.0,
+            leave_one_out_attempts: 0,
+            leave_one_out_supported: 0,
+            leave_one_out_support_fraction: 0.0,
+            median_leave_one_out_reprojection_px: 0.0,
         };
         assert_eq!(
             rejection_reason(&quality, &LocalSubmapQualityConfig::default()),
             Some(LocalSubmapRejectionReason::TooFewRegisteredImages)
         );
+
+        let otherwise_valid = LocalSubmapQuality {
+            requested_images: 4,
+            registered_images: 4,
+            registration_fraction: 1.0,
+            landmarks: 40,
+            observations: 120,
+            median_track_length: 3.0,
+            median_max_parallax_deg: 3.0,
+            camera_center_diameter: 1.0,
+            mean_reprojection_px: 0.5,
+            leave_one_out_attempts: 120,
+            leave_one_out_supported: 48,
+            leave_one_out_support_fraction: 0.4,
+            median_leave_one_out_reprojection_px: 0.5,
+        };
+        assert_eq!(
+            rejection_reason(&otherwise_valid, &LocalSubmapQualityConfig::default()),
+            Some(LocalSubmapRejectionReason::InsufficientLeaveOneOutSupport)
+        );
+        assert_eq!(
+            rejection_reason(
+                &LocalSubmapQuality {
+                    leave_one_out_supported: 120,
+                    leave_one_out_support_fraction: 1.0,
+                    median_leave_one_out_reprojection_px: 2.5,
+                    ..otherwise_valid
+                },
+                &LocalSubmapQualityConfig::default(),
+            ),
+            Some(LocalSubmapRejectionReason::HighLeaveOneOutReprojection)
+        );
+    }
+
+    #[test]
+    fn leave_one_out_support_detects_an_observation_not_explained_by_other_views() {
+        let scene = scene();
+        let point = scene.points[scene.points.len() / 2];
+        let poses = scene.poses.iter().cloned().map(Some).collect::<Vec<_>>();
+        let observations = scene
+            .poses
+            .iter()
+            .enumerate()
+            .map(|(image, pose)| {
+                let pixel = scene
+                    .camera
+                    .project(&pose.transform_world_point(&point))
+                    .expect("scene point projects");
+                (image, 0, pixel)
+            })
+            .collect::<Vec<_>>();
+        let clean = crate::SfmTrack {
+            position: point,
+            observations: observations.clone(),
+        };
+        let config = IncrementalSfmConfig {
+            min_triangulation_angle_deg: 0.1,
+            max_reprojection_error_px: 2.0,
+            ..IncrementalSfmConfig::default()
+        };
+        let (clean_attempts, clean_supported, clean_errors) =
+            leave_one_out_support(&scene.camera, &poses, &[clean], &config);
+        assert_eq!(clean_attempts, observations.len());
+        assert_eq!(clean_supported, clean_attempts);
+        assert!(median(clean_errors) < 1.0e-6);
+
+        let mut corrupted_observations = observations;
+        corrupted_observations[2].2.x += 100.0;
+        let corrupted = crate::SfmTrack {
+            position: point,
+            observations: corrupted_observations,
+        };
+        let (corrupt_attempts, corrupt_supported, _) =
+            leave_one_out_support(&scene.camera, &poses, &[corrupted], &config);
+        assert_eq!(corrupt_attempts, clean_attempts);
+        assert!(corrupt_supported < clean_supported);
     }
 }
