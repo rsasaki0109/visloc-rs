@@ -886,6 +886,39 @@ revisits with real baseline, which retrieval currently never surfaces.
 Run: `E:/visloc_archive/dpvo_a3_20260721/on_800_qf5_2d2d/`, recall JSON
 `.../recall_qf_ab/qf5_2d2d.json`.
 
+Ranking slice A — offline ranking laboratory (2026-07-22): the demo gained
+opt-in `--ll-dump-frame-descriptors <dir>` (bare-`.npy` writer added to
+`dpvo/npz.rs`; per-arrival keypoints+descriptors exactly as the index
+receives them; dump verified byte-identical ATE against the qf5 control) and
+`scripts/eval_dpvo_retrieval_ranking_offline.py` evaluates ranking methods
+offline under the streaming constraint (query j ranks only i <= j-150; vocab
+methods fit only on arrivals < 150). 32 new Python tests (65 total for the
+two harnesses); dump run `.../on_800_qf5_dump/`, results JSON
+`.../ranking_offline/mh01_800_qf5_ranking.json`.
+
+Correction of record: the streaming Rust index is VLAD over 32 words
+(`--ll-vocab-words`), not TF-IDF as earlier blocks loosely said.
+
+Results (MH_01 800f dump, radius 1.0 m, denominator 359 labelled query
+arrivals): mean-pooled cosine and GeM(p=3) both reach recall@1 = 0.989;
+k-means+TF-IDF reaches 0.992 (k=256) and 0.994 (k=1024); the mutual-NN
+oracle is 1.0 on its subsample. For the hard pair (42,456): mutual-NN match
+count is 124 (genuinely matchable), ranks are 72 (mean-pool), 47 (GeM), 119
+(k=256 TF-IDF), 29 (oracle) and **3 (k=1024 TF-IDF)** — inside the current
+top_k=3 cutoff. Conclusion: labelled ranking on this sequence is essentially
+solved by even simple global descriptors offline, so the streaming VLAD-32
+index is badly underperforming its own input data; the >=90% recall gate is
+plausibly reachable with retrieval-side changes alone. Secondary finding:
+near-target candidates rank #1 at query arrivals 457/459/461 but the real
+run queried 453/458 — exact query-arrival choice matters independently of
+ranking.
+
+Next slice (cheapest first): bump `--ll-vocab-words` well above 32 with no
+code changes and A/B recall on the same binary; if VLAD stays weak, port the
+k=1024 bag-of-words+TF-IDF scheme the lab validated. Then re-run
+qf5 + 2d2d-geometry + improved-retrieval and check whether real-baseline
+post-to-pre-hover loops finally reach stage 2 and pass on their merits.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

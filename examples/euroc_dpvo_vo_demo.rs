@@ -243,6 +243,7 @@ use visloc_rs::slam::{
     ImuNoiseModel, ScaleCouplingConfig,
 };
 use visloc_rs::vision::distortion::RadialTangential;
+use visloc_rs::vision::dpvo::npz::write_npy_f32;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
 
@@ -405,6 +406,19 @@ struct CliArgs {
     ll_2d2d_min_coverage_fraction: f64,
     ll_2d2d_max_mean_sampson_error: f64,
     ll_2d2d_umeyama_vs_e_rotation_max_deg: f64,
+    /// A3 ranking-lab offline dump (`docs/visual_slam_sequential_sfm_plan.md`,
+    /// "A3 — Sound long-range loop closure", ranking slice A): when `Some`,
+    /// dumps EVERY frame `--long-loop` ingests (arrival index, keypoint
+    /// count, raw SP keypoints + 256-d descriptors, exactly as
+    /// `crate::dpvo_long_loop::DpvoLongLoopIndex::ingest_frame` receives
+    /// them) as `.npy` files under this directory, for
+    /// `scripts/eval_dpvo_retrieval_ranking_offline.py` to load with numpy —
+    /// no Rust re-run needed to try a new ranking method. Requires
+    /// `--long-loop`. `None` (default): zero extra I/O, zero extra clones
+    /// (`DpvoOdometryConfig::long_loop_dump_enabled` stays `false`), and the
+    /// trajectory/ATE this run produces is byte-for-byte identical to the
+    /// same flags without this one.
+    ll_dump_frame_descriptors: Option<PathBuf>,
     /// Milestone M14 (`docs/dpvo_droid_port_plan.md`): enable the
     /// low-parallax ("hover") freeze (`DpvoOdometryConfig::low_parallax`).
     /// Default off — every prior milestone's behavior unaffected (the
@@ -534,6 +548,7 @@ impl Default for CliArgs {
                 .stage2_max_mean_sampson_error,
             ll_2d2d_umeyama_vs_e_rotation_max_deg: DpvoLongLoopConfig::default()
                 .stage2_umeyama_vs_e_rotation_max_deg,
+            ll_dump_frame_descriptors: None,
             hover_freeze: false,
             // Mirror `DpvoLowParallaxConfig::default()` exactly so omitting
             // these flags reproduces that struct's own defaults.
@@ -710,6 +725,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--ll-2d2d-umeyama-vs-e-rotation-max-deg" => {
                 args.ll_2d2d_umeyama_vs_e_rotation_max_deg = raw.remove(i + 1).parse()?
             }
+            "--ll-dump-frame-descriptors" => {
+                args.ll_dump_frame_descriptors = Some(PathBuf::from(raw.remove(i + 1)))
+            }
             "--hover-freeze" => {
                 args.hover_freeze = true;
                 raw.remove(i);
@@ -752,6 +770,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         raw.remove(i);
     }
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
+    if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
+        return Err("--ll-dump-frame-descriptors requires --long-loop (it dumps exactly what \
+                     the long-loop index ingests)"
+            .into());
+    }
     if args.hover_release_duration_commits > 0 && args.hover_release_start_cap_frames == 0 {
         return Err(
             "--hover-release-start-cap-frames must be positive when gradual release is enabled"
@@ -840,6 +863,55 @@ fn final_pose_of(graph: &DpvoPatchGraph, arrival_index: usize) -> Option<SE3> {
         .iter()
         .find(|f| f.arrival_index == arrival_index)
         .map(|f| f.pose.clone())
+}
+
+/// A3 ranking-lab offline dump (`docs/visual_slam_sequential_sfm_plan.md`,
+/// "A3 — Sound long-range loop closure", ranking slice A): write one
+/// ingested frame's raw SP keypoints + descriptors to `dir` as two bare
+/// `.npy` files (`{arrival:06}_keypoints.npy` shape `(N, 2)`,
+/// `{arrival:06}_descriptors.npy` shape `(N, D)`), exactly as
+/// `crate::dpvo_long_loop::DpvoLongLoopIndex::ingest_frame` received them
+/// (patch-grid coordinates, i.e. already divided by `RES` — see
+/// `DpvoOdometry::long_loop_last_ingested`'s own doc). Returns
+/// `(keypoint_count, descriptor_dim)` for the caller's manifest row. See
+/// `crates/vision/src/dpvo/npz.rs::write_npy_f32`'s own doc for why this is
+/// a bare `.npy` per array rather than a `.npz` (no CRC32 bookkeeping
+/// needed, and `numpy.load(path)` reads a bare `.npy` with zero extra code).
+fn dump_long_loop_frame(
+    dir: &std::path::Path,
+    arrival_index: usize,
+    keypoints: &[Point2<f64>],
+    descriptors: &[Vec<f32>],
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let n = keypoints.len();
+    debug_assert_eq!(
+        n,
+        descriptors.len(),
+        "long-loop index always ingests one descriptor per keypoint"
+    );
+    let descriptor_dim = descriptors.first().map(|d| d.len()).unwrap_or(0);
+
+    let mut keypoint_flat: Vec<f32> = Vec::with_capacity(n * 2);
+    for k in keypoints {
+        keypoint_flat.push(k.x as f32);
+        keypoint_flat.push(k.y as f32);
+    }
+    let keypoints_path = dir.join(format!("{arrival_index:06}_keypoints.npy"));
+    write_npy_f32(&keypoints_path, &[n, 2], &keypoint_flat)?;
+
+    let mut descriptor_flat: Vec<f32> = Vec::with_capacity(n * descriptor_dim);
+    for d in descriptors {
+        // `debug_assert_eq!` below is the honest-failure backstop: every
+        // descriptor a real SuperPoint extraction produces is the SAME
+        // fixed dimension, but this dump must not silently truncate/pad a
+        // ragged row if that assumption is ever violated in release builds.
+        debug_assert_eq!(d.len(), descriptor_dim, "ragged descriptor dimension");
+        descriptor_flat.extend_from_slice(d);
+    }
+    let descriptors_path = dir.join(format!("{arrival_index:06}_descriptors.npy"));
+    write_npy_f32(&descriptors_path, &[n, descriptor_dim], &descriptor_flat)?;
+
+    Ok((n, descriptor_dim))
 }
 
 fn nearest_ground_truth(
@@ -1053,6 +1125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gradual_release_duration_commits: args.hover_release_duration_commits,
             gradual_release_start_cap_frames: args.hover_release_start_cap_frames,
         }),
+        // A3 ranking-lab offline dump: `--ll-dump-frame-descriptors <dir>` is
+        // the actual on/off switch; omitting it leaves this `false` and
+        // `DpvoOdometry::long_loop_last_ingested` stays `None` for the whole
+        // run — zero behavior/perf change even with `--long-loop` itself on.
+        long_loop_dump_enabled: args.ll_dump_frame_descriptors.is_some(),
     };
 
     if args.loop_closure {
@@ -1266,6 +1343,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Milestone M11: same "log only on change" philosophy for the long-range
     // loop mechanism's own accepted-total count.
     let mut prev_ll_accepted_total = 0usize;
+    // A3 ranking-lab offline dump: `--ll-dump-frame-descriptors <dir>`'s own
+    // state. `ll_dump_last_arrival` dedupes against
+    // `DpvoOdometry::long_loop_last_ingested` staying `Some` (unchanged)
+    // across frames where nothing new was ingested; `ll_dump_manifest`
+    // accumulates one `(arrival_index, keypoint_count, descriptor_dim)` row
+    // per actually-dumped frame, written to `manifest.csv` once after the
+    // main loop (see `dump_long_loop_frame`'s own doc for the per-frame
+    // `.npy` file naming).
+    if let Some(dump_dir) = args.ll_dump_frame_descriptors.as_ref() {
+        fs::create_dir_all(dump_dir)?;
+    }
+    let mut ll_dump_last_arrival: Option<usize> = None;
+    let mut ll_dump_manifest: Vec<(usize, usize, usize)> = Vec::new();
     // Milestone M7: track weight/convergence/rollback TRANSITIONS (same
     // "log only on change" philosophy as M5b/M6 above).
     let mut prev_sc_converged = false;
@@ -1311,6 +1401,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let pose = odometry.process_frame(undistorted.view(), timestamp_seconds)?;
+
+        // A3 ranking-lab offline dump: `long_loop_last_ingested` is
+        // overwritten (not accumulated) on every actual ingest inside
+        // `process_frame`, so reading it once right here and deduping on
+        // `arrival_index` captures EVERY ingested frame exactly once,
+        // regardless of whether this particular `process_frame` call itself
+        // committed a frame (a rejected candidate frame leaves the prior
+        // ingest's snapshot in place, which the dedupe correctly skips).
+        if let Some(dump_dir) = args.ll_dump_frame_descriptors.as_ref() {
+            if let Some((arrival_index, keypoints, descriptors)) =
+                odometry.long_loop_last_ingested()
+            {
+                if ll_dump_last_arrival != Some(arrival_index) {
+                    ll_dump_last_arrival = Some(arrival_index);
+                    let (keypoint_count, descriptor_dim) =
+                        dump_long_loop_frame(dump_dir, arrival_index, keypoints, descriptors)?;
+                    ll_dump_manifest.push((arrival_index, keypoint_count, descriptor_dim));
+                }
+            }
+        }
 
         if args.imu {
             let imu_diag = odometry.imu_diagnostics();
@@ -2115,6 +2225,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "wrote {} hover flow-trace entries to {}",
             flow_log.len(),
             csv_path.display()
+        );
+    }
+
+    // A3 ranking-lab offline dump (`docs/visual_slam_sequential_sfm_plan.md`,
+    // "A3 — Sound long-range loop closure", ranking slice A): `manifest.csv`
+    // (arrival index, keypoint count, descriptor dim, the two `.npy`
+    // filenames `dump_long_loop_frame` already wrote per frame) plus a
+    // `README.md` documenting the on-disk format, so
+    // `scripts/eval_dpvo_retrieval_ranking_offline.py` can load everything
+    // with `numpy.load(...)` alone — no framework/Rust re-run needed to try
+    // a new ranking method.
+    if let Some(dump_dir) = args.ll_dump_frame_descriptors.as_ref() {
+        let mut manifest = String::from(
+            "arrival_index,keypoint_count,descriptor_dim,keypoints_file,descriptors_file\n",
+        );
+        for &(arrival_index, keypoint_count, descriptor_dim) in &ll_dump_manifest {
+            manifest.push_str(&format!(
+                "{arrival_index},{keypoint_count},{descriptor_dim},{arrival_index:06}_keypoints.npy,{arrival_index:06}_descriptors.npy\n",
+            ));
+        }
+        let manifest_path = dump_dir.join("manifest.csv");
+        fs::write(&manifest_path, &manifest)?;
+
+        let readme = format!(
+            "# A3 ranking-lab offline frame-descriptor dump\n\n\
+             Written by `examples/euroc_dpvo_vo_demo.rs --ll-dump-frame-descriptors <dir>` \
+             (`docs/visual_slam_sequential_sfm_plan.md`, \"A3 — Sound long-range loop \
+             closure\", ranking slice A). One row per arrival index that \
+             `crate::dpvo_long_loop::DpvoLongLoopIndex::ingest_frame` actually indexed \
+             during this run (i.e. skips frames whose SuperPoint extraction failed or \
+             returned zero keypoints — see that function's own `descriptors.is_empty()` \
+             early return).\n\n\
+             ## Files\n\n\
+             - `manifest.csv`: one row per ingested arrival —\n\
+             \x20 `arrival_index,keypoint_count,descriptor_dim,keypoints_file,descriptors_file`.\n\
+             - `<arrival_index:06>_keypoints.npy`: bare `.npy` (numpy `<f4`, C-order), shape \
+             `(keypoint_count, 2)`, columns `(x, y)` in PATCH-GRID coordinates — the raw \
+             SuperPoint keypoint pixel coordinates already divided by `RES` (this crate's \
+             DPVO downsample stride), the EXACT space `crate::dpvo_patch_ba::DpvoPatch::x`/`y` \
+             and `DpvoLongLoopIndex`'s own internal `keypoints` field live in. NOT full-resolution \
+             image pixels.\n\
+             - `<arrival_index:06>_descriptors.npy`: bare `.npy` (numpy `<f4`, C-order), shape \
+             `(keypoint_count, descriptor_dim)` — row `i` is the SuperPoint descriptor for \
+             keypoint row `i` of the matching `_keypoints.npy` (same ordering, same count).\n\n\
+             ## Loading in Python\n\n\
+             ```python\n\
+             import numpy as np\n\
+             import csv\n\n\
+             manifest = list(csv.DictReader(open(\"manifest.csv\")))\n\
+             row = manifest[0]\n\
+             keypoints = np.load(row[\"keypoints_file\"])      # (N, 2) float32\n\
+             descriptors = np.load(row[\"descriptors_file\"])  # (N, D) float32\n\
+             ```\n\n\
+             ## Why bare `.npy`, not `.npz`\n\n\
+             `crates/vision/src/dpvo/npz.rs` only ever needed to READ `.npz` fixtures before \
+             this dump existed; writing a real `.npz` (ZIP) would require computing correct \
+             per-entry CRC32 values (Python's `zipfile` verifies them on read) for no benefit \
+             over one bare `.npy` per array, which `numpy.load(path)` already reads directly \
+             with zero extra code. See `write_npy_f32`'s own doc in that module for the exact \
+             format (numpy `.npy` v1.0: `\\x93NUMPY` magic, version, header dict, raw \
+             little-endian `<f4` data).\n"
+        );
+        let readme_path = dump_dir.join("README.md");
+        fs::write(&readme_path, &readme)?;
+
+        println!(
+            "wrote {} frame-descriptor dumps ({} manifest rows) to {}",
+            ll_dump_manifest.len(),
+            ll_dump_manifest.len(),
+            dump_dir.display()
         );
     }
 

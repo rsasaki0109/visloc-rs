@@ -106,6 +106,85 @@ const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_DIR_SIGNATURE: u32 = 0x0201_4b50;
 const LOCAL_FILE_SIGNATURE: u32 = 0x0403_4b50;
 
+/// Write a bare `.npy` v1.0 file (`<f4`, C-order) — added for the A3
+/// ranking-lab offline dump (`examples/euroc_dpvo_vo_demo.rs`'s
+/// `--ll-dump-frame-descriptors`, `docs/visual_slam_sequential_sfm_plan.md`'s
+/// "A3 — Sound long-range loop closure" section). Deliberately NOT a `.npz`
+/// (ZIP) writer: numpy's zipfile-based `.npz` reader verifies each entry's
+/// CRC32 on read, and computing/writing a correct CRC32 here would add real
+/// complexity (and, per this module's own doc, a new reason to touch the
+/// hand-rolled ZIP format) for no benefit when a bare `.npy` per array
+/// already loads directly via `numpy.load(path)` with zero extra framework
+/// code on the Python side — this module otherwise only ever needed to
+/// *read* `.npz` (see the module doc), so this is the first writer here.
+///
+/// `shape`'s element product must equal `data.len()`
+/// ([`NpzError::MalformedNpy`] otherwise, not a silent truncation/pad).
+pub fn write_npy_f32(
+    path: impl AsRef<Path>,
+    shape: &[usize],
+    data: &[f32],
+) -> Result<(), NpzError> {
+    let bytes = encode_npy_f32(shape, data)?;
+    fs::write(path.as_ref(), &bytes)
+        .map_err(|error| NpzError::Io(format!("{}: {error}", path.as_ref().display())))
+}
+
+/// Encode `data` (row-major, dtype `<f4`) as a complete `.npy` v1.0 byte
+/// buffer per `numpy.lib.format`'s documented header layout — the exact
+/// inverse of [`parse_npy`]'s `"<f4"` branch, and byte-for-byte the same
+/// padding rule the test-only `build_test_npz` helper below already
+/// reproduces (kept independent rather than sharing code with the test
+/// helper, since that helper also builds the ZIP container this function
+/// deliberately does not).
+fn encode_npy_f32(shape: &[usize], data: &[f32]) -> Result<Vec<u8>, NpzError> {
+    let expected_elements: usize =
+        shape.iter().product::<usize>().max(if shape.is_empty() { 1 } else { 0 });
+    if data.len() != expected_elements {
+        return Err(NpzError::MalformedNpy(format!(
+            "shape {shape:?} implies {expected_elements} elements, got {} data values",
+            data.len()
+        )));
+    }
+    let shape_str = match shape.len() {
+        0 => "()".to_string(),
+        1 => format!("({},)", shape[0]),
+        _ => format!(
+            "({})",
+            shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let header_dict =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
+    // numpy pads the header with spaces + a trailing '\n' so
+    // (magic + version + header_len_field + header) is a multiple of 64
+    // bytes; not load-bearing for numpy's own reader (it only trusts the
+    // length field), but reproduced for fidelity with real `numpy.save`
+    // output.
+    let prefix_len = 6 + 2 + 2; // magic + version + u16 header length field
+    let unpadded_len = header_dict.len() + 1; // +1 for trailing '\n'
+    let total = prefix_len + unpadded_len;
+    let pad = (64 - (total % 64)) % 64;
+    let mut header = header_dict.into_bytes();
+    header.extend(std::iter::repeat_n(b' ', pad));
+    header.push(b'\n');
+
+    let mut npy = Vec::with_capacity(prefix_len + header.len() + data.len() * 4);
+    npy.extend_from_slice(b"\x93NUMPY");
+    npy.push(1); // major version
+    npy.push(0); // minor version
+    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    npy.extend_from_slice(&header);
+    for v in data {
+        npy.extend_from_slice(&v.to_le_bytes());
+    }
+    Ok(npy)
+}
+
 impl NpzArchive {
     /// Read a whole `.npz` file into memory.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NpzError> {
@@ -541,6 +620,71 @@ mod tests {
                 data: vec![1, 2]
             }
         );
+    }
+
+    #[test]
+    fn encode_npy_f32_round_trips_through_parse_npy() {
+        let values = vec![1.5_f32, -2.25, 0.0, 3.0, 4.0, 5.5];
+        let bytes = encode_npy_f32(&[2, 3], &values).expect("encodes");
+        let parsed = parse_npy(&bytes).expect("parses its own output");
+        assert_eq!(
+            parsed,
+            NpyArray::F32 {
+                shape: vec![2, 3],
+                data: values,
+            }
+        );
+    }
+
+    #[test]
+    fn encode_npy_f32_rejects_shape_data_length_mismatch() {
+        let err = encode_npy_f32(&[2, 3], &[1.0, 2.0]).unwrap_err();
+        assert!(matches!(err, NpzError::MalformedNpy(_)));
+    }
+
+    #[test]
+    fn write_npy_f32_round_trips_through_a_real_file() {
+        // Exercises `write_npy_f32`'s actual `fs::write` path (not just the
+        // in-memory `encode_npy_f32` helper it wraps), then reads the file
+        // back with the exact same reader `NpzArchive::read_f32` uses
+        // internally (`parse_npy`) — this is the same code path
+        // `scripts/eval_dpvo_retrieval_ranking_offline.py`'s numpy
+        // `np.load(...)` calls are meant to stand in for on the Python side.
+        let dir = std::env::temp_dir().join(format!(
+            "visloc_npz_write_npy_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("descriptors.npy");
+        let values: Vec<f32> = (0..(4 * 256)).map(|i| i as f32 * 0.001).collect();
+        write_npy_f32(&path, &[4, 256], &values).expect("write succeeds");
+
+        let raw = fs::read(&path).expect("read back the written file");
+        let parsed = parse_npy(&raw).expect("the written file is a well-formed .npy");
+        assert_eq!(
+            parsed,
+            NpyArray::F32 {
+                shape: vec![4, 256],
+                data: values,
+            }
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_npy_f32_reports_io_error_for_an_unwritable_path() {
+        // A directory that does not exist and is never created — `fs::write`
+        // must fail, and that failure must surface as `NpzError::Io`, not a
+        // panic.
+        let bogus = std::env::temp_dir().join(format!(
+            "visloc_npz_write_npy_test_does_not_exist_{}",
+            std::process::id()
+        ));
+        let path = bogus.join("nested").join("descriptors.npy");
+        let err = write_npy_f32(&path, &[1], &[1.0]).unwrap_err();
+        assert!(matches!(err, NpzError::Io(_)));
     }
 
     #[test]

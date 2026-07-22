@@ -619,6 +619,19 @@ pub struct DpvoOdometryConfig {
     /// something), so there is no extra cost and no RNG-call-count change
     /// on any existing call site.
     pub low_parallax: Option<DpvoLowParallaxConfig>,
+    /// A3 ranking-lab offline dump (`docs/visual_slam_sequential_sfm_plan.md`,
+    /// "A3 — Sound long-range loop closure", ranking slice A): when `true`
+    /// AND `long_loop` is `Some`, [`DpvoOdometry::process_frame`] additionally
+    /// clones each ingested frame's raw SuperPoint keypoints+descriptors
+    /// (the EXACT values `crate::dpvo_long_loop::DpvoLongLoopIndex::ingest_frame`
+    /// receives — patch-grid coordinates, i.e. already divided by `RES`) into
+    /// [`DpvoOdometry::long_loop_last_ingested`], for `examples/euroc_dpvo_vo_demo.rs`'s
+    /// `--ll-dump-frame-descriptors` to write to disk. Default `false`: no
+    /// extra clone, no extra memory, and `long_loop_last_ingested` stays
+    /// `None` for the whole run — byte-for-byte the same behavior as every
+    /// milestone before this flag existed, even with `long_loop` itself
+    /// `Some`.
+    pub long_loop_dump_enabled: bool,
 }
 
 /// Milestone M15 (`docs/dpvo_droid_port_plan.md`): which action
@@ -2169,6 +2182,14 @@ pub struct DpvoOdometry {
     /// calls [`LowParallaxDampState::flag`] from the `DepthDamp` branch of
     /// [`Self::low_parallax_gate`].
     low_parallax_damp: LowParallaxDampState,
+
+    /// A3 ranking-lab offline dump: `(arrival_index, keypoints, descriptors)`
+    /// for the MOST RECENTLY ingested long-loop frame, captured only when
+    /// `config.long_loop_dump_enabled` is `true` — see that field's own doc.
+    /// Overwritten on every ingest, never accumulated (the demo reads this
+    /// once per `process_frame` call, right after it returns, and writes it
+    /// to disk itself — see [`DpvoOdometry::long_loop_last_ingested`]).
+    long_loop_last_ingested: Option<(usize, Vec<nalgebra::Point2<f64>>, Vec<Vec<f32>>)>,
 }
 
 /// Milestone M11: the ONNX-runtime-dependent half of the long-range loop
@@ -2347,6 +2368,7 @@ impl DpvoOdometry {
             low_parallax_last_exit_frame: None,
             low_parallax_flow_log: Vec::new(),
             low_parallax_damp: LowParallaxDampState::default(),
+            long_loop_last_ingested: None,
         })
     }
 
@@ -2494,6 +2516,21 @@ impl DpvoOdometry {
             .as_ref()
             .map(|runtime| runtime.index.empty_query_arrivals())
             .unwrap_or(&[])
+    }
+
+    /// A3 ranking-lab offline dump: the most recently ingested long-loop
+    /// frame's `(arrival_index, keypoints, descriptors)` — `None` unless
+    /// `config.long_loop_dump_enabled` is `true` AND at least one frame has
+    /// been ingested since the last call site read this (the demo reads it
+    /// once per `process_frame` call; see `DpvoOdometryConfig::long_loop_dump_enabled`'s
+    /// own doc for exactly what "ingested" means and why this is never
+    /// perturbing the odometry solve itself).
+    pub fn long_loop_last_ingested(&self) -> Option<(usize, &[nalgebra::Point2<f64>], &[Vec<f32>])> {
+        self.long_loop_last_ingested
+            .as_ref()
+            .map(|(arrival, keypoints, descriptors)| {
+                (*arrival, keypoints.as_slice(), descriptors.as_slice())
+            })
     }
 
     /// Snapshot of the Milestone M14 low-parallax hover-freeze state —
@@ -2746,6 +2783,18 @@ impl DpvoOdometry {
                     .iter()
                     .map(|k| nalgebra::Point2::new(k.x / RES as f64, k.y / RES as f64))
                     .collect();
+                // A3 ranking-lab offline dump: clone BEFORE `ingest_frame`
+                // moves both vectors — only when opted in, so every other
+                // run pays zero extra clone/memory cost (see
+                // `DpvoOdometryConfig::long_loop_dump_enabled`'s own doc).
+                // Mirrors `DpvoLongLoopIndex::ingest_frame`'s own
+                // `descriptors.is_empty()` early return: an empty-descriptor
+                // frame is never actually indexed, so it should not be
+                // reported as "ingested" by this dump either.
+                if self.config.long_loop_dump_enabled && !features.descriptors.is_empty() {
+                    self.long_loop_last_ingested =
+                        Some((arrival_index, keypoints.clone(), features.descriptors.clone()));
+                }
                 runtime
                     .index
                     .ingest_frame(arrival_index, keypoints, features.descriptors);
