@@ -1303,6 +1303,37 @@ connected-chain, and honest-rejection tests pass. The graph still uses the
 existing dense-normal-equation Sim3 optimizer internally, so this is the S2/R3
 integration boundary—not a runtime-scaling result.
 
+Sustained-runtime and sparse-index audit (2026-07-23): bounded three-stage
+prefetch plus compact native-CUDA correlation targets reduced the 11-patch,
+lifetime-6 MH_03 2700-frame visual run to 43.77 ms/frame, but its Sim3 ATE was
+still 2.4566 m. The full IMU/proximity/global-BA/Sim3/long-loop stack did not
+repair it: conservative IMU bootstrap rejected every attempt, proximity loops
+were unsafe, and long-loop indexing every frame broke the real-time gate.
+Throttling long-loop extraction to every tenth input restored bounded runtime,
+then exposed a real cadence bug: extraction is scheduled by input attempts,
+whereas queries were scheduled by committed arrival indices. Initial motion
+rejections shifted their phases, so every query consumed its cadence on a
+current frame that had no indexed descriptor. `DpvoLongLoopIndex::due` now
+refuses unindexed current frames without consuming cadence, with a regression
+test.
+
+The corrected MH_03 800-frame mean-pool run issued 18 queries, only 2 empty,
+and surfaced 43 candidates. Independent GT scoring measured recall@1=1.000 at
+both 0.5 m (7/7 issued revisit opportunities) and 1.0 m (8/8), while retaining
+48.64 ms/frame. Fourteen candidates passed calibrated 2D-2D geometry, but all
+failed the symmetric sparse 3D-3D bridge. Acceptance-neutral PnP telemetry now
+runs for every stage-2 pass: only three candidates reached ten old-3D/current-
+2D correspondences, and their inferred scale ratios were 0.273, 1.901, and
+0.960 on an almost stationary revisit. A guarded PnP-writeback probe accepted
+two constraints, but Sim3 rejected every correction as active-reprojection
+worsening and ATE changed 0.3185 -> 0.3225 m; the writeback was reverted.
+Increasing the random patch budget to 16 was also a decisive negative:
+56.38 ms/frame and 0.3875 m ATE at 800 frames. Therefore neither looser bridge
+acceptance nor more sparse patches is the next step. Keep the cadence fix and
+telemetry; pursue an independently conditioned multi-view constraint or fix
+the front-end's long stationary-transition drift without detector-specific
+hover tuning.
+
 ### A4/B5 — Generalization and release candidate (2-4 weeks)
 
 - Freeze one configuration per sensor/dataset family before held-out runs.

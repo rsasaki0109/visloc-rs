@@ -1154,10 +1154,21 @@ impl DpvoLongLoopIndex {
     /// Throttle check — `true` at most once every
     /// [`DpvoLongLoopConfig::query_frequency`] arrival-index units;
     /// mirrors `crate::dpvo_vo`'s own `global_ba_due`-style "always eligible
-    /// on the very first call" semantics. Updates internal state as a side
-    /// effect when due (matching that function's own contract), so this
-    /// should be called at most once per candidate committed frame.
+    /// on the first INDEXED call" semantics. An unindexed current frame can
+    /// never supply a query descriptor, so it returns `false` WITHOUT
+    /// consuming the cadence. This matters when `index_frequency > 1`:
+    /// input attempts and committed arrival indices can have different
+    /// phases after motion-gate rejections. Updates internal state as a side
+    /// effect when due, so this should be called at most once per candidate
+    /// committed frame.
     pub fn due(&mut self, current_arrival: usize) -> bool {
+        if !self
+            .frames
+            .iter()
+            .any(|frame| frame.arrival_index == current_arrival)
+        {
+            return false;
+        }
         let due = match self.last_query_arrival {
             None => true,
             Some(last) => {
@@ -1480,51 +1491,56 @@ impl DpvoLongLoopIndex {
                         break 'stage2;
                     }
 
-                    if diagnostic_stage2_rotation_failure {
-                        let pnp_pairs: Vec<(usize, usize)> = rel
-                            .inliers
-                            .iter()
-                            .map(|&index| {
-                                let descriptor_match = stage2_kept[index];
-                                (descriptor_match.query_index, descriptor_match.train_index)
-                            })
-                            .collect();
-                        let pnp_correspondences = pnp_correspondences_from_old_patches(
-                            &pnp_pairs,
-                            &old_keypoints,
-                            &old_pose,
-                            &old_intr,
-                            &old_patches,
-                            &current_keypoints,
-                            self.config.patch_pixel_radius,
-                        );
-                        outcome.stage2_pnp_correspondences = Some(pnp_correspondences.len());
-                        let pnp = PnPRansac {
-                            iterations: self.config.ransac_iterations,
-                            reprojection_threshold: 1.0,
-                            seed: self.config.ransac_seed,
-                            ..PnPRansac::default()
-                        };
-                        if let Some(report) = pnp.estimate(&pnp_correspondences, &camera) {
-                            let pnp_relative = report
-                                .pose
-                                .world_to_camera
-                                .compose(&old_pose.inverse());
-                            outcome.stage2_pnp_inliers = Some(report.inliers.len());
-                            outcome.stage2_pnp_mean_reprojection_error =
-                                Some(report.mean_reprojection_error);
-                            outcome.stage2_pnp_vs_e_rotation_deg = Some(
-                                pnp_relative.rotation.angle_to(&e_rotation).to_degrees(),
-                            );
-                            let trusted_translation_norm = relative_pose.translation.norm();
-                            let pnp_translation_norm = pnp_relative.translation.norm();
-                            if trusted_translation_norm > 1.0e-9
-                                && trusted_translation_norm.is_finite()
-                                && pnp_translation_norm.is_finite()
-                            {
-                                outcome.stage2_pnp_scale_ratio =
-                                    Some(pnp_translation_norm / trusted_translation_norm);
-                            }
+                    // Measure the independently useful old-3D/current-2D
+                    // bridge for EVERY stage-2 geometry pass, not only the
+                    // low-baseline diagnostic continuation. This is
+                    // acceptance-neutral instrumentation: the existing
+                    // 3D-3D bridge below remains the sole source of a loop
+                    // measurement. It reveals whether sparse DPVO patches
+                    // can support PnP even when requiring a matching patch
+                    // on BOTH frames makes the old bridge empty.
+                    let pnp_pairs: Vec<(usize, usize)> = rel
+                        .inliers
+                        .iter()
+                        .map(|&index| {
+                            let descriptor_match = stage2_kept[index];
+                            (descriptor_match.query_index, descriptor_match.train_index)
+                        })
+                        .collect();
+                    let pnp_correspondences = pnp_correspondences_from_old_patches(
+                        &pnp_pairs,
+                        &old_keypoints,
+                        &old_pose,
+                        &old_intr,
+                        &old_patches,
+                        &current_keypoints,
+                        self.config.patch_pixel_radius,
+                    );
+                    outcome.stage2_pnp_correspondences = Some(pnp_correspondences.len());
+                    let pnp = PnPRansac {
+                        iterations: self.config.ransac_iterations,
+                        reprojection_threshold: 1.0,
+                        seed: self.config.ransac_seed,
+                        ..PnPRansac::default()
+                    };
+                    if let Some(report) = pnp.estimate(&pnp_correspondences, &camera) {
+                        let pnp_relative = report
+                            .pose
+                            .world_to_camera
+                            .compose(&old_pose.inverse());
+                        outcome.stage2_pnp_inliers = Some(report.inliers.len());
+                        outcome.stage2_pnp_mean_reprojection_error =
+                            Some(report.mean_reprojection_error);
+                        outcome.stage2_pnp_vs_e_rotation_deg =
+                            Some(pnp_relative.rotation.angle_to(&e_rotation).to_degrees());
+                        let trusted_translation_norm = relative_pose.translation.norm();
+                        let pnp_translation_norm = pnp_relative.translation.norm();
+                        if trusted_translation_norm > 1.0e-9
+                            && trusted_translation_norm.is_finite()
+                            && pnp_translation_norm.is_finite()
+                        {
+                            outcome.stage2_pnp_scale_ratio =
+                                Some(pnp_translation_norm / trusted_translation_norm);
                         }
                     }
 
@@ -2664,13 +2680,19 @@ mod tests {
     fn due_throttles_by_query_frequency() {
         let cfg = DpvoLongLoopConfig {
             query_frequency: 10,
+            retrieval_scorer: RetrievalScorer::MeanPool,
             ..DpvoLongLoopConfig::default()
         };
         let mut index = DpvoLongLoopIndex::new(cfg);
+        index.ingest_frame(0, vec![], frame_descriptors(0, 20, 16));
         assert!(index.due(0), "first call is always due");
+        index.ingest_frame(5, vec![], frame_descriptors(5, 20, 16));
         assert!(!index.due(5), "too soon");
+        index.ingest_frame(10, vec![], frame_descriptors(10, 20, 16));
         assert!(index.due(10), "exactly the throttle period later");
+        index.ingest_frame(15, vec![], frame_descriptors(15, 20, 16));
         assert!(!index.due(15));
+        index.ingest_frame(25, vec![], frame_descriptors(25, 20, 16));
         assert!(index.due(25));
     }
 
@@ -3315,6 +3337,36 @@ mod tests {
         assert_eq!(diagnostics.queries_issued_total, issued);
         assert_eq!(diagnostics.queries_with_zero_candidates, issued);
         assert_eq!(index.empty_query_arrivals(), &expected_empty_arrivals[..]);
+    }
+
+    #[test]
+    fn sparse_index_queries_only_indexed_arrivals_without_consuming_cadence() {
+        // Regression for the live `index_frequency > 1` failure: extraction
+        // is scheduled from the input-attempt counter while this index sees
+        // committed arrival indices. Bootstrap motion rejection can shift
+        // those two counters, so a nominal query boundary need not itself be
+        // indexed. Such a frame must not consume the cadence; the next
+        // indexed frame that clears the interval must issue the query.
+        let cfg = DpvoLongLoopConfig {
+            retrieval_scorer: RetrievalScorer::MeanPool,
+            query_frequency: 40,
+            index_frequency: 10,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        index.ingest_frame(7, vec![], frame_descriptors(7, 20, 16));
+        assert!(index.due(7), "first indexed arrival is immediately eligible");
+
+        assert!(
+            !index.due(47),
+            "an unindexed nominal boundary cannot supply a query descriptor"
+        );
+        index.ingest_frame(48, vec![], frame_descriptors(48, 20, 16));
+        assert!(
+            index.due(48),
+            "the unindexed arrival must not consume the elapsed cadence"
+        );
+        assert!(!index.due(48), "the indexed arrival consumes cadence once");
     }
 
     // ---- A3 stage 2, first slice: 2D-2D-first loop geometry ----

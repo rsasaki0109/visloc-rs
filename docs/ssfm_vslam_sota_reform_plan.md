@@ -925,6 +925,23 @@ upper bounds (matching the evaluator) so a frozen configuration may select a
 smaller, safer solve such as 64 free poses without weakening the public 256
 maximum.
 
+The apparent sparse-index retrieval failure was then isolated and fixed. The
+index extractor used input-attempt cadence while `due()` consumed committed-
+arrival cadence; bootstrap motion rejection shifted their phases, so every
+query targeted an unindexed current frame. `due()` now returns false for an
+unindexed current arrival without consuming its interval. On the corrected
+MH_03 800-frame run, mean-pool retrieval produced 43 candidates over 18
+queries (2 empty), with independent-GT recall@1=1.000 at both 0.5 m (7/7)
+and 1.0 m (8/8), while total time remained 48.64 ms/frame. Fourteen candidates
+passed the calibrated 2D-2D stage, but every one failed the symmetric sparse
+3D-3D bridge. PnP telemetry is now collected acceptance-neutrally for every
+stage-2 pass. A guarded PnP-writeback experiment accepted two loops, but every
+Sim3 correction was rejected as active-reprojection worsening and ATE moved
+from 0.3185 to 0.3225 m; that writeback was reverted. Raising the visual patch
+budget to 16 was also negative (56.38 ms/frame, 0.3875 m ATE). The retained
+result is therefore a real retrieval/cadence repair and stronger telemetry,
+not a claimed long-horizon accuracy repair.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
