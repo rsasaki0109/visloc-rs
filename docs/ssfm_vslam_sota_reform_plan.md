@@ -413,7 +413,9 @@ and five selective BA iterations.
 
 This satisfies the S2 gate only on the 120-frame development smoke. Full MH_03
 must still confirm peak RAM, every seam RPE, registration/ATE, and <=50% wall
-time without further tuning; seam landmark welding in export also remains open.
+time without further tuning. Export now also welds only R2-inlier local landmark
+groups into one deduplicated multi-view COLMAP track; all unwelded points remain
+submap-owned, so unverified cross-seam observations cannot be merged.
 
 ### S3 — Hard-video robustness
 

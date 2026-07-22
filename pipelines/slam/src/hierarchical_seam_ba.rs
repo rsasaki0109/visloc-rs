@@ -54,6 +54,8 @@ pub struct HierarchicalSeamBaResult {
     pub initial_cost: f64,
     pub final_cost: f64,
     pub iterations: usize,
+    /// R2-verified local landmark identities merged into one BA variable.
+    pub welded_landmark_groups: Vec<Vec<(u64, u64)>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,12 +126,18 @@ pub(crate) fn refine_hierarchical_seams(
     }
     let mut global_id_by_root = BTreeMap::<usize, u64>::new();
     let mut global_landmark_id = BTreeMap::<(u64, u64), u64>::new();
+    let mut members_by_root = BTreeMap::<usize, Vec<(u64, u64)>>::new();
     for (index, &key) in landmark_keys.iter().enumerate() {
         let root = dsu.find(index);
+        members_by_root.entry(root).or_default().push(key);
         let next_id = global_id_by_root.len() as u64;
         let id = *global_id_by_root.entry(root).or_insert(next_id);
         global_landmark_id.insert(key, id);
     }
+    let welded_landmark_groups = members_by_root
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .collect::<Vec<_>>();
 
     let mut pose_initial = BTreeMap::<u64, Pose>::new();
     let mut fixed_poses = BTreeSet::new();
@@ -260,6 +268,7 @@ pub(crate) fn refine_hierarchical_seams(
         initial_cost: result.initial_cost,
         final_cost: result.final_cost,
         iterations: result.iterations.len(),
+        welded_landmark_groups,
     })
 }
 

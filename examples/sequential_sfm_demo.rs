@@ -75,7 +75,7 @@
 //! when registration is not lower, at least 90% of landmarks survive, valid
 //! observations grow by at least 25%, and mean reprojection strictly improves.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -1466,15 +1466,63 @@ fn export_hierarchical_result(
         .map(|&frame_id| image_names[frame_id as usize].clone())
         .collect::<Vec<_>>();
 
-    // S2c will weld/retriangulate seam points. Until then, retain observations
-    // only from the submap that owns each exported image; no keypoint is emitted
-    // into two different COLMAP tracks.
     let mut landmarks_out = Vec::<ExportLandmark>::new();
+    let mut welded_members = BTreeSet::<(u64, u64)>::new();
+    if let Some(seam_ba) = &result.atlas.seam_bundle_adjustment {
+        for group in &seam_ba.welded_landmark_groups {
+            let mut atlas_position = None;
+            let mut observations = BTreeMap::<(u64, usize), Point2<f64>>::new();
+            for &(submap_id, landmark_id) in group {
+                welded_members.insert((submap_id, landmark_id));
+                let node = result
+                    .atlas
+                    .hierarchy
+                    .node(submap_id)
+                    .expect("weld group references retained submap");
+                let landmark = node
+                    .submap
+                    .landmarks
+                    .iter()
+                    .find(|landmark| landmark.local_landmark_id == landmark_id)
+                    .expect("weld group references retained landmark");
+                atlas_position.get_or_insert_with(|| {
+                    node.atlas_from_local()
+                        .expect("successful hierarchy leaves every node aligned")
+                        .transform_point(&landmark.position)
+                });
+                for observation in &landmark.observations {
+                    observations
+                        .entry((observation.source_frame_id, observation.keypoint_index))
+                        .or_insert(observation.pixel);
+                }
+            }
+            let observations = observations
+                .into_iter()
+                .filter_map(|((frame_id, keypoint_index), pixel)| {
+                    remap
+                        .get(&frame_id)
+                        .map(|&image_index| (image_index, keypoint_index, pixel))
+                })
+                .collect::<Vec<_>>();
+            if observations.len() >= 2 {
+                landmarks_out.push((
+                    atlas_position.expect("weld group is non-empty"),
+                    observations,
+                ));
+            }
+        }
+    }
+
+    // Unwelded local points retain only observations owned by their submap; no
+    // unverified cross-seam keypoint can enter two different COLMAP tracks.
     for node in result.atlas.hierarchy.nodes() {
         let atlas_from_local = node
             .atlas_from_local()
             .expect("successful hierarchy leaves every node aligned");
         for landmark in &node.submap.landmarks {
+            if welded_members.contains(&(node.id, landmark.local_landmark_id)) {
+                continue;
+            }
             let observations = landmark
                 .observations
                 .iter()
@@ -1547,11 +1595,12 @@ fn export_hierarchical_result(
     );
     if let Some(ba) = &result.atlas.seam_bundle_adjustment {
         println!(
-            "  seam BA: poses={} (fixed={}) landmarks={} observations={} cost={:.3}->{:.3} iterations={}",
+            "  seam BA: poses={} (fixed={}) landmarks={} observations={} weld_groups={} cost={:.3}->{:.3} iterations={}",
             ba.pose_count,
             ba.fixed_pose_count,
             ba.landmark_count,
             ba.observation_count,
+            ba.welded_landmark_groups.len(),
             ba.initial_cost,
             ba.final_cost,
             ba.iterations,
