@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "protocol_id": "ssfm-external-baselines-v1",
+  "frozen_utc": "2026-07-22T15:01:43.7331242Z",
+  "heldout_protocol": {
+    "path": "benchmarks/protocols/ssfm_heldout_euroc_v1.json",
+    "sha256": "4c7885251c4e5b1424c4322fd12391e338b038707dde2d7b5ad7d52fd57fb57d"
+  },
+  "hardware_policy": {
+    "host_gpu": "NVIDIA GeForce GTX 1660 Ti",
+    "gpu_memory_mib": 6144,
+    "execution_platform": "WSL2 Ubuntu 22.04 on the same physical host",
+    "one_gpu": true,
+    "serial_with_all_other_timed_engines": true,
+    "full_resolution": true,
+    "full_sequence": true,
+    "subsampling": 1,
+    "ground_truth_policy": "Neither external engine may receive or read GT. GT remains unmaterialized until both external cells and all reproduced internal/COLMAP cells have exited."
+  },
+  "engines": {
+    "gluemap": {
+      "official_repository": "https://github.com/colmap/gluemap.git",
+      "revision": "adc9e4bb5f41014d3f7c157a879edc278588c829",
+      "revision_discovery": "git ls-remote <official_repository> HEAD",
+      "source_status_at_freeze": "available",
+      "configuration": {
+        "official_config": "configs/example.yaml",
+        "chosen_model": "pi3",
+        "is_sequential": true,
+        "sample_frequency": 1,
+        "intrinsics_mode": "SHARED",
+        "skip_doppelgangers": false,
+        "coarse_only": false,
+        "post_result_tuning_allowed": false
+      },
+      "attempt_policy": "Install the exact revision and recursive submodules after clean S2 timing. Run the official full pipeline once per frozen sequence. OOM, dependency, or platform failure remains an explicit DNF with command, source tree hash, logs, wall time, and peak RAM/VRAM."
+    },
+    "instantsfm": {
+      "published_repository": "https://github.com/cre185/InstantSfM.git",
+      "observed_browser_redirect": "https://github.com/flqcsvqqvw/InstantSfM",
+      "source_status_at_freeze": "unavailable",
+      "retrieval_evidence": [
+        {
+          "command": "git ls-remote https://github.com/cre185/InstantSfM.git HEAD",
+          "returncode": 128,
+          "result": "Repository not found"
+        },
+        {
+          "command": "git ls-remote https://github.com/flqcsvqqvw/InstantSfM.git HEAD",
+          "returncode": 128,
+          "result": "Repository not found"
+        },
+        {
+          "command": "HTTP HEAD https://codeload.github.com/flqcsvqqvw/InstantSfM/zip/refs/heads/master",
+          "http_status": 404
+        }
+      ],
+      "published_requirements": {
+        "tested_platform": "Ubuntu 20.04, CUDA 12.1, PyTorch 2.3.1",
+        "windows": "strongly unrecommended because bae lacks Windows support",
+        "pipeline": "ins-feat followed by ins-sfm --export_txt"
+      },
+      "attempt_policy": "This freeze-time outage is not yet a benchmark DNF. Recheck the published URL immediately before external setup. If source becomes available, bind its exact revision before any held-out run and attempt it in WSL2. If it remains unavailable, emit one source-unavailable DNF per sequence with fresh retrieval logs before GT materialization."
+    }
+  },
+  "reporting": {
+    "required_cells_per_sequence": [
+      "gluemap",
+      "instantsfm"
+    ],
+    "success_or_explicit_dnf": true,
+    "include_in_median_and_worst_tables": true,
+    "claimable_gate_requires_both_cells": true
+  },
+  "stop_rules": [
+    "No external baseline may run after GT materialization for its sequence.",
+    "No configuration change is allowed after the first external held-out result.",
+    "A 6 GiB OOM is a DNF on the declared equal hardware, not permission to subsample or reduce resolution.",
+    "A source outage must be rechecked immediately before the suite and cannot be silently omitted."
+  ]
+}

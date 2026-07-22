@@ -507,6 +507,19 @@ engine-exit hash/timestamp chain for successful runs, and regenerates the suite
 summary to detect edited aggregate results. Both explicit-failure and
 successful deferred-GT evidence chains have regression coverage.
 
+External-baseline pre-freeze (2026-07-22):
+`benchmarks/protocols/ssfm_external_baselines_v1.json` binds GLUEMAP official
+HEAD `adc9e4bb5f41014d3f7c157a879edc278588c829`, its full default Pi3 pipeline,
+the same 6 GiB GPU/full-resolution/full-sequence policy, and mandatory
+GLUEMAP/InstantSfM cells. The published InstantSfM URL currently redirects to
+`flqcsvqqvw/InstantSfM`, while both original and redirected Git transports
+return repository-not-found and the redirected codeload archive returns 404.
+This is recorded as a source outage, not yet a DNF; it must be rechecked just
+before setup. Critically, external baselines cannot be run later after labels
+are visible: their success/DNF manifests must join the per-sequence transaction
+before GT materialization. The frozen held-out suite has not started, and its
+launcher must be extended with these two cells before it is allowed to run.
+
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
 the literal placeholder `anon`, and the official supplemental ZIP contains no
