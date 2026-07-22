@@ -50,6 +50,73 @@ def git_revision(root: Path) -> str:
     ).strip()
 
 
+def normalized_patch(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n")
+
+
+def validate_patched_source(root: Path, patch_path: Path) -> dict:
+    revision = git_revision(root)
+    if revision != PINNED_REVISION:
+        raise RuntimeError(f"MASt3R-SLAM revision {revision}, expected {PINNED_REVISION}")
+    status = subprocess.check_output(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+        text=True,
+    ).splitlines()
+    expected_status = {" M main.py", " M mast3r_slam/evaluate.py"}
+    if set(status) != expected_status or len(status) != len(expected_status):
+        raise RuntimeError(
+            "MASt3R-SLAM source must contain only the frozen export patch; "
+            f"status={status}"
+        )
+    diff = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--binary",
+            "--unified=0",
+            "--",
+            "main.py",
+            "mast3r_slam/evaluate.py",
+        ]
+    )
+    if normalized_patch(diff) != normalized_patch(patch_path.read_bytes()):
+        raise RuntimeError("MASt3R-SLAM working-tree diff is not the frozen export patch")
+    return {
+        "official_revision": revision,
+        "main_source_sha256": sha256(root / "main.py"),
+        "evaluate_source_sha256": sha256(root / "mast3r_slam" / "evaluate.py"),
+        "working_tree_diff_sha256": hashlib.sha256(normalized_patch(diff)).hexdigest(),
+    }
+
+
+def prepare_output_directory(path: Path, extract_only: bool) -> None:
+    if extract_only:
+        if not path.is_dir():
+            raise FileNotFoundError(f"extract-only output directory: {path}")
+        for name in ("manifest.json", "old_anchor_points.txt", "new_anchor_points.txt"):
+            if (path / name).exists():
+                raise FileExistsError(f"refusing to overwrite {path / name}")
+        return
+    path.mkdir(parents=True)
+
+
+def file_evidence(path: Path) -> dict:
+    return {"path": str(path.resolve()), "sha256": sha256(path)}
+
+
+def changed_file_evidence(evidence: list[dict]) -> list[str]:
+    return [
+        item["path"]
+        for item in evidence
+        if not Path(item["path"]).is_file()
+        or sha256(Path(item["path"])) != item["sha256"]
+    ]
+
+
 def image_rows(mav0: Path) -> list[str]:
     rows = []
     with (mav0 / "cam0" / "data.csv").open(encoding="utf-8") as handle:
@@ -99,7 +166,9 @@ def write_calibration(path: Path) -> None:
     )
 
 
-def run_side(args: argparse.Namespace, side: str, anchor: int) -> tuple[list[int], Path]:
+def run_side(
+    args: argparse.Namespace, side: str, anchor: int
+) -> tuple[list[int], Path, list[str]]:
     side_dir = args.out_dir / side
     arrivals = prepare_side(args.mav0, image_rows(args.mav0), anchor, args.radius, side_dir)
     calibration = side_dir / "calibration.yaml"
@@ -129,7 +198,7 @@ def run_side(args: argparse.Namespace, side: str, anchor: int) -> tuple[list[int
             stderr=subprocess.STDOUT,
             check=True,
         )
-    return arrivals, state
+    return arrivals, state, command
 
 
 def extract_anchor_points(
@@ -173,27 +242,64 @@ def extract_anchor_points(
 
 def main() -> int:
     args = parse_args()
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    revision = git_revision(args.mast3r_slam_root)
-    if revision != PINNED_REVISION:
-        raise RuntimeError(f"MASt3R-SLAM revision {revision}, expected {PINNED_REVISION}")
-    main_source = (args.mast3r_slam_root / "main.py").read_text(encoding="utf-8")
-    evaluate_source = (args.mast3r_slam_root / "mast3r_slam" / "evaluate.py").read_text(
-        encoding="utf-8"
-    )
-    if "--export-state" not in main_source or "def save_state_npz(" not in evaluate_source:
-        raise RuntimeError(f"apply scripts/patches/{PATCH_NAME} to MASt3R-SLAM first")
     patch_path = Path(__file__).resolve().parent / "patches" / PATCH_NAME
+    source_evidence = validate_patched_source(args.mast3r_slam_root, patch_path)
+    prepare_output_directory(args.out_dir, args.extract_only)
+    filenames = image_rows(args.mav0)
+    frozen_inputs = [
+        file_evidence(Path(__file__)),
+        file_evidence(patch_path),
+        file_evidence(args.mast3r_slam_root / "main.py"),
+        file_evidence(args.mast3r_slam_root / "mast3r_slam" / "evaluate.py"),
+        file_evidence(args.config),
+        file_evidence(args.mav0 / "cam0" / "data.csv"),
+        file_evidence(args.descriptor_dump / "manifest.csv"),
+    ]
+    side_inputs = {}
+    for side, anchor in (("old", args.old_anchor), ("new", args.new_anchor)):
+        arrivals = list(range(anchor - args.radius, anchor + args.radius + 1))
+        if arrivals[0] < 0 or arrivals[-1] >= len(filenames):
+            raise ValueError(f"submap [{arrivals[0]}, {arrivals[-1]}] is out of range")
+        images = [
+            file_evidence(args.mav0 / "cam0" / "data" / filenames[arrival])
+            for arrival in arrivals
+        ]
+        with (args.descriptor_dump / "manifest.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            descriptor_row = next(
+                row
+                for row in csv.DictReader(handle)
+                if int(row["arrival_index"]) == anchor
+            )
+        keypoints = file_evidence(
+            args.descriptor_dump / descriptor_row["keypoints_file"]
+        )
+        side_inputs[side] = {
+            "arrivals": arrivals,
+            "images": images,
+            "keypoints": keypoints,
+        }
+        frozen_inputs.extend(images)
+        frozen_inputs.append(keypoints)
 
     manifest = {
         "schema_version": 1,
-        "official_revision": revision,
-        "independent_process_per_side": True,
+        **source_evidence,
+        "execution_mode": "extract_only" if args.extract_only else "independent_runs",
+        "independent_process_per_side": not args.extract_only,
         "radius": args.radius,
+        "exporter": str(Path(__file__).resolve()),
+        "exporter_sha256": sha256(Path(__file__).resolve()),
+        "camera_index": str((args.mav0 / "cam0" / "data.csv").resolve()),
+        "camera_index_sha256": sha256(args.mav0 / "cam0" / "data.csv"),
+        "descriptor_manifest": str((args.descriptor_dump / "manifest.csv").resolve()),
+        "descriptor_manifest_sha256": sha256(args.descriptor_dump / "manifest.csv"),
         "config": str(args.config.resolve()),
         "config_sha256": sha256(args.config),
         "source_patch": str(patch_path),
         "source_patch_sha256": sha256(patch_path),
+        "frozen_inputs": frozen_inputs,
         "sides": {},
     }
     for side, anchor in (("old", args.old_anchor), ("new", args.new_anchor)):
@@ -201,20 +307,44 @@ def main() -> int:
         if args.extract_only:
             arrivals = list(range(anchor - args.radius, anchor + args.radius + 1))
             state = side_dir / "optimized_state.npz"
+            command = None
         else:
-            arrivals, state = run_side(args, side, anchor)
+            arrivals, state, command = run_side(args, side, anchor)
         output = args.out_dir / f"{side}_anchor_points.txt"
+        keypoints_evidence = side_inputs[side]["keypoints"]
+        keypoints_path = Path(keypoints_evidence["path"])
         kept = extract_anchor_points(
             state, descriptor_keypoints(args.descriptor_dump, anchor), output, args.radius
         )
+        changed = changed_file_evidence(frozen_inputs)
+        if changed:
+            raise RuntimeError(f"frozen R1e input changed during execution: {changed}")
         manifest["sides"][side] = {
             "anchor_arrival": anchor,
             "local_anchor_index": args.radius,
             "arrivals": arrivals,
+            "command": command,
+            "input_images": [
+                {
+                    "arrival": arrival,
+                    **evidence,
+                }
+                for arrival, evidence in zip(arrivals, side_inputs[side]["images"])
+            ],
             "state": str(state.resolve()),
             "state_sha256": sha256(state),
+            "run_log": (
+                {
+                    "path": str((side_dir / "run.log").resolve()),
+                    "sha256": sha256(side_dir / "run.log"),
+                }
+                if not args.extract_only
+                else None
+            ),
             "anchor_points": str(output.resolve()),
             "anchor_points_sha256": sha256(output),
+            "descriptor_keypoints": str(keypoints_path),
+            "descriptor_keypoints_sha256": keypoints_evidence["sha256"],
             "points_kept": kept,
         }
     (args.out_dir / "manifest.json").write_text(

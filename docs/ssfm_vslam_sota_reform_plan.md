@@ -306,6 +306,13 @@ source/config/output SHA-256 hashes. The exact minimal upstream patch is
 configuration is `scripts/configs/mast3r_slam_v1_calib.yaml`. Apply the
 zero-context patch with `git apply --unidiff-zero <patch>`. Patch reversal,
 Python static checks, and synthetic pointmap-coordinate extraction pass.
+The exporter now refuses a reused output directory and verifies that the
+pinned checkout contains exactly that two-file patch and no other tracked or
+untracked change. Its manifest binds the exporter, normalized working-tree
+diff, patched source files, config, camera index, descriptor manifest and
+keypoints, every source image, exact per-side command/log, optimized state,
+and exported anchor points. `--extract-only` is explicitly labeled as such and
+cannot claim independent per-side execution or overwrite existing evidence.
 
 The real R1e gate has not run yet. Ubuntu currently has neither the requested
 Python 3.11 environment nor CUDA `nvcc`; installing and compiling the official
