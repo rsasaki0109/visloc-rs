@@ -174,9 +174,30 @@ sets, and prove that rotation-only evidence cannot acquire a scale field.
 
 Verification: full `visloc-slam` library suite with `onnx-inference` passes
 448 tests (7 ignored). This is an architectural positive, not an R1/R2 gate
-pass: no real dual-submap EuRoC measurement has run yet, no constraint is wired
-to the backend, and all defaults remain unchanged. The next slice is V1a's
-acceptance-neutral MH_01 pre/post-hover probe.
+pass; no constraint is wired to the backend and all defaults remain unchanged.
+
+V1a real-data result (2026-07-22):
+`examples/dpvo_independent_submap_probe.rs` now reconstructs two fresh local
+maps directly from the 800-frame MH_01 SuperPoint dump, with no DPVO pose,
+depth, backend, or GT input. The known old/new anchors are arrivals 38/462.
+At radius 16, both maps passed the fixed conditioning gates (27/33 and 33/33
+registered, 390/467 landmarks, 5.57/6.61-degree median parallax, and
+0.75/0.78 patch-pixel mean reprojection). Essential verification returned 35
+anchor inliers and 33 were independently triangulated in both maps, but only
+7/33 fit one Sim3, so the typed estimator correctly rejected `TooFewInliers`.
+Radius 24 improved to 13/31 but still failed the fixed 0.60 consensus gate at
+0.419. Radius 32 failed earlier because the new map registered only 38/65
+(0.585). A ratio-0.90 control, multi-frame bridge voting, and COLMAP-style
+local/global refinement also rejected; none was admitted or written back.
+Logs are under
+`E:/visloc_archive/dpvo_a3_20260721/independent_submap_probe_*_20260722`.
+
+Verdict: V1a is a useful negative, not a scale-bridge pass. Appearance and
+two-view geometry find the revisit, but current sparse feature tracks plus the
+incremental initializer do not produce two sufficiently Sim3-rigid local maps.
+Per the V1 stop rule, the next R1b slice must test a stronger learned
+two-view/multi-view geometry initializer or dense correspondence prior while
+retaining the same independent-map and typed acceptance gates.
 
 ### R3 — Sparse hierarchical optimization
 
@@ -318,9 +339,10 @@ time.
 2. **R1a:** specify and test the local-submap data model, track builder,
    triangulation quality record, and gauge conventions; reuse existing
    two-view, track, BA, and Sim(3) primitives before adding dependencies.
-3. **V1a:** build two acceptance-neutral 24-keyframe submaps around the known
-   MH_01 pre/post-hover bridges and produce a labelled separation report before
-   any backend write-back code is permitted.
+3. **V1a (measured negative):** the 16/24/32-radius MH_01 probe rejected every
+   scale bridge without backend write-back. Proceed to **R1b**: compare a
+   stronger learned geometry initializer against the frozen sparse-SfM result;
+   do not weaken R2's consensus gate.
 
 ## 8. Stop rules
 

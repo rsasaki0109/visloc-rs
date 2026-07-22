@@ -1215,9 +1215,26 @@ refit, normalized residual, agreement with the independently verified E
 rotation, and leave-one-out scale stability. It has no live-pose/depth input.
 Synthetic known-transform/outlier, wrong-E, degeneracy, and observability tests
 pass; the full ONNX-enabled SLAM library suite is 448 passed / 7 ignored.
-Nothing is accepted or fed to the backend yet. Verdict: architectural positive,
-real-data acceptance still unmeasured; V1a must next build and label two fresh
-MH_01 pre/post-hover local maps before any write-back path is implemented.
+
+V1a independent-submap probe (2026-07-22): the acceptance-neutral executable
+`examples/dpvo_independent_submap_probe.rs` rebuilt fresh maps around MH_01
+arrivals 38 and 462 from stored SuperPoint observations only. No live DPVO
+pose/depth, GT, or backend state entered reconstruction or acceptance. Radius
+16 produced well-populated maps (27/33 and 33/33 registered, 390/467
+landmarks, median parallax 5.57/6.61 degrees, reprojection 0.75/0.78 patch px),
+and 33 of 35 anchor Essential inliers existed as 3D points on both sides.
+Nevertheless only 7/33 shared points fit one Sim3, so the strict estimator
+rejected `TooFewInliers`. Radius 24 reached 13/31 = 0.419 and failed the fixed
+0.60 ratio gate; radius 32 failed the local-map registration gate (38/65).
+Ratio-0.90, multi-frame bridge voting, and COLMAP-style refinement controls
+also rejected. Logs live under
+`E:/visloc_archive/dpvo_a3_20260721/independent_submap_probe_*_20260722`.
+
+Verdict: architectural positive, real-data scale bridge negative, zero backend
+write-back. The current sparse independent reconstructions are not mutually
+Sim3-rigid enough. Per the reform plan, the next work is R1b's learned
+two-view/multi-view initialization or dense geometry prior under the same typed
+gates—not another DPVO-depth or acceptance-threshold sweep.
 
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
