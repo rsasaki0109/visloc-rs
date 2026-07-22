@@ -20,14 +20,20 @@ namespace {
 
 struct Context {
   float* anchors = nullptr;
+  float* anchors_hwc = nullptr;
   float* level0 = nullptr;
   float* level1 = nullptr;
+  float* level0_hwc = nullptr;
+  float* level1_hwc = nullptr;
   float* coords = nullptr;
   float* output = nullptr;
   int32_t* targets = nullptr;
   size_t anchors_capacity = 0;
+  size_t anchors_hwc_capacity = 0;
   size_t level0_capacity = 0;
   size_t level1_capacity = 0;
+  size_t level0_hwc_capacity = 0;
+  size_t level1_hwc_capacity = 0;
   size_t coords_capacity = 0;
   size_t output_capacity = 0;
   size_t targets_capacity = 0;
@@ -69,78 +75,132 @@ bool copy_to_device(void* destination, const void* source, size_t bytes,
   return false;
 }
 
-__device__ inline float map_value(const float* maps, int frame, int channel,
-                                  int y, int x, int channels, int height,
-                                  int width) {
+__global__ void transpose_chw_to_hwc(const float* source, float* destination,
+                                     int batches, int channels, int height,
+                                     int width) {
+  const size_t total = static_cast<size_t>(batches) * channels * height * width;
+  size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) return;
+  const int channel = index % channels;
+  size_t rest = index / channels;
+  const int x = rest % width;
+  rest /= width;
+  const int y = rest % height;
+  const int batch = rest / height;
+  const size_t source_index =
+      ((static_cast<size_t>(batch) * channels + channel) * height + y) * width + x;
+  destination[index] = source[source_index];
+}
+
+__global__ void transpose_ecpp_to_eppc(const float* source, float* destination,
+                                       int edges, int channels, int patch) {
+  const size_t total = static_cast<size_t>(edges) * channels * patch * patch;
+  size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) return;
+  const int channel = index % channels;
+  size_t rest = index / channels;
+  const int px = rest % patch;
+  rest /= patch;
+  const int py = rest % patch;
+  const int edge = rest / patch;
+  const size_t source_index =
+      ((static_cast<size_t>(edge) * channels + channel) * patch + py) * patch + px;
+  destination[index] = source[source_index];
+}
+
+__device__ inline float map_value_hwc(const float* maps, int frame, int channel,
+                                      int y, int x, int channels, int height,
+                                      int width) {
   if (x < 0 || x >= width || y < 0 || y >= height) return 0.0f;
   const size_t index =
-      ((static_cast<size_t>(frame) * channels + channel) * height + y) * width + x;
+      ((static_cast<size_t>(frame) * height + y) * width + x) * channels + channel;
   return maps[index];
 }
 
-__global__ void correlation_kernel(
+__global__ void correlation_warp_kernel(
     const float* anchors, const float* level0, const float* level1,
     const float* coords, const int32_t* targets, float* output, int edges,
     int frames, int channels, int patch, int height0, int width0, int height1,
     int width1, int radius) {
-  const int taps = 2 * radius + 1;
-  const int values_per_edge = patch * patch * taps * taps * 2;
-  int linear = blockIdx.x * blockDim.x + threadIdx.x;
-  const int total = edges * values_per_edge;
-  if (linear >= total) return;
+  const int lane = threadIdx.x & 31;
+  const int warp_in_block = threadIdx.x >> 5;
+  const int warps_per_block = blockDim.x >> 5;
+  const int item = blockIdx.x * warps_per_block + warp_in_block;
+  const int items = edges * patch * patch;
+  if (item >= items) return;
 
-  const int output_index = linear;
-  const int level = linear % 2;
-  linear /= 2;
-  const int tap = linear % (taps * taps);
-  linear /= taps * taps;
-  const int px = linear % patch;
-  linear /= patch;
-  const int py = linear % patch;
-  const int edge = linear / patch;
+  const int taps = 2 * radius + 1;
+  const int px = item % patch;
+  const int py = (item / patch) % patch;
+  const int edge = item / (patch * patch);
   const int target = targets[edge];
   if (target < 0 || target >= frames) {
-    output[output_index] = 0.0f;
+    if (lane == 0) {
+      for (int value = 0; value < taps * taps * 2; ++value) {
+        output[static_cast<size_t>(item) * taps * taps * 2 + value] = 0.0f;
+      }
+    }
     return;
   }
-
-  const int tx = tap % taps;
-  const int ty = tap / taps;
-  const float scale = level == 0 ? 1.0f : 0.25f;
-  const float center_x = coords[((edge * patch + py) * patch + px) * 2] * scale;
-  const float center_y = coords[((edge * patch + py) * patch + px) * 2 + 1] * scale;
-  const float sample_x = center_x + static_cast<float>(tx - radius);
-  const float sample_y = center_y + static_cast<float>(ty - radius);
-  const int x0 = static_cast<int>(floorf(sample_x));
-  const int y0 = static_cast<int>(floorf(sample_y));
-  const float fx = sample_x - static_cast<float>(x0);
-  const float fy = sample_y - static_cast<float>(y0);
-  const float* maps = level == 0 ? level0 : level1;
-  const int height = level == 0 ? height0 : height1;
-  const int width = level == 0 ? width0 : width1;
-
-  float sum = 0.0f;
-  for (int channel = 0; channel < channels; ++channel) {
-    const size_t anchor_index =
-        ((static_cast<size_t>(edge) * channels + channel) * patch + py) * patch + px;
-    const float sampled =
-        (1.0f - fx) * (1.0f - fy) *
-            map_value(maps, target, channel, y0, x0, channels, height, width) +
-        fx * (1.0f - fy) *
-            map_value(maps, target, channel, y0, x0 + 1, channels, height, width) +
-        (1.0f - fx) * fy *
-            map_value(maps, target, channel, y0 + 1, x0, channels, height, width) +
-        fx * fy * map_value(maps, target, channel, y0 + 1, x0 + 1,
-                            channels, height, width);
-    sum += anchors[anchor_index] * sampled;
+  const size_t anchor_base = static_cast<size_t>(item) * channels;
+  float anchor_values[4];
+  #pragma unroll
+  for (int group = 0; group < 4; ++group) {
+    anchor_values[group] = anchors[anchor_base + lane + group * 32];
   }
-  output[output_index] = sum / sqrtf(static_cast<float>(channels));
+
+  for (int level = 0; level < 2; ++level) {
+    const float coordinate_scale = level == 0 ? 1.0f : 0.25f;
+    const float center_x =
+        coords[((edge * patch + py) * patch + px) * 2] * coordinate_scale;
+    const float center_y =
+        coords[((edge * patch + py) * patch + px) * 2 + 1] * coordinate_scale;
+    const int base_x = static_cast<int>(floorf(center_x));
+    const int base_y = static_cast<int>(floorf(center_y));
+    const float fx = center_x - static_cast<float>(base_x);
+    const float fy = center_y - static_cast<float>(base_y);
+    const float w00 = (1.0f - fx) * (1.0f - fy);
+    const float w01 = fx * (1.0f - fy);
+    const float w10 = (1.0f - fx) * fy;
+    const float w11 = fx * fy;
+    const float* maps = level == 0 ? level0 : level1;
+    const int height = level == 0 ? height0 : height1;
+    const int width = level == 0 ? width0 : width1;
+
+    for (int tap = 0; tap < taps * taps; ++tap) {
+      const int x0 = base_x + tap % taps - radius;
+      const int y0 = base_y + tap / taps - radius;
+      float sum = 0.0f;
+      #pragma unroll
+      for (int group = 0; group < 4; ++group) {
+        const int channel = lane + group * 32;
+        const float sampled =
+            w00 * map_value_hwc(maps, target, channel, y0, x0, channels, height, width) +
+            w01 * map_value_hwc(maps, target, channel, y0, x0 + 1, channels, height, width) +
+            w10 * map_value_hwc(maps, target, channel, y0 + 1, x0, channels, height, width) +
+            w11 * map_value_hwc(maps, target, channel, y0 + 1, x0 + 1, channels, height, width);
+        sum += anchor_values[group] * sampled;
+      }
+      #pragma unroll
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+      }
+      if (lane == 0) {
+        const size_t output_index =
+            (static_cast<size_t>(item) * taps * taps + tap) * 2 + level;
+        output[output_index] = sum / sqrtf(static_cast<float>(channels));
+      }
+    }
+  }
 }
 
 void release(Context* context) {
   cudaFree(context->anchors);
+  cudaFree(context->anchors_hwc);
   cudaFree(context->level0);
   cudaFree(context->level1);
+  cudaFree(context->level0_hwc);
+  cudaFree(context->level1_hwc);
   cudaFree(context->coords);
   cudaFree(context->output);
   cudaFree(context->targets);
@@ -171,8 +231,8 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
     int patch, int height0, int width0, int height1, int width1, int radius,
     int upload_frames, float* device_elapsed_ms) {
   if (!opaque || !anchors || !level0_frames || !level1_frames || !coords ||
-      !targets || !output || edges <= 0 || frames <= 0 || channels <= 0 ||
-      patch <= 0 || height0 <= 1 || width0 <= 1 || height1 <= 1 ||
+      !targets || !output || edges <= 0 || frames <= 0 || channels != 128 ||
+      patch != 3 || height0 <= 1 || width0 <= 1 || height1 <= 1 ||
       width1 <= 1 || radius < 0) {
     return 1;
   }
@@ -206,10 +266,19 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
 
   if (!reserve(reinterpret_cast<void**>(&context->anchors),
                &context->anchors_capacity, anchors_bytes, context, "anchors") ||
+      !reserve(reinterpret_cast<void**>(&context->anchors_hwc),
+               &context->anchors_hwc_capacity, anchors_bytes, context,
+               "anchors_hwc") ||
       !reserve(reinterpret_cast<void**>(&context->level0),
                &context->level0_capacity, level0_bytes, context, "level0") ||
       !reserve(reinterpret_cast<void**>(&context->level1),
                &context->level1_capacity, level1_bytes, context, "level1") ||
+      !reserve(reinterpret_cast<void**>(&context->level0_hwc),
+               &context->level0_hwc_capacity, level0_bytes, context,
+               "level0_hwc") ||
+      !reserve(reinterpret_cast<void**>(&context->level1_hwc),
+               &context->level1_hwc_capacity, level1_bytes, context,
+               "level1_hwc") ||
       !reserve(reinterpret_cast<void**>(&context->coords),
                &context->coords_capacity, coords_bytes, context, "coords") ||
       !reserve(reinterpret_cast<void**>(&context->targets),
@@ -250,6 +319,12 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
         return 4;
       }
     }
+    const size_t level0_elements = level0_bytes / sizeof(float);
+    const size_t level1_elements = level1_bytes / sizeof(float);
+    transpose_chw_to_hwc<<<(level0_elements + 255) / 256, 256>>>(
+        context->level0, context->level0_hwc, frames, channels, height0, width0);
+    transpose_chw_to_hwc<<<(level1_elements + 255) / 256, 256>>>(
+        context->level1, context->level1_hwc, frames, channels, height1, width1);
     context->maps_uploaded = true;
     context->resident_frames = frames;
     context->resident_channels = channels;
@@ -259,10 +334,15 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
     context->resident_width1 = width1;
   }
 
-  const int values_per_edge = patch * patch * taps * taps * 2;
-  const int total = edges * values_per_edge;
-  correlation_kernel<<<(total + 255) / 256, 256>>>(
-      context->anchors, context->level0, context->level1, context->coords,
+  const size_t anchor_elements = anchors_bytes / sizeof(float);
+  transpose_ecpp_to_eppc<<<(anchor_elements + 255) / 256, 256>>>(
+      context->anchors, context->anchors_hwc, edges, channels, patch);
+  const int items = edges * patch * patch;
+  constexpr int correlation_threads = 128;
+  constexpr int warps_per_block = correlation_threads / 32;
+  correlation_warp_kernel<<<(items + warps_per_block - 1) / warps_per_block,
+                            correlation_threads>>>(
+      context->anchors_hwc, context->level0_hwc, context->level1_hwc, context->coords,
       context->targets, context->output, edges, frames, channels, patch,
       height0, width0, height1, width1, radius);
   cudaError_t status = cudaGetLastError();

@@ -606,6 +606,31 @@ fn native_cuda_correlation_matches_frozen_fixture() {
         "indexed native CUDA correlation differs from CPU: {indexed_diff:.3e}"
     );
 
+    let target1_pattern = ndarray::Array3::<f32>::from_shape_fn(target1.dim(), |(c, y, x)| {
+        ((c * 17 + y * 11 + x * 5) % 257) as f32 / 257.0
+    });
+    let coords_l1 = coords.mapv(|value| value * 0.25);
+    let expected_l1 = corr_cpu(anchor.view(), target1_pattern.view(), coords_l1.view(), 3);
+    let (two_level, _) = runtime
+        .run(
+            anchor.view(),
+            &[&target0],
+            &[&target1_pattern],
+            coords.view(),
+            &targets,
+        )
+        .expect("two-level native CUDA correlation succeeds");
+    let mut level1_diff = 0.0_f32;
+    for (tap, expected_value) in expected_l1.iter().enumerate() {
+        level1_diff = level1_diff.max((two_level[(tap / 441, (tap % 441) * 2 + 1)]
+            - expected_value)
+            .abs());
+    }
+    assert!(
+        level1_diff <= PASS_THRESHOLD,
+        "native CUDA level-1 correlation differs from CPU: {level1_diff:.3e}"
+    );
+
     let (cached_first, first_ms) = runtime
         .run_cached(
             anchor.view(),

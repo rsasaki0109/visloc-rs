@@ -738,6 +738,20 @@ The next native design must preserve stable per-frame device slots and upload
 only the newly encoded map; accuracy work must use materially longer
 development prefixes before any full-sequence V4 run.
 
+The next kernel revision transposes feature maps to channel-last storage on
+device and assigns one warp to each edge/patch pixel, keeping its 128-channel
+anchor in registers while reducing all 98 level/tap dot products with warp
+shuffles. Both pyramid levels and indexed multi-frame selection pass the CPU
+reference at <=2.44e-7 max absolute error. On the same 30-frame MH_03 probe,
+total latency fell again from 218.00 to 172.03 ms/frame and correlation from
+54.06 to 40.50. The 100-frame profile fell from 229.58 to 199.19 ms/frame,
+with correlation 54.73, update 44.03, encoder 30.67, and BA 9.15 ms/frame.
+This is another positive speed slice but remains 4.0x over the V4 input-rate
+gate; its 0.1636 m 100-frame Sim(3) ATE also remains an explicit V3 accuracy
+failure. Next profiling must separate map upload/transpose from the warp
+kernel, then preserve stable per-frame device slots rather than retransferring
+all retained maps after each arrival.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
