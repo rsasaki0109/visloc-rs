@@ -68,6 +68,7 @@ class VslamSotaV4Tests(unittest.TestCase):
             "executable_sha256": "1" * 64,
             "model_bundle_sha256": "2" * 64,
             "configuration_sha256": "3" * 64,
+            "ort_dylib_sha256": "4" * 64,
         }
         experiment = {
             "schema_version": 1,
@@ -106,6 +107,7 @@ class VslamSotaV4Tests(unittest.TestCase):
                     "sampled_peak_working_set_bytes": 4 * 1024**3,
                     "sampled_peak_gpu_memory_bytes": 4 * 1024**3,
                     "queue_bounds": bounds,
+                    "protocol_sha256": digest(protocol_path),
                     **fixed_hashes,
                 }
                 (run / "run_manifest.json").write_text(

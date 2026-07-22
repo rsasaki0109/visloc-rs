@@ -640,7 +640,14 @@ rejected scale-jump proposals are counted separately. The evaluator
 ATE and deliberately leaves `claimable_sota=false` unless separate verified
 public ETH3D SLAM or ORBIT frontier evidence and a released-artifact SHA-256
 are supplied. No EuRoC result or public-frontier result has been claimed by
-this protocol yet.
+this protocol yet. `scripts/run_vslam_euroc_sota_v4.py` is the corresponding
+serial runner: it audits official cam0 row counts before launch, owns the
+full-sequence/stride/seed arguments, rechecks executable, configuration,
+DPVO/SuperPoint model-bundle, protocol, and ONNX Runtime hashes, samples
+working-set and per-process GPU memory, and preserves every failed run. The
+algorithm configuration remains a separate mandatory hashed input until V3
+development selects the single policy; this avoids freezing an unfinished
+configuration while preventing mixed-policy V4 matrices.
 
 ## 6. Execution order and resource split
 

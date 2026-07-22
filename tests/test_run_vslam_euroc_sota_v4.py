@@ -1,0 +1,111 @@
+import importlib.util
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "run_vslam_euroc_sota_v4.py"
+)
+SPEC = importlib.util.spec_from_file_location("run_vslam_euroc_sota_v4", SCRIPT_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
+
+
+BOUNDS = {
+    "inactive_edge_cap": 4096,
+    "max_free_poses": 256,
+    "long_loop_max_indexed_frames": 1000,
+}
+REQUIRED = [
+    "--imu",
+    "--loop-closure",
+    "--global-ba",
+    "--gba-widen-t0",
+    "--sim3-backend",
+    "--long-loop",
+    "--gba-inactive-edge-cap",
+    "4096",
+    "--gba-max-free-poses",
+    "256",
+    "--ll-max-indexed-frames",
+    "1000",
+    "--s3b-max-abs-log-scale-correction",
+    "4.0",
+]
+GATES = {"queue_bounds": BOUNDS, "max_committed_abs_log_scale": 4.0}
+
+
+class VslamSotaV4RunnerTests(unittest.TestCase):
+    def test_configuration_requires_full_stack_and_exact_bounds(self) -> None:
+        MODULE.validate_configuration(
+            {
+                "schema_version": 1,
+                "arguments": REQUIRED,
+                "queue_bounds": BOUNDS,
+                "long_loop_superpoint_model": "superpoint.onnx",
+            },
+            GATES,
+        )
+        with self.assertRaisesRegex(ValueError, "missing --long-loop"):
+            MODULE.validate_configuration(
+                {
+                    "schema_version": 1,
+                    "arguments": [value for value in REQUIRED if value != "--long-loop"],
+                    "queue_bounds": BOUNDS,
+                    "long_loop_superpoint_model": "superpoint.onnx",
+                },
+                GATES,
+            )
+        with self.assertRaisesRegex(ValueError, "runner-owned"):
+            MODULE.validate_configuration(
+                {
+                    "schema_version": 1,
+                    "arguments": [*REQUIRED, "--seed", "99"],
+                    "queue_bounds": BOUNDS,
+                    "long_loop_superpoint_model": "superpoint.onnx",
+                },
+                GATES,
+            )
+
+    def test_model_bundle_hash_binds_paths_and_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "a").mkdir()
+            first = root / "a" / "weights.onnx"
+            first.write_bytes(b"one")
+            before = MODULE.model_bundle_sha256(root)
+            first.write_bytes(b"two")
+            self.assertNotEqual(before, MODULE.model_bundle_sha256(root))
+            first.write_bytes(b"one")
+            moved = root / "weights.onnx"
+            first.rename(moved)
+            self.assertNotEqual(before, MODULE.model_bundle_sha256(root))
+
+    def test_nested_sequence_resolution_and_camera_row_count(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sequence = root / "machine_hall" / "MH_01_easy"
+            csv_dir = sequence / "mav0" / "cam0"
+            csv_dir.mkdir(parents=True)
+            (csv_dir / "data.csv").write_text(
+                "#timestamp,filename\n1,1.png\n2,2.png\n", encoding="utf-8"
+            )
+            self.assertEqual(MODULE.resolve_sequence(root, "MH_01_easy"), sequence)
+            self.assertEqual(MODULE.camera_rows(sequence), 2)
+
+    def test_gpu_peak_parser_selects_target_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "gpu.log"
+            path.write_text("12, 100\n99, 200\n12, 150\n", encoding="utf-8")
+            self.assertEqual(MODULE.parse_gpu_peak(path, 12), 150 * 1024 * 1024)
+            self.assertIsNone(MODULE.parse_gpu_peak(path, 77))
+
+
+if __name__ == "__main__":
+    unittest.main()

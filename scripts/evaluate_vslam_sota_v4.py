@@ -131,7 +131,12 @@ def evaluate(
         raise ValueError("V4 experiment manifest must have schema_version=1")
     if experiment.get("protocol_sha256", "").lower() != sha256(protocol_path):
         raise ValueError("experiment protocol SHA-256 does not match the frozen protocol")
-    for key in ("executable_sha256", "model_bundle_sha256", "configuration_sha256"):
+    for key in (
+        "executable_sha256",
+        "model_bundle_sha256",
+        "configuration_sha256",
+        "ort_dylib_sha256",
+    ):
         if not valid_digest(experiment.get(key)):
             raise ValueError(f"experiment has invalid {key}")
 
@@ -171,7 +176,14 @@ def evaluate(
             row["reasons"].append(f"exit_code={manifest.get('exit_code')!r}")
             run_rows.append(row)
             continue
-        for key in ("executable_sha256", "model_bundle_sha256", "configuration_sha256"):
+        if str(manifest.get("protocol_sha256", "")).lower() != sha256(protocol_path):
+            row["reasons"].append("protocol_sha256 differs from frozen protocol")
+        for key in (
+            "executable_sha256",
+            "model_bundle_sha256",
+            "configuration_sha256",
+            "ort_dylib_sha256",
+        ):
             if str(manifest.get(key, "")).lower() != str(experiment[key]).lower():
                 row["reasons"].append(f"{key} differs from experiment")
         summary_path = manifest_path.parent / "summary.txt"
