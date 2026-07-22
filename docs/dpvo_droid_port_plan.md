@@ -3272,7 +3272,7 @@ full diagnosis.
 Three pieces:
 
 1. **Retained pose history** (`pipelines/slam/src/dpvo_patch_graph.rs`,
-   `DpvoPatchGraph::retained_poses`/`retained_poses_mut`): an unconditional,
+   `DpvoPatchGraph::retained_poses`/`set_retained_pose_override`): an unconditional,
    uncapped `BTreeMap<arrival_index, SE3>` — every frame's FINAL pose is
    archived the instant `fold_frame` removes it from the live window (unlike
    M8's inactive-edge cap, this never evicts; a `SE3` per folded frame is

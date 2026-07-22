@@ -113,6 +113,7 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
         "--seed",
         "--model-dir",
         "--ll-superpoint-model",
+        "--native-cuda-correlation-dll",
     }
     if forbidden.intersection(arguments):
         raise ValueError("configuration contains runner-owned arguments")
@@ -138,6 +139,12 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
         raise ValueError("frozen V4 protocol must require the fused update graph")
     if gates.get("forbid_grouped_onnx_correlation") is not True:
         raise ValueError("frozen V4 protocol must forbid grouped ONNX correlation")
+    if gates.get("required_native_cuda_correlation") is not True:
+        raise ValueError("frozen V4 protocol must require native CUDA correlation")
+    if gates.get("required_native_cuda_correlation_abi") != 3:
+        raise ValueError("frozen V4 protocol must require native CUDA correlation ABI 3")
+    if gates.get("required_final_refinement_iterations") != 12:
+        raise ValueError("frozen V4 protocol must require 12 final refinement iterations")
     queue_bounds = gates["queue_bounds"]
     if configuration.get("queue_bounds") != queue_bounds:
         raise ValueError("configuration queue bounds differ from the frozen V4 protocol")
@@ -287,6 +294,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--configuration", type=Path, required=True)
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--native-cuda-correlation-dll", type=Path, required=True)
+    parser.add_argument("--ort-provider-shared-dll", type=Path, required=True)
+    parser.add_argument("--ort-provider-cuda-dll", type=Path, required=True)
     parser.add_argument("--sample-interval", type=float, default=0.5)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
@@ -296,12 +306,40 @@ def main() -> int:
     args = parse_args()
     if args.sample_interval <= 0 or not math.isfinite(args.sample_interval):
         raise ValueError("sample interval must be finite and positive")
-    for path in (args.dataset_root, args.protocol, args.configuration, args.executable, args.model_dir):
+    for path in (
+        args.dataset_root,
+        args.protocol,
+        args.configuration,
+        args.executable,
+        args.model_dir,
+        args.native_cuda_correlation_dll,
+        args.ort_provider_shared_dll,
+        args.ort_provider_cuda_dll,
+    ):
         if not path.exists():
             raise FileNotFoundError(path)
     ort_path_value = os.environ.get("ORT_DYLIB_PATH")
     if not ort_path_value or not (ort_path := Path(ort_path_value)).is_file():
         raise ValueError("ORT_DYLIB_PATH must name the frozen ONNX Runtime DLL")
+    executable_dir = args.executable.resolve().parent
+    required_runtime_files = {
+        "onnxruntime.dll": ort_path,
+        "onnxruntime_providers_shared.dll": args.ort_provider_shared_dll,
+        "onnxruntime_providers_cuda.dll": args.ort_provider_cuda_dll,
+    }
+    for name, path in required_runtime_files.items():
+        expected = executable_dir / name
+        if path.resolve() != expected.resolve():
+            raise ValueError(f"{name} must be frozen beside the executable: {expected}")
+    native_library = (
+        ctypes.WinDLL(str(args.native_cuda_correlation_dll))
+        if os.name == "nt"
+        else ctypes.CDLL(str(args.native_cuda_correlation_dll))
+    )
+    abi_version = native_library.visloc_dpvo_corr_abi_version
+    abi_version.restype = ctypes.c_uint32
+    if abi_version() != 3:
+        raise ValueError("native CUDA correlation DLL must expose ABI version 3")
 
     protocol = load_json(args.protocol)
     if protocol.get("schema_version") != 1 or protocol.get("repetitions") != 3:
@@ -339,6 +377,9 @@ def main() -> int:
         "executable_sha256": sha256(args.executable),
         "model_bundle_sha256": model_bundle_sha256(args.model_dir, [superpoint_path]),
         "ort_dylib_sha256": sha256(ort_path),
+        "ort_provider_shared_sha256": sha256(args.ort_provider_shared_dll),
+        "ort_provider_cuda_sha256": sha256(args.ort_provider_cuda_dll),
+        "native_cuda_correlation_sha256": sha256(args.native_cuda_correlation_dll),
         "sequences": sequences,
         "repetitions": 3,
         "host": {"platform": platform.platform(), "python": sys.version},
@@ -353,6 +394,9 @@ def main() -> int:
             "executable_sha256",
             "model_bundle_sha256",
             "ort_dylib_sha256",
+            "ort_provider_shared_sha256",
+            "ort_provider_cuda_sha256",
+            "native_cuda_correlation_sha256",
             "sequences",
             "repetitions",
         ):
@@ -371,11 +415,30 @@ def main() -> int:
         "1",
         "--ll-superpoint-model",
         str(superpoint_path),
+        "--native-cuda-correlation-dll",
+        str(args.native_cuda_correlation_dll),
         *configuration["arguments"],
     ]
     failures = 0
     for sequence in sequences:
         for repetition in range(1, 4):
+            current_evidence = {
+                "protocol_sha256": sha256(args.protocol),
+                "configuration_sha256": sha256(args.configuration),
+                "executable_sha256": sha256(args.executable),
+                "model_bundle_sha256": model_bundle_sha256(
+                    args.model_dir, [superpoint_path]
+                ),
+                "ort_dylib_sha256": sha256(ort_path),
+                "ort_provider_shared_sha256": sha256(args.ort_provider_shared_dll),
+                "ort_provider_cuda_sha256": sha256(args.ort_provider_cuda_dll),
+                "native_cuda_correlation_sha256": sha256(
+                    args.native_cuda_correlation_dll
+                ),
+            }
+            for key, value in current_evidence.items():
+                if frozen[key] != value:
+                    raise ValueError(f"frozen evidence changed before run: {key}")
             run_dir = args.out_root / f"{sequence}_r{repetition}"
             manifest_path = run_dir / "run_manifest.json"
             if run_dir.exists():
@@ -416,6 +479,11 @@ def main() -> int:
                 "executable_sha256": frozen["executable_sha256"],
                 "model_bundle_sha256": frozen["model_bundle_sha256"],
                 "ort_dylib_sha256": frozen["ort_dylib_sha256"],
+                "ort_provider_shared_sha256": frozen["ort_provider_shared_sha256"],
+                "ort_provider_cuda_sha256": frozen["ort_provider_cuda_sha256"],
+                "native_cuda_correlation_sha256": frozen[
+                    "native_cuda_correlation_sha256"
+                ],
             }
             result = run_one(
                 args.executable,

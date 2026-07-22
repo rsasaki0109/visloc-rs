@@ -46,6 +46,9 @@ GATES = {
     "required_onnx_backend": "cuda",
     "required_onnx_full_update_graph": True,
     "forbid_grouped_onnx_correlation": True,
+    "required_native_cuda_correlation": True,
+    "required_native_cuda_correlation_abi": 3,
+    "required_final_refinement_iterations": 12,
 }
 
 

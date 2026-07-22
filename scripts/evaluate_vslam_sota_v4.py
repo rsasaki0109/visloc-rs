@@ -105,6 +105,12 @@ def validate_protocol(protocol: dict[str, Any]) -> None:
         raise ValueError("V4 protocol must require the fused ONNX update graph")
     if gates.get("forbid_grouped_onnx_correlation") is not True:
         raise ValueError("V4 protocol must forbid the measured-negative grouped correlation graph")
+    if gates.get("required_native_cuda_correlation") is not True:
+        raise ValueError("V4 protocol must require native CUDA correlation")
+    if gates.get("required_native_cuda_correlation_abi") != 3:
+        raise ValueError("V4 protocol must require native CUDA correlation ABI 3")
+    if gates.get("required_final_refinement_iterations") != 12:
+        raise ValueError("V4 protocol must require 12 final refinement iterations")
 
 
 def public_frontier_verdict(path: Path | None) -> tuple[bool, list[str]]:
@@ -142,6 +148,9 @@ def evaluate(
         "model_bundle_sha256",
         "configuration_sha256",
         "ort_dylib_sha256",
+        "ort_provider_shared_sha256",
+        "ort_provider_cuda_sha256",
+        "native_cuda_correlation_sha256",
     ):
         if not valid_digest(experiment.get(key)):
             raise ValueError(f"experiment has invalid {key}")
@@ -189,6 +198,9 @@ def evaluate(
             "model_bundle_sha256",
             "configuration_sha256",
             "ort_dylib_sha256",
+            "ort_provider_shared_sha256",
+            "ort_provider_cuda_sha256",
+            "native_cuda_correlation_sha256",
         ):
             if str(manifest.get(key, "")).lower() != str(experiment[key]).lower():
                 row["reasons"].append(f"{key} differs from experiment")
@@ -207,6 +219,8 @@ def evaluate(
             row["reasons"].append("run did not enable the fused ONNX update graph")
         if values.get("onnx_correlation_requested") != "false":
             row["reasons"].append("run requested the forbidden grouped ONNX correlation graph")
+        if values.get("native_cuda_correlation_enabled") != "true":
+            row["reasons"].append("run did not enable native CUDA correlation")
         try:
             ate = finite_float(values, "ate_similarity_rmse_m")
             tracked_fraction = finite_float(values, "tracked_fraction")
@@ -226,6 +240,8 @@ def evaluate(
             )
             max_free_poses = nonnegative_int(values, "global_ba_max_free_pose_count")
             indexed_frames = nonnegative_int(values, "long_loop_frames_indexed")
+            native_abi = nonnegative_int(values, "native_cuda_correlation_abi")
+            final_iterations = nonnegative_int(values, "final_refinement_iterations")
         except ValueError as error:
             row["reasons"].append(str(error))
             run_rows.append(row)
@@ -236,6 +252,10 @@ def evaluate(
             row["reasons"].append("run queue bounds differ from frozen protocol")
         if frames != protocol["full_sequence_frame_counts"][sequence]:
             row["reasons"].append("run did not consume the frozen full sequence")
+        if native_abi != gates["required_native_cuda_correlation_abi"]:
+            row["reasons"].append("native CUDA correlation ABI differs from protocol")
+        if final_iterations != gates["required_final_refinement_iterations"]:
+            row["reasons"].append("final refinement count differs from protocol")
         if tracked_fraction < gates["min_tracked_fraction"]:
             row["reasons"].append("tracking coverage is below the frozen minimum")
         if elapsed_ms > gates["max_ms_per_frame_total"]:

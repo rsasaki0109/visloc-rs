@@ -722,9 +722,11 @@ boundary and speed direction, not sustained real time or full-sequence
 accuracy: 48-patch latency remains 4.6x above the 50 ms gate, and feature maps
 are still recopied on every update instead of remaining resident across
 updates. The next latency slice is persistent per-frame device storage plus a
-longer steady-state profile. V4 packaging must hash the native DLL and all
-three CUDA ORT runtime/provider DLLs beside the executable; a probe exposed
-that Windows otherwise preferred an unrelated `System32/onnxruntime.dll`.
+longer steady-state profile. The V4 runner now requires and hashes the native
+DLL plus all three CUDA ORT runtime/provider DLLs, and requires the ORT files
+beside the executable; a probe exposed that Windows otherwise preferred an
+unrelated `System32/onnxruntime.dll`. The evaluator also rejects any run that
+does not report native ABI 3 and exactly 12 final refinement iterations.
 
 ABI v2 then retained an unchanged ordered pyramid set across repeated update
 iterations. The fixture's first-upload and reuse paths are bit-identical, but
@@ -765,6 +767,23 @@ a modest 3.9% improvement rather than a headline real-time result. The
 remaining measured floor is distributed across correlation, the fused update
 cell, encoder, undistortion/I/O, and BA; reaching 50 ms requires eliminating
 host round trips between these stages, not another map-copy-only tweak.
+
+The first longer-prefix accuracy audit closed two upstream-parity omissions
+and one sizing hypothesis. Folded keyframes were being exported from their
+stale fold-time absolute snapshots even though upstream `get_pose()`
+recursively composes the stored relative delta from the final live ancestor;
+trajectory export now performs that reconstruction while treating explicit
+global-backend writes as authoritative override anchors. This changed the
+matched 48-patch MH_03 100-frame Sim(3) ATE only from 0.1639 to 0.1622 m, so
+it was a real correctness bug but not the dominant drift source. Upstream's
+12 final `terminate()` update/BA iterations were also missing; they are now
+mandatory, counted in the summary, and included in wall time. The first run
+reported 0.1633 m and 214.49 ms/frame, so final refinement did not rescue the
+prefix and costs about 22 ms/frame at this short length. Finally, restoring
+the default 96-patch/22-10-13 graph made the same prefix worse (0.1703 m,
+391.57 ms/frame), closing graph starvation as the explanation. V3 must now
+cross-check the production pose/BA stream against upstream DPVO rather than
+sweep patch/window size.
 
 ## 6. Execution order and resource split
 

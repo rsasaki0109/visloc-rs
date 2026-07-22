@@ -970,21 +970,17 @@ fn bilinear_sample_u8(image: &Array2<u8>, x: f64, y: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
-/// Milestone M9: a tracked frame's FINAL best pose, by `arrival_index` —
-/// checks `retained_poses` (folded frames, possibly Sim3-corrected) first,
-/// then falls back to scanning still-live `frames()` (also possibly
-/// corrected, by either the global-BA pass or the Sim3 backend). See the
-/// main loop's own comment on why this is a POST-HOC lookup rather than the
-/// live-at-commit-time pose `process_frame` returns.
+/// A tracked frame's final pose, using upstream DPVO's recursive delta-chain
+/// reconstruction for folded frames. Explicit global-backend overrides are
+/// honored by `reconstruct_pose` as recursion anchors.
 fn final_pose_of(graph: &DpvoPatchGraph, arrival_index: usize) -> Option<SE3> {
-    if let Some(pose) = graph.retained_poses().get(&arrival_index) {
-        return Some(pose.clone());
-    }
-    graph
-        .frames()
-        .iter()
-        .find(|f| f.arrival_index == arrival_index)
-        .map(|f| f.pose.clone())
+    graph.reconstruct_pose(arrival_index, &|arrival| {
+        graph
+            .frames()
+            .iter()
+            .find(|frame| frame.arrival_index == arrival)
+            .map(|frame| frame.pose.clone())
+    })
 }
 
 /// A3 ranking-lab offline dump (`docs/visual_slam_sequential_sfm_plan.md`,
@@ -1878,16 +1874,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    odometry.finalize_trajectory()?;
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
 
     // Milestone M9: build the trajectory CSV / ATE alignment vectors NOW,
     // reading each tracked frame's FINAL pose (`final_pose_of`) — live
-    // frames read straight from `odometry.graph().frames()`, folded frames
-    // from `odometry.graph().retained_poses()` (both already reflect every
-    // correction applied up to this point, including the Sim3 backend's
-    // own write-back) — rather than the stale live-at-commit-time pose the
-    // old incremental approach captured. See the main loop's own comment at
-    // the `tracked_entries.push(...)` call site for the full rationale.
+    // frames from `odometry.graph().frames()`, folded frames recursively
+    // reconstructed through upstream's relative-delta chain (with explicit
+    // global-backend overrides as anchors) — rather than either the stale
+    // live-at-commit pose or the stale fold-time absolute snapshot.
     let mut traj_csv = String::from("timestamp_ns,tx,ty,tz,qw,qx,qy,qz\n");
     let mut aligned_estimated: Vec<Point3<f64>> = Vec::new();
     let mut aligned_reference: Vec<Point3<f64>> = Vec::new();
@@ -1977,6 +1972,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let full_update_graph_enabled = odometry.full_update_graph_enabled();
     let correlation_graph_enabled = odometry.correlation_graph_enabled();
     let native_cuda_correlation_enabled = odometry.native_cuda_correlation_enabled();
+    let native_cuda_correlation_abi = odometry.native_cuda_correlation_abi();
 
     let summary = format!(
         "euroc_dir={}\n\
@@ -1986,9 +1982,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          onnx_correlation_graph_enabled={correlation_graph_enabled}\n\
          onnx_correlation_requested={}\n\
          native_cuda_correlation_enabled={native_cuda_correlation_enabled}\n\
+         native_cuda_correlation_abi={}\n\
          native_cuda_correlation_dll={}\n\
          frames_requested={frame_count}\n\
          frames_tracked={tracked_frames}\n\
+         final_refinement_iterations={}\n\
          tracked_fraction={tracked_fraction:.4}\n\
          total_elapsed_s={total_elapsed_s:.2}\n\
          ms_per_frame_total={ms_per_frame:.2}\n\
@@ -2155,10 +2153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.euroc_dir.display(),
         args.model_dir.display(),
         args.onnx_correlation,
+        native_cuda_correlation_abi
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| "none".into()),
         args.native_cuda_correlation_dll
             .as_deref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "none".into()),
+        stats.final_refinement_iterations,
         frame_count = frames.len(),
         io_ms = io_ms_total / stats.frames_processed.max(1) as f64,
         undistort_ms = undistort_ms_total / stats.frames_processed.max(1) as f64,

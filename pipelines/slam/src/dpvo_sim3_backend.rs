@@ -953,7 +953,7 @@ fn apply_corrections(
         scale_min = scale_min.min(scale);
         scale_max = scale_max.max(scale);
         let new_pose = new_pose.clone();
-        graph.retained_poses_mut().insert(arrival, new_pose);
+        graph.set_retained_pose_override(arrival, new_pose);
         if let Some(frame) = graph.retained_folded_frames_mut().get_mut(&arrival) {
             for patch in &mut frame.patches {
                 patch.inverse_depth *= scale;

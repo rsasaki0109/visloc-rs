@@ -94,6 +94,8 @@ impl fmt::Debug for NativeCudaCorrelation {
 }
 
 impl NativeCudaCorrelation {
+    pub const ABI_VERSION: u32 = 3;
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self, NativeCudaCorrelationError> {
         let path = path.as_ref();
         let load_error = |message: String| NativeCudaCorrelationError::Load {
@@ -130,7 +132,7 @@ impl NativeCudaCorrelation {
             )
         };
         let version = unsafe { abi_version() };
-        if version != 3 {
+        if version != Self::ABI_VERSION {
             return Err(NativeCudaCorrelationError::AbiVersion(version));
         }
         let context =
@@ -143,6 +145,10 @@ impl NativeCudaCorrelation {
             run,
             resident_map_version: None,
         })
+    }
+
+    pub fn abi_version(&self) -> u32 {
+        Self::ABI_VERSION
     }
 
     pub fn run(

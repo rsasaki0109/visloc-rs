@@ -1933,6 +1933,9 @@ pub enum DpvoImuRejectionDetail {
 pub struct DpvoOdometryStats {
     pub frames_processed: usize,
     pub frames_tracked: usize,
+    /// Upstream `DPVO::terminate()` runs 12 final update/BA iterations
+    /// before exporting the trajectory. This counts those iterations.
+    pub final_refinement_iterations: usize,
     pub encode_ms_total: f64,
     /// Time spent reprojecting every active edge's patch grid
     /// (`reproject_patch_grid`) and assembling the 2-pyramid-level
@@ -2002,6 +2005,7 @@ pub struct DpvoOdometry {
     patch_imap: Vec<Array1<f32>>,
     rng: StdRng,
     stats: DpvoOdometryStats,
+    trajectory_finalized: bool,
 
     // ---- Milestone M5 (IMU coupling) state — see the module doc's own
     // "IMU coupling" section and `crate::dpvo_vi_ba`'s module doc for the
@@ -2361,6 +2365,7 @@ impl DpvoOdometry {
             patch_imap: Vec::new(),
             rng: StdRng::seed_from_u64(seed),
             stats: DpvoOdometryStats::default(),
+            trajectory_finalized: false,
             pending_imu: VecDeque::new(),
             last_imu_boundary_timestamp: None,
             imu_deltas_by_arrival: HashMap::new(),
@@ -2459,6 +2464,12 @@ impl DpvoOdometry {
 
     pub fn native_cuda_correlation_enabled(&self) -> bool {
         self.native_correlation.is_some()
+    }
+
+    pub fn native_cuda_correlation_abi(&self) -> Option<u32> {
+        self.native_correlation
+            .as_ref()
+            .map(NativeCudaCorrelation::abi_version)
     }
 
     pub fn graph(&self) -> &DpvoPatchGraph {
@@ -2678,6 +2689,22 @@ impl DpvoOdometry {
         self.pending_imu.push_back((timestamp, gyro, accel));
     }
 
+    /// Match upstream `DPVO::terminate()` by refining the final live graph
+    /// for 12 additional update/BA iterations before trajectory export.
+    /// Repeated calls without another processed frame are idempotent.
+    pub fn finalize_trajectory(&mut self) -> Result<(), DpvoOdometryError> {
+        if self.trajectory_finalized || !self.graph.is_initialized() {
+            self.trajectory_finalized = true;
+            return Ok(());
+        }
+        for _ in 0..12 {
+            self.update_step()?;
+            self.stats.final_refinement_iterations += 1;
+        }
+        self.trajectory_finalized = true;
+        Ok(())
+    }
+
     /// Process one incoming grayscale frame (`(height, width)`, `RES`- and
     /// distortion-corrected upstream by the caller — see
     /// `examples/euroc_dpvo_vo_demo.rs`). Returns the just-processed frame's
@@ -2696,6 +2723,7 @@ impl DpvoOdometry {
                 actual: (w, h),
             });
         }
+        self.trajectory_finalized = false;
         self.stats.frames_processed += 1;
 
         let encode_start = Instant::now();
@@ -4125,8 +4153,7 @@ impl DpvoOdometry {
         // Write back the folded prefix into the retention stores.
         for (idx, &arrival) in gathered.folded_arrivals.iter().enumerate() {
             self.graph
-                .retained_poses_mut()
-                .insert(arrival, solved.poses[idx].clone());
+                .set_retained_pose_override(arrival, solved.poses[idx].clone());
             if let Some(ff) = self.graph.retained_folded_frames_mut().get_mut(&arrival) {
                 ff.patches =
                     solved.patches[idx * patches_per_frame..(idx + 1) * patches_per_frame].to_vec();

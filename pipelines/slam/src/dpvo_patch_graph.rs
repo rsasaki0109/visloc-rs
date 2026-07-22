@@ -190,7 +190,7 @@
 //! | `DAMPED_LINEAR` motion model (`__call__`'s `if self.n > 1` block) | same | 410-424 |
 //! | `flatmeshgrid` | `dpvo/utils.py` | 85-87 |
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nalgebra::{Vector2, Vector6};
 use visloc_core::geometry::SE3;
@@ -467,6 +467,11 @@ pub struct DpvoPatchGraph {
     /// when a later Sim3 solve corrects a folded frame's pose (see
     /// `crate::dpvo_sim3_backend`'s module doc).
     retained_poses: BTreeMap<usize, SE3>,
+    /// Folded poses explicitly overwritten by a global correction backend.
+    /// Ordinary fold-time snapshots are not authoritative for trajectory
+    /// export: upstream reconstructs them through `delta` from a final live
+    /// ancestor. An override becomes an authoritative recursion anchor.
+    retained_pose_overrides: BTreeSet<usize>,
 }
 
 impl DpvoPatchGraph {
@@ -487,6 +492,7 @@ impl DpvoPatchGraph {
             inactive_edge_retention_stride: 1,
             retained_folded_frames: BTreeMap::new(),
             retained_poses: BTreeMap::new(),
+            retained_pose_overrides: BTreeSet::new(),
         }
     }
 
@@ -517,7 +523,7 @@ impl DpvoPatchGraph {
     /// Mutable access so a Milestone M10 widened global-BA pass can write a
     /// solved inverse depth back into an already-folded frame's patches — the
     /// folded-frame counterpart of [`Self::patches_mut`] (the live one) and
-    /// [`Self::retained_poses_mut`] (the folded-pose one).
+    /// [`Self::set_retained_pose_override`] (the folded-pose one).
     pub fn retained_folded_frames_mut(&mut self) -> &mut BTreeMap<usize, RetainedFoldedFrame> {
         &mut self.retained_folded_frames
     }
@@ -534,11 +540,12 @@ impl DpvoPatchGraph {
         &self.retained_poses
     }
 
-    /// Mutable access so `crate::dpvo_sim3_backend`'s pose-graph solve can
-    /// write corrected poses back into already-folded frames (the live
-    /// counterpart is [`Self::frames_mut`]).
-    pub fn retained_poses_mut(&mut self) -> &mut BTreeMap<usize, SE3> {
-        &mut self.retained_poses
+    /// Record an explicit global correction to an already-folded pose.
+    /// Unlike the ordinary fold-time snapshot, this pose is an authoritative
+    /// anchor when reconstructing descendants through the delta chain.
+    pub fn set_retained_pose_override(&mut self, arrival_index: usize, pose: SE3) {
+        self.retained_poses.insert(arrival_index, pose);
+        self.retained_pose_overrides.insert(arrival_index);
     }
 
     pub fn config(&self) -> &DpvoVoConfig {
@@ -1071,6 +1078,9 @@ impl DpvoPatchGraph {
         arrival_index: usize,
         live_pose_of: &dyn Fn(usize) -> Option<SE3>,
     ) -> Option<SE3> {
+        if self.retained_pose_overrides.contains(&arrival_index) {
+            return self.retained_poses.get(&arrival_index).cloned();
+        }
         if let Some(pose) = live_pose_of(arrival_index) {
             return Some(pose);
         }
@@ -1411,6 +1421,74 @@ mod tests {
         assert_eq!(
             graph.retained_poses()[&arrival_2].translation,
             pose_2.translation
+        );
+    }
+
+    #[test]
+    fn folded_pose_reconstruction_follows_final_parent_and_honors_override() {
+        let config = small_config();
+        let m = config.patches_per_frame;
+        let mut graph = DpvoPatchGraph::new(config);
+        for i in 0..12 {
+            graph.begin_frame(i as f64 * 0.05);
+            graph
+                .commit_frame(
+                    SE3::new(
+                        UnitQuaternion::identity(),
+                        Vector3::new(i as f64 * 0.001, 0.0, 0.0),
+                    ),
+                    intr(),
+                    patches_for_frame(m, 0.0),
+                )
+                .unwrap();
+            let forw = graph.edges_forw();
+            let back = graph.edges_back();
+            graph.append_edges(&forw, 4);
+            graph.append_edges(&back, 4);
+        }
+        graph.set_initialized(true);
+        let folded_local = graph.n_frames() - config.keyframe_index;
+        let folded_arrival = graph.frames()[folded_local].arrival_index;
+        let parent_arrival = graph.frames()[folded_local - 1].arrival_index;
+        let old_parent = graph.frames()[folded_local - 1].pose.clone();
+        let old_folded = graph.frames()[folded_local].pose.clone();
+        let delta = old_folded.compose(&old_parent.inverse());
+        graph.keyframe().expect("near-zero motion folds one frame");
+
+        let parent_index = graph
+            .frames()
+            .iter()
+            .position(|frame| frame.arrival_index == parent_arrival)
+            .unwrap();
+        let corrected_parent = SE3::new(
+            UnitQuaternion::identity(),
+            Vector3::new(10.0, 2.0, -1.0),
+        );
+        graph.frames_mut()[parent_index].pose = corrected_parent.clone();
+        let reconstructed = graph
+            .reconstruct_pose(folded_arrival, &|arrival| {
+                graph
+                    .frames()
+                    .iter()
+                    .find(|frame| frame.arrival_index == arrival)
+                    .map(|frame| frame.pose.clone())
+            })
+            .unwrap();
+        assert_eq!(reconstructed, delta.compose(&corrected_parent));
+        assert_ne!(
+            reconstructed,
+            graph.retained_poses()[&folded_arrival],
+            "fold-time snapshot must not freeze ordinary trajectory export"
+        );
+
+        let override_pose = SE3::new(
+            UnitQuaternion::identity(),
+            Vector3::new(42.0, 0.0, 0.0),
+        );
+        graph.set_retained_pose_override(folded_arrival, override_pose.clone());
+        assert_eq!(
+            graph.reconstruct_pose(folded_arrival, &|_| None),
+            Some(override_pose)
         );
     }
 
