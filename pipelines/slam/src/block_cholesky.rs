@@ -162,8 +162,8 @@ const INTRA_CONTRIB_CHUNK: usize = 8;
 /// (scalar COO, summed on assembly, symmetric, in the caller's permuted order)
 /// at block size `block_size`, and `RHS` has one or more columns. Returns the
 /// solution `X` (same row order as `RHS`) or `Err(())` when a diagonal block is
-/// not positive-definite. `block_size` must be 3 or 6 — the only sizes the
-/// pose-graph back-end assembles.
+/// not positive-definite. `block_size` must be 3, 6, or 7 — the sizes the
+/// pose-graph back-ends assemble.
 pub(crate) fn solve_spd_block(
     triplets: &[(usize, usize, f64)],
     dim: usize,
@@ -226,7 +226,17 @@ pub(crate) fn solve_spd_block_cached(
             INTRA_MIN_CONTRIB,
             INTRA_MIN_WORK,
         ),
-        other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
+        7 => solve_with_symbolic::<7>(
+            sym,
+            triplets,
+            rhs,
+            lambda,
+            threads,
+            PARALLEL_MIN_LEVEL_WORK,
+            INTRA_MIN_CONTRIB,
+            INTRA_MIN_WORK,
+        ),
+        other => panic!("block_cholesky supports block sizes 3, 6, and 7, got {other}"),
     }
 }
 
@@ -244,7 +254,7 @@ pub(crate) fn solve_spd_block_cached(
 /// caller's variable order, so block column `j` maps straight back to variable
 /// `j` (more fill than the reordered solve, but covariance recovery is not the
 /// per-iteration hot path and the natural order keeps the index mapping trivial).
-/// `block_size` must be 3 or 6.
+/// `block_size` must be 3, 6, or 7.
 #[allow(clippy::type_complexity)]
 pub(crate) fn factor_blocks(
     triplets: &[(usize, usize, f64)],
@@ -254,7 +264,8 @@ pub(crate) fn factor_blocks(
     match block_size {
         3 => factor_blocks_inner::<3>(triplets, dim),
         6 => factor_blocks_inner::<6>(triplets, dim),
-        other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
+        7 => factor_blocks_inner::<7>(triplets, dim),
+        other => panic!("block_cholesky supports block sizes 3, 6, and 7, got {other}"),
     }
 }
 
@@ -327,7 +338,17 @@ fn solve_spd_block_inner(
             min_intra_contrib,
             min_intra_work,
         ),
-        other => panic!("block_cholesky supports block sizes 3 and 6, got {other}"),
+        7 => solve_dispatch::<7>(
+            triplets,
+            dim,
+            rhs,
+            lambda,
+            threads,
+            min_level_work,
+            min_intra_contrib,
+            min_intra_work,
+        ),
+        other => panic!("block_cholesky supports block sizes 3, 6, and 7, got {other}"),
     }
 }
 
@@ -520,7 +541,7 @@ impl BlockSymbolic {
 
 /// Symbolic analysis: from the scalar COO sparsity pattern (values ignored)
 /// build the [`BlockSymbolic`] shared by every refactor of a fixed-pattern
-/// system. `dim` must be a multiple of `block_size` (3 or 6).
+/// system. `dim` must be a multiple of `block_size` (3, 6, or 7).
 pub(crate) fn analyze(
     triplets: &[(usize, usize, f64)],
     dim: usize,
@@ -1412,6 +1433,19 @@ mod tests {
         let (m, t) = random_spd(n, 6, keep, 7);
         assert_solves(&m, &t, 6, 0.0);
         assert_solves(&m, &t, 6, 1e-3);
+    }
+
+    #[test]
+    fn block7_banded_with_loop_matches_references() {
+        // Sim(3) pose-graph shape: 7-DOF chain plus a long-range loop edge.
+        let n = 12;
+        let keep = |bi: usize, bj: usize| {
+            let d = bi.abs_diff(bj);
+            d == 1 || (bi == 0 && bj == n - 1) || (bi == n - 1 && bj == 0)
+        };
+        let (m, t) = random_spd(n, 7, keep, 17);
+        assert_solves(&m, &t, 7, 0.0);
+        assert_solves(&m, &t, 7, 1e-3);
     }
 
     #[test]

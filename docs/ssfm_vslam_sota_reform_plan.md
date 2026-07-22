@@ -293,6 +293,24 @@ delegates to the existing deterministic Sim3 optimizer, whose normal equations
 are dense. It provides the stable boundary for a block-sparse submap solve and
 S2 mapper, but no near-linear/full-sequence claim is made yet.
 
+R3b block-sparse Sim(3) solve (2026-07-22):
+the shared block Cholesky backend now supports 7-DOF blocks, and
+`Sim3PoseGraph` switches at a configurable node threshold from its dense
+reference solve to direct scalar-COO assembly. The sparse path never allocates
+the `7N x 7N` dense Hessian and reuses one symbolic factorization across LM
+iterations. A forced sparse-vs-dense regression reaches matching final cost
+within `1e-12` and every optimized node within `1e-8` tangent norm; the complete
+SLAM library result is 422 passed / 6 ignored. The release one-iteration chain
+plus loop probe measured 300 nodes in 0.006 s, 900 in 0.016 s, and 2700 in
+0.050 s: 3x node growth cost 2.89x then 3.16x. The reproducible ignored test is
+`bench_sparse_growth_to_euroc_length`.
+
+This closes the dense-solver bottleneck and supplies near-linear solver evidence
+to full MH_03 frame count, but it still does not close the whole R3 gate. The S2
+mapper must route real independent submaps through this graph, then demonstrate
+bounded end-to-end VSLAM memory and no full-sequence accuracy/completeness
+regression against the dense control.
+
 ## 4. Sequential SfM campaign
 
 ### S1 — Freeze and measure full-sequence scaling

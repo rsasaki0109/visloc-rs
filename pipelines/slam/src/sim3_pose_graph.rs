@@ -10,16 +10,20 @@
 //!
 //! This optimizer mirrors the `SE(3)` [`crate::PoseGraph`] loop (Levenberg-
 //! Marquardt with one fixed anchor) but works in the `Sim(3)` tangent and uses
-//! central-difference Jacobians, which are simple and robust for the modest
-//! graphs a loop-closure scale correction produces. The dense normal equations
-//! are solved with the same Cholesky/LU helper as the `SE(3)` path.
+//! central-difference Jacobians. Small graphs use the dense normal-equation
+//! helper; larger graphs assemble scalar COO entries directly into the shared
+//! block-sparse Cholesky solver, caching its symbolic factorization across LM
+//! iterations.
 
 use std::collections::BTreeMap;
 
 use nalgebra::{DMatrix, DVector, SMatrix};
 use visloc_core::geometry::{Sim3, Sim3Tangent};
 
-use crate::{solve_normal_equations, PoseGraphError};
+use crate::{
+    block_cholesky::{solve_spd_block_cached, BlockSymbolic},
+    solve_normal_equations, PoseGraphError,
+};
 
 /// Degrees of freedom of a `Sim(3)` node (`[ρ; ω; σ]`).
 const DOF: usize = 7;
@@ -60,6 +64,8 @@ pub struct Sim3PoseGraphResult {
     pub anchor_id: u64,
     pub edge_count: usize,
     pub variable_count: usize,
+    /// Whether the 7-DOF block-sparse normal-equation path was used.
+    pub used_sparse_solver: bool,
     pub initial_cost: f64,
     pub final_cost: f64,
     pub iterations: Vec<Sim3PoseGraphIterationStats>,
@@ -81,6 +87,9 @@ pub struct Sim3PoseGraphConfig {
     pub lambda_decrease_factor: f64,
     pub max_lambda: f64,
     pub min_lambda: f64,
+    /// Use the 7-DOF block-sparse solver at or above this many non-anchor
+    /// nodes. Set to `usize::MAX` to force the dense reference path.
+    pub sparse_solve_min_variables: usize,
 }
 
 impl Default for Sim3PoseGraphConfig {
@@ -94,6 +103,7 @@ impl Default for Sim3PoseGraphConfig {
             lambda_decrease_factor: 0.1,
             max_lambda: 1e12,
             min_lambda: 1e-9,
+            sparse_solve_min_variables: 32,
         }
     }
 }
@@ -205,14 +215,17 @@ impl Sim3PoseGraph {
         }
 
         let dim = variable_count * DOF;
+        let used_sparse_solver = variable_count >= config.sparse_solve_min_variables;
         let initial_cost = self.cost();
         let mut current_cost = initial_cost;
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let mut iterations = Vec::with_capacity(config.max_iterations);
         let mut converged = false;
+        let mut sparse_symbolic: Option<BlockSymbolic> = None;
 
         for iteration in 0..config.max_iterations {
-            let mut h = DMatrix::<f64>::zeros(dim, dim);
+            let mut h = (!used_sparse_solver).then(|| DMatrix::<f64>::zeros(dim, dim));
+            let mut h_triplets = used_sparse_solver.then(Vec::new);
             let mut g = DVector::<f64>::zeros(dim);
 
             for edge in &self.edges {
@@ -236,27 +249,66 @@ impl Sim3PoseGraph {
 
                 if let (Some(i), Some(jf)) = (i_from, &j_from) {
                     let ot = jf.transpose() * omega;
-                    accumulate_block(&mut h, i * DOF, i * DOF, &(ot * jf));
+                    accumulate_normal_block(
+                        &mut h,
+                        &mut h_triplets,
+                        i * DOF,
+                        i * DOF,
+                        &(ot * jf),
+                    );
                     accumulate_segment(&mut g, i * DOF, &(ot * r));
                 }
                 if let (Some(j), Some(jt)) = (i_to, &j_to) {
                     let ot = jt.transpose() * omega;
-                    accumulate_block(&mut h, j * DOF, j * DOF, &(ot * jt));
+                    accumulate_normal_block(
+                        &mut h,
+                        &mut h_triplets,
+                        j * DOF,
+                        j * DOF,
+                        &(ot * jt),
+                    );
                     accumulate_segment(&mut g, j * DOF, &(ot * r));
                 }
                 if let (Some(i), Some(jf), Some(j), Some(jt)) = (i_from, &j_from, i_to, &j_to) {
                     let cross = jf.transpose() * omega * jt;
-                    accumulate_block(&mut h, i * DOF, j * DOF, &cross);
-                    accumulate_block(&mut h, j * DOF, i * DOF, &cross.transpose());
+                    accumulate_normal_block(
+                        &mut h,
+                        &mut h_triplets,
+                        i * DOF,
+                        j * DOF,
+                        &cross,
+                    );
+                    accumulate_normal_block(
+                        &mut h,
+                        &mut h_triplets,
+                        j * DOF,
+                        i * DOF,
+                        &cross.transpose(),
+                    );
                 }
             }
 
             // Damp and solve (H + λI) δ = -g.
-            let mut damped = h.clone();
-            for d in 0..dim {
-                damped[(d, d)] += lambda;
-            }
-            let delta = solve_normal_equations(&damped, &(-&g))?;
+            let rhs_vector = -&g;
+            let delta = if let Some(triplets) = &h_triplets {
+                let rhs = DMatrix::from_column_slice(dim, 1, rhs_vector.as_slice());
+                let solution = solve_spd_block_cached(
+                    &mut sparse_symbolic,
+                    triplets,
+                    dim,
+                    DOF,
+                    &rhs,
+                    lambda,
+                )
+                .map_err(|_| PoseGraphError::SingularSystem)?;
+                solution.column(0).into_owned()
+            } else {
+                let mut damped = h.expect("dense Hessian exists on the dense solver path");
+                for d in 0..dim {
+                    damped[(d, d)] += lambda;
+                }
+                solve_normal_equations(&damped, &rhs_vector)?
+            };
 
             let cost_before = current_cost;
             let saved_poses = config.initial_lambda.is_some().then(|| self.poses.clone());
@@ -322,6 +374,7 @@ impl Sim3PoseGraph {
             anchor_id,
             edge_count: self.edges.len(),
             variable_count,
+            used_sparse_solver,
             initial_cost,
             final_cost: current_cost,
             iterations,
@@ -373,6 +426,31 @@ fn accumulate_block(h: &mut DMatrix<f64>, row: usize, col: usize, block: &SMatri
     for r in 0..DOF {
         for c in 0..DOF {
             h[(row + r, col + c)] += block[(r, c)];
+        }
+    }
+}
+
+/// Add a complete 7×7 block to exactly one normal-equation representation.
+/// The sparse path deliberately emits zero-valued entries too: the graph's
+/// scalar sparsity pattern then remains stable while Jacobian values change,
+/// making the cached symbolic factorization valid for every LM iteration.
+fn accumulate_normal_block(
+    dense: &mut Option<DMatrix<f64>>,
+    sparse: &mut Option<Vec<(usize, usize, f64)>>,
+    row: usize,
+    col: usize,
+    block: &SMatrix<f64, 7, 7>,
+) {
+    if let Some(h) = dense {
+        accumulate_block(h, row, col, block);
+        return;
+    }
+    let triplets = sparse
+        .as_mut()
+        .expect("sparse triplets exist on the sparse solver path");
+    for r in 0..DOF {
+        for c in 0..DOF {
+            triplets.push((row + r, col + c, block[(r, c)]));
         }
     }
 }
@@ -491,6 +569,98 @@ mod tests {
                 (graph.poses[id].translation - pose.translation).norm() < 1e-5,
                 "node {id} translation off by {}",
                 (graph.poses[id].translation - pose.translation).norm()
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_solver_matches_dense_reference() {
+        let truth = ground_truth(12);
+        let mut initial = graph_with_true_measurements(&truth);
+        initial.anchor(0);
+        for (id, pose) in &truth {
+            if *id == 0 {
+                continue;
+            }
+            let i = *id as f64;
+            let mut drift = Sim3Tangent::zeros();
+            drift[0] = 0.025 * i;
+            drift[4] = -0.006 * i;
+            drift[6] = 0.025 * i;
+            initial.add_pose(*id, pose.compose(&Sim3::exp(&drift)));
+        }
+
+        let mut dense = initial.clone();
+        let mut sparse = initial;
+        let dense_result = dense
+            .optimize(&Sim3PoseGraphConfig {
+                sparse_solve_min_variables: usize::MAX,
+                ..Sim3PoseGraphConfig::default()
+            })
+            .unwrap();
+        let sparse_result = sparse
+            .optimize(&Sim3PoseGraphConfig {
+                sparse_solve_min_variables: 1,
+                ..Sim3PoseGraphConfig::default()
+            })
+            .unwrap();
+
+        assert!(!dense_result.used_sparse_solver);
+        assert!(sparse_result.used_sparse_solver);
+        assert!(
+            (dense_result.final_cost - sparse_result.final_cost).abs() < 1e-12,
+            "dense cost {}, sparse cost {}",
+            dense_result.final_cost,
+            sparse_result.final_cost
+        );
+        for id in dense.poses.keys() {
+            let disagreement = sparse.poses[id]
+                .compose(&dense.poses[id].inverse())
+                .log()
+                .norm();
+            assert!(
+                disagreement < 1e-8,
+                "node {id}: dense/sparse disagreement {disagreement}"
+            );
+        }
+    }
+
+    /// Empirical R3 scaling probe. Run with:
+    /// `cargo test -p visloc-slam --release -- --ignored --nocapture
+    /// bench_sparse_growth_to_euroc_length`.
+    #[test]
+    #[ignore]
+    fn bench_sparse_growth_to_euroc_length() {
+        use std::time::Instant;
+
+        let config = Sim3PoseGraphConfig {
+            max_iterations: 1,
+            sparse_solve_min_variables: 1,
+            ..Sim3PoseGraphConfig::default()
+        };
+        let mut samples = Vec::new();
+        for node_count in [300_u64, 900, 2700] {
+            let truth = ground_truth(node_count);
+            let mut graph = graph_with_true_measurements(&truth);
+            graph.anchor(0);
+            let started = Instant::now();
+            let result = graph.optimize(&config).unwrap();
+            let elapsed = started.elapsed();
+            assert!(result.used_sparse_solver);
+            samples.push((node_count, elapsed.as_secs_f64(), result.final_cost));
+            println!(
+                "Sim3 sparse: nodes={node_count}, edges={}, elapsed={:.3}s, final_cost={:.3e}",
+                result.edge_count,
+                elapsed.as_secs_f64(),
+                result.final_cost
+            );
+        }
+        for window in samples.windows(2) {
+            let node_growth = window[1].0 as f64 / window[0].0 as f64;
+            let time_growth = window[1].1 / window[0].1;
+            println!(
+                "growth {}->{}: nodes={node_growth:.2}x, time={time_growth:.2}x",
+                window[0].0, window[1].0
             );
         }
     }
