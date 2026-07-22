@@ -1072,6 +1072,53 @@ never scale) and independently verify the essential-decomposition convention
 on a known-good real wide-baseline pair before interpreting these 52-108
 degree rejections or allowing any candidate through stage 2.
 
+Stage-2 convention + multi-model diagnostic (2026-07-22): added opt-in,
+acceptance-neutral `--ll-2d2d-low-baseline-diagnostic`. It runs the existing
+COLMAP-style E/F/H classifier on the exact live stage-2 correspondences and
+logs its model/H diagnostics plus the recovered E rotation quaternion; all
+existing gates and acceptance behavior remain unchanged. Same-binary qf1
+artifact:
+`E:/visloc_archive/dpvo_a3_20260721/on_800_qf1_mp_2d2d_hdiag/`.
+The diagnostic adds only ~12.6 s to long-loop work (25.00 vs 12.44 s total;
+whole-run wall 1281.4 s) and reproduces the exact 1,945-attempt funnel, zero
+passes/acceptances, and byte-identical trajectory.
+
+This measurement **corrects the prior low-baseline/twisted-pair hypothesis**.
+Using EuRoC GT camera rotations (`R_WC = R_WB R_BC`) independently of both
+DPVO and the E estimator, the logged E rotation matches the forward
+old-camera -> new-camera convention, not its inverse. On real 0.75-1.0 m
+baseline pairs the forward E-vs-GT median error is 1.106 degrees versus
+23.630 degrees for the inverse; `(34,502)` is 0.412 vs 24.34 degrees. Across
+all 129 GT-labelled true pre/post-hover bridge candidates, E-vs-GT is
+0.153/1.571/9.407 degrees (min/median/max), while the final DPVO trusted
+relative rotation vs GT is 51.038/80.649/108.166 degrees. E-vs-trusted is
+therefore 50.516/81.110/108.162 degrees for the expected reason: **the E
+decomposition and direction convention are correct; DPVO's long-span
+trusted rotation is the badly drifted signal.** The existing 20-degree
+E-vs-trusted gate is rejecting correct loops, not protecting against a
+twisted E solution, on this pre/post-hover set.
+
+The multi-model check is useful but not sufficient alone. Of the 129 true
+pre/post bridges, 128 classify non-degenerate (84 `uncalibrated`, 36
+`calibrated`, 8 `planar`; one degenerate). Of 541 non-labelled pre/post
+candidates, only 31 classify non-degenerate (19 `uncalibrated`, 12
+`calibrated`; 510 degenerate). Thus E/F/H competition rejects 94.3% of that
+negative set while retaining 99.2% of labelled positives, but its 31
+remaining false candidates prohibit treating classification as an
+acceptance gate by itself. Only 8/129 positives are homography-dominant, so
+a homography/pure-rotation branch is a useful low-baseline side path, not the
+main explanation or the main bridge mechanism here.
+
+Verdict: convention verified positive; original degeneracy interpretation
+falsified. Do NOT loosen the trusted-rotation gate in place. The next
+diagnostic must carry E-vs-trusted failures forward without accepting them,
+run the existing independent 3D-3D Umeyama fit, and measure E-vs-Umeyama
+agreement plus scale for labelled/non-labelled candidates. Only if that
+stronger two-independent-geometry consensus separates the remaining 31
+multi-model false candidates may it replace (not merely bypass) the invalid
+long-span trusted-rotation comparison. Homography-classified candidates must
+remain rotation-only and must never emit a scale edge.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

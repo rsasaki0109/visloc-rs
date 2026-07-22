@@ -262,7 +262,10 @@ use visloc_core::types::Camera;
 use visloc_tracking::{umeyama_similarity_transform, TrajectorySimilarityTransform};
 use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, DescriptorMatch, Matcher};
 use visloc_vision::place_recognition::{cosine_similarity, mean_pool, vlad, Vocabulary};
-use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
+use visloc_vision::two_view::{
+    ConfigurationType, RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions,
+    TwoViewGeometryVerifier,
+};
 
 use crate::dpvo_patch_ba::{DpvoIntrinsics, DpvoPatch};
 use crate::dpvo_sim3_backend::Sim3LoopMeasurement;
@@ -476,6 +479,13 @@ pub struct DpvoLongLoopConfig {
     /// milestone's behavior (M1-M12) is reproduced byte-for-byte when this
     /// stays off — see `--ll-2d2d-geometry`.
     pub stage2_2d2d_geometry: bool,
+    /// A3 stage-2 low-baseline diagnostic: additionally run the existing
+    /// COLMAP-style E/F/H classifier for every stage-2 candidate and expose
+    /// its model, homography inlier count, and homography-vs-trusted
+    /// rotation disagreement in [`QueryCandidateLogEntry`]. Diagnostic
+    /// only: this flag never changes acceptance or any existing gate.
+    /// Default `false`.
+    pub stage2_low_baseline_diagnostic: bool,
     /// Lowe ratio-test threshold for the STAGE-2 2D-2D cross-check match —
     /// separate from `match_ratio`, which still governs the EXISTING 3D-3D
     /// bridge's own cross-check match, unchanged. Default `Some(0.9)`, per
@@ -542,6 +552,7 @@ impl Default for DpvoLongLoopConfig {
             sp_patch_min_separation: 2.0,
             max_rotation_inconsistency_deg: 20.0,
             stage2_2d2d_geometry: false,
+            stage2_low_baseline_diagnostic: false,
             stage2_match_ratio: Some(0.9),
             stage2_min_inliers: 30,
             stage2_min_coverage_fraction: 0.25,
@@ -744,6 +755,22 @@ pub struct QueryCandidateLogEntry {
     /// `stage2_2d2d_inliers` cleared `stage2_min_inliers` and the coverage
     /// gate), regardless of whether it then passed `max_rotation_inconsistency_deg`.
     pub stage2_e_rotation_disagreement_deg: Option<f64>,
+    /// A3 stage-2 convention diagnostic: the essential fit's recovered
+    /// previous-to-current rotation as `(w, x, y, z)`. Logged independently
+    /// of the trusted-pose comparison so a real pair can be checked against
+    /// an external GT rotation without reconstructing the fit.
+    pub stage2_e_rotation_wxyz: Option<[f64; 4]>,
+    /// A3 stage-2 low-baseline diagnostic: COLMAP-style E/F/H classification
+    /// (`not_run`, `undefined`, `degenerate`, `uncalibrated`, `calibrated`,
+    /// `planar`, `panoramic`, `planar_or_panoramic`, `watermark`, or
+    /// `multiple`).
+    pub stage2_model: &'static str,
+    /// Winning homography-model inlier count when `stage2_model` is planar,
+    /// panoramic, or unresolved planar/panoramic.
+    pub stage2_h_inliers: Option<usize>,
+    /// Homography-decomposed previous-to-current rotation disagreement from
+    /// DPVO's trusted relative rotation, when decomposition succeeded.
+    pub stage2_h_rotation_disagreement_deg: Option<f64>,
     /// The furthest verification stage this candidate reached this query —
     /// see [`CandidateOutcome`]'s own doc for the full list of values. Kept
     /// as a plain string (not an enum) since this is purely a diagnostic/CSV
@@ -772,6 +799,10 @@ pub struct QueryCandidateLogEntry {
 struct CandidateOutcome {
     stage2_2d2d_inliers: Option<usize>,
     stage2_e_rotation_disagreement_deg: Option<f64>,
+    stage2_e_rotation_wxyz: Option<[f64; 4]>,
+    stage2_model: &'static str,
+    stage2_h_inliers: Option<usize>,
+    stage2_h_rotation_disagreement_deg: Option<f64>,
     rotation_disagreement_deg: Option<f64>,
     stage_reached: &'static str,
 }
@@ -781,6 +812,10 @@ impl Default for CandidateOutcome {
         Self {
             stage2_2d2d_inliers: None,
             stage2_e_rotation_disagreement_deg: None,
+            stage2_e_rotation_wxyz: None,
+            stage2_model: "not_run",
+            stage2_h_inliers: None,
+            stage2_h_rotation_disagreement_deg: None,
             rotation_disagreement_deg: None,
             stage_reached: "not_attempted",
         }
@@ -1274,6 +1309,44 @@ impl DpvoLongLoopIndex {
                     current_intrinsics.cx,
                     current_intrinsics.cy,
                 );
+                if self.config.stage2_low_baseline_diagnostic {
+                    // Diagnostic-only E/F/H competition. One patch-grid
+                    // pixel is eight full-resolution pixels under DPVO's
+                    // fixed RES=8 representation: deliberately tighter than
+                    // the verifier's generic 4px default in THIS coordinate
+                    // space, while still broad enough for real SP matches.
+                    let mut options = TwoViewGeometryOptions::for_camera(&camera, 1.0);
+                    options.min_num_inliers = self.config.stage2_min_inliers;
+                    let report = TwoViewGeometryVerifier::new(options)
+                        .classify(&correspondences, &camera);
+                    outcome.stage2_model = match report.config {
+                        ConfigurationType::Undefined => "undefined",
+                        ConfigurationType::Degenerate => "degenerate",
+                        ConfigurationType::Uncalibrated => "uncalibrated",
+                        ConfigurationType::Calibrated => "calibrated",
+                        ConfigurationType::Planar => "planar",
+                        ConfigurationType::Panoramic => "panoramic",
+                        ConfigurationType::PlanarOrPanoramic => "planar_or_panoramic",
+                        ConfigurationType::Watermark => "watermark",
+                        ConfigurationType::Multiple => "multiple",
+                    };
+                    if matches!(
+                        report.config,
+                        ConfigurationType::Planar
+                            | ConfigurationType::Panoramic
+                            | ConfigurationType::PlanarOrPanoramic
+                    ) {
+                        outcome.stage2_h_inliers = Some(report.inliers.len());
+                    }
+                    if let Some((rotation, _translation)) = report.relative_pose {
+                        let h_rotation = UnitQuaternion::from_rotation_matrix(
+                            &Rotation3::from_matrix_unchecked(rotation),
+                        );
+                        outcome.stage2_h_rotation_disagreement_deg = Some(
+                            h_rotation.angle_to(&relative_pose.rotation).to_degrees(),
+                        );
+                    }
+                }
                 let stage2_result =
                     RelativePoseEstimator::default().estimate(&correspondences, &camera);
                 'stage2: {
@@ -1283,6 +1356,13 @@ impl DpvoLongLoopIndex {
                         break 'stage2;
                     };
                     outcome.stage2_2d2d_inliers = Some(rel.inliers.len());
+                    let e_quaternion = rel.previous_to_current.rotation.quaternion();
+                    outcome.stage2_e_rotation_wxyz = Some([
+                        e_quaternion.w,
+                        e_quaternion.i,
+                        e_quaternion.j,
+                        e_quaternion.k,
+                    ]);
                     if rel.inliers.len() < self.config.stage2_min_inliers {
                         self.diag_stage2_rejected_inliers += 1;
                         outcome.stage_reached = "insufficient_2d2d_inliers";
@@ -1474,6 +1554,11 @@ impl DpvoLongLoopIndex {
                 rotation_disagreement_deg: outcome.rotation_disagreement_deg,
                 stage2_2d2d_inliers: outcome.stage2_2d2d_inliers,
                 stage2_e_rotation_disagreement_deg: outcome.stage2_e_rotation_disagreement_deg,
+                stage2_e_rotation_wxyz: outcome.stage2_e_rotation_wxyz,
+                stage2_model: outcome.stage2_model,
+                stage2_h_inliers: outcome.stage2_h_inliers,
+                stage2_h_rotation_disagreement_deg: outcome
+                    .stage2_h_rotation_disagreement_deg,
                 stage_reached: outcome.stage_reached,
                 final_accepted: is_accepted,
             });

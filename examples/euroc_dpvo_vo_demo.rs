@@ -440,6 +440,10 @@ struct CliArgs {
     /// Requires `--long-loop`. Default off — every prior milestone's
     /// behavior (M1-M12) unaffected.
     ll_2d2d_geometry: bool,
+    /// A3 low-baseline/convention probe: run the default-off diagnostic E/F/H
+    /// classifier and append its result plus recovered rotations to the
+    /// candidate CSV. Requires `--ll-2d2d-geometry`; acceptance is unchanged.
+    ll_2d2d_low_baseline_diagnostic: bool,
     /// A3 stage 2: `DpvoLongLoopConfig`'s new fields, mirrored 1:1.
     ll_2d2d_match_ratio: f32,
     ll_2d2d_min_inliers: usize,
@@ -582,6 +586,8 @@ impl Default for CliArgs {
             ll_max_rotation_inconsistency_deg: DpvoLongLoopConfig::default()
                 .max_rotation_inconsistency_deg,
             ll_2d2d_geometry: DpvoLongLoopConfig::default().stage2_2d2d_geometry,
+            ll_2d2d_low_baseline_diagnostic: DpvoLongLoopConfig::default()
+                .stage2_low_baseline_diagnostic,
             ll_2d2d_match_ratio: DpvoLongLoopConfig::default()
                 .stage2_match_ratio
                 .unwrap_or(0.9),
@@ -775,6 +781,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 raw.remove(i);
                 continue;
             }
+            "--ll-2d2d-low-baseline-diagnostic" => {
+                args.ll_2d2d_low_baseline_diagnostic = true;
+                raw.remove(i);
+                continue;
+            }
             "--ll-2d2d-match-ratio" => args.ll_2d2d_match_ratio = raw.remove(i + 1).parse()?,
             "--ll-2d2d-min-inliers" => args.ll_2d2d_min_inliers = raw.remove(i + 1).parse()?,
             "--ll-2d2d-min-coverage-fraction" => {
@@ -835,6 +846,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         return Err("--ll-dump-frame-descriptors requires --long-loop (it dumps exactly what \
                      the long-loop index ingests)"
             .into());
+    }
+    if args.ll_2d2d_low_baseline_diagnostic && !args.ll_2d2d_geometry {
+        return Err(
+            "--ll-2d2d-low-baseline-diagnostic requires --ll-2d2d-geometry".into(),
+        );
     }
     if args.hover_release_duration_commits > 0 && args.hover_release_start_cap_frames == 0 {
         return Err(
@@ -1172,6 +1188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // on/off switch; omitting it reproduces M1-M12's exact behavior
             // byte-for-byte even with `--long-loop` itself on.
             stage2_2d2d_geometry: args.ll_2d2d_geometry,
+            stage2_low_baseline_diagnostic: args.ll_2d2d_low_baseline_diagnostic,
             stage2_match_ratio: Some(args.ll_2d2d_match_ratio),
             stage2_min_inliers: args.ll_2d2d_min_inliers,
             stage2_min_coverage_fraction: args.ll_2d2d_min_coverage_fraction,
@@ -1288,6 +1305,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.ll_2d2d_max_mean_sampson_error,
                 args.ll_2d2d_umeyama_vs_e_rotation_max_deg,
             );
+            if args.ll_2d2d_low_baseline_diagnostic {
+                println!(
+                    "  A3 stage 2 low-baseline diagnostic enabled: COLMAP E/F/H classification + E/H rotations logged; acceptance unchanged"
+                );
+            }
         }
     }
 
@@ -2231,15 +2253,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.long_loop {
         let query_log = odometry.long_loop_query_log();
         // A3 stage 2, first slice (`docs/visual_slam_sequential_sfm_plan.md`):
-        // 4 new columns APPENDED AT THE END — `stage2_2d2d_inliers`,
-        // `stage2_e_rotation_disagreement_deg`, `stage_reached`,
-        // `final_accepted` — per the task's own explicit instruction, so
+        // Stage-2 diagnostic columns are appended at the end, so
         // `scripts/eval_dpvo_long_loop_recall.py`'s existing `csv.DictReader`-
         // based loader (which only checks its own required column SUBSET is
         // present, ignoring anything extra) keeps working unmodified.
         let mut csv = String::from(
             "query_arrival,rank,candidate_arrival,gap,similarity,accepted,rotation_disagreement_deg,\
-             stage2_2d2d_inliers,stage2_e_rotation_disagreement_deg,stage_reached,final_accepted\n",
+             stage2_2d2d_inliers,stage2_e_rotation_disagreement_deg,stage2_e_rotation_qw,\
+             stage2_e_rotation_qx,stage2_e_rotation_qy,stage2_e_rotation_qz,stage2_model,\
+             stage2_h_inliers,stage2_h_rotation_disagreement_deg,stage_reached,final_accepted\n",
         );
         for entry in query_log {
             let rot = entry
@@ -2254,8 +2276,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .stage2_e_rotation_disagreement_deg
                 .map(|d| format!("{d:.3}"))
                 .unwrap_or_default();
+            let stage2_e_quat = entry.stage2_e_rotation_wxyz.unwrap_or([f64::NAN; 4]);
+            let format_quaternion_component = |value: f64| {
+                if value.is_finite() {
+                    format!("{value:.9}")
+                } else {
+                    String::new()
+                }
+            };
+            let stage2_h_inliers = entry
+                .stage2_h_inliers
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let stage2_h_rot = entry
+                .stage2_h_rotation_disagreement_deg
+                .map(|d| format!("{d:.3}"))
+                .unwrap_or_default();
             csv.push_str(&format!(
-                "{},{},{},{},{:.6},{},{},{},{},{},{}\n",
+                "{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 entry.query_arrival,
                 entry.rank,
                 entry.candidate_arrival,
@@ -2265,6 +2303,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rot,
                 stage2_inliers,
                 stage2_e_rot,
+                format_quaternion_component(stage2_e_quat[0]),
+                format_quaternion_component(stage2_e_quat[1]),
+                format_quaternion_component(stage2_e_quat[2]),
+                format_quaternion_component(stage2_e_quat[3]),
+                entry.stage2_model,
+                stage2_h_inliers,
+                stage2_h_rot,
                 entry.stage_reached,
                 entry.final_accepted,
             ));
@@ -2278,7 +2323,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // consumers that only read `rank >= 0` rows are unaffected.
         let empty_arrivals = odometry.long_loop_empty_query_arrivals();
         for &arrival in empty_arrivals {
-            csv.push_str(&format!("{arrival},-1,-1,-1,0.000000,false,,,,no_candidates,false\n"));
+            csv.push_str(&format!(
+                "{arrival},-1,-1,-1,0.000000,false,,,,,,,,not_run,,,no_candidates,false\n"
+            ));
         }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
         fs::write(&csv_path, &csv)?;
