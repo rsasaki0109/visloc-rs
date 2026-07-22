@@ -45,6 +45,12 @@ pub use submap_partition::{
     AdaptiveSubmapPartitionHints, SubmapPartitionError, SubmapWindow,
 };
 
+pub mod submap_overlap;
+pub use submap_overlap::{
+    collect_submap_overlap_evidence, shared_landmark_point_matches, PairRotationEvidence,
+    SubmapOverlapConfig, SubmapOverlapError, SubmapOverlapEvidence,
+};
+
 pub mod submap_alignment;
 pub use submap_alignment::{
     estimate_submap_sim3_constraint, RotationConstraintGeometry, RotationOnlyConstraint,
@@ -56,6 +62,12 @@ pub mod hierarchical_submap_graph;
 pub use hierarchical_submap_graph::{
     HierarchicalSubmapGraph, HierarchicalSubmapGraphError, HierarchicalSubmapId,
     HierarchicalSubmapNode, HierarchicalSubmapOptimizationResult,
+};
+
+pub mod hierarchical_sfm;
+pub use hierarchical_sfm::{
+    hierarchical_sfm, optimize_independent_submaps, HierarchicalSfmAtlas, HierarchicalSfmConfig,
+    HierarchicalSfmError, HierarchicalSfmResult, HierarchicalSfmSeam,
 };
 
 pub mod ordered_view_graph;

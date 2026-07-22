@@ -349,6 +349,19 @@ seam selection, motion-quality override, local-index remapping, and invalid
 input rejection. This is the deterministic input boundary for the S2 mapper,
 not yet an end-to-end S2 gate result.
 
+S2b typed assembly path (2026-07-22):
+`submap_overlap` converts shared `(source frame, keypoint)` identities into
+mutual-best one-to-one landmark matches and separately transforms verified
+essential pair rotations into the two independent local gauges. A weighted
+angular consensus rejects inconsistent rotation evidence before R2. The new
+`hierarchical_sfm` composition then runs S2a partitioning, rebuilds every local
+window independently, verifies every adjacent 3D seam through the unchanged R2
+gates, and commits node transforms only after the R3 graph succeeds. Synthetic
+tests recover an exact scale-2.5 seam through the complete R2/R3 transaction,
+reject absent independent rotation evidence, and handle a one-submap sequence
+without inventing a scale edge. Real-data frontend/export wiring and the MH_03
+S2 gate remain open.
+
 ### S3 — Hard-video robustness
 
 - Add motion/blur/dynamic-region quality scores to edge selection, not to the
