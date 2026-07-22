@@ -995,6 +995,25 @@ current visually refined endpoint poses while constructing IMU factors across
 folded gaps (composition or re-integration); neither a lower scale gate nor
 stale pose snapshots is admissible.
 
+That composition hypothesis was then implemented and closed before merge.
+Bias-corrected preintegration composition across folded arrivals did recover a
+well-conditioned live alignment: at 400 frames it accepted 330/331 windows and
+estimated scale 0.1562 while preserving 0.0040 m ATE. It also exposed that the
+coupled branch was solving metric IMU residuals directly in DPVO's visual
+gauge, causing 57 soft rollbacks. Solving an isolated branch in the recovered
+metric gauge and mapping it back before output blending reached weight 1.0 and
+0.0039 m ATE at 400 frames, but failed the longer safety gate: by 650 frames
+the scale posterior had self-fed from 0.162 to 0.407 and ATE was 0.4614 m.
+Freezing all posteriors while active caused repeated convergence/rollback
+cycles; freezing only scale delayed but did not prevent feedback, ending at
+scale 0.382 and 0.5566 m ATE. All composed-factor/metric-branch changes were
+therefore reverted. A real continuous-coupling design needs a separately
+maintained visual-only shadow state (or another independent scale source), not
+posterior updates from poses already influenced by that posterior. One genuine
+state-machine fix remains: after a rollback event the consecutive-bad counter
+now starts a fresh audit instead of remaining at threshold and re-firing on
+every subsequent bad frame.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

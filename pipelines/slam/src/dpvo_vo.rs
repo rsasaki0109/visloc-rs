@@ -5276,7 +5276,13 @@ pub(crate) fn rollback_monitor_step(
     } else {
         consecutive_bad + 1
     };
-    (next, next >= threshold)
+    if next >= threshold {
+        // A rollback starts a fresh audit. Returning the still-tripped
+        // threshold would otherwise re-fire on every following bad frame.
+        (0, true)
+    } else {
+        (next, false)
+    }
 }
 
 /// Admit recursive sensor evidence at most once for each camera arrival.
@@ -6786,7 +6792,7 @@ mod tests {
             consecutive = next;
         }
         let (next, tripped) = rollback_monitor_step(10_000.0, bound, consecutive, threshold);
-        assert_eq!(next, 5);
+        assert_eq!(next, 0, "a completed rollback starts a fresh audit");
         assert!(
             tripped,
             "must roll back on the {threshold}th consecutive bad frame"
