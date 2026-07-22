@@ -337,6 +337,18 @@ Gate: on MH_03 full, equal or better registration and ATE than the current full
 control at <=50% wall time and <=50% peak RAM; no submap seam exceeds the RPE
 threshold.
 
+S2a partition boundary (2026-07-22):
+`submap_partition` now deterministically divides an ordered verified view graph
+into overlapping windows with hard minimum/maximum sizes and no short tail.
+Within a bounded radius of the target size it selects the seam with the most
+verified cross-boundary correspondences; an optional non-negative per-cut hint
+lets the frontend downweight blur, dynamics, or unsafe motion without weakening
+any geometric acceptance gate. Pair indices are filtered and remapped into each
+independent local window. Five tests cover exact overlap/coverage, supported
+seam selection, motion-quality override, local-index remapping, and invalid
+input rejection. This is the deterministic input boundary for the S2 mapper,
+not yet an end-to-end S2 gate result.
+
 ### S3 — Hard-video robustness
 
 - Add motion/blur/dynamic-region quality scores to edge selection, not to the

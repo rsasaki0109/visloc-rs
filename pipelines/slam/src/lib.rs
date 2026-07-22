@@ -39,6 +39,12 @@ pub use local_submap::{
     LocalSubmapRejectionReason,
 };
 
+pub mod submap_partition;
+pub use submap_partition::{
+    partition_ordered_submaps, remap_pairs_to_submap, AdaptiveSubmapPartitionConfig,
+    AdaptiveSubmapPartitionHints, SubmapPartitionError, SubmapWindow,
+};
+
 pub mod submap_alignment;
 pub use submap_alignment::{
     estimate_submap_sim3_constraint, RotationConstraintGeometry, RotationOnlyConstraint,
