@@ -333,6 +333,11 @@ pub struct DpvoLongLoopConfig {
     /// cosine similarity over the whole indexed history + cross-check
     /// matching + RANSAC) costs meaningfully more per call. Default `40`.
     pub query_frequency: usize,
+    /// Extract/index one appearance frame every this many input arrivals.
+    /// Query frames should use a compatible cadence (the defaults 1 and 40
+    /// guarantee every query frame is indexed). This bounds the otherwise
+    /// per-frame SuperPoint cost independently of query cadence.
+    pub index_frequency: usize,
     /// Top-K appearance candidates (by VLAD cosine similarity) to attempt
     /// geometric verification against, per query, stopping at the first
     /// ACCEPTED one. Default `3`.
@@ -536,6 +541,7 @@ impl Default for DpvoLongLoopConfig {
             vocab_seed: 0,
             retrieval_scorer: RetrievalScorer::Vlad,
             query_frequency: 40,
+            index_frequency: 1,
             top_k: 3,
             min_similarity: 0.15,
             min_temporal_gap: 150,

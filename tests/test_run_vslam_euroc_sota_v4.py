@@ -65,6 +65,17 @@ class VslamSotaV4RunnerTests(unittest.TestCase):
             },
             GATES,
         )
+        MODULE.validate_configuration(
+            {
+                "schema_version": 1,
+                "arguments": [
+                    "64" if value == "256" else value for value in REQUIRED
+                ],
+                "queue_bounds": BOUNDS,
+                "long_loop_superpoint_model": "superpoint.onnx",
+            },
+            GATES,
+        )
         with self.assertRaisesRegex(ValueError, "missing --long-loop"):
             MODULE.validate_configuration(
                 {

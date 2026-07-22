@@ -160,8 +160,8 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
             actual = int(unique_option(arguments, option))
         except ValueError as error:
             raise ValueError(f"configuration has invalid {option}") from error
-        if actual != queue_bounds[key]:
-            raise ValueError(f"configuration {option} differs from the frozen V4 protocol")
+        if actual < 1 or actual > queue_bounds[key]:
+            raise ValueError(f"configuration {option} exceeds the frozen V4 queue bound")
     try:
         actual_scale_gate = float(
             unique_option(arguments, "--s3b-max-abs-log-scale-correction")

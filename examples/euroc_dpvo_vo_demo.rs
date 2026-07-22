@@ -416,6 +416,7 @@ struct CliArgs {
     /// own doc). Parsed from `--ll-retrieval-scorer {vlad,mean-pool}`.
     ll_retrieval_scorer: RetrievalScorer,
     ll_query_frequency: usize,
+    ll_index_frequency: usize,
     ll_top_k: usize,
     /// A3 ranking slice B: `Some(..)` only when `--ll-min-similarity` was
     /// actually passed on the command line — `None` (the default) means
@@ -591,6 +592,7 @@ impl Default for CliArgs {
             ll_vocab_words: DpvoLongLoopConfig::default().vocab_words,
             ll_retrieval_scorer: DpvoLongLoopConfig::default().retrieval_scorer,
             ll_query_frequency: DpvoLongLoopConfig::default().query_frequency,
+            ll_index_frequency: DpvoLongLoopConfig::default().index_frequency,
             ll_top_k: DpvoLongLoopConfig::default().top_k,
             // `None` until `--ll-min-similarity` is actually passed — see
             // that field's own doc for why the resolved value depends on
@@ -795,6 +797,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 };
             }
             "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
+            "--ll-index-frequency" => args.ll_index_frequency = raw.remove(i + 1).parse()?,
             "--ll-top-k" => args.ll_top_k = raw.remove(i + 1).parse()?,
             "--ll-min-similarity" => args.ll_min_similarity = Some(raw.remove(i + 1).parse()?),
             "--ll-min-temporal-gap" => args.ll_min_temporal_gap = raw.remove(i + 1).parse()?,
@@ -911,6 +914,15 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     }
     if args.ll_2d2d_low_baseline_diagnostic && !args.ll_2d2d_geometry {
         return Err("--ll-2d2d-low-baseline-diagnostic requires --ll-2d2d-geometry".into());
+    }
+    if args.long_loop
+        && (args.ll_index_frequency == 0
+            || args.ll_query_frequency % args.ll_index_frequency != 0)
+    {
+        return Err(
+            "--ll-index-frequency must be positive and divide --ll-query-frequency so every query frame is indexed"
+                .into(),
+        );
     }
     if args.hover_release_duration_commits > 0 && args.hover_release_start_cap_frames == 0 {
         return Err(
@@ -1331,6 +1343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vocab_words: args.ll_vocab_words,
             retrieval_scorer: args.ll_retrieval_scorer,
             query_frequency: args.ll_query_frequency,
+            index_frequency: args.ll_index_frequency,
             top_k: args.ll_top_k,
             min_similarity: ll_min_similarity,
             min_temporal_gap: args.ll_min_temporal_gap,
@@ -1428,7 +1441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         println!(
             "long-range loop enabled (Milestone M11): superpoint_model={} vocab_bootstrap_frames={} \
-             vocab_words={} retrieval_scorer={} (A3 ranking slice B) query_frequency={} top_k={} \
+             vocab_words={} retrieval_scorer={} (A3 ranking slice B) query_frequency={} index_frequency={} top_k={} \
              min_similarity={:.3}{} min_temporal_gap={} \
              max_indexed_frames={} patch_pixel_radius={:.2} min_bridge_correspondences={} \
              ransac_iterations={} min_ransac_inliers={} max_mean_residual_ratio={:.3} \
@@ -1439,6 +1452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.ll_vocab_words,
             retrieval_scorer_str,
             args.ll_query_frequency,
+            args.ll_index_frequency,
             args.ll_top_k,
             ll_min_similarity,
             if args.ll_min_similarity.is_some() {
@@ -2278,6 +2292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          sim3_backend_total_elapsed_ms={s3b_total_elapsed_ms:.3}\n\
          long_loop_enabled={ll_enabled}\n\
          long_loop_frames_indexed={ll_frames_indexed}\n\
+         long_loop_index_frequency={ll_index_frequency}\n\
          long_loop_vocab_built={ll_vocab_built}\n\
          long_loop_estimated_index_bytes={ll_estimated_bytes}\n\
          long_loop_queries_attempted={ll_queries_attempted}\n\
@@ -2450,6 +2465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3b_total_elapsed_ms = s3b_diag.total_elapsed_ms,
         ll_enabled = ll_diag.enabled,
         ll_frames_indexed = ll_diag.frames_indexed,
+        ll_index_frequency = args.ll_index_frequency,
         ll_vocab_built = ll_diag.vocab_built,
         ll_estimated_bytes = ll_diag.estimated_index_bytes,
         ll_queries_attempted = ll_diag.queries_attempted,

@@ -891,6 +891,40 @@ accuracy run must use V4's required IMU, proximity loop, global BA, Sim(3), and
 long-range loop stack on full MH_03/MH_01, then freeze only if both development
 sequences clear the 0.020 m policy without losing the new full-sequence timing.
 
+The first required-stack audit prevents treating mere feature enablement as a
+solution. On the same 400-frame prefix, enabling IMU, proximity loops, widened
+global BA, Sim(3), and long-loop raised latency to 82.22 ms/frame. SuperPoint
+had indexed 339 frames (about 99 MB) although only 9 retrieval queries were
+issued. `DpvoLongLoopConfig::index_frequency` and `--ll-index-frequency` now
+bound descriptor extraction independently of query cadence, while requiring
+the index cadence to divide query cadence so every query frame is present.
+Index frequency 10 with query frequency 40 reduced the required-stack prefix
+to 49.54 ms/frame and 0.0113 m ATE.
+
+The corresponding full-2700 required-stack run is nevertheless a closed
+failure: 79.29 ms/frame and 2.5006 m ATE. It accepted 135 proximity loops,
+spent 81.3 seconds in 38 widened global-BA calls and 6.4 seconds in Sim(3),
+but was worse than the 2.4566 m visual-only trajectory. The IMU bootstrap was
+rejected by its bias-magnitude gate 2589 times, and all 66 long-range queries
+returned zero candidates even though 264 frames were indexed. A configured
+256-free-pose cap also reported a 331-pose maximum, so it does not currently
+satisfy the V4 bound. These are three independent blockers: false/unsafe
+proximity evidence plus unbounded global solves, an unusable IMU initializer,
+and a sparse-index retrieval policy that never proposes a long loop. Do not
+paper over them by loosening the existing IMU bias gate: the earlier measured
+0.3-rad/s experiment bootstrapped a false 18.66 scale and catastrophically
+worsened the trajectory. The next slice must fix evidence/cost construction,
+not thresholds.
+
+The cap violation was a concrete implementation bug: folded prefix poses were
+trimmed, but if the still-live graph alone exceeded the cap they all remained
+free. The gather now fixes the oldest additional live poses while retaining
+their residual coverage, and a regression test requires the actual free block
+to remain within the cap. The V4 runner also treats protocol queue values as
+upper bounds (matching the evaluator) so a frozen configuration may select a
+smaller, safer solve such as 64 free poses without weakening the public 256
+maximum.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

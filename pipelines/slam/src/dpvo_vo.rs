@@ -2831,11 +2831,18 @@ impl DpvoOdometry {
         // sequence relative to the coords/depths sampling below — M11's own
         // `long_loop` runs (`sp_anchored_patches` unset, i.e. `false`)
         // reproduce byte-for-byte.
-        let sp_features: Option<DeepFeatureSet> = self.long_loop.as_mut().and_then(|runtime| {
-            GrayscaleImage::from_luma_u8(w, h, image.iter().copied().collect())
-                .ok()
-                .and_then(|gray| runtime.extractor.extract_deep(&gray).ok())
+        let index_due = self.long_loop.as_ref().is_some_and(|runtime| {
+            self.graph.counter() % runtime.index.config().index_frequency.max(1) == 0
         });
+        let sp_features: Option<DeepFeatureSet> = index_due
+            .then(|| {
+                self.long_loop.as_mut().and_then(|runtime| {
+                    GrayscaleImage::from_luma_u8(w, h, image.iter().copied().collect())
+                        .ok()
+                        .and_then(|gray| runtime.extractor.extract_deep(&gray).ok())
+                })
+            })
+            .flatten();
 
         // Centroid sampling (`Patchifier.forward`, `RANDOM` strategy,
         // `net.py:131-133`): integers in `[1, w-1)`/`[1, h-1)` in `fmap`'s
@@ -5591,7 +5598,7 @@ pub(crate) fn gather_widened_global_ba_problem(
         }
     }
 
-    let fixedp = if folded_count > 0 {
+    let mut fixedp = if folded_count > 0 {
         0
     } else {
         // No folding needed: t0_arrival's own frame is still live. Widen in
@@ -5603,6 +5610,18 @@ pub(crate) fn gather_widened_global_ba_problem(
             .unwrap_or(active_t0_live);
         active_t0_live.min(loop_t0_live)
     };
+    // Trimming folded material alone cannot enforce the bound when the live
+    // graph itself exceeds `max_free_poses` (observed as 331 free poses with
+    // a configured cap of 256). Keep the full pose/edge arrays for residual
+    // coverage, but fix the oldest additional poses so the dense solve's
+    // actual free block is bounded exactly as the public config promises.
+    if let Some(cap) = max_free_poses {
+        let required_fixed = (folded_count + n).saturating_sub(cap);
+        if required_fixed > fixedp {
+            fixedp = required_fixed;
+            capped = true;
+        }
+    }
     let free_pose_count = (folded_count + n).saturating_sub(fixedp);
     let plain_active_free_pose_count = n.saturating_sub(active_t0_live);
     let t0_widened_by_loop_edge = free_pose_count > plain_active_free_pose_count;
@@ -6384,6 +6403,15 @@ mod global_ba_tests {
             "a cap with no headroom must drop the folded prefix entirely"
         );
         assert!(capped.capped, "the trim must be reported, never silent");
+
+        // The live graph itself can exceed the cap after every folded pose
+        // has already been removed. The oldest live poses must then become
+        // fixed variables; the configured bound is on the solve, not only
+        // on the optional folded prefix.
+        let tight = gather_widened_global_ba_problem(&graph, &loop_pairs, Some(1))
+            .expect("tight live-graph cap");
+        assert_eq!(tight.poses.len() - tight.fixedp, 1);
+        assert!(tight.capped);
     }
 
     /// Milestone M10 (task spec, part G): "no-op when disabled" — with
