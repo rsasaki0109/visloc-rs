@@ -32,6 +32,20 @@ pub use incremental_sfm::{
     IncrementalSfmResult, NextImagePolicy, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
 };
 
+pub mod local_submap;
+pub use local_submap::{
+    LocalSubmap, LocalSubmapBuildError, LocalSubmapBuilder, LocalSubmapConfig, LocalSubmapFrame,
+    LocalSubmapLandmark, LocalSubmapObservation, LocalSubmapQuality, LocalSubmapQualityConfig,
+    LocalSubmapRejectionReason,
+};
+
+pub mod submap_alignment;
+pub use submap_alignment::{
+    estimate_submap_sim3_constraint, RotationConstraintGeometry, RotationOnlyConstraint,
+    SubmapPointMatch, SubmapSim3AlignmentConfig, SubmapSim3Constraint, SubmapSim3Rejection,
+    SubmapSim3RejectionReason, VerifiedSubmapConstraint,
+};
+
 pub mod ordered_view_graph;
 pub use ordered_view_graph::{
     generate_ordered_pairs, OrderedPairCandidate, OrderedPairGeneratorConfig, OrderedPairHints,

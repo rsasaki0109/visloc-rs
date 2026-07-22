@@ -1,6 +1,11 @@
 # Visual SLAM + Sequential SfM development plan
 
-Status: proposed, 2026-07-19
+Status: active, 2026-07-22
+
+SOTA reform program: [ssfm_vslam_sota_reform_plan.md](ssfm_vslam_sota_reform_plan.md).
+That document defines the current frontier, the shared local-submap
+architectural reform, and the claim-level gates; this document remains the
+detailed experiment ledger and historical source of truth.
 
 User priority (2026-07-19): **monocular first and monocular by default.** All
 headline SLAM and Sequential SfM work is mono-to-mono. IMU/stereo work is
@@ -1196,6 +1201,23 @@ triangulation over temporal neighborhoods, then E-consistent Sim3 alignment)
 rather than reuse the corrupted single-frame DPVO patch depths. E-derived
 rotation-only constraints remain separately viable but cannot satisfy A3's
 scale/ATE gate by themselves.
+
+Independent-submap foundation (2026-07-22): the next mechanism now has a
+shared library boundary rather than another demo-local bridge.
+`LocalSubmapBuilder` reconstructs an independent monocular gauge solely from
+calibration, raw features, and verified pairwise matches, then exposes
+registration/track/parallax/reprojection conditioning and one deterministic
+quality-rejection reason. Separate typed `RotationOnlyConstraint` and
+`SubmapSim3Constraint` products make it impossible for low-parallax evidence
+to silently acquire a scale. The Sim3 estimator requires unique 3D matches,
+non-collinear geometry on both sides, deterministic RANSAC plus consensus
+refit, normalized residual, agreement with the independently verified E
+rotation, and leave-one-out scale stability. It has no live-pose/depth input.
+Synthetic known-transform/outlier, wrong-E, degeneracy, and observability tests
+pass; the full ONNX-enabled SLAM library suite is 448 passed / 7 ignored.
+Nothing is accepted or fed to the backend yet. Verdict: architectural positive,
+real-data acceptance still unmeasured; V1a must next build and label two fresh
+MH_01 pre/post-hover local maps before any write-back path is implemented.
 
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
