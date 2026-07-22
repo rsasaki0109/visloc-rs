@@ -494,7 +494,13 @@ turns a pre-finalization failure into three explicit DNF cells instead of
 omitting the sequence. It requires all three frozen sequences, reports
 median/worst plus the per-sequence reproduced Pareto frontier, and deliberately
 leaves the claimable SOTA gate false while GLUEMAP, InstantSfM, ORBIT, or
-release evidence is absent.
+release evidence is absent. `run_ssfm_heldout_suite.py` is the frozen serial
+entry point: it verifies the GT-free extraction and all executable/script
+hashes before the first run, executes the three sequences once in protocol
+order, preserves a synthetic failure manifest if a child crashes before
+writing one, and always attempts the failure-inclusive aggregate. Its
+end-to-end failure-path test confirms that three preparation failures remain
+three DNF rows per engine rather than disappearing from the report.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
