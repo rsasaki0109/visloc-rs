@@ -94,6 +94,23 @@ def main() -> int:
         "colmap": REPO / "scripts" / "run_colmap_ssfm_frozen.py",
         "finalize": REPO / "scripts" / "finalize_ssfm_heldout_sequence.py",
     }
+    hierarchical_executable = {
+        "path": str(args.hierarchical_exe.resolve()),
+        "sha256": sha256(args.hierarchical_exe),
+        "build_revision": args.hierarchical_build_revision,
+    }
+    colmap_executable = {
+        "path": str(args.colmap.resolve()),
+        "sha256": sha256(args.colmap),
+    }
+    python_executable = {
+        "path": str(args.python.resolve()),
+        "sha256": sha256(args.python),
+    }
+    runner_scripts = {
+        name: {"path": str(path.resolve()), "sha256": sha256(path)}
+        for name, path in scripts.items()
+    }
     commands = {}
     returncodes = {}
     started_utc = timestamp()
@@ -112,15 +129,10 @@ def main() -> int:
             "ground_truth_path_disclosed_only_to_finalizer": (
                 "finalize" in commands
             ),
-            "hierarchical_executable": {
-                "path": str(args.hierarchical_exe.resolve()),
-                "sha256": sha256(args.hierarchical_exe),
-                "build_revision": args.hierarchical_build_revision,
-            },
-            "runner_scripts": {
-                name: {"path": str(path.resolve()), "sha256": sha256(path)}
-                for name, path in scripts.items()
-            },
+            "hierarchical_executable": hierarchical_executable,
+            "colmap_executable": colmap_executable,
+            "python_executable": python_executable,
+            "runner_scripts": runner_scripts,
             "commands": commands,
             "returncodes": returncodes,
             "final_manifest": (
