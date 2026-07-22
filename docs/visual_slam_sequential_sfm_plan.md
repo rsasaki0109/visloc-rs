@@ -950,6 +950,84 @@ surface the tightest pre/post-hover bridge; the lab's secondary finding
 (near-target candidates rank #1 at query arrivals 457/459/461) says
 query-arrival placement is the remaining lever for that specific pair.
 
+Ranking slice B — vocabulary-free mean-pool scorer, live (2026-07-22): the
+live index gained `--ll-retrieval-scorer {vlad,mean-pool}` (default `vlad`,
+every prior milestone byte-for-byte unchanged, including the vocabulary
+bootstrap path). `mean-pool` computes an L2-normalized mean of the frame's
+raw SP descriptors per frame, immediately on ingest — no vocabulary is ever
+trained or buffered-toward. `min_similarity`'s floor already existed as a
+plain config field (no new plumbing needed); the demo now resolves a
+scorer-appropriate DEFAULT (`0.15` for `vlad`, unchanged) unless
+`--ll-min-similarity` is passed explicitly. The `mean-pool` default (`0.5`)
+is calibrated from the same offline dump the ranking lab used
+(`E:/visloc_archive/dpvo_a3_20260721/frame_descriptors_800/`): among the 355
+MH_01 800f query arrivals whose top-1 mean-pool candidate is a true
+labelled revisit (radius 1.0 m), the minimum observed similarity is 0.583
+(median 0.915); 0.5 sits comfortably below that minimum (excludes 0/355
+labelled hits) while staying 3.3x VLAD's own `0.15` — still a loose
+proposal-only pre-filter, not a correctness gate.
+
+Same-binary MH_01 800f qf5 A/B (seed 0, `--ll-sp-anchored-patches`,
+byte-identical everything else to the qf5 controls):
+
+- **Retrieval recall jumps to near-ceiling and matches the offline lab
+  prediction.** Both mean-pool arms (2d2d-guarded and unguarded) score
+  identically on the retrieval side — the scorer/candidates are the same,
+  only acceptance differs: 159 issued queries, 29 empty (18.24%, vs the
+  qf5+2d2d VLAD control's 61 empty/38%); recall@{1,3,5,10} = 71/72 = 0.9861
+  at radius 1.0 m and 69/70 = 0.9857 at radius 0.5 m — up from VLAD's
+  0.5694 at qf5 (Stage-1b) and far above every `--ll-vocab-words` arm in the
+  vocab-size A/B (0.33-0.44). Opportunity coverage is unchanged (79.94%
+  missed, 287/359) — cadence, not scorer, still bounds how many labelled
+  arrivals are even queried. The tightest pair (42,456) is still NOT
+  surfaced (`found_near_target: false`; near queries 453/458 the top-3
+  candidates are all similarity 0.89-0.92 but none near arrival 42) —
+  exactly the lab's own caveat (offline rank 72), not a new failure.
+- **Arm MP** (`--ll-retrieval-scorer mean-pool --ll-2d2d-geometry`,
+  `E:/visloc_archive/dpvo_a3_20260721/on_800_qf5_mp_2d2d/`): stage-2 funnel
+  `attempts=389, passed=0` (138 insufficient matches / 123 insufficient
+  inliers / 33 insufficient coverage / 95 rotation-inconsistent / 0 high
+  residual / 0 reaching the umeyama-vs-E gate) — zero accepted loops, and
+  the trajectory is byte-identical to the `on_800_qf5_2d2d` VLAD control
+  (rigid 4.0866 / sim 3.3224 / scale 16.019 / tracked 1.0). The mechanism
+  stays inert exactly like the VLAD+2d2d arm, now proven scorer-independent:
+  swapping in a scorer with far higher live recall@1 does not, by itself,
+  make an unsound loop pass a sound geometric gate.
+- **Arm MP-noguard** (`--ll-retrieval-scorer mean-pool`, no `--ll-2d2d-geometry`,
+  diagnostic only, `.../on_800_qf5_mp_noguard/`): 7 loops accepted, ALL
+  short-cycle (candidate/query pairs `(21,233)` `(205,368)` `(205,373)`
+  `(219,383)` `(219,388)` `(219,393)` `(246,418)`, gaps 163-212 frames,
+  rotation disagreement 7.8-19.7 degrees against the existing 20-degree
+  gate) — reproducing Stage-1b's exact "just-under-20-degrees" borderline
+  pattern under a different scorer, not a new corruption mode. One fit is
+  outright wrong (scale 0.052); the other six cluster near correct
+  (0.972-1.0076) — but NONE satisfies this task's own "genuine long-range
+  bridge" test (candidate < 216 AND query > 461): every accepted pair sits
+  entirely inside or just entering the M13 hover span, never bridging
+  pre-hover to post-hover. Net trajectory effect is small and mixed, not a
+  scale-cliff fix: rigid ATE 4.1441 (control 4.0866), similarity ATE 3.9143
+  (control 3.3224, worse), scale 13.599 (control 16.019, modest
+  improvement), tracked 1.0. Wall time ~1416-1418 s for both new arms vs the
+  `on_800_qf5_2d2d` control's 1511 s (all three ran with an unrelated
+  concurrent SfM mapper on the machine — diagnostic only, not a controlled
+  timing comparison).
+
+Verdict: honest, precisely-scoped negative on acceptance, a real positive on
+retrieval. The mean-pool scorer closes essentially all of the live-vs-offline
+retrieval gap the vocab-size A/B proved was NOT fixable by tuning VLAD's own
+`k` — recall@1 rises from 0.57 to 0.99 with zero vocabulary and 32x less
+per-frame storage — but it does not by itself produce a sound long-range
+loop: with the 2D-2D guard on, the mechanism stays fully inert (0/389
+candidates pass, byte-identical ATE to the control); with the guard off, it
+reproduces the same short-cycle-borderline-pass failure mode already
+diagnosed under VLAD, not the sought pre/post-hover bridge. The A3 gate
+(>=90% recall, zero false loops, improved full-sequence ATE on >=2
+sequences) is closer on the recall term (now met on MH_01 800f under this
+scorer) but still unmet on the false-loop/ATE terms without further
+disambiguation work (§2's open front (b), homography/pure-rotation check +
+E-convention verification, is unchanged by this slice). Recall JSONs:
+`.../recall_qf_ab/qf5_mp_2d2d.json`, `.../recall_qf_ab/qf5_mp_noguard.json`.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

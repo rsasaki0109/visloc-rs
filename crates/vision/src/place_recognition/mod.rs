@@ -215,6 +215,60 @@ pub fn vlad(local_descriptors: &[Vec<f32>], vocab: &Vocabulary) -> Vec<f32> {
     out
 }
 
+/// Vocabulary-free alternative to [`vlad`]: the L2-normalized MEAN of a
+/// frame's own local descriptors — no vocabulary, no per-word residual
+/// pooling, just a single pooled vector in the SAME `dim` as the local
+/// descriptors themselves (`256` for SuperPoint, vs VLAD's `k * dim`).
+///
+/// Motivation (`docs/visual_slam_sequential_sfm_plan.md`'s "A3 — Sound
+/// long-range loop closure" section, "Decisive implication" paragraph, and
+/// `pipelines/slam/src/dpvo_long_loop.rs`'s own "A3 ranking slice B" module
+/// doc): an offline ranking-lab evaluation on real MH_01 SuperPoint
+/// descriptors found this reaches the SAME recall@1 as a `k=32` VLAD
+/// vocabulary while needing no vocabulary bootstrap/training step at all and
+/// `32x` less per-frame storage.
+///
+/// Returns an all-zero vector of the descriptors' own dimension if every
+/// descriptor happens to sum to exactly zero (an L2 norm of `0`, the same
+/// "cannot normalize a zero vector, return the zero vector rather than
+/// dividing by zero" convention [`vlad`] itself uses), or an EMPTY vector
+/// (`Vec::new()`) if `local_descriptors` itself is empty — unlike [`vlad`],
+/// there is no vocabulary here to fix an output length ahead of time when
+/// there is nothing to pool, so the honest answer is "no descriptor at all",
+/// not a zero vector of a guessed length. In this crate's actual caller
+/// (`crate::dpvo_long_loop::DpvoLongLoopIndex::ingest_frame`), a frame with
+/// zero local descriptors is never passed to this function in the first
+/// place (that caller returns early on `descriptors.is_empty()`), so this
+/// case is a defensive contract for other/future callers and this function's
+/// own unit tests, not a path this crate's own pipeline exercises.
+pub fn mean_pool(local_descriptors: &[Vec<f32>]) -> Vec<f32> {
+    let Some(dim) = local_descriptors
+        .iter()
+        .map(|d| d.len())
+        .find(|&len| len > 0)
+    else {
+        return Vec::new();
+    };
+    let mut sum = vec![0.0f32; dim];
+    let mut count = 0usize;
+    for d in local_descriptors {
+        if d.len() != dim {
+            continue; // Skip a malformed/mismatched-dimension entry rather than panicking.
+        }
+        for (s, &x) in sum.iter_mut().zip(d.iter()) {
+            *s += x;
+        }
+        count += 1;
+    }
+    if count > 0 {
+        for s in sum.iter_mut() {
+            *s /= count as f32;
+        }
+    }
+    l2_normalize(&mut sum);
+    sum
+}
+
 /// Cosine similarity of two descriptors. For L2-normalized inputs (as [`vlad`]
 /// returns) this is just the dot product. Returns 0 if the lengths differ or
 /// either is empty.

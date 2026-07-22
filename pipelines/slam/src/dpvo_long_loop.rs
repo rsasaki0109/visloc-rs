@@ -229,6 +229,26 @@
 //! count, E-vs-trusted rotation disagreement) is logged unconditionally into
 //! [`DpvoLongLoopIndex::query_log`] — see [`QueryCandidateLogEntry`]'s new
 //! fields.
+//!
+//! # A3 ranking slice B: vocabulary-free mean-pool scorer (opt-in)
+//!
+//! `docs/visual_slam_sequential_sfm_plan.md`'s "A3" section, "Decisive
+//! implication" paragraph: the ranking-lab's own offline evaluation
+//! (`scripts/eval_dpvo_retrieval_ranking_offline.py`, `E:/visloc_archive/dpvo_a3_20260721/ranking_offline/`)
+//! found that a per-frame signature as simple as the L2-normalized MEAN of a
+//! frame's own raw SP descriptors — no vocabulary, no k-means, no VLAD
+//! residual pooling — reaches the SAME recall@1 (`0.989`) as the streaming
+//! VLAD-32 index's own best-case offline analog, using `32x` less per-frame
+//! storage (`256` floats vs `8192`). [`RetrievalScorer::MeanPool`] (selected
+//! via `DpvoLongLoopConfig::retrieval_scorer`, default
+//! [`RetrievalScorer::Vlad`] — every prior milestone's behavior byte-for-byte
+//! unchanged) makes this the live index's own scorer: every ingested frame's
+//! signature is [`mean_pool`] of its raw descriptors, computed and indexed
+//! IMMEDIATELY on ingest — no `vocab_bootstrap_frames` warm-up buffering, no
+//! `Vocabulary::build` call, ever. Everything downstream of "rank candidates
+//! by cosine similarity of two signatures" (`top_k`, `min_temporal_gap`,
+//! `query_frequency`/[`DpvoLongLoopIndex::due`], the whole stage-2 geometric
+//! pipeline, `query_log`) is scorer-agnostic and reused unchanged.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -241,11 +261,36 @@ use visloc_core::geometry::SE3;
 use visloc_core::types::Camera;
 use visloc_tracking::{umeyama_similarity_transform, TrajectorySimilarityTransform};
 use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, DescriptorMatch, Matcher};
-use visloc_vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
+use visloc_vision::place_recognition::{cosine_similarity, mean_pool, vlad, Vocabulary};
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
 use crate::dpvo_patch_ba::{DpvoIntrinsics, DpvoPatch};
 use crate::dpvo_sim3_backend::Sim3LoopMeasurement;
+
+/// A3 ranking slice B (`docs/visual_slam_sequential_sfm_plan.md`, "A3 —
+/// Sound long-range loop closure", "Decisive implication" paragraph): which
+/// per-frame global-descriptor SCORER [`DpvoLongLoopIndex`] uses to rank
+/// retrieval candidates — see the module doc's own "A3 ranking slice B"
+/// section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetrievalScorer {
+    /// The original M11-M12 mechanism: a [`Vocabulary`] trained ONCE (see
+    /// the module doc's "Streaming descriptors" section) from the first
+    /// `vocab_bootstrap_frames` committed frames, then every frame
+    /// (including the buffered ones, retroactively) VLAD-encoded against
+    /// it. Default — every prior milestone's behavior (M1-M12, A3 stage 1
+    /// and 2) reproduced byte-for-byte.
+    #[default]
+    Vlad,
+    /// The A3 ranking-lab's own "decisive implication": [`mean_pool`] of a
+    /// frame's raw SP descriptors, L2-normalized, cosine-ranked — NO
+    /// vocabulary is ever trained (or buffered-while-waiting-to-train) when
+    /// this is selected; every ingested frame is immediately queryable from
+    /// the very first eligible arrival, removing the vocabulary bootstrap
+    /// dependency entirely. See the module doc's own "A3 ranking slice B"
+    /// section for the offline evidence motivating this.
+    MeanPool,
+}
 
 /// Configuration for the Milestone M11 long-range loop-candidate source.
 /// `None` on `crate::dpvo_vo::DpvoOdometryConfig::long_loop` (every prior
@@ -268,6 +313,14 @@ pub struct DpvoLongLoopConfig {
     pub vocab_kmeans_iterations: usize,
     /// Deterministic k-means++ seed. Default `0`.
     pub vocab_seed: u64,
+    /// A3 ranking slice B: which per-frame global-descriptor scorer this
+    /// index uses — see [`RetrievalScorer`]'s own doc. Default
+    /// [`RetrievalScorer::Vlad`]: every prior milestone's behavior
+    /// byte-for-byte unchanged, including `vocab_bootstrap_frames`,
+    /// `vocab_words`, `vocab_kmeans_iterations`, and `vocab_seed` above,
+    /// which are all unused (never read) when this is
+    /// [`RetrievalScorer::MeanPool`].
+    pub retrieval_scorer: RetrievalScorer,
     /// Re-check throttle, in committed (arrival-index) frames since the last
     /// query attempt — deliberately INDEPENDENT of and much coarser than
     /// `crate::dpvo_loop_closure::DpvoLoopClosureConfig::global_opt_freq`'s
@@ -279,10 +332,19 @@ pub struct DpvoLongLoopConfig {
     /// geometric verification against, per query, stopping at the first
     /// ACCEPTED one. Default `3`.
     pub top_k: usize,
-    /// Minimum VLAD cosine similarity for a candidate to be considered at
-    /// all. Default `0.15` — deliberately loose (appearance similarity is
-    /// only a proposal signal; the geometric gates below are the actual
-    /// correctness backstop, per the module doc's "Failure modes" section).
+    /// Minimum cosine similarity (of whichever `retrieval_scorer` signature
+    /// is active) for a candidate to be considered at all. Default `0.15`,
+    /// calibrated for [`RetrievalScorer::Vlad`] — deliberately loose
+    /// (appearance similarity is only a proposal signal; the geometric
+    /// gates below are the actual correctness backstop, per the module
+    /// doc's "Failure modes" section). [`RetrievalScorer::MeanPool`]'s
+    /// cosine similarities run structurally higher (offline hit
+    /// similarities cluster `~0.58`-`0.99` on MH_01, median `~0.91` — see
+    /// the module doc's "A3 ranking slice B" section); a caller selecting
+    /// `MeanPool` should override this field (`--ll-min-similarity` in
+    /// `examples/euroc_dpvo_vo_demo.rs`, whose own default switches to
+    /// `0.5` when `--ll-retrieval-scorer mean-pool` is selected without an
+    /// explicit override) rather than keep this VLAD-calibrated default.
     pub min_similarity: f32,
     /// Minimum `(current_arrival - candidate_arrival)` gap, in stable
     /// arrival-index units, for a candidate to be considered — the actual
@@ -460,6 +522,7 @@ impl Default for DpvoLongLoopConfig {
             vocab_words: 32,
             vocab_kmeans_iterations: 20,
             vocab_seed: 0,
+            retrieval_scorer: RetrievalScorer::Vlad,
             query_frequency: 40,
             top_k: 3,
             min_similarity: 0.15,
@@ -730,7 +793,12 @@ impl Default for CandidateOutcome {
 #[derive(Debug, Clone, PartialEq)]
 struct IndexedFrame {
     arrival_index: usize,
-    vlad: Vec<f32>,
+    /// The frame's global retrieval descriptor — VLAD or mean-pool,
+    /// depending on `DpvoLongLoopConfig::retrieval_scorer` (see
+    /// [`RetrievalScorer`]'s own doc); whichever it is, [`query_candidates`]
+    /// scores every pair with plain [`cosine_similarity`], so this field's
+    /// own name is scorer-agnostic on purpose.
+    signature: Vec<f32>,
     /// Patch-grid-coordinate keypoints (already divided by `RES` by the
     /// caller — see [`DpvoLongLoopConfig::patch_pixel_radius`]'s own doc).
     keypoints: Vec<Point2<f64>>,
@@ -744,8 +812,8 @@ fn indexed_frame_bytes(frame: &IndexedFrame) -> usize {
         .map(|d| d.len() * std::mem::size_of::<f32>())
         .sum();
     let keypoint_bytes = frame.keypoints.len() * std::mem::size_of::<Point2<f64>>();
-    let vlad_bytes = frame.vlad.len() * std::mem::size_of::<f32>();
-    descriptor_bytes + keypoint_bytes + vlad_bytes
+    let signature_bytes = frame.signature.len() * std::mem::size_of::<f32>();
+    descriptor_bytes + keypoint_bytes + signature_bytes
 }
 
 /// One buffered pre-vocabulary frame — `(arrival_index, keypoints, descriptors)`.
@@ -910,11 +978,19 @@ impl DpvoLongLoopIndex {
     /// Ingest one committed frame's raw SuperPoint keypoints (already in
     /// patch-grid coordinates) + descriptors — called unconditionally, every
     /// committed frame, per the module doc's "images are never retained"
-    /// constraint. Before a vocabulary exists, buffers the frame (bounded to
-    /// `3 * vocab_bootstrap_frames`, oldest dropped first, as a safety valve
-    /// against a pathological low-keypoint opening segment that never
-    /// accumulates enough descriptors to build one — see the module doc's
-    /// "Failure modes" section); once buffered, attempts
+    /// constraint.
+    ///
+    /// [`RetrievalScorer::MeanPool`] (A3 ranking slice B): the frame's
+    /// [`mean_pool`] signature is computed and indexed IMMEDIATELY — no
+    /// vocabulary is ever trained or buffered-toward under this scorer, per
+    /// the module doc's own "A3 ranking slice B" section.
+    ///
+    /// [`RetrievalScorer::Vlad`] (default, every prior milestone
+    /// byte-for-byte unchanged): before a vocabulary exists, buffers the
+    /// frame (bounded to `3 * vocab_bootstrap_frames`, oldest dropped first,
+    /// as a safety valve against a pathological low-keypoint opening segment
+    /// that never accumulates enough descriptors to build one — see the
+    /// module doc's "Failure modes" section); once buffered, attempts
     /// [`Vocabulary::build`] every subsequent call until it succeeds, then
     /// retroactively VLAD-encodes every buffered frame. After a vocabulary
     /// exists, VLAD-encodes and indexes immediately.
@@ -927,11 +1003,24 @@ impl DpvoLongLoopIndex {
         if descriptors.is_empty() {
             return;
         }
-        let encoded = self.vocab.as_ref().map(|vocab| vlad(&descriptors, vocab));
-        if let Some(vlad_vector) = encoded {
+        if self.config.retrieval_scorer == RetrievalScorer::MeanPool {
+            // A3 ranking slice B: no vocabulary involved at all — queryable
+            // from the very first ingested frame.
+            let signature = mean_pool(&descriptors);
             self.push_indexed(IndexedFrame {
                 arrival_index,
-                vlad: vlad_vector,
+                signature,
+                keypoints,
+                descriptors,
+            });
+            return;
+        }
+
+        let encoded = self.vocab.as_ref().map(|vocab| vlad(&descriptors, vocab));
+        if let Some(signature) = encoded {
+            self.push_indexed(IndexedFrame {
+                arrival_index,
+                signature,
                 keypoints,
                 descriptors,
             });
@@ -968,10 +1057,10 @@ impl DpvoLongLoopIndex {
         };
         let buffered = std::mem::take(&mut self.bootstrap);
         for (arrival_index, keypoints, descriptors) in buffered {
-            let vlad_vector = vlad(&descriptors, &vocab);
+            let signature = vlad(&descriptors, &vocab);
             self.push_indexed(IndexedFrame {
                 arrival_index,
-                vlad: vlad_vector,
+                signature,
                 keypoints,
                 descriptors,
             });
@@ -1026,7 +1115,12 @@ impl DpvoLongLoopIndex {
                 f.arrival_index != current_arrival
                     && current_arrival.saturating_sub(f.arrival_index) >= min_gap
             })
-            .map(|f| (f.arrival_index, cosine_similarity(&current.vlad, &f.vlad)))
+            .map(|f| {
+                (
+                    f.arrival_index,
+                    cosine_similarity(&current.signature, &f.signature),
+                )
+            })
             .filter(|&(_, score)| score >= self.config.min_similarity)
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2345,6 +2439,122 @@ mod tests {
             !arrivals.contains(&210),
             "the query frame itself must never be its own candidate"
         );
+    }
+
+    // ---- A3 ranking slice B: `RetrievalScorer::MeanPool` ----
+
+    #[test]
+    fn default_retrieval_scorer_is_vlad() {
+        // Explicit pin for the "default-vlad bit-compat" contract: every
+        // prior milestone's config construction (`..DpvoLongLoopConfig::default()`,
+        // used throughout this test module and `examples/euroc_dpvo_vo_demo.rs`)
+        // must keep reproducing the VLAD path byte-for-byte with zero
+        // changes required at any of those call sites.
+        assert_eq!(
+            DpvoLongLoopConfig::default().retrieval_scorer,
+            RetrievalScorer::Vlad
+        );
+    }
+
+    #[test]
+    fn mean_pool_signature_matches_hand_computed_value() {
+        // Two orthonormal-basis descriptors: mean = [0.5, 0.5], and
+        // normalizing [0.5, 0.5] gives [1/sqrt(2), 1/sqrt(2)] — a fully
+        // hand-checkable case (the classic `normalize([1, 1])`).
+        let descriptors = vec![vec![1.0f32, 0.0], vec![0.0f32, 1.0]];
+        let signature = mean_pool(&descriptors);
+        let expected = 1.0f32 / std::f32::consts::SQRT_2;
+        assert_eq!(signature.len(), 2);
+        assert!(
+            (signature[0] - expected).abs() < 1e-6 && (signature[1] - expected).abs() < 1e-6,
+            "{signature:?}"
+        );
+        // Already unit-norm, by construction.
+        let norm: f32 = signature.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "norm={norm}");
+    }
+
+    #[test]
+    fn mean_pool_signature_ignores_descriptor_order() {
+        // The mean is order-independent — a basic sanity check that this is
+        // really a plain arithmetic mean, not something ordering-sensitive.
+        let a = mean_pool(&[vec![1.0f32, 2.0, 3.0], vec![3.0, 2.0, 1.0], vec![0.0, 0.0, 5.0]]);
+        let b = mean_pool(&[vec![3.0f32, 2.0, 1.0], vec![0.0, 0.0, 5.0], vec![1.0, 2.0, 3.0]]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mean_pool_of_empty_descriptors_returns_an_empty_signature() {
+        // Unlike `vlad` (whose vocabulary fixes an output length ahead of
+        // time), there is no vocabulary here to fall back on — see
+        // `mean_pool`'s own doc for why this returns empty, not a
+        // zero-length-guessed vector.
+        let signature = mean_pool(&[]);
+        assert!(signature.is_empty(), "{signature:?}");
+    }
+
+    #[test]
+    fn mean_pool_scorer_query_candidates_ranks_by_cosine_similarity() {
+        let cfg = DpvoLongLoopConfig {
+            retrieval_scorer: RetrievalScorer::MeanPool,
+            min_temporal_gap: 50,
+            min_similarity: -1.0, // accept everything the gap gate allows, for this ranking test.
+            top_k: 5,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        // Arrival 10 shares appearance "A" (base_seed=1) with the query;
+        // arrival 20 is a different appearance "B" (base_seed=99).
+        index.ingest_frame(10, vec![], frame_descriptors(1, 20, 16));
+        index.ingest_frame(20, vec![], frame_descriptors(99, 20, 16));
+        // The query frame itself, appearance "A".
+        index.ingest_frame(210, vec![], frame_descriptors(1, 20, 16));
+
+        let candidates = index.query_candidates(210);
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
+        assert_eq!(
+            candidates[0].0, 10,
+            "the appearance-matching arrival must rank first: {candidates:?}"
+        );
+        assert_eq!(candidates[1].0, 20);
+        assert!(
+            candidates[0].1 > candidates[1].1,
+            "cosine similarity must actually order them: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn mean_pool_scorer_never_trains_a_vocabulary_and_indexes_from_the_first_frame() {
+        let cfg = DpvoLongLoopConfig {
+            retrieval_scorer: RetrievalScorer::MeanPool,
+            // The VLAD default — must be entirely irrelevant under MeanPool.
+            vocab_bootstrap_frames: 40,
+            ..DpvoLongLoopConfig::default()
+        };
+        let mut index = DpvoLongLoopIndex::new(cfg);
+        // A single frame — far fewer than `vocab_bootstrap_frames` — is
+        // immediately indexed and queryable, unlike VLAD's own bootstrap
+        // wait (contrast
+        // `index_stays_unbuilt_until_bootstrap_threshold_then_builds_and_backfills`,
+        // below).
+        index.ingest_frame(0, vec![], frame_descriptors(1, 20, 16));
+        let diag = index.diagnostics();
+        assert_eq!(
+            diag.frames_indexed, 1,
+            "MeanPool must index on the very first ingest call, no bootstrap wait"
+        );
+        assert!(!diag.vocab_built, "MeanPool must never build a vocabulary");
+
+        // Ingest far more frames than the bootstrap threshold would have
+        // required under VLAD — the vocabulary must STILL never build.
+        for arrival in 1..60 {
+            index.ingest_frame(arrival, vec![], frame_descriptors(arrival as u64, 20, 16));
+        }
+        assert!(
+            !index.diagnostics().vocab_built,
+            "MeanPool must never build a vocabulary, however many frames are ingested"
+        );
+        assert_eq!(index.diagnostics().frames_indexed, 60);
     }
 
     // ---- End-to-end: find_and_verify_long_range_loop ----

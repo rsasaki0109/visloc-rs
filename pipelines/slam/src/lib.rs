@@ -73,7 +73,7 @@ pub use dpvo_sim3_backend::{
 pub mod dpvo_long_loop;
 pub use dpvo_long_loop::{
     AcceptedLongLoop, DpvoLongLoopConfig, DpvoLongLoopDiagnostics, DpvoLongLoopIndex,
-    QueryCandidateLogEntry,
+    QueryCandidateLogEntry, RetrievalScorer,
 };
 pub mod dpvo_scale_coupling;
 pub use dpvo_scale_coupling::{

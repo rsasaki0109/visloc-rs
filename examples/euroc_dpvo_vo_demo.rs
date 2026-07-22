@@ -240,12 +240,37 @@ use visloc_rs::slam::dpvo_vo::{
 };
 use visloc_rs::slam::{
     DpvoIntrinsics, DpvoLongLoopConfig, DpvoLoopClosureConfig, DpvoSim3BackendConfig,
-    ImuNoiseModel, ScaleCouplingConfig,
+    ImuNoiseModel, RetrievalScorer, ScaleCouplingConfig,
 };
 use visloc_rs::vision::distortion::RadialTangential;
 use visloc_rs::vision::dpvo::npz::write_npy_f32;
 use visloc_rs::vision::features::superpoint_onnx::OnnxBackend;
 use visloc_rs::{umeyama_similarity_transform, TrajectorySimilarityTransform};
+
+/// A3 ranking slice B: `--ll-min-similarity`'s default when `--ll-retrieval-scorer
+/// vlad` is selected (or omitted, the overall default) — `DpvoLongLoopConfig::default().min_similarity`,
+/// i.e. no behavior change from any prior milestone.
+const DEFAULT_MIN_SIMILARITY_VLAD: f32 = 0.15;
+
+/// A3 ranking slice B: `--ll-min-similarity`'s default when `--ll-retrieval-scorer
+/// mean-pool` is selected. Calibrated from the offline ranking lab
+/// (`scripts/eval_dpvo_retrieval_ranking_offline.py`'s own dump,
+/// `E:/visloc_archive/dpvo_a3_20260721/frame_descriptors_800/`, the SAME
+/// descriptors `.../ranking_offline/mh01_800_qf5_ranking.json` scores):
+/// among the 355 MH_01 800-frame query arrivals whose top-1-ranked mean-pool
+/// candidate is a true labelled revisit (radius 1.0 m, `min_gap=150`), the
+/// MINIMUM observed similarity is `0.583` (median `0.915`); `0.5` sits
+/// comfortably below that minimum (excludes 0/355 of those hits) while
+/// still being `3.3x` `DEFAULT_MIN_SIMILARITY_VLAD` — i.e. still loose
+/// enough that this floor is a proposal-only pre-filter, not a
+/// correctness gate (the geometric gates are the actual backstop, per
+/// `DpvoLongLoopConfig::min_similarity`'s own doc); a random sample of
+/// eligible NON-hit pairs scores a similar range (median `~0.59`), so this
+/// floor is not expected to meaningfully change WHICH candidates are
+/// proposed, only to reject the appearance-degenerate low end mean-pool
+/// cosine similarities can take that VLAD's own `0.15` floor was never
+/// calibrated to filter.
+const DEFAULT_MIN_SIMILARITY_MEAN_POOL: f32 = 0.5;
 
 #[derive(Debug)]
 struct CliArgs {
@@ -367,9 +392,24 @@ struct CliArgs {
     /// that struct's own doc for what each bounds/gates.
     ll_vocab_bootstrap_frames: usize,
     ll_vocab_words: usize,
+    /// A3 ranking slice B (`docs/visual_slam_sequential_sfm_plan.md`, "A3 —
+    /// Sound long-range loop closure", "Decisive implication" paragraph):
+    /// `DpvoLongLoopConfig::retrieval_scorer` — `vlad` (default, every prior
+    /// milestone byte-for-byte unchanged) or `mean-pool` (vocabulary-free,
+    /// queryable from the first eligible arrival — see `RetrievalScorer`'s
+    /// own doc). Parsed from `--ll-retrieval-scorer {vlad,mean-pool}`.
+    ll_retrieval_scorer: RetrievalScorer,
     ll_query_frequency: usize,
     ll_top_k: usize,
-    ll_min_similarity: f32,
+    /// A3 ranking slice B: `Some(..)` only when `--ll-min-similarity` was
+    /// actually passed on the command line — `None` (the default) means
+    /// "use the scorer-appropriate default"
+    /// (`DEFAULT_MIN_SIMILARITY_VLAD`/`DEFAULT_MIN_SIMILARITY_MEAN_POOL`, see
+    /// their own doc for why the two scorers need different defaults), so
+    /// switching `--ll-retrieval-scorer` alone (with no explicit
+    /// `--ll-min-similarity` override) picks up the right floor for the
+    /// selected scorer automatically.
+    ll_min_similarity: Option<f32>,
     ll_min_temporal_gap: usize,
     ll_max_indexed_frames: usize,
     ll_patch_pixel_radius: f64,
@@ -523,9 +563,13 @@ impl Default for CliArgs {
             // these flags reproduces that struct's own defaults.
             ll_vocab_bootstrap_frames: DpvoLongLoopConfig::default().vocab_bootstrap_frames,
             ll_vocab_words: DpvoLongLoopConfig::default().vocab_words,
+            ll_retrieval_scorer: DpvoLongLoopConfig::default().retrieval_scorer,
             ll_query_frequency: DpvoLongLoopConfig::default().query_frequency,
             ll_top_k: DpvoLongLoopConfig::default().top_k,
-            ll_min_similarity: DpvoLongLoopConfig::default().min_similarity,
+            // `None` until `--ll-min-similarity` is actually passed — see
+            // that field's own doc for why the resolved value depends on
+            // `ll_retrieval_scorer`.
+            ll_min_similarity: None,
             ll_min_temporal_gap: DpvoLongLoopConfig::default().min_temporal_gap,
             ll_max_indexed_frames: DpvoLongLoopConfig::default().max_indexed_frames,
             ll_patch_pixel_radius: DpvoLongLoopConfig::default().patch_pixel_radius,
@@ -684,9 +728,26 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 args.ll_vocab_bootstrap_frames = raw.remove(i + 1).parse()?
             }
             "--ll-vocab-words" => args.ll_vocab_words = raw.remove(i + 1).parse()?,
+            // A3 ranking slice B: like `--hover-response`, `RetrievalScorer`
+            // has no general-purpose `FromStr` impl (this demo's own CLI
+            // surface for it), so this arm matches the accepted spellings
+            // directly.
+            "--ll-retrieval-scorer" => {
+                let raw_value = raw.remove(i + 1);
+                args.ll_retrieval_scorer = match raw_value.as_str() {
+                    "vlad" => RetrievalScorer::Vlad,
+                    "mean-pool" => RetrievalScorer::MeanPool,
+                    other => {
+                        return Err(format!(
+                            "--ll-retrieval-scorer: expected \"vlad\" or \"mean-pool\", got {other:?}"
+                        )
+                        .into())
+                    }
+                };
+            }
             "--ll-query-frequency" => args.ll_query_frequency = raw.remove(i + 1).parse()?,
             "--ll-top-k" => args.ll_top_k = raw.remove(i + 1).parse()?,
-            "--ll-min-similarity" => args.ll_min_similarity = raw.remove(i + 1).parse()?,
+            "--ll-min-similarity" => args.ll_min_similarity = Some(raw.remove(i + 1).parse()?),
             "--ll-min-temporal-gap" => args.ll_min_temporal_gap = raw.remove(i + 1).parse()?,
             "--ll-max-indexed-frames" => args.ll_max_indexed_frames = raw.remove(i + 1).parse()?,
             "--ll-patch-pixel-radius" => args.ll_patch_pixel_radius = raw.remove(i + 1).parse()?,
@@ -970,6 +1031,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         OnnxBackend::default()
     };
+    // A3 ranking slice B: resolve the scorer-appropriate `min_similarity`
+    // floor UNLESS the caller explicitly passed `--ll-min-similarity` — see
+    // `CliArgs::ll_min_similarity`'s own doc and
+    // `DEFAULT_MIN_SIMILARITY_MEAN_POOL`'s own doc for the calibration.
+    let ll_min_similarity = args.ll_min_similarity.unwrap_or(match args.ll_retrieval_scorer {
+        RetrievalScorer::Vlad => DEFAULT_MIN_SIMILARITY_VLAD,
+        RetrievalScorer::MeanPool => DEFAULT_MIN_SIMILARITY_MEAN_POOL,
+    });
     let odometry_config = DpvoOdometryConfig {
         vo: DpvoVoConfig {
             buffer_size: 4096,
@@ -1081,9 +1150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         long_loop: args.long_loop.then_some(DpvoLongLoopConfig {
             vocab_bootstrap_frames: args.ll_vocab_bootstrap_frames,
             vocab_words: args.ll_vocab_words,
+            retrieval_scorer: args.ll_retrieval_scorer,
             query_frequency: args.ll_query_frequency,
             top_k: args.ll_top_k,
-            min_similarity: args.ll_min_similarity,
+            min_similarity: ll_min_similarity,
             min_temporal_gap: args.ll_min_temporal_gap,
             max_indexed_frames: args.ll_max_indexed_frames,
             patch_pixel_radius: args.ll_patch_pixel_radius,
@@ -1172,9 +1242,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.long_loop {
+        let retrieval_scorer_str = match args.ll_retrieval_scorer {
+            RetrievalScorer::Vlad => "vlad",
+            RetrievalScorer::MeanPool => "mean-pool",
+        };
         println!(
             "long-range loop enabled (Milestone M11): superpoint_model={} vocab_bootstrap_frames={} \
-             vocab_words={} query_frequency={} top_k={} min_similarity={:.3} min_temporal_gap={} \
+             vocab_words={} retrieval_scorer={} (A3 ranking slice B) query_frequency={} top_k={} \
+             min_similarity={:.3}{} min_temporal_gap={} \
              max_indexed_frames={} patch_pixel_radius={:.2} min_bridge_correspondences={} \
              ransac_iterations={} min_ransac_inliers={} max_mean_residual_ratio={:.3} \
              sp_anchored_patches={} (Milestone M12) sp_patch_min_separation={:.2} \
@@ -1182,9 +1257,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.ll_superpoint_model.display(),
             args.ll_vocab_bootstrap_frames,
             args.ll_vocab_words,
+            retrieval_scorer_str,
             args.ll_query_frequency,
             args.ll_top_k,
-            args.ll_min_similarity,
+            ll_min_similarity,
+            if args.ll_min_similarity.is_some() {
+                " (explicit override)"
+            } else {
+                " (scorer default)"
+            },
             args.ll_min_temporal_gap,
             args.ll_max_indexed_frames,
             args.ll_patch_pixel_radius,
