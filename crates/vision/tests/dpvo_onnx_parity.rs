@@ -606,6 +606,33 @@ fn native_cuda_correlation_matches_frozen_fixture() {
         "indexed native CUDA correlation differs from CPU: {indexed_diff:.3e}"
     );
 
+    let (cached_first, first_ms) = runtime
+        .run_cached(
+            anchor.view(),
+            &[&target0, &target0_scaled],
+            &[&target1, &target1_scaled],
+            coords.view(),
+            &indexed_targets,
+            7,
+        )
+        .expect("first resident-map call uploads maps");
+    let (cached_second, second_ms) = runtime
+        .run_cached(
+            anchor.view(),
+            &[&target0, &target0_scaled],
+            &[&target1, &target1_scaled],
+            coords.view(),
+            &indexed_targets,
+            7,
+        )
+        .expect("second resident-map call reuses maps");
+    assert_eq!(cached_first, cached_second);
+    println!("native CUDA resident maps first={first_ms:.3}ms reused={second_ms:.3}ms");
+    assert!(
+        second_ms < first_ms,
+        "resident reuse should avoid map upload: first={first_ms:.3}ms second={second_ms:.3}ms"
+    );
+
     let invalid_targets = vec![1_i32; anchor_shape[0]];
     let error = runtime
         .run(

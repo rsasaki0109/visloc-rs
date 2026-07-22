@@ -1997,6 +1997,9 @@ pub struct DpvoOdometry {
     graph: DpvoPatchGraph,
     /// Parallel to `graph.frames()`.
     frame_pyramids: Vec<FramePyramid>,
+    /// Monotonic identity of the ordered `frame_pyramids` set. The native
+    /// CUDA backend reuses resident maps only while this value is unchanged.
+    frame_pyramid_generation: u64,
     /// Parallel to `graph.patches()` (flat, per-frame contiguous blocks).
     patch_gmap: Vec<Array3<f32>>,
     patch_imap: Vec<Array1<f32>>,
@@ -2357,6 +2360,7 @@ impl DpvoOdometry {
             agg_ij,
             graph,
             frame_pyramids: Vec::new(),
+            frame_pyramid_generation: 0,
             patch_gmap: Vec::new(),
             patch_imap: Vec::new(),
             rng: StdRng::seed_from_u64(seed),
@@ -2852,6 +2856,7 @@ impl DpvoOdometry {
             }
         }
         self.frame_pyramids.push(candidate_pyramid);
+        self.frame_pyramid_generation = self.frame_pyramid_generation.wrapping_add(1);
         for i in 0..m {
             self.patch_gmap.push(gmap.index_axis(Axis(0), i).to_owned());
             self.patch_imap.push(squeeze_patch_vector(&imap_patch4, i));
@@ -2960,6 +2965,7 @@ impl DpvoOdometry {
             self.try_long_loop_closure();
             if let Some(k) = self.keyframe_dispatch() {
                 self.frame_pyramids.remove(k);
+                self.frame_pyramid_generation = self.frame_pyramid_generation.wrapping_add(1);
                 let m = self.graph.config().patches_per_frame;
                 self.patch_gmap.drain(k * m..(k + 1) * m);
                 self.patch_imap.drain(k * m..(k + 1) * m);
@@ -4374,12 +4380,13 @@ impl DpvoOdometry {
                 .native_correlation
                 .as_mut()
                 .expect("checked above")
-                .run(
+                .run_cached(
                     anchor_gmap.view(),
                     &level0_frames?,
                     &level1_frames?,
                     coords_grid_px.view(),
                     &targets,
+                    self.frame_pyramid_generation,
                 )?;
             self.stats.native_correlation_device_ms_total += device_ms as f64;
             correlation

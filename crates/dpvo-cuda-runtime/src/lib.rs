@@ -39,6 +39,7 @@ type RunFn = unsafe extern "C" fn(
     c_int,
     c_int,
     c_int,
+    c_int,
     *mut c_float,
 ) -> c_int;
 
@@ -62,7 +63,7 @@ impl fmt::Display for NativeCudaCorrelationError {
                 )
             }
             Self::AbiVersion(version) => {
-                write!(f, "native CUDA correlation ABI {version}, expected 1")
+                write!(f, "native CUDA correlation ABI {version}, expected 2")
             }
             Self::NullContext => write!(f, "native CUDA correlation returned a null context"),
             Self::Shape(message) => write!(f, "native CUDA correlation shape: {message}"),
@@ -81,6 +82,7 @@ pub struct NativeCudaCorrelation {
     destroy: DestroyFn,
     last_error: LastErrorFn,
     run: RunFn,
+    resident_map_version: Option<u64>,
 }
 
 impl fmt::Debug for NativeCudaCorrelation {
@@ -127,7 +129,7 @@ impl NativeCudaCorrelation {
             )
         };
         let version = unsafe { abi_version() };
-        if version != 1 {
+        if version != 2 {
             return Err(NativeCudaCorrelationError::AbiVersion(version));
         }
         let context =
@@ -138,6 +140,7 @@ impl NativeCudaCorrelation {
             destroy,
             last_error,
             run,
+            resident_map_version: None,
         })
     }
 
@@ -148,6 +151,40 @@ impl NativeCudaCorrelation {
         level1_frames: &[&Array3<f32>],
         coords: ArrayView4<'_, f32>,
         targets: &[i32],
+    ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
+        self.run_impl(anchors, level0_frames, level1_frames, coords, targets, None)
+    }
+
+    /// Run while retaining feature maps on the device across calls carrying
+    /// the same immutable map-set version. Callers must advance `map_version`
+    /// whenever a frame is added, removed, reordered, or modified.
+    pub fn run_cached(
+        &mut self,
+        anchors: ArrayView4<'_, f32>,
+        level0_frames: &[&Array3<f32>],
+        level1_frames: &[&Array3<f32>],
+        coords: ArrayView4<'_, f32>,
+        targets: &[i32],
+        map_version: u64,
+    ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
+        self.run_impl(
+            anchors,
+            level0_frames,
+            level1_frames,
+            coords,
+            targets,
+            Some(map_version),
+        )
+    }
+
+    fn run_impl(
+        &mut self,
+        anchors: ArrayView4<'_, f32>,
+        level0_frames: &[&Array3<f32>],
+        level1_frames: &[&Array3<f32>],
+        coords: ArrayView4<'_, f32>,
+        targets: &[i32],
+        map_version: Option<u64>,
     ) -> Result<(Array2<f32>, f32), NativeCudaCorrelationError> {
         let (edges, channels, patch_y, patch_x) = anchors.dim();
         if channels != FNET_DIM || patch_y != PATCH || patch_x != PATCH {
@@ -230,6 +267,9 @@ impl NativeCudaCorrelation {
         let width1_c = checked_c_int("width1", width1)?;
         let mut output = Array2::<f32>::zeros((edges, CORR_DIM));
         let mut device_elapsed_ms = 0.0_f32;
+        let upload_frames = map_version
+            .map(|version| self.resident_map_version != Some(version))
+            .unwrap_or(true);
         let code = unsafe {
             (self.run)(
                 self.context.as_ptr(),
@@ -251,6 +291,7 @@ impl NativeCudaCorrelation {
                 height1_c,
                 width1_c,
                 3,
+                c_int::from(upload_frames),
                 &mut device_elapsed_ms,
             )
         };
@@ -265,6 +306,7 @@ impl NativeCudaCorrelation {
             };
             return Err(NativeCudaCorrelationError::Runtime { code, message });
         }
+        self.resident_map_version = map_version;
         Ok((output, device_elapsed_ms))
     }
 }

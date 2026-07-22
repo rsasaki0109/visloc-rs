@@ -31,6 +31,13 @@ struct Context {
   size_t coords_capacity = 0;
   size_t output_capacity = 0;
   size_t targets_capacity = 0;
+  bool maps_uploaded = false;
+  int resident_frames = 0;
+  int resident_channels = 0;
+  int resident_height0 = 0;
+  int resident_width0 = 0;
+  int resident_height1 = 0;
+  int resident_width1 = 0;
   char error[512] = {};
 };
 
@@ -141,7 +148,7 @@ void release(Context* context) {
 
 }  // namespace
 
-VISLOC_EXPORT uint32_t visloc_dpvo_corr_abi_version() { return 1; }
+VISLOC_EXPORT uint32_t visloc_dpvo_corr_abi_version() { return 2; }
 
 VISLOC_EXPORT void* visloc_dpvo_corr_create() { return new Context(); }
 
@@ -162,7 +169,7 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
     const float* const* level1_frames, const float* coords,
     const int32_t* targets, float* output, int edges, int frames, int channels,
     int patch, int height0, int width0, int height1, int width1, int radius,
-    float* device_elapsed_ms) {
+    int upload_frames, float* device_elapsed_ms) {
   if (!opaque || !anchors || !level0_frames || !level1_frames || !coords ||
       !targets || !output || edges <= 0 || frames <= 0 || channels <= 0 ||
       patch <= 0 || height0 <= 1 || width0 <= 1 || height1 <= 1 ||
@@ -171,6 +178,17 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
   }
   Context* context = static_cast<Context*>(opaque);
   context->error[0] = '\0';
+  if (!upload_frames &&
+      (!context->maps_uploaded || context->resident_frames != frames ||
+       context->resident_channels != channels ||
+       context->resident_height0 != height0 ||
+       context->resident_width0 != width0 ||
+       context->resident_height1 != height1 ||
+       context->resident_width1 != width1)) {
+    std::snprintf(context->error, sizeof(context->error),
+                  "resident feature maps are absent or have different dimensions");
+    return 7;
+  }
   const int taps = 2 * radius + 1;
   const size_t anchors_bytes =
       static_cast<size_t>(edges) * channels * patch * patch * sizeof(float);
@@ -216,19 +234,29 @@ VISLOC_EXPORT int visloc_dpvo_corr_run(
     cudaEventDestroy(end);
     return 3;
   }
-  for (int frame = 0; frame < frames; ++frame) {
-    if (!copy_to_device(context->level0 + static_cast<size_t>(frame) *
-                                              level0_frame_bytes / sizeof(float),
-                        level0_frames[frame], level0_frame_bytes, context,
-                        "level0 frame") ||
-        !copy_to_device(context->level1 + static_cast<size_t>(frame) *
-                                              level1_frame_bytes / sizeof(float),
-                        level1_frames[frame], level1_frame_bytes, context,
-                        "level1 frame")) {
-      cudaEventDestroy(begin);
-      cudaEventDestroy(end);
-      return 4;
+  if (upload_frames) {
+    for (int frame = 0; frame < frames; ++frame) {
+      if (!copy_to_device(context->level0 + static_cast<size_t>(frame) *
+                                                level0_frame_bytes / sizeof(float),
+                          level0_frames[frame], level0_frame_bytes, context,
+                          "level0 frame") ||
+          !copy_to_device(context->level1 + static_cast<size_t>(frame) *
+                                                level1_frame_bytes / sizeof(float),
+                          level1_frames[frame], level1_frame_bytes, context,
+                          "level1 frame")) {
+        context->maps_uploaded = false;
+        cudaEventDestroy(begin);
+        cudaEventDestroy(end);
+        return 4;
+      }
     }
+    context->maps_uploaded = true;
+    context->resident_frames = frames;
+    context->resident_channels = channels;
+    context->resident_height0 = height0;
+    context->resident_width0 = width0;
+    context->resident_height1 = height1;
+    context->resident_width1 = width1;
   }
 
   const int values_per_edge = patch * patch * taps * taps * 2;

@@ -726,6 +726,18 @@ longer steady-state profile. V4 packaging must hash the native DLL and all
 three CUDA ORT runtime/provider DLLs beside the executable; a probe exposed
 that Windows otherwise preferred an unrelated `System32/onnxruntime.dll`.
 
+ABI v2 then retained an unchanged ordered pyramid set across repeated update
+iterations. The fixture's first-upload and reuse paths are bit-identical, but
+the matched 48-patch probe improved only from 229.95 to 218.00 ms/frame
+(correlation 57.94 to 54.06): ordinary tracking changes the frame set every
+arrival, so only same-frame iterations reuse it. A 100-frame profile measured
+229.58 ms/frame (correlation 63.75, update 46.69, encoder 33.41, BA 10.14) and
+0.1633 m Sim(3) ATE. This closes whole-set generation caching as the real-time
+solution and also shows why a 30-frame accuracy prefix is not evidence for V3.
+The next native design must preserve stable per-frame device slots and upload
+only the newly encoded map; accuracy work must use materially longer
+development prefixes before any full-sequence V4 run.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:
