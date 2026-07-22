@@ -250,7 +250,7 @@
 //! `query_frequency`/[`DpvoLongLoopIndex::due`], the whole stage-2 geometric
 //! pipeline, `query_log`) is scorer-agnostic and reused unchanged.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 use nalgebra::{Point2, Point3, Rotation3, UnitQuaternion, Vector3};
@@ -262,6 +262,8 @@ use visloc_core::types::Camera;
 use visloc_tracking::{umeyama_similarity_transform, TrajectorySimilarityTransform};
 use visloc_vision::matching::{BruteForceMatcher, CrossCheckMatcher, DescriptorMatch, Matcher};
 use visloc_vision::place_recognition::{cosine_similarity, mean_pool, vlad, Vocabulary};
+use visloc_vision::pnp::Correspondence2D3D;
+use visloc_vision::ransac::{PnPRansac, RobustPoseEstimator};
 use visloc_vision::two_view::{
     ConfigurationType, RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions,
     TwoViewGeometryVerifier,
@@ -479,12 +481,12 @@ pub struct DpvoLongLoopConfig {
     /// milestone's behavior (M1-M12) is reproduced byte-for-byte when this
     /// stays off — see `--ll-2d2d-geometry`.
     pub stage2_2d2d_geometry: bool,
-    /// A3 stage-2 low-baseline diagnostic: additionally run the existing
-    /// COLMAP-style E/F/H classifier for every stage-2 candidate and expose
-    /// its model, homography inlier count, and homography-vs-trusted
-    /// rotation disagreement in [`QueryCandidateLogEntry`]. Diagnostic
-    /// only: this flag never changes acceptance or any existing gate.
-    /// Default `false`.
+    /// A3 stage-2 low-baseline diagnostic: run the existing COLMAP-style
+    /// E/F/H classifier and, after an E-vs-trusted rejection, measure the
+    /// existing 3D-3D Umeyama bridge plus an old-3D/current-2D PnP bridge.
+    /// All results are exposed in [`QueryCandidateLogEntry`]. Diagnostic
+    /// only: a continued candidate is unconditionally rejected before any
+    /// measurement is constructed. Default `false`.
     pub stage2_low_baseline_diagnostic: bool,
     /// Lowe ratio-test threshold for the STAGE-2 2D-2D cross-check match —
     /// separate from `match_ratio`, which still governs the EXISTING 3D-3D
@@ -779,6 +781,14 @@ pub struct QueryCandidateLogEntry {
     /// Rotation disagreement between the independent 2D-2D E fit and 3D-3D
     /// Umeyama fit in the acceptance-neutral continuation diagnostic.
     pub stage2_umeyama_vs_e_rotation_deg: Option<f64>,
+    /// Acceptance-neutral old-3D/current-2D PnP diagnostic.
+    pub stage2_pnp_correspondences: Option<usize>,
+    pub stage2_pnp_inliers: Option<usize>,
+    pub stage2_pnp_mean_reprojection_error: Option<f64>,
+    pub stage2_pnp_vs_e_rotation_deg: Option<f64>,
+    /// Candidate scale correction `|t_pnp| / |t_trusted|`, where PnP
+    /// localizes the current view in the old retained patch map.
+    pub stage2_pnp_scale_ratio: Option<f64>,
     /// The furthest verification stage this candidate reached this query —
     /// see [`CandidateOutcome`]'s own doc for the full list of values. Kept
     /// as a plain string (not an enum) since this is purely a diagnostic/CSV
@@ -814,6 +824,11 @@ struct CandidateOutcome {
     stage2_diagnostic_umeyama_scale: Option<f64>,
     stage2_diagnostic_umeyama_inliers: Option<usize>,
     stage2_umeyama_vs_e_rotation_deg: Option<f64>,
+    stage2_pnp_correspondences: Option<usize>,
+    stage2_pnp_inliers: Option<usize>,
+    stage2_pnp_mean_reprojection_error: Option<f64>,
+    stage2_pnp_vs_e_rotation_deg: Option<f64>,
+    stage2_pnp_scale_ratio: Option<f64>,
     rotation_disagreement_deg: Option<f64>,
     stage_reached: &'static str,
 }
@@ -830,6 +845,11 @@ impl Default for CandidateOutcome {
             stage2_diagnostic_umeyama_scale: None,
             stage2_diagnostic_umeyama_inliers: None,
             stage2_umeyama_vs_e_rotation_deg: None,
+            stage2_pnp_correspondences: None,
+            stage2_pnp_inliers: None,
+            stage2_pnp_mean_reprojection_error: None,
+            stage2_pnp_vs_e_rotation_deg: None,
+            stage2_pnp_scale_ratio: None,
             rotation_disagreement_deg: None,
             stage_reached: "not_attempted",
         }
@@ -1454,6 +1474,54 @@ impl DpvoLongLoopIndex {
                         break 'stage2;
                     }
 
+                    if diagnostic_stage2_rotation_failure {
+                        let pnp_pairs: Vec<(usize, usize)> = rel
+                            .inliers
+                            .iter()
+                            .map(|&index| {
+                                let descriptor_match = stage2_kept[index];
+                                (descriptor_match.query_index, descriptor_match.train_index)
+                            })
+                            .collect();
+                        let pnp_correspondences = pnp_correspondences_from_old_patches(
+                            &pnp_pairs,
+                            &old_keypoints,
+                            &old_pose,
+                            &old_intr,
+                            &old_patches,
+                            &current_keypoints,
+                            self.config.patch_pixel_radius,
+                        );
+                        outcome.stage2_pnp_correspondences = Some(pnp_correspondences.len());
+                        let pnp = PnPRansac {
+                            iterations: self.config.ransac_iterations,
+                            reprojection_threshold: 1.0,
+                            seed: self.config.ransac_seed,
+                            ..PnPRansac::default()
+                        };
+                        if let Some(report) = pnp.estimate(&pnp_correspondences, &camera) {
+                            let pnp_relative = report
+                                .pose
+                                .world_to_camera
+                                .compose(&old_pose.inverse());
+                            outcome.stage2_pnp_inliers = Some(report.inliers.len());
+                            outcome.stage2_pnp_mean_reprojection_error =
+                                Some(report.mean_reprojection_error);
+                            outcome.stage2_pnp_vs_e_rotation_deg = Some(
+                                pnp_relative.rotation.angle_to(&e_rotation).to_degrees(),
+                            );
+                            let trusted_translation_norm = relative_pose.translation.norm();
+                            let pnp_translation_norm = pnp_relative.translation.norm();
+                            if trusted_translation_norm > 1.0e-9
+                                && trusted_translation_norm.is_finite()
+                                && pnp_translation_norm.is_finite()
+                            {
+                                outcome.stage2_pnp_scale_ratio =
+                                    Some(pnp_translation_norm / trusted_translation_norm);
+                            }
+                        }
+                    }
+
                     if !diagnostic_stage2_rotation_failure {
                         self.diag_stage2_passed += 1;
                         outcome.stage_reached = "stage2_passed";
@@ -1619,6 +1687,12 @@ impl DpvoLongLoopIndex {
                 stage2_diagnostic_umeyama_scale: outcome.stage2_diagnostic_umeyama_scale,
                 stage2_diagnostic_umeyama_inliers: outcome.stage2_diagnostic_umeyama_inliers,
                 stage2_umeyama_vs_e_rotation_deg: outcome.stage2_umeyama_vs_e_rotation_deg,
+                stage2_pnp_correspondences: outcome.stage2_pnp_correspondences,
+                stage2_pnp_inliers: outcome.stage2_pnp_inliers,
+                stage2_pnp_mean_reprojection_error: outcome
+                    .stage2_pnp_mean_reprojection_error,
+                stage2_pnp_vs_e_rotation_deg: outcome.stage2_pnp_vs_e_rotation_deg,
+                stage2_pnp_scale_ratio: outcome.stage2_pnp_scale_ratio,
                 stage_reached: outcome.stage_reached,
                 final_accepted: is_accepted,
             });
@@ -1782,6 +1856,53 @@ fn nearest_patch_within<'a>(
         }
     }
     best.map(|(p, _)| p)
+}
+
+fn pnp_correspondences_from_old_patches(
+    raw_pairs: &[(usize, usize)],
+    old_keypoints: &[Point2<f64>],
+    old_pose: &SE3,
+    old_intr: &DpvoIntrinsics,
+    old_patches: &[DpvoPatch],
+    new_keypoints: &[Point2<f64>],
+    radius: f64,
+) -> Vec<Correspondence2D3D> {
+    let mut used_old_patches = HashSet::new();
+    let mut out = Vec::new();
+    for &(old_keypoint_index, new_keypoint_index) in raw_pairs {
+        let (Some(old_keypoint), Some(&new_keypoint)) = (
+            old_keypoints.get(old_keypoint_index),
+            new_keypoints.get(new_keypoint_index),
+        ) else {
+            continue;
+        };
+        let Some((patch_index, old_patch)) = old_patches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, patch)| {
+                let distance = ((patch.x - old_keypoint.x).powi(2)
+                    + (patch.y - old_keypoint.y).powi(2))
+                .sqrt();
+                (distance <= radius).then_some((index, patch, distance))
+            })
+            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(index, patch, _)| (index, patch))
+        else {
+            continue;
+        };
+        if !used_old_patches.insert(patch_index) {
+            continue;
+        }
+        let Some(point3d) = patch_to_world_point(old_pose, old_intr, old_patch) else {
+            continue;
+        };
+        out.push(Correspondence2D3D {
+            point2d: new_keypoint,
+            point3d,
+            confidence: None,
+        });
+    }
+    out
 }
 
 /// A3 stage 2, first slice: bounding-box area of the keypoints at `indices`,

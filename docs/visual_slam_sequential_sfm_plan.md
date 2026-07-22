@@ -1161,6 +1161,42 @@ be cross-checked against the already-verified E rotation. It must be
 measured acceptance-neutral first; homography-dominant/low-parallax pairs
 remain rotation-only and may never produce scale.
 
+Acceptance-neutral old-3D/current-2D PnP probe (2026-07-22): implemented the
+above route inside the same default-off diagnostic. For each E-inlier match,
+the old SP keypoint is associated to its nearest uniquely-used owned patch
+within the unchanged 3-patch-grid-pixel radius, backprojected through the
+old pose into the retained world, and paired with the current 2D keypoint.
+The existing `PnPRansac` then logs correspondence/inlier counts, reprojection
+error, PnP-vs-E rotation, and candidate scale `|t_pnp|/|t_trusted|`; no PnP
+result can be accepted. Artifact:
+`E:/visloc_archive/dpvo_a3_20260721/on_800_qf1_mp_2d2d_pnpdiag/` (1347.2 s,
+zero accepted, control-identical trajectory, stage-2 funnel partition
+700+614+148+461+22 = 1,945).
+
+Verdict: **honest negative; close retained-patch PnP as a scale source.** Of
+129 GT-labelled true pre/post candidates, 110 have enough associated old
+patches to attempt PnP and 96 return a numerical fit, but consensus is
+absent: median/max inliers = 1/8, median/max inlier ratio = 0.071/0.357,
+median PnP-vs-E rotation error = 163.322 degrees, and zero candidates pass
+the deliberately ordinary quality conjunction (>=8 inliers, >=0.5 inlier
+ratio, <=1 patch-grid-pixel mean reprojection error, <=10-degree PnP-vs-E
+rotation). The resulting scale ratios are correspondingly meaningless
+(median 5005, range 0.010-7554). The non-labelled pre/post set yields only
+one numerical PnP fit (1/6 inliers, 168-degree PnP-vs-E error). The 167
+quality-looking PnP fits elsewhere in the run are all inside the near-zero-
+motion hover cycle; their tiny trusted translation norms make the scale
+ratio ill-conditioned and they cannot inform the pre/post scale cliff.
+
+Both existing DPVO-patch scale routes are now closed by data: symmetric
+3D-3D gives internally coherent but E-inconsistent arbitrary scales, and
+old-3D/current-2D PnP cannot re-localize across the cliff. Do not tune their
+radii or inlier gates. A future pure-mono scale attempt must build a fresh,
+independently conditioned local submap on each side (multi-view
+triangulation over temporal neighborhoods, then E-consistent Sim3 alignment)
+rather than reuse the corrupted single-frame DPVO patch depths. E-derived
+rotation-only constraints remain separately viable but cannot satisfy A3's
+scale/ATE gate by themselves.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

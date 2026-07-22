@@ -1307,7 +1307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             if args.ll_2d2d_low_baseline_diagnostic {
                 println!(
-                    "  A3 stage 2 low-baseline diagnostic enabled: COLMAP E/F/H classification + E/H rotations logged; acceptance unchanged"
+                    "  A3 stage 2 low-baseline diagnostic enabled: E/F/H + E/Umeyama + old-3D/current-2D PnP logged; acceptance unchanged"
                 );
             }
         }
@@ -2262,7 +2262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              stage2_2d2d_inliers,stage2_e_rotation_disagreement_deg,stage2_e_rotation_qw,\
              stage2_e_rotation_qx,stage2_e_rotation_qy,stage2_e_rotation_qz,stage2_model,\
              stage2_h_inliers,stage2_h_rotation_disagreement_deg,stage2_diagnostic_umeyama_scale,\
-             stage2_diagnostic_umeyama_inliers,stage2_umeyama_vs_e_rotation_deg,stage_reached,final_accepted\n",
+             stage2_diagnostic_umeyama_inliers,stage2_umeyama_vs_e_rotation_deg,stage2_pnp_correspondences,\
+             stage2_pnp_inliers,stage2_pnp_mean_reprojection_error,stage2_pnp_vs_e_rotation_deg,\
+             stage2_pnp_scale_ratio,stage_reached,final_accepted\n",
         );
         for entry in query_log {
             let rot = entry
@@ -2305,8 +2307,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .stage2_umeyama_vs_e_rotation_deg
                 .map(|d| format!("{d:.3}"))
                 .unwrap_or_default();
+            let pnp_correspondences = entry
+                .stage2_pnp_correspondences
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let pnp_inliers = entry
+                .stage2_pnp_inliers
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let pnp_reprojection = entry
+                .stage2_pnp_mean_reprojection_error
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_default();
+            let pnp_vs_e = entry
+                .stage2_pnp_vs_e_rotation_deg
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_default();
+            let pnp_scale = entry
+                .stage2_pnp_scale_ratio
+                .map(|value| format!("{value:.9}"))
+                .unwrap_or_default();
             csv.push_str(&format!(
-                "{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 entry.query_arrival,
                 entry.rank,
                 entry.candidate_arrival,
@@ -2326,6 +2348,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 diagnostic_scale,
                 diagnostic_inliers,
                 umeyama_vs_e,
+                pnp_correspondences,
+                pnp_inliers,
+                pnp_reprojection,
+                pnp_vs_e,
+                pnp_scale,
                 entry.stage_reached,
                 entry.final_accepted,
             ));
@@ -2340,7 +2367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let empty_arrivals = odometry.long_loop_empty_query_arrivals();
         for &arrival in empty_arrivals {
             csv.push_str(&format!(
-                "{arrival},-1,-1,-1,0.000000,false,,,,,,,,not_run,,,,,,no_candidates,false\n"
+                "{arrival},-1,-1,-1,0.000000,false,,,,,,,,not_run,,,,,,,,,,,no_candidates,false\n"
             ));
         }
         let csv_path = args.out_dir.join("long_loop_candidates.csv");
