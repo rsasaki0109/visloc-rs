@@ -561,8 +561,10 @@ three subtly different Win32 loops. Every timed stage records its effective
 poll cadence; successful engine cells propagate that cadence into the final
 manifest. The release verifier rejects a missing, non-numeric, or out-of-range
 cadence in the prepared, hierarchical, COLMAP, external, or final evidence
-chain. The shared wait uses timeout-aware process completion, removing the
-previous up-to-one-poll wall-time bias. Static checks and 17 held-out/external
+chain, and now requires all successful stages to use the same 0.5 s cadence
+(the external runner previously defaulted to a less comparable 1.0 s). The
+shared wait uses timeout-aware process completion, removing the
+previous up-to-one-poll wall-time bias. Static checks and 18 held-out/external
 transaction tests pass, including deterministic summary regeneration.
 
 External-baseline pre-freeze (2026-07-22):

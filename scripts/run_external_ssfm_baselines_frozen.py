@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--setup-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument("--poll-seconds", type=float, default=0.5)
     return parser.parse_args()
 
 

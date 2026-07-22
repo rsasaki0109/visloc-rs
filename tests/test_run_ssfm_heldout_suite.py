@@ -166,6 +166,14 @@ class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
             path.write_text("after", encoding="utf-8")
             self.assertEqual(changed_frozen_files(evidence), ["fixture"])
 
+    def test_release_verifier_rejects_mixed_resource_sampling_cadence(self) -> None:
+        from verify_ssfm_heldout_suite import require_uniform_sampling_cadence
+
+        with self.assertRaisesRegex(ValueError, "cadence mismatch"):
+            require_uniform_sampling_cadence(
+                [("hierarchical", 0.5), ("external", 1.0)]
+            )
+
     def test_release_verifier_accepts_deferred_gt_success_chain(self) -> None:
         from verify_ssfm_heldout_suite import ENGINES, verify_success_sequence
 

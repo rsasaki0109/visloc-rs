@@ -73,6 +73,16 @@ def require_sampling_cadence(record: dict, label: str) -> float:
     return value
 
 
+def require_uniform_sampling_cadence(cadences: list[tuple[str, float]]) -> float:
+    if not cadences:
+        raise ValueError("resource sampling cadence evidence is empty")
+    distinct = {value for _, value in cadences}
+    if len(distinct) != 1:
+        rendered = ", ".join(f"{label}={value}" for label, value in cadences)
+        raise ValueError(f"resource sampling cadence mismatch: {rendered}")
+    return next(iter(distinct))
+
+
 def verify_success_sequence(
     sequence_root: Path,
     runner: dict,
@@ -116,26 +126,42 @@ def verify_success_sequence(
         raise ValueError("hierarchical engine read GT")
     if colmap.get("ground_truth_read") is not False:
         raise ValueError("COLMAP engine read GT")
+    sampling_cadences = []
     for stage_name, stage in prepared["stages"].items():
-        require_sampling_cadence(stage, f"prepared stage {stage_name}")
-    require_sampling_cadence(hierarchical["mapper"], "hierarchical mapper")
+        label = f"prepared stage {stage_name}"
+        sampling_cadences.append((label, require_sampling_cadence(stage, label)))
+    sampling_cadences.append(
+        (
+            "hierarchical mapper",
+            require_sampling_cadence(hierarchical["mapper"], "hierarchical mapper"),
+        )
+    )
     for stage_name, stage in colmap["stages"].items():
-        require_sampling_cadence(stage, f"COLMAP stage {stage_name}")
+        label = f"COLMAP stage {stage_name}"
+        sampling_cadences.append((label, require_sampling_cadence(stage, label)))
     for engine, result in external["results"].items():
         if result["status"] == "success":
-            require_sampling_cadence(result, f"external engine {engine}")
+            label = f"external engine {engine}"
+            sampling_cadences.append((label, require_sampling_cadence(result, label)))
     for engine, result in final["results"].items():
         if result["status"] != "success":
             continue
         cadence = result.get("resource_poll_seconds")
         if isinstance(cadence, dict):
             for stage_name, value in cadence.items():
-                require_sampling_cadence(
-                    {"resource_poll_seconds": value},
-                    f"final engine {engine} stage {stage_name}",
+                label = f"final engine {engine} stage {stage_name}"
+                sampling_cadences.append(
+                    (
+                        label,
+                        require_sampling_cadence(
+                            {"resource_poll_seconds": value}, label
+                        ),
+                    )
                 )
         else:
-            require_sampling_cadence(result, f"final engine {engine}")
+            label = f"final engine {engine}"
+            sampling_cadences.append((label, require_sampling_cadence(result, label)))
+    require_uniform_sampling_cadence(sampling_cadences)
     validate_external_baseline_manifest(
         external,
         sequence=runner["sequence"],
