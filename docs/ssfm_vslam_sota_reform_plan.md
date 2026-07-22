@@ -199,6 +199,30 @@ Per the V1 stop rule, the next R1b slice must test a stronger learned
 two-view/multi-view geometry initializer or dense correspondence prior while
 retaining the same independent-map and typed acceptance gates.
 
+R1b learned-prior result (2026-07-22): the probe now accepts externally
+generated match graphs and indexed anchor point clouds without weakening any
+R2 gate. `scripts/export_dpvo_submap_lightglue_matches.py` replayed official
+SuperPoint-LightGlue on all 310 temporal edges plus the loop anchor. It raised
+anchor Essential support from 35 to 49, but sparse independent-SfM rigidity
+fell to 5/32 = 0.156; matcher recall was not the limiting factor.
+
+`scripts/export_vggt_submap_anchor_points.py` then ran the official VGGT-1B
+implementation (`facebookresearch/vggt` revision `a288dd0`) independently on
+five views per side at offsets -16/-8/0/8/16. On the available GTX 1660 Ti,
+fp16 produced all-NaN tokens/depth and was rejected; fp32 was finite and fit at
+5.64 GiB peak allocated VRAM. Depth-unprojected anchor geometry improved the
+same 49 LightGlue+E correspondences to 14/49 = 0.286. The dedicated point-map
+head reached 13/49 = 0.265. Both failed the frozen 0.60 consensus gate, so no
+scale was emitted. Artifacts are under
+`E:/visloc_archive/dpvo_a3_20260721/{lightglue_submap_r16_20260722,vggt_submap_5view_fp32_20260722,vggt_submap_5view_point_fp32_20260722,independent_submap_probe_r16_vggt5*_20260722}`.
+
+Verdict: R1b is another informative negative. Learned matching increases
+two-view support and VGGT roughly doubles the rigid-consensus fraction over the
+LightGlue+sparse-SfM arm, but neither makes this severe pre/post-hover view pair
+scale-observable at the required reliability. The next initializer comparison
+should be a correspondence-grounded 3D model such as MASt3R/MASt3R-SLAM, not a
+looser R2 threshold or another sparse matcher sweep.
+
 ### R3 — Sparse hierarchical optimization
 
 - Replace dense whole-history Sim(3) solving with a sparse submap graph.

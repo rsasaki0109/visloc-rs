@@ -1236,6 +1236,23 @@ Sim3-rigid enough. Per the reform plan, the next work is R1b's learned
 two-view/multi-view initialization or dense geometry prior under the same typed
 gates—not another DPVO-depth or acceptance-threshold sweep.
 
+R1b learned-prior probe (2026-07-22): official LightGlue was replayed over the
+two radius-16 temporal graphs and loop anchor. Anchor Essential support rose
+35 -> 49, while the sparse-submap Sim3 consensus remained only 5/32 = 0.156.
+Official VGGT-1B (`facebookresearch/vggt` revision `a288dd0`) was then run as
+two independent five-view inferences at offsets -16/-8/0/8/16. GTX 1660 Ti
+fp16 inference yielded NaNs and was discarded; finite fp32 inference peaked at
+5.64 GiB allocated VRAM. Its depth branch raised the rigid consensus to 14/49
+= 0.286 and its point-map branch reached 13/49 = 0.265, both below the frozen
+0.60 gate. Thus no learned-prior scale edge was accepted or written back.
+Reproducible exporters now live in
+`scripts/export_dpvo_submap_lightglue_matches.py` and
+`scripts/export_vggt_submap_anchor_points.py`; logs and point products are
+under `E:/visloc_archive/dpvo_a3_20260721/*vggt*20260722` and
+`*lightglue*20260722`. Verdict: matching is not the bottleneck and a generalist
+depth/point prior is insufficient on this cliff; evaluate correspondence-
+grounded MASt3R geometry next while preserving the same typed gate.
+
 ### B4 — Win the runtime without weakening geometry (3-5 weeks)
 
 Profile first, then optimize the largest measured stages:

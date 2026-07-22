@@ -10,7 +10,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Point2, UnitQuaternion};
+use nalgebra::{Point2, Point3, UnitQuaternion};
 use visloc_rs::slam::{
     estimate_submap_sim3_constraint, LocalSubmap, LocalSubmapBuilder, LocalSubmapConfig,
     LocalSubmapQualityConfig, SubmapPointMatch, SubmapSim3AlignmentConfig,
@@ -23,6 +23,9 @@ use visloc_rs::{Camera, IncrementalSfmConfig, PairwiseMatches};
 #[derive(Debug)]
 struct Args {
     dump_dir: PathBuf,
+    lightglue_dir: Option<PathBuf>,
+    vggt_old_points: Option<PathBuf>,
+    vggt_new_points: Option<PathBuf>,
     old_anchor: u64,
     new_anchor: u64,
     radius: u64,
@@ -39,6 +42,9 @@ impl Default for Args {
         // EuRoC cam0 intrinsics and resolution in DPVO's RES=8 patch grid.
         Self {
             dump_dir: PathBuf::new(),
+            lightglue_dir: None,
+            vggt_old_points: None,
+            vggt_new_points: None,
             old_anchor: 38,
             new_anchor: 462,
             radius: 16,
@@ -67,6 +73,9 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             .ok_or_else(|| format!("missing value after {flag}"))?;
         match flag.as_str() {
             "--dump-dir" => args.dump_dir = PathBuf::from(value),
+            "--lightglue-dir" => args.lightglue_dir = Some(PathBuf::from(value)),
+            "--vggt-old-points" => args.vggt_old_points = Some(PathBuf::from(value)),
+            "--vggt-new-points" => args.vggt_new_points = Some(PathBuf::from(value)),
             "--old-anchor" => args.old_anchor = value.parse()?,
             "--new-anchor" => args.new_anchor = value.parse()?,
             "--radius" => args.radius = value.parse()?,
@@ -85,6 +94,9 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
     if args.old_anchor >= args.new_anchor {
         return Err("--old-anchor must be before --new-anchor".into());
     }
+    if args.vggt_old_points.is_some() != args.vggt_new_points.is_some() {
+        return Err("--vggt-old-points and --vggt-new-points must be supplied together".into());
+    }
     Ok(args)
 }
 
@@ -100,6 +112,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.cy,
     );
     let all_frames = load_dump(&args.dump_dir)?;
+    let external_matches = args
+        .lightglue_dir
+        .as_deref()
+        .map(load_external_matches)
+        .transpose()?;
     let old_frames = select_window(&all_frames, args.old_anchor, args.radius)?;
     let new_frames = select_window(&all_frames, args.new_anchor, args.radius)?;
     println!(
@@ -111,8 +128,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         new_frames.len()
     );
 
-    let (old_pairs, old_pair_attempts) = verified_temporal_pairs(&old_frames, &camera);
-    let (new_pairs, new_pair_attempts) = verified_temporal_pairs(&new_frames, &camera);
+    let (old_pairs, old_pair_attempts) =
+        verified_temporal_pairs(&old_frames, &camera, external_matches.as_ref());
+    let (new_pairs, new_pair_attempts) =
+        verified_temporal_pairs(&new_frames, &camera, external_matches.as_ref());
     println!(
         "old_pairwise attempted={} verified={} matches={}",
         old_pair_attempts,
@@ -183,9 +202,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let old_anchor = frame_by_arrival(&old_frames, args.old_anchor)?;
     let new_anchor = frame_by_arrival(&new_frames, args.new_anchor)?;
-    let Some(anchor_verification) =
-        verified_anchor_rotation(&old_anchor.features, &new_anchor.features, &camera)
-    else {
+    let Some(anchor_verification) = verified_anchor_rotation(
+        &old_anchor.features,
+        &new_anchor.features,
+        &camera,
+        external_matches
+            .as_ref()
+            .and_then(|matches| matches.get(&(args.old_anchor, args.new_anchor))),
+    ) else {
         println!("probe_status=rejected stage=anchor_essential");
         return Ok(());
     };
@@ -194,24 +218,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         anchor_verification.inlier_matches.len()
     );
 
-    let point_matches = anchor_landmark_matches(
-        &old_submap,
-        &new_submap,
-        args.old_anchor,
-        args.new_anchor,
-        &anchor_verification.inlier_matches,
-    );
-    println!(
-        "anchor_landmark_bridge essential_inliers={} triangulated_matches={}",
-        anchor_verification.inlier_matches.len(),
-        point_matches.len()
-    );
-
-    let old_anchor_pose = submap_pose(&old_submap, args.old_anchor)?;
-    let new_anchor_pose = submap_pose(&new_submap, args.new_anchor)?;
-    let target_from_source_rotation = new_anchor_pose.world_to_camera.rotation.inverse()
-        * anchor_verification.rotation
-        * old_anchor_pose.world_to_camera.rotation;
+    let (point_matches, target_from_source_rotation) = if let (Some(old_path), Some(new_path)) = (
+        args.vggt_old_points.as_deref(),
+        args.vggt_new_points.as_deref(),
+    ) {
+        let old_points = load_anchor_points(old_path)?;
+        let new_points = load_anchor_points(new_path)?;
+        let matches = indexed_anchor_point_matches(
+            &old_points,
+            &new_points,
+            &anchor_verification.inlier_matches,
+        );
+        println!(
+            "vggt_anchor_bridge essential_inliers={} old_points={} new_points={} lifted_matches={}",
+            anchor_verification.inlier_matches.len(),
+            old_points.len(),
+            new_points.len(),
+            matches.len()
+        );
+        (matches, anchor_verification.rotation)
+    } else {
+        let matches = anchor_landmark_matches(
+            &old_submap,
+            &new_submap,
+            args.old_anchor,
+            args.new_anchor,
+            &anchor_verification.inlier_matches,
+        );
+        println!(
+            "anchor_landmark_bridge essential_inliers={} triangulated_matches={}",
+            anchor_verification.inlier_matches.len(),
+            matches.len()
+        );
+        let old_anchor_pose = submap_pose(&old_submap, args.old_anchor)?;
+        let new_anchor_pose = submap_pose(&new_submap, args.new_anchor)?;
+        let rotation = new_anchor_pose.world_to_camera.rotation.inverse()
+            * anchor_verification.rotation
+            * old_anchor_pose.world_to_camera.rotation;
+        (matches, rotation)
+    };
     match estimate_submap_sim3_constraint(
         0,
         1,
@@ -287,7 +332,11 @@ fn select_window(
 const TEMPORAL_OFFSETS: [usize; 6] = [1, 2, 4, 8, 12, 16];
 const MATCH_RATIO: f32 = 0.8;
 
-fn verified_temporal_pairs(frames: &[DumpFrame], camera: &Camera) -> (Vec<PairwiseMatches>, usize) {
+fn verified_temporal_pairs(
+    frames: &[DumpFrame],
+    camera: &Camera,
+    external_matches: Option<&HashMap<(u64, u64), Vec<(usize, usize)>>>,
+) -> (Vec<PairwiseMatches>, usize) {
     let matcher = CrossCheckMatcher::new(BruteForceMatcher {
         ratio: Some(MATCH_RATIO),
     });
@@ -300,13 +349,29 @@ fn verified_temporal_pairs(frames: &[DumpFrame], camera: &Camera) -> (Vec<Pairwi
                 continue;
             }
             attempts += 1;
-            if let Some(matches) = verified_pair_matches(
-                &frames[image_i].features,
-                &frames[image_j].features,
-                camera,
-                &matcher,
-                20,
-            ) {
+            let provided = external_matches.and_then(|matches| {
+                matches.get(&(frames[image_i].arrival, frames[image_j].arrival))
+            });
+            let verified = if let Some(matches) = provided {
+                verified_index_matches(
+                    &frames[image_i].features,
+                    &frames[image_j].features,
+                    camera,
+                    matches,
+                    20,
+                )
+            } else if external_matches.is_none() {
+                verified_pair_matches(
+                    &frames[image_i].features,
+                    &frames[image_j].features,
+                    camera,
+                    &matcher,
+                    20,
+                )
+            } else {
+                None
+            };
+            if let Some(matches) = verified {
                 pairwise.push(PairwiseMatches {
                     image_i,
                     image_j,
@@ -327,16 +392,30 @@ fn verified_pair_matches(
 ) -> Option<Vec<(usize, usize)>> {
     let matches: Vec<DescriptorMatch> =
         matcher.match_descriptors(&first.descriptors, &second.descriptors);
+    let kept = matches
+        .into_iter()
+        .map(|descriptor_match| (descriptor_match.query_index, descriptor_match.train_index))
+        .collect::<Vec<_>>();
+    verified_index_matches(first, second, camera, &kept, min_inliers)
+}
+
+fn verified_index_matches(
+    first: &FeatureSet,
+    second: &FeatureSet,
+    camera: &Camera,
+    matches: &[(usize, usize)],
+    min_inliers: usize,
+) -> Option<Vec<(usize, usize)>> {
     let mut kept = Vec::new();
     let mut correspondences = Vec::new();
-    for descriptor_match in matches {
+    for &(query_index, train_index) in matches {
         let (Some(&previous_xy), Some(&current_xy)) = (
-            first.keypoints.get(descriptor_match.query_index),
-            second.keypoints.get(descriptor_match.train_index),
+            first.keypoints.get(query_index),
+            second.keypoints.get(train_index),
         ) else {
             continue;
         };
-        kept.push((descriptor_match.query_index, descriptor_match.train_index));
+        kept.push((query_index, train_index));
         correspondences.push(TwoViewCorrespondence::new(previous_xy, current_xy));
     }
     let relative = RelativePoseEstimator::default().estimate(&correspondences, camera)?;
@@ -355,27 +434,33 @@ fn verified_anchor_rotation(
     old: &FeatureSet,
     new: &FeatureSet,
     camera: &Camera,
+    external_matches: Option<&Vec<(usize, usize)>>,
 ) -> Option<AnchorVerification> {
-    let matcher = CrossCheckMatcher::new(BruteForceMatcher {
-        ratio: Some(MATCH_RATIO),
-    });
-    let matches = matcher.match_descriptors(&old.descriptors, &new.descriptors);
-    let mut kept = Vec::new();
-    let mut correspondences = Vec::new();
-    for descriptor_match in matches {
-        let (Some(&old_xy), Some(&new_xy)) = (
-            old.keypoints.get(descriptor_match.query_index),
-            new.keypoints.get(descriptor_match.train_index),
-        ) else {
-            continue;
-        };
-        kept.push((descriptor_match.query_index, descriptor_match.train_index));
-        correspondences.push(TwoViewCorrespondence::new(old_xy, new_xy));
-    }
+    let owned_matches;
+    let matches = if let Some(matches) = external_matches {
+        matches.as_slice()
+    } else {
+        let matcher = CrossCheckMatcher::new(BruteForceMatcher {
+            ratio: Some(MATCH_RATIO),
+        });
+        owned_matches = matcher
+            .match_descriptors(&old.descriptors, &new.descriptors)
+            .into_iter()
+            .map(|descriptor_match| (descriptor_match.query_index, descriptor_match.train_index))
+            .collect::<Vec<_>>();
+        &owned_matches
+    };
+    let inlier_matches = verified_index_matches(old, new, camera, matches, 30)?;
+    let correspondences = inlier_matches
+        .iter()
+        .map(|&(old_index, new_index)| {
+            TwoViewCorrespondence::new(old.keypoints[old_index], new.keypoints[new_index])
+        })
+        .collect::<Vec<_>>();
     let relative = RelativePoseEstimator::default().estimate(&correspondences, camera)?;
-    (relative.inliers.len() >= 30).then(|| AnchorVerification {
+    Some(AnchorVerification {
         rotation: relative.previous_to_current.rotation,
-        inlier_matches: relative.inliers.iter().map(|&index| kept[index]).collect(),
+        inlier_matches,
     })
 }
 
@@ -424,6 +509,111 @@ fn landmark_observation_lookup(submap: &LocalSubmap) -> HashMap<(u64, usize), us
         }
     }
     lookup
+}
+
+fn load_anchor_points(path: &Path) -> Result<HashMap<usize, Point3<f64>>, Box<dyn Error>> {
+    let text = fs::read_to_string(path)?;
+    let mut points = HashMap::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        if columns.len() != 5 {
+            return Err(format!(
+                "{}:{} expected five columns",
+                path.display(),
+                line_index + 1
+            )
+            .into());
+        }
+        let keypoint_index = columns[0].parse::<usize>()?;
+        let point = Point3::new(
+            columns[1].parse::<f64>()?,
+            columns[2].parse::<f64>()?,
+            columns[3].parse::<f64>()?,
+        );
+        if !point.coords.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "{}:{} contains a non-finite point",
+                path.display(),
+                line_index + 1
+            )
+            .into());
+        }
+        if points.insert(keypoint_index, point).is_some() {
+            return Err(
+                format!("{} has duplicate keypoint {keypoint_index}", path.display()).into(),
+            );
+        }
+    }
+    Ok(points)
+}
+
+fn indexed_anchor_point_matches(
+    old_points: &HashMap<usize, Point3<f64>>,
+    new_points: &HashMap<usize, Point3<f64>>,
+    inlier_matches: &[(usize, usize)],
+) -> Vec<SubmapPointMatch> {
+    inlier_matches
+        .iter()
+        .filter_map(|&(old_index, new_index)| {
+            Some(SubmapPointMatch {
+                source_landmark_id: old_index as u64,
+                target_landmark_id: new_index as u64,
+                source_point: *old_points.get(&old_index)?,
+                target_point: *new_points.get(&new_index)?,
+            })
+        })
+        .collect()
+}
+
+fn load_external_matches(
+    dir: &Path,
+) -> Result<HashMap<(u64, u64), Vec<(usize, usize)>>, Box<dyn Error>> {
+    let manifest = fs::read_to_string(dir.join("manifest.csv"))?;
+    let mut pairs = HashMap::new();
+    for (line_index, line) in manifest.lines().enumerate().skip(1) {
+        let columns = line.split(',').collect::<Vec<_>>();
+        if columns.len() != 5 {
+            return Err(format!(
+                "external manifest line {} has {} columns",
+                line_index + 1,
+                columns.len()
+            )
+            .into());
+        }
+        let arrival_i = columns[1].parse::<u64>()?;
+        let arrival_j = columns[2].parse::<u64>()?;
+        let text = fs::read_to_string(dir.join(columns[3]))?;
+        let mut matches = Vec::new();
+        for (match_line_index, match_line) in text.lines().enumerate() {
+            let match_line = match_line.trim();
+            if match_line.is_empty() || match_line.starts_with('#') {
+                continue;
+            }
+            let fields = match_line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 2 {
+                return Err(format!(
+                    "{}:{} has fewer than two columns",
+                    columns[3],
+                    match_line_index + 1
+                )
+                .into());
+            }
+            matches.push((fields[0].parse()?, fields[1].parse()?));
+        }
+        if pairs.insert((arrival_i, arrival_j), matches).is_some() {
+            return Err(format!("duplicate external pair {arrival_i}/{arrival_j}").into());
+        }
+    }
+    println!(
+        "external_matcher=lightglue directory={} pairs={}",
+        dir.display(),
+        pairs.len()
+    );
+    Ok(pairs)
 }
 
 fn load_dump(dir: &Path) -> Result<Vec<DumpFrame>, Box<dyn Error>> {
