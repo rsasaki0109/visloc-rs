@@ -785,6 +785,33 @@ the default 96-patch/22-10-13 graph made the same prefix worse (0.1703 m,
 cross-check the production pose/BA stream against upstream DPVO rather than
 sweep patch/window size.
 
+That cross-check found the dominant learned-contract defect. Upstream
+`dpvo/altcorr/correlation_kernel.cu` accumulates the raw 128-channel dot
+product, while the port divided it by `sqrt(128)`. More subtly, upstream
+returns `(dx, dy, patch_y, patch_x)` before stacking pyramid level, whereas
+the port flattened `(patch_y, patch_x, dy, dx)`; the old normalization made
+the wrong tap ordering less visible to the update network. The exporter,
+Rust reference/fast paths, grouped ONNX graph, and ABI-3 native CUDA kernel
+now use the exact raw `(dx, dy, patch_y, patch_x, level)` contract. A newly
+generated r6 fixture bundle passes all seven external CPU/ONNX/native parity
+tests; native CUDA differs from the frozen PyTorch fixture by at most
+`2.772e-6`.
+
+Correct correlation also restored upstream's expected bootstrap motion
+filter behaviour: low-motion arrivals are rejected from the live graph but
+remain trajectory samples through `pg.delta[counter-1] = (counter-2,
+Identity)`. The demo previously exported only committed frames; it now
+reconstructs every input timestamp through the same recursive delta chain as
+upstream `get_pose()`. On MH_03 at stride 1 with the frozen 48/16/7/11 graph,
+the 100-frame development prefix now exports 100/100 poses at **0.0032 m**
+Sim(3) ATE (max 0.0150 m), versus 0.1633 m before the contract fix. A
+materially longer 400-frame prefix independently retains **0.0040 m** Sim(3)
+ATE (max 0.0153 m), 400/400 poses. This clears the 0.020 m accuracy target on
+development evidence, but not the runtime gate: the 400-frame run takes
+268.02 ms/frame (correlation 58.58, update 71.79, encoder 31.32, BA 14.09).
+V3 must next preserve this exact contract while fusing/removing the remaining
+GPU-host round trips; only then may the configuration be frozen for V4.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

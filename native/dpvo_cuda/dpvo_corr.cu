@@ -140,8 +140,16 @@ __global__ void correlation_warp_kernel(
   const int target = targets[edge];
   if (target < 0 || target >= frames) {
     if (lane == 0) {
-      for (int value = 0; value < taps * taps * 2; ++value) {
-        output[static_cast<size_t>(item) * taps * taps * 2 + value] = 0.0f;
+      for (int tap = 0; tap < taps * taps; ++tap) {
+        for (int level = 0; level < 2; ++level) {
+          const size_t output_index =
+              (((static_cast<size_t>(edge) * taps * taps + tap) * patch + py) *
+                   patch +
+               px) *
+                  2 +
+              level;
+          output[output_index] = 0.0f;
+        }
       }
     }
     return;
@@ -172,8 +180,10 @@ __global__ void correlation_warp_kernel(
     const int width = level == 0 ? width0 : width1;
 
     for (int tap = 0; tap < taps * taps; ++tap) {
-      const int x0 = base_x + tap % taps - radius;
-      const int y0 = base_y + tap / taps - radius;
+      // Upstream returns out.permute({0,1,3,2,4,5}), so flattened taps
+      // are x-major: dx is the outer axis and dy is the inner axis.
+      const int x0 = base_x + tap / taps - radius;
+      const int y0 = base_y + tap % taps - radius;
       float sum = 0.0f;
       #pragma unroll
       for (int group = 0; group < 4; ++group) {
@@ -191,8 +201,14 @@ __global__ void correlation_warp_kernel(
       }
       if (lane == 0) {
         const size_t output_index =
-            (static_cast<size_t>(item) * taps * taps + tap) * 2 + level;
-        output[output_index] = sum / sqrtf(static_cast<float>(channels));
+            (((static_cast<size_t>(edge) * taps * taps + tap) * patch + py) *
+                 patch +
+             px) *
+                2 +
+            level;
+        // Upstream DPVO's altcorr kernel returns the raw channel dot
+        // product; its learned update network was trained on this scale.
+        output[output_index] = sum;
       }
     }
   }

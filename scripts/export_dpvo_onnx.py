@@ -895,11 +895,12 @@ def patchify_cpu(fmap: torch.Tensor, coords: torch.Tensor, radius: int) -> torch
 
 
 def corr_cpu(patch_feats: torch.Tensor, target_fmap: torch.Tensor, coords: torch.Tensor, radius: int) -> torch.Tensor:
-    """Own reimplementation of `altcorr.corr`: normalised dot-product cost
+    """PyTorch reimplementation of `altcorr.corr`: raw dot-product cost
     volume between a patch's per-pixel feature vector and a
     `(2*radius+1)^2`-tap bilinearly-sampled neighbourhood of the target
-    feature map, per the plan doc's description of the (uninspectable)
-    CUDA kernel. NOT verified against the CUDA kernel.
+    feature map. This matches upstream DPVO's directly inspected
+    `dpvo/altcorr/correlation_kernel.cu`, which stores the accumulated
+    channel sum without `sqrt(C)` normalization.
     patch_feats: (E, C, P, P) per-edge anchor patch features.
     target_fmap: (E, C, H, W) per-edge already-selected destination feature
                  map (i.e. `pyramid_level[jj]`).
@@ -928,8 +929,11 @@ def corr_cpu(patch_feats: torch.Tensor, target_fmap: torch.Tensor, coords: torch
     sampled = sampled.reshape(E, C, P, P, taps, taps)
 
     anchor = patch_feats.view(E, C, P, P, 1, 1)
-    corr = (anchor * sampled).sum(dim=1) / (C ** 0.5)  # (E,P,P,taps,taps)
-    return corr.reshape(E, P, P, taps * taps)
+    corr = (anchor * sampled).sum(dim=1)  # (E,P,P,dy,dx)
+    # Upstream correlation_kernel.cu returns
+    # `out.permute({0,1,3,2,4,5})`: dx is therefore the outer/slow tap axis
+    # and dy the inner/fast tap axis when DPVO later flattens the tensor.
+    return corr.permute(0, 1, 2, 4, 3).reshape(E, P, P, taps * taps)
 
 
 class CorrelationPyramidOnnx(nn.Module):
@@ -941,7 +945,12 @@ class CorrelationPyramidOnnx(nn.Module):
         target1 = target_level1.expand(edge_count, -1, -1, -1)
         corr0 = corr_cpu(anchor, target0, coords_level0, RADIUS)
         corr1 = corr_cpu(anchor, target1, coords_level0 / 4.0, RADIUS)
-        return torch.stack((corr0, corr1), dim=-1).reshape(edge_count, CORR_DIM)
+        taps = 2 * RADIUS + 1
+        # DPVO flattens the upstream kernel result shaped
+        # (edge, dx, dy, patch_y, patch_x, level), not patch-major.
+        corr = torch.stack((corr0, corr1), dim=-1)
+        corr = corr.reshape(edge_count, PATCH, PATCH, taps, taps, 2)
+        return corr.permute(0, 3, 4, 1, 2, 5).reshape(edge_count, CORR_DIM)
 
 
 def export_correlation_graph(out_dir, num_edges, height, width, opset):

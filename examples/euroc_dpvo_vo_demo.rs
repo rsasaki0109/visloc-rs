@@ -970,7 +970,7 @@ fn bilinear_sample_u8(image: &Array2<u8>, x: f64, y: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
-/// A tracked frame's final pose, using upstream DPVO's recursive delta-chain
+/// An arrival's final pose, using upstream DPVO's recursive delta-chain
 /// reconstruction for folded frames. Explicit global-backend overrides are
 /// honored by `reconstruct_pose` as recursion anchors.
 fn final_pose_of(graph: &DpvoPatchGraph, arrival_index: usize) -> Option<SE3> {
@@ -1455,12 +1455,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.stride
     );
 
-    // Milestone M9: `(timestamp_ns, arrival_index)` per successfully tracked
-    // frame — see the main loop's own comment (right before this Vec is
-    // pushed to) for why the trajectory CSV/ATE are no longer built
-    // incrementally here.
-    let mut tracked_entries: Vec<(i128, usize)> = Vec::new();
-    let mut tracked_frames = 0usize;
+    // Every input timestamp belongs in the final trajectory, including a
+    // candidate rejected by upstream's pre-initialization motion filter.
+    // `reject_pending_frame` records that arrival's identity delta to its
+    // predecessor, exactly as DPVO::terminate()/get_pose reconstruct it.
+    let mut trajectory_entries: Vec<(i128, usize)> = Vec::new();
+    let mut committed_frames = 0usize;
 
     // Coarse timing split for everything *outside* `DpvoOdometry` itself
     // (`DpvoOdometryStats` only covers ONNX/BA time inside `process_frame`;
@@ -1552,6 +1552,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let pose = odometry.process_frame(undistorted.view(), timestamp_seconds)?;
+        // `begin_frame` increments the graph counter once for every input,
+        // accepted or rejected, so this loop index is the stable arrival
+        // index used by the graph's delta chain.
+        trajectory_entries.push((entry.timestamp_nanoseconds, idx));
 
         // A3 ranking-lab offline dump: `long_loop_last_ingested` is
         // overwritten (not accumulated) on every actual ingest inside
@@ -1716,29 +1720,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prev_ll_accepted_total = ll_diag.accepted_total;
         }
 
-        // Milestone M9: record only `(timestamp, arrival_index)` here — the
-        // trajectory CSV and ATE evaluation are built in a POST-HOC pass
-        // after the whole run finishes (see `final_pose_of`, called below
-        // the main loop), so that a LATER correction (global BA widening the
-        // window, or this milestone's own Sim3 backend correcting a frame
-        // that already committed many iterations ago) is actually reflected
-        // in the exported trajectory instead of the STALE pose this frame's
-        // own `process_frame` call happened to return at commit time. Prior
-        // milestones built `traj_csv`/`aligned_estimated` incrementally,
-        // right here, which silently froze each frame's pose at ITS OWN
-        // commit time — harmless before M9 (a corrected OLD frame's pose was
-        // never written back this far outside the BA window), but exactly
-        // the gap M9's own retained-pose-history + Sim3 corrections need
-        // this pass to close.
+        // Count graph commits separately from final trajectory coverage.
+        // Rejected arrivals were already recorded above and are recovered
+        // post-hoc through their identity-delta chain; committed/folded
+        // arrivals likewise receive their final corrected pose rather than
+        // the stale value returned during this iteration.
         if pose.is_some() {
-            tracked_frames += 1;
+            committed_frames += 1;
             let arrival_index = odometry
                 .graph()
                 .frames()
                 .last()
                 .expect("process_frame returned Some(pose) => at least one live frame exists")
                 .arrival_index;
-            tracked_entries.push((entry.timestamp_nanoseconds, arrival_index));
+            debug_assert_eq!(arrival_index, idx);
         }
 
         if idx % 10 == 0 || idx + 1 == frames.len() {
@@ -1746,10 +1741,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let n = stats.frames_processed.max(1) as f64;
             let imu_diag = odometry.imu_diagnostics();
             println!(
-                "frame {}/{} tracked={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2} imu_bootstrapped={} imu_attempts={} imu_rejections={} imu_rollbacks={}",
+                "frame {}/{} committed={} frames_graph_n={} io_ms_avg={:.2} undistort_ms_avg={:.2} encode_ms_avg={:.2} corr_ms_avg={:.2} update_ms_avg={:.2} ba_ms_avg={:.2} imu_bootstrapped={} imu_attempts={} imu_rejections={} imu_rollbacks={}",
                 idx + 1,
                 frames.len(),
-                tracked_frames,
+                committed_frames,
                 odometry.graph().n_frames(),
                 io_ms_total / n,
                 undistort_ms_total / n,
@@ -1878,7 +1873,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_elapsed_s = run_start.elapsed().as_secs_f64();
 
     // Milestone M9: build the trajectory CSV / ATE alignment vectors NOW,
-    // reading each tracked frame's FINAL pose (`final_pose_of`) — live
+    // reading each arrival's FINAL pose (`final_pose_of`) — live
     // frames from `odometry.graph().frames()`, folded frames recursively
     // reconstructed through upstream's relative-delta chain (with explicit
     // global-backend overrides as anchors) — rather than either the stale
@@ -1886,10 +1881,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut traj_csv = String::from("timestamp_ns,tx,ty,tz,qw,qx,qy,qz\n");
     let mut aligned_estimated: Vec<Point3<f64>> = Vec::new();
     let mut aligned_reference: Vec<Point3<f64>> = Vec::new();
-    for &(timestamp_ns, arrival_index) in &tracked_entries {
+    let mut trajectory_frames = 0usize;
+    for &(timestamp_ns, arrival_index) in &trajectory_entries {
         let Some(pose_world_to_camera) = final_pose_of(odometry.graph(), arrival_index) else {
             continue;
         };
+        trajectory_frames += 1;
         // DPVO poses are `T_world_to_camera` (see `dpvo_patch_ba.rs`'s
         // convention-mapping doc) — the camera center in world is the
         // inverse's translation.
@@ -1954,7 +1951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     let tracked_fraction = if !frames.is_empty() {
-        tracked_frames as f64 / frames.len() as f64
+        trajectory_frames as f64 / frames.len() as f64
     } else {
         0.0
     };
@@ -1985,7 +1982,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          native_cuda_correlation_abi={}\n\
          native_cuda_correlation_dll={}\n\
          frames_requested={frame_count}\n\
-         frames_tracked={tracked_frames}\n\
+         frames_tracked={trajectory_frames}\n\
          final_refinement_iterations={}\n\
          tracked_fraction={tracked_fraction:.4}\n\
          total_elapsed_s={total_elapsed_s:.2}\n\

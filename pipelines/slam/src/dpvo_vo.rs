@@ -6312,9 +6312,9 @@ mod global_ba_tests {
 /// reprojected `3×3` grids (`num_items, 3, 3, 2`, in level-0/native pixel
 /// coordinates), run the 2-pyramid-level correlation lookup and interleave
 /// into DPVO's own `(num_items, 882)` layout — `DPVO.corr` (`dpvo.py:200-
-/// 207`): `torch.stack([corr1, corr2], -1).view(1, len(ii), -1)`, i.e. the
-/// pyramid level is the fastest-varying axis, nested inside tap, inside
-/// patch-pixel-column, inside patch-pixel-row.
+/// 207`): upstream `altcorr` first returns `(dx, dy, patch_y, patch_x)`, then
+/// `torch.stack([corr1, corr2], -1).view(1, len(ii), -1)` makes pyramid level
+/// fastest, inside patch x, patch y, dy, and dx.
 fn corr_pyramid(
     anchor_gmap: ArrayView4<'_, f32>,
     coords_grid_px: ArrayView4<'_, f32>,
@@ -6339,10 +6339,10 @@ fn corr_pyramid(
     let taps = 2 * CORR_RADIUS + 1;
     let mut out = Array2::<f32>::zeros((num_items, CORR_DIM));
     for i in 0..num_items {
-        for py in 0..PATCH {
-            for px in 0..PATCH {
-                for t in 0..taps * taps {
-                    let base = ((py * PATCH + px) * taps * taps + t) * 2;
+        for t in 0..taps * taps {
+            for py in 0..PATCH {
+                for px in 0..PATCH {
+                    let base = ((t * PATCH + py) * PATCH + px) * 2;
                     out[(i, base)] = corr1[(i, py, px, t)];
                     out[(i, base + 1)] = corr2[(i, py, px, t)];
                 }
