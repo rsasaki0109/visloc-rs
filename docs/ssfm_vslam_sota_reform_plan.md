@@ -954,6 +954,31 @@ is one contributor, not the root cause; even the high-density front end needs
 a long-horizon/stationary-transition repair before backend optimization alone
 can reach V3/V4.
 
+Prefix and relative-motion analysis of that corrected 48-patch trajectory
+also supersedes the old pre-contract "single scale cliff" diagnosis. Sim(3)
+ATE stays at 0.0040 m through frame 400, then grows gradually (0.0088 at 500,
+0.0204 at 600, 0.0365 at 700, and 0.0775 at 800). The aligned orientation
+error remains about 1--2 degrees; small translation-direction errors accumulate
+after motion resumes. The old M5/M7 IMU negatives used the now-invalid
+correlation trajectory and therefore cannot close IMU coupling on this one.
+
+Re-running continuous scale coupling exposed a separate state-accounting bug:
+each `update_step`, including the 12 final-refinement iterations on an unchanged
+graph, was admitted as a new recursive gyro/scale observation and as another
+annealing/rollback frame. A 400-frame pre-fix probe consequently added 12
+duplicate measurements during finalization, briefly declared convergence, and
+soft-rolled back. Recursive evidence, annealing, and consecutive-failure
+monitoring are now gated by immutable camera arrival ID; numerical BA repeats
+may still reuse the fixed posterior. The matched 400-frame run ended with the
+same frame-400 evidence state (155 accepted, 176 rejected, zero rollback) and
+retained 0.0040 m ATE. At 800 frames the mechanism remained safely inactive:
+0.0773 m ATE, weight zero, 161 accepted / 412 rejected, and zero rollback.
+After frame 500 nearly every new alignment failed the existing physical scale
+gate, so lowering convergence thresholds would manufacture confidence rather
+than repair the measurement. The next VSLAM slice must diagnose why the live
+mono-VI alignment becomes out-of-range after motion resumes; this change only
+fixes independent-evidence accounting.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

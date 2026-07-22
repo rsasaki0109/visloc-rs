@@ -2169,6 +2169,11 @@ pub struct DpvoOdometry {
     /// `crate::dpvo_scale_coupling`'s module doc for why gravity itself is
     /// not put through its own recursive filter this milestone.
     scale_coupling_gravity: Option<Vector3<f64>>,
+    /// Latest camera arrival whose visual/IMU window was admitted as NEW
+    /// recursive evidence. `update_step` legitimately runs multiple solver
+    /// iterations for one arrival (including 12 final-refinement passes),
+    /// but those iterations are not independent sensor measurements.
+    scale_coupling_last_evidence_arrival: Option<usize>,
     scale_coupling_consecutive_bad: usize,
     scale_coupling_measurements: usize,
     scale_coupling_measurement_rejections: usize,
@@ -2442,6 +2447,7 @@ impl DpvoOdometry {
             gyro_bias_estimator: RecursiveGyroBiasEstimator::new(sc_cfg),
             scale_coupling_weight: AnnealingWeight::new(sc_cfg.anneal_frames, sc_cfg.decay_frames),
             scale_coupling_gravity: None,
+            scale_coupling_last_evidence_arrival: None,
             scale_coupling_consecutive_bad: 0,
             scale_coupling_measurements: 0,
             scale_coupling_measurement_rejections: 0,
@@ -4717,6 +4723,13 @@ impl DpvoOdometry {
             .imu
             .as_ref()
             .is_some_and(|c| c.scale_coupling.is_some());
+        let advance_scale_evidence = if use_scale_coupling {
+            window_arrivals.last().is_some_and(|&arrival| {
+                advance_once_per_arrival(&mut self.scale_coupling_last_evidence_arrival, arrival)
+            })
+        } else {
+            false
+        };
         // Milestone M5: once the IMU bootstrap chain has succeeded, couple
         // consecutive-window IMU factors into the SAME Gauss-Newton solve
         // (`crate::dpvo_vi_ba::dpvo_vi_ba`) instead of the plain visual-only
@@ -4726,7 +4739,14 @@ impl DpvoOdometry {
         // bootstrap has not (yet) succeeded — visual-only behavior is
         // therefore byte-for-byte unchanged from M4 in both of those cases.
         let (new_poses, new_patches, new_velocities) = if use_scale_coupling {
-            self.scale_coupling_step(&problem, frame_lo, n, local_fixedp, &ba_config)?
+            self.scale_coupling_step(
+                &problem,
+                frame_lo,
+                n,
+                local_fixedp,
+                &ba_config,
+                advance_scale_evidence,
+            )?
         } else if self.imu_bootstrapped {
             let imu_cfg = self
                 .config
@@ -4842,7 +4862,7 @@ impl DpvoOdometry {
     }
 
     /// Milestone M7 (`docs/dpvo_droid_port_plan.md`): the continuous,
-    /// uncertainty-weighted scale-coupling per-frame step — see
+    /// uncertainty-weighted scale-coupling solver step — see
     /// `crate::dpvo_scale_coupling`'s module doc for the full design this
     /// implements. Called from [`Self::update_step`] in place of the
     /// M5/M5b branch whenever `config.imu.scale_coupling` is `Some`.
@@ -4852,8 +4872,11 @@ impl DpvoOdometry {
     /// # Why this never touches `self.imu_bootstrapped`/`self.imu_bias_gyro`
     /// as a COMMITTED, staged value
     ///
-    /// Unlike M5b's `try_imu_bootstrap`, this method re-derives its own
-    /// gyro-bias/scale evidence EVERY call from the current window — nothing
+    /// Unlike M5b's `try_imu_bootstrap`, this method continually re-derives
+    /// gyro-bias/scale evidence from the current window, but admits recursive
+    /// evidence only once per camera arrival. Repeated solver/final-refinement
+    /// calls on an unchanged window may reuse the fixed posterior in the
+    /// coupled solve, but are not independent sensor observations. Nothing
     /// here is a one-shot "compute once, fix forever" decision, so there is
     /// no analogous boolean to flip. `self.imu_bias_gyro` is still updated
     /// (purely for [`DpvoOdometry::imu_diagnostics`]'s own echo — a caller
@@ -4867,6 +4890,7 @@ impl DpvoOdometry {
         n: usize,
         local_fixedp: usize,
         ba_config: &DpvoBaConfig,
+        advance_evidence: bool,
     ) -> Result<ScaleCouplingSolution, DpvoOdometryError> {
         let imu_cfg =
             self.config.imu.clone().expect(
@@ -4920,7 +4944,7 @@ impl DpvoOdometry {
         // requirement). Reuses `estimate_gyro_bias` UNCHANGED (rotation-only
         // alignment is scale-invariant — same reasoning
         // `crate::dpvo_vi_ba`'s own "Sequencing" section gives for M5b), but
-        // called EVERY frame against the CURRENT live window instead of
+        // called once per camera arrival against the CURRENT live window instead of
         // once against a decoupled bootstrap history — the recursive
         // estimator's own robustness (not a decoupled-history mechanism) is
         // what protects this from M5's original "stationary opening
@@ -4949,17 +4973,19 @@ impl DpvoOdometry {
             window_factors.iter().map(|f| f.factor.clone()).collect();
 
         let seed_bias = self.gyro_bias_estimator.mean();
-        if let Some(alignment) =
-            estimate_gyro_bias(&map, &arrival_ids, &factors_for_gyro, seed_bias)
-        {
-            // Honest variance proxy (same "derive it from the LSQ's own
-            // fit quality" philosophy as the scale estimator — see
-            // `crate::dpvo_scale_coupling`'s module doc): the ROTATION
-            // alignment's own converged residual RMS is the direct
-            // empirical noise-level estimate for THIS measurement.
-            let variance = alignment.rotation_residual_rms_after.max(1.0e-9).powi(2);
-            self.gyro_bias_estimator
-                .update(alignment.bias_gyro, variance);
+        if advance_evidence {
+            if let Some(alignment) =
+                estimate_gyro_bias(&map, &arrival_ids, &factors_for_gyro, seed_bias)
+            {
+                // Honest variance proxy (same "derive it from the LSQ's own
+                // fit quality" philosophy as the scale estimator — see
+                // `crate::dpvo_scale_coupling`'s module doc): the ROTATION
+                // alignment's own converged residual RMS is the direct
+                // empirical noise-level estimate for THIS measurement.
+                let variance = alignment.rotation_residual_rms_after.max(1.0e-9).powi(2);
+                self.gyro_bias_estimator
+                    .update(alignment.bias_gyro, variance);
+            }
         }
         let bias_gyro = self.gyro_bias_estimator.mean();
         self.imu_bias_gyro = bias_gyro; // diagnostics echo only — see this method's own doc.
@@ -5018,15 +5044,18 @@ impl DpvoOdometry {
             })
             .collect();
 
-        match estimate_mono_vi_alignment(
-            mono_poses,
-            &mono_factors,
-            &imu_cfg.body_to_camera,
-            bias_gyro,
-            self.imu_bias_accel,
-            &gates,
-        ) {
-            Ok(alignment) => {
+        let alignment_result = advance_evidence.then(|| {
+            estimate_mono_vi_alignment(
+                mono_poses,
+                &mono_factors,
+                &imu_cfg.body_to_camera,
+                bias_gyro,
+                self.imu_bias_accel,
+                &gates,
+            )
+        });
+        match alignment_result {
+            Some(Ok(alignment)) => {
                 self.scale_coupling_measurements += 1;
                 let measurement = scale_measurement_from_alignment(&alignment, &sc_cfg.scale);
                 self.scale_estimator.update(measurement);
@@ -5035,7 +5064,7 @@ impl DpvoOdometry {
                     window_velocities[mono_start + idx] = v;
                 }
             }
-            Err(rejection) => {
+            Some(Err(rejection)) => {
                 self.scale_coupling_measurement_rejections += 1;
                 match rejection {
                     DpvoMonoViAlignmentRejection::NotEnoughFactors => {
@@ -5059,10 +5088,13 @@ impl DpvoOdometry {
                 }
                 self.scale_coupling_last_rejection = Some(rejection);
             }
+            None => {}
         }
 
         let should_increase = self.scale_estimator.is_converged();
-        self.scale_coupling_weight.step(should_increase);
+        if advance_evidence {
+            self.scale_coupling_weight.step(should_increase);
+        }
         let weight = self.scale_coupling_weight.value;
 
         if weight <= 0.0 {
@@ -5143,18 +5175,20 @@ impl DpvoOdometry {
         } else {
             0.0
         };
-        let (next_bad, should_soft_rollback) = rollback_monitor_step(
-            mean_nis,
-            sc_cfg.scale.rollback_mean_nis_bound,
-            self.scale_coupling_consecutive_bad,
-            sc_cfg.scale.rollback_consecutive_frames,
-        );
-        self.scale_coupling_consecutive_bad = next_bad;
-        if should_soft_rollback {
-            self.scale_estimator.soft_reset();
-            self.gyro_bias_estimator.soft_reset();
-            self.scale_coupling_weight.force_decay();
-            self.scale_coupling_rollback_count += 1;
+        if advance_evidence {
+            let (next_bad, should_soft_rollback) = rollback_monitor_step(
+                mean_nis,
+                sc_cfg.scale.rollback_mean_nis_bound,
+                self.scale_coupling_consecutive_bad,
+                sc_cfg.scale.rollback_consecutive_frames,
+            );
+            self.scale_coupling_consecutive_bad = next_bad;
+            if should_soft_rollback {
+                self.scale_estimator.soft_reset();
+                self.gyro_bias_estimator.soft_reset();
+                self.scale_coupling_weight.force_decay();
+                self.scale_coupling_rollback_count += 1;
+            }
         }
 
         let (blended_poses, blended_patches) = blend_solutions(
@@ -5243,6 +5277,19 @@ pub(crate) fn rollback_monitor_step(
         consecutive_bad + 1
     };
     (next, next >= threshold)
+}
+
+/// Admit recursive sensor evidence at most once for each camera arrival.
+/// Solver iterations on an unchanged graph window are useful numerical
+/// refinement, but are correlated repeats of the same images and IMU
+/// factors—not additional measurements and not additional elapsed frames
+/// for an annealing or consecutive-failure counter.
+fn advance_once_per_arrival(last: &mut Option<usize>, current: usize) -> bool {
+    if *last == Some(current) {
+        return false;
+    }
+    *last = Some(current);
+    true
 }
 
 /// Milestone M7 diagnostic fix (see [`DpvoOdometry::scale_coupling_step`]'s
@@ -5661,7 +5708,18 @@ fn global_ba_due(
 
 #[cfg(test)]
 mod scale_coupling_windowing_tests {
-    use super::trailing_consecutive_run_start;
+    use super::{advance_once_per_arrival, trailing_consecutive_run_start};
+
+    #[test]
+    fn recursive_evidence_advances_once_per_camera_arrival() {
+        let mut last = None;
+        assert!(advance_once_per_arrival(&mut last, 42));
+        for _ in 0..12 {
+            assert!(!advance_once_per_arrival(&mut last, 42));
+        }
+        assert!(advance_once_per_arrival(&mut last, 43));
+        assert!(!advance_once_per_arrival(&mut last, 43));
+    }
 
     #[test]
     fn whole_window_is_one_run_when_there_is_no_gap() {
