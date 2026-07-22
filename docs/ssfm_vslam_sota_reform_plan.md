@@ -470,6 +470,17 @@ sequences. All five Machine Hall sequences plus previously used V1_01, V2_01,
 and V2_03 are explicitly excluded as development data. The manifest binds the
 already-frozen S2 policy/source revision, forbids post-result tuning, requires
 failure/DNF cells, and requires per-sequence plus median/worst reporting.
+The official Room 1/2 archive URLs, byte sizes, and publisher-provided MD5
+checksums are bound in that manifest. `download_ssfm_heldout_euroc.py` performs
+resumable downloads and refuses promotion from `.partial` until size and MD5
+both pass; it is queued behind the clean S2 launcher. Input preparation is
+isolated in `prepare_ssfm_heldout_euroc_inputs.py`, which never opens GT and
+records calibration/index, frontend source, SuperPoint weight, protocol, and
+feature-set hashes. `run_colmap_ssfm_frozen.py` runs COLMAP 4.1 incremental and
+global mappers from one same-input SIFT/sequential-match database, preserves
+explicit DNF cells, monitors wall/RAM/global-VRAM, and opens GT only after both
+timed mapper processes exit. These runners are prepared and synthetically
+verified; no held-out result has been observed yet.
 
 ORBIT release audit (2026-07-22): the official CVPR paper/supplement defines
 the 100-clip protocol and success thresholds, but its Code/Dataset links remain
