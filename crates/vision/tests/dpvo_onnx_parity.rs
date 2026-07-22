@@ -35,6 +35,7 @@ use visloc_vision::dpvo::npz::NpzArchive;
 use visloc_vision::dpvo::onnx_session::DpvoOnnxSession;
 use visloc_vision::dpvo::patchify::patchify_cpu;
 use visloc_vision::dpvo::softagg::SoftAgg;
+use visloc_vision::features::superpoint_onnx::OnnxBackend;
 
 const PASS_THRESHOLD: f32 = 1e-4;
 
@@ -432,5 +433,77 @@ fn fnet_inet_sessions_load_and_produce_finite_output_of_the_documented_shape() {
     assert!(
         fmap_diff <= PASS_THRESHOLD && imap_diff <= PASS_THRESHOLD,
         "concurrent encoders changed outputs: fmap={fmap_diff:.3e}, imap={imap_diff:.3e}"
+    );
+}
+
+#[test]
+#[ignore = "reads the external ONNX bundle/fixtures and needs CUDA ORT"]
+fn fused_correlation_level0_matches_frozen_fixture_under_strict_cuda() {
+    let onnx = onnx_dir();
+    let session = DpvoOnnxSession::load_from_paths_with_backend(
+        onnx.join("fnet.onnx"),
+        onnx.join("inet.onnx"),
+        onnx.join("dpvo_update_pre_agg.onnx"),
+        onnx.join("dpvo_update_post_agg.onnx"),
+        OnnxBackend::Cuda,
+    )
+    .expect("load strict-CUDA sessions including dpvo_corr_pyramid.onnx");
+    assert!(session.correlation_graph_enabled());
+
+    let fixture = NpzArchive::open(fixtures_dir().join("correlation_fixture.npz")).unwrap();
+    let (anchor_shape, anchor_data) = fixture.read_f32("anchor_patch_feats").unwrap();
+    let (target_shape, target_data) = fixture.read_f32("target_fmap").unwrap();
+    let (coords_shape, coords_data) = fixture.read_f32("coords_center").unwrap();
+    let (expected_shape, expected_data) = fixture.read_f32("corr_out").unwrap();
+    let anchor = ndarray::Array4::from_shape_vec(
+        (
+            anchor_shape[0],
+            anchor_shape[1],
+            anchor_shape[2],
+            anchor_shape[3],
+        ),
+        anchor_data,
+    )
+    .unwrap();
+    let target0 = ndarray::Array4::from_shape_vec(
+        (
+            target_shape[0],
+            target_shape[1],
+            target_shape[2],
+            target_shape[3],
+        ),
+        target_data,
+    )
+    .unwrap();
+    let target1 = ndarray::Array4::<f32>::zeros((
+        1,
+        target_shape[1],
+        target_shape[2] / 4,
+        target_shape[3] / 4,
+    ));
+    let coords = ndarray::Array4::from_shape_vec(
+        (
+            coords_shape[0],
+            coords_shape[1],
+            coords_shape[2],
+            coords_shape[3],
+        ),
+        coords_data,
+    )
+    .unwrap();
+    let got = session
+        .run_correlation_pyramid(anchor.view(), target0.view(), target1.view(), coords.view())
+        .expect("run fused correlation");
+    assert_eq!(expected_shape, vec![anchor_shape[0], 3, 3, 49]);
+    let mut got_level0 = Vec::with_capacity(expected_data.len());
+    for edge in 0..anchor_shape[0] {
+        for scalar in 0..(3 * 3 * 49) {
+            got_level0.push(got[(edge, scalar * 2)]);
+        }
+    }
+    let diff = max_abs_diff(&got_level0, &expected_data);
+    assert!(
+        diff <= PASS_THRESHOLD,
+        "fused CUDA correlation level 0 differs from fixture: {diff:.3e}"
     );
 }

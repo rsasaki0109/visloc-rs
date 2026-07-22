@@ -15,7 +15,7 @@
 //! `load-dynamic`/`ORT_DYLIB_PATH` runtime-library setup this crate already
 //! documents (unchanged here — same `ort` dependency, same feature gate).
 
-use ndarray::{Array3, Array4, ArrayView3, ArrayView4, Axis};
+use ndarray::{Array2, Array3, Array4, ArrayView3, ArrayView4, Axis};
 use ort::session::Session;
 use std::collections::HashMap;
 use std::fmt;
@@ -89,6 +89,7 @@ pub struct DpvoOnnxSession {
     update_pre_agg: Arc<Mutex<Session>>,
     update_post_agg: Arc<Mutex<Session>>,
     update_full: Option<Arc<Mutex<Session>>>,
+    correlation: Option<Arc<Mutex<Session>>>,
 }
 
 impl fmt::Debug for DpvoOnnxSession {
@@ -126,6 +127,7 @@ impl DpvoOnnxSession {
     ) -> Result<Self, DpvoOnnxError> {
         let update_pre_agg_path = update_pre_agg_path.as_ref();
         let full_path = update_pre_agg_path.with_file_name("dpvo_update_full.onnx");
+        let correlation_path = update_pre_agg_path.with_file_name("dpvo_corr_pyramid.onnx");
         Ok(Self {
             backend,
             fnet: Arc::new(Mutex::new(build_session(fnet_path.as_ref(), backend)?)),
@@ -140,12 +142,46 @@ impl DpvoOnnxSession {
                 .then(|| build_session(&full_path, backend))
                 .transpose()?
                 .map(|session| Arc::new(Mutex::new(session))),
+            correlation: correlation_path
+                .is_file()
+                .then(|| build_session(&correlation_path, backend))
+                .transpose()?
+                .map(|session| Arc::new(Mutex::new(session))),
         })
     }
 
     /// Whether this model bundle supplies the fused update graph.
     pub fn full_update_enabled(&self) -> bool {
         self.update_full.is_some()
+    }
+
+    pub fn correlation_graph_enabled(&self) -> bool {
+        self.correlation.is_some()
+    }
+
+    pub fn run_correlation_pyramid(
+        &self,
+        anchor: ArrayView4<'_, f32>,
+        target_level0: ArrayView4<'_, f32>,
+        target_level1: ArrayView4<'_, f32>,
+        coords_level0: ArrayView4<'_, f32>,
+    ) -> Result<Array2<f32>, DpvoOnnxError> {
+        let session = self.correlation.as_ref().ok_or_else(|| {
+            DpvoOnnxError::OnnxRuntime("model bundle has no dpvo_corr_pyramid.onnx".into())
+        })?;
+        let tensor = |array: ArrayView4<'_, f32>| {
+            ort::value::Tensor::from_array(array.to_owned()).map_err(DpvoOnnxError::from_ort)
+        };
+        let mut session = session.lock().map_err(lock_poisoned)?;
+        let mut outputs = session
+            .run(ort::inputs![
+                tensor(anchor)?,
+                tensor(target_level0)?,
+                tensor(target_level1)?,
+                tensor(coords_level0)?
+            ])
+            .map_err(DpvoOnnxError::from_ort)?;
+        extract_array2(&mut outputs, "corr")
     }
 
     /// Run `fnet`: raw `[0, 255]`-range pixels in `(1, 3, H, W)`, matching
@@ -451,6 +487,28 @@ fn extract_array3(
         .into_dimensionality::<ndarray::Ix3>()
         .map_err(|e| DpvoOnnxError::OutputShapeMismatch {
             expected: "a 3-D output",
+            actual: e.to_string(),
+        })
+}
+
+fn extract_array2(
+    outputs: &mut ort::session::SessionOutputs<'_>,
+    name: &str,
+) -> Result<Array2<f32>, DpvoOnnxError> {
+    let value = outputs
+        .remove(name)
+        .ok_or_else(|| DpvoOnnxError::OutputShapeMismatch {
+            expected: "an output present in the session's declared outputs",
+            actual: format!("missing output named `{name}`"),
+        })?;
+    let array = value
+        .try_extract_array::<f32>()
+        .map_err(DpvoOnnxError::from_ort)?;
+    array
+        .into_owned()
+        .into_dimensionality::<ndarray::Ix2>()
+        .map_err(|e| DpvoOnnxError::OutputShapeMismatch {
+            expected: "a 2-D output",
             actual: e.to_string(),
         })
 }

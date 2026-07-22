@@ -695,6 +695,16 @@ remaining dominant stage is CPU correlation at 469.48 ms/frame, so the next
 GPU-residency slice is the batched two-level correlation volume, not further
 update-cell or encoder tuning.
 
+The first grouped correlation graph is a measured negative, retained only
+behind `--onnx-correlation`. It exports the exact two-level 882-value volume,
+passes the frozen level-0 fixture under strict CUDA, and caches channel-first
+maps, but one ORT call and host upload per destination-frame group increased
+the matched 16-patch correlation stage from 127.14 to 303.17 ms/frame (total
+250.03 to 443.57 ms/frame). It is therefore off by default and forbidden as a
+V4 speed path. The next implementation must batch across target frames while
+keeping the feature-map pyramid resident on device (or call a native indexed
+CUDA kernel); repeating target-by-target ORT calls is experimentally closed.
+
 ## 6. Execution order and resource split
 
 The order is designed to make each expensive experiment answer one question:

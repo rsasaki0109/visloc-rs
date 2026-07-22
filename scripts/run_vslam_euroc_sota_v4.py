@@ -130,8 +130,14 @@ def validate_configuration(configuration: dict[str, Any], gates: dict[str, Any])
         raise ValueError("configuration is missing " + ", ".join(sorted(missing)))
     if "--onnx-cpu" in arguments:
         raise ValueError("configuration cannot combine strict CUDA with --onnx-cpu")
+    if "--onnx-correlation" in arguments:
+        raise ValueError("configuration cannot use the measured-negative grouped correlation graph")
     if gates.get("required_onnx_backend") != "cuda":
         raise ValueError("frozen V4 protocol must require the strict CUDA backend")
+    if gates.get("required_onnx_full_update_graph") is not True:
+        raise ValueError("frozen V4 protocol must require the fused update graph")
+    if gates.get("forbid_grouped_onnx_correlation") is not True:
+        raise ValueError("frozen V4 protocol must forbid grouped ONNX correlation")
     queue_bounds = gates["queue_bounds"]
     if configuration.get("queue_bounds") != queue_bounds:
         raise ValueError("configuration queue bounds differ from the frozen V4 protocol")

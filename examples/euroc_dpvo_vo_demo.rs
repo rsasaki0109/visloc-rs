@@ -294,6 +294,7 @@ struct CliArgs {
     /// `CudaThenCpu` policy, this must fail instead of silently falling back
     /// to CPU, which makes V4 runtime evidence auditable.
     onnx_cuda: bool,
+    onnx_correlation: bool,
     /// Milestone M5 (`docs/dpvo_droid_port_plan.md`): feed `mav0/imu0/data.csv`
     /// into `DpvoOdometry::push_imu` and enable the IMU-coupled joint solve
     /// once its bootstrap chain succeeds. Default off — visual-only, exactly
@@ -517,6 +518,7 @@ impl Default for CliArgs {
             motion_damping: 0.5,
             onnx_cpu: false,
             onnx_cuda: false,
+            onnx_correlation: false,
             imu: false,
             imu_gravity_norm_deviation_ratio: 0.3,
             imu_min_bootstrap_factors: 10,
@@ -654,6 +656,11 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             "--onnx-cuda" => {
                 args.onnx_cuda = true;
+                raw.remove(i);
+                continue;
+            }
+            "--onnx-correlation" => {
+                args.onnx_correlation = true;
                 raw.remove(i);
                 continue;
             }
@@ -863,6 +870,9 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
     args.euroc_dir = euroc_dir.ok_or("--euroc-dir <path/to/MH_01_easy> is required")?;
     if args.onnx_cpu && args.onnx_cuda {
         return Err("--onnx-cpu and --onnx-cuda are mutually exclusive".into());
+    }
+    if args.onnx_correlation && !args.onnx_cuda {
+        return Err("--onnx-correlation requires --onnx-cuda".into());
     }
     if args.ll_dump_frame_descriptors.is_some() && !args.long_loop {
         return Err(
@@ -1104,6 +1114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ba_ep: 100.0,
         motion_probe_min_flow: 2.0,
         seed: args.seed,
+        fused_correlation: args.onnx_correlation,
         // Milestone M5 (`docs/dpvo_droid_port_plan.md`): `--imu` couples
         // `mav0/imu0/data.csv` into the joint solve via
         // `crate::dpvo_vi_ba`; omitting the flag reproduces M4/M4-perf's
@@ -1950,12 +1961,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ll_diag = odometry.long_loop_diagnostics();
     let hf_diag = odometry.low_parallax_diagnostics();
     let full_update_graph_enabled = odometry.full_update_graph_enabled();
+    let correlation_graph_enabled = odometry.correlation_graph_enabled();
 
     let summary = format!(
         "euroc_dir={}\n\
          model_dir={}\n\
          onnx_backend_requested={onnx_backend_requested}\n\
          onnx_full_update_graph_enabled={full_update_graph_enabled}\n\
+         onnx_correlation_graph_enabled={correlation_graph_enabled}\n\
+         onnx_correlation_requested={}\n\
          frames_requested={frame_count}\n\
          frames_tracked={tracked_frames}\n\
          tracked_fraction={tracked_fraction:.4}\n\
@@ -2122,6 +2136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          hover_release_histogram_frames={hf_release_histogram_frames:?}\n",
         args.euroc_dir.display(),
         args.model_dir.display(),
+        args.onnx_correlation,
         frame_count = frames.len(),
         io_ms = io_ms_total / stats.frames_processed.max(1) as f64,
         undistort_ms = undistort_ms_total / stats.frames_processed.max(1) as f64,

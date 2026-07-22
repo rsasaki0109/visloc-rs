@@ -44,6 +44,8 @@ GATES = {
     "queue_bounds": BOUNDS,
     "max_committed_abs_log_scale": 4.0,
     "required_onnx_backend": "cuda",
+    "required_onnx_full_update_graph": True,
+    "forbid_grouped_onnx_correlation": True,
 }
 
 
@@ -83,6 +85,16 @@ class VslamSotaV4RunnerTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "arguments": [*REQUIRED, "--onnx-cpu"],
+                    "queue_bounds": BOUNDS,
+                    "long_loop_superpoint_model": "superpoint.onnx",
+                },
+                GATES,
+            )
+        with self.assertRaisesRegex(ValueError, "measured-negative"):
+            MODULE.validate_configuration(
+                {
+                    "schema_version": 1,
+                    "arguments": [*REQUIRED, "--onnx-correlation"],
                     "queue_bounds": BOUNDS,
                     "long_loop_superpoint_model": "superpoint.onnx",
                 },

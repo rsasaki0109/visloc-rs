@@ -101,6 +101,10 @@ def validate_protocol(protocol: dict[str, Any]) -> None:
             raise ValueError(f"V4 protocol has invalid queue bound {key}")
     if gates.get("required_onnx_backend") != "cuda":
         raise ValueError("V4 protocol must require the strict CUDA ONNX backend")
+    if gates.get("required_onnx_full_update_graph") is not True:
+        raise ValueError("V4 protocol must require the fused ONNX update graph")
+    if gates.get("forbid_grouped_onnx_correlation") is not True:
+        raise ValueError("V4 protocol must forbid the measured-negative grouped correlation graph")
 
 
 def public_frontier_verdict(path: Path | None) -> tuple[bool, list[str]]:
@@ -199,6 +203,10 @@ def evaluate(
         values = parse_summary(summary_path)
         if values.get("onnx_backend_requested") != gates["required_onnx_backend"]:
             row["reasons"].append("run did not request the frozen strict CUDA backend")
+        if values.get("onnx_full_update_graph_enabled") != "true":
+            row["reasons"].append("run did not enable the fused ONNX update graph")
+        if values.get("onnx_correlation_requested") != "false":
+            row["reasons"].append("run requested the forbidden grouped ONNX correlation graph")
         try:
             ate = finite_float(values, "ate_similarity_rmse_m")
             tracked_fraction = finite_float(values, "tracked_fraction")

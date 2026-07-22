@@ -37,6 +37,8 @@
     "min_tracked_fraction": 0.9,
     "max_committed_abs_log_scale": 4.0,
     "required_onnx_backend": "cuda",
+    "required_onnx_full_update_graph": true,
+    "forbid_grouped_onnx_correlation": true,
     "max_ms_per_frame_total": 50.0,
     "max_sampled_peak_working_set_bytes": 8589934592,
     "max_sampled_peak_gpu_memory_bytes": 6442450944,

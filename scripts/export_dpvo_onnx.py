@@ -918,8 +918,11 @@ def corr_cpu(patch_feats: torch.Tensor, target_fmap: torch.Tensor, coords: torch
 
     sample_xy = coords[:, :, :, None, None, :] + dxdy.view(1, 1, 1, taps, taps, 2)  # (E,P,P,taps,taps,2)
     grid = sample_xy.reshape(E, P * P * taps * taps, 1, 2).clone()
-    grid[..., 0] = 2.0 * grid[..., 0] / max(W - 1, 1) - 1.0
-    grid[..., 1] = 2.0 * grid[..., 1] / max(H - 1, 1) - 1.0
+    # Feature maps are always larger than one pixel in both dimensions.
+    # Avoid Python's `max`, which would freeze traced H/W and invalidate the
+    # declared dynamic spatial axes.
+    grid[..., 0] = 2.0 * grid[..., 0] / (W - 1) - 1.0
+    grid[..., 1] = 2.0 * grid[..., 1] / (H - 1) - 1.0
 
     sampled = F.grid_sample(target_fmap, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
     sampled = sampled.reshape(E, C, P, P, taps, taps)
@@ -927,6 +930,52 @@ def corr_cpu(patch_feats: torch.Tensor, target_fmap: torch.Tensor, coords: torch
     anchor = patch_feats.view(E, C, P, P, 1, 1)
     corr = (anchor * sampled).sum(dim=1) / (C ** 0.5)  # (E,P,P,taps,taps)
     return corr.reshape(E, P, P, taps * taps)
+
+
+class CorrelationPyramidOnnx(nn.Module):
+    """Two-level DPVO correlation for one destination-frame edge group."""
+
+    def forward(self, anchor, target_level0, target_level1, coords_level0):
+        edge_count = anchor.shape[0]
+        target0 = target_level0.expand(edge_count, -1, -1, -1)
+        target1 = target_level1.expand(edge_count, -1, -1, -1)
+        corr0 = corr_cpu(anchor, target0, coords_level0, RADIUS)
+        corr1 = corr_cpu(anchor, target1, coords_level0 / 4.0, RADIUS)
+        return torch.stack((corr0, corr1), dim=-1).reshape(edge_count, CORR_DIM)
+
+
+def export_correlation_graph(out_dir, num_edges, height, width, opset):
+    edge_count = num_edges
+    h0, w0 = height // RES, width // RES
+    h1, w1 = h0 // 4, w0 // 4
+    anchor = torch.randn(edge_count, FNET_DIM, PATCH, PATCH)
+    target0 = torch.randn(1, FNET_DIM, h0, w0)
+    target1 = torch.randn(1, FNET_DIM, h1, w1)
+    coords = torch.rand(edge_count, PATCH, PATCH, 2)
+    coords[..., 0] *= max(w0 - 1, 1)
+    coords[..., 1] *= max(h0 - 1, 1)
+    model = CorrelationPyramidOnnx().eval()
+    with torch.no_grad():
+        expected = model(anchor, target0, target1, coords)
+    path = os.path.join(out_dir, "dpvo_corr_pyramid.onnx")
+    torch.onnx.export(
+        model,
+        (anchor, target0, target1, coords),
+        path,
+        input_names=["anchor", "target_level0", "target_level1", "coords_level0"],
+        output_names=["corr"],
+        dynamic_axes={
+            "anchor": {0: "num_edges"},
+            "target_level0": {2: "height_4", 3: "width_4"},
+            "target_level1": {2: "height_16", 3: "width_16"},
+            "coords_level0": {0: "num_edges"},
+            "corr": {0: "num_edges"},
+        },
+        opset_version=opset,
+    )
+    consolidate_onnx(path)
+    print(f"  wrote {path} ({os.path.getsize(path) // 1024} KB), sanity {tuple(expected.shape)}")
+    return path
 
 
 def dump_correlation_fixture(fnet_module, out_path_patchify: str, out_path_corr: str, seed: int = 0):
@@ -1156,7 +1205,7 @@ def export_update_graphs(pre_agg, post_agg, agg_kk, agg_ij, out_dir, num_edges, 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", required=True, help="directory to write the 5 .onnx graphs into")
+    ap.add_argument("--out-dir", required=True, help="directory to write the 6 .onnx graphs into")
     ap.add_argument("--checkpoint", default=None,
                     help="path to DPVO's dpvo.pth (download per E:/tools/DPVO/download_models_and_data.sh); "
                          "omit to export with random weights (still a valid export-correctness test)")
@@ -1189,6 +1238,10 @@ def main():
     print("exporting update cell (legacy split plus fused graph)...")
     _, _, _, update_fixture = export_update_graphs(
         pre_agg, post_agg, agg_kk, agg_ij, args.out_dir, args.num_edges, args.opset, seed=args.seed)
+    print("exporting grouped two-level correlation graph...")
+    export_correlation_graph(
+        args.out_dir, args.num_edges, args.height, args.width, args.opset
+    )
 
     manifest = {
         "have_real_weights": have_weights,
@@ -1197,6 +1250,7 @@ def main():
         "num_edges_traced": args.num_edges,
         "fnet_dim": FNET_DIM, "inet_dim": DIM, "corr_dim": CORR_DIM, "res": RES,
         "fused_update_graph": True,
+        "grouped_correlation_graph": True,
     }
     with open(os.path.join(args.out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

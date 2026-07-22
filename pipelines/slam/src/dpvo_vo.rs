@@ -570,6 +570,11 @@ pub struct DpvoOdometryConfig {
     /// seed, matching how this codebase already threads RNG seeds through
     /// other ONNX-adjacent demos.
     pub seed: u64,
+    /// Experimental grouped ONNX correlation graph. Default callers keep
+    /// this false because the first target-by-target CUDA implementation is
+    /// slower than the optimized CPU path due to repeated session and host
+    /// transfer overhead.
+    pub fused_correlation: bool,
     /// IMU coupling (Milestone M5, `docs/dpvo_droid_port_plan.md`). `None`
     /// (the default constructed by every M4 call site) preserves the
     /// exact visual-only behavior of M4/M4-perf; `Some` enables
@@ -1933,7 +1938,7 @@ pub struct DpvoOdometryStats {
 /// upstream), `level1` is a further ×4 average-pooled map
 /// (`avg_pool2d(fmap, 4, 4)`, `dpvo.py:438`).
 ///
-/// # M4-perf: stored channel-last, not channel-first (`docs/dpvo_droid_port_plan.md`)
+/// # M4-perf: cached CPU and optional fused-CUDA layouts
 ///
 /// Both levels are stored as [`ChannelLastImage`] — already transposed into
 /// the layout [`corr_cpu_prebuilt_target`] needs — rather than the raw
@@ -1945,13 +1950,16 @@ pub struct DpvoOdometryStats {
 /// (plan doc, "M4-perf results") showed re-transposing the same ~120x188x128
 /// feature map from scratch on every one of those reads was a real,
 /// avoidable cost, not just a theoretical one. Nothing outside this module
-/// reads `level0`/`level1` in channel-first form (checked directly — see the
-/// plan doc's writeup), so there is no other consumer to keep a duplicate
-/// channel-first copy for.
+/// reads `level0`/`level1` in channel-first form on the legacy path. A model
+/// bundle containing `dpvo_corr_pyramid.onnx` additionally retains the two
+/// channel-first tensors so each target-group call can use the fused CUDA
+/// graph without transposing them back on every update.
 #[derive(Debug, Clone)]
 struct FramePyramid {
     level0: ChannelLastImage,
     level1: ChannelLastImage,
+    level0_chw: Option<Array3<f32>>,
+    level1_chw: Option<Array3<f32>>,
 }
 
 /// Milestone M7: `(poses, patches, velocities)` in a window's own local
@@ -2420,6 +2428,10 @@ impl DpvoOdometry {
         self.session.full_update_enabled()
     }
 
+    pub fn correlation_graph_enabled(&self) -> bool {
+        self.session.correlation_graph_enabled()
+    }
+
     pub fn graph(&self) -> &DpvoPatchGraph {
         &self.graph
     }
@@ -2763,9 +2775,12 @@ impl DpvoOdometry {
         // storing (and repeatedly re-transposing) the raw channel-first
         // arrays.
         let level1_chw = avg_pool_4x4(fmap.view());
+        let retain_chw = self.config.fused_correlation && self.session.correlation_graph_enabled();
         let candidate_pyramid = FramePyramid {
             level0: ChannelLastImage::from_chw(fmap.view()),
             level1: ChannelLastImage::from_chw(level1_chw.view()),
+            level0_chw: retain_chw.then(|| fmap.clone()),
+            level1_chw: retain_chw.then(|| level1_chw.clone()),
         };
 
         // Milestone M15: `true` only under `LowParallaxResponse::DepthDamp`
@@ -2958,6 +2973,31 @@ impl DpvoOdometry {
         values[(values.len() - 1) / 2]
     }
 
+    fn correlate_group(
+        &self,
+        anchor_gmap: ArrayView4<'_, f32>,
+        coords_grid_px: ArrayView4<'_, f32>,
+        target: &FramePyramid,
+    ) -> Result<Array2<f32>, DpvoOdometryError> {
+        if let (Some(level0), Some(level1)) = (&target.level0_chw, &target.level1_chw) {
+            return self
+                .session
+                .run_correlation_pyramid(
+                    anchor_gmap,
+                    level0.view().insert_axis(Axis(0)),
+                    level1.view().insert_axis(Axis(0)),
+                    coords_grid_px,
+                )
+                .map_err(DpvoOdometryError::Onnx);
+        }
+        Ok(corr_pyramid(
+            anchor_gmap,
+            coords_grid_px,
+            &target.level0,
+            &target.level1,
+        ))
+    }
+
     /// `dpvo.py::motion_probe` (lines 240-255): reproject the *previous*
     /// committed frame's patches into the *candidate* frame's predicted
     /// pose (not yet committed), run one zero-history GRU update, and
@@ -2999,12 +3039,8 @@ impl DpvoOdometry {
                 }
             }
         }
-        let corr_flat = corr_pyramid(
-            anchor_gmap.view(),
-            coords_grid_px.view(),
-            &candidate_pyramid.level0,
-            &candidate_pyramid.level1,
-        );
+        let corr_flat =
+            self.correlate_group(anchor_gmap.view(), coords_grid_px.view(), candidate_pyramid)?;
         self.stats.correlation_ms_total += corr_start.elapsed().as_secs_f64() * 1000.0;
 
         let net_zero = Array3::<f32>::zeros((1, m, DIM));
@@ -4270,12 +4306,8 @@ impl DpvoOdometry {
                     }
                 }
             }
-            let group_corr = corr_pyramid(
-                anchor_gmap.view(),
-                coords_grid_px.view(),
-                &target_pyramid.level0,
-                &target_pyramid.level1,
-            );
+            let group_corr =
+                self.correlate_group(anchor_gmap.view(), coords_grid_px.view(), &target_pyramid)?;
             for (local, &idx) in idxs.iter().enumerate() {
                 corr_flat.row_mut(idx).assign(&group_corr.row(local));
             }
