@@ -291,6 +291,10 @@ mod tests {
                 median_track_length: 0.0,
                 median_max_parallax_deg: 0.0,
                 camera_center_diameter: 0.0,
+                camera_center_step_median: 0.0,
+                camera_center_step_max: 0.0,
+                seed_pair_final_distance: 1.0,
+                camera_center_window_drift_ratio: 0.0,
                 mean_reprojection_px: 0.0,
                 leave_one_out_attempts: 0,
                 leave_one_out_supported: 0,
@@ -299,6 +303,9 @@ mod tests {
             },
             track_build_stats: crate::TrackBuildStats::default(),
             ba_result: None,
+            seed_source_frame_i: 0,
+            seed_source_frame_j: 0,
+            seed_match_count: 0,
         }
     }
 
@@ -381,6 +388,56 @@ mod tests {
         assert_eq!(result.retained_rotation_constraint_count, 1);
         assert!(result.pose_graph.final_cost <= result.pose_graph.initial_cost);
         assert_eq!(hierarchy.rotation_constraints().len(), 1);
+    }
+
+    #[test]
+    fn banded_constraint_makes_chain_optimization_move_nodes() {
+        let mut hierarchy = HierarchicalSubmapGraph::new(0, empty_submap());
+        hierarchy.insert_independent(1, empty_submap()).unwrap();
+        hierarchy.insert_independent(2, empty_submap()).unwrap();
+        hierarchy
+            .add_constraint(constraint(
+                0,
+                1,
+                Sim3::new(UnitQuaternion::identity(), Vector3::new(1.0, 0.0, 0.0), 1.0),
+            ))
+            .unwrap();
+        hierarchy
+            .add_constraint(constraint(
+                1,
+                2,
+                Sim3::new(UnitQuaternion::identity(), Vector3::new(1.2, 0.0, 0.0), 1.0),
+            ))
+            .unwrap();
+        hierarchy
+            .add_constraint(constraint(
+                0,
+                2,
+                Sim3::new(UnitQuaternion::identity(), Vector3::new(2.0, 0.0, 0.0), 1.0),
+            ))
+            .unwrap();
+
+        let result = hierarchy.optimize(&Sim3PoseGraphConfig::default()).unwrap();
+        let optimized_one = &hierarchy
+            .node(1)
+            .unwrap()
+            .local_from_atlas
+            .as_ref()
+            .unwrap()
+            .translation;
+        let optimized_two = &hierarchy
+            .node(2)
+            .unwrap()
+            .local_from_atlas
+            .as_ref()
+            .unwrap()
+            .translation;
+
+        assert_eq!(result.scale_constraint_count, 3);
+        assert!(result.pose_graph.initial_cost > 0.0);
+        assert!(result.pose_graph.final_cost < result.pose_graph.initial_cost);
+        assert!((optimized_one.x - 1.0).abs() > 1.0e-6);
+        assert!((optimized_two.x - 2.2).abs() > 1.0e-6);
     }
 
     #[test]

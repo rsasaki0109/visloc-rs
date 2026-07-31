@@ -74,6 +74,16 @@
 //! from the base pairs plus those wide pairs. It replaces the trusted arm only
 //! when registration is not lower, at least 90% of landmarks survive, valid
 //! observations grow by at least 25%, and mean reprojection strictly improves.
+//! `--parallel-ba` sets [`visloc_rs::BaConfig::parallel`] on every bundle
+//! adjustment this binary runs (periodic, final, and — under `--hierarchical`
+//! — each local submap's and the seam BA's): a rayon-parallelized assembly /
+//! Schur-reduction / back-substitution path proven bit-identical to the serial
+//! one. Off by default.
+//! `--submap-loop-closure` enables descriptor-derived long-range submap loops
+//! and a second Sim(3) pose-graph solve after seam BA. Candidate frame pairs
+//! use `--match-ratio`; `--submap-loop-min-matches` defaults to 30.
+//! Accepted loops then run a loop-landmark-welded second BA by default; use
+//! `--no-submap-loop-ba` to retain the loop-PGO result without that pass.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
@@ -144,7 +154,17 @@ struct Args {
     submap_min_shared_observations: usize,
     submap_build_threads: usize,
     submap_camera_scale_refinement: bool,
+    submap_constraint_band: usize,
+    submap_loop_closure: bool,
+    submap_loop_min_matches: usize,
+    submap_loop_top_k: usize,
+    submap_loop_min_similarity: Option<f32>,
+    submap_loop_ba: bool,
     submap_seam_ba: bool,
+    submap_seam_ba_iterations: Option<usize>,
+    submap_seam_ba_rounds: Option<usize>,
+    submap_seam_ba_filter_px: Option<f64>,
+    parallel_ba: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -185,7 +205,17 @@ fn parse_args() -> Result<Args, String> {
     let mut submap_min_shared_observations = 2usize;
     let mut submap_build_threads = 2usize;
     let mut submap_camera_scale_refinement = false;
+    let mut submap_constraint_band = 4usize;
+    let mut submap_loop_closure = false;
+    let mut submap_loop_min_matches = 30usize;
+    let mut submap_loop_top_k = 8usize;
+    let mut submap_loop_min_similarity: Option<f32> = None;
+    let mut submap_loop_ba: Option<bool> = None;
     let mut submap_seam_ba = false;
+    let mut submap_seam_ba_iterations = None;
+    let mut submap_seam_ba_rounds: Option<usize> = None;
+    let mut submap_seam_ba_filter_px: Option<f64> = None;
+    let mut parallel_ba = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -295,7 +325,35 @@ fn parse_args() -> Result<Args, String> {
                 submap_build_threads = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--submap-camera-scale-refinement" => submap_camera_scale_refinement = true,
+            "--submap-constraint-band" => {
+                submap_constraint_band = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-loop-closure" => submap_loop_closure = true,
+            "--submap-loop-min-matches" => {
+                submap_loop_min_matches = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-loop-top-k" => {
+                submap_loop_top_k = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--submap-loop-min-similarity" => {
+                submap_loop_min_similarity =
+                    Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--submap-loop-ba" => submap_loop_ba = Some(true),
+            "--no-submap-loop-ba" => submap_loop_ba = Some(false),
             "--submap-seam-ba" => submap_seam_ba = true,
+            "--submap-seam-ba-iterations" => {
+                submap_seam_ba_iterations =
+                    Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--submap-seam-ba-rounds" => {
+                submap_seam_ba_rounds = Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--submap-seam-ba-filter-px" => {
+                submap_seam_ba_filter_px =
+                    Some(a.remove(i + 1).parse().map_err(|e| format!("{e}"))?)
+            }
+            "--parallel-ba" => parallel_ba = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -309,6 +367,23 @@ fn parse_args() -> Result<Args, String> {
     }
     if pose_graph_stride == 0 {
         return Err("--pose-graph-stride must be ≥1".into());
+    }
+    if submap_seam_ba_rounds == Some(0) {
+        return Err("--submap-seam-ba-rounds must be ≥1".into());
+    }
+    if submap_loop_min_matches == 0 {
+        return Err("--submap-loop-min-matches must be ≥1".into());
+    }
+    if submap_loop_top_k == 0 {
+        return Err("--submap-loop-top-k must be ≥1".into());
+    }
+    if submap_loop_min_similarity
+        .is_some_and(|value| !value.is_finite() || !(-1.0..=1.0).contains(&value))
+    {
+        return Err("--submap-loop-min-similarity must be finite and within [-1, 1]".into());
+    }
+    if submap_seam_ba_filter_px.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        return Err("--submap-seam-ba-filter-px must be finite and >0".into());
     }
     if pose_guided_track_augmentation && wide_hypothesis {
         return Err(
@@ -365,7 +440,17 @@ fn parse_args() -> Result<Args, String> {
         submap_min_shared_observations,
         submap_build_threads,
         submap_camera_scale_refinement,
+        submap_constraint_band,
+        submap_loop_closure,
+        submap_loop_min_matches,
+        submap_loop_top_k,
+        submap_loop_min_similarity,
+        submap_loop_ba: submap_loop_ba.unwrap_or(submap_loop_closure),
         submap_seam_ba,
+        submap_seam_ba_iterations,
+        submap_seam_ba_rounds,
+        submap_seam_ba_filter_px,
+        parallel_ba,
     })
 }
 
@@ -924,6 +1009,7 @@ fn augment_tracks_with_pose_guided_edges(
     features: &[FeatureSet],
     wide_pairs: &[PairwiseMatches],
     min_observations: usize,
+    parallel_ba: bool,
     result: &mut visloc_rs::IncrementalSfmResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if result.registered_images != result.poses.len() || wide_pairs.is_empty() {
@@ -1050,6 +1136,7 @@ fn augment_tracks_with_pose_guided_edges(
     let ba_result = ba.optimize(&BaConfig {
         max_iterations: 30,
         robust_kernel: RobustKernel::Huber { delta: 2.0 },
+        parallel: parallel_ba,
         ..BaConfig::default()
     })?;
     let candidate_poses = (0..original_poses.len())
@@ -1145,6 +1232,7 @@ fn refine_with_pose_only_edges(
     features: &[FeatureSet],
     wide_pairs: &[PairwiseMatches],
     min_matches: usize,
+    parallel_ba: bool,
     result: &mut visloc_rs::IncrementalSfmResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if result.registered_images != result.poses.len() || wide_pairs.is_empty() {
@@ -1300,6 +1388,7 @@ fn refine_with_pose_only_edges(
     let point_ba = ba.optimize(&BaConfig {
         max_iterations: 20,
         robust_kernel: RobustKernel::Huber { delta: 2.0 },
+        parallel: parallel_ba,
         ..BaConfig::default()
     })?;
     let mut candidate_tracks = original_tracks.clone();
@@ -1735,7 +1824,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let config = IncrementalSfmConfig {
+    let mut config = IncrementalSfmConfig {
         min_seed_matches: args.min_matches,
         min_pnp_inliers: args.min_pnp_inliers,
         max_reprojection_error_px: args.max_reproj,
@@ -1759,6 +1848,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // not forward video. See `docs/sfm_vs_colmap_benchmark.md`.
         ..IncrementalSfmConfig::default()
     };
+    // `--parallel-ba` flag-gates `BaConfig::parallel` (see `bundle.rs`'s "Parallelism"
+    // section): a rayon-parallel assembly / Schur-reduction / back-substitution path
+    // proven bit-identical to the serial path. Default off, so every existing
+    // invocation is unchanged. This is the single place that needs to be set: every
+    // BA this binary runs — periodic, final, and (via `hierarchical_config.local_submap.sfm
+    // = config.clone()` below) each hierarchical local submap's — reads `config.ba_config`.
+    config.ba_config.parallel = args.parallel_ba;
     if args.hierarchical {
         if args.refine_intrinsics {
             return Err(
@@ -1778,16 +1874,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hierarchical_config.partition.max_images = args.submap_max_images;
         hierarchical_config.partition.overlap_images = args.submap_overlap_images;
         hierarchical_config.partition.boundary_search_radius = args.submap_boundary_search_radius;
+        // `min_post_widen_overlap_images` is deliberately left at
+        // `HierarchicalSfmConfig::default()`'s small constant (see
+        // `AdaptiveSubmapPartitionConfig`'s doc comment) rather than mirrored
+        // from `--submap-overlap-images`: tying it to the full configured
+        // overlap chains a costly cascade of full incremental-SfM rebuilds
+        // (measured far worse than linear in image count) for a marginal
+        // safety gain over the cheap single-absorption default.
         hierarchical_config
             .overlap
             .min_shared_observations_per_landmark = args.submap_min_shared_observations;
         hierarchical_config.max_parallel_local_builds = args.submap_build_threads;
+        hierarchical_config.submap_constraint_band = args.submap_constraint_band;
+        hierarchical_config.submap_loop_closure = args.submap_loop_closure;
+        hierarchical_config.submap_loop_min_matches = args.submap_loop_min_matches;
+        hierarchical_config.submap_loop_top_k = args.submap_loop_top_k;
+        hierarchical_config.submap_loop_min_similarity = args.submap_loop_min_similarity;
+        hierarchical_config.submap_loop_bundle_adjustment = args.submap_loop_ba;
+        // Loop discovery intentionally uses the identical descriptor matcher
+        // and Lowe ratio as the sequential-pair path above.
+        hierarchical_config.submap_loop_match_ratio = args.match_ratio;
         if args.submap_camera_scale_refinement {
             hierarchical_config.camera_centre_refinement =
                 Some(CameraCentreScaleRefinementConfig::default());
         }
         if args.submap_seam_ba {
-            hierarchical_config.seam_bundle_adjustment = Some(HierarchicalSeamBaConfig::default());
+            let mut seam_ba_config = HierarchicalSeamBaConfig::default();
+            if let Some(max_iterations) = args.submap_seam_ba_iterations {
+                seam_ba_config.ba.max_iterations = max_iterations;
+            }
+            // Preserve the frozen CLI behavior unless iterative filtering is
+            // explicitly requested. The library config defaults to three
+            // COLMAP-style rounds, while this example historically ran one
+            // unfiltered solve.
+            seam_ba_config.max_rounds = args.submap_seam_ba_rounds.unwrap_or(1);
+            if let Some(max_reprojection_px) = args.submap_seam_ba_filter_px {
+                seam_ba_config.max_reprojection_px = max_reprojection_px;
+            }
+            seam_ba_config.ba.parallel = args.parallel_ba;
+            hierarchical_config.seam_bundle_adjustment = Some(seam_ba_config);
         }
         hierarchical_config.local_submap.sfm = config.clone();
         let source_frame_ids = (0..features.len())
@@ -1890,6 +2015,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &features,
             &pose_graph_pairwise,
             args.min_matches,
+            args.parallel_ba,
             &mut result,
         )?;
     } else if !args.wide_hypothesis && !pose_graph_pairwise.is_empty() {
@@ -1898,6 +2024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &features,
             &pose_graph_pairwise,
             args.min_matches,
+            args.parallel_ba,
             &mut result,
         )?;
     }

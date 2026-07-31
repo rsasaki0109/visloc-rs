@@ -428,6 +428,98 @@ pub fn estimate_submap_sim3_constraint(
     })
 }
 
+/// Diagnostic-only per-match residual dump for the `LowInlierRatio` seam
+/// cluster investigation (see `report_all_failing_seams` in
+/// `hierarchical_sfm.rs`, which is the only caller). Runs the *same*
+/// minimal-sample RANSAC + consensus-refit procedure
+/// `estimate_submap_sim3_constraint` uses, but -- unlike that function --
+/// returns the per-match `(residual, is_inlier)` pair for *every* input match
+/// against the winning consensus refit, regardless of whether the fit would
+/// ultimately clear every downstream gate. This never feeds any accept/reject
+/// decision; it exists purely so a caller can correlate which matches failed
+/// to reach consensus with *where* those matches sit in each submap's own
+/// frame timeline (a drift signature clusters by frame index; contaminated
+/// matching scatters). Returns `None` only if RANSAC found no hypothesis at
+/// all (mirrors `NoRobustFit`) or fewer than 3 correspondences were supplied.
+pub(crate) fn diagnose_sim3_residuals(
+    matches: &[SubmapPointMatch],
+    config: &SubmapSim3AlignmentConfig,
+) -> Option<Vec<(f64, bool)>> {
+    let count = matches.len();
+    if count < 3 {
+        return None;
+    }
+    let target_points = matches
+        .iter()
+        .map(|point_match| point_match.target_point)
+        .collect::<Vec<_>>();
+    let target_scene_scale = median_pairwise_distance(&target_points);
+    if !target_scene_scale.is_finite() || target_scene_scale <= 1.0e-12 {
+        return None;
+    }
+    let threshold = (target_scene_scale * config.max_inlier_residual_ratio).max(1.0e-9);
+    let mut rng = StdRng::seed_from_u64(config.random_seed);
+    let mut best_inliers: Vec<usize> = Vec::new();
+    let mut best_mean = f64::INFINITY;
+    for _ in 0..config.ransac_iterations.max(1) {
+        let Some(indices) = sample_three(count, &mut rng) else {
+            break;
+        };
+        let source = indices.map(|index| matches[index].source_point);
+        let target = indices.map(|index| matches[index].target_point);
+        let Some(fit) = umeyama_similarity_transform(&source, &target, true) else {
+            continue;
+        };
+        if !valid_scale(fit.scale, config) {
+            continue;
+        }
+        let residuals = matches
+            .iter()
+            .map(|point_match| {
+                (fit.apply(&point_match.source_point) - point_match.target_point).norm()
+            })
+            .collect::<Vec<_>>();
+        let inliers = residuals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, residual)| (*residual <= threshold).then_some(index))
+            .collect::<Vec<_>>();
+        let mean = if inliers.is_empty() {
+            f64::INFINITY
+        } else {
+            inliers.iter().map(|index| residuals[*index]).sum::<f64>() / inliers.len() as f64
+        };
+        if inliers.len() > best_inliers.len()
+            || (inliers.len() == best_inliers.len() && mean < best_mean)
+        {
+            best_inliers = inliers;
+            best_mean = mean;
+        }
+    }
+    if best_inliers.is_empty() {
+        return None;
+    }
+    let refit_source = best_inliers
+        .iter()
+        .map(|&index| matches[index].source_point)
+        .collect::<Vec<_>>();
+    let refit_target = best_inliers
+        .iter()
+        .map(|&index| matches[index].target_point)
+        .collect::<Vec<_>>();
+    let refit = umeyama_similarity_transform(&refit_source, &refit_target, true)?;
+    Some(
+        matches
+            .iter()
+            .map(|point_match| {
+                let residual =
+                    (refit.apply(&point_match.source_point) - point_match.target_point).norm();
+                (residual, residual <= threshold)
+            })
+            .collect(),
+    )
+}
+
 /// Refine an already verified landmark constraint with a fixed-rotation
 /// scale/translation fit to shared camera centres. The candidate is returned
 /// only after the original landmark inlier/residual gates and an independent
@@ -626,7 +718,7 @@ fn point_cloud_second_to_first_ratio(points: &[Point3<f64>]) -> f64 {
     }
 }
 
-fn median_pairwise_distance(points: &[Point3<f64>]) -> f64 {
+pub(crate) fn median_pairwise_distance(points: &[Point3<f64>]) -> f64 {
     let mut distances = Vec::new();
     for i in 0..points.len() {
         for j in (i + 1)..points.len() {

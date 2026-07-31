@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use nalgebra::UnitQuaternion;
+use nalgebra::{Point3, UnitQuaternion};
 
 use crate::{LocalSubmap, SubmapPointMatch};
 
@@ -217,6 +217,117 @@ pub fn shared_camera_center_matches(
         .collect()
 }
 
+/// Which side of a seam [`seam_step_shape_diagnostic`] identifies as the
+/// more internally inconsistent one -- purely evidential (both the merge
+/// remediation and the trigger decision itself only need
+/// [`SeamStepShapeDiagnostic::disagreement_ratio`]; the merge always widens
+/// both windows into one regardless of which side "caused" it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeamDriftSide {
+    Source,
+    Target,
+}
+
+/// Cross-submap internal-consistency comparison for one seam
+/// (`LOWINLIERRATIO_DIAGNOSIS.md` Probe 2, formalized). `source_change_factor`
+/// / `target_change_factor` are each that side's own
+/// [`crate::local_submap::windowed_camera_center_drift_ratio`] computed over
+/// *only* the frames the two submaps share -- how much that side's own step
+/// size, self-compared across the shared span, varies. `disagreement_ratio`
+/// is the ratio between the two: close to `1.0` means both sides agree on
+/// the shared span's motion shape (whether or not the underlying real
+/// motion is itself fast or slow, uniform or accelerating -- genuine motion
+/// is common to both independent reconstructions of the same frames and
+/// cancels out of this comparison), far from `1.0` means one side's own
+/// reconstruction disagrees with an otherwise-independent, otherwise-equally
+/// -valid account of the same real motion, i.e. an internal defect specific
+/// to that one side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SeamStepShapeDiagnostic {
+    pub shared_frames: usize,
+    pub source_change_factor: f64,
+    pub target_change_factor: f64,
+    pub disagreement_ratio: f64,
+    pub defective_side: SeamDriftSide,
+}
+
+/// Compute [`SeamStepShapeDiagnostic`] for one seam, or `None` if there are
+/// too few shared frames (fewer than `2 * window_count`, the minimum needed
+/// for each side to form `window_count` non-empty windows) to say anything.
+pub(crate) fn seam_step_shape_diagnostic(
+    source: &LocalSubmap,
+    target: &LocalSubmap,
+    window_count: usize,
+) -> Option<SeamStepShapeDiagnostic> {
+    let camera_matches = shared_camera_center_matches(source, target);
+    // `shared_camera_center_matches` carries the shared `source_frame_id` on
+    // both id fields (see that function's doc); `BTreeMap` sorts by frame id
+    // for free, giving temporal order directly.
+    let by_frame: BTreeMap<u64, (Point3<f64>, Point3<f64>)> = camera_matches
+        .iter()
+        .map(|point_match| {
+            (
+                point_match.source_landmark_id,
+                (point_match.source_point, point_match.target_point),
+            )
+        })
+        .collect();
+    let frames: Vec<u64> = by_frame.keys().copied().collect();
+    if frames.len() < 2 * window_count.max(1) {
+        return None;
+    }
+    let source_steps: Vec<f64> = frames
+        .windows(2)
+        .map(|pair| {
+            let (a, _) = by_frame[&pair[0]];
+            let (b, _) = by_frame[&pair[1]];
+            (b - a).norm()
+        })
+        .collect();
+    let target_steps: Vec<f64> = frames
+        .windows(2)
+        .map(|pair| {
+            let (_, a) = by_frame[&pair[0]];
+            let (_, b) = by_frame[&pair[1]];
+            (b - a).norm()
+        })
+        .collect();
+    let source_change_factor =
+        crate::local_submap::windowed_camera_center_drift_ratio(&source_steps, window_count);
+    let target_change_factor =
+        crate::local_submap::windowed_camera_center_drift_ratio(&target_steps, window_count);
+    if source_change_factor <= 1.0e-9 && target_change_factor <= 1.0e-9 {
+        return None;
+    }
+    let (defective_side, max_cf, min_cf) = if source_change_factor >= target_change_factor {
+        (
+            SeamDriftSide::Source,
+            source_change_factor,
+            target_change_factor,
+        )
+    } else {
+        (
+            SeamDriftSide::Target,
+            target_change_factor,
+            source_change_factor,
+        )
+    };
+    let disagreement_ratio = if min_cf > 1.0e-9 {
+        max_cf / min_cf
+    } else if max_cf > 1.0e-9 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+    Some(SeamStepShapeDiagnostic {
+        shared_frames: frames.len(),
+        source_change_factor,
+        target_change_factor,
+        disagreement_ratio,
+        defective_side,
+    })
+}
+
 fn update_best(best: &mut BTreeMap<u64, (u64, usize)>, key: u64, candidate: u64, count: usize) {
     let replace = best.get(&key).is_none_or(|&(current, current_count)| {
         count > current_count || (count == current_count && candidate < current)
@@ -336,6 +447,10 @@ mod tests {
                 median_track_length: 0.0,
                 median_max_parallax_deg: 0.0,
                 camera_center_diameter: 0.0,
+                camera_center_step_median: 0.0,
+                camera_center_step_max: 0.0,
+                seed_pair_final_distance: 1.0,
+                camera_center_window_drift_ratio: 0.0,
                 mean_reprojection_px: 0.0,
                 leave_one_out_attempts: 0,
                 leave_one_out_supported: 0,
@@ -344,6 +459,9 @@ mod tests {
             },
             track_build_stats: TrackBuildStats::default(),
             ba_result: None,
+            seed_source_frame_i: 0,
+            seed_source_frame_j: 0,
+            seed_match_count: 0,
         }
     }
 
@@ -520,5 +638,98 @@ mod tests {
         assert_eq!(matches[0].source_landmark_id, 7);
         assert_eq!(matches[0].source_point, Point3::origin());
         assert_eq!(matches[0].target_point, Point3::new(1.0, 0.0, 0.0));
+    }
+
+    /// `n + 1` frames sharing ids `0..=n`, with camera centres along `x` at
+    /// the cumulative sum of `steps` (so `steps.len() == n`), scaled by
+    /// `gauge_scale` -- an independent reconstruction's absolute gauge is
+    /// arbitrary, so tests exercise that this cancels out of the comparison.
+    fn stepped_submap(steps: &[f64], gauge_scale: f64) -> LocalSubmap {
+        let mut x = 0.0_f64;
+        let mut frames = vec![LocalSubmapFrame {
+            local_frame_index: 0,
+            source_frame_id: 0,
+            pose: Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::zeros()),
+        }];
+        for (index, step) in steps.iter().enumerate() {
+            x += step * gauge_scale;
+            frames.push(LocalSubmapFrame {
+                local_frame_index: index + 1,
+                source_frame_id: (index + 1) as u64,
+                pose: Pose::from_world_to_camera(
+                    UnitQuaternion::identity(),
+                    Vector3::new(x, 0.0, 0.0),
+                ),
+            });
+        }
+        submap(frames, Vec::new())
+    }
+
+    #[test]
+    fn seam_step_shape_diagnostic_stays_quiet_when_both_sides_agree_on_shape() {
+        // Both sides see the same *relative* shape (steps 0.1 for the first
+        // half, 1.0 for the second -- a 10x internal change, mimicking a
+        // genuinely fast-accelerating shared span) but at unrelated absolute
+        // gauges (source: raw; target: 3x). A real, common-mode motion trend
+        // must cancel out of the comparison regardless of the two
+        // independent reconstructions' arbitrary monocular scales.
+        let mut steps = vec![0.1_f64; 6];
+        steps.extend(vec![1.0_f64; 6]);
+        let source = stepped_submap(&steps, 1.0);
+        let target = stepped_submap(&steps, 3.0);
+        let diagnostic = seam_step_shape_diagnostic(&source, &target, 2)
+            .expect("12 shared steps is enough for a 2-window split");
+        assert_eq!(diagnostic.shared_frames, 13);
+        assert!((diagnostic.source_change_factor - 10.0).abs() < 1.0e-9);
+        assert!((diagnostic.target_change_factor - 10.0).abs() < 1.0e-9);
+        assert!(
+            (diagnostic.disagreement_ratio - 1.0).abs() < 1.0e-9,
+            "matching shapes at different gauges must not disagree, got {}",
+            diagnostic.disagreement_ratio
+        );
+    }
+
+    #[test]
+    fn seam_step_shape_diagnostic_fires_when_one_side_diverges() {
+        // Source is flat (no internal drift); target shows the same 10x
+        // within-window growth as the diagnosed submap 9/13 defect. Only
+        // target disagrees with the (shared, real) motion the flat source
+        // faithfully reports.
+        let flat_steps = vec![0.5_f64; 12];
+        let mut drifting_steps = vec![0.1_f64; 6];
+        drifting_steps.extend(vec![1.0_f64; 6]);
+        let source = stepped_submap(&flat_steps, 1.0);
+        let target = stepped_submap(&drifting_steps, 1.0);
+        let diagnostic = seam_step_shape_diagnostic(&source, &target, 2).unwrap();
+        assert!((diagnostic.source_change_factor - 1.0).abs() < 1.0e-9);
+        assert!((diagnostic.target_change_factor - 10.0).abs() < 1.0e-9);
+        assert!((diagnostic.disagreement_ratio - 10.0).abs() < 1.0e-9);
+        assert_eq!(diagnostic.defective_side, SeamDriftSide::Target);
+    }
+
+    #[test]
+    fn seam_step_shape_diagnostic_none_when_too_few_shared_frames() {
+        // A single shared step (2 frames) is fewer than the 2 windows
+        // requested -- `windowed_camera_center_drift_ratio` reports `0.0`
+        // (nothing to compare) on both sides, so the diagnostic itself is
+        // `None` rather than a meaningless `1.0`.
+        let steps = vec![0.1_f64];
+        let source = stepped_submap(&steps, 1.0);
+        let target = stepped_submap(&steps, 1.0);
+        assert_eq!(seam_step_shape_diagnostic(&source, &target, 2), None);
+    }
+
+    #[test]
+    fn seam_step_shape_diagnostic_none_when_no_shared_frames() {
+        let source = stepped_submap(&[0.1; 6], 1.0);
+        let target = submap(
+            vec![LocalSubmapFrame {
+                local_frame_index: 0,
+                source_frame_id: 900,
+                pose: Pose::identity(),
+            }],
+            Vec::new(),
+        );
+        assert_eq!(seam_step_shape_diagnostic(&source, &target, 2), None);
     }
 }

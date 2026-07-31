@@ -41,8 +41,9 @@ pub use local_submap::{
 
 pub mod submap_partition;
 pub use submap_partition::{
-    partition_ordered_submaps, remap_pairs_to_submap, AdaptiveSubmapPartitionConfig,
-    AdaptiveSubmapPartitionHints, SubmapPartitionError, SubmapWindow,
+    partition_ordered_submaps, remap_pairs_to_submap, widen_and_build,
+    AdaptiveSubmapPartitionConfig, AdaptiveSubmapPartitionHints, SubmapPartitionError,
+    SubmapWindow, WidenMergeReason,
 };
 
 pub mod submap_overlap;
@@ -71,6 +72,9 @@ pub use hierarchical_sfm::{
     hierarchical_sfm, optimize_independent_submaps, HierarchicalSfmAtlas, HierarchicalSfmConfig,
     HierarchicalSfmError, HierarchicalSfmResult, HierarchicalSfmSeam,
 };
+
+mod hierarchical_loop_closure;
+pub use hierarchical_loop_closure::HierarchicalLoopClosureResult;
 
 mod hierarchical_seam_ba;
 pub(crate) use hierarchical_seam_ba::HierarchicalSeamLandmarkLink;

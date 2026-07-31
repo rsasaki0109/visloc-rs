@@ -249,35 +249,17 @@ impl Sim3PoseGraph {
 
                 if let (Some(i), Some(jf)) = (i_from, &j_from) {
                     let ot = jf.transpose() * omega;
-                    accumulate_normal_block(
-                        &mut h,
-                        &mut h_triplets,
-                        i * DOF,
-                        i * DOF,
-                        &(ot * jf),
-                    );
+                    accumulate_normal_block(&mut h, &mut h_triplets, i * DOF, i * DOF, &(ot * jf));
                     accumulate_segment(&mut g, i * DOF, &(ot * r));
                 }
                 if let (Some(j), Some(jt)) = (i_to, &j_to) {
                     let ot = jt.transpose() * omega;
-                    accumulate_normal_block(
-                        &mut h,
-                        &mut h_triplets,
-                        j * DOF,
-                        j * DOF,
-                        &(ot * jt),
-                    );
+                    accumulate_normal_block(&mut h, &mut h_triplets, j * DOF, j * DOF, &(ot * jt));
                     accumulate_segment(&mut g, j * DOF, &(ot * r));
                 }
                 if let (Some(i), Some(jf), Some(j), Some(jt)) = (i_from, &j_from, i_to, &j_to) {
                     let cross = jf.transpose() * omega * jt;
-                    accumulate_normal_block(
-                        &mut h,
-                        &mut h_triplets,
-                        i * DOF,
-                        j * DOF,
-                        &cross,
-                    );
+                    accumulate_normal_block(&mut h, &mut h_triplets, i * DOF, j * DOF, &cross);
                     accumulate_normal_block(
                         &mut h,
                         &mut h_triplets,
@@ -292,15 +274,9 @@ impl Sim3PoseGraph {
             let rhs_vector = -&g;
             let delta = if let Some(triplets) = &h_triplets {
                 let rhs = DMatrix::from_column_slice(dim, 1, rhs_vector.as_slice());
-                let solution = solve_spd_block_cached(
-                    &mut sparse_symbolic,
-                    triplets,
-                    dim,
-                    DOF,
-                    &rhs,
-                    lambda,
-                )
-                .map_err(|_| PoseGraphError::SingularSystem)?;
+                let solution =
+                    solve_spd_block_cached(&mut sparse_symbolic, triplets, dim, DOF, &rhs, lambda)
+                        .map_err(|_| PoseGraphError::SingularSystem)?;
                 solution.column(0).into_owned()
             } else {
                 let mut damped = h.expect("dense Hessian exists on the dense solver path");

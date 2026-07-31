@@ -305,6 +305,18 @@ pub struct IncrementalSfmConfig {
     /// visibility pyramid is the safe default; correspondence count preserves
     /// the pre-M3 ordering for controlled regression experiments.
     pub next_image_policy: NextImagePolicy,
+    /// Seed pairs (`image_i`, `image_j`, normalized to `(min, max)`) that
+    /// [`seed_candidate_order`] must skip. Empty by default. This is the
+    /// mechanism `LocalSubmapBuilder::build`'s scale-pathology retry (see
+    /// `crate::local_submap`, `NOROBUSTFIT_CLUSTER_DIAGNOSIS.md` §6(b)) uses
+    /// to force a rebuild onto the *next*-ranked seed candidate after a
+    /// previous seed pair (which reached `88/88` registration with
+    /// unremarkable per-observation gates) produced an internally
+    /// scale-exploded reconstruction: excluding the offending pair and
+    /// re-running `incremental_sfm` deterministically walks to the next
+    /// candidate in the same descending-match-count order, without
+    /// perturbing any other seed-selection behaviour.
+    pub excluded_seed_pairs: HashSet<(usize, usize)>,
 }
 
 /// Ranking policy for the next image offered to incremental PnP registration.
@@ -405,6 +417,7 @@ impl Default for IncrementalSfmConfig {
             filter_min_image_observations: 15,
             track_source: TrackSource::default(),
             next_image_policy: NextImagePolicy::default(),
+            excluded_seed_pairs: HashSet::new(),
         }
     }
 }
@@ -514,6 +527,14 @@ pub struct IncrementalSfmResult {
     /// camera, so a COLMAP / 3DGS export must use it rather than the input camera.
     /// `None` when intrinsics refinement was off.
     pub refined_camera: Option<Camera>,
+    /// Local index (into this call's `features`/`pairwise`) of the first
+    /// image of the seed pair the winning growth trial started from.
+    /// Purely observational — does not influence poses/tracks/gates.
+    pub seed_image_i: usize,
+    /// Local index of the second image of the winning seed pair.
+    pub seed_image_j: usize,
+    /// Number of verified matches in the winning seed pair (`pairwise[..].matches.len()`).
+    pub seed_match_count: usize,
 }
 
 /// Why [`incremental_sfm`] could not build a reconstruction.
@@ -620,6 +641,11 @@ pub fn incremental_sfm(
         .div_ceil(2)
         .max(1);
     let mut best: Option<SeedGrowth> = None;
+    // Tracks which `pairwise` entry produced `best`, purely for observability
+    // (the per-submap build summary log wants to report which image pair was
+    // actually chosen as the seed). Always `Some` exactly when `best` is,
+    // updated in lockstep below.
+    let mut best_pi: Option<usize> = None;
     let mut grows = 0usize;
     for &pi in &seed_order {
         let (trial_poses, trial_points, reach, trial_cam) = grow_from_seed(
@@ -647,12 +673,17 @@ pub fn incremental_sfm(
             .is_none_or(|(best_reach, _, _, _)| reach > *best_reach)
         {
             best = Some((reach, trial_poses, trial_points, trial_cam));
+            best_pi = Some(pi);
         }
         if reach >= not_trapped || grows >= trials {
             break;
         }
     }
     let (_, mut poses, mut track_point, grown_cam) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
+    let winning_pi = best_pi.expect("set together with `best` on every assignment above");
+    let seed_image_i = pairwise[winning_pi].image_i;
+    let seed_image_j = pairwise[winning_pi].image_j;
+    let seed_match_count = pairwise[winning_pi].matches.len();
     let seed_growth_seconds = seed_growth_started.elapsed().as_secs_f64();
 
     // ---- 4 + 5. Final refinement ----
@@ -969,6 +1000,9 @@ pub fn incremental_sfm(
         mean_reprojection_px,
         ba_result,
         refined_camera: config.refine_intrinsics.then_some(cam),
+        seed_image_i,
+        seed_image_j,
+        seed_match_count,
     })
 }
 
@@ -1258,6 +1292,14 @@ fn largest_connected_component(pairwise: &[PairwiseMatches], n_images: usize) ->
 fn seed_candidate_order(pairwise: &[PairwiseMatches], config: &IncrementalSfmConfig) -> Vec<usize> {
     let mut order: Vec<usize> = (0..pairwise.len())
         .filter(|&i| pairwise[i].matches.len() >= config.min_seed_matches)
+        .filter(|&i| {
+            let pair = &pairwise[i];
+            let key = (
+                pair.image_i.min(pair.image_j),
+                pair.image_i.max(pair.image_j),
+            );
+            !config.excluded_seed_pairs.contains(&key)
+        })
         .collect();
     order.sort_by_key(|&i| std::cmp::Reverse(pairwise[i].matches.len()));
     order
@@ -4143,6 +4185,67 @@ pub(crate) fn reprojection_error_px(
 mod tests {
     use super::*;
     use nalgebra::{UnitQuaternion, Vector3};
+
+    /// `LocalSubmapBuilder::build`'s scale-pathology retry
+    /// (`NOROBUSTFIT_CLUSTER_DIAGNOSIS.md` §6(b)) relies on
+    /// `seed_candidate_order` walking to the *next*-ranked seed candidate,
+    /// deterministically, once the previously tried pair is excluded. This
+    /// pins that mechanism directly: descending match-count order by
+    /// default, and excluding a pair (regardless of which of its two image
+    /// orderings is recorded) removes exactly that pair and nothing else,
+    /// repeatably.
+    #[test]
+    fn seed_candidate_order_skips_excluded_pairs_deterministically() {
+        let pairwise = vec![
+            PairwiseMatches {
+                image_i: 0,
+                image_j: 1,
+                matches: vec![(0, 0); 50],
+            },
+            PairwiseMatches {
+                image_i: 1,
+                image_j: 2,
+                matches: vec![(0, 0); 40],
+            },
+            PairwiseMatches {
+                image_i: 2,
+                image_j: 3,
+                matches: vec![(0, 0); 30],
+            },
+        ];
+        let config = IncrementalSfmConfig::default();
+        assert_eq!(seed_candidate_order(&pairwise, &config), vec![0, 1, 2]);
+
+        let mut excluded_first = config.clone();
+        excluded_first.excluded_seed_pairs.insert((0, 1));
+        assert_eq!(seed_candidate_order(&pairwise, &excluded_first), vec![1, 2]);
+        // Deterministic: repeated calls on the same (excluded) config agree.
+        assert_eq!(seed_candidate_order(&pairwise, &excluded_first), vec![1, 2]);
+
+        // The pairwise-side key is normalized regardless of which image is
+        // recorded as `image_i`/`image_j`: a reversed-direction entry for
+        // the same underlying pair still matches a normalized `(0, 1)`
+        // exclusion key.
+        let mut reversed_first_pair = pairwise.clone();
+        reversed_first_pair[0] = PairwiseMatches {
+            image_i: 1,
+            image_j: 0,
+            matches: vec![(0, 0); 50],
+        };
+        let mut excluded_normalized = config.clone();
+        excluded_normalized.excluded_seed_pairs.insert((0, 1));
+        assert_eq!(
+            seed_candidate_order(&reversed_first_pair, &excluded_normalized),
+            vec![1, 2]
+        );
+
+        // Excluding the two strongest pairs walks to the third-ranked
+        // candidate, still in descending order among what remains.
+        let mut excluded_two = config;
+        excluded_two.excluded_seed_pairs.insert((0, 1));
+        excluded_two.excluded_seed_pairs.insert((1, 2));
+        assert_eq!(seed_candidate_order(&pairwise, &excluded_two), vec![2]);
+    }
 
     /// A synthetic 3D point cloud and a ring of cameras looking at it, used to
     /// exercise the full unordered pipeline end-to-end.

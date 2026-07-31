@@ -182,6 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_mean_reprojection_px: 2.0,
             min_leave_one_out_support_fraction: 0.5,
             max_median_leave_one_out_reprojection_px: 2.0,
+            ..LocalSubmapQualityConfig::default()
         },
     });
     let old_ids = old_frames

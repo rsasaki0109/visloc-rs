@@ -18,6 +18,54 @@
 //! second landmark, or a known-distance pair. Rectified-stereo BA (any
 //! [`BaStereoObservation`] present) has only 6 DoF gauge freedom — the
 //! baseline anchors metric scale — so a single fixed pose is enough.
+//!
+//! # Parallelism
+//!
+//! [`BaConfig::parallel`] (default `false`, so [`BundleAdjustment::optimize`]
+//! and friends are unchanged unless a caller opts in) parallelizes the three
+//! per-item hot loops of [`BundleAdjustment::optimize_weighted`]'s
+//! Levenberg-Marquardt iteration with `rayon`:
+//!
+//! - **Assembly** (`build_normal_equations`'s monocular observation loop):
+//!   each observation's residual/Jacobian is a pure function of the current
+//!   pose and landmark estimate — it touches no shared state — so it is
+//!   computed on the rayon pool in fixed-size chunks
+//!   ([`PARALLEL_OBSERVATION_CHUNK`]), collected into a plain per-chunk
+//!   `Vec`; the actual `+=` scatter into `h_pp` / `b_p` / the per-landmark
+//!   blocks stays a single serial pass over each chunk's precomputed
+//!   contributions, *in the original per-observation order*.
+//! - **Schur reduction** (`solve_step`'s per-landmark `S -= H_PL H_LL⁻¹
+//!   H_PLᵀ` loop): each landmark's `3×3` factorization is independent and
+//!   computed directly in parallel (disjoint output slots, no merge needed);
+//!   the pose-pair contributions it produces are computed the same chunked
+//!   way as assembly, collecting each landmark's `(Vec<(p,q,block)>,
+//!   Vec<(p,upd)>)` pair per chunk and then flattening/merging into the
+//!   shared reduced system `s` / `b_reduced` by a serial pass over each
+//!   chunk, in landmark-ascending order.
+//! - **Back-substitution** (`solve_step`'s per-landmark `δ_L` loop): each
+//!   landmark writes only its own 3 rows of `delta_l`, so this is
+//!   embarrassingly parallel with no merge step at all.
+//!
+//! Unlike [`crate::block_cholesky`]'s intra-column path — which reassociates
+//! a floating-point sum across contributors and is therefore only
+//! deterministic *to rounding* — every merge here reproduces the exact
+//! summation order the serial code would have used, so the parallel path is
+//! bit-identical to the serial one at any thread count or chunk size; the
+//! chunk constants below exist only to cap peak memory (a full-sequence BA
+//! can carry tens of millions of observations, so materializing one
+//! contribution per observation up front is not an option) and to amortize
+//! the per-dispatch rayon overhead, never to change the result. Each path is
+//! also work-gated ([`PARALLEL_MIN_OBSERVATIONS`], [`PARALLEL_MIN_LANDMARKS`])
+//! so small problems stay on the plain serial loop even with the flag on,
+//! matching `block_cholesky`'s `PARALLEL_MIN_BLOCKS` precedent.
+//!
+//! Not parallelized: [`BundleAdjustment::optimize_joint_intrinsics`]'s own
+//! Schur reduction (a separate, less-used code path — self-calibration BA is
+//! opt-in and typically run on far smaller problems than a full-sequence
+//! pose/structure solve) and the cost-evaluation passes (`robust_cost_weighted`
+//! / `reprojection_squared_residuals`, shared by many callers beyond the LM
+//! loop, so gating them on `BaConfig` would require threading the flag
+//! through call sites that have nothing to do with this optimizer).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -599,6 +647,7 @@ impl BundleAdjustment {
             &bias_index,
             &RobustKernel::None,
             None,
+            false,
         );
         let ordered_ids = |index: &BTreeMap<u64, usize>| {
             let mut ids: Vec<(usize, u64)> = index.iter().map(|(id, slot)| (*slot, *id)).collect();
@@ -1514,6 +1563,14 @@ impl BundleAdjustment {
                 converged = true;
                 break;
             }
+            if config.relative_cost_tolerance.is_some_and(|tolerance| {
+                tolerance.is_finite()
+                    && tolerance >= 0.0
+                    && (cost_before - cost_after) / cost_before.abs().max(f64::EPSILON) < tolerance
+            }) {
+                converged = true;
+                break;
+            }
         }
 
         Ok(BaResult {
@@ -2082,6 +2139,7 @@ impl BundleAdjustment {
                 &bias_index,
                 &kernel,
                 gnc_weights,
+                config.parallel,
             );
 
             // Build the reduced (Schur-complement) camera system. λ is added
@@ -2102,6 +2160,7 @@ impl BundleAdjustment {
                 bias_index.len(),
                 lambda,
                 config.linear_solver,
+                config.parallel,
             ) {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
@@ -2233,6 +2292,14 @@ impl BundleAdjustment {
                 converged = true;
                 break;
             }
+            if config.relative_cost_tolerance.is_some_and(|tolerance| {
+                tolerance.is_finite()
+                    && tolerance >= 0.0
+                    && (cost_before - cost_after) / cost_before.abs().max(f64::EPSILON) < tolerance
+            }) {
+                converged = true;
+                break;
+            }
         }
 
         Ok(BaResult {
@@ -2265,6 +2332,13 @@ pub struct BaConfig {
     pub min_lambda: f64,
     pub step_tolerance: f64,
     pub cost_tolerance: f64,
+    /// Optional relative accepted-cost-decrease stopping threshold.
+    ///
+    /// An accepted iteration converges when
+    /// `(cost_before - cost_after) / max(abs(cost_before), epsilon)` is below
+    /// this value. `None` preserves the historical absolute-cost and step-only
+    /// stopping rules.
+    pub relative_cost_tolerance: Option<f64>,
     /// Linear-solver backend for the Schur-reduced pose system. The
     /// landmark elimination is always done analytically via per-landmark
     /// `3×3` block inversion (since `H_LL` is block-diagonal).
@@ -2295,6 +2369,19 @@ pub struct BaConfig {
     /// are appended to `Camera::params` as `[fx, fy, cx, cy, k1, k2]`. **`false`
     /// by default.**
     pub refine_distortion: bool,
+    /// Run the per-observation assembly, per-landmark Schur reduction, and
+    /// back-substitution loops of [`BundleAdjustment::optimize_weighted`]'s
+    /// Levenberg-Marquardt iteration on the `rayon` pool (see the module's
+    /// "Parallelism" section). The result is bit-identical to the serial
+    /// path at any thread count — this only changes *how* the normal
+    /// equations are computed, never the summation order — so it is safe to
+    /// flip independently of everything else in this config. Small problems
+    /// stay serial even when this is set (see `PARALLEL_MIN_OBSERVATIONS` /
+    /// `PARALLEL_MIN_LANDMARKS`). Only consumed by `optimize_weighted`
+    /// (the plain pose/structure/IMU solve); `optimize_joint_intrinsics`
+    /// ignores it. **`false` by default** (the public
+    /// [`BundleAdjustment::optimize`] is then bit-identical to before).
+    pub parallel: bool,
 }
 
 impl Default for BaConfig {
@@ -2308,10 +2395,12 @@ impl Default for BaConfig {
             min_lambda: 1e-9,
             step_tolerance: 1e-7,
             cost_tolerance: 1e-9,
+            relative_cost_tolerance: None,
             linear_solver: LinearSolver::Dense,
             robust_kernel: RobustKernel::None,
             refine_intrinsics: false,
             refine_distortion: false,
+            parallel: false,
         }
     }
 }
@@ -2545,6 +2634,215 @@ struct NormalEquationsBa {
     landmarks: Vec<LandmarkBlock>,
 }
 
+// --- Parallel assembly / Schur-reduction support (see the module's
+// "Parallelism" section). ---
+
+/// Below this many observations, [`assemble_mono_observations_parallel`] is
+/// not dispatched even when [`BaConfig::parallel`] is set: a full-sequence
+/// BA's per-observation cost dwarfs the rayon per-chunk overhead, but small
+/// problems (a handful of keyframes) do not, so they stay on the plain
+/// serial loop. Mirrors `block_cholesky::PARALLEL_MIN_BLOCKS`.
+const PARALLEL_MIN_OBSERVATIONS: usize = 4_096;
+/// Observations computed per rayon chunk in the parallel assembly path.
+/// Bounds the transient `Vec<Option<MonoObsContribution>>` buffer to a few
+/// megabytes regardless of the total observation count — a full-sequence BA
+/// can carry tens of millions of observations, so materializing one
+/// contribution per observation up front (rather than chunk by chunk) would
+/// multiply the assembly's peak memory several-fold. The value does not
+/// affect the result at all (see the merge comment on
+/// [`assemble_mono_observations_parallel`]), so it is chosen purely for that
+/// memory/dispatch-overhead trade-off.
+const PARALLEL_OBSERVATION_CHUNK: usize = 65_536;
+
+/// Below this many landmarks, the parallel Schur-reduction and back-
+/// substitution paths in [`solve_step`] are not dispatched. Mirrors
+/// [`PARALLEL_MIN_OBSERVATIONS`].
+const PARALLEL_MIN_LANDMARKS: usize = 2_048;
+/// Landmarks processed per rayon chunk in the parallel Schur reduction.
+/// Bounds the transient per-chunk `(pose, pose, block)` triplet buffer the
+/// same way [`PARALLEL_OBSERVATION_CHUNK`] bounds the assembly path's; it
+/// does not affect the result (same reasoning as that constant).
+const PARALLEL_LANDMARK_CHUNK: usize = 16_384;
+
+/// Precomputed contribution of one monocular observation to the normal
+/// equations: the weighted `H_pp` / `b_p` block for the observing pose (if
+/// non-fixed), the weighted `H_ll` / `b_l` block for the observed landmark
+/// (if non-fixed), and their cross term (if both are). `None` when the
+/// observation is skipped exactly as the serial loop in
+/// [`build_normal_equations`] skips it — behind the camera or not
+/// projectable. This is the unit of work
+/// [`assemble_mono_observations_parallel`] farms out to the rayon pool: it
+/// is a pure function of the current pose/landmark estimate, so many can be
+/// computed concurrently with no shared mutable state.
+struct MonoObsContribution {
+    pose: Option<(usize, Matrix6<f64>, Vector6<f64>)>,
+    landmark: Option<(usize, Matrix3<f64>, Vector3<f64>)>,
+    cross: Option<(usize, usize, Matrix6x3<f64>)>,
+}
+
+/// Compute one observation's [`MonoObsContribution`]. Deliberately kept
+/// byte-for-byte in step with the inline loop body in
+/// [`build_normal_equations`] (same operations in the same order, so the
+/// weighted blocks are bitwise identical to what that loop would compute) —
+/// if the residual/Jacobian model there ever changes, this must change with
+/// it.
+#[allow(clippy::too_many_arguments)]
+fn compute_mono_contribution(
+    ba: &BundleAdjustment,
+    intrinsics: &(f64, f64, f64, f64),
+    kernel: &RobustKernel,
+    gnc_weights: Option<&[f64]>,
+    pose_index: &BTreeMap<u64, usize>,
+    landmark_index: &BTreeMap<u64, usize>,
+    obs_idx: usize,
+    obs: &BaObservation,
+) -> Option<MonoObsContribution> {
+    let pose = &ba.poses[&obs.keyframe_id];
+    let point = &ba.landmarks[&obs.landmark_id];
+    let r_mat = pose
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    let xc = pose.transform_world_point(point);
+    if xc.z <= 0.0 {
+        return None;
+    }
+    let predicted = project_pinhole(intrinsics, &xc)?;
+    let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
+
+    let (fx, fy, _, _) = *intrinsics;
+    let z_inv = 1.0 / xc.z;
+    let mut j_pi = Matrix2x3::<f64>::zeros();
+    j_pi[(0, 0)] = fx * z_inv;
+    j_pi[(0, 1)] = 0.0;
+    j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
+    j_pi[(1, 0)] = 0.0;
+    j_pi[(1, 1)] = fy * z_inv;
+    j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+
+    let xw_skew = skew(&point.coords);
+    let mut dx_dxi = nalgebra::Matrix3x6::<f64>::zeros();
+    dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
+    dx_dxi
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-r_mat * xw_skew));
+    let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+    let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+
+    let s = residual.x * residual.x + residual.y * residual.y;
+    let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
+
+    let i_pose = pose_index.get(&obs.keyframe_id).copied();
+    let i_lm = landmark_index.get(&obs.landmark_id).copied();
+
+    let pose_update = i_pose.map(|p| {
+        let h_pp_block: Matrix6<f64> = j_pose.transpose() * j_pose;
+        let b_p_block: Vector6<f64> = j_pose.transpose() * residual;
+        (p, w * h_pp_block, w * b_p_block)
+    });
+    let landmark_update = i_lm.map(|l| {
+        let h_ll_block: Matrix3<f64> = j_lm.transpose() * j_lm;
+        let b_l_block: Vector3<f64> = j_lm.transpose() * residual;
+        (l, w * h_ll_block, w * b_l_block)
+    });
+    let cross_update = match (i_pose, i_lm) {
+        (Some(p), Some(l)) => {
+            let cross: Matrix6x3<f64> = j_pose.transpose() * j_lm;
+            Some((p, l, w * cross))
+        }
+        _ => None,
+    };
+
+    Some(MonoObsContribution {
+        pose: pose_update,
+        landmark: landmark_update,
+        cross: cross_update,
+    })
+}
+
+/// Scatter one [`MonoObsContribution`] into the shared accumulators, in
+/// exactly the pose-then-landmark-then-cross order the serial loop in
+/// [`build_normal_equations`] uses. Never called concurrently on the same
+/// `h_pp` / `b_p` / `landmarks` — see the serial merge loop in
+/// [`assemble_mono_observations_parallel`].
+fn apply_mono_contribution(
+    contribution: MonoObsContribution,
+    h_pp: &mut DMatrix<f64>,
+    b_p: &mut DVector<f64>,
+    landmarks: &mut [LandmarkBlock],
+) {
+    if let Some((p, h_pp_block, b_p_block)) = contribution.pose {
+        for r in 0..6 {
+            for c in 0..6 {
+                h_pp[(p * 6 + r, p * 6 + c)] += h_pp_block[(r, c)];
+            }
+            b_p[p * 6 + r] += b_p_block[r];
+        }
+    }
+    if let Some((l, h_ll_block, b_l_block)) = contribution.landmark {
+        landmarks[l].h_ll += h_ll_block;
+        landmarks[l].b_l += b_l_block;
+    }
+    if let Some((p, l, cross)) = contribution.cross {
+        landmarks[l].cross.push((p, cross));
+    }
+}
+
+/// Parallel counterpart of the monocular loop in [`build_normal_equations`].
+///
+/// Processes observations in fixed-size chunks
+/// ([`PARALLEL_OBSERVATION_CHUNK`]): within a chunk, every observation's
+/// [`MonoObsContribution`] is computed concurrently on the rayon pool (pure
+/// function, no shared state) and collected into a `Vec` that preserves the
+/// original index order exactly like the serial loop would produce it; the
+/// chunk's contributions are then scattered into `h_pp` / `b_p` /
+/// `landmarks` by a single serial pass, *in ascending observation-index
+/// order*, before the next chunk starts. Because the scatter order is
+/// therefore always identical to what the plain serial loop would produce —
+/// only the (order-independent) computation of each contribution moved to
+/// the pool — the result is bit-identical to the serial path at any thread
+/// count or chunk size, unlike a reassociating parallel reduction.
+fn assemble_mono_observations_parallel(
+    ba: &BundleAdjustment,
+    intrinsics: &(f64, f64, f64, f64),
+    pose_index: &BTreeMap<u64, usize>,
+    landmark_index: &BTreeMap<u64, usize>,
+    kernel: &RobustKernel,
+    gnc_weights: Option<&[f64]>,
+    h_pp: &mut DMatrix<f64>,
+    b_p: &mut DVector<f64>,
+    landmarks: &mut [LandmarkBlock],
+) {
+    use rayon::prelude::*;
+
+    let mut start = 0;
+    while start < ba.observations.len() {
+        let end = (start + PARALLEL_OBSERVATION_CHUNK).min(ba.observations.len());
+        let chunk = &ba.observations[start..end];
+        let contributions: Vec<Option<MonoObsContribution>> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(offset, obs)| {
+                compute_mono_contribution(
+                    ba,
+                    intrinsics,
+                    kernel,
+                    gnc_weights,
+                    pose_index,
+                    landmark_index,
+                    start + offset,
+                    obs,
+                )
+            })
+            .collect();
+        for contribution in contributions.into_iter().flatten() {
+            apply_mono_contribution(contribution, h_pp, b_p, landmarks);
+        }
+        start = end;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_normal_equations(
     ba: &BundleAdjustment,
@@ -2555,6 +2853,7 @@ fn build_normal_equations(
     bias_index: &BTreeMap<u64, usize>,
     kernel: &RobustKernel,
     gnc_weights: Option<&[f64]>,
+    parallel: bool,
 ) -> NormalEquationsBa {
     let p_count = pose_index.len();
     let l_count = landmark_index.len();
@@ -2580,78 +2879,96 @@ fn build_normal_equations(
         })
         .collect();
 
-    for (obs_idx, obs) in ba.observations.iter().enumerate() {
-        let pose = &ba.poses[&obs.keyframe_id];
-        let point = &ba.landmarks[&obs.landmark_id];
-        let r_mat = pose
-            .world_to_camera
-            .rotation
-            .to_rotation_matrix()
-            .into_inner();
-        let xc = pose.transform_world_point(point);
-        if xc.z <= 0.0 {
-            continue;
-        }
-        // Predicted pixel - measured pixel.
-        let predicted = match project_pinhole(intrinsics, &xc) {
-            Some(p) => p,
-            None => continue,
-        };
-        let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
-
-        // Projection Jacobian J_π (2×3) at X_c = (X, Y, Z):
-        //   J_π = (1/Z) [[fx, 0, -fx X/Z], [0, fy, -fy Y/Z]]
-        let (fx, fy, _, _) = *intrinsics;
-        let z_inv = 1.0 / xc.z;
-        let mut j_pi = Matrix2x3::<f64>::zeros();
-        j_pi[(0, 0)] = fx * z_inv;
-        j_pi[(0, 1)] = 0.0;
-        j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
-        j_pi[(1, 0)] = 0.0;
-        j_pi[(1, 1)] = fy * z_inv;
-        j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
-
-        // Right perturbation pose Jacobian:
-        //   ∂X_c / ∂[ρ; ω] = [R, -R · [X_w]_×]   (3×6)
-        let xw_skew = skew(&point.coords);
-        let mut dx_dxi = nalgebra::Matrix3x6::<f64>::zeros();
-        dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
-        dx_dxi
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-r_mat * xw_skew));
-        let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
-        // Landmark Jacobian: ∂X_c / ∂X_w = R, so J_lm = J_π · R (2×3).
-        let j_lm: Matrix2x3<f64> = j_pi * r_mat;
-
-        // IRLS weight applied per-observation. With `RobustKernel::None`
-        // this is `1.0` and the build matches plain Gauss-Newton; with
-        // Huber / Cauchy the weight shrinks for large residuals so a
-        // single bad observation cannot dominate the normal equations.
-        let s = residual.x * residual.x + residual.y * residual.y;
-        let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
-
-        let i_pose = pose_index.get(&obs.keyframe_id).copied();
-        let i_lm = landmark_index.get(&obs.landmark_id).copied();
-
-        if let Some(p) = i_pose {
-            let h_pp_block: Matrix6<f64> = j_pose.transpose() * j_pose;
-            let b_p_block: Vector6<f64> = j_pose.transpose() * residual;
-            for r in 0..6 {
-                for c in 0..6 {
-                    h_pp[(p * 6 + r, p * 6 + c)] += w * h_pp_block[(r, c)];
-                }
-                b_p[p * 6 + r] += w * b_p_block[r];
+    // Flag-gated, work-gated parallel assembly (see the module's
+    // "Parallelism" section): bit-identical to the plain loop below at any
+    // thread count, so the branch only changes how the contributions are
+    // computed, never the result.
+    if parallel && ba.observations.len() >= PARALLEL_MIN_OBSERVATIONS {
+        assemble_mono_observations_parallel(
+            ba,
+            intrinsics,
+            pose_index,
+            landmark_index,
+            kernel,
+            gnc_weights,
+            &mut h_pp,
+            &mut b_p,
+            &mut landmarks,
+        );
+    } else {
+        for (obs_idx, obs) in ba.observations.iter().enumerate() {
+            let pose = &ba.poses[&obs.keyframe_id];
+            let point = &ba.landmarks[&obs.landmark_id];
+            let r_mat = pose
+                .world_to_camera
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
+            let xc = pose.transform_world_point(point);
+            if xc.z <= 0.0 {
+                continue;
             }
-        }
-        if let Some(l) = i_lm {
-            let h_ll_block: Matrix3<f64> = j_lm.transpose() * j_lm;
-            let b_l_block: Vector3<f64> = j_lm.transpose() * residual;
-            landmarks[l].h_ll += w * h_ll_block;
-            landmarks[l].b_l += w * b_l_block;
-        }
-        if let (Some(p), Some(l)) = (i_pose, i_lm) {
-            let cross: Matrix6x3<f64> = j_pose.transpose() * j_lm;
-            landmarks[l].cross.push((p, w * cross));
+            // Predicted pixel - measured pixel.
+            let predicted = match project_pinhole(intrinsics, &xc) {
+                Some(p) => p,
+                None => continue,
+            };
+            let residual = Vector2::new(predicted.x - obs.xy.x, predicted.y - obs.xy.y);
+
+            // Projection Jacobian J_π (2×3) at X_c = (X, Y, Z):
+            //   J_π = (1/Z) [[fx, 0, -fx X/Z], [0, fy, -fy Y/Z]]
+            let (fx, fy, _, _) = *intrinsics;
+            let z_inv = 1.0 / xc.z;
+            let mut j_pi = Matrix2x3::<f64>::zeros();
+            j_pi[(0, 0)] = fx * z_inv;
+            j_pi[(0, 1)] = 0.0;
+            j_pi[(0, 2)] = -fx * xc.x * z_inv * z_inv;
+            j_pi[(1, 0)] = 0.0;
+            j_pi[(1, 1)] = fy * z_inv;
+            j_pi[(1, 2)] = -fy * xc.y * z_inv * z_inv;
+
+            // Right perturbation pose Jacobian:
+            //   ∂X_c / ∂[ρ; ω] = [R, -R · [X_w]_×]   (3×6)
+            let xw_skew = skew(&point.coords);
+            let mut dx_dxi = nalgebra::Matrix3x6::<f64>::zeros();
+            dx_dxi.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_mat);
+            dx_dxi
+                .fixed_view_mut::<3, 3>(0, 3)
+                .copy_from(&(-r_mat * xw_skew));
+            let j_pose: Matrix2x6<f64> = j_pi * dx_dxi;
+            // Landmark Jacobian: ∂X_c / ∂X_w = R, so J_lm = J_π · R (2×3).
+            let j_lm: Matrix2x3<f64> = j_pi * r_mat;
+
+            // IRLS weight applied per-observation. With `RobustKernel::None`
+            // this is `1.0` and the build matches plain Gauss-Newton; with
+            // Huber / Cauchy the weight shrinks for large residuals so a
+            // single bad observation cannot dominate the normal equations.
+            let s = residual.x * residual.x + residual.y * residual.y;
+            let w = kernel.weight(s) * gnc_weights.map_or(1.0, |gw| gw[obs_idx]);
+
+            let i_pose = pose_index.get(&obs.keyframe_id).copied();
+            let i_lm = landmark_index.get(&obs.landmark_id).copied();
+
+            if let Some(p) = i_pose {
+                let h_pp_block: Matrix6<f64> = j_pose.transpose() * j_pose;
+                let b_p_block: Vector6<f64> = j_pose.transpose() * residual;
+                for r in 0..6 {
+                    for c in 0..6 {
+                        h_pp[(p * 6 + r, p * 6 + c)] += w * h_pp_block[(r, c)];
+                    }
+                    b_p[p * 6 + r] += w * b_p_block[r];
+                }
+            }
+            if let Some(l) = i_lm {
+                let h_ll_block: Matrix3<f64> = j_lm.transpose() * j_lm;
+                let b_l_block: Vector3<f64> = j_lm.transpose() * residual;
+                landmarks[l].h_ll += w * h_ll_block;
+                landmarks[l].b_l += w * b_l_block;
+            }
+            if let (Some(p), Some(l)) = (i_pose, i_lm) {
+                let cross: Matrix6x3<f64> = j_pose.transpose() * j_lm;
+                landmarks[l].cross.push((p, w * cross));
+            }
         }
     }
 
@@ -3423,22 +3740,50 @@ fn solve_step(
     b_count: usize,
     lambda: f64,
     linear_solver: LinearSolver,
+    parallel: bool,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
     // Landmark-only BA: H_LL is block-diagonal so each landmark gets an
-    // independent 3×3 solve. No Schur complement needed.
+    // independent 3×3 solve. No Schur complement needed. Every landmark's
+    // solve is independent and writes only its own 3 rows of `delta_l`, so
+    // the parallel path is a direct embarrassingly-parallel dispatch with no
+    // merge step: bit-identical to the serial loop below at any thread
+    // count.
     if p_count == 0 && v_count == 0 && b_count == 0 {
         let mut delta_l = DVector::<f64>::zeros(l_count * 3);
-        for (l, landmark) in system.landmarks.iter().enumerate() {
-            let mut h_ll = landmark.h_ll;
-            if lambda > 0.0 {
-                h_ll[(0, 0)] += lambda;
-                h_ll[(1, 1)] += lambda;
-                h_ll[(2, 2)] += lambda;
+        if parallel && l_count >= PARALLEL_MIN_LANDMARKS {
+            use rayon::prelude::*;
+            let solved: Result<Vec<Vector3<f64>>, BaError> = system
+                .landmarks
+                .par_iter()
+                .map(|landmark| {
+                    let mut h_ll = landmark.h_ll;
+                    if lambda > 0.0 {
+                        h_ll[(0, 0)] += lambda;
+                        h_ll[(1, 1)] += lambda;
+                        h_ll[(2, 2)] += lambda;
+                    }
+                    let h_ll_inv = h_ll.try_inverse().ok_or(BaError::SingularSystem)?;
+                    Ok(-(h_ll_inv * landmark.b_l))
+                })
+                .collect();
+            for (l, dl) in solved?.into_iter().enumerate() {
+                for k in 0..3 {
+                    delta_l[l * 3 + k] = dl[k];
+                }
             }
-            let h_ll_inv = h_ll.try_inverse().ok_or(BaError::SingularSystem)?;
-            let dl: Vector3<f64> = -(h_ll_inv * landmark.b_l);
-            for k in 0..3 {
-                delta_l[l * 3 + k] = dl[k];
+        } else {
+            for (l, landmark) in system.landmarks.iter().enumerate() {
+                let mut h_ll = landmark.h_ll;
+                if lambda > 0.0 {
+                    h_ll[(0, 0)] += lambda;
+                    h_ll[(1, 1)] += lambda;
+                    h_ll[(2, 2)] += lambda;
+                }
+                let h_ll_inv = h_ll.try_inverse().ok_or(BaError::SingularSystem)?;
+                let dl: Vector3<f64> = -(h_ll_inv * landmark.b_l);
+                for k in 0..3 {
+                    delta_l[l * 3 + k] = dl[k];
+                }
             }
         }
         return Ok((DVector::<f64>::zeros(0), delta_l));
@@ -3462,46 +3807,56 @@ fn solve_step(
     //   b_S -= H_PL_l · H_LL_l^{-1} · b_l
     // Both updates only touch the rows/cols of S corresponding to poses
     // that observed this landmark, so we never materialize the full H_PL.
-    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(system.landmarks.len());
-    let mut b_l_cache: Vec<Vector3<f64>> = Vec::with_capacity(system.landmarks.len());
-    for landmark in &system.landmarks {
-        let mut h_ll = landmark.h_ll;
-        if lambda > 0.0 {
-            h_ll[(0, 0)] += lambda;
-            h_ll[(1, 1)] += lambda;
-            h_ll[(2, 2)] += lambda;
-        }
-        let h_ll_inv = h_ll.try_inverse();
-        h_ll_inv_cache.push(h_ll_inv);
-        b_l_cache.push(landmark.b_l);
-        let h_ll_inv = match h_ll_inv {
-            Some(h) => h,
-            None => continue,
-        };
-        // Update S:
-        //   for (p, A) in cross, for (q, B) in cross:
-        //     S[p, q] -= A · h_ll_inv · B^T
-        for (p, a) in &landmark.cross {
-            // Precompute A · h_ll_inv (6×3) once per outer pose.
-            let a_h: Matrix6x3<f64> = a * h_ll_inv;
-            for (q, b) in &landmark.cross {
-                let block: Matrix6<f64> = a_h * b.transpose();
-                for r in 0..6 {
-                    for c in 0..6 {
-                        s[(p * 6 + r, q * 6 + c)] -= block[(r, c)];
+    // Flag-gated, work-gated parallel reduction (see the module's
+    // "Parallelism" section): bit-identical to the plain loop below at any
+    // thread count / chunk size.
+    let (h_ll_inv_cache, b_l_cache): (Vec<Option<Matrix3<f64>>>, Vec<Vector3<f64>>) =
+        if parallel && system.landmarks.len() >= PARALLEL_MIN_LANDMARKS {
+            schur_reduce_parallel(system, lambda, &mut s, &mut b_reduced)
+        } else {
+            let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> =
+                Vec::with_capacity(system.landmarks.len());
+            let mut b_l_cache: Vec<Vector3<f64>> = Vec::with_capacity(system.landmarks.len());
+            for landmark in &system.landmarks {
+                let mut h_ll = landmark.h_ll;
+                if lambda > 0.0 {
+                    h_ll[(0, 0)] += lambda;
+                    h_ll[(1, 1)] += lambda;
+                    h_ll[(2, 2)] += lambda;
+                }
+                let h_ll_inv = h_ll.try_inverse();
+                h_ll_inv_cache.push(h_ll_inv);
+                b_l_cache.push(landmark.b_l);
+                let h_ll_inv = match h_ll_inv {
+                    Some(h) => h,
+                    None => continue,
+                };
+                // Update S:
+                //   for (p, A) in cross, for (q, B) in cross:
+                //     S[p, q] -= A · h_ll_inv · B^T
+                for (p, a) in &landmark.cross {
+                    // Precompute A · h_ll_inv (6×3) once per outer pose.
+                    let a_h: Matrix6x3<f64> = a * h_ll_inv;
+                    for (q, b) in &landmark.cross {
+                        let block: Matrix6<f64> = a_h * b.transpose();
+                        for r in 0..6 {
+                            for c in 0..6 {
+                                s[(p * 6 + r, q * 6 + c)] -= block[(r, c)];
+                            }
+                        }
+                    }
+                    // Update reduced rhs. Schur derivation:
+                    //   S · δ_p = -g_p + H_PL · H_LL^{-1} · g_l,
+                    // so each landmark `l` contributes `+ A · h_ll_inv · b_l`
+                    // to `b_reduced` (which already starts at `-g_p = -b_p`).
+                    let upd: Vector6<f64> = a_h * landmark.b_l;
+                    for k in 0..6 {
+                        b_reduced[p * 6 + k] += upd[k];
                     }
                 }
             }
-            // Update reduced rhs. Schur derivation:
-            //   S · δ_p = -g_p + H_PL · H_LL^{-1} · g_l,
-            // so each landmark `l` contributes `+ A · h_ll_inv · b_l` to
-            // `b_reduced` (which already starts at `-g_p = -b_p`).
-            let upd: Vector6<f64> = a_h * landmark.b_l;
-            for k in 0..6 {
-                b_reduced[p * 6 + k] += upd[k];
-            }
-        }
-    }
+            (h_ll_inv_cache, b_l_cache)
+        };
 
     // Solve the reduced pose system. The dense path uses Cholesky/LU; the
     // sparse path goes through CscCholesky on S as a CSC matrix.
@@ -3554,26 +3909,151 @@ fn solve_step(
 
     // Back-substitute landmark updates:
     //   δ_L[l] = h_ll_inv · (-b_l - Σ_p H_pl^T · δ_p)
+    // Each landmark writes only its own 3 rows of `delta_l` and only reads
+    // the (already solved, read-only from here on) `delta_p` and its own
+    // cache entries, so — like the landmark-only branch above — the
+    // parallel path is a direct embarrassingly-parallel dispatch with no
+    // merge step: bit-identical to the serial loop below at any thread
+    // count.
     let mut delta_l = DVector::<f64>::zeros(system.landmarks.len() * 3);
-    for (l, landmark) in system.landmarks.iter().enumerate() {
-        let h_ll_inv = match h_ll_inv_cache[l] {
-            Some(h) => h,
-            None => continue,
-        };
-        let mut acc = -b_l_cache[l];
-        for (p, a) in &landmark.cross {
-            let dp = delta_p.fixed_rows::<6>(p * 6);
-            let dp_vec: Vector6<f64> = dp.into_owned();
-            let sub: Vector3<f64> = a.transpose() * dp_vec;
-            acc -= sub;
-        }
-        let dl = h_ll_inv * acc;
-        for k in 0..3 {
-            delta_l[l * 3 + k] = dl[k];
+    if parallel && system.landmarks.len() >= PARALLEL_MIN_LANDMARKS {
+        use rayon::prelude::*;
+        delta_l
+            .as_mut_slice()
+            .par_chunks_mut(3)
+            .zip(system.landmarks.par_iter())
+            .zip(h_ll_inv_cache.par_iter())
+            .zip(b_l_cache.par_iter())
+            .for_each(|(((out, landmark), h_ll_inv), b_l)| {
+                let Some(h_ll_inv) = h_ll_inv else {
+                    return;
+                };
+                let mut acc = -*b_l;
+                for (p, a) in &landmark.cross {
+                    let dp = delta_p.fixed_rows::<6>(p * 6);
+                    let dp_vec: Vector6<f64> = dp.into_owned();
+                    let sub: Vector3<f64> = a.transpose() * dp_vec;
+                    acc -= sub;
+                }
+                let dl = *h_ll_inv * acc;
+                out.copy_from_slice(dl.as_slice());
+            });
+    } else {
+        for (l, landmark) in system.landmarks.iter().enumerate() {
+            let h_ll_inv = match h_ll_inv_cache[l] {
+                Some(h) => h,
+                None => continue,
+            };
+            let mut acc = -b_l_cache[l];
+            for (p, a) in &landmark.cross {
+                let dp = delta_p.fixed_rows::<6>(p * 6);
+                let dp_vec: Vector6<f64> = dp.into_owned();
+                let sub: Vector3<f64> = a.transpose() * dp_vec;
+                acc -= sub;
+            }
+            let dl = h_ll_inv * acc;
+            for k in 0..3 {
+                delta_l[l * 3 + k] = dl[k];
+            }
         }
     }
 
     Ok((delta_p, delta_l))
+}
+
+/// Parallel counterpart of the per-landmark Schur reduction in
+/// [`solve_step`] (the `p_count > 0` branch's main loop). Fills
+/// `h_ll_inv_cache` / `b_l_cache` directly in parallel — each landmark's
+/// `3×3` factorization only touches its own output slot, no merge needed —
+/// then updates `s` / `b_reduced` from fixed-size landmark chunks
+/// ([`PARALLEL_LANDMARK_CHUNK`]) the same way
+/// [`assemble_mono_observations_parallel`] updates the assembly
+/// accumulators: within a chunk, every landmark's pose-pair contributions
+/// (its `S[p, q] -= …` blocks and its `b_reduced[p] += …` update) are
+/// computed concurrently — a pure function of that landmark's cached
+/// inverse, `b_l`, and cross blocks, collected into a `(Vec<(p, q, block)>,
+/// Vec<(p, upd)>)` pair per landmark — and then folded into `s` /
+/// `b_reduced` by a single serial pass, landmark by landmark in ascending
+/// index order, before the next chunk starts. `s` and `b_reduced` are
+/// disjoint arrays, so grouping a landmark's `S` updates before its
+/// `b_reduced` update (rather than interleaving them per pose as the serial
+/// loop does) does not change either accumulator's own summation order —
+/// only operations that target the *same* memory location are
+/// order-sensitive for floating point, and each one's order here is exactly
+/// the serial loop's. The result is therefore bit-identical to the serial
+/// path at any thread count or chunk size.
+fn schur_reduce_parallel(
+    system: &NormalEquationsBa,
+    lambda: f64,
+    s: &mut DMatrix<f64>,
+    b_reduced: &mut DVector<f64>,
+) -> (Vec<Option<Matrix3<f64>>>, Vec<Vector3<f64>>) {
+    use rayon::prelude::*;
+
+    let (h_ll_inv_cache, b_l_cache): (Vec<Option<Matrix3<f64>>>, Vec<Vector3<f64>>) = system
+        .landmarks
+        .par_iter()
+        .map(|landmark| {
+            let mut h_ll = landmark.h_ll;
+            if lambda > 0.0 {
+                h_ll[(0, 0)] += lambda;
+                h_ll[(1, 1)] += lambda;
+                h_ll[(2, 2)] += lambda;
+            }
+            (h_ll.try_inverse(), landmark.b_l)
+        })
+        .unzip();
+
+    let mut start = 0;
+    while start < system.landmarks.len() {
+        let end = (start + PARALLEL_LANDMARK_CHUNK).min(system.landmarks.len());
+
+        #[allow(clippy::type_complexity)]
+        let (s_updates, b_updates): (
+            Vec<Vec<(usize, usize, Matrix6<f64>)>>,
+            Vec<Vec<(usize, Vector6<f64>)>>,
+        ) = system.landmarks[start..end]
+            .par_iter()
+            .zip(h_ll_inv_cache[start..end].par_iter())
+            .map(|(landmark, h_ll_inv)| {
+                let mut s_acc = Vec::new();
+                let mut b_acc = Vec::new();
+                let Some(h_ll_inv) = h_ll_inv else {
+                    return (s_acc, b_acc);
+                };
+                for (p, a) in &landmark.cross {
+                    let a_h: Matrix6x3<f64> = a * h_ll_inv;
+                    for (q, b) in &landmark.cross {
+                        let block: Matrix6<f64> = a_h * b.transpose();
+                        s_acc.push((*p, *q, block));
+                    }
+                    let upd: Vector6<f64> = a_h * landmark.b_l;
+                    b_acc.push((*p, upd));
+                }
+                (s_acc, b_acc)
+            })
+            .unzip();
+        let s_updates: Vec<(usize, usize, Matrix6<f64>)> =
+            s_updates.into_iter().flatten().collect();
+        let b_updates: Vec<(usize, Vector6<f64>)> = b_updates.into_iter().flatten().collect();
+
+        for (p, q, block) in s_updates {
+            for r in 0..6 {
+                for c in 0..6 {
+                    s[(p * 6 + r, q * 6 + c)] -= block[(r, c)];
+                }
+            }
+        }
+        for (p, upd) in b_updates {
+            for k in 0..6 {
+                b_reduced[p * 6 + k] += upd[k];
+            }
+        }
+
+        start = end;
+    }
+
+    (h_ll_inv_cache, b_l_cache)
 }
 
 fn project_pinhole(intrinsics: &(f64, f64, f64, f64), xc: &Point3<f64>) -> Option<Point2<f64>> {
@@ -3968,5 +4448,208 @@ mod imu_gradient_tests {
                 "coordinate {coordinate}: analytic={analytic} numerical={numerical} tolerance={tolerance}"
             );
         }
+    }
+}
+
+/// Tests for [`BaConfig::parallel`] (see the module's "Parallelism"
+/// section): the serial and parallel assembly / Schur-reduction /
+/// back-substitution paths must agree, and the parallel path must be
+/// deterministic. The synthetic problem is sized past
+/// `PARALLEL_MIN_OBSERVATIONS` / `PARALLEL_MIN_LANDMARKS` so these tests
+/// actually exercise the parallel dispatch rather than falling through the
+/// work gate to the serial loops.
+#[cfg(test)]
+mod parallel_ba_tests {
+    use super::*;
+    use nalgebra::UnitQuaternion;
+
+    /// Deterministic `[0, 1)` pseudo-random value (GLSL-style sine hash) —
+    /// avoids pulling in a `rand` dependency just to scatter synthetic
+    /// points/poses reproducibly.
+    fn pseudo_rand(seed: u64) -> f64 {
+        let x = (seed as f64 + 1.0) * 12.9898;
+        let y = x.sin() * 43758.5453;
+        y - y.floor()
+    }
+
+    /// Build a synthetic multi-camera, multi-landmark monocular BA problem:
+    /// `num_cameras` cameras translated along a horizontal baseline (plus a
+    /// small yaw each) all observe every one of `num_landmarks` landmarks
+    /// scattered in front of them, so every camera/landmark pair is a valid,
+    /// positive-depth observation. The first two poses are fixed (anchor +
+    /// scale, per the module doc's gauge-fixing rule); every other pose and
+    /// every landmark is then nudged away from the ground truth that
+    /// generated the observations by a small deterministic offset, so LM has
+    /// a real (if easy, well-conditioned) problem to converge on rather than
+    /// starting already at the optimum.
+    fn build_synthetic_ba(num_cameras: usize, num_landmarks: usize) -> BundleAdjustment {
+        let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut ba = BundleAdjustment::new(camera.clone());
+
+        let center = (num_cameras as f64 - 1.0) / 2.0;
+        let gt_poses: Vec<Pose> = (0..num_cameras)
+            .map(|i| {
+                let baseline = (i as f64 - center) * 0.4;
+                let yaw = (i as f64 - center) * 0.02;
+                let rotation = UnitQuaternion::from_euler_angles(0.0, yaw, 0.0);
+                let translation = Vector3::new(-baseline, 0.0, 0.0);
+                Pose::from_world_to_camera(rotation, translation)
+            })
+            .collect();
+        let gt_points: Vec<Point3<f64>> = (0..num_landmarks)
+            .map(|j| {
+                let x = (pseudo_rand(j as u64 * 3) - 0.5) * 6.0;
+                let y = (pseudo_rand(j as u64 * 3 + 1) - 0.5) * 6.0;
+                let z = 8.0 + pseudo_rand(j as u64 * 3 + 2) * 4.0;
+                Point3::new(x, y, z)
+            })
+            .collect();
+
+        for (i, pose) in gt_poses.iter().enumerate() {
+            ba.add_pose(i as u64, pose.clone());
+        }
+        for (j, point) in gt_points.iter().enumerate() {
+            ba.add_landmark(1_000_000 + j as u64, *point);
+        }
+        for (i, pose) in gt_poses.iter().enumerate() {
+            for (j, point) in gt_points.iter().enumerate() {
+                let xc = pose.transform_world_point(point);
+                let xy = camera
+                    .project(&xc)
+                    .expect("synthetic landmarks stay in front of every camera");
+                ba.add_observation(BaObservation {
+                    keyframe_id: i as u64,
+                    landmark_id: 1_000_000 + j as u64,
+                    xy,
+                });
+            }
+        }
+
+        ba.fix_pose(0);
+        ba.fix_pose(1);
+
+        // Nudge every non-fixed pose off ground truth.
+        for i in 2..num_cameras {
+            let dxi = Vector6::new(
+                (pseudo_rand(i as u64 * 7) - 0.5) * 0.02,
+                (pseudo_rand(i as u64 * 7 + 1) - 0.5) * 0.02,
+                (pseudo_rand(i as u64 * 7 + 2) - 0.5) * 0.02,
+                (pseudo_rand(i as u64 * 7 + 3) - 0.5) * 0.01,
+                (pseudo_rand(i as u64 * 7 + 4) - 0.5) * 0.01,
+                (pseudo_rand(i as u64 * 7 + 5) - 0.5) * 0.01,
+            );
+            let pose = ba.poses.get_mut(&(i as u64)).expect("pose was just added");
+            pose.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&dxi));
+        }
+        // Nudge every landmark off ground truth.
+        for j in 0..num_landmarks {
+            let d = Vector3::new(
+                (pseudo_rand(j as u64 * 11) - 0.5) * 0.05,
+                (pseudo_rand(j as u64 * 11 + 1) - 0.5) * 0.05,
+                (pseudo_rand(j as u64 * 11 + 2) - 0.5) * 0.05,
+            );
+            let point = ba
+                .landmarks
+                .get_mut(&(1_000_000 + j as u64))
+                .expect("landmark was just added");
+            *point = Point3::from(point.coords + d);
+        }
+
+        ba
+    }
+
+    /// `num_landmarks` clears `PARALLEL_MIN_LANDMARKS` and `num_cameras *
+    /// num_landmarks` clears `PARALLEL_MIN_OBSERVATIONS`, so every parallel
+    /// path in the module (assembly, Schur reduction, back-substitution) is
+    /// actually dispatched by these tests instead of falling through the
+    /// work gate.
+    const TEST_CAMERAS: usize = 6;
+    const TEST_LANDMARKS: usize = 2_500;
+
+    #[test]
+    fn parallel_config_defaults_to_off() {
+        assert!(!BaConfig::default().parallel);
+    }
+
+    #[test]
+    fn serial_and_parallel_converge_to_the_same_result() {
+        let mut ba_serial = build_synthetic_ba(TEST_CAMERAS, TEST_LANDMARKS);
+        let mut ba_parallel = ba_serial.clone();
+
+        let serial_config = BaConfig {
+            max_iterations: 8,
+            parallel: false,
+            ..BaConfig::default()
+        };
+        let parallel_config = BaConfig {
+            parallel: true,
+            ..serial_config
+        };
+
+        let result_serial = ba_serial
+            .optimize(&serial_config)
+            .expect("serial BA should solve the synthetic problem");
+        let result_parallel = ba_parallel
+            .optimize(&parallel_config)
+            .expect("parallel BA should solve the synthetic problem");
+
+        assert!(result_serial.converged, "serial run should converge");
+        assert!(result_parallel.converged, "parallel run should converge");
+
+        // The parallel assembly / Schur-reduction / back-substitution paths
+        // change only *how* the normal equations are computed, never the
+        // summation order (see the module's "Parallelism" section), so the
+        // two runs must land on bit-identical states -- a far tighter check
+        // than the "~1e-9 relative" bar a reassociating design would need.
+        assert_eq!(
+            result_serial.final_cost, result_parallel.final_cost,
+            "final cost must match exactly"
+        );
+        assert_eq!(
+            result_serial.iterations.len(),
+            result_parallel.iterations.len(),
+            "iteration count must match exactly"
+        );
+        assert_eq!(
+            ba_serial.poses, ba_parallel.poses,
+            "poses must match exactly"
+        );
+        assert_eq!(
+            ba_serial.landmarks, ba_parallel.landmarks,
+            "landmarks must match exactly"
+        );
+    }
+
+    #[test]
+    fn parallel_path_is_deterministic_across_runs() {
+        let ba = build_synthetic_ba(TEST_CAMERAS, TEST_LANDMARKS);
+        let mut ba_run_a = ba.clone();
+        let mut ba_run_b = ba.clone();
+
+        let config = BaConfig {
+            max_iterations: 8,
+            parallel: true,
+            ..BaConfig::default()
+        };
+
+        let result_a = ba_run_a
+            .optimize(&config)
+            .expect("parallel BA should solve the synthetic problem");
+        let result_b = ba_run_b
+            .optimize(&config)
+            .expect("parallel BA should solve the synthetic problem");
+
+        assert_eq!(
+            result_a.final_cost, result_b.final_cost,
+            "repeated parallel runs must produce bitwise-identical cost"
+        );
+        assert_eq!(
+            ba_run_a.poses, ba_run_b.poses,
+            "repeated parallel runs must produce bitwise-identical poses"
+        );
+        assert_eq!(
+            ba_run_a.landmarks, ba_run_b.landmarks,
+            "repeated parallel runs must produce bitwise-identical landmarks"
+        );
     }
 }
