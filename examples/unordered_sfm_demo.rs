@@ -299,6 +299,9 @@ struct Args {
     refine_distortion: bool,
     colmap_style: bool,
     structureless_registration: bool,
+    /// Raise above 128 to opt into the COLMAP-style confidence-based
+    /// adaptive PnP RANSAC budget for large correspondence sets.
+    pnp_max_iterations: usize,
     filter_images: bool,
     verification_mode: VerificationMode,
     /// `Incremental` (default): the existing grow-from-seed mapper.
@@ -401,6 +404,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_distortion = false;
     let mut colmap_style = false;
     let mut structureless_registration = false;
+    let mut pnp_max_iterations = 128usize;
     let mut filter_images = false;
     let mut verification_mode = VerificationMode::Legacy;
     let mut track_source = TrackSource::UnionFind;
@@ -467,6 +471,9 @@ fn parse_args() -> Result<Args, String> {
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--structureless-registration" => structureless_registration = true,
+            "--pnp-max-iterations" => {
+                pnp_max_iterations = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             "--mapper" => {
                 mapper = match a.remove(i + 1).as_str() {
                     "incremental" => MapperKind::Incremental,
@@ -552,6 +559,7 @@ fn parse_args() -> Result<Args, String> {
         refine_distortion,
         colmap_style,
         structureless_registration,
+        pnp_max_iterations,
         mapper,
         filter_images,
         verification_mode,
@@ -1526,6 +1534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         colmap_style_mapper: args.colmap_style,
         structureless_registration: args.structureless_registration,
+        pnp_max_iterations: args.pnp_max_iterations,
         filter_images: args.filter_images,
         track_source: args.track_source,
         ..IncrementalSfmConfig::default()

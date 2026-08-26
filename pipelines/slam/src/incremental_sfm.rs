@@ -119,6 +119,10 @@ pub struct IncrementalSfmConfig {
     pub ba_config: BaConfig,
     /// Minimal solver the PnP RANSAC uses to register each new image.
     pub pnp_solver: PnpSolver,
+    /// Maximum absolute-pose RANSAC iterations. The dynamic termination
+    /// (confidence 0.999) usually exits far earlier; this cap governs
+    /// heavily contaminated correspondence sets.
+    pub pnp_max_iterations: usize,
     /// Post-BA track-refinement rounds. Each round removes observations that
     /// reproject worse than `max_reprojection_error_px` after the global BA —
     /// the symptom of a contaminated union-find track whose merged 3D point
@@ -392,6 +396,11 @@ impl Default for IncrementalSfmConfig {
                 ..BaConfig::default()
             },
             pnp_solver: PnpSolver::default(),
+            // Legacy default: fixed 128-sample PnP with no dynamic
+            // termination. Raising this above 128 opts into the COLMAP-style
+            // confidence-based adaptive budget for large correspondence
+            // sets.
+            pnp_max_iterations: 128,
             track_filter_iterations: 2,
             retriangulate: false,
             // COLMAP IncrementalMapper defaults (off unless colmap_style_mapper).
@@ -1551,7 +1560,18 @@ fn grow_from_seed(
             PnpSolver::P3p => PnPRansac {
                 pose_estimator: P3PGrunert,
                 pose_refiner: Some(GaussNewtonPoseRefiner::default()),
-                iterations: 128,
+                // COLMAP-style dynamic budget: `iterations` is a fail-safe
+                // cap; the search exits once the best model's inlier ratio
+                // implies 99.9% registration confidence. Large
+                // correspondence sets (repetitive-texture scenes where the
+                // inlier ratio can be tiny) need samples proportional to
+                // their size; small clean sets keep the historical budget.
+                iterations: if corrs.len() >= 64 {
+                    config.pnp_max_iterations
+                } else {
+                    128
+                },
+                confidence: (config.pnp_max_iterations > 128).then_some(0.999),
                 reprojection_threshold: config.max_reprojection_error_px,
                 seed: 7,
                 early_stop_min_iterations: 0,
@@ -1560,6 +1580,7 @@ fn grow_from_seed(
             .estimate(&corrs, &cam),
             PnpSolver::Dlt => PnPRansac {
                 reprojection_threshold: config.max_reprojection_error_px,
+                confidence: Some(0.999),
                 ..PnPRansac::default()
             }
             .estimate(&corrs, &cam),
@@ -1710,7 +1731,8 @@ fn post_refinement_registration_pass(
             PnpSolver::P3p => PnPRansac {
                 pose_estimator: P3PGrunert,
                 pose_refiner: Some(GaussNewtonPoseRefiner::default()),
-                iterations: 128,
+                iterations: config.pnp_max_iterations,
+                confidence: Some(0.999),
                 reprojection_threshold: config.max_reprojection_error_px,
                 seed: 7,
                 early_stop_min_iterations: 0,

@@ -93,6 +93,12 @@ pub struct PnPRansac<P = DltPnP, R = GaussNewtonPoseRefiner> {
     /// high-consensus PnP pairs from spending the full budget scoring
     /// near-identical hypotheses.
     pub early_stop_inlier_ratio: Option<f64>,
+    /// COLMAP-style dynamic iteration budget: when set, `iterations` becomes
+    /// a *maximum* cap and the search stops as soon as the best model's
+    /// inlier ratio implies, with this confidence, that enough samples have
+    /// been drawn (`needed = log(1-conf)/log(1-w^s)`, standard RANSAC
+    /// termination). `None` keeps the fixed budget.
+    pub confidence: Option<f64>,
 }
 
 impl Default for PnPRansac {
@@ -100,6 +106,7 @@ impl Default for PnPRansac {
         Self {
             pose_estimator: DltPnP::default(),
             pose_refiner: Some(GaussNewtonPoseRefiner::default()),
+            confidence: None,
             iterations: 128,
             reprojection_threshold: 4.0,
             seed: 7,
@@ -330,6 +337,10 @@ where
         };
         let expansion_denom = expansion_iters.saturating_sub(1).max(1);
 
+        // Dynamic RANSAC termination (COLMAP `UpdateNumIterations`): with a
+        // confidence target, the required sample count shrinks as the best
+        // model's inlier ratio grows.
+        let mut required_iterations = self.iterations.max(1);
         for iteration in 0..self.iterations {
             // PROSAC shrinking sample-set: m_k expands linearly from
             // `sample_size` to `n`. When an early-stop guard is active,
@@ -374,6 +385,27 @@ where
                 self.early_stop_inlier_ratio,
             ) {
                 break;
+            }
+
+            if let Some(confidence) = self.confidence {
+                let w = if n > 0 {
+                    best_inliers.len() as f64 / n as f64
+                } else {
+                    0.0
+                };
+                if w > 0.0 && w < 1.0 {
+                    // needed = log(1-confidence) / log(1 - w^s)
+                    let denom = (1.0 - w.powi(sample_size as i32)).ln();
+                    if denom < -1e-12 {
+                        let needed = ((1.0 - confidence).ln() / denom).ceil().max(1.0) as usize;
+                        required_iterations = required_iterations.min(needed);
+                    }
+                } else if w >= 1.0 {
+                    required_iterations = iteration + 1; // perfect consensus
+                }
+                if iteration + 1 >= required_iterations {
+                    break;
+                }
             }
         }
 
@@ -548,6 +580,7 @@ mod tests {
             },
             pose_refiner: None::<crate::pnp::GaussNewtonPoseRefiner>,
             iterations: 8,
+            confidence: None,
             reprojection_threshold: 1.0e-6,
             seed: 3,
             early_stop_min_iterations: 0,
@@ -640,6 +673,7 @@ mod tests {
             reprojection_threshold: 2.0,
             seed: 11,
             early_stop_min_iterations: 0,
+            confidence: None,
             early_stop_inlier_ratio: None,
         };
 
@@ -685,6 +719,7 @@ mod tests {
             reprojection_threshold: 1.0e-3,
             seed: 7,
             early_stop_min_iterations: 0,
+            confidence: None,
             early_stop_inlier_ratio: None,
         };
         let unweighted = ransac.estimate(&correspondences, &camera).unwrap();
@@ -785,6 +820,7 @@ mod tests {
             reprojection_threshold: 2.0,
             seed: 1234,
             early_stop_min_iterations: 0,
+            confidence: None,
             early_stop_inlier_ratio: None,
         };
 
@@ -842,6 +878,7 @@ mod tests {
             reprojection_threshold: 1.0e-3,
             seed: 99,
             early_stop_min_iterations: 0,
+            confidence: None,
             early_stop_inlier_ratio: None,
         };
 
