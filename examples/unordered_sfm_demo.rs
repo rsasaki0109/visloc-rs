@@ -138,7 +138,7 @@
 //! `verify_pairs`'s doc comment and `docs/colmap_port_plan.md`'s M1/M1.1
 //! sections.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -212,6 +212,12 @@ enum PairSource {
     Vlad,
     /// Hierarchical-k-means vocab-tree retrieval (M3).
     VocabTree,
+    /// COLMAP's `TransitivePairGenerator` port: propose pairs through the
+    /// *verified-match* graph — images that share a matched partner but have
+    /// no direct pair yet get proposed (`pairing.cc`). Runs a vocab-tree
+    /// base pass, then expands transitively for
+    /// [`TRANSITIVE_ROUNDS`] rounds.
+    Transitive,
 }
 
 impl std::str::FromStr for PairSource {
@@ -220,8 +226,9 @@ impl std::str::FromStr for PairSource {
         match s {
             "vlad" => Ok(Self::Vlad),
             "vocab-tree" => Ok(Self::VocabTree),
+            "transitive" => Ok(Self::Transitive),
             other => Err(format!(
-                "unknown --pair-source {other:?} (expected vlad|vocab-tree)"
+                "unknown --pair-source {other:?} (expected vlad|vocab-tree|transitive)"
             )),
         }
     }
@@ -804,9 +811,21 @@ fn candidate_pairs_vocab_tree(
     )
 }
 
+/// How many transitive-expansion rounds
+/// ([`PairSource::Transitive`], COLMAP's `TransitivePairGenerator`) run
+/// after the vocab-tree base pass. Two rounds cover the common
+/// "bridge image chains a-b-c and b-d-e" real-scene topology; each round
+/// only proposes pairs not proposed before, so cost is bounded by the
+/// verified-graph neighbourhood size.
+const TRANSITIVE_ROUNDS: usize = 2;
+
 /// Candidate image pairs `(i, j)` with `i < j` — dispatches on
 /// [`PairSource`] (`docs/colmap_port_plan.md`'s M3 A/B switch); `exhaustive`
 /// overrides either source, matching pre-M3 behaviour.
+/// [`PairSource::Transitive`] returns its *base* pass here (vocab-tree);
+/// the transitive expansion happens in [`expand_transitive`] after those
+/// base pairs are verified, mirroring COLMAP's generator running against
+/// an existing match table.
 fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> {
     match args.pair_source {
         PairSource::Vlad => candidate_pairs_vlad(
@@ -815,7 +834,7 @@ fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> 
             args.retrieval_topk,
             args.exhaustive,
         ),
-        PairSource::VocabTree => candidate_pairs_vocab_tree(
+        PairSource::VocabTree | PairSource::Transitive => candidate_pairs_vocab_tree(
             features,
             args.vocab_tree_branching,
             args.vocab_tree_depth,
@@ -823,6 +842,44 @@ fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> 
             args.exhaustive,
         ),
     }
+}
+
+/// One round of COLMAP's `TransitivePairGenerator` (`src/colmap/pairing.cc`):
+/// from the verified-match adjacency, propose every `(i, k)` with `i < k`
+/// that shares a common matched partner `j` but has no direct pair yet.
+fn expand_transitive(
+    pairwise: &[PairwiseMatches],
+    already_proposed: &HashSet<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    let mut neighbors: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for p in pairwise {
+        if p.matches.is_empty() {
+            continue;
+        }
+        neighbors.entry(p.image_i).or_default().insert(p.image_j);
+        neighbors.entry(p.image_j).or_default().insert(p.image_i);
+    }
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut seen = already_proposed.clone();
+    for (&i, ni) in &neighbors {
+        for &j in ni {
+            // Partners of partners.
+            let Some(nj) = neighbors.get(&j) else {
+                continue;
+            };
+            for &k in nj {
+                if k == i {
+                    continue;
+                }
+                let key = if i < k { (i, k) } else { (k, i) };
+                if seen.insert(key) {
+                    out.push(key);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Per-`ConfigurationType` pair counts from the COLMAP-style verifier, for
@@ -854,6 +911,17 @@ impl VerificationStats {
             ConfigurationType::Multiple => self.multiple += 1,
             ConfigurationType::Undefined => {}
         }
+    }
+
+    fn merge(&mut self, other: &VerificationStats) {
+        self.calibrated += other.calibrated;
+        self.uncalibrated += other.uncalibrated;
+        self.planar += other.planar;
+        self.panoramic += other.panoramic;
+        self.planar_or_panoramic += other.planar_or_panoramic;
+        self.watermark += other.watermark;
+        self.degenerate += other.degenerate;
+        self.multiple += other.multiple;
     }
 
     fn total(&self) -> usize {
@@ -1456,11 +1524,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match args.pair_source {
                 PairSource::Vlad => "VLAD top-k",
                 PairSource::VocabTree => "vocab-tree",
+                PairSource::Transitive => "transitive (vocab-tree base)",
             }
         },
     );
 
-    let (mut pairwise, verification_stats) = verify_pairs(
+    let (mut pairwise, mut verification_stats) = verify_pairs(
         &features,
         &args.camera,
         &candidates,
@@ -1469,6 +1538,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.verification_mode,
         &pair_matcher,
     );
+    if args.pair_source == PairSource::Transitive {
+        let mut all_proposed: HashSet<(usize, usize)> = candidates.iter().copied().collect();
+        for _ in 0..TRANSITIVE_ROUNDS {
+            let extension = expand_transitive(&pairwise, &all_proposed);
+            if extension.is_empty() {
+                break;
+            }
+            println!("transitive expansion: {} new pairs", extension.len());
+            extension.iter().for_each(|p| {
+                all_proposed.insert(*p);
+            });
+            let (more, stats) = verify_pairs(
+                &features,
+                &args.camera,
+                &extension,
+                args.match_ratio,
+                args.min_matches,
+                args.verification_mode,
+                &pair_matcher,
+            );
+            verification_stats.merge(&stats);
+            pairwise.extend(more);
+        }
+    }
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
     println!(
         "verified {} / {} pairs, {} inlier correspondences",

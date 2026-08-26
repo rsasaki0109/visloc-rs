@@ -455,19 +455,51 @@ pub fn average_positions(
         })
         .map(|(i, _)| i);
 
-    // ---- Graduated Huber IRLS ----------------------------------------------
-    // Bent shapes come from noisy bearings pulling the least squares equally
-    // with good ones. Graduated non-convexity (GNC): solve repeatedly while
-    // RELAXING the Huber threshold each round, starting tight (robust against
-    // the initial bent guess) and ending loose (final polish approaches the
-    // plain least-squares optimum on the now-clean bearing set). Bearings are
-    // never hard-deleted; their weights soften as their residuals demand.
-    const ROUNDS: usize = 6;
-    let thresholds: Vec<f64> = (0..ROUNDS)
-        .map(|round| 0.05 * (10.0f64).powf(round as f64 / (ROUNDS - 1) as f64))
-        .collect(); // ~0.05 rad (2.9°) → ~0.5 rad (28.6°)
+    // ---- Trust-hierarchy graduated Huber ------------------------------------
+    // Bent shapes come from systematically wrong bearings pulling the least
+    // squares; the errors are not outlier-like, so plain robust weighting
+    // cannot separate them. What does distinguish them is TRUST: a maximum-
+    // weight spanning tree (Kruskal) marks the edges most likely to be right.
+    // We therefore run graduated Huber rounds where every edge's threshold is
+    // scaled by its trust tier — tree edges tolerate twice the angular error
+    // of off-tree edges at every round — so systematically wrong off-tree
+    // edges are demoted FIRST while the trusted skeleton survives to anchor
+    // the shape. On clean data nothing ever exceeds even the tight threshold,
+    // making the whole schedule an identity.
+    let mut parent: Vec<usize> = (0..members.len()).collect();
+    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+        let mut x = x;
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let local_of: HashMap<usize, usize> =
+        members.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut tree_flags = vec![false; bearings.len()];
+    {
+        let mut order: Vec<usize> = (0..bearings.len()).collect();
+        order.sort_by(|&a, &b| {
+            bearings[b]
+                .weight
+                .total_cmp(&bearings[a].weight)
+                .then_with(|| a.cmp(&b))
+        });
+        for &k in &order {
+            let li = *local_of.get(&bearings[k].i).unwrap();
+            let lj = *local_of.get(&bearings[k].j).unwrap();
+            let (ri, rj) = (find(&mut parent, li), find(&mut parent, lj));
+            if ri != rj {
+                parent[ri] = rj;
+                tree_flags[k] = true;
+            }
+        }
+    }
 
+    const WEIGHT_FLOOR: f64 = 1e-6;
     let mut bearing_weights: Vec<f64> = bearings.iter().map(|b| b.weight.max(1.0)).collect();
+
     let mut rhs: HashMap<usize, Vector3<f64>> = HashMap::new();
     if let Some(k) = scale_index {
         let b = &bearings[k];
@@ -555,21 +587,27 @@ pub fn average_positions(
     };
 
     let mut positions = solve_cg(bearing_weights.as_slice(), cg_iterations);
-    for (round, &threshold) in thresholds.iter().enumerate() {
-        // Re-measure angular errors under the current solution and re-weight
-        // every bearing with the round's Huber factor.
+
+    // Graduated rounds: the per-edge effective threshold is the round's base
+    // relaxed over ~0.05 rad → ~0.4 rad, doubled for tree-tier edges.
+    const ROUNDS: usize = 8;
+    let bases: Vec<f64> = (0..ROUNDS)
+        .map(|round| 0.05 * (8.0f64).powf(round as f64 / (ROUNDS - 1) as f64))
+        .collect();
+    for (round, &base) in bases.iter().enumerate() {
         let mut changed = false;
         for k in 0..bearings.len() {
             if Some(k) == scale_index {
                 continue;
             }
+            let threshold = if tree_flags[k] { base * 2.0 } else { base };
             let err = bearing_angle_error(&positions, k);
             let factor = if err.is_finite() && err > threshold {
-                threshold / err
+                (threshold / err).max(WEIGHT_FLOOR / bearing_weights[k].max(1e-12))
             } else {
                 1.0
             };
-            let target = bearings[k].weight.max(1.0) * factor;
+            let target = bearing_weights[k] * factor;
             if (target - bearing_weights[k]).abs() > 1e-9 {
                 bearing_weights[k] = target;
                 changed = true;
@@ -583,13 +621,13 @@ pub fn average_positions(
                 .collect();
             errs.sort_by(|a, b| a.total_cmp(b));
             eprintln!(
-                "global-sfm debug: position round {round} threshold={:.3} rad                  median residual {:.2} deg",
-                threshold,
+                "global-sfm debug: position round {round} base={:.3} rad                  median residual {:.2} deg",
+                base,
                 errs.get(errs.len() / 2).copied().unwrap_or(f64::NAN).to_degrees()
             );
         }
-        if !changed && round + 1 < thresholds.len() {
-            continue;
+        if !changed {
+            break;
         }
     }
 

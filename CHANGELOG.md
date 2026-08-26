@@ -4,9 +4,16 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **COLMAP `TransitivePairGenerator` port (`--pair-source transitive`) — pairing module 60% → 70% (2026-08-26).**
+  - Faithful port of `src/colmap/pairing.cc`: after a vocab-tree base pass is verified, images that share a common matched partner but have no direct pair yet are proposed (`expand_transitive`), for up to two expansion rounds (`TRANSITIVE_ROUNDS`), never re-proposing a pair.
+  - `VerificationStats::merge` accumulates classifier counts across passes.
+  - Measured on ETH3D courtyard: base pass 703 candidates → 210 verified pairs after expansion (+cross-component bridge proposals); incremental registration unchanged at **21/38** — decisive negative finding: pair *supply* is not the binding constraint for the unregistered images; their cross-component structure does not chain into tracks under NN+ratio matching (the M5/M6 LightGlue motivation, model not present locally so the joint-matcher A/B remains open).
+
 ### Changed
 
-- **Global-SfM position stage: hard-trim IRLS replaced with graduated Huber non-convexity — measured parity, diagnosis recorded (2026-08-26).** `average_positions` now runs 6 graduated rounds relaxing the Huber threshold ~2.9°→~28.6° with soft per-bearing weights instead of hard-deleting bearings above a fixed angle. Measured on ETH3D courtyard (SIFT, global mapper): **identical outcome to the hard trim** (37/38 registered, Sim(3) centre RMSE 477.5 cm vs 477.6 cm) with all 127 bearings retained rather than 29. Decisive negative finding: courtyard's bearing errors are NOT outlier-distributed — they are systematic (chirality-ambiguous essential estimates on repetitive façades survive both trimming and soft weighting), so robust positioning alone cannot straighten the shape. The binding lever remains upstream edge quality: chirality-hardened relative-pose estimation and/or detector-side affine-covariant sampling. Kept because the graduated form is strictly more principled (no information deleted) and is the substrate the eventual edge-quality fix needs.
+- **Global-SfM position stage: trust-hierarchy graduated Huber IRLS (spanning-tree tiers) — internal consistency ×3, GT parity; basin-flip diagnosis recorded (2026-08-26).** `average_positions` now builds a maximum-weight spanning tree (Kruskal) over the bearing graph and runs 8 graduated Huber rounds (~2.9°→~22.9°) where tree-tier edges tolerate **double** the angular error of off-tree edges each round, so systematically wrong off-tree bearings are demoted first while the trusted skeleton anchors the topology. Measured on ETH3D courtyard (SIFT, global mapper): median bearing residual **69.5°→21.3°** and mean reprojection **509 px→59 px** (×3 internal-consistency gain) at identical GT outcome (37/38, Sim(3) RMSE 471 cm vs 477 cm). Clean-data tests are bit-identical to plain LS because nothing exceeds even the tight threshold. Decisive negative finding: courtyard's bearing errors are NOT outlier-distributed — they are systematic (chirality-ambiguous essential estimates on repetitive façades survive both trimming and soft weighting), so robust positioning alone cannot straighten the shape. The binding lever remains upstream edge quality: chirality-hardened relative-pose estimation and/or detector-side affine-covariant sampling. Kept because the graduated form is strictly more principled (no information deleted) and is the substrate the eventual edge-quality fix needs.
 
 
 ### Added
