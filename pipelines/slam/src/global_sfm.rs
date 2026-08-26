@@ -72,6 +72,69 @@ pub struct GlobalSfmEdge {
     /// re-estimated under globally-averaged rotations. Empty in synthetic
     /// fixtures that only exercise averaging.
     pub inlier_sample: Vec<(Point2<f64>, Point2<f64>)>,
+    /// Optional runner-up relative rotation from chirality-ambiguous essential
+    /// decomposition. Rotation averaging picks primary vs alternate by
+    /// agreement with the emerging global solution.
+    pub rotation_alt: Option<UnitQuaternion<f64>>,
+    /// Bearing paired with [`Self::rotation_alt`] (camera-j centre in cam-i).
+    pub direction_alt: Option<Vector3<f64>>,
+}
+
+impl GlobalSfmEdge {
+    /// Relative rotation step leaving `from` under the primary hypothesis.
+    fn step_primary(&self, from: usize) -> UnitQuaternion<f64> {
+        if self.image_i == from {
+            self.rotation_ij
+        } else {
+            self.rotation_ij.inverse()
+        }
+    }
+
+    /// Relative rotation step leaving `from`, choosing primary or alternate
+    /// by which better predicts `to_hint` when supplied.
+    fn step_adaptive(
+        &self,
+        from: usize,
+        from_q: UnitQuaternion<f64>,
+        to_hint: Option<UnitQuaternion<f64>>,
+    ) -> UnitQuaternion<f64> {
+        let primary = self.step_primary(from);
+        let Some(hint) = to_hint else {
+            return primary;
+        };
+        let Some(r_alt) = self.rotation_alt else {
+            return primary;
+        };
+        let alt = if self.image_i == from {
+            r_alt
+        } else {
+            r_alt.inverse()
+        };
+        let primary_pred = primary * from_q;
+        let alt_pred = alt * from_q;
+        if (alt_pred.inverse() * hint).angle() + 1e-12 < (primary_pred.inverse() * hint).angle() {
+            alt
+        } else {
+            primary
+        }
+    }
+
+    /// Select primary or alternate (R, direction) under current global
+    /// orientations of both endpoints.
+    fn select_pose(
+        &self,
+        qi: UnitQuaternion<f64>,
+        qj: UnitQuaternion<f64>,
+    ) -> (UnitQuaternion<f64>, Vector3<f64>) {
+        let primary_err = ((self.rotation_ij * qi).inverse() * qj).angle();
+        if let (Some(r_alt), Some(d_alt)) = (self.rotation_alt, self.direction_alt) {
+            let alt_err = ((r_alt * qi).inverse() * qj).angle();
+            if alt_err + 1e-12 < primary_err {
+                return (r_alt, d_alt);
+            }
+        }
+        (self.rotation_ij, self.direction_ij)
+    }
 }
 
 /// Result of the global pose solve.
@@ -243,12 +306,7 @@ fn build_adjacency(num_images: usize, edges: &[GlobalSfmEdge]) -> Option<Adjacen
 /// Rotation step along an edge leaving `from`: composes onto `from`'s
 /// orientation to predict its neighbour's.
 fn step_from(edges: &[GlobalSfmEdge], index: usize, from: usize) -> UnitQuaternion<f64> {
-    let edge = &edges[index];
-    if edge.image_i == from {
-        edge.rotation_ij
-    } else {
-        edge.rotation_ij.inverse()
-    }
+    edges[index].step_primary(from)
 }
 
 /// Maximum-spanning-tree rotation seeding (Kruskal over descending weights).
@@ -362,7 +420,11 @@ pub fn average_rotations(
                 let Some(neighbor_q) = rotations[neighbor] else {
                     continue;
                 };
-                let predicted = step_from(edges, edge_index, neighbor) * neighbor_q;
+                let predicted = edges[edge_index].step_adaptive(
+                    neighbor,
+                    neighbor_q,
+                    rotations[image],
+                ) * neighbor_q;
                 let q = predicted.coords;
                 let w = w.max(1.0);
                 for r in 0..4 {
@@ -403,7 +465,8 @@ pub fn average_rotations(
                     continue;
                 }
                 if let (Some(qi), Some(qj)) = (rotations[e.image_i], rotations[e.image_j]) {
-                    let predicted = step_from(edges, edge_index, e.image_i) * qi;
+                    let (r_sel, _) = e.select_pose(qi, qj);
+                    let predicted = r_sel * qi;
                     let err = (predicted.inverse() * qj).angle();
                     if err > max_error_rad {
                         weights[edge_index] = 0.0;
@@ -439,7 +502,11 @@ pub fn average_positions(
         let Some(q) = rotations.get(edge.image_i).copied().flatten() else {
             continue;
         };
-        let world = q.inverse().transform_vector(&edge.direction_ij);
+        let Some(qj) = rotations.get(edge.image_j).copied().flatten() else {
+            continue;
+        };
+        let (_, direction_ij) = edge.select_pose(q, qj);
+        let world = q.inverse().transform_vector(&direction_ij);
         let norm = world.norm();
         if !norm.is_finite() || norm < 1e-12 {
             continue;
@@ -965,6 +1032,12 @@ pub struct GlobalReconstructionTuning {
     /// retained inlier samples. Flips chirality-ambiguous pairwise
     /// translations that survive per-pair RANSAC. Default false.
     pub refine_translations_with_global_rotations: bool,
+    /// Keep chirality-ambiguous essentials as multi-hypothesis edges
+    /// (primary + runner-up R/t). Rotation averaging and position bearings
+    /// pick the hypothesis that agrees with the emerging global solution.
+    /// When combined with [`Self::chirality_harden_edges`], uses angle /
+    /// depth gates without the ambiguity *rejection* ratio. Default false.
+    pub multi_hypothesis_edges: bool,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -980,6 +1053,7 @@ impl Default for GlobalReconstructionTuning {
             chirality_harden_edges: false,
             rotation_seed_trials: 1,
             refine_translations_with_global_rotations: false,
+            multi_hypothesis_edges: false,
         }
     }
 }
@@ -1031,15 +1105,16 @@ pub fn reconstruct_global_sfm(
 ) -> Result<(Vec<Option<Pose>>, Vec<SfmTrack>, f64), GlobalReconstructionError> {
     // ---- Relative poses → global edges ------------------------------------
     let estimator = RelativePoseEstimator {
-        cheirality: if tuning.chirality_harden_edges {
-            CheiralityOptions::hardened()
-        } else {
-            CheiralityOptions::default()
+        cheirality: match (tuning.chirality_harden_edges, tuning.multi_hypothesis_edges) {
+            (true, true) => CheiralityOptions::hardened_keep_ambiguous(),
+            (true, false) => CheiralityOptions::hardened(),
+            (false, _) => CheiralityOptions::default(),
         },
         ..RelativePoseEstimator::default()
     };
     let mut edges = Vec::new();
     let mut chirality_rejected = 0usize;
+    let mut multi_hyp_edges = 0usize;
     for pair in pairwise {
         if pair.matches.len() < tuning.min_pair_matches {
             continue;
@@ -1070,6 +1145,24 @@ pub fn reconstruct_global_sfm(
         let Some(direction_ij) = (-r_ij.inverse().transform_vector(&t_ij)).try_normalize(1e-12)
         else {
             continue;
+        };
+        let (rotation_alt, direction_alt) = if tuning.multi_hypothesis_edges {
+            match relative.alternate {
+                Some((r_alt, t_alt_unit)) => {
+                    let scale = relative.translation_scale;
+                    let t_alt = t_alt_unit * scale;
+                    match (-r_alt.inverse().transform_vector(&t_alt)).try_normalize(1e-12) {
+                        Some(d_alt) => {
+                            multi_hyp_edges += 1;
+                            (Some(r_alt), Some(d_alt))
+                        }
+                        None => (None, None),
+                    }
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
         };
         // GLOMAP-style baseline gate: triangulate a sample of the inlier
         // correspondences under this pair's pose and measure the median ray
@@ -1133,13 +1226,23 @@ pub fn reconstruct_global_sfm(
             direction_ij,
             weight: relative.inliers.len() as f64,
             inlier_sample,
+            rotation_alt,
+            direction_alt,
         });
     }
-    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && tuning.chirality_harden_edges {
-        eprintln!(
-            "global-sfm debug: chirality-harden rejected {chirality_rejected} pairs; kept {} edges",
-            edges.len()
-        );
+    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+        if tuning.chirality_harden_edges {
+            eprintln!(
+                "global-sfm debug: chirality-harden rejected {chirality_rejected} pairs; kept {} edges",
+                edges.len()
+            );
+        }
+        if tuning.multi_hypothesis_edges {
+            eprintln!(
+                "global-sfm debug: multi-hypothesis edges carrying alternate: {multi_hyp_edges} / {}",
+                edges.len()
+            );
+        }
     }
 
     // ---- Triplet loop-closure sanitisation ---------------------------------
@@ -1159,13 +1262,17 @@ pub fn reconstruct_global_sfm(
             edge_lookup.insert((e.image_i, e.image_j), index);
             edge_lookup.insert((e.image_j, e.image_i), index);
         }
-        let step = |from: usize, index: usize| -> UnitQuaternion<f64> {
+        let step_hyps = |from: usize, index: usize| -> Vec<UnitQuaternion<f64>> {
             let e = &edges[index];
-            if e.image_i == from {
-                e.rotation_ij
-            } else {
-                e.rotation_ij.inverse()
+            let mut hyps = vec![e.step_primary(from)];
+            if let Some(r_alt) = e.rotation_alt {
+                hyps.push(if e.image_i == from {
+                    r_alt
+                } else {
+                    r_alt.inverse()
+                });
             }
+            hyps
         };
         let mut loop_errors: Vec<Vec<f64>> = vec![Vec::new(); edges.len()];
         for e_index in 0..edges.len() {
@@ -1183,8 +1290,20 @@ pub fn reconstruct_global_sfm(
                 let Some(&wu) = edge_lookup.get(&(w, u)) else {
                     continue;
                 };
-                let loop_r = step(w, wu) * step(v, vw) * step(u, e_index);
-                loop_errors[e_index].push(loop_r.angle());
+                // Min loop error over primary/alternate combinations so an
+                // edge with a wrong primary but correct alternate is not
+                // dropped by triplet sanitation.
+                let mut best = f64::INFINITY;
+                for s_uv in step_hyps(u, e_index) {
+                    for s_vw in step_hyps(v, vw) {
+                        for s_wu in step_hyps(w, wu) {
+                            best = best.min((s_wu * s_vw * s_uv).angle());
+                        }
+                    }
+                }
+                if best.is_finite() {
+                    loop_errors[e_index].push(best);
+                }
             }
         }
         let mut dropped = 0usize;
@@ -1661,6 +1780,8 @@ mod tests {
                     direction_ij,
                     weight: 100.0,
                     inlier_sample: Vec::new(),
+                    rotation_alt: None,
+                    direction_alt: None,
                 });
             }
         }
@@ -1809,6 +1930,8 @@ mod tests {
                     direction_ij: d.normalize(),
                     weight: 10.0,
                     inlier_sample: Vec::new(),
+                    rotation_alt: None,
+                    direction_alt: None,
                 });
             }
         }
@@ -1836,6 +1959,8 @@ mod tests {
             direction_ij: Vector3::x(),
             weight: 5.0,
             inlier_sample: Vec::new(),
+            rotation_alt: None,
+            direction_alt: None,
         };
         let degenerate = GlobalSfmEdge {
             image_i: 0,
@@ -1884,6 +2009,8 @@ mod tests {
             direction_ij: -true_dir, // deliberately flipped
             weight: samples.len() as f64,
             inlier_sample: samples,
+            rotation_alt: None,
+            direction_alt: None,
         }];
         let rotations = vec![Some(r), Some(r)];
         let weights = vec![1.0];
@@ -1895,6 +2022,80 @@ mod tests {
             "refined direction {:?} should align with {:?}",
             edges[0].direction_ij,
             true_dir
+        );
+    }
+
+    #[test]
+    fn multi_hypothesis_rotation_averaging_picks_alternate() {
+        // Triangle of identity cameras. Edge 0–1 and 0–2 are exact. Edge 1–2
+        // stores a *wrong* primary rotation (90° about Z) but the correct
+        // identity as alternate. Adaptive averaging must select the alternate
+        // so all three orientations stay identity in the seed frame.
+        let identity = UnitQuaternion::identity();
+        let wrong = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2);
+        let edges = vec![
+            GlobalSfmEdge {
+                image_i: 0,
+                image_j: 1,
+                rotation_ij: identity,
+                direction_ij: Vector3::x(),
+                weight: 100.0,
+                inlier_sample: Vec::new(),
+                rotation_alt: None,
+                direction_alt: None,
+            },
+            GlobalSfmEdge {
+                image_i: 0,
+                image_j: 2,
+                rotation_ij: identity,
+                direction_ij: Vector3::y(),
+                weight: 100.0,
+                inlier_sample: Vec::new(),
+                rotation_alt: None,
+                direction_alt: None,
+            },
+            GlobalSfmEdge {
+                image_i: 1,
+                image_j: 2,
+                rotation_ij: wrong,
+                direction_ij: (Vector3::y() - Vector3::x()).normalize(),
+                weight: 50.0,
+                inlier_sample: Vec::new(),
+                rotation_alt: Some(identity),
+                direction_alt: Some((Vector3::y() - Vector3::x()).normalize()),
+            },
+        ];
+        let adjacency = build_adjacency(3, &edges).unwrap();
+        let averaged = average_rotations(3, &edges, &adjacency, 0, 16, 10.0).0;
+        for (image, rotation) in averaged.iter().enumerate() {
+            let q = rotation.expect("reachable");
+            let err = q.angle();
+            assert!(
+                err < 1e-3,
+                "image {image} should stay near identity, err={err}"
+            );
+        }
+        // Without the alternate, IRLS would zero the inconsistent edge or
+        // bend image 2 — pin that primary-only fails the tight check.
+        let primary_only: Vec<GlobalSfmEdge> = edges
+            .iter()
+            .map(|e| GlobalSfmEdge {
+                rotation_alt: None,
+                direction_alt: None,
+                ..e.clone()
+            })
+            .collect();
+        let adjacency_po = build_adjacency(3, &primary_only).unwrap();
+        let averaged_po = average_rotations(3, &primary_only, &adjacency_po, 0, 16, 10.0).0;
+        // With a wrong primary and no alt, at least one non-seed rotation
+        // drifts OR the bad edge is trimmed — either way image 2 or the
+        // consensus is worse than the multi-hyp solve. Require multi-hyp
+        // strictly better on image 2.
+        let err_multi = averaged[2].unwrap().angle();
+        let err_primary = averaged_po[2].unwrap().angle();
+        assert!(
+            err_multi + 1e-6 < err_primary || err_primary > 0.1,
+            "multi-hyp err={err_multi} should beat primary-only err={err_primary}"
         );
     }
 }

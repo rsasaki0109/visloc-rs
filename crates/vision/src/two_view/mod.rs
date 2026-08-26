@@ -105,6 +105,10 @@ pub struct RelativePose {
     pub translation_scale: f64,
     pub inliers: Vec<usize>,
     pub mean_sampson_error: f64,
+    /// Runner-up (R, t_unit) when essential decomposition is chirality-
+    /// ambiguous. Global SfM can keep this as an alternate view-graph edge
+    /// hypothesis; `None` when the margin is decisive or unused.
+    pub alternate: Option<(UnitQuaternion<f64>, Vector3<f64>)>,
 }
 
 /// Estimator for an essential matrix from pixel correspondences plus
@@ -392,11 +396,23 @@ impl CheiralityOptions {
             min_positive_depth_fraction: 0.5,
         }
     }
+
+    /// Like [`Self::hardened`] but never drops on `second/best` ratio alone —
+    /// the runner-up is exposed via [`RelativePoseRecovery::alternate`] so the
+    /// view-graph can carry multi-hypothesis edges instead of discarding the
+    /// pair.
+    pub fn hardened_keep_ambiguous() -> Self {
+        Self {
+            max_ambiguity_ratio: 1.0,
+            ..Self::hardened()
+        }
+    }
 }
 
 /// Result of decomposing an essential matrix, including the margin that
 /// separates the winning hypothesis from the runner-up. Callers that build
-/// view-graph edges can down-weight low-margin recoveries.
+/// view-graph edges can down-weight low-margin recoveries or keep the
+/// runner-up as an alternate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelativePoseRecovery {
     pub rotation: UnitQuaternion<f64>,
@@ -405,6 +421,9 @@ pub struct RelativePoseRecovery {
     pub best_score: i64,
     /// Same count for the second-best of the four hypotheses.
     pub second_score: i64,
+    /// Runner-up (R, t) when its score is positive and the rotation differs
+    /// from the winner; used for multi-hypothesis view-graph edges.
+    pub alternate: Option<(UnitQuaternion<f64>, Vector3<f64>)>,
 }
 
 impl RelativePoseRecovery {
@@ -519,6 +538,7 @@ where
             translation_scale,
             inliers: report.inliers,
             mean_sampson_error: report.mean_sampson_error,
+            alternate: recovered.alternate,
         })
     }
 }
@@ -569,9 +589,7 @@ pub fn recover_relative_pose_with_options(
     let t_unit = u.column(2).into_owned();
 
     let candidates = [(r1, t_unit), (r1, -t_unit), (r2, t_unit), (r2, -t_unit)];
-    let mut best: Option<(Matrix3<f64>, Vector3<f64>)> = None;
-    let mut best_score: i64 = -1;
-    let mut second_score: i64 = -1;
+    let mut ranked: Vec<(i64, Matrix3<f64>, Vector3<f64>)> = Vec::with_capacity(4);
     let min_angle_rad = options.min_tri_angle_deg.to_radians();
     for (rotation, translation) in candidates {
         let score = cheirality_score(
@@ -582,19 +600,13 @@ pub fn recover_relative_pose_with_options(
             inliers,
             min_angle_rad,
         );
-        if score > best_score {
-            second_score = best_score;
-            best_score = score;
-            best = Some((rotation, translation));
-        } else if score > second_score {
-            second_score = score;
+        if score > 0 {
+            ranked.push((score, rotation, translation));
         }
     }
-
-    let (rotation, translation) = best?;
-    if best_score <= 0 {
-        return None;
-    }
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    let (best_score, rotation, translation) = ranked.first().copied()?;
+    let second_score = ranked.get(1).map(|(s, _, _)| *s).unwrap_or(0);
     if options.min_positive_depth_fraction > 0.0 {
         let required = (options.min_positive_depth_fraction * inliers.len() as f64).ceil() as i64;
         if best_score < required {
@@ -605,6 +617,8 @@ pub fn recover_relative_pose_with_options(
     // the essential is chirality-ambiguous (typical on repetitive façades) and
     // the recovered translation direction is not trustworthy as a view-graph
     // bearing. `max_ambiguity_ratio == 1.0` never rejects on ratio alone.
+    // Callers that want multi-hypothesis edges should use
+    // `max_ambiguity_ratio = 1.0` and read `alternate`.
     if options.max_ambiguity_ratio < 1.0
         && second_score > 0
         && (second_score as f64) > (best_score as f64) * options.max_ambiguity_ratio
@@ -612,11 +626,27 @@ pub fn recover_relative_pose_with_options(
         return None;
     }
     let rotation = UnitQuaternion::from_matrix(&rotation);
+    let alternate = ranked.get(1).and_then(|(score, r, t)| {
+        if *score <= 0 {
+            return None;
+        }
+        let r = UnitQuaternion::from_matrix(r);
+        // Keep only if it is a meaningfully different pose (different R or
+        // anti-aligned t).
+        let rot_diff = r.rotation_to(&rotation).angle();
+        let t_anti = t.dot(&translation) < 0.0;
+        if rot_diff > 1e-2 || t_anti {
+            Some((r, *t))
+        } else {
+            None
+        }
+    });
     Some(RelativePoseRecovery {
         rotation,
         translation_unit: translation,
         best_score,
         second_score: second_score.max(0),
+        alternate,
     })
 }
 
@@ -1148,5 +1178,37 @@ mod tests {
             "clean baseline should separate winner from runner-up, margin={}",
             recovered.chirality_margin()
         );
+    }
+
+    #[test]
+    fn hardened_keep_ambiguous_exposes_alternate_on_clean_pair() {
+        // Even a clean pair has a runner-up (usually −t or the other R); with
+        // keep-ambiguous gates that runner-up is returned rather than rejected.
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let report = EssentialRansac::default()
+            .estimate(&correspondences, &camera)
+            .unwrap();
+        let recovered = recover_relative_pose_with_options(
+            &report.essential,
+            &correspondences,
+            &camera,
+            &report.inliers,
+            &CheiralityOptions::hardened_keep_ambiguous(),
+        )
+        .expect("clean pair must recover under keep-ambiguous");
+        assert!(recovered.best_score > 0);
+        // Runner-up score may be low; alternate is only set when it differs.
+        if recovered.second_score > 0 {
+            assert!(
+                recovered.alternate.is_some() || recovered.chirality_margin() > 0.99,
+                "expected an alternate or a decisive margin"
+            );
+        }
     }
 }
