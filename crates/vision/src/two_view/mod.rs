@@ -350,6 +350,74 @@ where
     }
 }
 
+/// Gates applied when selecting among the four essential-matrix (R, t)
+/// hypotheses. Default values reproduce the legacy positive-depth-only
+/// count that [`recover_relative_pose`] has always used.
+///
+/// Hardened settings ([`CheiralityOptions::hardened`]) additionally require a
+/// minimum triangulation angle, reject poses whose second-best hypothesis
+/// scores nearly as well as the winner (chirality / façade ambiguity), and
+/// demand that a minimum fraction of inliers pass the positive-depth test.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CheiralityOptions {
+    /// Minimum ray-intersection angle (degrees) for a triangulated point to
+    /// count toward the cheirality score. `0.0` = legacy (depth-only).
+    pub min_tri_angle_deg: f64,
+    /// Reject the recovery when `second_best / best` exceeds this ratio.
+    /// `1.0` never rejects on ratio alone (legacy); values like `0.85` drop
+    /// chirality-ambiguous essentials that survive plain inlier counts on
+    /// repetitive façades.
+    pub max_ambiguity_ratio: f64,
+    /// Require `best_score >= fraction * inliers.len()`. `0.0` = legacy.
+    pub min_positive_depth_fraction: f64,
+}
+
+impl Default for CheiralityOptions {
+    fn default() -> Self {
+        Self {
+            min_tri_angle_deg: 0.0,
+            max_ambiguity_ratio: 1.0,
+            min_positive_depth_fraction: 0.0,
+        }
+    }
+}
+
+impl CheiralityOptions {
+    /// Courtyard-class edge quality: angle-gated cheirality, ambiguity
+    /// rejection, and a majority positive-depth requirement.
+    pub fn hardened() -> Self {
+        Self {
+            min_tri_angle_deg: 1.0,
+            max_ambiguity_ratio: 0.85,
+            min_positive_depth_fraction: 0.5,
+        }
+    }
+}
+
+/// Result of decomposing an essential matrix, including the margin that
+/// separates the winning hypothesis from the runner-up. Callers that build
+/// view-graph edges can down-weight low-margin recoveries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelativePoseRecovery {
+    pub rotation: UnitQuaternion<f64>,
+    pub translation_unit: Vector3<f64>,
+    /// Cheirality (positive-depth [+ angle]) count for the winning hypothesis.
+    pub best_score: i64,
+    /// Same count for the second-best of the four hypotheses.
+    pub second_score: i64,
+}
+
+impl RelativePoseRecovery {
+    /// `(best - second) / best`, or `0` when `best == 0`. Near-zero means the
+    /// essential was chirality-ambiguous.
+    pub fn chirality_margin(&self) -> f64 {
+        if self.best_score <= 0 {
+            return 0.0;
+        }
+        (self.best_score - self.second_score) as f64 / self.best_score as f64
+    }
+}
+
 /// Composes essential-matrix RANSAC with relative-pose recovery, applying a
 /// caller-controlled translation scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -360,6 +428,9 @@ pub struct RelativePoseEstimator<E = EightPointEssentialMatrixEstimator> {
     /// GNSS displacement, the previous frame's translation, or a configured
     /// default).
     pub default_translation_scale: f64,
+    /// Cheirality gates applied during essential decomposition. Default is
+    /// byte-identical to the historical positive-depth-only selector.
+    pub cheirality: CheiralityOptions,
 }
 
 impl Default for RelativePoseEstimator {
@@ -367,6 +438,7 @@ impl Default for RelativePoseEstimator {
         Self {
             ransac: EssentialRansac::default(),
             default_translation_scale: 1.0,
+            cheirality: CheiralityOptions::default(),
         }
     }
 }
@@ -430,12 +502,20 @@ where
             }
             _ => self.ransac.estimate(correspondences, camera),
         }?;
-        let (rotation, translation_unit) =
-            recover_relative_pose(&report.essential, correspondences, camera, &report.inliers)?;
-        let se3 = SE3::new(rotation, translation_unit * translation_scale);
+        let recovered = recover_relative_pose_with_options(
+            &report.essential,
+            correspondences,
+            camera,
+            &report.inliers,
+            &self.cheirality,
+        )?;
+        let se3 = SE3::new(
+            recovered.rotation,
+            recovered.translation_unit * translation_scale,
+        );
         Some(RelativePose {
             previous_to_current: se3,
-            translation_unit,
+            translation_unit: recovered.translation_unit,
             translation_scale,
             inliers: report.inliers,
             mean_sampson_error: report.mean_sampson_error,
@@ -444,13 +524,35 @@ where
 }
 
 /// Decompose an essential matrix into the (R, t_unit) pair that puts the most
-/// inlier correspondences in front of both cameras.
+/// inlier correspondences in front of both cameras. Legacy gates only
+/// ([`CheiralityOptions::default`]).
 pub fn recover_relative_pose(
     essential: &Matrix3<f64>,
     correspondences: &[TwoViewCorrespondence],
     camera: &Camera,
     inliers: &[usize],
 ) -> Option<(UnitQuaternion<f64>, Vector3<f64>)> {
+    let recovered = recover_relative_pose_with_options(
+        essential,
+        correspondences,
+        camera,
+        inliers,
+        &CheiralityOptions::default(),
+    )?;
+    Some((recovered.rotation, recovered.translation_unit))
+}
+
+/// Decompose an essential matrix with explicit [`CheiralityOptions`] gates.
+/// Returns `None` when every hypothesis fails the positive-depth test, when
+/// the winner's margin against the runner-up is too thin (ambiguous
+/// chirality), or when too few inliers pass the depth/angle gates.
+pub fn recover_relative_pose_with_options(
+    essential: &Matrix3<f64>,
+    correspondences: &[TwoViewCorrespondence],
+    camera: &Camera,
+    inliers: &[usize],
+    options: &CheiralityOptions,
+) -> Option<RelativePoseRecovery> {
     let svd = essential.svd(true, true);
     let u = svd.u?;
     let v_t = svd.v_t?;
@@ -469,11 +571,23 @@ pub fn recover_relative_pose(
     let candidates = [(r1, t_unit), (r1, -t_unit), (r2, t_unit), (r2, -t_unit)];
     let mut best: Option<(Matrix3<f64>, Vector3<f64>)> = None;
     let mut best_score: i64 = -1;
+    let mut second_score: i64 = -1;
+    let min_angle_rad = options.min_tri_angle_deg.to_radians();
     for (rotation, translation) in candidates {
-        let score = cheirality_score(&rotation, &translation, correspondences, camera, inliers);
+        let score = cheirality_score(
+            &rotation,
+            &translation,
+            correspondences,
+            camera,
+            inliers,
+            min_angle_rad,
+        );
         if score > best_score {
+            second_score = best_score;
             best_score = score;
             best = Some((rotation, translation));
+        } else if score > second_score {
+            second_score = score;
         }
     }
 
@@ -481,8 +595,29 @@ pub fn recover_relative_pose(
     if best_score <= 0 {
         return None;
     }
+    if options.min_positive_depth_fraction > 0.0 {
+        let required = (options.min_positive_depth_fraction * inliers.len() as f64).ceil() as i64;
+        if best_score < required {
+            return None;
+        }
+    }
+    // Ambiguity gate: when the runner-up scores nearly as well as the winner,
+    // the essential is chirality-ambiguous (typical on repetitive façades) and
+    // the recovered translation direction is not trustworthy as a view-graph
+    // bearing. `max_ambiguity_ratio == 1.0` never rejects on ratio alone.
+    if options.max_ambiguity_ratio < 1.0
+        && second_score > 0
+        && (second_score as f64) > (best_score as f64) * options.max_ambiguity_ratio
+    {
+        return None;
+    }
     let rotation = UnitQuaternion::from_matrix(&rotation);
-    Some((rotation, translation))
+    Some(RelativePoseRecovery {
+        rotation,
+        translation_unit: translation,
+        best_score,
+        second_score: second_score.max(0),
+    })
 }
 
 fn cheirality_score(
@@ -491,11 +626,15 @@ fn cheirality_score(
     correspondences: &[TwoViewCorrespondence],
     camera: &Camera,
     inliers: &[usize],
+    min_tri_angle_rad: f64,
 ) -> i64 {
     let p_prev = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
     let mut p_curr = Matrix3x4::zeros();
     p_curr.fixed_view_mut::<3, 3>(0, 0).copy_from(rotation);
     p_curr.fixed_view_mut::<3, 1>(0, 3).copy_from(translation);
+
+    // Camera-2 centre in camera-1 coordinates: C2 = −Rᵀ t.
+    let cam2_centre = -(rotation.transpose() * translation);
 
     let mut score: i64 = 0;
     for &index in inliers {
@@ -525,9 +664,23 @@ fn cheirality_score(
         }
         let world = Vector3::new(solution[0] / w, solution[1] / w, solution[2] / w);
         let camera_curr = rotation * world + translation;
-        if world.z > 0.0 && camera_curr.z > 0.0 {
-            score += 1;
+        if world.z <= 0.0 || camera_curr.z <= 0.0 {
+            continue;
         }
+        if min_tri_angle_rad > 0.0 {
+            let ray1 = world;
+            let ray2 = world - cam2_centre;
+            let n1 = ray1.norm();
+            let n2 = ray2.norm();
+            if n1 < 1e-12 || n2 < 1e-12 {
+                continue;
+            }
+            let cos = (ray1.dot(&ray2) / (n1 * n2)).clamp(-1.0, 1.0);
+            if cos.acos() < min_tri_angle_rad {
+                continue;
+            }
+        }
+        score += 1;
     }
     score
 }
@@ -920,5 +1073,80 @@ mod tests {
             .estimate_with_weights(&correspondences, &camera, &weights)
             .unwrap();
         assert_eq!(unweighted.inliers, weighted.inliers);
+    }
+
+    #[test]
+    fn hardened_cheirality_recovers_clean_translation() {
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let estimator = RelativePoseEstimator {
+            cheirality: CheiralityOptions::hardened(),
+            ..RelativePoseEstimator::default()
+        };
+        let pose = estimator
+            .estimate_with_scale(&correspondences, &camera, 0.3)
+            .expect("hardened recovery must succeed on a clean baseline");
+        assert!(
+            (pose.previous_to_current.translation - Vector3::new(-0.3, 0.0, 0.0)).norm() < 5e-3
+        );
+    }
+
+    #[test]
+    fn hardened_cheirality_rejects_near_planar_pure_rotation() {
+        // Near-zero baseline: every (R, ±t) hypothesis triangulates with tiny
+        // angles, so the angle gate + ambiguity ratio should refuse recovery.
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02);
+        let current = Pose::from_world_to_camera(yaw, Vector3::new(-1e-4, 0.0, 0.0));
+        let correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let report = EssentialRansac::default()
+            .estimate(&correspondences, &camera)
+            .expect("essential still fits a near-planar pair");
+        let recovered = recover_relative_pose_with_options(
+            &report.essential,
+            &correspondences,
+            &camera,
+            &report.inliers,
+            &CheiralityOptions::hardened(),
+        );
+        assert!(
+            recovered.is_none(),
+            "pure-rotation / tiny-baseline essentials must fail hardened gates"
+        );
+    }
+
+    #[test]
+    fn chirality_margin_is_high_on_clean_baseline() {
+        let camera = synthetic_camera();
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let correspondences =
+            correspondences(&previous, &current, &camera, &synthetic_world_points());
+        let report = EssentialRansac::default()
+            .estimate(&correspondences, &camera)
+            .unwrap();
+        let recovered = recover_relative_pose_with_options(
+            &report.essential,
+            &correspondences,
+            &camera,
+            &report.inliers,
+            &CheiralityOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            recovered.chirality_margin() > 0.5,
+            "clean baseline should separate winner from runner-up, margin={}",
+            recovered.chirality_margin()
+        );
     }
 }

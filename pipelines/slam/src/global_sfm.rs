@@ -44,7 +44,7 @@ use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
 use visloc_vision::stereo_bootstrap::triangulate_two_view_left_frame;
-use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
+use visloc_vision::two_view::{CheiralityOptions, RelativePoseEstimator, TwoViewCorrespondence};
 
 use crate::incremental_sfm::{
     build_tracks_detailed, reprojection_error_px, run_bundle_adjustment, triangulate_pending,
@@ -435,6 +435,103 @@ pub fn average_positions(
         return vec![None; rotations.len()];
     }
 
+    // ---- Translation-sign repair via MST placement --------------------------
+    // Chirality-ambiguous essentials can flip `direction_ij` 180° while still
+    // passing per-pair RANSAC. Build a maximum-weight spanning tree, place
+    // cameras by walking unit steps along tree bearings, then flip any
+    // (tree or off-tree) bearing that is anti-aligned with the preliminary
+    // displacement. Self-consistent flip basins stay flipped together — this
+    // only repairs *isolated* sign errors against a trusted skeleton.
+    {
+        let members: Vec<usize> = (0..rotations.len())
+            .filter(|&i| rotations[i].is_some())
+            .collect();
+        let local_of: HashMap<usize, usize> =
+            members.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let mut parent: Vec<usize> = (0..members.len()).collect();
+        fn find_sign(parent: &mut [usize], x: usize) -> usize {
+            let mut x = x;
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let mut tree_edge: Vec<usize> = Vec::new();
+        let mut order: Vec<usize> = (0..bearings.len()).collect();
+        order.sort_by(|&a, &b| {
+            bearings[b]
+                .weight
+                .total_cmp(&bearings[a].weight)
+                .then_with(|| a.cmp(&b))
+        });
+        for &k in &order {
+            let Some(&li) = local_of.get(&bearings[k].i) else {
+                continue;
+            };
+            let Some(&lj) = local_of.get(&bearings[k].j) else {
+                continue;
+            };
+            let (ri, rj) = (find_sign(&mut parent, li), find_sign(&mut parent, lj));
+            if ri != rj {
+                parent[ri] = rj;
+                tree_edge.push(k);
+            }
+        }
+        // BFS place from seed along tree edges.
+        let mut adj: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        for &k in &tree_edge {
+            let b = &bearings[k];
+            adj.entry(b.i).or_default().push((b.j, k));
+            adj.entry(b.j).or_default().push((b.i, k));
+        }
+        let mut prelim: HashMap<usize, Vector3<f64>> = HashMap::new();
+        if rotations.get(seed).copied().flatten().is_some() {
+            prelim.insert(seed, Vector3::zeros());
+            let mut stack = vec![seed];
+            while let Some(node) = stack.pop() {
+                let Some(nbrs) = adj.get(&node) else {
+                    continue;
+                };
+                let c_node = prelim[&node];
+                for &(other, k) in nbrs {
+                    if prelim.contains_key(&other) {
+                        continue;
+                    }
+                    let b = &bearings[k];
+                    // Walking i→j along +direction; j→i along −direction.
+                    let step = if b.i == node {
+                        b.direction
+                    } else {
+                        -b.direction
+                    };
+                    prelim.insert(other, c_node + step);
+                    stack.push(other);
+                }
+            }
+        }
+        let mut flipped = 0usize;
+        for b in bearings.iter_mut() {
+            let (Some(ci), Some(cj)) = (prelim.get(&b.i), prelim.get(&b.j)) else {
+                continue;
+            };
+            let disp = *cj - *ci;
+            if disp.norm() < 1e-12 {
+                continue;
+            }
+            if disp.dot(&b.direction) < 0.0 {
+                b.direction = -b.direction;
+                flipped += 1;
+            }
+        }
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && flipped > 0 {
+            eprintln!(
+                "global-sfm debug: translation-sign repair flipped {flipped}/{} bearings",
+                bearings.len()
+            );
+        }
+    }
+
     const PRIOR_WEIGHT: f64 = 1e-6;
     let members: Vec<usize> = (0..rotations.len())
         .filter(|&i| rotations[i].is_some())
@@ -682,6 +779,18 @@ pub struct GlobalReconstructionTuning {
     /// / tiny-baseline pairs are exactly the ones whose bearings bend the
     /// position solve on repetitive scenes. Set to 0 to disable.
     pub min_edge_parallax_deg: f64,
+    /// When true, relative-pose recovery uses
+    /// [`visloc_vision::two_view::CheiralityOptions::hardened`]: min
+    /// triangulation angle, ambiguity rejection, and a majority
+    /// positive-depth fraction. Chirality-ambiguous essentials on repetitive
+    /// façades are dropped instead of entering the view graph as bent
+    /// bearings. Default false = byte-identical legacy decomposition.
+    pub chirality_harden_edges: bool,
+    /// Number of rotation-averaging seeds to try inside the largest
+    /// connected component (highest-degree nodes preferred). The solve with
+    /// the most kept edges / lowest median residual wins. `1` = legacy
+    /// single-seed behaviour.
+    pub rotation_seed_trials: usize,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -694,6 +803,8 @@ impl Default for GlobalReconstructionTuning {
             min_edge_inliers: 15,
             max_edge_rotation_error_deg: 10.0,
             min_edge_parallax_deg: 2.0,
+            chirality_harden_edges: false,
+            rotation_seed_trials: 1,
         }
     }
 }
@@ -744,8 +855,16 @@ pub fn reconstruct_global_sfm(
     mapper: &crate::incremental_sfm::IncrementalSfmConfig,
 ) -> Result<(Vec<Option<Pose>>, Vec<SfmTrack>, f64), GlobalReconstructionError> {
     // ---- Relative poses → global edges ------------------------------------
-    let estimator = RelativePoseEstimator::default();
+    let estimator = RelativePoseEstimator {
+        cheirality: if tuning.chirality_harden_edges {
+            CheiralityOptions::hardened()
+        } else {
+            CheiralityOptions::default()
+        },
+        ..RelativePoseEstimator::default()
+    };
     let mut edges = Vec::new();
+    let mut chirality_rejected = 0usize;
     for pair in pairwise {
         if pair.matches.len() < tuning.min_pair_matches {
             continue;
@@ -761,6 +880,9 @@ pub fn reconstruct_global_sfm(
             })
             .collect();
         let Some(relative) = estimator.estimate(&correspondences, camera) else {
+            if tuning.chirality_harden_edges {
+                chirality_rejected += 1;
+            }
             continue;
         };
         if relative.inliers.len() < tuning.min_edge_inliers {
@@ -825,6 +947,12 @@ pub fn reconstruct_global_sfm(
             direction_ij,
             weight: relative.inliers.len() as f64,
         });
+    }
+    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && tuning.chirality_harden_edges {
+        eprintln!(
+            "global-sfm debug: chirality-harden rejected {chirality_rejected} pairs; kept {} edges",
+            edges.len()
+        );
     }
 
     // ---- Triplet loop-closure sanitisation ---------------------------------
@@ -931,14 +1059,64 @@ pub fn reconstruct_global_sfm(
         }
     };
 
-    let solved = solve_global_sfm(
-        features.len(),
-        &edges,
-        seed,
-        tuning.sweeps,
-        tuning.cg_iterations,
-        tuning.max_edge_rotation_error_deg,
-    )
+    let solved = {
+        // Multi-seed rotation averaging: try the component's highest-degree
+        // nodes (plus the selected seed) and keep the solve with the most
+        // surviving edges / lowest median residual. Escapes flip basins that
+        // a single bad tree-root can lock into on repetitive façades.
+        let trials = tuning.rotation_seed_trials.max(1);
+        let mut candidate_seeds = vec![seed];
+        if trials > 1 {
+            let mut degrees: Vec<(usize, usize)> = adjacency_for_seed
+                .iter()
+                .map(|(&node, nbrs)| (nbrs.len(), node))
+                .collect();
+            degrees.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for &(_, node) in degrees.iter().take(trials) {
+                if !candidate_seeds.contains(&node) {
+                    candidate_seeds.push(node);
+                }
+            }
+            candidate_seeds.truncate(trials);
+        }
+        let mut best: Option<(GlobalSfmPoses, usize, f64, usize)> = None;
+        for &trial_seed in &candidate_seeds {
+            let Some(solution) = solve_global_sfm(
+                features.len(),
+                &edges,
+                trial_seed,
+                tuning.sweeps,
+                tuning.cg_iterations,
+                tuning.max_edge_rotation_error_deg,
+            ) else {
+                continue;
+            };
+            // Score: prefer more registered cameras, then lower mean bearing
+            // residual.
+            let registered = solution.poses.iter().filter(|p| p.is_some()).count();
+            let residual = solution.mean_bearing_residual_rad;
+            let better = match &best {
+                None => true,
+                Some((_, best_reg, best_res, _)) => {
+                    registered > *best_reg
+                        || (registered == *best_reg && residual < *best_res)
+                }
+            };
+            if better {
+                best = Some((solution, registered, residual, trial_seed));
+            }
+        }
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && trials > 1 {
+            if let Some((_, reg, res, chosen)) = &best {
+                eprintln!(
+                    "global-sfm debug: multi-seed chose seed {chosen} (registered={reg}, bearing_mean={:.3} deg) from {} trials",
+                    res.to_degrees(),
+                    candidate_seeds.len()
+                );
+            }
+        }
+        best.map(|(s, _, _, _)| s)
+    }
     .ok_or(GlobalReconstructionError::NoUsableEdges)?;
     let poses = solved.poses;
     if !poses.iter().any(Option::is_some) {

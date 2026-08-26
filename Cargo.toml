@@ -74,6 +74,11 @@ visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
 ndarray = { version = "0.17", optional = true }
 
 [[example]]
+name = "colmap"
+path = "examples/colmap.rs"
+required-features = ["image-io"]
+
+[[example]]
 name = "multi_session_place_recognition_kitti_demo"
 path = "examples/multi_session_place_recognition_kitti_demo.rs"
 required-features = ["image-io"]

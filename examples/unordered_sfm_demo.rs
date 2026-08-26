@@ -428,6 +428,8 @@ struct Args {
     feature_suffix: String,
     image_suffix: String,
     sift_max_keypoints: usize,
+    /// Enable SIFT affine shape adaptation (descriptor-side Baumberg).
+    sift_affine: bool,
     out_colmap: PathBuf,
     camera: Camera,
     vocab_size: usize,
@@ -458,6 +460,12 @@ struct Args {
     /// position averaging, track triangulation, one joint BA
     /// (`visloc_slam::global_sfm::reconstruct_global_sfm`).
     mapper: MapperKind,
+    /// Global mapper only: harden essential cheirality (min tri-angle,
+    /// ambiguity rejection). Default off = byte-identical legacy edges.
+    chirality_harden: bool,
+    /// Global mapper only: try this many high-degree rotation seeds and keep
+    /// the best. `1` = legacy single-seed.
+    rotation_seed_trials: usize,
     /// M2 A/B switch: which algorithm builds feature tracks from the verified
     /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
     /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
@@ -572,8 +580,11 @@ fn parse_args() -> Result<Args, String> {
     let mut lightglue_model: Option<PathBuf> = None;
     let mut feature_extractor = FeatureExtractorKind::Files;
     let mut mapper = MapperKind::Incremental;
+    let mut chirality_harden = false;
+    let mut rotation_seed_trials = 1usize;
     let mut images_dir: Option<PathBuf> = None;
     let mut sift_max_keypoints = 2048usize;
+    let mut sift_affine = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -595,6 +606,7 @@ fn parse_args() -> Result<Args, String> {
             "--sift-max-keypoints" => {
                 sift_max_keypoints = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
+            "--sift-affine" => sift_affine = true,
             "--feature-suffix" => feature_suffix = a.remove(i + 1),
             "--image-suffix" => image_suffix = a.remove(i + 1),
             "--out-colmap" => out_colmap = Some(PathBuf::from(a.remove(i + 1))),
@@ -633,6 +645,10 @@ fn parse_args() -> Result<Args, String> {
                         return Err(format!("--mapper must be incremental|global, got {other}"))
                     }
                 };
+            }
+            "--chirality-harden" => chirality_harden = true,
+            "--rotation-seed-trials" => {
+                rotation_seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--filter-images" => filter_images = true,
             "--colmap-verification" => verification_mode = VerificationMode::Full,
@@ -712,6 +728,8 @@ fn parse_args() -> Result<Args, String> {
         structureless_registration,
         pnp_max_iterations,
         mapper,
+        chirality_harden,
+        rotation_seed_trials,
         filter_images,
         verification_mode,
         guided_matching,
@@ -729,6 +747,7 @@ fn parse_args() -> Result<Args, String> {
         matcher,
         lightglue_model,
         sift_max_keypoints,
+        sift_affine,
     })
 }
 
@@ -749,12 +768,14 @@ enum FeatureExtractorKind {
 fn extract_sift_for_image(
     path: &Path,
     max_keypoints: usize,
+    affine: bool,
 ) -> Result<FeatureSet, Box<dyn std::error::Error>> {
     use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig};
     let grayscale = visloc_io::images::read_common_image(path)?;
     let image = GrayImage::new(grayscale.width(), grayscale.height(), grayscale.pixels())?;
     let config = SiftConfig {
         max_keypoints,
+        affine,
         ..SiftConfig::default()
     };
     let (keypoints, descriptors) = extract_sift(&image, &config)?;
@@ -769,6 +790,7 @@ fn extract_sift_for_image(
 fn load_images_with_sift(
     _dir: &Path,
     _max_keypoints: usize,
+    _affine: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     Err("--feature-extractor sift requires building with --features image-io".into())
 }
@@ -778,6 +800,7 @@ fn load_images_with_sift(
 fn load_images_with_sift(
     dir: &Path,
     max_keypoints: usize,
+    affine: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     const IMAGE_SUFFIXES: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"];
     let mut files: Vec<String> = std::fs::read_dir(dir)?
@@ -796,7 +819,7 @@ fn load_images_with_sift(
     let mut features = Vec::new();
     let mut names = Vec::new();
     for f in &files {
-        features.push(extract_sift_for_image(&dir.join(f), max_keypoints)?);
+        features.push(extract_sift_for_image(&dir.join(f), max_keypoints, affine)?);
         names.push(f.to_string());
     }
     Ok((features, names))
@@ -1253,6 +1276,7 @@ fn verify_pairs(
                 },
             },
             default_translation_scale: 1.0,
+            ..RelativePoseEstimator::default()
         }
     });
 
@@ -1667,7 +1691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("error: --feature-extractor sift requires --images-dir");
                 std::process::exit(2);
             });
-            load_images_with_sift(&dir, args.sift_max_keypoints)?
+            load_images_with_sift(&dir, args.sift_max_keypoints, args.sift_affine)?
         }
     };
     if features.len() < 2 {
@@ -1825,6 +1849,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.mapper == MapperKind::Global {
         let tuning = GlobalReconstructionTuning {
             min_pair_matches: args.min_matches,
+            chirality_harden_edges: args.chirality_harden,
+            rotation_seed_trials: args.rotation_seed_trials,
             ..GlobalReconstructionTuning::default()
         };
         let (poses, tracks, mean_reproj) =
