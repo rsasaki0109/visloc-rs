@@ -17,9 +17,14 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import pytest  # noqa: E402
+import unittest
 
-import build_ssfm_dev_gate_v2 as builder  # noqa: E402
+try:
+    import build_ssfm_dev_gate_v2 as builder  # type: ignore[no-redef]  # noqa: E402
+except ImportError as error:  # pragma: no cover - depends on private bench modules
+    raise unittest.SkipTest(
+        f"private bench module unavailable on this machine: {error}"
+    ) from error
 import build_b07h_runtime_runset_v2 as runset_builder  # noqa: E402
 import run_b07h_runtime_driver_v6 as driver  # noqa: E402
 import run_ssfm_heldout_suite_v5_pre_gt as controller  # noqa: E402

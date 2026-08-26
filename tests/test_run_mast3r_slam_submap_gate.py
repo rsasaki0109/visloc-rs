@@ -227,6 +227,7 @@ class Mast3rSlamSubmapGateTests(unittest.TestCase):
         self.assertEqual(rendered, "E:\\probe\\points.txt")
         self.assertEqual(convert.call_args.args[0][0], "wslpath")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows/WSL-only bench harness")
     def test_release_verifier_recomputes_positive_and_negative_gates(self) -> None:
         for weak, expected in ((False, True), (True, False)):
             with self.subTest(weak=weak), tempfile.TemporaryDirectory() as raw_root:
@@ -250,6 +251,7 @@ class Mast3rSlamSubmapGateTests(unittest.TestCase):
             ), self.assertRaisesRegex(ValueError, "metrics differ"):
                 verify_gate_manifest(path)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows/WSL-only bench harness")
     def test_release_verifier_rejects_mutated_log_or_command(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -286,6 +288,7 @@ class Mast3rSlamSubmapGateTests(unittest.TestCase):
             ), self.assertRaisesRegex(ValueError, "old-points differs"):
                 verify_gate_manifest(path)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows/WSL-only bench harness")
     def test_release_verifier_emits_self_bound_audit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)

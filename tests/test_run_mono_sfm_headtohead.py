@@ -41,6 +41,7 @@ class ReportedMeanReprojectionTests(unittest.TestCase):
             log.write_text("unrelated mapper failure\n", encoding="utf-8")
             self.assertFalse(is_unsupported_caspar_failure("CASPAR", log))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only bench harness")
     def test_measured_runner_captures_child_working_set_on_windows(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "child.log"

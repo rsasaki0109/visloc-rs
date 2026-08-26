@@ -13,12 +13,18 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import pytest  # noqa: E402
+import unittest
+
+try:
+    import build_ssfm_dev_gate_v3 as gate_v3  # type: ignore[no-redef]  # noqa: E402
+except ImportError as error:  # pragma: no cover - depends on private bench modules
+    raise unittest.SkipTest(
+        f"private bench module unavailable on this machine: {error}"
+    ) from error
 
 import run_b07h_runtime_driver_v7 as v7  # noqa: E402
 import run_b07h_runtime_driver_v8 as v8  # noqa: E402
 import run_b07h_runtime_driver_v9 as v9  # noqa: E402
-import build_ssfm_dev_gate_v3 as gate_v3  # noqa: E402
 
 
 ROOT_PARENT = Path("E:/visloc_archive/tmp/b07_storage_hardening/v8-recovery")

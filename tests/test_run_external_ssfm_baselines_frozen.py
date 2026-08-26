@@ -91,6 +91,7 @@ class ExternalSsfmBaselineRunnerTests(unittest.TestCase):
                 all(cell["status"] == "dnf" for cell in manifest["results"].values())
             )
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only bench harness")
     def test_ready_adapters_emit_valid_success_cells(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)

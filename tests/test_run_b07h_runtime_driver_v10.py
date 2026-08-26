@@ -3,7 +3,14 @@ from __future__ import annotations
 import json, os, shutil, sys, uuid
 from pathlib import Path
 os.environ["PYTHONDONTWRITEBYTECODE"]="1"; sys.dont_write_bytecode=True; sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"scripts"))
-import pytest
+import unittest
+
+try:
+    import build_ssfm_dev_gate_v3  # type: ignore[no-redef]  # noqa: E402
+except ImportError as error:  # pragma: no cover - depends on private bench modules
+    raise unittest.SkipTest(
+        f"private bench module unavailable on this machine: {error}"
+    ) from error
 import run_b07h_runtime_driver_v10 as driver
 import run_b07h_runtime_driver_v7 as v7
 import run_b07h_runtime_driver_v8 as v8

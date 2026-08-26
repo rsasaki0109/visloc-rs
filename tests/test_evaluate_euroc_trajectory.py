@@ -70,7 +70,10 @@ class EvaluateEurocTrajectoryTests(unittest.TestCase):
         self.assertAlmostEqual(result["association_ratio"], 1.0)
         self.assertLess(result["ate_translation_se3_m"]["rmse"], 1e-12)
         self.assertLess(result["rpe_translation_consecutive_m"]["rmse"], 1e-12)
-        self.assertLess(result["rpe_rotation_consecutive_deg"]["rmse"], 1e-6)
+        # 1e-6 deg is tighter than cross-platform libm reproducibility
+        # (observed 1.7e-6 on x86-64 glibc); 1e-4 deg is still exactness for
+        # an identity-vs-rigid-transform comparison.
+        self.assertLess(result["rpe_rotation_consecutive_deg"]["rmse"], 1e-4)
 
     def test_restricts_comparison_to_exact_common_timestamps(self) -> None:
         rotation = np.eye(3)

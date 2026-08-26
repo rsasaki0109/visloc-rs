@@ -20,6 +20,10 @@ from run_ssfm_heldout_suite import main  # noqa: E402
 
 
 class HeldoutSsfmSuiteRunnerTests(unittest.TestCase):
+    @unittest.skipUnless(
+        Path.home().joinpath(".cache/torch/hub/checkpoints/superpoint_v1.pth").exists(),
+        "requires the frozen SuperPoint checkpoint in the torch hub cache",
+    )
     def test_three_sequence_failures_still_produce_five_engine_summary(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
