@@ -216,6 +216,7 @@ impl NativeCudaCorrelation {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_impl(
         &mut self,
         anchors: ArrayView4<'_, f32>,
