@@ -419,18 +419,13 @@ pub fn average_positions(
         if !norm.is_finite() || norm < 1e-12 {
             continue;
         }
-        let direction = world / norm;
         bearings.push(Bearing {
             i: edge.image_i,
             j: edge.image_j,
-            direction,
+            direction: world / norm,
             weight,
         });
     }
-    if bearings.is_empty() {
-        return vec![None; rotations.len()];
-    }
-    // Keep only edges whose both endpoints carry a rotation.
     bearings.retain(|b| {
         rotations.get(b.i).copied().flatten().is_some()
             && rotations.get(b.j).copied().flatten().is_some()
@@ -440,43 +435,14 @@ pub fn average_positions(
     }
 
     const PRIOR_WEIGHT: f64 = 1e-6;
-    // IRLS trim threshold on the bearing angle (radians, ~8.6 degrees):
-    // bent shapes come from noisy bearings pulling the least squares;
-    // trimming the worst offenders per round straightens the solution.
-    const MAX_BEARING_ERROR_RAD: f64 = 0.3;
-
     let members: Vec<usize> = (0..rotations.len())
         .filter(|&i| rotations[i].is_some())
         .collect();
 
-    // Hessian-vector product of the perpendicular rows + prior for one
-    // displacement field, over the given bearing slice.
-    let hess_vec = |bs: &[Bearing],
-                    active: &[bool],
-                    v: &HashMap<usize, Vector3<f64>>|
-     -> HashMap<usize, Vector3<f64>> {
-        let mut out: HashMap<usize, Vector3<f64>> = HashMap::new();
-        for (k, b) in bs.iter().enumerate() {
-            if !active[k] {
-                continue;
-            }
-            let ci = v.get(&b.i).copied().unwrap_or(Vector3::zeros());
-            let cj = v.get(&b.j).copied().unwrap_or(Vector3::zeros());
-            // J_i v = d × (vi − vj); Aᵀ_i y = w·(d × y).
-            let y = b.direction.cross(&(ci - cj));
-            *out.entry(b.i).or_default() += b.direction.cross(&y).scale(-b.weight);
-            *out.entry(b.j).or_default() += b.direction.cross(&y).scale(b.weight);
-        }
-        for (&node, val) in v {
-            *out.entry(node).or_default() += val.scale(PRIOR_WEIGHT);
-        }
-        out
-    };
-
     // One scale-fixing unit-displacement row on the highest-weight edge
-    // touching the seed (ties → smallest neighbour index): the perpendicular
-    // rows alone are homogeneous, so exactly one unit row fixes the global
-    // scale without biasing any other edge's length.
+    // touching the seed: the perpendicular rows alone are homogeneous, so
+    // exactly one unit row fixes the global scale without biasing any other
+    // edge's length. It is handled as an affine rhs row, not part of H.
     let scale_index = bearings
         .iter()
         .enumerate()
@@ -489,12 +455,19 @@ pub fn average_positions(
         })
         .map(|(i, _)| i);
 
-    let mut active = vec![true; bearings.len()];
-    if let Some(k) = scale_index {
-        active[k] = false; // handled as the affine rhs row, not part of H
-    }
+    // ---- Graduated Huber IRLS ----------------------------------------------
+    // Bent shapes come from noisy bearings pulling the least squares equally
+    // with good ones. Graduated non-convexity (GNC): solve repeatedly while
+    // RELAXING the Huber threshold each round, starting tight (robust against
+    // the initial bent guess) and ending loose (final polish approaches the
+    // plain least-squares optimum on the now-clean bearing set). Bearings are
+    // never hard-deleted; their weights soften as their residuals demand.
+    const ROUNDS: usize = 6;
+    let thresholds: Vec<f64> = (0..ROUNDS)
+        .map(|round| 0.05 * (10.0f64).powf(round as f64 / (ROUNDS - 1) as f64))
+        .collect(); // ~0.05 rad (2.9°) → ~0.5 rad (28.6°)
 
-    // RHS from the scale row's unit target: Aᵀ_i b = −w d, Aᵀ_j b = +w d.
+    let mut bearing_weights: Vec<f64> = bearings.iter().map(|b| b.weight.max(1.0)).collect();
     let mut rhs: HashMap<usize, Vector3<f64>> = HashMap::new();
     if let Some(k) = scale_index {
         let b = &bearings[k];
@@ -502,26 +475,45 @@ pub fn average_positions(
         *rhs.entry(b.j).or_default() += b.direction.scale(b.weight);
     }
 
-    let solve_cg = |active: &[bool],
-                    rhs: &HashMap<usize, Vector3<f64>>,
-                    cg_iterations: usize|
+    let hess_vec = |bs: &[Bearing],
+                    ws: &[f64],
+                    v: &HashMap<usize, Vector3<f64>>|
      -> HashMap<usize, Vector3<f64>> {
+        let mut out: HashMap<usize, Vector3<f64>> = HashMap::new();
+        for (k, b) in bs.iter().enumerate() {
+            let w = ws[k];
+            if w <= 0.0 {
+                continue;
+            }
+            let ci = v.get(&b.i).copied().unwrap_or(Vector3::zeros());
+            let cj = v.get(&b.j).copied().unwrap_or(Vector3::zeros());
+            // J_i v = d × (vi − vj); Aᵀ_i y = −w·(d × y), Aᵀ_j y = +w·(d×y).
+            let y = b.direction.cross(&(ci - cj));
+            *out.entry(b.i).or_default() += b.direction.cross(&y).scale(-w);
+            *out.entry(b.j).or_default() += b.direction.cross(&y).scale(w);
+        }
+        for (&node, val) in v {
+            *out.entry(node).or_default() += val.scale(PRIOR_WEIGHT);
+        }
+        out
+    };
+
+    let solve_cg = |ws: &[f64], cg_iterations: usize| -> HashMap<usize, Vector3<f64>> {
         let zero_field: HashMap<usize, Vector3<f64>> =
             members.iter().map(|&i| (i, Vector3::zeros())).collect();
-        let positions = zero_field.clone();
-        let h0 = hess_vec(bearings.as_slice(), active, &zero_field);
+        let mut out = zero_field.clone();
+        let h0 = hess_vec(bearings.as_slice(), ws, &zero_field);
         let mut r: HashMap<usize, Vector3<f64>> = rhs
             .iter()
             .map(|(k, v)| (*k, *v - h0.get(k).copied().unwrap_or(Vector3::zeros())))
             .collect();
         let mut p = r.clone();
         let mut rs_old: f64 = r.values().map(|g| g.norm_squared()).sum();
-        let mut out = positions;
         for _ in 0..cg_iterations.max(1) {
             if !rs_old.is_finite() || rs_old < 1e-24 {
                 break;
             }
-            let hp = hess_vec(bearings.as_slice(), active, &p);
+            let hp = hess_vec(bearings.as_slice(), ws, &p);
             let denom: f64 = p
                 .iter()
                 .map(|(k, v)| v.dot(&hp.get(k).copied().unwrap_or(Vector3::zeros())))
@@ -550,59 +542,67 @@ pub fn average_positions(
         out
     };
 
-    let mut positions = solve_cg(&active, &rhs, cg_iterations);
+    let bearing_angle_error = |positions: &HashMap<usize, Vector3<f64>>, k: usize| -> f64 {
+        let b = &bearings[k];
+        let ci = positions.get(&b.i).copied().unwrap_or(Vector3::zeros());
+        let cj = positions.get(&b.j).copied().unwrap_or(Vector3::zeros());
+        let disp = cj - ci;
+        let norm = disp.norm();
+        if norm < 1e-9 {
+            return f64::INFINITY;
+        }
+        (disp.dot(&b.direction) / norm).clamp(-1.0, 1.0).acos()
+    };
 
-    // IRLS rounds: measure each bearing's angular error against the solved
-    // geometry, deactivate the worst, re-solve.
-    for _ in 0..3 {
-        let mut worst: Vec<(f64, usize)> = Vec::new();
-        for (k, b) in bearings.iter().enumerate() {
-            if !active[k] || k == scale_index.unwrap_or(usize::MAX) {
+    let mut positions = solve_cg(bearing_weights.as_slice(), cg_iterations);
+    for (round, &threshold) in thresholds.iter().enumerate() {
+        // Re-measure angular errors under the current solution and re-weight
+        // every bearing with the round's Huber factor.
+        let mut changed = false;
+        for k in 0..bearings.len() {
+            if Some(k) == scale_index {
                 continue;
             }
-            let ci = positions.get(&b.i).copied().unwrap_or(Vector3::zeros());
-            let cj = positions.get(&b.j).copied().unwrap_or(Vector3::zeros());
-            let disp = cj - ci;
-            let norm = disp.norm();
-            if norm < 1e-9 {
-                worst.push((f64::INFINITY, k));
-                continue;
+            let err = bearing_angle_error(&positions, k);
+            let factor = if err.is_finite() && err > threshold {
+                threshold / err
+            } else {
+                1.0
+            };
+            let target = bearings[k].weight.max(1.0) * factor;
+            if (target - bearing_weights[k]).abs() > 1e-9 {
+                bearing_weights[k] = target;
+                changed = true;
             }
-            let cos = (disp.dot(&b.direction) / norm).clamp(-1.0, 1.0);
-            worst.push((cos.acos(), k));
         }
-        worst.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let before = active.iter().filter(|&&a| a).count();
-        for &(err, k) in &worst {
-            if err <= MAX_BEARING_ERROR_RAD {
-                break;
-            }
-            active[k] = false;
+        positions = solve_cg(bearing_weights.as_slice(), cg_iterations);
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+            let mut errs: Vec<f64> = (0..bearings.len())
+                .filter(|&k| Some(k) != scale_index)
+                .map(|k| bearing_angle_error(&positions, k))
+                .collect();
+            errs.sort_by(|a, b| a.total_cmp(b));
+            eprintln!(
+                "global-sfm debug: position round {round} threshold={:.3} rad                  median residual {:.2} deg",
+                threshold,
+                errs.get(errs.len() / 2).copied().unwrap_or(f64::NAN).to_degrees()
+            );
         }
-        let after = active.iter().filter(|&&a| a).count();
-        if after == before {
-            break;
+        if !changed && round + 1 < thresholds.len() {
+            continue;
         }
-        positions = solve_cg(&active, &rhs, cg_iterations);
     }
 
     if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
-        let mut errs: Vec<f64> = Vec::new();
-        for (k, b) in bearings.iter().enumerate() {
-            if !active[k] {
-                continue;
-            }
-            let ci = positions.get(&b.i).copied().unwrap_or(Vector3::zeros());
-            let cj = positions.get(&b.j).copied().unwrap_or(Vector3::zeros());
-            let disp = (cj - ci).normalize();
-            errs.push(disp.dot(&b.direction).clamp(-1.0, 1.0).acos());
-        }
+        let mut errs: Vec<f64> = (0..bearings.len())
+            .filter(|&k| Some(k) != scale_index)
+            .map(|k| bearing_angle_error(&positions, k))
+            .collect();
         errs.sort_by(|a, b| a.total_cmp(b));
         eprintln!(
-            "global-sfm debug: positions: {} nodes, {}/{} bearings kept, median angular residual {:.2} deg",
+            "global-sfm debug: positions final: {} nodes, {} bearings, median angular residual {:.2} deg",
             positions.len(),
             errs.len(),
-            bearings.len(),
             errs.get(errs.len() / 2).copied().unwrap_or(f64::NAN).to_degrees()
         );
     }

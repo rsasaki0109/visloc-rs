@@ -4,6 +4,11 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Changed
+
+- **Global-SfM position stage: hard-trim IRLS replaced with graduated Huber non-convexity — measured parity, diagnosis recorded (2026-08-26).** `average_positions` now runs 6 graduated rounds relaxing the Huber threshold ~2.9°→~28.6° with soft per-bearing weights instead of hard-deleting bearings above a fixed angle. Measured on ETH3D courtyard (SIFT, global mapper): **identical outcome to the hard trim** (37/38 registered, Sim(3) centre RMSE 477.5 cm vs 477.6 cm) with all 127 bearings retained rather than 29. Decisive negative finding: courtyard's bearing errors are NOT outlier-distributed — they are systematic (chirality-ambiguous essential estimates on repetitive façades survive both trimming and soft weighting), so robust positioning alone cannot straighten the shape. The binding lever remains upstream edge quality: chirality-hardened relative-pose estimation and/or detector-side affine-covariant sampling. Kept because the graduated form is strictly more principled (no information deleted) and is the substrate the eventual edge-quality fix needs.
+
+
 ### Added
 
 - **COLMAP-port continuation slice 4: adaptive PnP RANSAC budget (`--pnp-max-iterations`) — courtyard registration 12/38 → 21/38 (2026-08-26, same day follow-up 3).**
