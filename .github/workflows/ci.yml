@@ -57,7 +57,7 @@ jobs:
       - name: Benchmark registry
         run: |
           python3 scripts/benchmark_registry.py validate benchmarks/registry/readme_claims_v1.json benchmarks/registry/claim_matrix_v1.json benchmarks/registry/runs
-          python3 scripts/benchmark_registry.py check-generated
+          python3 scripts/benchmark_registry.py check-generated --readme docs/readme_details.md
 
       - name: Documentation links
         run: scripts/check_docs_links.sh
