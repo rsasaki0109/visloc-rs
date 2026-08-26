@@ -70,6 +70,21 @@ pub struct ImageScore {
     pub score: f32,
 }
 
+/// Deterministic work counters from one [`VocabTree::query_with_work`]
+/// call. They exist so retrieval-cost scaling can be asserted without
+/// depending on wall-clock noise: `leaf_distance_computations` is the
+/// corpus-size-independent word-assignment cost, while `entries_visited`
+/// is the corpus-size-dependent inverted-file cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryWorkStats {
+    /// Leaf-centroid distance computations performed while assigning query
+    /// descriptors to visual words (well-formed input: `descriptors ×
+    /// num_words`).
+    pub leaf_distance_computations: usize,
+    /// Inverted-file entries scored across every assigned word.
+    pub entries_visited: usize,
+}
+
 /// Configuration for [`VocabTree`]. Field-for-field citations in the module
 /// doc comment above; defaults reproduce COLMAP's own where one exists.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -493,9 +508,21 @@ impl VocabTree {
         descriptors: &[Vec<f32>],
         max_num_images: Option<usize>,
     ) -> Vec<ImageScore> {
+        self.query_with_work(descriptors, max_num_images).0
+    }
+
+    /// Same scoring as [`Self::query`], additionally reporting deterministic
+    /// work counters so callers can measure retrieval-cost scaling without
+    /// depending on wall-clock noise.
+    pub fn query_with_work(
+        &self,
+        descriptors: &[Vec<f32>],
+        max_num_images: Option<usize>,
+    ) -> (Vec<ImageScore>, QueryWorkStats) {
+        let mut stats = QueryWorkStats::default();
         debug_assert!(self.finalized, "query() requires finalize() to have run");
         if descriptors.is_empty() {
-            return Vec::new();
+            return (Vec::new(), stats);
         }
 
         // Self-similarity of the query, summed across every (descriptor,
@@ -511,6 +538,7 @@ impl VocabTree {
             } else {
                 Vec::new()
             };
+            stats.leaf_distance_computations += self.vocab.num_words();
             for &w in &words {
                 self_similarity += self.files[w].squared_idf_weight as f64;
             }
@@ -529,6 +557,7 @@ impl VocabTree {
             }
             let proj = project(&self.proj_matrix, d);
             for &w in words {
+                stats.entries_visited += self.files[w].entries.len();
                 for (image_id, s) in self.files[w].score_feature(&proj, &self.weight_lut) {
                     *scores.entry(image_id).or_insert(0.0) += s;
                 }
@@ -558,7 +587,7 @@ impl VocabTree {
         if let Some(n) = max_num_images {
             out.truncate(n);
         }
-        out
+        (out, stats)
     }
 }
 
@@ -709,5 +738,80 @@ mod tests {
                 assert!(dot.abs() < 1e-3, "rows {i},{j} not orthogonal (dot={dot})");
             }
         }
+    }
+
+    /// M4 acceptance, deterministic form: the corpus-size-dependent part of
+    /// a vocab-tree query must grow (near-)linearly with the number of
+    /// indexed images, so that replacing the flat-VLAD quadratic pairwise
+    /// scan is a genuine sub-linear-vs-quadratic win at retrieval scale.
+    /// Work counters (`QueryWorkStats`) make this machine-independent.
+    #[test]
+    fn query_work_grows_linearly_while_flat_pairwise_is_quadratic() {
+        // Synthetic "places" corpus: `places` clusters in descriptor space;
+        // every image draws its descriptors from one place. Dimension 256
+        // keeps the crate-default Hamming embedding (64) valid.
+        let dim = 256;
+        let per_image = 8;
+        let places = 24usize;
+        let mut rng = Lcg(4242);
+        let centroids: Vec<Vec<f32>> = (0..places)
+            .map(|_| (0..dim).map(|_| rng.next() * 2.0 - 1.0).collect())
+            .collect();
+        let mut descriptors_for = |image: usize| -> Vec<Vec<f32>> {
+            let c = &centroids[image % places];
+            (0..per_image)
+                .map(|_| {
+                    c.iter()
+                        .map(|&v| v + (rng.next() - 0.5) * 0.2)
+                        .collect::<Vec<f32>>()
+                })
+                .collect()
+        };
+
+        let mut build_and_query_work = |num_images: usize| -> usize {
+            let mut training: Vec<Vec<Vec<f32>>> = Vec::new();
+            let mut corpus: Vec<Vec<Vec<f32>>> = Vec::new();
+            for image in 0..num_images {
+                let d = descriptors_for(image);
+                if image % 32 == 0 {
+                    training.push(d.clone());
+                }
+                corpus.push(d);
+            }
+            let flat_training: Vec<&[f32]> = training
+                .iter()
+                .flat_map(|d| d.iter().map(|v| v.as_slice()))
+                .collect();
+            let hkm = HkmBuildOptions {
+                branching_factor: 4,
+                depth: 2,
+                iterations: 3,
+                seed: 7,
+                ..HkmBuildOptions::default()
+            };
+            let options = VocabTreeOptions::default();
+            let mut tree = VocabTree::build(&flat_training, &hkm, &options).expect("tree builds");
+            for (image, d) in corpus.iter().enumerate() {
+                tree.add_image(image, d);
+            }
+            tree.finalize();
+            let queries: Vec<Vec<f32>> = corpus[num_images / 2].clone();
+            let (_, stats) = tree.query_with_work(&queries, None);
+            stats.entries_visited
+        };
+
+        let work_small = build_and_query_work(256);
+        let work_large = build_and_query_work(2048);
+        let ratio = work_large as f64 / work_small as f64;
+        // 8× more images: linear scaling predicts ~8; allow slack for IDF /
+        // word-distribution drift but far below the quadratic 64×.
+        assert!(
+            ratio < 10.0,
+            "entries_visited grew {ratio:.2}x for an 8x corpus — not near-linear"
+        );
+        // The flat-VLAD mutual-NN scan this index replaces is exactly
+        // quadratic in corpus size (every query against every global).
+        let flat_ratio = ((2048f64) * 2047.0) / ((256f64) * 255.0);
+        assert!(flat_ratio > 60.0, "sanity: flat scan is ~64x for 8x corpus");
     }
 }

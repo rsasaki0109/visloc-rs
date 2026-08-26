@@ -59,10 +59,13 @@
 //! It requires three-view reprojection plus a verified-edge cycle and rolls the
 //! added tracks and BA back if the original clean tracks' residual worsens. It is
 //! experimental and off by default.
-//! `--structureless-registration` runs one bounded pass after ordinary
+//! `--structureless-registration` runs bounded passes after ordinary
 //! post-refinement PnP. A missing image needs at least three registered verified
 //! neighbours whose independently recovered rotations agree; their camera-
 //! centre direction lines recover translation scale in the existing model.
+//! Passes repeat until a pass registers nothing (budget
+//! `--structureless-max-rounds`, default 4), so an island can chain inward
+//! through a bridge whose index is higher than the images it unlocks.
 //! It is experimental and off by default.
 //! `--pose-guided-track-augmentation` keeps the separately matched
 //! `--pose-graph-offsets` out of initial union-find construction, then attaches
@@ -143,6 +146,7 @@ struct Args {
     next_image_policy: NextImagePolicy,
     post_refinement_registration: bool,
     structureless_registration: bool,
+    structureless_max_rounds: usize,
     geometry_guided_conflict_recovery: bool,
     track_source: TrackSource,
     hierarchical: bool,
@@ -194,6 +198,7 @@ fn parse_args() -> Result<Args, String> {
     let mut next_image_policy = NextImagePolicy::VisibilityPyramid;
     let mut post_refinement_registration = false;
     let mut structureless_registration = false;
+    let mut structureless_max_rounds = 4usize;
     let mut geometry_guided_conflict_recovery = false;
     let mut track_source = TrackSource::UnionFind;
     let mut hierarchical = false;
@@ -288,6 +293,9 @@ fn parse_args() -> Result<Args, String> {
             "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--post-refinement-registration" => post_refinement_registration = true,
             "--structureless-registration" => structureless_registration = true,
+            "--structureless-max-rounds" => {
+                structureless_max_rounds = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             "--geometry-conflict-recovery" => geometry_guided_conflict_recovery = true,
             "--track-source" => {
                 track_source = match a.remove(i + 1).as_str() {
@@ -429,6 +437,7 @@ fn parse_args() -> Result<Args, String> {
         next_image_policy,
         post_refinement_registration,
         structureless_registration,
+        structureless_max_rounds,
         geometry_guided_conflict_recovery,
         track_source,
         hierarchical,
@@ -1836,6 +1845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         next_image_policy: args.next_image_policy,
         post_refinement_registration: args.post_refinement_registration,
         structureless_registration: args.structureless_registration,
+        structureless_max_rounds: args.structureless_max_rounds,
         geometry_guided_conflict_recovery: args.geometry_guided_conflict_recovery,
         track_source: args.track_source,
         min_triangulation_angle_deg: args.min_tri_angle,

@@ -52,5 +52,5 @@ pub mod index;
 pub mod pair_generator;
 
 pub use hkm::{HierarchicalVocabulary, HkmBuildOptions};
-pub use index::{ImageScore, VocabTree, VocabTreeOptions};
+pub use index::{ImageScore, QueryWorkStats, VocabTree, VocabTreeOptions};
 pub use pair_generator::{generate_pairs, VocabTreePairGeneratorOptions};

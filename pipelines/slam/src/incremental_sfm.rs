@@ -206,6 +206,16 @@ pub struct IncrementalSfmConfig {
     /// reconstruction frame; a single essential pair is never sufficient.
     /// Experimental and off by default.
     pub structureless_registration: bool,
+    /// Maximum ascending-scan rounds of the structure-less completion pass.
+    /// A single scan registers an image only when its consensus neighbours are
+    /// *already* registered at the moment the scan reaches it, so a chain whose
+    /// bridge image has a higher index than its dependent images (an island's
+    /// entry point numbered above the images it unlocks — the courtyard-class
+    /// second-component failure) is left behind by one pass. Each round feeds
+    /// the images it registered back in as neighbours for the next round; the
+    /// loop stops as soon as a round registers nothing. One round therefore
+    /// reproduces the historical single-pass behaviour exactly.
+    pub structureless_max_rounds: usize,
     /// Minimum registered relative-pose neighbours required to propose one
     /// structure-less camera pose.
     pub structureless_min_neighbors: usize,
@@ -393,6 +403,7 @@ impl Default for IncrementalSfmConfig {
             max_registration_trials: 3,
             post_refinement_registration: false,
             structureless_registration: false,
+            structureless_max_rounds: 4,
             structureless_min_neighbors: 3,
             structureless_min_pair_inliers: 30,
             structureless_max_rotation_disagreement_deg: 3.0,
@@ -926,7 +937,7 @@ pub fn incremental_sfm(
         && config.structureless_registration
         && poses.iter().any(Option::is_none)
     {
-        structureless_registration_pass(
+        structureless_registration_rounds(
             &cam,
             features,
             pairwise,
@@ -2419,6 +2430,48 @@ fn build_structureless_local_tracks(
         }
     }
     local_tracks
+}
+
+/// Run [`structureless_registration_pass`] repeatedly until a round registers
+/// nothing, the budget [`IncrementalSfmConfig::structureless_max_rounds`] is
+/// spent, or every image is registered. Each round scans in the same fixed
+/// ascending image order, so the loop is deterministic; images registered by
+/// earlier rounds act as neighbours for later ones, which is what lets an
+/// island chain inward through its bridge even when the bridge's index is
+/// higher than the images it unlocks.
+fn structureless_registration_rounds(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    tracks: &mut Vec<Vec<(usize, usize)>>,
+    config: &IncrementalSfmConfig,
+    poses: &mut [Option<Pose>],
+    track_point: &mut Vec<Option<Point3<f64>>>,
+) -> usize {
+    let mut total = 0usize;
+    let max_rounds = config.structureless_max_rounds.max(1);
+    for round in 0..max_rounds {
+        if !poses.iter().any(Option::is_none) {
+            break;
+        }
+        let registered = structureless_registration_pass(
+            camera,
+            features,
+            pairwise,
+            tracks,
+            config,
+            poses,
+            track_point,
+        );
+        if sfm_debug_enabled() && registered > 0 {
+            eprintln!("sfm-debug: structure-less round {round} registered {registered} image(s)");
+        }
+        total += registered;
+        if registered == 0 {
+            break;
+        }
+    }
+    total
 }
 
 /// One bounded multi-neighbour recovery sweep. Each missing image is attempted
@@ -6172,5 +6225,231 @@ mod tests {
             },
         ];
         assert!(solve_structureless_pose(&constraints, &IncrementalSfmConfig::default()).is_err());
+    }
+
+    /// Island-chain fixture. Ten arc cameras all observing one point cloud,
+    /// with the verified pair graph pruned into a main component
+    /// `{0, 1, 2, 3, 6, 7, 8, 9}` and a two-image island `{4, 5}` where the
+    /// bridge image `5` has a *higher* index than its dependent `4`:
+    ///
+    /// - `4` pairs only with `{2, 3, 5}` — two registered neighbours while
+    ///   `5` is unregistered, below [`IncrementalSfmConfig::
+    ///   structureless_min_neighbors`];
+    /// - `5` pairs with registered `{3, 6, 7}` plus the island partner `4`.
+    ///
+    /// Every island pair is narrow-baseline (adjacent arc steps) because the
+    /// two-view essential estimate degrades on this synthetic cloud beyond
+    /// ~0.4 rad of arc separation. Disjoint keypoint bands keep every
+    /// island-touching union-find component at two images, below the
+    /// track-length floor: the clean global model triangulates from
+    /// main-component tracks only, leaving the island's observations free
+    /// for local-submap synthesis — exactly the thin-per-image-structure
+    /// regime the courtyard second component exposed.
+    struct IslandScene {
+        camera: Camera,
+        poses: Vec<Pose>,
+        features: Vec<FeatureSet>,
+        pairwise: Vec<PairwiseMatches>,
+    }
+
+    fn build_island_scene() -> IslandScene {
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut points = Vec::new();
+        for xi in -3..=3 {
+            for yi in -2..=2 {
+                for zi in 0..=4 {
+                    points.push(Point3::new(
+                        xi as f64 * 0.3,
+                        yi as f64 * 0.3,
+                        zi as f64 * 0.25,
+                    ));
+                }
+            }
+        }
+        let mut poses = Vec::new();
+        for k in 0..10 {
+            let angle = -0.585 + k as f64 * 0.13;
+            let radius = 3.0;
+            let cam_center = Point3::new(radius * angle.sin(), 0.0, -radius * angle.cos());
+            let forward = (Point3::origin() - cam_center).normalize();
+            let world_up = Vector3::new(0.0, 1.0, 0.0);
+            let right = forward.cross(&world_up).normalize();
+            let up = right.cross(&forward);
+            let r_cam_to_world = nalgebra::Matrix3::from_columns(&[right, -up, forward]);
+            let q_c2w = UnitQuaternion::from_rotation_matrix(
+                &nalgebra::Rotation3::from_matrix_unchecked(r_cam_to_world),
+            );
+            let q_w2c = q_c2w.inverse();
+            let t_w2c = -(q_w2c * cam_center.coords);
+            poses.push(Pose::from_world_to_camera(q_w2c, t_w2c));
+        }
+
+        // Every camera sees every point; keypoint index == point index.
+        let features: Vec<FeatureSet> = poses
+            .iter()
+            .map(|pose| {
+                let (kps, descs): (Vec<_>, Vec<_>) = points
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pidx, p)| {
+                        project(&camera, pose, p).map(|px| (px, vec![pidx as f32, 1.0, 0.0, 0.0]))
+                    })
+                    .unzip();
+                FeatureSet::new(kps, descs).unwrap()
+            })
+            .collect();
+
+        // Strided keypoint bands. Every band must mix points across all
+        // three grid axes: a band confined to one grid slice is exactly
+        // planar, and a planar correspondence set makes the two-view
+        // essential estimate chirality-degenerate (the failure that
+        // motivated this design).
+        let all: Vec<usize> = (0..points.len()).collect();
+        let main_points: Vec<usize> = all.iter().step_by(4).copied().collect();
+        let remainder: Vec<usize> = {
+            let main_set: HashSet<usize> = main_points.iter().copied().collect();
+            all.into_iter().filter(|p| !main_set.contains(p)).collect()
+        };
+        let island_band =
+            |k: usize| -> Vec<usize> { remainder.iter().skip(k).step_by(6).copied().collect() };
+        let band_a = island_band(0);
+        let band_b = island_band(1);
+        let band_c = island_band(2);
+        let band_d = island_band(3);
+        let band_e = island_band(4);
+        let band_f = island_band(5);
+
+        let pair = |image_i: usize, image_j: usize, band: &[usize]| PairwiseMatches {
+            image_i,
+            image_j,
+            matches: band.iter().map(|&p| (p, p)).collect(),
+        };
+
+        let mut pairwise = Vec::new();
+        let main = [0usize, 1, 2, 3, 6, 7, 8, 9];
+        for (a, &i) in main.iter().enumerate() {
+            for &j in main.iter().skip(a + 1) {
+                pairwise.push(pair(i, j, &main_points));
+            }
+        }
+        pairwise.push(pair(4, 3, &band_a));
+        pairwise.push(pair(4, 2, &band_b));
+        pairwise.push(pair(4, 5, &band_c));
+        pairwise.push(pair(5, 6, &band_d));
+        pairwise.push(pair(5, 3, &band_e));
+        pairwise.push(pair(5, 7, &band_f));
+
+        IslandScene {
+            camera,
+            poses,
+            features,
+            pairwise,
+        }
+    }
+
+    #[test]
+    fn structureless_rounds_chain_an_island_through_a_higher_indexed_bridge() {
+        let scene = build_island_scene();
+        let min_track_length = 5;
+        let mut tracks = build_tracks(scene.features.len(), &scene.pairwise, min_track_length);
+        assert!(!tracks.is_empty(), "fixture sanity: main tracks must form");
+        for track in &tracks {
+            let images: HashSet<usize> = track.iter().map(|&(image, _)| image).collect();
+            assert!(
+                !images.contains(&4) && !images.contains(&5),
+                "fixture sanity: island observations must not join global tracks"
+            );
+        }
+
+        // Register only the main component with ground-truth poses and
+        // triangulate the clean model.
+        let mut poses: Vec<Option<Pose>> = scene.poses.iter().cloned().map(Some).collect();
+        poses[4] = None;
+        poses[5] = None;
+        let mut track_point = vec![None; tracks.len()];
+        let config = IncrementalSfmConfig {
+            colmap_style_mapper: true,
+            structureless_registration: true,
+            structureless_min_pair_inliers: 5,
+            structureless_min_support_tracks: 6,
+            // The 20-point synthetic essentials carry ~1 deg of rotation
+            // noise, which at fx=500 is ~9 px of reprojection — far beyond
+            // the production-default 2 px admission gate that real
+            // hundreds-of-inlier matches easily meet. This fixture exercises
+            // the round-chaining mechanics, not the pixel gate (which has
+            // its own dedicated tests), so the gate is widened accordingly.
+            structureless_max_reprojection_error_px: 12.0,
+            max_reprojection_error_px: 12.0,
+            ..IncrementalSfmConfig::default()
+        };
+        triangulate_pending(
+            &scene.camera,
+            &scene.features,
+            &tracks,
+            &poses,
+            &config,
+            &mut track_point,
+        );
+        let clean_points = track_point.iter().filter(|p| p.is_some()).count();
+        assert!(
+            clean_points >= 10,
+            "fixture sanity: clean model must triangulate ({clean_points} points)"
+        );
+
+        // A single ascending scan must register the bridge `6` but leave `3`
+        // behind: when the scan reaches `3`, `6` is still unregistered and `3`
+        // has only two admissible neighbours.
+        let single_round_config = IncrementalSfmConfig {
+            structureless_max_rounds: 1,
+            ..config.clone()
+        };
+        let single_registered = structureless_registration_rounds(
+            &scene.camera,
+            &scene.features,
+            &scene.pairwise,
+            &mut tracks.clone(),
+            &single_round_config,
+            &mut poses.clone(),
+            &mut track_point.clone(),
+        );
+        assert_eq!(
+            single_registered, 1,
+            "one ascending pass must recover exactly the bridge image"
+        );
+
+        // Multiple rounds feed `6` back in as a neighbour and chain `3`.
+        let total_registered = structureless_registration_rounds(
+            &scene.camera,
+            &scene.features,
+            &scene.pairwise,
+            &mut tracks,
+            &config,
+            &mut poses,
+            &mut track_point,
+        );
+        assert_eq!(
+            total_registered, 2,
+            "rounds must chain the dependent island image through the bridge"
+        );
+        assert!(poses.iter().all(Option::is_some));
+
+        // The chained pose must sit at the true (metric) geometry: rotation
+        // tight, centre within a fraction of the neighbour spread.
+        for image in [4usize, 5] {
+            let pose = poses[image].as_ref().unwrap();
+            let rotation_error = (pose.world_to_camera.rotation.inverse()
+                * scene.poses[image].world_to_camera.rotation)
+                .angle();
+            let center_error =
+                (pose.camera_center_world() - scene.poses[image].camera_center_world()).norm();
+            assert!(
+                rotation_error < 0.01,
+                "image {image} rotation error {rotation_error} rad too large"
+            );
+            assert!(
+                center_error < 0.05,
+                "image {image} centre error {center_error} m too large"
+            );
+        }
     }
 }

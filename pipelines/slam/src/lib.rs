@@ -88,6 +88,9 @@ pub use ordered_view_graph::{
     OrderedPairSource,
 };
 
+pub mod global_sfm;
+pub use global_sfm::{average_positions, average_rotations, GlobalSfmEdge, GlobalSfmPoses};
+
 pub mod imu_preintegration;
 pub use imu_preintegration::{
     ImuNoiseModel, ImuPreintegratedDelta, ImuPreintegrationFactor, ImuPreintegrator, Matrix9,
