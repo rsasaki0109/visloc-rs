@@ -276,7 +276,9 @@ fn guided_epipolar_matches(
     let sampson_sq = |ni: &[f64; 3], nj: &[f64; 3]| -> Option<f64> {
         let e_ni = essential * nalgebra::Vector3::new(ni[0], ni[1], ni[2]);
         let et_nj = essential.transpose() * nalgebra::Vector3::new(nj[0], nj[1], nj[2]);
-        let numerator = nalgebra::Vector3::new(nj[0], nj[1], nj[2]).dot(&e_ni).powi(2);
+        let numerator = nalgebra::Vector3::new(nj[0], nj[1], nj[2])
+            .dot(&e_ni)
+            .powi(2);
         let denominator = e_ni.x * e_ni.x + e_ni.y * e_ni.y + et_nj.x * et_nj.x + et_nj.y * et_nj.y;
         if denominator < 1e-18 {
             None
