@@ -1,7 +1,7 @@
 //! GLOMAP-style global structure-from-motion back-end: rotation averaging
 //! followed by translation-direction position averaging.
 //!
-//! The incremental mapper ([`crate::incremental_sfm`]) grows one
+//! The incremental mapper ([`crate::incremental_sfm::incremental_sfm`]) grows one
 //! reconstruction image by image; the global SfM lineage (GLOMAP, Stumberger
 //! et al. 2024, and its ancestors) instead exploits verified pairwise
 //! relative poses directly: average all relative rotations into one
@@ -681,7 +681,7 @@ impl std::error::Error for GlobalReconstructionError {}
 /// tracks against the averaged cameras, and finish with one bundle adjustment
 /// over everything registered.
 ///
-/// This is the global analogue of [`crate::incremental_sfm`]'s grow-from-a-
+/// This is the global analogue of [`crate::incremental_sfm::incremental_sfm`]'s grow-from-a-
 /// seed loop: instead of chaining registrations image by image, every camera
 /// lands in one consistent frame at once and BA only has to polish local
 /// geometry. Images outside the seed's view-graph component stay unposed.

@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+// The DPVO-port and verification modules document internal (crate-private)
+// items extensively; intra-doc links to them are intentional and resolve
+// under --document-private-items. Tolerated repo-wide until that doc pass.
+#![allow(rustdoc::private_intra_doc_links, rustdoc::broken_intra_doc_links)]
 //! Vision building blocks for visual localization.
 //!
 //! This crate contains feature-extractor traits/adapters, descriptor matching,

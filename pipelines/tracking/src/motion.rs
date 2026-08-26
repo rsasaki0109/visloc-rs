@@ -39,7 +39,7 @@ pub trait MotionModel {
     ///
     /// Default no-op — correct for stateless models (e.g.
     /// [`ConstantPoseMotionModel`]) that read `last_successful_pose`
-    /// fresh from the [`Tracker`](crate::Tracker) on every call and so
+    /// fresh from the [`Tracker`] on every call and so
     /// need no cache of their own to correct.
     fn apply_pose_correction(&mut self, _correction: &SE3) {}
 

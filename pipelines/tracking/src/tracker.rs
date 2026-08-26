@@ -230,7 +230,7 @@ where
     /// `map.keyframes[*].frame.pose` rigid); `correction.scale` is left
     /// to [`MotionModel::apply_similarity_correction`] for models that
     /// cache a world-frame velocity, where it multiplies that vector
-    /// (see [`ImuPredictiveMotionModel`](crate::ImuPredictiveMotionModel)'s
+    /// (see [`ImuPredictiveMotionModel`]'s
     /// override).
     pub fn apply_similarity_pose_correction(&mut self, correction: &Sim3) {
         let se3_part = SE3::new(correction.rotation, correction.translation);
