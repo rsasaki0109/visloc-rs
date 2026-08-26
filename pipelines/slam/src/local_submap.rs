@@ -166,19 +166,10 @@ impl Default for LocalSubmapQualityConfig {
 }
 
 /// Construction and acceptance policy for [`LocalSubmapBuilder`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LocalSubmapConfig {
     pub sfm: IncrementalSfmConfig,
     pub quality: LocalSubmapQualityConfig,
-}
-
-impl Default for LocalSubmapConfig {
-    fn default() -> Self {
-        Self {
-            sfm: IncrementalSfmConfig::default(),
-            quality: LocalSubmapQualityConfig::default(),
-        }
-    }
 }
 
 /// A registered frame expressed in this submap's independent local gauge.
@@ -377,17 +368,9 @@ impl From<IncrementalSfmError> for LocalSubmapBuildError {
 }
 
 /// Stateless builder; all gauge and geometric state belongs to each output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LocalSubmapBuilder {
     pub config: LocalSubmapConfig,
-}
-
-impl Default for LocalSubmapBuilder {
-    fn default() -> Self {
-        Self {
-            config: LocalSubmapConfig::default(),
-        }
-    }
 }
 
 impl LocalSubmapBuilder {
@@ -398,6 +381,7 @@ impl LocalSubmapBuilder {
     /// Reconstruct a local map exclusively from `features` and pre-verified
     /// `pairwise` correspondences. `source_frame_ids` only preserve identity;
     /// their numeric values never influence geometry or selection.
+    #[allow(clippy::result_large_err)]
     pub fn build(
         &self,
         camera: &Camera,
@@ -550,6 +534,7 @@ impl LocalSubmapBuilder {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_inputs(
     source_frame_ids: &[u64],
     features: &[FeatureSet],
@@ -567,6 +552,7 @@ fn validate_inputs(
             return Err(LocalSubmapBuildError::DuplicateSourceFrameId(id));
         }
     }
+    #[allow(clippy::result_large_err)]
     for (pair_index, pair) in pairwise.iter().enumerate() {
         for image_index in [pair.image_i, pair.image_j] {
             if image_index >= features.len() {
@@ -602,6 +588,7 @@ fn validate_inputs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_quality(
     requested_images: usize,
     camera: &Camera,
@@ -614,6 +601,7 @@ fn measure_quality(
     drift_window_count: usize,
 ) -> LocalSubmapQuality {
     let registered_images = poses.iter().filter(|pose| pose.is_some()).count();
+    #[allow(clippy::too_many_arguments)]
     let registration_fraction = if requested_images == 0 {
         0.0
     } else {

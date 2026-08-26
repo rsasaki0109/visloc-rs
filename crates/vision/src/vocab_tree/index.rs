@@ -787,7 +787,6 @@ mod tests {
                 depth: 2,
                 iterations: 3,
                 seed: 7,
-                ..HkmBuildOptions::default()
             };
             let options = VocabTreeOptions::default();
             let mut tree = VocabTree::build(&flat_training, &hkm, &options).expect("tree builds");

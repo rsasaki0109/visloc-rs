@@ -376,6 +376,7 @@ fn select_window(
 const TEMPORAL_OFFSETS: [usize; 6] = [1, 2, 4, 8, 12, 16];
 const MATCH_RATIO: f32 = 0.8;
 
+#[allow(clippy::type_complexity)]
 fn verified_temporal_pairs(
     frames: &[DumpFrame],
     camera: &Camera,
@@ -782,6 +783,7 @@ fn measure_camera_center_scale_transfer(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn load_external_matches(
     dir: &Path,
 ) -> Result<HashMap<(u64, u64), Vec<(usize, usize)>>, Box<dyn Error>> {

@@ -1377,7 +1377,7 @@ pub fn estimate_gravity_and_velocities(
             continue;
         }
         let delta_time = factor.delta.delta_time;
-        if !(delta_time > 0.0) {
+        if delta_time <= 0.0 {
             continue;
         }
         let idx_from = *index_of.get(&factor.keyframe_id_from).expect("windowed id");

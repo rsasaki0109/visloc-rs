@@ -554,6 +554,7 @@ impl MapAtlas {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Align two adjacent submaps from the explicit frame-to-frame factor at
     /// their tracking boundary. Unlike map-wide relocalization, this retains
     /// the actual last-good view and its landmark observations across the
@@ -1137,7 +1138,7 @@ impl MapAtlas {
             };
             let Some(target_pose) = localization
                 .success
-                .then(|| localization.pose.as_ref())
+                .then_some(localization.pose.as_ref())
                 .flatten()
             else {
                 diagnostic.failure_reason =
@@ -1883,9 +1884,8 @@ fn append_transformed_submap(
             .get(&old_id)
             .map(|covariance| rotation * covariance * rotation.transpose());
 
-        if output.landmarks.contains_key(&new_id) {
+        if let Some(existing) = output.landmarks.get_mut(&new_id) {
             let existing_covariance = output.landmark_position_covariances.get(&new_id).cloned();
-            let existing = output.landmarks.get_mut(&new_id).unwrap();
             let existing_observation_count = existing.observations.len().max(1);
             let source_observation_count = remapped_observations.len().max(1);
             let (fused_position, fused_covariance) = fuse_landmark_estimates(
@@ -2449,8 +2449,10 @@ mod tests {
 
     #[test]
     fn fallible_insert_rejects_submap_id_exhaustion_without_overwrite() {
-        let mut atlas = MapAtlas::default();
-        atlas.next_submap_id = u64::MAX;
+        let mut atlas = MapAtlas {
+            next_submap_id: u64::MAX,
+            ..MapAtlas::default()
+        };
 
         let result = atlas.try_insert_independent(VisualMap::new());
 

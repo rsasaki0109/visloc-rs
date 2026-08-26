@@ -799,8 +799,8 @@ mod tests {
             }
         }
         // Four deterministic outliers exercise the robust fit and index report.
-        for index in 0..4 {
-            matches[index].target_point += Vector3::new(4.0 + index as f64, -3.0, 2.0);
+        for (index, m) in matches.iter_mut().enumerate().take(4) {
+            m.target_point += Vector3::new(4.0 + index as f64, -3.0, 2.0);
         }
         (matches, truth)
     }

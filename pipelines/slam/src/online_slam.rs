@@ -5866,17 +5866,29 @@ mod bias_release_promotion_tests {
         // (required for `OnlineSlamPipeline::new` to succeed at all).
         let seed_gravity = OnlineSlamImuConfig::default().gravity_world;
 
-        let mut vi_init_config = OnlineSlamViInitConfig::default();
-        vi_init_config.initializer.gravity_world = seed_gravity;
+        let vi_init_config = OnlineSlamViInitConfig {
+            initializer: VisualInertialInitializerConfig {
+                gravity_world: seed_gravity,
+                ..VisualInertialInitializerConfig::default()
+            },
+            ..OnlineSlamViInitConfig::default()
+        };
 
-        let mut motion_config = OnlineSlamMotionViInitConfig::default();
-        motion_config.initializer.gravity_world = seed_gravity;
+        let motion_config = OnlineSlamMotionViInitConfig {
+            initializer: MotionBasedViInitializerConfig {
+                gravity_world: seed_gravity,
+                ..MotionBasedViInitializerConfig::default()
+            },
+            ..OnlineSlamMotionViInitConfig::default()
+        };
 
-        let mut config = OnlineSlamConfig::default();
-        config.imu = Some(OnlineSlamImuConfig::default());
-        config.local_vi_ba = Some(OnlineSlamLocalBaConfig::default());
-        config.vi_init = Some(vi_init_config);
-        config.vi_motion_init = Some(motion_config);
+        let config = OnlineSlamConfig {
+            imu: Some(OnlineSlamImuConfig::default()),
+            local_vi_ba: Some(OnlineSlamLocalBaConfig::default()),
+            vi_init: Some(vi_init_config),
+            vi_motion_init: Some(motion_config),
+            ..OnlineSlamConfig::default()
+        };
 
         // Sanity check: the seed config must actually be constructible
         // before we exercise the mutation under test.

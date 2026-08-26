@@ -2789,6 +2789,7 @@ fn apply_mono_contribution(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Parallel counterpart of the monocular loop in [`build_normal_equations`].
 ///
 /// Processes observations in fixed-size chunks
@@ -3732,6 +3733,7 @@ fn build_normal_equations(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_step(
     system: &NormalEquationsBa,
     p_count: usize,

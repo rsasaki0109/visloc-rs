@@ -937,7 +937,7 @@ pub(crate) fn imu_factor_whitener(factor: &ImuPreintegrationFactor) -> Matrix9 {
 /// "after the fact" detector M5's own "poisoned forever" failure had no
 /// equivalent of (see `crate::dpvo_vo::DpvoOdometry::rollback_imu_bootstrap`'s
 /// doc for what happens once this trips).
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn imu_factor_nis(
     pose_i: &SE3,
     pose_j: &SE3,

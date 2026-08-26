@@ -715,37 +715,36 @@ mod tests {
         let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
         let centre = Point3::new(id as f64 * 0.1, 0.0, 0.0);
         let pose = Pose::from_world_to_camera(UnitQuaternion::identity(), -centre.coords);
-        let landmarks: Vec<LocalSubmapLandmark> = with_landmarks
-            .then(|| {
-                (0..8_u64)
-                    .map(|landmark_id| {
-                        let point = Point3::new(
-                            (landmark_id % 4) as f64 * 0.2 - 0.3,
-                            (landmark_id / 4) as f64 * 0.2 - 0.1,
-                            4.0 + landmark_id as f64 * 0.03,
+        let landmarks: Vec<LocalSubmapLandmark> = if with_landmarks {
+            (0..8_u64)
+                .map(|landmark_id| {
+                    let point = Point3::new(
+                        (landmark_id % 4) as f64 * 0.2 - 0.3,
+                        (landmark_id / 4) as f64 * 0.2 - 0.1,
+                        4.0 + landmark_id as f64 * 0.03,
+                    );
+                    let mut pixel = camera.project(&pose.transform_world_point(&point)).unwrap();
+                    if pixel_noise {
+                        pixel += Vector2::new(
+                            landmark_id as f64 * 0.2 + 0.1,
+                            -(landmark_id as f64) * 0.1,
                         );
-                        let mut pixel =
-                            camera.project(&pose.transform_world_point(&point)).unwrap();
-                        if pixel_noise {
-                            pixel += Vector2::new(
-                                landmark_id as f64 * 0.2 + 0.1,
-                                -(landmark_id as f64) * 0.1,
-                            );
-                        }
-                        LocalSubmapLandmark {
-                            local_landmark_id: landmark_id,
-                            position: point,
-                            observations: vec![LocalSubmapObservation {
-                                local_frame_index: 0,
-                                source_frame_id: id,
-                                keypoint_index: landmark_id as usize,
-                                pixel,
-                            }],
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    }
+                    LocalSubmapLandmark {
+                        local_landmark_id: landmark_id,
+                        position: point,
+                        observations: vec![LocalSubmapObservation {
+                            local_frame_index: 0,
+                            source_frame_id: id,
+                            keypoint_index: landmark_id as usize,
+                            pixel,
+                        }],
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         LocalSubmap {
             camera,
             source_frame_ids: vec![id],
@@ -807,14 +806,14 @@ mod tests {
             .collect()
     }
 
-    fn hierarchy_state(
-        hierarchy: &HierarchicalSubmapGraph,
-    ) -> Vec<(
+    type HierarchyStateEntry = (
         u64,
         Option<Sim3>,
         Vec<LocalSubmapFrame>,
         Vec<LocalSubmapLandmark>,
-    )> {
+    );
+
+    fn hierarchy_state(hierarchy: &HierarchicalSubmapGraph) -> Vec<HierarchyStateEntry> {
         hierarchy
             .nodes()
             .map(|node| {

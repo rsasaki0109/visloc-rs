@@ -1610,13 +1610,13 @@ impl DpvoLongLoopIndex {
                 .angle_to(&relative_pose.rotation)
                 .to_degrees();
             outcome.rotation_disagreement_deg = Some(rotation_disagreement_deg);
-            if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg {
-                if !diagnostic_stage2_rotation_failure {
-                    self.diag_rejected_rotation_inconsistent += 1;
-                    outcome.stage_reached = "rotation_inconsistent";
-                    outcomes.push((old_arrival, outcome));
-                    continue;
-                }
+            if rotation_disagreement_deg > self.config.max_rotation_inconsistency_deg
+                && !diagnostic_stage2_rotation_failure
+            {
+                self.diag_rejected_rotation_inconsistent += 1;
+                outcome.stage_reached = "rotation_inconsistent";
+                outcomes.push((old_arrival, outcome));
+                continue;
             }
 
             // A3 stage 2 step (d): ADDITIONALLY require the Umeyama

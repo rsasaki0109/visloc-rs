@@ -1566,9 +1566,8 @@ pub fn run_inertial_only_vi_ba_with_options(
                     })
             })
             .fold(1.0_f64, f64::max);
-        let shared_bias_equality_weight = (strongest_factor_information * 1.0e4)
-            .max(1.0e8)
-            .min(1.0e20);
+        let shared_bias_equality_weight =
+            (strongest_factor_information * 1.0e4).clamp(1.0e8, 1.0e20);
         for pair in sorted_ids.windows(2) {
             ba.add_bias_random_walk_factor(BiasRandomWalkFactor {
                 keyframe_id_from: pair[0],
@@ -1935,10 +1934,12 @@ mod tests {
     #[test]
     fn navigation_prior_propagates_across_two_window_shifts() {
         let map = build_three_keyframe_map();
-        let mut config = OnlineSlamLocalBaConfig::default();
-        config.bias_random_walk_weights = Some((10.0, 10.0));
-        config.marginalize_navigation_state = true;
-        config.initial_navigation_prior_std_devs = Some((1.0, 0.01, 0.1));
+        let config = OnlineSlamLocalBaConfig {
+            bias_random_walk_weights: Some((10.0, 10.0)),
+            marginalize_navigation_state: true,
+            initial_navigation_prior_std_devs: Some((1.0, 0.01, 0.1)),
+            ..OnlineSlamLocalBaConfig::default()
+        };
         let mut state = OnlineSlamLocalBaState::new(config);
         for id in [10_u64, 20, 30] {
             state.keyframe_state.insert(

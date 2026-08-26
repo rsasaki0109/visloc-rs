@@ -37,6 +37,7 @@ pub(crate) struct HierarchicalLoopClosureOutput {
     pub landmark_links: Vec<HierarchicalSeamLandmarkLink>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_close_hierarchical_loops(
     enabled: bool,
     hierarchy: &mut HierarchicalSubmapGraph,
@@ -78,6 +79,7 @@ pub(crate) fn maybe_close_hierarchical_loops(
     .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn close_hierarchical_loops(
     hierarchy: &mut HierarchicalSubmapGraph,
     camera: &Camera,
@@ -191,6 +193,7 @@ struct VerificationOutcome {
     result: Result<VerifiedLoopConstraint, String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn discover_loop_constraints(
     hierarchy: &HierarchicalSubmapGraph,
     camera: &Camera,
@@ -743,7 +746,7 @@ fn mutual_point_matches(
     best_source
         .into_iter()
         .filter_map(|(source_id, (target_id, _))| {
-            (best_target.get(&target_id)?.0 == source_id).then(|| SubmapPointMatch {
+            (best_target.get(&target_id)?.0 == source_id).then_some(SubmapPointMatch {
                 source_landmark_id: source_id,
                 target_landmark_id: target_id,
                 source_point: source_points[&source_id],

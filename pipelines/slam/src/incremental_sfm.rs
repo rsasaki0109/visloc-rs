@@ -2310,6 +2310,7 @@ fn structureless_pose_consistency(
 /// missing image and the configured number of registered consensus neighbours,
 /// triangulate with sufficient parallax, and reproject within the initialization
 /// gate in every contributing view.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_structureless_local_tracks(
     camera: &Camera,
     features: &[FeatureSet],
@@ -2965,6 +2966,7 @@ fn parallax_angle_ok(angle: f64, num_obs: usize, config: &IncrementalSfmConfig) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Triangulate one track from its registered observations: choose the
 /// widest-parallax view pair, DLT-triangulate, and validate cheirality,
 /// parallax, and reprojection in both views.
@@ -3313,6 +3315,7 @@ fn mean_reprojection_for_track_range(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Among unregistered images still under the per-image trial cap, choose the one
 /// observing the most triangulated tracks, returning it with its 2D-3D
 /// correspondences.
@@ -3616,6 +3619,7 @@ fn adjust_local_bundle(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 /// With every camera and every pre-existing landmark fixed, refine only the
 /// landmarks created by a tentative structure-less insertion. This is the
 /// bounded local-submap solve used after projecting the new camera into the

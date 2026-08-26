@@ -1052,8 +1052,8 @@ mod tests {
         // Gauge: the solver frame is camera 0's frame; rotations must match
         // R_i·R_0⁻¹ and centres up to one global scale.
         let gauge = scene.gt_poses[0].world_to_camera.rotation.inverse();
-        for image in 0..n {
-            let pose = poses[image].as_ref().unwrap();
+        for (image, pose) in poses.iter().enumerate() {
+            let pose = pose.as_ref().unwrap();
             let expected = scene.gt_poses[image].world_to_camera.rotation * gauge;
             let rot_err = (pose.world_to_camera.rotation.inverse() * expected).angle();
             assert!(rot_err < 1e-2, "image {image} rotation error {rot_err} rad");
@@ -1091,8 +1091,6 @@ mod tests {
             "islands stay unposed"
         );
     }
-
-    use super::*;
 
     /// Deterministic pseudo-random unit vector.
     fn rand_unit(rng: &mut u64) -> Vector3<f64> {
@@ -1205,10 +1203,10 @@ mod tests {
             - result.poses[1].as_ref().unwrap().camera_center_world())
         .norm();
         let scale = baseline_true / baseline_est;
-        for image in 0..n {
-            let est = result.poses[image].as_ref().unwrap().camera_center_world() * scale;
-            let err = (est - mapped[image]).norm();
-            assert!(err < 5e-3, "image {image} centre error {err} after scaling");
+        for (est, expected) in result.poses.iter().zip(mapped.iter()) {
+            let est = est.as_ref().unwrap().camera_center_world() * scale;
+            let err = (est - expected).norm();
+            assert!(err < 5e-3, "centre error {err} after scaling");
         }
         assert!(
             result.mean_bearing_residual_rad < 1e-3,

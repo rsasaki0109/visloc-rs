@@ -672,6 +672,7 @@ impl ObservationDisjointSet {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Triangulate new multi-view tracks from wide matches whose endpoints are both
 /// absent from the trusted reconstructed structure. Duplicate-image components,
 /// two-view-only components, low parallax, failed cheirality, and any observation

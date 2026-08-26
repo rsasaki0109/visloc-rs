@@ -5,6 +5,7 @@
 //! observation + essential-rotation overlap evidence, R2 Sim(3) verification,
 //! and the R3 sparse global submap graph.
 
+#![allow(clippy::result_large_err)]
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -571,7 +572,7 @@ pub fn hierarchical_sfm(
         if !loop_output.landmark_links.is_empty() {
             let mut welded_links = atlas.seam_landmark_links.clone();
             welded_links.extend(loop_output.landmark_links);
-            let loop_ba_config = config.seam_bundle_adjustment.clone().unwrap_or_default();
+            let loop_ba_config = config.seam_bundle_adjustment.unwrap_or_default();
             let first_seam_mean_cost = atlas
                 .seam_bundle_adjustment
                 .as_ref()
@@ -875,12 +876,13 @@ fn merge_degenerate_seams_and_optimize(
 }
 
 /// Evaluate every seam between adjacent `submaps` (the same per-seam overlap
-/// + Sim3 alignment pipeline [`optimize_independent_submaps`] runs) and
+/// and Sim3 alignment pipeline [`optimize_independent_submaps`] runs) and
 /// `eprintln` each one that would be rejected, instead of stopping at the
 /// first rejection. Purely for observability — it does not affect what error
 /// any caller returns, and re-running the same (deterministic) pipeline here
 /// costs nothing beyond CPU time already about to be spent failing anyway.
 /// Returns the number of failing seams found, for a one-line summary.
+///
 /// Gate for the `LowInlierRatio`-seam-cluster diagnosis's verbose per-match /
 /// per-frame-step dump in [`debug_low_inlier_seam`] (env-checked per call
 /// site; not a hot loop). Off by default so ordinary runs are unaffected;
@@ -1959,7 +1961,7 @@ mod tests {
             );
             // Exactly one rebuild, for the merged window only — submap 2
             // (images 20..30) is carried over untouched, never rebuilt.
-            assert_eq!(calls.borrow().as_slice(), [0..20]);
+            assert_eq!(calls.borrow().as_slice(), [Range { start: 0, end: 20 }]);
             assert_eq!(atlas.seams.len(), 1);
             assert_eq!(atlas.seams[0].sim3_inliers, 15);
         }
@@ -1991,12 +1993,12 @@ mod tests {
                 |id: u64, window: &SubmapWindow| -> Result<LocalSubmap, HierarchicalSfmError> {
                     calls.borrow_mut().push(window.image_range.clone());
                     match window.image_range.clone() {
-                        r if r == (0..20) => Ok(local_submap(
+                        r if r.start == 0 && r.end == 20 => Ok(local_submap(
                             20,
                             UnitQuaternion::identity(),
                             m1_source.clone(),
                         )),
-                        r if r == (0..30) => Ok(local_submap(
+                        r if r.start == 0 && r.end == 30 => Ok(local_submap(
                             30,
                             UnitQuaternion::identity(),
                             m2_source.clone(),
@@ -2035,8 +2037,10 @@ mod tests {
             let pair_rotations = vec![rotation_link(10, 20), rotation_link(20, 30)];
             let calls = RefCell::new(Vec::new());
             let mut next_id = 3u64;
-            let mut config = HierarchicalSfmConfig::default();
-            config.max_degenerate_seam_merges = 1; // one merge short of the second needed
+            let config = HierarchicalSfmConfig {
+                max_degenerate_seam_merges: 1, // one merge short of the second needed
+                ..HierarchicalSfmConfig::default()
+            };
             let error = merge_degenerate_seams_and_optimize(
                 windows,
                 submaps,
@@ -2174,12 +2178,12 @@ mod tests {
                     |id: u64, window: &SubmapWindow| -> Result<LocalSubmap, HierarchicalSfmError> {
                         calls.borrow_mut().push(window.image_range.clone());
                         match window.image_range.clone() {
-                            r if r == (0..20) => Ok(local_submap(
+                            r if r.start == 0 && r.end == 20 => Ok(local_submap(
                                 20,
                                 UnitQuaternion::identity(),
                                 m1_source.clone(),
                             )),
-                            r if r == (0..30) => Ok(local_submap(
+                            r if r.start == 0 && r.end == 30 => Ok(local_submap(
                                 30,
                                 UnitQuaternion::identity(),
                                 m2_source.clone(),
