@@ -43,6 +43,7 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
 use visloc_vision::features::FeatureSet;
+use visloc_vision::stereo_bootstrap::triangulate_two_view_left_frame;
 use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
 
 use crate::incremental_sfm::{
@@ -674,6 +675,13 @@ pub struct GlobalReconstructionTuning {
     /// by more than this are zeroed; view-graph triangles whose median loop
     /// error exceeds twice this are dropped outright.
     pub max_edge_rotation_error_deg: f64,
+    /// GLOMAP-style baseline gate: an edge whose median two-view
+    /// triangulation angle over its inliers falls below this (degrees)
+    /// carries no usable positional information — its translation direction
+    /// is noise — and is dropped from the view graph entirely. Pure-rotation
+    /// / tiny-baseline pairs are exactly the ones whose bearings bend the
+    /// position solve on repetitive scenes. Set to 0 to disable.
+    pub min_edge_parallax_deg: f64,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -685,6 +693,7 @@ impl Default for GlobalReconstructionTuning {
             min_pair_matches: 10,
             min_edge_inliers: 15,
             max_edge_rotation_error_deg: 10.0,
+            min_edge_parallax_deg: 2.0,
         }
     }
 }
@@ -765,6 +774,50 @@ pub fn reconstruct_global_sfm(
         else {
             continue;
         };
+        // GLOMAP-style baseline gate: triangulate a sample of the inlier
+        // correspondences under this pair's pose and measure the median ray
+        // intersection angle. Tiny-baseline pairs produce well-fit essential
+        // matrices whose translation direction is pure noise — dropping them
+        // protects both averaging stages from systematically bent bearings.
+        if tuning.min_edge_parallax_deg > 0.0 {
+            let pose_i_to_j = relative.previous_to_current;
+            let step: usize = (relative.inliers.len() / 100).max(1);
+            let mut angles: Vec<f64> = Vec::new();
+            for &idx in relative.inliers.iter().step_by(step) {
+                let Some(corr) = correspondences.get(idx) else {
+                    continue;
+                };
+                let Some(point) = triangulate_two_view_left_frame(
+                    camera,
+                    camera,
+                    &pose_i_to_j,
+                    &corr.previous_xy,
+                    &corr.current_xy,
+                ) else {
+                    continue;
+                };
+                let cam_j_centre: Vector3<f64> = r_ij.inverse() * (-t_ij);
+                let ray1 = point.coords;
+                let ray2 = point.coords - cam_j_centre;
+                let cos = ray1.normalize().dot(&ray2.normalize()).clamp(-1.0, 1.0);
+                angles.push(cos.acos());
+            }
+            angles.sort_by(|a, b| a.total_cmp(b));
+            if let Some(angle) = angles.get(angles.len() / 2).copied() {
+                if angle < tuning.min_edge_parallax_deg.to_radians() {
+                    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+                        eprintln!(
+                            "global-sfm debug: dropped low-parallax edge {}-{} ({:.2} deg, {} inliers)",
+                            pair.image_i,
+                            pair.image_j,
+                            angle.to_degrees(),
+                            relative.inliers.len()
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
         edges.push(GlobalSfmEdge {
             image_i: pair.image_i,
             image_j: pair.image_j,

@@ -149,8 +149,9 @@ use visloc_rs::vision::features::lightglue_onnx::LightGlueOnnxMatcher;
 use visloc_rs::vision::place_recognition::{cosine_similarity, vlad, Vocabulary};
 use visloc_rs::vision::two_view::{
     connected_components, generate_bridge_candidates, BridgeCandidateOptions, ConfigurationType,
-    EightPointEssentialMatrixEstimator, EssentialRansac, EssentialRansacConfig,
-    RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions, TwoViewGeometryVerifier,
+    EightPointEssentialMatrixEstimator, EssentialMatrixEstimator, EssentialRansac,
+    EssentialRansacConfig, RelativePoseEstimator, TwoViewCorrespondence, TwoViewGeometryOptions,
+    TwoViewGeometryVerifier,
 };
 use visloc_rs::vision::vocab_tree::{
     generate_pairs, HkmBuildOptions, VocabTree, VocabTreeOptions, VocabTreePairGeneratorOptions,
@@ -234,6 +235,140 @@ impl std::str::FromStr for PairSource {
     }
 }
 
+/// COLMAP-style guided matching (`FeaturePairsMatching`'s
+/// `FindGuidedMatches`): given the pair's verified essential geometry,
+/// rematch descriptors that the initial NN+ratio pass missed under an
+/// epipolar constraint. For every not-yet-matched query descriptor the best
+/// unused train descriptor is accepted only when **both** the Lowe ratio
+/// (`0.9`, looser than the main pass) and the squared Sampson distance
+/// (`guided_max_error_px`) pass — pure geometric admission without a ratio
+/// gate is what produced M5's false-bridge failure, so this stays
+/// deliberately conservative. Conflicts (two queries claiming one train)
+/// resolve to the smaller descriptor distance, greedy by distance order.
+fn guided_epipolar_matches(
+    camera: &Camera,
+    features_i: &FeatureSet,
+    features_j: &FeatureSet,
+    initial: &[DescriptorMatch],
+    inlier_corrs: &[TwoViewCorrespondence],
+    max_error_px: f64,
+) -> Vec<DescriptorMatch> {
+    // Essential matrix from the verified inliers (normalized eight-point).
+    let Some(essential) = EssentialMatrixEstimator::estimate(
+        &EightPointEssentialMatrixEstimator::default(),
+        inlier_corrs,
+        camera,
+    ) else {
+        return Vec::new();
+    };
+    let (fx, fy, _, _) = camera.intrinsics().unwrap_or((1.0, 1.0, 0.0, 0.0));
+    let focal = 0.5 * (fx + fy);
+    let max_sq_norm = (max_error_px / focal).powi(2);
+
+    let normalize_all = |keypoints: &[Point2<f64>]| -> Vec<Option<[f64; 3]>> {
+        keypoints
+            .iter()
+            .map(|p| camera.normalize_pixel(p).map(|n| [n.x, n.y, 1.0]))
+            .collect()
+    };
+    let norm_i = normalize_all(&features_i.keypoints);
+    let norm_j = normalize_all(&features_j.keypoints);
+    let sampson_sq = |ni: &[f64; 3], nj: &[f64; 3]| -> Option<f64> {
+        let e_ni = essential * nalgebra::Vector3::new(ni[0], ni[1], ni[2]);
+        let et_nj = essential.transpose() * nalgebra::Vector3::new(nj[0], nj[1], nj[2]);
+        let numerator = nalgebra::Vector3::new(nj[0], nj[1], nj[2]).dot(&e_ni).powi(2);
+        let denominator = e_ni.x * e_ni.x + e_ni.y * e_ni.y + et_nj.x * et_nj.x + et_nj.y * et_nj.y;
+        if denominator < 1e-18 {
+            None
+        } else {
+            Some(numerator / denominator)
+        }
+    };
+
+    let mut used_query = vec![false; features_i.descriptors.len()];
+    let mut used_train = vec![false; features_j.descriptors.len()];
+    for m in initial {
+        used_query[m.query_index] = true;
+        used_train[m.train_index] = true;
+    }
+
+    // Descriptor-distance matrix over the full pair (one GEMM), rows =
+    // queries, cols = trains.
+    let n_q = features_i.descriptors.len();
+    let n_t = features_j.descriptors.len();
+    if n_q == 0 || n_t == 0 || features_i.descriptors[0].is_empty() {
+        return Vec::new();
+    }
+    let dim = features_i.descriptors[0].len();
+    let q = nalgebra::DMatrix::from_fn(n_q, dim, |a, k| features_i.descriptors[a][k] as f64);
+    let t = nalgebra::DMatrix::from_fn(n_t, dim, |b, k| features_j.descriptors[b][k] as f64);
+    let dist = &q * &t.transpose();
+
+    struct Candidate {
+        query: usize,
+        train: usize,
+        distance: f32,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for qi in 0..n_q {
+        if used_query[qi] || norm_i[qi].is_none() {
+            continue;
+        }
+        let mut best: Option<(usize, f64)> = None;
+        let mut second: f64 = f64::INFINITY;
+        for tj in 0..n_t {
+            if used_train[tj] {
+                continue;
+            }
+            let d = ((dist[(qi, tj)]).max(0.0)).sqrt();
+            if d < second {
+                if d < best.map_or(f64::INFINITY, |(_, bd)| bd) {
+                    second = best.map_or(f64::INFINITY, |(_, bd)| bd);
+                    best = Some((tj, d));
+                } else {
+                    second = d;
+                }
+            }
+        }
+        let Some((tj, d)) = best else { continue };
+        if d <= 0.0 || d >= second {
+            continue;
+        }
+        if d / second > 0.8 {
+            continue;
+        }
+        let Some(nj) = norm_j[tj] else { continue };
+        let Some(sq) = sampson_sq(&norm_i[qi].unwrap(), &nj) else {
+            continue;
+        };
+        if sq <= max_sq_norm {
+            candidates.push(Candidate {
+                query: qi,
+                train: tj,
+                distance: d as f32,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    let mut taken_train = used_train;
+    let mut out = Vec::new();
+    for c in candidates {
+        if taken_train[c.train] {
+            continue;
+        }
+        taken_train[c.train] = true;
+        out.push(DescriptorMatch {
+            query_index: c.query,
+            train_index: c.train,
+            distance: c.distance,
+            second_best_distance: None,
+            ratio: None,
+            confidence: None,
+        });
+    }
+    out
+}
+
 /// The M6 pair-*matching* A/B switch (`docs/colmap_port_plan.md`'s "M6
 /// results"): which algorithm turns two images' descriptor sets into
 /// candidate correspondences, **before** two-view geometric verification
@@ -311,6 +446,11 @@ struct Args {
     pnp_max_iterations: usize,
     filter_images: bool,
     verification_mode: VerificationMode,
+    /// COLMAP-style guided matching: after a pair verifies, rematch
+    /// descriptors missed by the initial NN+ratio pass under the verified
+    /// epipolar geometry, then re-verify. Off by default (byte-identical
+    /// legacy behaviour when off).
+    guided_matching: bool,
     /// `Incremental` (default): the existing grow-from-seed mapper.
     /// `Global`: GLOMAP-style — per-pair essential relative poses, rotation +
     /// position averaging, track triangulation, one joint BA
@@ -411,6 +551,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_distortion = false;
     let mut colmap_style = false;
     let mut structureless_registration = false;
+    let mut guided_matching = false;
     let mut pnp_max_iterations = 128usize;
     let mut filter_images = false;
     let mut verification_mode = VerificationMode::Legacy;
@@ -478,6 +619,7 @@ fn parse_args() -> Result<Args, String> {
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--structureless-registration" => structureless_registration = true,
+            "--guided-matching" => guided_matching = true,
             "--pnp-max-iterations" => {
                 pnp_max_iterations = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
@@ -570,6 +712,7 @@ fn parse_args() -> Result<Args, String> {
         mapper,
         filter_images,
         verification_mode,
+        guided_matching,
         track_source,
         pair_source,
         vocab_tree_branching,
@@ -1078,6 +1221,7 @@ fn build_matcher(args: &Args) -> Result<PairMatcher, Box<dyn std::error::Error>>
 ///   classification, mirroring how COLMAP's own init-pair search
 ///   recomputes and gates on triangulation angle rather than consulting the
 ///   stored `ConfigurationType`).
+#[allow(clippy::too_many_arguments)]
 fn verify_pairs(
     features: &[FeatureSet],
     camera: &Camera,
@@ -1086,6 +1230,7 @@ fn verify_pairs(
     min_matches: usize,
     mode: VerificationMode,
     matcher: &PairMatcher,
+    guided_matching: bool,
 ) -> (Vec<PairwiseMatches>, VerificationStats) {
     let verifier = (mode == VerificationMode::Full)
         .then(|| TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(camera, 4.0)));
@@ -1155,6 +1300,47 @@ fn verify_pairs(
                 if !keep || report.inliers.len() < min_matches {
                     return (None, Some(report.config));
                 }
+                // Guided matching (COLMAP FindGuidedMatches): expand the
+                // match set under the verified epipolar geometry, then
+                // re-verify so config/inliers describe the final set.
+                let (dm, report) = if guided_matching {
+                    let inlier_corrs: Vec<TwoViewCorrespondence> = report
+                        .inliers
+                        .iter()
+                        .filter_map(|&idx| corrs.get(idx).copied())
+                        .collect();
+                    let extra = guided_epipolar_matches(
+                        camera,
+                        &features[i],
+                        &features[j],
+                        &dm,
+                        &inlier_corrs,
+                        2.0,
+                    );
+                    if extra.is_empty() {
+                        (dm, report)
+                    } else {
+                        let mut expanded = dm.clone();
+                        expanded.extend(extra);
+                        let new_corrs: Vec<TwoViewCorrespondence> = expanded
+                            .iter()
+                            .map(|m| {
+                                TwoViewCorrespondence::new(
+                                    features[i].keypoints[m.query_index],
+                                    features[j].keypoints[m.train_index],
+                                )
+                            })
+                            .collect();
+                        let new_report = verifier.classify(&new_corrs, camera);
+                        if new_report.inliers.len() >= min_matches {
+                            (expanded, new_report)
+                        } else {
+                            (dm, report)
+                        }
+                    }
+                } else {
+                    (dm, report)
+                };
                 let matches: Vec<(usize, usize)> = report
                     .inliers
                     .iter()
@@ -1537,6 +1723,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.min_matches,
         args.verification_mode,
         &pair_matcher,
+        args.guided_matching,
     );
     if args.pair_source == PairSource::Transitive {
         let mut all_proposed: HashSet<(usize, usize)> = candidates.iter().copied().collect();
@@ -1557,6 +1744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.min_matches,
                 args.verification_mode,
                 &pair_matcher,
+                args.guided_matching,
             );
             verification_stats.merge(&stats);
             pairwise.extend(more);

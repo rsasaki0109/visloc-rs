@@ -6,6 +6,12 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **GLOMAP-style parallax gate for view-graph edges + COLMAP-style guided matching (`--guided-matching`) (2026-08-26).**
+  - `GlobalReconstructionTuning::min_edge_parallax_deg` (default 2.0°): each candidate edge's median two-view triangulation angle over a sample of its inliers is measured under the pair pose (`triangulate_two_view_left_frame`); edges below the threshold are dropped before averaging. Tiny-baseline pairs produce well-fit essential matrices whose translation direction is pure noise — courtyard drops 8 such edges and median bearing residual improves 21.3° → **8.33°** (mean reprojection 59 px → 35.8 px in the global mapper). Set to 0 to disable.
+  - Guided matching ports COLMAP's post-verification rematch: descriptors missed by NN+ratio get one more chance under the verified epipolar geometry, gated by a conservative Lowe ratio (< 0.8) AND Sampson distance (< 2 px), conflicts resolved greedily by distance, then the pair is re-classified so config/inliers describe the final set. Off by default; on courtyard incremental it holds registration at 21/38 while tightening geometry: mean reproj 0.477 px → **0.403 px**, tracks 4958 → 5141. Looser gates (ratio 0.9 / 4 px) measurably *degrade* the solve (19/38, 0.763 px) — recorded as the honest boundary.
+
+### Added
+
 - **COLMAP `TransitivePairGenerator` port (`--pair-source transitive`) — pairing module 60% → 70% (2026-08-26).**
   - Faithful port of `src/colmap/pairing.cc`: after a vocab-tree base pass is verified, images that share a common matched partner but have no direct pair yet are proposed (`expand_transitive`), for up to two expansion rounds (`TRANSITIVE_ROUNDS`), never re-proposing a pair.
   - `VerificationStats::merge` accumulates classifier counts across passes.
