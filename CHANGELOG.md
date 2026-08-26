@@ -4,6 +4,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Changed
+
+- **SIFT affine path: VLFeat covdet ordering + location refine (2026-08-27).** When `SiftConfig::affine` / `--sift-affine` is on: (1) estimate Baumberg shape first, (2) refine the detection locus inside the affine-normalized patch via peak squared-gradient search, (3) assign orientation on canonical-axis gradients, (4) describe through `A`. Shape adaptation gains VLFeat-style min-singular-value hold, anisotropy cap (6×), and convergence gate. Cross-stretch harness improves plain=1 → **affine=3** mutual matches (still ignored; ≥4 bar not met). **Courtyard honest negative** (`--mapper global --sift-affine --chirality-harden --rotation-seed-trials 8`): verified pairs drop (158/703), registration **22/38** (was 37/38 without affine), Sim(3) RMSE still metres-scale — descriptor-side+ordering affine alone thins the view graph on this façade scene; fuller multi-anisotropy detection remains open.
+
 ### Added
 
 - **Chirality-hardened relative-pose recovery + multi-seed rotation averaging + MST translation-sign repair (2026-08-27) — courtyard GT parity; edge-quality levers wired.**

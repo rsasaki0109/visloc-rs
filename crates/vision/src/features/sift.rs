@@ -43,9 +43,11 @@ pub struct SiftConfig {
     /// Cap on returned keypoints (strongest contrast first when exceeded).
     pub max_keypoints: usize,
     /// Estimate an affine (anisotropic) shape per keypoint via structure-
-    /// tensor iteration (Baumberg/covdet-style) and warp the descriptor
-    /// sampling grid by it, so descriptors stay comparable across affine
-    /// view changes. Off by default: the isotropic pipeline is faster and
+    /// tensor iteration (Baumberg/covdet-style), refine the detection locus
+    /// inside the affine-normalized patch, assign orientation on that
+    /// normalized frame, and warp the descriptor sampling grid by the shape
+    /// — so detections and descriptors stay comparable across affine view
+    /// changes. Off by default: the isotropic pipeline is faster and
     /// sufficient for planar-motion data.
     pub affine: bool,
 }
@@ -389,32 +391,83 @@ fn assign_orientations(
     config: &SiftConfig,
     out: &mut Vec<SiftKeypoint>,
 ) {
-    // Orientation histogram on the DoG magnitude (a common simplification of
-    // Lowe's Gaussian-blurred-image gradients).
+    // Layer → original-frame mapping: original = layer · 2^(octave−1)
+    // (the first octave lives on the doubled grid).
+    let upsample = (1usize << octave) as f64 / 2.0;
+    let kp_x = x as f64 * upsample;
+    let kp_y = y as f64 * upsample;
+    let sigma = config.sigma_base * k.powi(interval) * upsample;
+
+    // VLFeat covdet order when affine is on: estimate shape first, refine the
+    // detection locus inside the normalized patch (detector-side half of
+    // affine adaptation), assign orientation on affine-normalized gradients,
+    // then describe. Legacy isotropic path keeps the DoG-layer histogram.
+    let (kp_x, kp_y, affine_shape) = if config.affine {
+        let shape = estimate_affine_shape(image, kp_x, kp_y, sigma);
+        let (rx, ry) = refine_location_affine(image, kp_x, kp_y, sigma, shape);
+        (rx, ry, Some(shape))
+    } else {
+        (kp_x, kp_y, None)
+    };
+
     let hist_sigma = 1.5 * config.sigma_base * k.powi(interval) / 2.0f64.powi(octave as i32);
     let radius = (hist_sigma * 3.0).ceil() as i64;
     let mut hist = [0.0f64; 36];
-    for wy in -radius..=radius {
-        for wx in -radius..=radius {
-            let gx = 0.5 * (mid.get(x + wx + 1, y) - mid.get(x + wx - 1, y));
-            let gy = 0.5 * (mid.get(x + wx, y + 1) - mid.get(x + wx, y - 1));
-            let magnitude = (gx * gx + gy * gy).sqrt();
-            if magnitude <= f64::EPSILON {
-                continue;
+
+    if let Some(shape) = affine_shape {
+        // Canonical-frame orientation: sample the original image through A
+        // and take gradients along A's columns so bins are pose-normalized.
+        let canon_sigma = (sigma).max(1.0);
+        let canon_radius = (canon_sigma * 3.0).ceil().max(2.0) as i64;
+        let norm_sq = 2.0 * canon_sigma * canon_sigma;
+        for dy in -canon_radius..=canon_radius {
+            for dx in -canon_radius..=canon_radius {
+                let xi = dx as f64;
+                let yi = dy as f64;
+                let (ox, oy) = mat2_apply(shape, (xi, yi));
+                let px = kp_x + ox;
+                let py = kp_y + oy;
+                let ex = (shape[0][0], shape[1][0]);
+                let ey = (shape[0][1], shape[1][1]);
+                let gx = 0.5
+                    * (sample_bilinear(image, px + ex.0, py + ex.1)
+                        - sample_bilinear(image, px - ex.0, py - ex.1));
+                let gy = 0.5
+                    * (sample_bilinear(image, px + ey.0, py + ey.1)
+                        - sample_bilinear(image, px - ey.0, py - ey.1));
+                let magnitude = (gx * gx + gy * gy).sqrt();
+                if magnitude <= f64::EPSILON {
+                    continue;
+                }
+                let weight = (-(xi * xi + yi * yi) / norm_sq).exp();
+                let angle = gy.atan2(gx).to_degrees().rem_euclid(360.0);
+                let bin = ((angle / 10.0) as usize).min(35);
+                hist[bin] += magnitude * weight;
             }
-            let weight = (-(wx * wx + wy * wy) as f64 / (2.0 * hist_sigma * hist_sigma)).exp();
-            let angle = gy.atan2(gx).to_degrees().rem_euclid(360.0);
-            let bin = ((angle / 10.0) as usize).min(35);
-            hist[bin] += magnitude * weight;
+        }
+    } else {
+        // Orientation histogram on the DoG magnitude (a common simplification of
+        // Lowe's Gaussian-blurred-image gradients).
+        for wy in -radius..=radius {
+            for wx in -radius..=radius {
+                let gx = 0.5 * (mid.get(x + wx + 1, y) - mid.get(x + wx - 1, y));
+                let gy = 0.5 * (mid.get(x + wx, y + 1) - mid.get(x + wx, y - 1));
+                let magnitude = (gx * gx + gy * gy).sqrt();
+                if magnitude <= f64::EPSILON {
+                    continue;
+                }
+                let weight = (-(wx * wx + wy * wy) as f64 / (2.0 * hist_sigma * hist_sigma)).exp();
+                let angle = gy.atan2(gx).to_degrees().rem_euclid(360.0);
+                let bin = ((angle / 10.0) as usize).min(35);
+                hist[bin] += magnitude * weight;
+            }
         }
     }
+
     let max_hist = hist.iter().cloned().fold(f64::MIN, f64::max);
     if max_hist <= 0.0 {
         return;
     }
-    // Layer → original-frame mapping: original = layer · 2^(octave−1)
-    // (the first octave lives on the doubled grid).
-    let upsample = (1usize << octave) as f64 / 2.0;
     for bin in 0..36 {
         if hist[bin] < 0.8 * max_hist {
             continue;
@@ -426,16 +479,6 @@ fn assign_orientations(
             ((prev - next) / denom).clamp(-0.5, 0.5)
         } else {
             0.0
-        };
-        let kp_x = x as f64 * upsample;
-        let kp_y = y as f64 * upsample;
-        let sigma = config.sigma_base * k.powi(interval) * upsample;
-        // Affine-shape estimation runs on the ORIGINAL image at the
-        // keypoint's own scale.
-        let affine_shape = if config.affine {
-            Some(estimate_affine_shape(image, kp_x, kp_y, sigma))
-        } else {
-            None
         };
         out.push(SiftKeypoint {
             x: kp_x,
@@ -480,14 +523,17 @@ fn mat2_apply(a: [[f64; 2]; 2], v: (f64, f64)) -> (f64, f64) {
 }
 
 /// Estimate an affine shape for one keypoint by structure-tensor iteration
-/// (Baumberg 1995 / VLFeat `covdet.c`'s affine adaptation, simplified):
+/// (Baumberg 1995 / VLFeat `covdet.c`'s affine adaptation):
 /// starting from the identity, resample the neighbourhood through the
 /// current shape, measure its second-moment matrix μ in the canonical
-/// frame, and update `A ← A · μ^{-1/2}` with det(A) normalized to 1 until
-/// the canonical patch is locally isotropic. The returned matrix maps
-/// canonical disk coordinates to image offsets.
+/// frame, and update `A ← A · P · Q^{-1/2}` (equivalently `A · μ^{-1/2}`)
+/// with the smallest singular value held, until the canonical patch is
+/// locally isotropic or anisotropy / iteration limits fire. The returned
+/// matrix maps canonical disk coordinates to image offsets.
 fn estimate_affine_shape(image: &GrayImage<'_>, x: f64, y: f64, sigma: f64) -> [[f64; 2]; 2] {
-    const ITERS: usize = 5;
+    const ITERS: usize = 8;
+    const MAX_ANISOTROPY: f64 = 6.0;
+    const CONVERGENCE: f64 = 1.05;
     // Matrix square root of inverse via eigen decomposition of the 2×2
     // symmetric positive-definite structure tensor.
     fn inv_sqrt_sym(m: [[f64; 2]; 2]) -> Option<[[f64; 2]; 2]> {
@@ -527,8 +573,39 @@ fn estimate_affine_shape(image: &GrayImage<'_>, x: f64, y: f64, sigma: f64) -> [
         ])
     }
 
+    fn singular_values(a: [[f64; 2]; 2]) -> (f64, f64) {
+        // Singular values of A via eigenvalues of AᵀA.
+        let s00 = a[0][0] * a[0][0] + a[1][0] * a[1][0];
+        let s01 = a[0][0] * a[0][1] + a[1][0] * a[1][1];
+        let s11 = a[0][1] * a[0][1] + a[1][1] * a[1][1];
+        let tr = s00 + s11;
+        let det = (s00 * s11 - s01 * s01).max(0.0);
+        let disc = ((tr * 0.5).powi(2) - det).max(0.0).sqrt();
+        let l1 = (tr * 0.5 + disc).max(0.0).sqrt();
+        let l2 = (tr * 0.5 - disc).max(0.0).sqrt();
+        (l1.max(l2), l1.min(l2).max(1e-12))
+    }
+
     let mut a = [[1.0f64, 0.0], [0.0, 1.0]];
-    for _ in 0..ITERS {
+    let mut reference_scale = 1.0f64;
+    for iter in 0..ITERS {
+        let (s_max, s_min) = singular_values(a);
+        let anisotropy = s_max / s_min;
+        if anisotropy > MAX_ANISOTROPY {
+            break;
+        }
+        // Hold the smallest singular value after the first iteration
+        // (VLFeat factor = referenceScale / min(D)).
+        if iter == 0 {
+            reference_scale = s_min;
+        } else {
+            let factor = reference_scale / s_min;
+            for row in &mut a {
+                row[0] *= factor;
+                row[1] *= factor;
+            }
+        }
+
         // Effective window radius in canonical units.
         let radius = (sigma * 3.0).ceil().max(2.0) as i64;
         let mut m00 = 0.0;
@@ -564,22 +641,74 @@ fn estimate_affine_shape(image: &GrayImage<'_>, x: f64, y: f64, sigma: f64) -> [
         m00 /= scale;
         m01 /= scale;
         m11 /= scale;
+        if m00 <= 1e-15 || m11 <= 1e-15 {
+            break;
+        }
+        // Convergence: μ is nearly isotropic.
+        let ratio = if m00 > m11 { m00 / m11 } else { m11 / m00 };
+        if ratio < CONVERGENCE {
+            break;
+        }
         let Some(update) = inv_sqrt_sym([[m00, m01], [m01, m11]]) else {
             break;
         };
         a = mat2_mul(a, update);
-        // Normalize det(A) → 1 (fixed anisotropy, free isotropic scale — the
-        // detector's own DoG σ carries that).
-        let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-        if det.is_finite() && det > 1e-12 {
-            let f = 1.0 / det.sqrt();
-            for row in &mut a {
-                row[0] *= f;
-                row[1] *= f;
-            }
+    }
+    // Normalize det(A) → 1 (fixed anisotropy, free isotropic scale — the
+    // detector's own DoG σ carries that).
+    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+    if det.is_finite() && det.abs() > 1e-12 {
+        let f = 1.0 / det.abs().sqrt();
+        // Keep orientation of the basis (positive det).
+        let f = if det < 0.0 { -f } else { f };
+        for row in &mut a {
+            row[0] *= f;
+            row[1] *= f;
         }
     }
     a
+}
+
+/// Refine a keypoint's image location inside its affine-normalized patch by
+/// searching for the peak of squared-gradient magnitude near the origin of
+/// the canonical frame, then mapping that offset back through `A`. This is
+/// the detector-side half of VLFeat covdet affine adaptation: after the
+/// elliptical shape is known, re-localize on the normalized appearance so
+/// detections land on corresponding structures across affine warps.
+fn refine_location_affine(
+    image: &GrayImage<'_>,
+    x: f64,
+    y: f64,
+    sigma: f64,
+    shape: [[f64; 2]; 2],
+) -> (f64, f64) {
+    let radius = ((sigma * 1.5).ceil() as i64).clamp(1, 4);
+    let mut best = (0i64, 0i64, f64::NEG_INFINITY);
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let (ox, oy) = mat2_apply(shape, (dx as f64, dy as f64));
+            let px = x + ox;
+            let py = y + oy;
+            let ex = (shape[0][0], shape[1][0]);
+            let ey = (shape[0][1], shape[1][1]);
+            let gx = 0.5
+                * (sample_bilinear(image, px + ex.0, py + ex.1)
+                    - sample_bilinear(image, px - ex.0, py - ex.1));
+            let gy = 0.5
+                * (sample_bilinear(image, px + ey.0, py + ey.1)
+                    - sample_bilinear(image, px - ey.0, py - ey.1));
+            let score = gx * gx + gy * gy;
+            if score > best.2 {
+                best = (dx, dy, score);
+            }
+        }
+    }
+    if best.2.is_finite() && best.2 > 0.0 {
+        let (ox, oy) = mat2_apply(shape, (best.0 as f64, best.1 as f64));
+        (x + ox, y + oy)
+    } else {
+        (x, y)
+    }
 }
 
 /// 128-dim descriptor: 4×4 cells × 8 orientation bins around the keypoint.
@@ -920,15 +1049,14 @@ mod affine_tests {
         );
     }
 
-    /// Exploratory: cross-stretch matching. Currently NOT passing because the
-    /// isotropic DoG detector itself does not repeat across the anisotropic
-    /// warp (keypoints land on non-corresponding structures), which no
-    /// descriptor-side adaptation can repair; making this pass needs
-    /// detector-side affine-covariant sampling (VLFeat covdet-style scale-
-    /// space resampling) rather than descriptor work. Kept as the harness
-    /// for that follow-up; run with --ignored.
+    /// Progress note (2026-08-27): VLFeat ordering (shape → orientation on
+    /// normalized gradients → describe) plus mild location refine lifts
+    /// cross-stretch mutual matches from plain=1 to affine=3 at ratio 0.85,
+    /// but still short of the ≥4 / clear-win bar — isotropic DoG loci remain
+    /// the binding constraint. Kept ignored as the harness for a fuller
+    /// multi-anisotropy detector.
     #[test]
-    #[ignore = "detector repeatability across affine warps is the open bottleneck"]
+    #[ignore = "detector repeatability across affine warps still below bar (affine=3 vs plain=1)"]
     fn affine_descriptors_survive_anisotropic_stretch_better_than_isotropic() {
         let (w, h) = (96usize, 96usize);
         let base_px = dot_texture(w, h, 99);
