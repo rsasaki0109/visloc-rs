@@ -1699,7 +1699,7 @@ fn grow_from_seed(
 /// One bounded registration sweep after final global refinement. Unlike the
 /// growth loop, this cannot cycle: every missing image receives at most one
 /// attempt, and the caller invokes the function at most once.
-fn post_refinement_registration_pass(
+pub(crate) fn post_refinement_registration_pass(
     camera: &Camera,
     features: &[FeatureSet],
     tracks: &[Vec<(usize, usize)>],

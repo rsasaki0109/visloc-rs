@@ -47,8 +47,8 @@ use visloc_vision::stereo_bootstrap::triangulate_two_view_left_frame;
 use visloc_vision::two_view::{CheiralityOptions, RelativePoseEstimator, TwoViewCorrespondence};
 
 use crate::incremental_sfm::{
-    build_tracks_detailed, reprojection_error_px, run_bundle_adjustment, triangulate_pending,
-    PairwiseMatches, SfmTrack,
+    build_tracks_detailed, post_refinement_registration_pass, reprojection_error_px,
+    run_bundle_adjustment, triangulate_pending, PairwiseMatches, SfmTrack,
 };
 
 /// One verified pairwise constraint between two views of the view graph.
@@ -134,6 +134,21 @@ impl GlobalSfmEdge {
             }
         }
         (self.rotation_ij, self.direction_ij)
+    }
+
+    /// Swap primary ↔ alternate in place. No-op when no alternate is stored.
+    fn swap_primary_alternate(&mut self) {
+        let Some(r_alt) = self.rotation_alt.take() else {
+            return;
+        };
+        let Some(d_alt) = self.direction_alt.take() else {
+            self.rotation_alt = Some(r_alt);
+            return;
+        };
+        self.rotation_alt = Some(self.rotation_ij);
+        self.direction_alt = Some(self.direction_ij);
+        self.rotation_ij = r_alt;
+        self.direction_ij = d_alt;
     }
 }
 
@@ -1387,79 +1402,97 @@ pub fn reconstruct_global_sfm(
         }
         let built_for_score =
             build_tracks_detailed(features.len(), pairwise, mapper.min_track_length);
-        let mut best: Option<(GlobalSfmPoses, usize, f64, usize)> = None;
+        let mut best: Option<(GlobalSfmPoses, usize, f64, usize, bool)> = None;
+        // When multi-hypothesis edges are present, also try the global
+        // "all-alternates-as-primary" basin — MST seeding locks onto the
+        // stored primary, so adaptive consensus alone may never leave it.
+        let hyp_flips: &[bool] = if tuning.multi_hypothesis_edges {
+            &[false, true]
+        } else {
+            &[false]
+        };
         for &trial_seed in &candidate_seeds {
-            let mut trial_edges = edges.clone();
-            let Some(solution) = solve_global_sfm(
-                features.len(),
-                &mut trial_edges,
-                trial_seed,
-                tuning.sweeps,
-                tuning.cg_iterations,
-                tuning.max_edge_rotation_error_deg,
-                tuning.refine_translations_with_global_rotations,
-                Some(camera),
-            ) else {
-                continue;
-            };
-            let registered = solution.poses.iter().filter(|p| p.is_some()).count();
-            let mut track_point = vec![None; built_for_score.tracks.len()];
-            triangulate_pending(
-                camera,
-                features,
-                &built_for_score.tracks,
-                &solution.poses,
-                mapper,
-                &mut track_point,
-            );
-            let (mut reproj_sum, mut reproj_count) = (0.0f64, 0usize);
-            for (track_id, track) in built_for_score.tracks.iter().enumerate() {
-                let Some(position) = track_point[track_id] else {
-                    continue;
-                };
-                for &(image, kp) in track {
-                    let Some(pose) = &solution.poses[image] else {
-                        continue;
-                    };
-                    let Some(pixel) = features[image].keypoints.get(kp).copied() else {
-                        continue;
-                    };
-                    if let Some(error) = reprojection_error_px(camera, pose, &position, &pixel) {
-                        reproj_sum += error;
-                        reproj_count += 1;
+            for &flip_alts in hyp_flips {
+                let mut trial_edges = edges.clone();
+                if flip_alts {
+                    for e in &mut trial_edges {
+                        e.swap_primary_alternate();
                     }
                 }
-            }
-            let reproj = if reproj_count > 0 {
-                reproj_sum / reproj_count as f64
-            } else {
-                f64::INFINITY
-            };
-            let better = match &best {
-                None => true,
-                Some((_, best_reg, best_reproj, _)) => {
-                    registered > *best_reg
-                        || (registered == *best_reg && reproj < *best_reproj)
+                let Some(solution) = solve_global_sfm(
+                    features.len(),
+                    &mut trial_edges,
+                    trial_seed,
+                    tuning.sweeps,
+                    tuning.cg_iterations,
+                    tuning.max_edge_rotation_error_deg,
+                    tuning.refine_translations_with_global_rotations,
+                    Some(camera),
+                ) else {
+                    continue;
+                };
+                let registered = solution.poses.iter().filter(|p| p.is_some()).count();
+                let mut track_point = vec![None; built_for_score.tracks.len()];
+                triangulate_pending(
+                    camera,
+                    features,
+                    &built_for_score.tracks,
+                    &solution.poses,
+                    mapper,
+                    &mut track_point,
+                );
+                let (mut reproj_sum, mut reproj_count) = (0.0f64, 0usize);
+                for (track_id, track) in built_for_score.tracks.iter().enumerate() {
+                    let Some(position) = track_point[track_id] else {
+                        continue;
+                    };
+                    for &(image, kp) in track {
+                        let Some(pose) = &solution.poses[image] else {
+                            continue;
+                        };
+                        let Some(pixel) = features[image].keypoints.get(kp).copied() else {
+                            continue;
+                        };
+                        if let Some(error) = reprojection_error_px(camera, pose, &position, &pixel)
+                        {
+                            reproj_sum += error;
+                            reproj_count += 1;
+                        }
+                    }
                 }
-            };
-            if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
-                eprintln!(
-                    "global-sfm debug: seed {trial_seed} registered={registered} pre-BA reproj={reproj:.3} px (n={reproj_count})"
-                );
-            }
-            if better {
-                best = Some((solution, registered, reproj, trial_seed));
+                let reproj = if reproj_count > 0 {
+                    reproj_sum / reproj_count as f64
+                } else {
+                    f64::INFINITY
+                };
+                let better = match &best {
+                    None => true,
+                    Some((_, best_reg, best_reproj, _, _)) => {
+                        registered > *best_reg
+                            || (registered == *best_reg && reproj < *best_reproj)
+                    }
+                };
+                if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+                    eprintln!(
+                        "global-sfm debug: seed {trial_seed} flip_alts={flip_alts} registered={registered} pre-BA reproj={reproj:.3} px (n={reproj_count})"
+                    );
+                }
+                if better {
+                    best = Some((solution, registered, reproj, trial_seed, flip_alts));
+                }
             }
         }
-        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && trials > 1 {
-            if let Some((_, reg, reproj, chosen)) = &best {
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && (trials > 1 || hyp_flips.len() > 1)
+        {
+            if let Some((_, reg, reproj, chosen, flip)) = &best {
                 eprintln!(
-                    "global-sfm debug: multi-seed chose seed {chosen} (registered={reg}, pre-BA reproj={reproj:.3} px) from {} trials",
-                    candidate_seeds.len()
+                    "global-sfm debug: multi-seed chose seed {chosen} flip_alts={flip} (registered={reg}, pre-BA reproj={reproj:.3} px) from {} seeds × {} hyp configs",
+                    candidate_seeds.len(),
+                    hyp_flips.len()
                 );
             }
         }
-        best.map(|(s, _, _, _)| s)
+        best.map(|(s, _, _, _, _)| s)
     }
     .ok_or(GlobalReconstructionError::NoUsableEdges)?;
     let poses = solved.poses;
@@ -1471,21 +1504,50 @@ pub fn reconstruct_global_sfm(
     let built = build_tracks_detailed(features.len(), pairwise, mapper.min_track_length);
     let tracks = built.tracks;
     let mut track_point = vec![None; tracks.len()];
+    let mut poses = poses;
     triangulate_pending(camera, features, &tracks, &poses, mapper, &mut track_point);
 
     // ---- One joint bundle adjustment ---------------------------------------
-    let mut ba_poses = poses.clone();
     let _ba_result = run_bundle_adjustment(
         camera,
         features,
         &tracks,
         mapper,
-        &mut ba_poses,
+        &mut poses,
         &mut track_point,
         false,
     )
     .map_err(|error| GlobalReconstructionError::Ba(error.to_string()))?;
-    let poses = ba_poses;
+
+    // ---- Residual PnP for images outside the view-graph component ----------
+    // Same post-BA pass the incremental mapper uses: 2D–3D correspondences
+    // from tracks that already have triangulated points. Courtyard's missing
+    // DSC_0308 is typically disconnected from rotation averaging but may
+    // still see enough reconstructed structure to register.
+    let rescued = post_refinement_registration_pass(
+        camera,
+        features,
+        &tracks,
+        mapper,
+        &mut poses,
+        &mut track_point,
+    )
+    .map_err(|error| GlobalReconstructionError::Ba(error.to_string()))?;
+    if rescued > 0 {
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+            eprintln!("global-sfm debug: residual PnP registered {rescued} leftover image(s)");
+        }
+        let _ = run_bundle_adjustment(
+            camera,
+            features,
+            &tracks,
+            mapper,
+            &mut poses,
+            &mut track_point,
+            false,
+        )
+        .map_err(|error| GlobalReconstructionError::Ba(error.to_string()))?;
+    }
 
     // ---- Assemble output tracks --------------------------------------------
     let mut out_tracks: Vec<SfmTrack> = Vec::new();
