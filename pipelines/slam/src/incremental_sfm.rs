@@ -461,8 +461,8 @@ pub struct TrackBuildStats {
 }
 
 #[derive(Debug, Clone, Default)]
-struct TrackBuildOutput {
-    tracks: Vec<Vec<(usize, usize)>>,
+pub(crate) struct TrackBuildOutput {
+    pub(crate) tracks: Vec<Vec<(usize, usize)>>,
     conflicting_components: Vec<Vec<(usize, usize)>>,
     stats: TrackBuildStats,
 }
@@ -1039,7 +1039,7 @@ fn build_tracks_with_stats(
     (output.tracks, output.stats)
 }
 
-fn build_tracks_detailed(
+pub(crate) fn build_tracks_detailed(
     n_images: usize,
     pairwise: &[PairwiseMatches],
     min_track_length: usize,
@@ -2918,7 +2918,7 @@ fn structureless_registration_pass(
 
 /// Triangulate every track that has ≥2 registered observations and is not yet
 /// triangulated, accepting only well-conditioned (parallax + reprojection) points.
-fn triangulate_pending(
+pub(crate) fn triangulate_pending(
     camera: &Camera,
     features: &[FeatureSet],
     tracks: &[Vec<(usize, usize)>],
@@ -3456,7 +3456,7 @@ fn visibility_pyramid_score(
 /// refines the pinhole intrinsics (alternating) and the refined camera is
 /// returned as `Some` (the caller propagates it); otherwise the second tuple
 /// element is `None` and the camera is untouched.
-fn run_bundle_adjustment(
+pub(crate) fn run_bundle_adjustment(
     camera: &Camera,
     features: &[FeatureSet],
     tracks: &[Vec<(usize, usize)>],

@@ -273,9 +273,16 @@ impl std::str::FromStr for MatcherKind {
 }
 
 struct Args {
+    /// `Files` (default): read precomputed `X Y SCORE D…` feature files from
+    /// `features_dir`. `Sift`: run the pure-Rust SIFT frontend in-process on
+    /// every image in `images_dir` (requires `--images-dir`; ignores
+    /// `--features-dir`). See `visloc_vision::features::sift`.
+    feature_extractor: FeatureExtractorKind,
     features_dir: PathBuf,
+    images_dir: Option<PathBuf>,
     feature_suffix: String,
     image_suffix: String,
+    sift_max_keypoints: usize,
     out_colmap: PathBuf,
     camera: Camera,
     vocab_size: usize,
@@ -290,6 +297,7 @@ struct Args {
     refine_intrinsics: bool,
     refine_distortion: bool,
     colmap_style: bool,
+    structureless_registration: bool,
     filter_images: bool,
     verification_mode: VerificationMode,
     /// M2 A/B switch: which algorithm builds feature tracks from the verified
@@ -386,6 +394,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_intrinsics = false;
     let mut refine_distortion = false;
     let mut colmap_style = false;
+    let mut structureless_registration = false;
     let mut filter_images = false;
     let mut verification_mode = VerificationMode::Legacy;
     let mut track_source = TrackSource::UnionFind;
@@ -401,12 +410,30 @@ fn parse_args() -> Result<Args, String> {
     let mut diagnose_pairs: Vec<(usize, usize)> = Vec::new();
     let mut matcher = MatcherKind::Nn;
     let mut lightglue_model: Option<PathBuf> = None;
+    let mut feature_extractor = FeatureExtractorKind::Files;
+    let mut images_dir: Option<PathBuf> = None;
+    let mut sift_max_keypoints = 2048usize;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < a.len() {
         match a[i].as_str() {
             "--features-dir" => features_dir = Some(PathBuf::from(a.remove(i + 1))),
+            "--images-dir" => images_dir = Some(PathBuf::from(a.remove(i + 1))),
+            "--feature-extractor" => {
+                feature_extractor = match a.remove(i + 1).as_str() {
+                    "files" => FeatureExtractorKind::Files,
+                    "sift" => FeatureExtractorKind::Sift,
+                    other => {
+                        return Err(format!(
+                            "--feature-extractor must be files|sift, got {other}"
+                        ))
+                    }
+                };
+            }
+            "--sift-max-keypoints" => {
+                sift_max_keypoints = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             "--feature-suffix" => feature_suffix = a.remove(i + 1),
             "--image-suffix" => image_suffix = a.remove(i + 1),
             "--out-colmap" => out_colmap = Some(PathBuf::from(a.remove(i + 1))),
@@ -432,6 +459,7 @@ fn parse_args() -> Result<Args, String> {
             "--refine-intrinsics" => refine_intrinsics = true,
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
+            "--structureless-registration" => structureless_registration = true,
             "--filter-images" => filter_images = true,
             "--colmap-verification" => verification_mode = VerificationMode::Full,
             "--verification-mode" => {
@@ -488,7 +516,9 @@ fn parse_args() -> Result<Args, String> {
     );
 
     Ok(Args {
-        features_dir: features_dir.ok_or("--features-dir is required")?,
+        feature_extractor,
+        features_dir: features_dir.unwrap_or_default(),
+        images_dir,
         feature_suffix,
         image_suffix,
         out_colmap: out_colmap.ok_or("--out-colmap is required")?,
@@ -505,6 +535,7 @@ fn parse_args() -> Result<Args, String> {
         refine_intrinsics,
         refine_distortion,
         colmap_style,
+        structureless_registration,
         filter_images,
         verification_mode,
         track_source,
@@ -520,7 +551,72 @@ fn parse_args() -> Result<Args, String> {
         diagnose_pairs,
         matcher,
         lightglue_model,
+        sift_max_keypoints,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FeatureExtractorKind {
+    Files,
+    Sift,
+}
+
+/// Extract SIFT features for one image path.
+#[cfg(feature = "image-io")]
+fn extract_sift_for_image(
+    path: &Path,
+    max_keypoints: usize,
+) -> Result<FeatureSet, Box<dyn std::error::Error>> {
+    use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig};
+    let grayscale = visloc_io::images::read_common_image(path)?;
+    let image = GrayImage::new(grayscale.width(), grayscale.height(), grayscale.pixels())?;
+    let config = SiftConfig {
+        max_keypoints,
+        ..SiftConfig::default()
+    };
+    let (keypoints, descriptors) = extract_sift(&image, &config)?;
+    Ok(FeatureSet::new(
+        keypoints.iter().map(|k| Point2::new(k.x, k.y)).collect(),
+        descriptors,
+    )?)
+}
+
+/// In-process SIFT over every common-format image in `dir`, sorted lexically.
+#[cfg(not(feature = "image-io"))]
+fn load_images_with_sift(
+    _dir: &Path,
+    _max_keypoints: usize,
+) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
+    Err("--feature-extractor sift requires building with --features image-io".into())
+}
+
+/// In-process SIFT over every common-format image in `dir`, sorted lexically.
+#[cfg(feature = "image-io")]
+fn load_images_with_sift(
+    dir: &Path,
+    max_keypoints: usize,
+) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
+    const IMAGE_SUFFIXES: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"];
+    let mut files: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| {
+            IMAGE_SUFFIXES
+                .iter()
+                .any(|suffix| n.to_lowercase().ends_with(suffix))
+        })
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("no images found under {dir:?}").into());
+    }
+    let mut features = Vec::new();
+    let mut names = Vec::new();
+    for f in &files {
+        features.push(extract_sift_for_image(&dir.join(f), max_keypoints)?);
+        names.push(f.to_string());
+    }
+    Ok((features, names))
 }
 
 fn image_name_for(feat_filename: &str, feat_suffix: &str, image_suffix: &str) -> String {
@@ -1268,8 +1364,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let (features, image_names) =
-        load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?;
+    if args.feature_extractor == FeatureExtractorKind::Files
+        && args.features_dir.as_os_str().is_empty()
+    {
+        return Err(
+            "--features-dir is required (or use --feature-extractor sift with --images-dir)".into(),
+        );
+    }
+    let (features, image_names) = match args.feature_extractor {
+        FeatureExtractorKind::Files => {
+            load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?
+        }
+        FeatureExtractorKind::Sift => {
+            let dir = args.images_dir.clone().unwrap_or_else(|| {
+                eprintln!("error: --feature-extractor sift requires --images-dir");
+                std::process::exit(2);
+            });
+            load_images_with_sift(&dir, args.sift_max_keypoints)?
+        }
+    };
     if features.len() < 2 {
         return Err(format!("need ≥2 images, found {}", features.len()).into());
     }
@@ -1389,6 +1502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..IncrementalSfmConfig::default().ba_config
         },
         colmap_style_mapper: args.colmap_style,
+        structureless_registration: args.structureless_registration,
         filter_images: args.filter_images,
         track_source: args.track_source,
         ..IncrementalSfmConfig::default()

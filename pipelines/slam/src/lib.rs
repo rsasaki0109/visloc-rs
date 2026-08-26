@@ -89,7 +89,10 @@ pub use ordered_view_graph::{
 };
 
 pub mod global_sfm;
-pub use global_sfm::{average_positions, average_rotations, GlobalSfmEdge, GlobalSfmPoses};
+pub use global_sfm::{
+    average_positions, average_rotations, reconstruct_global_sfm, GlobalReconstructionError,
+    GlobalReconstructionTuning, GlobalSfmEdge, GlobalSfmPoses,
+};
 
 pub mod imu_preintegration;
 pub use imu_preintegration::{

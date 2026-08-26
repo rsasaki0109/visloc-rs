@@ -2846,3 +2846,54 @@ unreachable island.
   mapper file: **not touched** — this milestone, like M5, is strictly a
   frontend pre-filter (candidate-pair *matching*, upstream of geometric
   verification), per its own scope.
+
+---
+
+## 2026-08-26 continuation slice — four additions (implemented, Linux machine)
+
+This session continued the port along four independent axes. Full details in
+`CHANGELOG.md` (Unreleased > Added, 2026-08-26 entry); summary here for
+plan-level traceability.
+
+### 1. Multi-round structure-less registration (courtyard lever, §"What this implies for the next milestone")
+
+`IncrementalSfmConfig::structureless_max_rounds` (default 4) repeats the
+structure-less completion pass until a round registers nothing: a single
+ascending scan could never register an island image whose bridge has a higher
+index; rounds feed each round's registrations back in as neighbours.
+Synthetic-island unit test proves the chaining behaviour and pose accuracy;
+single-round mode reproduces historical output exactly. Wired as
+`--structureless-max-rounds` on `sequential_sfm_demo`.
+
+### 2. Retrieval-scaling evidence (M4 acceptance, deterministic form)
+
+`VocabTree::query_with_work` exposes `QueryWorkStats`; a unit test pins
+entries-visited growth near-linear (<10x) across an 8x corpus where flat-VLAD
+pairwise scanning is analytically 64x — the M4 sub-linear claim without
+wall-clock noise. `examples/retrieval_scale_benchmark.rs` measures both arms
+on a fixed-vocabulary synthetic corpus (registry manifest
+`benchmarks/registry/runs/retrieval/`, doc `docs/generated/retrieval_scaling.md`).
+
+### 3. GLOMAP-style global SfM geometry stage
+
+`visloc_slam::global_sfm`: rotation averaging (MST seed + geodesic consensus
+sweeps) then position averaging (CG least squares on perpendicular-bearing
+rows plus one scale-fixing row). `reconstruct_global_sfm` is the end-to-end
+entry point: verified matches → relative poses → global solve → triangulate →
+one joint BA. Synthetic ring E2E test recovers all cameras with tight gauge-
+aligned rotations and scale-invariant centres.
+
+### 4. Pure-Rust SIFT frontend + first real-data slice
+
+`visloc_vision::features::sift` (Lowe IJCV 2004 semantics; VLFeat cited as
+the BSD-clean behavioural reference) wired into `unordered_sfm_demo` via
+`--feature-extractor sift --images-dir`. First CPU-only courtyard run on this
+machine (1600 px max-dim): SIFT+NN+ratio registers **12 / 38** at 4096
+keypoints (`--exhaustive --min-matches 20`) vs the recorded SuperPoint run's
+14 / 38 on the same image cluster — below SP, above nothing-new; Sim(3)
+centre RMSE against ETH3D GT poses is poor (median ~1.8 m over the registered
+set), reproducing the documented bent-shape failure rather than fixing it.
+Honest reading: the classical path now runs end-to-end in pure Rust (~4 min
+for extraction+matching+mapping), but matching quality (NN+ratio, no
+LightGlue model on this machine) remains the binding constraint; detection
+density alone did not close the gap (2048→4096 kp moved registration 11→12).

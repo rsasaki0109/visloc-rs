@@ -41,6 +41,14 @@ use std::collections::HashMap;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use visloc_core::geometry::Pose;
+use visloc_core::types::Camera;
+use visloc_vision::features::FeatureSet;
+use visloc_vision::two_view::{RelativePoseEstimator, TwoViewCorrespondence};
+
+use crate::incremental_sfm::{
+    build_tracks_detailed, reprojection_error_px, run_bundle_adjustment, triangulate_pending,
+    PairwiseMatches, SfmTrack,
+};
 
 /// One verified pairwise constraint between two views of the view graph.
 #[derive(Debug, Clone, PartialEq)]
@@ -493,8 +501,371 @@ pub fn average_positions(
     out
 }
 
+/// Tunables for [`reconstruct_global_sfm`] beyond the shared incremental-
+/// mapper config (which supplies triangulation gates and the BA recipe).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalReconstructionTuning {
+    /// Image whose frame becomes the reconstruction gauge.
+    pub seed: usize,
+    /// Rotation-consensus sweeps (8-16 is ample on connected graphs).
+    pub sweeps: usize,
+    /// Position least-squares conjugate-gradient budget.
+    pub cg_iterations: usize,
+    /// Pairs below this verified-match count are skipped when estimating
+    /// relative poses.
+    pub min_pair_matches: usize,
+    /// Minimum essential inliers per pair for its edge to enter the graph.
+    pub min_edge_inliers: usize,
+}
+
+impl Default for GlobalReconstructionTuning {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            sweeps: 12,
+            cg_iterations: 500,
+            min_pair_matches: 10,
+            min_edge_inliers: 15,
+        }
+    }
+}
+
+/// Errors surfaced by [`reconstruct_global_sfm`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum GlobalReconstructionError {
+    /// The view-graph stage could not solve any component from the given
+    /// edges (no usable pairs, or every pair failed estimation).
+    NoUsableEdges,
+    /// The final bundle adjustment failed; the pre-BA geometry is lost so
+    /// only the error surfaces.
+    Ba(String),
+}
+
+impl std::fmt::Display for GlobalReconstructionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GlobalReconstructionError::NoUsableEdges => {
+                write!(f, "global SfM found no usable pairwise edges")
+            }
+            GlobalReconstructionError::Ba(error) => {
+                write!(f, "global SfM bundle adjustment failed: {error}")
+            }
+        }
+    }
+}
+impl std::error::Error for GlobalReconstructionError {}
+
+/// End-to-end GLOMAP-style reconstruction: estimate per-pair relative poses
+/// from verified matches, average them globally, triangulate the feature
+/// tracks against the averaged cameras, and finish with one bundle adjustment
+/// over everything registered.
+///
+/// This is the global analogue of [`crate::incremental_sfm`]'s grow-from-a-
+/// seed loop: instead of chaining registrations image by image, every camera
+/// lands in one consistent frame at once and BA only has to polish local
+/// geometry. Images outside the seed's view-graph component stay unposed.
+///
+/// Output: per-image poses (`None` outside the solved component), assembled
+/// BA-refined tracks, and mean track reprojection in pixels.
+#[allow(clippy::type_complexity)]
+pub fn reconstruct_global_sfm(
+    camera: &Camera,
+    features: &[FeatureSet],
+    pairwise: &[PairwiseMatches],
+    tuning: &GlobalReconstructionTuning,
+    mapper: &crate::incremental_sfm::IncrementalSfmConfig,
+) -> Result<(Vec<Option<Pose>>, Vec<SfmTrack>, f64), GlobalReconstructionError> {
+    // ---- Relative poses → global edges ------------------------------------
+    let estimator = RelativePoseEstimator::default();
+    let mut edges = Vec::new();
+    for pair in pairwise {
+        if pair.matches.len() < tuning.min_pair_matches {
+            continue;
+        }
+        let correspondences: Vec<TwoViewCorrespondence> = pair
+            .matches
+            .iter()
+            .filter_map(|&(ki, kj)| {
+                Some(TwoViewCorrespondence::new(
+                    *features[pair.image_i].keypoints.get(ki)?,
+                    *features[pair.image_j].keypoints.get(kj)?,
+                ))
+            })
+            .collect();
+        let Some(relative) = estimator.estimate(&correspondences, camera) else {
+            continue;
+        };
+        if relative.inliers.len() < tuning.min_edge_inliers {
+            continue;
+        }
+        // Bearing of camera j's centre expressed in camera i's frame:
+        // C_j^(i) = −R_ijᵀ t_ij.
+        let r_ij = relative.previous_to_current.rotation;
+        let t_ij = relative.previous_to_current.translation;
+        let Some(direction_ij) = (-r_ij.inverse().transform_vector(&t_ij)).try_normalize(1e-12)
+        else {
+            continue;
+        };
+        edges.push(GlobalSfmEdge {
+            image_i: pair.image_i,
+            image_j: pair.image_j,
+            rotation_ij: r_ij,
+            direction_ij,
+            weight: relative.inliers.len() as f64,
+        });
+    }
+
+    let solved = solve_global_sfm(
+        features.len(),
+        &edges,
+        tuning.seed,
+        tuning.sweeps,
+        tuning.cg_iterations,
+    )
+    .ok_or(GlobalReconstructionError::NoUsableEdges)?;
+    let poses = solved.poses;
+    if !poses.iter().any(Option::is_some) {
+        return Err(GlobalReconstructionError::NoUsableEdges);
+    }
+
+    // ---- Triangulate tracks against the averaged cameras -------------------
+    let built = build_tracks_detailed(features.len(), pairwise, mapper.min_track_length);
+    let tracks = built.tracks;
+    let mut track_point = vec![None; tracks.len()];
+    triangulate_pending(camera, features, &tracks, &poses, mapper, &mut track_point);
+
+    // ---- One joint bundle adjustment ---------------------------------------
+    let mut ba_poses = poses.clone();
+    let _ba_result = run_bundle_adjustment(
+        camera,
+        features,
+        &tracks,
+        mapper,
+        &mut ba_poses,
+        &mut track_point,
+        false,
+    )
+    .map_err(|error| GlobalReconstructionError::Ba(error.to_string()))?;
+    let poses = ba_poses;
+
+    // ---- Assemble output tracks --------------------------------------------
+    let mut out_tracks: Vec<SfmTrack> = Vec::new();
+    let (mut reproj_sum, mut reproj_count) = (0.0f64, 0usize);
+    for (track_id, track) in tracks.iter().enumerate() {
+        let Some(position) = track_point[track_id] else {
+            continue;
+        };
+        let mut observations = Vec::new();
+        for &(image, kp) in track {
+            let Some(pose) = &poses[image] else {
+                continue;
+            };
+            let Some(pixel) = features[image].keypoints.get(kp).copied() else {
+                continue;
+            };
+            observations.push((image, kp, pixel));
+            if let Some(error) = reprojection_error_px(camera, pose, &position, &pixel) {
+                reproj_sum += error;
+                reproj_count += 1;
+            }
+        }
+        if observations.len() >= 2.min(mapper.min_track_length) {
+            out_tracks.push(SfmTrack {
+                position,
+                observations,
+            });
+        }
+    }
+    let mean_reprojection_px = if reproj_count > 0 {
+        reproj_sum / reproj_count as f64
+    } else {
+        f64::NAN
+    };
+    Ok((poses, out_tracks, mean_reprojection_px))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use nalgebra::Point2;
+
+    /// Project a world point into a pose; `None` if behind camera or off-image.
+    fn project_point(camera: &Camera, pose: &Pose, p: &Point3<f64>) -> Option<Point2<f64>> {
+        let cam = pose.transform_world_point(p);
+        if cam.z <= 0.05 {
+            return None;
+        }
+        let px = camera.project(&cam)?;
+        if px.x < 0.0 || px.x >= camera.width as f64 || px.y < 0.0 || px.y >= camera.height as f64 {
+            return None;
+        }
+        Some(Point2::new(px.x, px.y))
+    }
+
+    /// A synthetic ring scene with rendered features and ground-truth
+    /// pairwise matches across every co-observing pair — the global SfM
+    /// end-to-end fixture (mirrors `incremental_sfm`'s own test scene).
+    struct E2eScene {
+        camera: Camera,
+        gt_poses: Vec<Pose>,
+        features: Vec<FeatureSet>,
+        pairwise: Vec<PairwiseMatches>,
+    }
+
+    fn build_e2e_scene(n: usize, radius: f64) -> E2eScene {
+        use visloc_vision::features::FeatureSet as FS;
+        // Point cloud around the origin.
+        let mut points = Vec::new();
+        for xi in -2..=2 {
+            for yi in -2..=2 {
+                for zi in 0..=2 {
+                    points.push(Point3::new(
+                        xi as f64 * 0.3,
+                        yi as f64 * 0.3,
+                        zi as f64 * 0.3,
+                    ));
+                }
+            }
+        }
+        let camera = Camera::pinhole(0, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        let mut gt_poses = Vec::new();
+        for k in 0..n {
+            let angle = std::f64::consts::TAU * k as f64 / n as f64;
+            let center = Point3::new(radius * angle.sin(), 0.0, -radius * angle.cos());
+            let forward = (Point3::origin() - center).normalize();
+            let world_up = Vector3::new(0.0, 1.0, 0.0);
+            let right = forward.cross(&world_up).normalize();
+            let up = right.cross(&forward);
+            let r_c2w = nalgebra::Matrix3::from_columns(&[right, -up, forward]);
+            let q_w2c = UnitQuaternion::from_rotation_matrix(
+                &nalgebra::Rotation3::from_matrix_unchecked(r_c2w),
+            )
+            .inverse();
+            let t_w2c = -(q_w2c * center.coords);
+            gt_poses.push(Pose::from_world_to_camera(q_w2c, t_w2c));
+        }
+        let mut features = Vec::new();
+        let mut visible: Vec<std::collections::HashMap<usize, usize>> = Vec::new();
+        for pose in &gt_poses {
+            let (kps, descs): (Vec<_>, Vec<_>) = points
+                .iter()
+                .enumerate()
+                .filter_map(|(pidx, p)| {
+                    project_point(&camera, pose, p).map(|px| (px, vec![pidx as f32, 1.0, 0.0, 0.0]))
+                })
+                .unzip();
+            visible.push(
+                points
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pidx, p)| project_point(&camera, pose, p).map(|px| (pidx, px)))
+                    .enumerate()
+                    .map(|(kidx, (pidx, _))| (pidx, kidx))
+                    .collect(),
+            );
+            features.push(FS::new(kps, descs).unwrap());
+        }
+        let mut pairwise = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let mut matches = Vec::new();
+                for (&pidx, &ki) in &visible[i] {
+                    if let Some(&kj) = visible[j].get(&pidx) {
+                        matches.push((ki, kj));
+                    }
+                }
+                if matches.len() >= 8 {
+                    pairwise.push(PairwiseMatches {
+                        image_i: i,
+                        image_j: j,
+                        matches,
+                    });
+                }
+            }
+        }
+        E2eScene {
+            camera,
+            gt_poses,
+            features,
+            pairwise,
+        }
+    }
+
+    #[test]
+    fn reconstruct_global_sfm_end_to_end_recovers_the_ring() {
+        let n = 6usize;
+        let scene = build_e2e_scene(n, 3.0);
+        assert!(
+            scene.pairwise.len() >= n,
+            "fixture sanity: the full ring must be connected"
+        );
+        let tuning = GlobalReconstructionTuning::default();
+        let mapper = crate::incremental_sfm::IncrementalSfmConfig {
+            min_track_length: 3,
+            max_reprojection_error_px: 2.0,
+            ..crate::incremental_sfm::IncrementalSfmConfig::default()
+        };
+        let (poses, tracks, mean_reproj) = reconstruct_global_sfm(
+            &scene.camera,
+            &scene.features,
+            &scene.pairwise,
+            &tuning,
+            &mapper,
+        )
+        .expect("global reconstruction succeeds on the synthetic ring");
+        assert_eq!(poses.iter().filter(|p| p.is_some()).count(), n);
+        assert!(
+            tracks.len() >= 20,
+            "expected a dense track set, got {}",
+            tracks.len()
+        );
+        assert!(
+            mean_reproj.is_finite() && mean_reproj < 0.5,
+            "mean reprojection {mean_reproj:.3} px too high"
+        );
+        // Gauge: the solver frame is camera 0's frame; rotations must match
+        // R_i·R_0⁻¹ and centres up to one global scale.
+        let gauge = scene.gt_poses[0].world_to_camera.rotation.inverse();
+        for image in 0..n {
+            let pose = poses[image].as_ref().unwrap();
+            let expected = scene.gt_poses[image].world_to_camera.rotation * gauge;
+            let rot_err = (pose.world_to_camera.rotation.inverse() * expected).angle();
+            assert!(rot_err < 1e-2, "image {image} rotation error {rot_err} rad");
+        }
+        let c_est = |i: usize| poses[i].as_ref().unwrap().camera_center_world();
+        let baseline_est = (c_est(0) - c_est(1)).norm();
+        let r0 = scene.gt_poses[0].world_to_camera.rotation;
+        let c0 = scene.gt_poses[0].camera_center_world();
+        let scale = (r0 * (scene.gt_poses[1].camera_center_world() - c0)).norm() / baseline_est;
+        for image in 0..n {
+            let expected = r0 * (scene.gt_poses[image].camera_center_world() - c0);
+            let err = (c_est(image) * scale - expected).coords.norm();
+            assert!(err < 5e-2, "image {image} centre error {err} after scaling");
+        }
+    }
+
+    #[test]
+    fn reconstruct_global_sfm_reports_no_usable_edges_on_disconnected_input() {
+        let scene = build_e2e_scene(4, 3.0);
+        // Keep only pairs among images {0, 1}; images 2 and 3 become islands.
+        let pairwise: Vec<PairwiseMatches> = scene
+            .pairwise
+            .iter()
+            .filter(|p| p.image_i <= 1 && p.image_j <= 1)
+            .cloned()
+            .collect();
+        let tuning = GlobalReconstructionTuning::default();
+        let mapper = crate::incremental_sfm::IncrementalSfmConfig::default();
+        let (poses, _tracks, _mean) =
+            reconstruct_global_sfm(&scene.camera, &scene.features, &pairwise, &tuning, &mapper)
+                .expect("the connected pair still solves");
+        assert!(poses[0].is_some() && poses[1].is_some());
+        assert!(
+            poses[2].is_none() && poses[3].is_none(),
+            "islands stay unposed"
+        );
+    }
+
     use super::*;
 
     /// Deterministic pseudo-random unit vector.

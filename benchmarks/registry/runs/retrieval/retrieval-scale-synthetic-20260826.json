@@ -1,0 +1,192 @@
+{
+  "artifacts": [],
+  "benchmark": {
+    "docs": [
+      "docs/generated/retrieval_scaling.md"
+    ],
+    "id": "retrieval-scale-synthetic",
+    "name": "Vocab-tree vs flat-VLAD pair generation scaling on a synthetic places corpus",
+    "protocol": "Deterministic synthetic corpus (256-dim descriptors, 200 place clusters, 64 descriptors/image); fixed vocabularies trained once on a separate 512-image pool (k-means VLAD words=256; HKM branching=16 depth=3). Both arms propose top-K=10 pairs for every image; wall clock, exact comparison counts, measured QueryWorkStats, and same-place recall@10 reported per corpus size.",
+    "script": "cargo run --release --example retrieval_scale_benchmark -- --sizes 250,500,1000,2000"
+  },
+  "build": {
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "cargo_lock_sha256": "697ef21b7d50d52d6dec8faa446d3f196ec11acd46adf2555ca7b966a0dc827a",
+    "features": [
+      "default"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "target": null
+  },
+  "claim_scope": "supporting",
+  "command": {
+    "argv": [],
+    "cwd": "/home/sasaki/workspace/visloc-rs",
+    "raw": null
+  },
+  "config": {
+    "config_files": [],
+    "params": {},
+    "seed": null
+  },
+  "created_utc": "2026-08-26T05:55:42Z",
+  "dataset": {
+    "checksum": null,
+    "checksum_method": null,
+    "name": "synthetic places corpus (deterministic LCG, seed 7)",
+    "path": null,
+    "sequence": "sizes 250/500/1000/2000",
+    "version": null
+  },
+  "failure_reason": null,
+  "git": {
+    "branch": "main",
+    "commit": "f5dc4af917d7e1fb33169b5b8c117921323ff4c8",
+    "dirty": true
+  },
+  "hardware": {
+    "gpu": null,
+    "hostname": "sasaki-pc",
+    "machine": "x86_64",
+    "notes": "Linux x86_64 (this machine), CPU-only release build",
+    "os": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
+    "processor": "x86_64"
+  },
+  "metrics": [
+    {
+      "implementation": null,
+      "name": "flat_scan_250_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 14.006
+    },
+    {
+      "implementation": null,
+      "name": "flat_scan_500_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 54.312
+    },
+    {
+      "implementation": null,
+      "name": "flat_scan_1000_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 208.881
+    },
+    {
+      "implementation": null,
+      "name": "flat_scan_2000_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 828.28
+    },
+    {
+      "implementation": null,
+      "name": "flat_comparisons_250",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 62500
+    },
+    {
+      "implementation": null,
+      "name": "flat_comparisons_2000",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 4000000
+    },
+    {
+      "implementation": null,
+      "name": "tree_query_250_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 28.453
+    },
+    {
+      "implementation": null,
+      "name": "tree_query_500_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 56.571
+    },
+    {
+      "implementation": null,
+      "name": "tree_query_1000_s",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 99.54
+    },
+    {
+      "implementation": null,
+      "name": "tree_query_2000_s",
+      "primary": true,
+      "source_artifact": null,
+      "unit": null,
+      "value": 196.923
+    },
+    {
+      "implementation": null,
+      "name": "tree_entries_visited_250",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 1292589
+    },
+    {
+      "implementation": null,
+      "name": "tree_entries_visited_500",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 4898092
+    },
+    {
+      "implementation": null,
+      "name": "tree_entries_visited_1000",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 18853327
+    },
+    {
+      "implementation": null,
+      "name": "tree_entries_visited_2000",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 76011190
+    },
+    {
+      "implementation": null,
+      "name": "recall_at10_flat",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 1.0
+    },
+    {
+      "implementation": null,
+      "name": "recall_at10_tree_2000",
+      "primary": false,
+      "source_artifact": null,
+      "unit": null,
+      "value": 0.957
+    }
+  ],
+  "models": [],
+  "notes": "M4 acceptance (colmap_port_plan): corpus-size-dependent tree work grows linearly (entries x~4.0 per doubling = corpus growth) while the flat global scan is quadratic (~4.0x per doubling on time, exactly quadratic in comparisons). Tree is 4.2x faster at 2000 images with near-parity recall (0.957 vs 1.000). Deterministic unit test query_work_grows_linearly_while_flat_pairwise_is_quadratic pins the linear-growth invariant machine-independently.",
+  "result_kind": "visloc_run",
+  "run_id": "retrieval-scale-synthetic-20260826",
+  "schema_version": 1,
+  "status": "success"
+}
