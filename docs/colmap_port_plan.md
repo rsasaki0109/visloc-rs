@@ -2488,7 +2488,7 @@ ETH3D acceptance matrix M1–M5 already used.
 [cvg/LightGlue](https://github.com/cvg/LightGlue)'s own `LICENSE` file and
 its README's `## License` section (fetched directly, quoted verbatim):
 > "The pre-trained weights of LightGlue and the code provided in this
-> repository are released under the [Apache-2.0 license](./LICENSE). [DISK]
+> repository are released under the Apache-2.0 license (see that repository's LICENSE). [DISK]
 > follows this license as well but SuperPoint follows [a different,
 > restrictive license](https://github.com/magicleap/SuperPointPretrainedNetwork/blob/master/LICENSE)
 > (this includes its pre-trained weights and its [inference file]) [...]"

@@ -28,11 +28,11 @@ repository front page. Current entry points and headline results remain in the
 
 **Showcases and artifacts**
 
-- [KITTI loop-closure benchmark](docs/kitti_loop_closure_benchmark.md): seq00 drift correction and loop diagnostics.
-- [EuRoC loop-closure benchmark](docs/euroc_loop_closure_benchmark.md): MH_03 visual loop-closure evidence and limitations.
-- [Public COLMAP map-reuse demo](docs/public_data_demo.md): classical vs deep localization artifacts.
-- [Unordered SfM benchmark](docs/unordered_sfm_benchmark.md): South Building and Gerrard Hall reconstruction / 3DGS outputs.
-- [Tracking persistence benchmark](docs/tracking_persistence_benchmark.md): death-spiral diagnosis, opt-in gate fixes, and honest coverage/ATE tradeoffs on EuRoC MH.
+- [KITTI loop-closure benchmark(kitti_loop_closure_benchmark.md): seq00 drift correction and loop diagnostics.
+- [EuRoC loop-closure benchmark(euroc_loop_closure_benchmark.md): MH_03 visual loop-closure evidence and limitations.
+- [Public COLMAP map-reuse demo(public_data_demo.md): classical vs deep localization artifacts.
+- [Unordered SfM benchmark(unordered_sfm_benchmark.md): South Building and Gerrard Hall reconstruction / 3DGS outputs.
+- [Tracking persistence benchmark(tracking_persistence_benchmark.md): death-spiral diagnosis, opt-in gate fixes, and honest coverage/ATE tradeoffs on EuRoC MH.
 - [Interactive trajectory viewer](https://rsasaki0109.github.io/visloc-rs/kitti3d/) and [EuRoC splat viewer](https://rsasaki0109.github.io/visloc-rs/euroc_splat/).
 
 `visloc-rs` is a pure-Rust foundation for **GPS-denied localization** — estimating
@@ -83,12 +83,12 @@ cargo run --example localize_dummy
 
 Local public-data development measurements, not official leaderboard submissions.
 The table below is the public headline snapshot generated from
-[`benchmarks/registry/readme_claims_v1.json`](benchmarks/registry/readme_claims_v1.json).
+[`benchmarks/registry/readme_claims_v1.json`(../benchmarks/registry/readme_claims_v1.json).
 Machine-readable run evidence, including supporting, exploratory, and negative
 runs that should not be promoted to headline claims, is rendered separately in
-[`docs/generated/registered_runs.md`](docs/generated/registered_runs.md), and
+[`docs/generated/registered_runs.md`(generated/registered_runs.md), and
 per-system comparison verdicts are scoped in
-[`docs/generated/benchmark_claim_matrix.md`](docs/generated/benchmark_claim_matrix.md).
+[`docs/generated/benchmark_claim_matrix.md`(generated/benchmark_claim_matrix.md).
 
 <!-- benchmark-registry:start -->
 | Benchmark | Result |
@@ -106,19 +106,19 @@ per-system comparison verdicts are scoped in
 | Outlier-robust PGO (GNC) | `sphere2500` + 30 wrong loops: L2 **89x** baseline, GNC **1.0x** (30/30 rejected) |
 <!-- benchmark-registry:end -->
 
-Details and reproduction: [KITTI multi-sequence published-baseline comparison](docs/kitti_multiseq_benchmark.md) ·
-[registered run evidence](docs/generated/registered_runs.md) ·
-[claim matrix](docs/generated/benchmark_claim_matrix.md) ·
-[KITTI loop closure](docs/kitti_loop_closure_benchmark.md) ·
-[EuRoC loop closure](docs/euroc_loop_closure_benchmark.md) ·
-[TUM RGB-D (virtual stereo)](docs/tum_rgbd_benchmark.md) ·
-[EuRoC SfM reconstruction](docs/euroc_sfm_benchmark.md) ·
-[sequential SfM vs COLMAP](docs/sfm_vs_colmap_benchmark.md) ([registry evidence](docs/generated/sfm_vs_colmap_headtohead.md)) ·
-[unordered SfM](docs/unordered_sfm_benchmark.md) ·
-[learned retrieval for relocalization](docs/learned_retrieval_relocalization.md) ·
-[multi-session lifelong mapping](docs/multi_session_lifelong_benchmark.md) ·
-[pose-graph / BA internals + GTSAM parity](docs/pgo_internals.md) ·
-[EuRoC vs published baselines](docs/phase_20_to_27_closeout.md).
+Details and reproduction: [KITTI multi-sequence published-baseline comparison(kitti_multiseq_benchmark.md) ·
+[registered run evidence(generated/registered_runs.md) ·
+[claim matrix(generated/benchmark_claim_matrix.md) ·
+[KITTI loop closure(kitti_loop_closure_benchmark.md) ·
+[EuRoC loop closure(euroc_loop_closure_benchmark.md) ·
+[TUM RGB-D (virtual stereo)(tum_rgbd_benchmark.md) ·
+[EuRoC SfM reconstruction(euroc_sfm_benchmark.md) ·
+[sequential SfM vs COLMAP(sfm_vs_colmap_benchmark.md) ([registry evidence(generated/sfm_vs_colmap_headtohead.md)) ·
+[unordered SfM(unordered_sfm_benchmark.md) ·
+[learned retrieval for relocalization(learned_retrieval_relocalization.md) ·
+[multi-session lifelong mapping(multi_session_lifelong_benchmark.md) ·
+[pose-graph / BA internals + GTSAM parity(pgo_internals.md) ·
+[EuRoC vs published baselines(phase_20_to_27_closeout.md).
 
 ## Project Boundaries
 
@@ -128,8 +128,8 @@ large API.
 
 - **In:** COLMAP/SfM maps, query/stereo features, file-backed deep features → `SE3`/`Pose` estimates with inlier counts, reprojection error, and tracking/loop diagnostics.
 - **Extensible & light:** feature extractors, matchers, pose estimators, priors, and VO frontends are trait-based; no mandatory OpenCV / PyTorch / ONNX / GPU runtime in default crates.
-- **Public surface:** common application imports should use `visloc_rs::prelude::*`; narrower imports should use the crate modules documented in [`docs/api_stability.md`](docs/api_stability.md). The root facade remains a convenience layer.
-- **Feature support:** default and `--no-default-features` stay dependency-light; PNG/JPEG/KITTI image helpers live behind `image-io`; ONNX/CUDA paths are opt-in deployment tiers. See [`docs/feature_matrix.md`](docs/feature_matrix.md).
+- **Public surface:** common application imports should use `visloc_rs::prelude::*`; narrower imports should use the crate modules documented in [`docs/api_stability.md`(api_stability.md). The root facade remains a convenience layer.
+- **Feature support:** default and `--no-default-features` stay dependency-light; PNG/JPEG/KITTI image helpers live behind `image-io`; ONNX/CUDA paths are opt-in deployment tiers. See [`docs/feature_matrix.md`(feature_matrix.md).
 - **Not claimed:** production full SLAM, dense mapping, internet-scale / global SfM (the SfM here is a focused incremental pipeline, not production COLMAP at collection scale), tightly coupled VIO/GNSS, or official KITTI leaderboard results.
 
 ## Try It
@@ -157,24 +157,24 @@ scripts/check.sh
 
 Each row points at a runnable example or sweep script on **real public data**;
 the full index (including synthetic correctness demos) lives in
-[`docs/demo_strategy.md`](docs/demo_strategy.md).
+[`docs/demo_strategy.md`(demo_strategy.md).
 
 | Demo | Stack | Reference |
 | --- | --- | --- |
-| COLMAP South Building localization | Real images vs sparse SfM map, deep frontend optional | [`examples/deep_localization_demo.rs`](examples/deep_localization_demo.rs), [`docs/public_data_demo.md`](docs/public_data_demo.md) |
-| KITTI stereo VO + BA + loop closure | Rectified stereo → 2D-3D PnP → multi-frame BA → SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`](examples/online_slam_stereo_vo_kitti_demo.rs) |
-| **KITTI loop closure (14×)** | Open SP/LG stereo VO vs VLAD→PnP→GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **36.29 m → 2.57 m Sim(3) ATE** | [`scripts/run_kitti_loop_closure_benchmark.sh`](scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) |
-| **KITTI multi-sequence published-baseline comparison** | One uniform full-stack config over six loopy sequences vs published per-sequence ATE (ORB-SLAM2 Table I, OV2SLAM Table V). Narrow seq00/seq09 wins are scoped in the claim matrix; three real-world failure modes were caught and fixed: dynamic-object PnP capture, motion-scale rescue feedback freeze, BA dynamic-track contamination | [`scripts/run_kitti_multiseq_benchmark.sh`](scripts/run_kitti_multiseq_benchmark.sh), [`docs/kitti_multiseq_benchmark.md`](docs/kitti_multiseq_benchmark.md) |
-| **EuRoC loop closure (UAV, 0.057 m)** | Same visual loop-closure + BA pipeline on MH_03. Window BA + loop **0.089 m** -> + two-view loop BA **0.065 m** -> + fixed-prefix local-map BA **0.061 m** -> + anisotropic loop-edge information **0.060 m** -> + BA init-residual gate **0.057 m**. The claim matrix marks the ORB-SLAM3 comparison as behind, not a win. | [`scripts/run_euroc_loop_closure_benchmark.sh`](scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) |
-| **EuRoC SfM reconstruction** | Stereo VO → merged multi-view tracks → one global BA → COLMAP export (`--sfm-colmap-out`). MH_03: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, for downstream 3DGS / MVS | [`scripts/run_euroc_sfm_benchmark.sh`](scripts/run_euroc_sfm_benchmark.sh), [`docs/euroc_sfm_benchmark.md`](docs/euroc_sfm_benchmark.md) |
-| **Unordered SfM** | Orderless photo set → VLAD view graph → essential-RANSAC verification → incremental reconstruction (robust multi-seed init → **P3P** register → triangulate → scale-gauge-fixed BA → iterative track filter) → COLMAP export. Real COLMAP examples vs their own models: **South Building** (128 photos) **128/128, 1.09 cm**; **Gerrard Hall** (100, 5616×3744 OPENCV) **98/100, 0.68 cm** — both 0.1% of extent; EuRoC V2_03 orbit **31/31, 1.08 cm** | [`examples/unordered_sfm_demo.rs`](examples/unordered_sfm_demo.rs), [`scripts/run_colmap_sfm_benchmark.sh`](scripts/run_colmap_sfm_benchmark.sh), [`scripts/run_unordered_sfm_benchmark.sh`](scripts/run_unordered_sfm_benchmark.sh), [`docs/unordered_sfm_benchmark.md`](docs/unordered_sfm_benchmark.md) |
-| **SfM → 3DGS (crisp, real building)** | The unordered-SfM model → undistort + recolour → gsplat **DefaultStrategy + degree-3 SH** → a photorealistic 3D Gaussian Splat. Reproduced on two real buildings (South-Building `SIMPLE_RADIAL`, Gerrard-Hall `OPENCV`) from the *same one command*. The crisp lever is the trainer's adaptive densification, *not* SfM precision (1.4 px and 0.66 px models render identically) | [`scripts/run_south_building_3dgs.sh`](scripts/run_south_building_3dgs.sh), [`scripts/gsplat_sfm_3dgs_train.py`](scripts/gsplat_sfm_3dgs_train.py), [`docs/unordered_sfm_benchmark.md`](docs/unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model) |
-| **In-process SuperPoint (CUDA, real-time)** | The deep feature front-end run *inside the process* via ONNX Runtime — no Python, no multi-GB feature export. EuRoC MH_03 752×480, top-1500: CPU **6 fps → CUDA 135 fps (≈22×)**, 6.7× over the 20 Hz camera rate; CPU/CUDA features identical | [`scripts/export_superpoint_onnx.py`](scripts/export_superpoint_onnx.py), [`scripts/run_superpoint_onnx_throughput.sh`](scripts/run_superpoint_onnx_throughput.sh), [`docs/superpoint_onnx_cuda_benchmark.md`](docs/superpoint_onnx_cuda_benchmark.md) |
-| **In-process LightGlue → full deep front-end (CUDA, real-time)** | The learned **matcher** in-process too — the whole front-end (extract + match) in pure Rust + ONNX, **bit-identical matches to Python** (1500/1500 indices agree). MH_03: full front-end CPU **1.1 fps → CUDA 34 fps (≈31×)**, above the 20 Hz camera; LightGlue match alone ≈35× | [`scripts/export_lightglue_onnx.py`](scripts/export_lightglue_onnx.py), [`scripts/run_deep_frontend_onnx_demo.sh`](scripts/run_deep_frontend_onnx_demo.sh), [`docs/lightglue_onnx_benchmark.md`](docs/lightglue_onnx_benchmark.md) |
-| **Single-binary deep stereo pipeline (opt-in ONNX)** | SuperPoint+LightGlue ONNX wired into the online stereo pipeline: raw rectified stereo -> learned frontend -> online BA + loop closure in one Rust binary. Registry-backed end-to-end wall-clock: in-process ONNX is **1.45x faster** than the file-based pre-export path it replaces (199 s vs 289 s) and at least as accurate (0.051 m vs 0.066 m ATE SE(3)), dropping the Python/PyTorch export and its ~30 GB feature dump; this remains an opt-in deployment tier, not the default build or a production full-SLAM claim. | [`examples/deep_stereo_slam.rs`](examples/deep_stereo_slam.rs), [`scripts/run_deep_stereo_slam.sh`](scripts/run_deep_stereo_slam.sh), [`scripts/run_deep_slam_3dgs.sh`](scripts/run_deep_slam_3dgs.sh), [`docs/inprocess_slam_benchmark.md`](docs/inprocess_slam_benchmark.md), [`docs/generated/inprocess_deep_slam_wallclock.md`](docs/generated/inprocess_deep_slam_wallclock.md) |
-| EuRoC online visual-inertial experiment | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap; experimental composition layer | [`examples/euroc_online_slam_vi_image_demo.rs`](examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) |
-| Outlier-robust PGO (GNC) | Wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89×** baseline, GNC **1.0×** | [`examples/pgo_g2o_robust_benchmark.rs`](examples/pgo_g2o_robust_benchmark.rs) |
-| GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`](examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`](docs/gnss_demo.md) |
+| COLMAP South Building localization | Real images vs sparse SfM map, deep frontend optional | [`examples/deep_localization_demo.rs`(../examples/deep_localization_demo.rs), [`docs/public_data_demo.md`(public_data_demo.md) |
+| KITTI stereo VO + BA + loop closure | Rectified stereo → 2D-3D PnP → multi-frame BA → SE(3) PGO | [`examples/online_slam_stereo_vo_kitti_demo.rs`(../examples/online_slam_stereo_vo_kitti_demo.rs) |
+| **KITTI loop closure (14×)** | Open SP/LG stereo VO vs VLAD→PnP→GNC SE(3) PGO on seq00 (4541 frames, 35 loops). **36.29 m → 2.57 m Sim(3) ATE** | [`scripts/run_kitti_loop_closure_benchmark.sh`(../scripts/run_kitti_loop_closure_benchmark.sh), [`docs/kitti_loop_closure_benchmark.md`(kitti_loop_closure_benchmark.md) |
+| **KITTI multi-sequence published-baseline comparison** | One uniform full-stack config over six loopy sequences vs published per-sequence ATE (ORB-SLAM2 Table I, OV2SLAM Table V). Narrow seq00/seq09 wins are scoped in the claim matrix; three real-world failure modes were caught and fixed: dynamic-object PnP capture, motion-scale rescue feedback freeze, BA dynamic-track contamination | [`scripts/run_kitti_multiseq_benchmark.sh`(../scripts/run_kitti_multiseq_benchmark.sh), [`docs/kitti_multiseq_benchmark.md`(kitti_multiseq_benchmark.md) |
+| **EuRoC loop closure (UAV, 0.057 m)** | Same visual loop-closure + BA pipeline on MH_03. Window BA + loop **0.089 m** -> + two-view loop BA **0.065 m** -> + fixed-prefix local-map BA **0.061 m** -> + anisotropic loop-edge information **0.060 m** -> + BA init-residual gate **0.057 m**. The claim matrix marks the ORB-SLAM3 comparison as behind, not a win. | [`scripts/run_euroc_loop_closure_benchmark.sh`(../scripts/run_euroc_loop_closure_benchmark.sh), [`docs/euroc_loop_closure_benchmark.md`(euroc_loop_closure_benchmark.md) |
+| **EuRoC SfM reconstruction** | Stereo VO → merged multi-view tracks → one global BA → COLMAP export (`--sfm-colmap-out`). MH_03: mean reprojection **4.08 px → 1.04 px**, 179 k tracks, for downstream 3DGS / MVS | [`scripts/run_euroc_sfm_benchmark.sh`(../scripts/run_euroc_sfm_benchmark.sh), [`docs/euroc_sfm_benchmark.md`(euroc_sfm_benchmark.md) |
+| **Unordered SfM** | Orderless photo set → VLAD view graph → essential-RANSAC verification → incremental reconstruction (robust multi-seed init → **P3P** register → triangulate → scale-gauge-fixed BA → iterative track filter) → COLMAP export. Real COLMAP examples vs their own models: **South Building** (128 photos) **128/128, 1.09 cm**; **Gerrard Hall** (100, 5616×3744 OPENCV) **98/100, 0.68 cm** — both 0.1% of extent; EuRoC V2_03 orbit **31/31, 1.08 cm** | [`examples/unordered_sfm_demo.rs`(../examples/unordered_sfm_demo.rs), [`scripts/run_colmap_sfm_benchmark.sh`(../scripts/run_colmap_sfm_benchmark.sh), [`scripts/run_unordered_sfm_benchmark.sh`(../scripts/run_unordered_sfm_benchmark.sh), [`docs/unordered_sfm_benchmark.md`(unordered_sfm_benchmark.md) |
+| **SfM → 3DGS (crisp, real building)** | The unordered-SfM model → undistort + recolour → gsplat **DefaultStrategy + degree-3 SH** → a photorealistic 3D Gaussian Splat. Reproduced on two real buildings (South-Building `SIMPLE_RADIAL`, Gerrard-Hall `OPENCV`) from the *same one command*. The crisp lever is the trainer's adaptive densification, *not* SfM precision (1.4 px and 0.66 px models render identically) | [`scripts/run_south_building_3dgs.sh`(../scripts/run_south_building_3dgs.sh), [`scripts/gsplat_sfm_3dgs_train.py`(../scripts/gsplat_sfm_3dgs_train.py), [`docs/unordered_sfm_benchmark.md`(unordered_sfm_benchmark.md#photorealistic-3d-gaussian-splatting-from-the-sfm-model) |
+| **In-process SuperPoint (CUDA, real-time)** | The deep feature front-end run *inside the process* via ONNX Runtime — no Python, no multi-GB feature export. EuRoC MH_03 752×480, top-1500: CPU **6 fps → CUDA 135 fps (≈22×)**, 6.7× over the 20 Hz camera rate; CPU/CUDA features identical | [`scripts/export_superpoint_onnx.py`(../scripts/export_superpoint_onnx.py), [`scripts/run_superpoint_onnx_throughput.sh`(../scripts/run_superpoint_onnx_throughput.sh), [`docs/superpoint_onnx_cuda_benchmark.md`(superpoint_onnx_cuda_benchmark.md) |
+| **In-process LightGlue → full deep front-end (CUDA, real-time)** | The learned **matcher** in-process too — the whole front-end (extract + match) in pure Rust + ONNX, **bit-identical matches to Python** (1500/1500 indices agree). MH_03: full front-end CPU **1.1 fps → CUDA 34 fps (≈31×)**, above the 20 Hz camera; LightGlue match alone ≈35× | [`scripts/export_lightglue_onnx.py`(../scripts/export_lightglue_onnx.py), [`scripts/run_deep_frontend_onnx_demo.sh`(../scripts/run_deep_frontend_onnx_demo.sh), [`docs/lightglue_onnx_benchmark.md`(lightglue_onnx_benchmark.md) |
+| **Single-binary deep stereo pipeline (opt-in ONNX)** | SuperPoint+LightGlue ONNX wired into the online stereo pipeline: raw rectified stereo -> learned frontend -> online BA + loop closure in one Rust binary. Registry-backed end-to-end wall-clock: in-process ONNX is **1.45x faster** than the file-based pre-export path it replaces (199 s vs 289 s) and at least as accurate (0.051 m vs 0.066 m ATE SE(3)), dropping the Python/PyTorch export and its ~30 GB feature dump; this remains an opt-in deployment tier, not the default build or a production full-SLAM claim. | [`examples/deep_stereo_slam.rs`(../examples/deep_stereo_slam.rs), [`scripts/run_deep_stereo_slam.sh`(../scripts/run_deep_stereo_slam.sh), [`scripts/run_deep_slam_3dgs.sh`(../scripts/run_deep_slam_3dgs.sh), [`docs/inprocess_slam_benchmark.md`(inprocess_slam_benchmark.md), [`docs/generated/inprocess_deep_slam_wallclock.md`(generated/inprocess_deep_slam_wallclock.md) |
+| EuRoC online visual-inertial experiment | Adaptive IMU/pose tracker, motion-based VI init, local VI-BA, stereo-strict bootstrap; experimental composition layer | [`examples/euroc_online_slam_vi_image_demo.rs`(../examples/euroc_online_slam_vi_image_demo.rs), [`docs/phase_20_to_27_closeout.md`(phase_20_to_27_closeout.md) |
+| Outlier-robust PGO (GNC) | Wrong loop closures into a real `.g2o` graph; `sphere2500` +30: L2 **89×** baseline, GNC **1.0×** | [`examples/pgo_g2o_robust_benchmark.rs`(../examples/pgo_g2o_robust_benchmark.rs) |
+| GNSS-prior moving-camera tracking | Image sequence + GNSS-derived submap narrowing, writes an `index.html` dashboard | [`examples/track_sequence_with_gnss_prior.rs`(../examples/track_sequence_with_gnss_prior.rs), [`docs/gnss_demo.md`(gnss_demo.md) |
 
 ## Minimal Example
 
@@ -225,15 +225,15 @@ docs/                  design notes, demo guides, EuRoC closeout, plan docs
 
 ## Roadmap
 
-[`docs/roadmap.md`](docs/roadmap.md) has the staged plan ([`PLAN.md`](PLAN.md) is the
+[`docs/roadmap.md`(roadmap.md) has the staged plan ([`PLAN.md`](../PLAN.md) is the
 handoff checklist): sequential tracking quality, keyframe policies, incremental map
 updates, deep VO integration, loop-closure visualization, VI/GNSS fusion, and larger
 public-data evaluation.
 
 ## Further reading
 
-- [`docs/pgo_internals.md`](docs/pgo_internals.md) — pose-graph / BA internals: block Cholesky, parallelism, chordal init, GTSAM parity, GNC.
-- [`docs/kitti_loop_closure_benchmark.md`](docs/kitti_loop_closure_benchmark.md) · [`docs/euroc_loop_closure_benchmark.md`](docs/euroc_loop_closure_benchmark.md) — the loop-closure benchmarks above, with reproduction.
-- [`docs/phase_20_to_27_closeout.md`](docs/phase_20_to_27_closeout.md) — EuRoC arc synthesis: recommended config, per-phase outcomes, honest negatives, headline ATE evolution.
-- [`docs/demo_strategy.md`](docs/demo_strategy.md) — full demo index · [`docs/binary_determinism_findings.md`](docs/binary_determinism_findings.md) — determinism protocol.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CHANGELOG.md`](CHANGELOG.md).
+- [`docs/pgo_internals.md`(pgo_internals.md) — pose-graph / BA internals: block Cholesky, parallelism, chordal init, GTSAM parity, GNC.
+- [`docs/kitti_loop_closure_benchmark.md`(kitti_loop_closure_benchmark.md) · [`docs/euroc_loop_closure_benchmark.md`(euroc_loop_closure_benchmark.md) — the loop-closure benchmarks above, with reproduction.
+- [`docs/phase_20_to_27_closeout.md`(phase_20_to_27_closeout.md) — EuRoC arc synthesis: recommended config, per-phase outcomes, honest negatives, headline ATE evolution.
+- [`docs/demo_strategy.md`(demo_strategy.md) — full demo index · [`docs/binary_determinism_findings.md`(binary_determinism_findings.md) — determinism protocol.
+- [`CONTRIBUTING.md`(../CONTRIBUTING.md), [`SECURITY.md`(../SECURITY.md), [`CHANGELOG.md`(../CHANGELOG.md).
