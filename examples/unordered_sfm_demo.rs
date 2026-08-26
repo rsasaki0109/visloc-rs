@@ -434,6 +434,10 @@ struct Args {
     sift_detector: String,
     /// Multi-anisotropy detection proposals (requires `--sift-affine`).
     sift_multi_anisotropy: bool,
+    /// Domain-size pooling (DSP-SIFT / Dong & Soatto).
+    sift_dsp: bool,
+    /// DSP scale count when `--sift-dsp` is on (COLMAP default 10).
+    sift_dsp_num_scales: usize,
     out_colmap: PathBuf,
     camera: Camera,
     vocab_size: usize,
@@ -603,6 +607,8 @@ fn parse_args() -> Result<Args, String> {
     let mut sift_affine = false;
     let mut sift_detector = String::from("dog");
     let mut sift_multi_anisotropy = false;
+    let mut sift_dsp = false;
+    let mut sift_dsp_num_scales = 10usize;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -626,6 +632,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--sift-affine" => sift_affine = true,
             "--sift-multi-anisotropy" => sift_multi_anisotropy = true,
+            "--sift-dsp" => sift_dsp = true,
+            "--sift-dsp-num-scales" => {
+                sift_dsp_num_scales = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             "--sift-detector" => sift_detector = a.remove(i + 1),
             "--feature-suffix" => feature_suffix = a.remove(i + 1),
             "--image-suffix" => image_suffix = a.remove(i + 1),
@@ -780,6 +790,8 @@ fn parse_args() -> Result<Args, String> {
         sift_affine,
         sift_detector,
         sift_multi_anisotropy,
+        sift_dsp,
+        sift_dsp_num_scales,
     })
 }
 
@@ -803,6 +815,8 @@ fn extract_sift_for_image(
     affine: bool,
     detector: &str,
     multi_anisotropy: bool,
+    dsp: bool,
+    dsp_num_scales: usize,
 ) -> Result<FeatureSet, Box<dyn std::error::Error>> {
     use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig, SiftDetector};
     let grayscale = visloc_io::images::read_common_image(path)?;
@@ -819,6 +833,8 @@ fn extract_sift_for_image(
         affine,
         detector,
         multi_anisotropy: multi_anisotropy && affine,
+        domain_size_pooling: dsp,
+        dsp_num_scales: if dsp { dsp_num_scales.max(1) } else { 10 },
         ..SiftConfig::default()
     };
     let (keypoints, descriptors) = extract_sift(&image, &config)?;
@@ -836,6 +852,8 @@ fn load_images_with_sift(
     _affine: bool,
     _detector: &str,
     _multi_anisotropy: bool,
+    _dsp: bool,
+    _dsp_num_scales: usize,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     Err("--feature-extractor sift requires building with --features image-io".into())
 }
@@ -848,33 +866,65 @@ fn load_images_with_sift(
     affine: bool,
     detector: &str,
     multi_anisotropy: bool,
+    dsp: bool,
+    dsp_num_scales: usize,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
-    const IMAGE_SUFFIXES: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"];
-    let mut files: Vec<String> = std::fs::read_dir(dir)?
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            IMAGE_SUFFIXES
-                .iter()
-                .any(|suffix| n.to_lowercase().ends_with(suffix))
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| {
+                    matches!(
+                        e.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp"
+                    )
+                })
+                .unwrap_or(false)
         })
         .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!("no images found under {dir:?}").into());
-    }
-    let mut features = Vec::new();
-    let mut names = Vec::new();
-    for f in &files {
-        features.push(extract_sift_for_image(
-            &dir.join(f),
-            max_keypoints,
-            affine,
-            detector,
-            multi_anisotropy,
-        )?);
-        names.push(f.to_string());
-    }
+    paths.sort();
+    let total = paths.len();
+    eprintln!(
+        "sift: extracting {total} image(s) (dsp={dsp}, dsp_scales={})",
+        if dsp { dsp_num_scales } else { 0 }
+    );
+    let results: Result<Vec<_>, Box<dyn std::error::Error + Send>> = paths
+        .par_iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            let started = std::time::Instant::now();
+            let feat = extract_sift_for_image(
+                path,
+                max_keypoints,
+                affine,
+                detector,
+                multi_anisotropy,
+                dsp,
+                dsp_num_scales,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error + Send> {
+                Box::new(std::io::Error::other(e.to_string()))
+            })?;
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("image")
+                .to_string();
+            eprintln!(
+                "sift: [{}/{}] {} -> {} kp in {:.1}s",
+                idx + 1,
+                total,
+                name,
+                feat.keypoints.len(),
+                started.elapsed().as_secs_f64()
+            );
+            Ok((feat, name))
+        })
+        .collect();
+    let results = results.map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let (features, names): (Vec<_>, Vec<_>) = results.into_iter().unzip();
     Ok((features, names))
 }
 
@@ -1750,6 +1800,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.sift_affine,
                 &args.sift_detector,
                 args.sift_multi_anisotropy,
+                args.sift_dsp,
+                args.sift_dsp_num_scales,
             )?
         }
     };

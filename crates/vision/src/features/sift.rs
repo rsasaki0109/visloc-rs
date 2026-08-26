@@ -71,6 +71,23 @@ pub struct SiftConfig {
     /// back under a strict NMS budget. Supplies loci that only peak under
     /// foreshortening. Off by default.
     pub multi_anisotropy: bool,
+    /// Domain-size pooling (DSP-SIFT / Dong & Soatto CVPR'15): average the
+    /// unnormalized SIFT histogram over `dsp_num_scales` scales in
+    /// `[dsp_min_scale, dsp_max_scale] × σ`, then L2-normalize once. Same
+    /// 128-D output; improves wide-baseline matching without changing
+    /// detections. Off by default (byte-identical legacy descriptors).
+    pub domain_size_pooling: bool,
+    /// Lower end of the DSP scale range as a multiple of the detected σ
+    /// (COLMAP default `1/6`).
+    pub dsp_min_scale: f64,
+    /// Upper end of the DSP scale range as a multiple of the detected σ.
+    /// Dong & Soatto use `4/3`; COLMAP defaults to `3` (much slower, little
+    /// extra mAP beyond ~4/3). Default follows the paper for practical CPU
+    /// cost on dense SfM; override toward 3 for COLMAP-literal A/Bs.
+    pub dsp_max_scale: f64,
+    /// Number of domain sizes pooled when [`Self::domain_size_pooling`] is on
+    /// (COLMAP default `10`).
+    pub dsp_num_scales: usize,
 }
 
 impl Default for SiftConfig {
@@ -86,6 +103,10 @@ impl Default for SiftConfig {
             detector: SiftDetector::Dog,
             affine: false,
             multi_anisotropy: false,
+            domain_size_pooling: false,
+            dsp_min_scale: 1.0 / 6.0,
+            dsp_max_scale: 4.0 / 3.0,
+            dsp_num_scales: 10,
         }
     }
 }
@@ -382,7 +403,7 @@ pub fn extract_sift(
     }
     let descriptors = keypoints
         .iter()
-        .map(|kp| describe(image, kp))
+        .map(|kp| describe(image, kp, config))
         .collect::<Vec<_>>();
     Ok((keypoints, descriptors))
 }
@@ -989,28 +1010,56 @@ fn refine_location_affine(
 }
 
 /// 128-dim descriptor: 4×4 cells × 8 orientation bins around the keypoint.
-fn describe(image: &GrayImage<'_>, kp: &SiftKeypoint) -> Vec<f32> {
+/// When [`SiftConfig::domain_size_pooling`] is on, averages unnormalized
+/// histograms over a geometric range of domain sizes (COLMAP DSP-SIFT) before
+/// the standard L2 clamp-and-renormalize.
+fn describe(image: &GrayImage<'_>, kp: &SiftKeypoint, config: &SiftConfig) -> Vec<f32> {
+    const DIM: usize = 128;
+    let mut acc = vec![0.0f64; DIM];
+    if config.domain_size_pooling && config.dsp_num_scales > 0 {
+        let n = config.dsp_num_scales.max(1);
+        let lo = config.dsp_min_scale.max(1e-6);
+        let hi = config.dsp_max_scale.max(lo);
+        for i in 0..n {
+            let t = if n == 1 {
+                0.0
+            } else {
+                i as f64 / (n - 1) as f64
+            };
+            // Geometric spacing in scale factor (COLMAP / Dong & Soatto).
+            let scale = lo * (hi / lo).powf(t);
+            let raw = describe_raw(image, kp, scale);
+            for (a, r) in acc.iter_mut().zip(raw.iter()) {
+                *a += *r;
+            }
+        }
+    } else {
+        acc = describe_raw(image, kp, 1.0);
+    }
+    normalize_sift_descriptor(&mut acc)
+}
+
+/// Unnormalized SIFT histogram at `scale_factor × kp.sigma` domain size.
+fn describe_raw(image: &GrayImage<'_>, kp: &SiftKeypoint, scale_factor: f64) -> Vec<f64> {
     const DIM: usize = 128;
     let mut desc = vec![0.0f64; DIM];
-    let cell_size = (8.0 * kp.sigma).max(3.0); // window half-width ≈ 4σ·√2/√2
+    let sigma = (kp.sigma * scale_factor).max(1e-6);
+    let cell_size = (8.0 * sigma).max(3.0);
     let (cos, sin) = (kp.orientation.cos(), kp.orientation.sin());
-    // Affine warp applied before the rotation: canonical offset → image
-    // offset is `A · R(θ) · canonical`. Without a shape this is the identity.
     let shape = kp.affine_shape.unwrap_or([[1.0, 0.0], [0.0, 1.0]]);
-    // Largest stretch of A bounds the sampling window.
     let a00a11 = shape[0][0] * shape[0][0] + shape[1][0] * shape[1][0];
     let a01a11 = shape[0][1] * shape[0][1] + shape[1][1] * shape[1][1];
     let max_stretch = a00a11.max(a01a11).sqrt().max(1.0);
     let half = (cell_size * max_stretch * 4.0f64.sqrt()) as i64;
-    for dy in -half..=half {
-        for dx in -half..=half {
-            // Rotate sample offset into the keypoint frame.
+    // Keep sample count roughly scale-invariant: stride grows with domain size
+    // so DSP pooling stays ~O(num_scales) rather than O(Σ scale²).
+    let step = scale_factor.round().max(1.0) as i64;
+    let area_weight = (step * step) as f64;
+    for dy in (-half..=half).step_by(step as usize) {
+        for dx in (-half..=half).step_by(step as usize) {
             let rx0 = dx as f64 * cos - dy as f64 * sin;
             let ry0 = dx as f64 * sin + dy as f64 * cos;
-            // Affine-warp the canonical offset into image space.
             let (wx, wy) = mat2_apply(shape, (rx0, ry0));
-            // Canonical-axis gradients: differences along A's columns so
-            // orientations stay comparable across affine shapes.
             let ex = (shape[0][0], shape[1][0]);
             let ey = (shape[0][1], shape[1][1]);
             let gx = 0.5
@@ -1024,8 +1073,8 @@ fn describe(image: &GrayImage<'_>, kp: &SiftKeypoint) -> Vec<f32> {
                 continue;
             }
             let theta = gy.atan2(gx) - kp.orientation;
-            let weight = (-(rx0 * rx0 + ry0 * ry0) / (2.0 * (cell_size * 2.0).powi(2))).exp();
-            // Trilinear bin assignment across cell and orientation bins.
+            let weight = (-(rx0 * rx0 + ry0 * ry0) / (2.0 * (cell_size * 2.0).powi(2))).exp()
+                * area_weight;
             let cx = (rx0 / cell_size) + 2.0 - 0.5;
             let cy = (ry0 / cell_size) + 2.0 - 0.5;
             let obin =
@@ -1051,19 +1100,23 @@ fn describe(image: &GrayImage<'_>, kp: &SiftKeypoint) -> Vec<f32> {
             }
         }
     }
+    desc
+}
+
+fn normalize_sift_descriptor(desc: &mut [f64]) -> Vec<f32> {
     // L2 normalization with the clamp-and-renormalize step (Lowe §6.1).
     let norm: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
     if norm > f64::EPSILON {
-        for v in &mut desc {
+        for v in desc.iter_mut() {
             *v /= norm;
         }
     }
-    for v in &mut desc {
+    for v in desc.iter_mut() {
         *v = v.min(0.2);
     }
     let clipped: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
     if clipped > f64::EPSILON {
-        for v in &mut desc {
+        for v in desc.iter_mut() {
             *v /= clipped;
         }
     }
@@ -1175,6 +1228,34 @@ mod tests {
         let features = extract_sift_features(&image, &config).unwrap();
         assert!(!features.keypoints.is_empty());
         assert_eq!(features.keypoints.len(), features.descriptors.len());
+    }
+
+    #[test]
+    fn dsp_sift_keeps_dimension_and_differs_from_plain() {
+        let (w, h) = (64usize, 64usize);
+        let pixels = blob_image(w, h, (32.0, 30.0), 4.0);
+        let image = GrayImage::new(w, h, &pixels).unwrap();
+        let plain = SiftConfig {
+            octaves: 2,
+            ..SiftConfig::default()
+        };
+        let dsp = SiftConfig {
+            domain_size_pooling: true,
+            dsp_num_scales: 5,
+            ..plain.clone()
+        };
+        let (kp_p, d_p) = extract_sift(&image, &plain).unwrap();
+        let (kp_d, d_d) = extract_sift(&image, &dsp).unwrap();
+        assert_eq!(kp_p.len(), kp_d.len(), "DSP must not change detections");
+        assert!(!d_p.is_empty());
+        for d in &d_d {
+            assert_eq!(d.len(), 128);
+            let norm: f32 = d.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "DSP descriptor must be L2-unit");
+        }
+        // At least one descriptor should move when domain sizes are pooled.
+        let changed = d_p.iter().zip(d_d.iter()).any(|(a, b)| a != b);
+        assert!(changed, "DSP pooling should alter at least one descriptor");
     }
 }
 
