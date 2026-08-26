@@ -476,6 +476,8 @@ struct Args {
     multi_hypothesis_edges: bool,
     /// Global mapper: minimum essential inliers for a view-graph edge.
     min_edge_inliers: usize,
+    /// Global mapper: down-weight chirality-ambiguous edges.
+    weight_by_chirality_margin: bool,
     /// M2 A/B switch: which algorithm builds feature tracks from the verified
     /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
     /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
@@ -595,6 +597,7 @@ fn parse_args() -> Result<Args, String> {
     let mut refine_global_translations = false;
     let mut multi_hypothesis_edges = false;
     let mut min_edge_inliers = 15usize;
+    let mut weight_by_chirality_margin = false;
     let mut images_dir: Option<PathBuf> = None;
     let mut sift_max_keypoints = 2048usize;
     let mut sift_affine = false;
@@ -672,6 +675,7 @@ fn parse_args() -> Result<Args, String> {
             "--min-edge-inliers" => {
                 min_edge_inliers = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
+            "--weight-by-chirality-margin" => weight_by_chirality_margin = true,
             "--filter-images" => filter_images = true,
             "--colmap-verification" => verification_mode = VerificationMode::Full,
             "--verification-mode" => {
@@ -755,6 +759,7 @@ fn parse_args() -> Result<Args, String> {
         refine_global_translations,
         multi_hypothesis_edges,
         min_edge_inliers,
+        weight_by_chirality_margin,
         filter_images,
         verification_mode,
         guided_matching,
@@ -1908,6 +1913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rotation_seed_trials: args.rotation_seed_trials,
             refine_translations_with_global_rotations: args.refine_global_translations,
             multi_hypothesis_edges: args.multi_hypothesis_edges,
+            weight_edges_by_chirality_margin: args.weight_by_chirality_margin,
             ..GlobalReconstructionTuning::default()
         };
         let (poses, tracks, mean_reproj) =

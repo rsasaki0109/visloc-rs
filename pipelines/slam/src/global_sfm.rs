@@ -1053,6 +1053,10 @@ pub struct GlobalReconstructionTuning {
     /// When combined with [`Self::chirality_harden_edges`], uses angle /
     /// depth gates without the ambiguity *rejection* ratio. Default false.
     pub multi_hypothesis_edges: bool,
+    /// Scale each edge weight by `(0.1 + chirality_margin)` so near-ambiguous
+    /// façade essentials contribute less to rotation IRLS and positioning.
+    /// Default false = weight = raw inlier count.
+    pub weight_edges_by_chirality_margin: bool,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -1069,6 +1073,7 @@ impl Default for GlobalReconstructionTuning {
             rotation_seed_trials: 1,
             refine_translations_with_global_rotations: false,
             multi_hypothesis_edges: false,
+            weight_edges_by_chirality_margin: false,
         }
     }
 }
@@ -1244,12 +1249,17 @@ pub fn reconstruct_global_sfm(
                 Some((c.previous_xy, c.current_xy))
             })
             .collect();
+        let weight = if tuning.weight_edges_by_chirality_margin {
+            relative.inliers.len() as f64 * (0.1 + relative.chirality_margin.clamp(0.0, 1.0))
+        } else {
+            relative.inliers.len() as f64
+        };
         edges.push(GlobalSfmEdge {
             image_i: pair.image_i,
             image_j: pair.image_j,
             rotation_ij: r_ij,
             direction_ij,
-            weight: relative.inliers.len() as f64,
+            weight,
             inlier_sample,
             rotation_alt,
             direction_alt,
@@ -1348,12 +1358,18 @@ pub fn reconstruct_global_sfm(
                         Some((c.previous_xy, c.current_xy))
                     })
                     .collect();
+                let weight = if tuning.weight_edges_by_chirality_margin {
+                    relative.inliers.len() as f64
+                        * (0.1 + relative.chirality_margin.clamp(0.0, 1.0))
+                } else {
+                    relative.inliers.len() as f64
+                };
                 edges.push(GlobalSfmEdge {
                     image_i: pair.image_i,
                     image_j: pair.image_j,
                     rotation_ij: r_ij,
                     direction_ij,
-                    weight: relative.inliers.len() as f64,
+                    weight,
                     inlier_sample,
                     rotation_alt,
                     direction_alt,
@@ -1552,7 +1568,8 @@ pub fn reconstruct_global_sfm(
         }
         let built_for_score =
             build_tracks_detailed(features.len(), pairwise, mapper.min_track_length);
-        let mut best: Option<(GlobalSfmPoses, usize, f64, usize, bool)> = None;
+        // (solution, registered, reproj, bearing_rad, obs_count, seed, flip)
+        let mut candidates: Vec<(GlobalSfmPoses, usize, f64, f64, usize, usize, bool)> = Vec::new();
         // When multi-hypothesis edges are present, also try the global
         // "all-alternates-as-primary" basin — MST seeding locks onto the
         // stored primary, so adaptive consensus alone may never leave it.
@@ -1615,34 +1632,66 @@ pub fn reconstruct_global_sfm(
                 } else {
                     f64::INFINITY
                 };
-                let better = match &best {
-                    None => true,
-                    Some((_, best_reg, best_reproj, _, _)) => {
-                        registered > *best_reg
-                            || (registered == *best_reg && reproj < *best_reproj)
-                    }
-                };
                 if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
                     eprintln!(
-                        "global-sfm debug: seed {trial_seed} flip_alts={flip_alts} registered={registered} pre-BA reproj={reproj:.3} px (n={reproj_count})"
+                        "global-sfm debug: seed {trial_seed} flip_alts={flip_alts} registered={registered} \
+                         pre-BA reproj={reproj:.3} px bearing={:.2} deg obs={reproj_count}",
+                        solution.mean_bearing_residual_rad.to_degrees()
                     );
                 }
-                if better {
-                    best = Some((solution, registered, reproj, trial_seed, flip_alts));
-                }
+                let bearing = solution.mean_bearing_residual_rad;
+                candidates.push((
+                    solution,
+                    registered,
+                    reproj,
+                    bearing,
+                    reproj_count,
+                    trial_seed,
+                    flip_alts,
+                ));
             }
         }
+        // Rank: most cameras, then require ≥50% of the densest triangulation
+        // among that registration count (rejects collapsed self-consistent
+        // basins with tiny track support), then lowest
+        // reproj*(1+bearing) score.
+        let max_reg = candidates.iter().map(|c| c.1).max().unwrap_or(0);
+        let max_obs = candidates
+            .iter()
+            .filter(|c| c.1 == max_reg)
+            .map(|c| c.4)
+            .max()
+            .unwrap_or(0);
+        let obs_floor = max_obs / 2;
+        let best = candidates
+            .into_iter()
+            .filter(|c| c.1 == max_reg && c.4 >= obs_floor)
+            .min_by(|a, b| {
+                let score = |c: &(_, _, f64, f64, _, _, _)| {
+                    if c.2.is_finite() {
+                        c.2 * (1.0 + c.3)
+                    } else {
+                        f64::INFINITY
+                    }
+                };
+                score(a)
+                    .partial_cmp(&score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && (trials > 1 || hyp_flips.len() > 1)
         {
-            if let Some((_, reg, reproj, chosen, flip)) = &best {
+            if let Some((_, reg, reproj, bearing, obs, chosen, flip)) = &best {
                 eprintln!(
-                    "global-sfm debug: multi-seed chose seed {chosen} flip_alts={flip} (registered={reg}, pre-BA reproj={reproj:.3} px) from {} seeds × {} hyp configs",
+                    "global-sfm debug: multi-seed chose seed {chosen} flip_alts={flip} \
+                     (registered={reg}, reproj={reproj:.3} px, bearing={:.2} deg, obs={obs}, floor={obs_floor}) \
+                     from {} seeds × {} hyp configs",
+                    bearing.to_degrees(),
                     candidate_seeds.len(),
                     hyp_flips.len()
                 );
             }
         }
-        best.map(|(s, _, _, _, _)| s)
+        best.map(|(s, _, _, _, _, _, _)| s)
     }
     .ok_or(GlobalReconstructionError::NoUsableEdges)?;
     let poses = solved.poses;

@@ -109,6 +109,9 @@ pub struct RelativePose {
     /// ambiguous. Global SfM can keep this as an alternate view-graph edge
     /// hypothesis; `None` when the margin is decisive or unused.
     pub alternate: Option<(UnitQuaternion<f64>, Vector3<f64>)>,
+    /// `(best - second) / best` from cheirality scoring; near zero means the
+    /// essential was ambiguous. View-graph builders can down-weight such edges.
+    pub chirality_margin: f64,
 }
 
 /// Estimator for an essential matrix from pixel correspondences plus
@@ -539,6 +542,7 @@ where
             inliers: report.inliers,
             mean_sampson_error: report.mean_sampson_error,
             alternate: recovered.alternate,
+            chirality_margin: recovered.chirality_margin(),
         })
     }
 }
