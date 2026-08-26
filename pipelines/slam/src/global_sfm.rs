@@ -467,7 +467,7 @@ pub fn average_positions(
     // the shape. On clean data nothing ever exceeds even the tight threshold,
     // making the whole schedule an identity.
     let mut parent: Vec<usize> = (0..members.len()).collect();
-    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+    fn find(parent: &mut [usize], x: usize) -> usize {
         let mut x = x;
         while parent[x] != x {
             parent[x] = parent[parent[x]];
