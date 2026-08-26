@@ -474,6 +474,8 @@ struct Args {
     refine_global_translations: bool,
     /// Global mapper: keep ambiguous essentials as primary+alternate edges.
     multi_hypothesis_edges: bool,
+    /// Global mapper: minimum essential inliers for a view-graph edge.
+    min_edge_inliers: usize,
     /// M2 A/B switch: which algorithm builds feature tracks from the verified
     /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
     /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
@@ -592,6 +594,7 @@ fn parse_args() -> Result<Args, String> {
     let mut rotation_seed_trials = 1usize;
     let mut refine_global_translations = false;
     let mut multi_hypothesis_edges = false;
+    let mut min_edge_inliers = 15usize;
     let mut images_dir: Option<PathBuf> = None;
     let mut sift_max_keypoints = 2048usize;
     let mut sift_affine = false;
@@ -666,6 +669,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--refine-global-translations" => refine_global_translations = true,
             "--multi-hypothesis-edges" => multi_hypothesis_edges = true,
+            "--min-edge-inliers" => {
+                min_edge_inliers = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
             "--filter-images" => filter_images = true,
             "--colmap-verification" => verification_mode = VerificationMode::Full,
             "--verification-mode" => {
@@ -748,6 +754,7 @@ fn parse_args() -> Result<Args, String> {
         rotation_seed_trials,
         refine_global_translations,
         multi_hypothesis_edges,
+        min_edge_inliers,
         filter_images,
         verification_mode,
         guided_matching,
@@ -1896,6 +1903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.mapper == MapperKind::Global {
         let tuning = GlobalReconstructionTuning {
             min_pair_matches: args.min_matches,
+            min_edge_inliers: args.min_edge_inliers,
             chirality_harden_edges: args.chirality_harden,
             rotation_seed_trials: args.rotation_seed_trials,
             refine_translations_with_global_rotations: args.refine_global_translations,

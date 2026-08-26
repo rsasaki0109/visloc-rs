@@ -1130,6 +1130,10 @@ pub fn reconstruct_global_sfm(
     let mut edges = Vec::new();
     let mut chirality_rejected = 0usize;
     let mut multi_hyp_edges = 0usize;
+    let mut pair_fail_estimate = vec![0usize; features.len()];
+    let mut pair_fail_inliers = vec![0usize; features.len()];
+    let mut pair_fail_parallax = vec![0usize; features.len()];
+    let mut pair_kept = vec![0usize; features.len()];
     for pair in pairwise {
         if pair.matches.len() < tuning.min_pair_matches {
             continue;
@@ -1148,11 +1152,15 @@ pub fn reconstruct_global_sfm(
             if tuning.chirality_harden_edges {
                 chirality_rejected += 1;
             }
+            pair_fail_estimate[pair.image_i] += 1;
+            pair_fail_estimate[pair.image_j] += 1;
             continue;
         };
         if relative.inliers.len() < tuning.min_edge_inliers {
+            pair_fail_inliers[pair.image_i] += 1;
+            pair_fail_inliers[pair.image_j] += 1;
             continue;
-        }
+        };
         // Bearing of camera j's centre expressed in camera i's frame:
         // C_j^(i) = −R_ijᵀ t_ij.
         let r_ij = relative.previous_to_current.rotation;
@@ -1219,6 +1227,8 @@ pub fn reconstruct_global_sfm(
                             relative.inliers.len()
                         );
                     }
+                    pair_fail_parallax[pair.image_i] += 1;
+                    pair_fail_parallax[pair.image_j] += 1;
                     continue;
                 }
             }
@@ -1244,6 +1254,122 @@ pub fn reconstruct_global_sfm(
             rotation_alt,
             direction_alt,
         });
+        pair_kept[pair.image_i] += 1;
+        pair_kept[pair.image_j] += 1;
+    }
+    // Orphan rescue: images that lost every edge at the strict inlier gate get
+    // one more chance at half the threshold (floored at 8). Courtyard's
+    // DSC_0308 typically has a single verified pair whose essential inliers
+    // sit just under the default 15 — connecting it beats leaving a hole.
+    {
+        let mut degree = vec![0usize; features.len()];
+        for e in &edges {
+            degree[e.image_i] += 1;
+            degree[e.image_j] += 1;
+        }
+        let orphans: Vec<usize> = degree
+            .iter()
+            .enumerate()
+            .filter(|&(_, &d)| d == 0)
+            .map(|(i, _)| i)
+            .collect();
+        let rescue_inliers = (tuning.min_edge_inliers / 2).max(8);
+        if !orphans.is_empty() && rescue_inliers < tuning.min_edge_inliers {
+            let orphan_set: HashSet<usize> = orphans.iter().copied().collect();
+            let existing: HashSet<(usize, usize)> = edges
+                .iter()
+                .map(|e| {
+                    (
+                        e.image_i.min(e.image_j),
+                        e.image_i.max(e.image_j),
+                    )
+                })
+                .collect();
+            let mut rescued = 0usize;
+            for pair in pairwise {
+                if !orphan_set.contains(&pair.image_i) && !orphan_set.contains(&pair.image_j) {
+                    continue;
+                }
+                let key = (
+                    pair.image_i.min(pair.image_j),
+                    pair.image_i.max(pair.image_j),
+                );
+                if existing.contains(&key) {
+                    continue;
+                }
+                if pair.matches.len() < tuning.min_pair_matches {
+                    continue;
+                }
+                let correspondences: Vec<TwoViewCorrespondence> = pair
+                    .matches
+                    .iter()
+                    .filter_map(|&(ki, kj)| {
+                        Some(TwoViewCorrespondence::new(
+                            *features[pair.image_i].keypoints.get(ki)?,
+                            *features[pair.image_j].keypoints.get(kj)?,
+                        ))
+                    })
+                    .collect();
+                let Some(relative) = estimator.estimate(&correspondences, camera) else {
+                    continue;
+                };
+                if relative.inliers.len() < rescue_inliers {
+                    continue;
+                }
+                let r_ij = relative.previous_to_current.rotation;
+                let t_ij = relative.previous_to_current.translation;
+                let Some(direction_ij) =
+                    (-r_ij.inverse().transform_vector(&t_ij)).try_normalize(1e-12)
+                else {
+                    continue;
+                };
+                let (rotation_alt, direction_alt) = if tuning.multi_hypothesis_edges {
+                    match relative.alternate {
+                        Some((r_alt, t_alt_unit)) => {
+                            let t_alt = t_alt_unit * relative.translation_scale;
+                            match (-r_alt.inverse().transform_vector(&t_alt)).try_normalize(1e-12)
+                            {
+                                Some(d_alt) => (Some(r_alt), Some(d_alt)),
+                                None => (None, None),
+                            }
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
+                let step = (relative.inliers.len() / 32).max(1);
+                let inlier_sample: Vec<(Point2<f64>, Point2<f64>)> = relative
+                    .inliers
+                    .iter()
+                    .step_by(step)
+                    .filter_map(|&idx| {
+                        let c = correspondences.get(idx)?;
+                        Some((c.previous_xy, c.current_xy))
+                    })
+                    .collect();
+                edges.push(GlobalSfmEdge {
+                    image_i: pair.image_i,
+                    image_j: pair.image_j,
+                    rotation_ij: r_ij,
+                    direction_ij,
+                    weight: relative.inliers.len() as f64,
+                    inlier_sample,
+                    rotation_alt,
+                    direction_alt,
+                });
+                pair_kept[pair.image_i] += 1;
+                pair_kept[pair.image_j] += 1;
+                rescued += 1;
+            }
+            if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+                eprintln!(
+                    "global-sfm debug: orphan-edge rescue (min_inliers={rescue_inliers}) \
+                     added {rescued} edge(s) for {} orphan image(s)",
+                    orphans.len()
+                );
+            }
+        }
     }
     if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
         if tuning.chirality_harden_edges {
@@ -1257,6 +1383,17 @@ pub fn reconstruct_global_sfm(
                 "global-sfm debug: multi-hypothesis edges carrying alternate: {multi_hyp_edges} / {}",
                 edges.len()
             );
+        }
+        for i in 0..features.len() {
+            if pair_kept[i] == 0
+                && (pair_fail_estimate[i] + pair_fail_inliers[i] + pair_fail_parallax[i] > 0)
+            {
+                eprintln!(
+                    "global-sfm debug: image {i} has 0 edges after relative-pose gates \
+                     (fail estimate={} inliers={} parallax={})",
+                    pair_fail_estimate[i], pair_fail_inliers[i], pair_fail_parallax[i]
+                );
+            }
         }
     }
 
@@ -1335,6 +1472,19 @@ pub fn reconstruct_global_sfm(
         }
         if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
             eprintln!("global-sfm debug: triplet sanitation dropped {dropped} edges");
+            let mut deg = vec![0usize; features.len()];
+            for e in &edges {
+                deg[e.image_i] += 1;
+                deg[e.image_j] += 1;
+            }
+            for (i, &d) in deg.iter().enumerate() {
+                if d == 0 {
+                    eprintln!(
+                        "global-sfm debug: image {i} degree 0 after triplet sanitation (pre-sanitation kept edges involving it: {})",
+                        pair_kept[i]
+                    );
+                }
+            }
         }
         edges.retain(|e| e.weight > 0.0);
     }
