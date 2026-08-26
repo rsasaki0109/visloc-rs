@@ -36,7 +36,7 @@
 //! Only the connected component containing the seed camera is solved;
 //! images outside it stay unposed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
@@ -87,17 +87,29 @@ pub struct GlobalSfmPoses {
 /// rotation, centre pinned at the origin); `sweeps` bounds the rotation
 /// consensus iterations (8–16 is ample on well-connected graphs);
 /// `cg_iterations` bounds the position least-squares solver.
+/// `max_edge_rotation_error_deg` trims edges whose implied relative rotation
+/// disagrees with the emerging global solution by more than this angle
+/// (IRLS-style outlier rejection; 10° is a reasonable default).
 ///
 /// Returns `None` when no valid edge touches any image.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_global_sfm(
     num_images: usize,
     edges: &[GlobalSfmEdge],
     seed: usize,
     sweeps: usize,
     cg_iterations: usize,
+    max_edge_rotation_error_deg: f64,
 ) -> Option<GlobalSfmPoses> {
     let adjacency = build_adjacency(num_images, edges)?;
-    let rotations = average_rotations(num_images, edges, &adjacency, seed, sweeps);
+    let (rotations, edge_weights) = average_rotations(
+        num_images,
+        edges,
+        &adjacency,
+        seed,
+        sweeps,
+        max_edge_rotation_error_deg,
+    );
     let component: Vec<usize> = rotations
         .iter()
         .enumerate()
@@ -107,7 +119,29 @@ pub fn solve_global_sfm(
     if component.is_empty() {
         return None;
     }
-    let centers = average_positions(edges, &rotations, seed, cg_iterations);
+    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+        let mut errs: Vec<f64> = Vec::new();
+        let kept = edge_weights.iter().filter(|&&w| w > 0.0).count();
+        for (index, e) in edges.iter().enumerate() {
+            if edge_weights[index] <= 0.0 {
+                continue;
+            }
+            if let (Some(qi), Some(qj)) = (rotations[e.image_i], rotations[e.image_j]) {
+                let predicted = step_from(edges, index, e.image_i) * qi;
+                errs.push((predicted.inverse() * qj).angle());
+            }
+        }
+        errs.sort_by(|a, b| a.total_cmp(b));
+        let med = errs.get(errs.len() / 2).copied().unwrap_or(f64::NAN);
+        eprintln!(
+            "global-sfm debug: post-average rotation err median={:.4} deg max={:.4} deg kept={}/{}",
+            med.to_degrees(),
+            errs.last().map(|e| e.to_degrees()).unwrap_or(f64::NAN),
+            kept,
+            edges.len()
+        );
+    }
+    let centers = average_positions(edges, &edge_weights, &rotations, seed, cg_iterations);
     let mut poses: Vec<Option<Pose>> = vec![None; num_images];
     for &image in &component {
         let (Some(q_w2c), Some(center)) = (rotations[image], centers[image]) else {
@@ -117,7 +151,10 @@ pub fn solve_global_sfm(
         poses[image] = Some(Pose::from_world_to_camera(q_w2c, t_w2c));
     }
     let (mut sum, mut count) = (0.0f64, 0usize);
-    for edge in edges {
+    for (edge_index, edge) in edges.iter().enumerate() {
+        if edge_weights.get(edge_index).copied().unwrap_or(1.0) <= 0.0 {
+            continue;
+        }
         let (Some(ci), Some(cj)) = (
             centers.get(edge.image_i).copied().flatten(),
             centers.get(edge.image_j).copied().flatten(),
@@ -195,47 +232,57 @@ fn step_from(edges: &[GlobalSfmEdge], index: usize, from: usize) -> UnitQuaterni
 fn tree_seed_rotations(
     num_images: usize,
     edges: &[GlobalSfmEdge],
+    adjacency: &Adjacency,
     root: usize,
 ) -> (Vec<Option<UnitQuaternion<f64>>>, Vec<usize>) {
-    let mut order: Vec<usize> = (0..edges.len()).collect();
-    order.sort_by(|&a, &b| {
-        edges[b]
-            .weight
-            .total_cmp(&edges[a].weight)
-            .then_with(|| a.cmp(&b))
-    });
-    let mut parent: Vec<usize> = (0..num_images).collect();
-    fn find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
+    // Maximum-spanning-tree growth from the root, Prim-style: always extend
+    // through the highest-weight edge leaving the reached set. A Kruskal
+    // pass cannot be used here because it consumes tree edges inside the
+    // unreached mass before the frontier ever reaches them, stranding the
+    // seed (observed as posed=4 on courtyard's 37-image component).
     let mut reached = vec![false; num_images];
-    reached[root] = true;
     let mut rotations: Vec<Option<UnitQuaternion<f64>>> = vec![None; num_images];
+    reached[root] = true;
     rotations[root] = Some(UnitQuaternion::identity());
-    for &index in &order {
-        let edge = &edges[index];
-        let (a, b) = (
-            find(&mut parent, edge.image_i),
-            find(&mut parent, edge.image_j),
-        );
-        if a == b {
-            continue;
+    // Frontier heap of (negated weight, tie-break index, from, edge_index).
+    let mut heap: std::collections::BinaryHeap<(u64, usize, usize, usize)> =
+        std::collections::BinaryHeap::new();
+    let push_frontier = |heap: &mut std::collections::BinaryHeap<(u64, usize, usize, usize)>,
+                         node: usize,
+                         reached: &[bool]| {
+        if let Some(neighbors) = adjacency.get(&node) {
+            for &(neighbor, edge_index) in neighbors {
+                if !reached[neighbor] {
+                    let w = edges[edge_index].weight;
+                    let key = if w.is_finite() && w > 0.0 { w } else { 1.0 };
+                    // Quantize the weight into the u64 key (nanogram precision
+                    // is plenty for inlier counts) so the heap is total.
+                    let key_bits = (key.max(0.0) * 1e6).round().max(0.0) as u64;
+                    heap.push((key_bits, usize::MAX - edge_index, node, edge_index));
+                }
+            }
         }
-        parent[a] = b;
-        let (known, unknown) = match (reached[edge.image_i], reached[edge.image_j]) {
-            (true, false) => (edge.image_i, edge.image_j),
-            (false, true) => (edge.image_j, edge.image_i),
-            _ => continue,
+    };
+    push_frontier(&mut heap, root, &reached);
+    let mut members = vec![root];
+    while let Some((_, _, known, edge_index)) = heap.pop() {
+        let unknown = {
+            let e = &edges[edge_index];
+            if reached[e.image_i] && !reached[e.image_j] {
+                e.image_j
+            } else if reached[e.image_j] && !reached[e.image_i] {
+                e.image_i
+            } else {
+                continue;
+            }
         };
-        let base = rotations[known].expect("reached image carries a seeded orientation");
-        rotations[unknown] = Some(step_from(edges, index, known) * base);
+        let base = rotations[known].expect("frontier source carries a seeded orientation");
+        rotations[unknown] = Some(step_from(edges, edge_index, known) * base);
         reached[unknown] = true;
+        members.push(unknown);
+        push_frontier(&mut heap, unknown, &reached);
     }
-    let members: Vec<usize> = (0..num_images).filter(|&i| reached[i]).collect();
+    members.sort_unstable();
     (rotations, members)
 }
 
@@ -248,12 +295,27 @@ pub fn average_rotations(
     adjacency: &Adjacency,
     seed: usize,
     sweeps: usize,
-) -> Vec<Option<UnitQuaternion<f64>>> {
-    let (mut rotations, members) = tree_seed_rotations(num_images, edges, seed);
+    max_edge_rotation_error_deg: f64,
+) -> (Vec<Option<UnitQuaternion<f64>>>, Vec<f64>) {
+    // IRLS edge weights: start from the verified-inlier weight; each sweep
+    // zeroes edges whose implied relative rotation disagrees with the
+    // emerging global solution beyond the trim threshold.
+    let mut weights: Vec<f64> = edges.iter().map(|e| e.weight.max(1.0)).collect();
+    let max_error_rad = max_edge_rotation_error_deg.to_radians();
+    let (mut rotations, members) = tree_seed_rotations(num_images, edges, adjacency, seed);
+    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+        eprintln!(
+            "global-sfm debug: tree seed reached {} of {} images from root {}",
+            members.len(),
+            num_images,
+            seed
+        );
+    }
     let mut ordered_members = members.clone();
     ordered_members.sort_unstable();
     for _ in 0..sweeps {
-        let mut updated = rotations.clone();
+        // Gauss-Seidel style: consume this sweep's own updates immediately
+        // (Jacobi snapshots can oscillate on noisy view graphs).
         for &image in &ordered_members {
             if image == seed {
                 continue;
@@ -268,12 +330,16 @@ pub fn average_rotations(
             // neighbour-implied predictions of this camera's orientation.
             let mut m = [[0.0f64; 4]; 4];
             for &(neighbor, edge_index) in neighbors {
+                let w = weights[edge_index];
+                if w <= 0.0 {
+                    continue;
+                }
                 let Some(neighbor_q) = rotations[neighbor] else {
                     continue;
                 };
                 let predicted = step_from(edges, edge_index, neighbor) * neighbor_q;
                 let q = predicted.coords;
-                let w = edges[edge_index].weight.max(1.0);
+                let w = w.max(1.0);
                 for r in 0..4 {
                     for c in 0..4 {
                         m[r][c] += w * q[r] * q[c];
@@ -302,67 +368,53 @@ pub fn average_rotations(
             if v.dot(current.as_vector()) < 0.0 {
                 v = -v;
             }
-            updated[image] = Some(UnitQuaternion::from_quaternion(
+            rotations[image] = Some(UnitQuaternion::from_quaternion(
                 nalgebra::Quaternion::from_vector(v),
             ));
         }
-        rotations = updated;
+        if max_error_rad.is_finite() && max_error_rad > 0.0 {
+            for (edge_index, e) in edges.iter().enumerate() {
+                if weights[edge_index] <= 0.0 {
+                    continue;
+                }
+                if let (Some(qi), Some(qj)) = (rotations[e.image_i], rotations[e.image_j]) {
+                    let predicted = step_from(edges, edge_index, e.image_i) * qi;
+                    let err = (predicted.inverse() * qj).angle();
+                    if err > max_error_rad {
+                        weights[edge_index] = 0.0;
+                    }
+                }
+            }
+        }
     }
-    rotations
+    (rotations, weights)
 }
 
-/// One world-frame bearing constraint between two solved cameras.
-struct Bearing {
-    i: usize,
-    j: usize,
-    /// World-frame unit bearing from camera i towards camera j.
-    direction: Vector3<f64>,
-    weight: f64,
-}
-
-impl Bearing {
-    /// Transposed-Jacobian product for the perpendicular rows' dual
-    /// residual only (Jacobian: ∂/∂ci = skew(d), ∂/∂cj = −skew(d);
-    /// skew(d)ᵀ = −skew(d)):
-    /// `Aᵀ_i y = w·(d×y)`, `Aᵀ_j y = −w·(d×y)`.
-    fn at_perp_product(&self, perp: Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
-        let term_i = -self.direction.cross(&perp);
-        (term_i * self.weight, -term_i * self.weight)
-    }
-
-    /// Transposed-Jacobian product for one scalar row `±dᵀ(c_j−c_i)−t`
-    /// (∂/∂ci = −d, ∂/∂cj = +d).
-    fn at_parallel_product(&self, dual: f64) -> (Vector3<f64>, Vector3<f64>) {
-        (
-            self.direction * (-dual * self.weight),
-            self.direction * (dual * self.weight),
-        )
-    }
-}
-
-/// Position averaging over the rotation-solved component: conjugate-gradient
-/// least squares on perpendicular-bearing plus unit-displacement rows.
-/// Images outside the component are `None`; the seed centre is the gauge
-/// origin (exactly zero).
 pub fn average_positions(
     edges: &[GlobalSfmEdge],
+    edge_weights: &[f64],
     rotations: &[Option<UnitQuaternion<f64>>],
     seed: usize,
     cg_iterations: usize,
 ) -> Vec<Option<Point3<f64>>> {
+    // World-frame bearings from every kept edge.
+    struct Bearing {
+        i: usize,
+        j: usize,
+        /// World-frame unit bearing from camera i towards camera j.
+        direction: Vector3<f64>,
+        weight: f64,
+    }
     let mut bearings: Vec<Bearing> = Vec::new();
-    for edge in edges {
-        // World-frame i→j bearing: rotate the frame direction out of the
-        // camera holding it (camera-to-world = inverse of the stored
-        // world-to-camera quaternion).
-        let world = if edge.image_i < rotations.len() {
-            rotations[edge.image_i].map(|q| q.inverse().transform_vector(&edge.direction_ij))
-        } else {
-            None
-        };
-        let Some(world) = world else {
+    for (edge_index, edge) in edges.iter().enumerate() {
+        let weight = edge_weights.get(edge_index).copied().unwrap_or(1.0);
+        if weight <= 0.0 {
+            continue;
+        }
+        let Some(q) = rotations.get(edge.image_i).copied().flatten() else {
             continue;
         };
+        let world = q.inverse().transform_vector(&edge.direction_ij);
         let norm = world.norm();
         if !norm.is_finite() || norm < 1e-12 {
             continue;
@@ -372,14 +424,13 @@ pub fn average_positions(
             i: edge.image_i,
             j: edge.image_j,
             direction,
-            weight: edge.weight.max(1.0),
+            weight,
         });
     }
     if bearings.is_empty() {
         return vec![None; rotations.len()];
     }
-    // Keep only edges whose both endpoints carry a rotation: positions are
-    // defined exactly for the rotation-solved component.
+    // Keep only edges whose both endpoints carry a rotation.
     bearings.retain(|b| {
         rotations.get(b.i).copied().flatten().is_some()
             && rotations.get(b.j).copied().flatten().is_some()
@@ -388,52 +439,33 @@ pub fn average_positions(
         return vec![None; rotations.len()];
     }
 
-    // Weak origin prior keeps the free-translation mode anchored during the
-    // solve; the result is re-anchored onto the seed afterwards.
     const PRIOR_WEIGHT: f64 = 1e-6;
-
-    // Scale gauge: the perpendicular rows alone are homogeneous (zero is a
-    // solution), so exactly ONE unit-displacement row — on the highest-weight
-    // edge touching the seed (ties broken by lowest neighbour index) — fixes
-    // the global scale without biasing any other edge's length.
-    let scale_row_index = bearings
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.i == seed || b.j == seed)
-        .max_by(|(ia, a), (ib, b)| {
-            a.weight
-                .total_cmp(&b.weight)
-                .then_with(|| b.j.cmp(&a.j))
-                .then_with(|| ib.cmp(ia))
-        })
-        .map(|(i, _)| i);
-    let scale_row = scale_row_index.map(|i| bearings.remove(i));
+    // IRLS trim threshold on the bearing angle (radians, ~8.6 degrees):
+    // bent shapes come from noisy bearings pulling the least squares;
+    // trimming the worst offenders per round straightens the solution.
+    const MAX_BEARING_ERROR_RAD: f64 = 0.3;
 
     let members: Vec<usize> = (0..rotations.len())
         .filter(|&i| rotations[i].is_some())
         .collect();
 
-    // Pure Hessian operator AᵀA acting on a displacement field: the
-    // perpendicular rows contribute their linear part, the single scale row
-    // contributes its (linear) displacement part without any target, plus
-    // the weak origin prior.
-    let hess_vec = |v: &HashMap<usize, Vector3<f64>>| -> HashMap<usize, Vector3<f64>> {
+    // Hessian-vector product of the perpendicular rows + prior for one
+    // displacement field, over the given bearing slice.
+    let hess_vec = |bs: &[Bearing],
+                    active: &[bool],
+                    v: &HashMap<usize, Vector3<f64>>|
+     -> HashMap<usize, Vector3<f64>> {
         let mut out: HashMap<usize, Vector3<f64>> = HashMap::new();
-        for b in &bearings {
+        for (k, b) in bs.iter().enumerate() {
+            if !active[k] {
+                continue;
+            }
             let ci = v.get(&b.i).copied().unwrap_or(Vector3::zeros());
             let cj = v.get(&b.j).copied().unwrap_or(Vector3::zeros());
+            // J_i v = d × (vi − vj); Aᵀ_i y = w·(d × y).
             let y = b.direction.cross(&(ci - cj));
-            let (at_i, at_j) = b.at_perp_product(y);
-            *out.entry(b.i).or_default() += at_i;
-            *out.entry(b.j).or_default() += at_j;
-        }
-        if let Some(b) = &scale_row {
-            let ci = v.get(&b.i).copied().unwrap_or(Vector3::zeros());
-            let cj = v.get(&b.j).copied().unwrap_or(Vector3::zeros());
-            let lin = b.direction.dot(&(cj - ci));
-            let (at_i, at_j) = b.at_parallel_product(lin);
-            *out.entry(b.i).or_default() += at_i;
-            *out.entry(b.j).or_default() += at_j;
+            *out.entry(b.i).or_default() += b.direction.cross(&y).scale(-b.weight);
+            *out.entry(b.j).or_default() += b.direction.cross(&y).scale(b.weight);
         }
         for (&node, val) in v {
             *out.entry(node).or_default() += val.scale(PRIOR_WEIGHT);
@@ -441,55 +473,138 @@ pub fn average_positions(
         out
     };
 
-    // Right-hand side Aᵀ b: only the scale row has a non-zero target (its
-    // unit displacement): Aᵀ_i b = w·(−d·1), Aᵀ_j b = w·(+d·1).
-    let mut rhs: HashMap<usize, Vector3<f64>> = HashMap::new();
-    if let Some(b) = &scale_row {
-        let (at_i, at_j) = b.at_parallel_product(1.0);
-        *rhs.entry(b.i).or_default() += at_i;
-        *rhs.entry(b.j).or_default() += at_j;
+    // One scale-fixing unit-displacement row on the highest-weight edge
+    // touching the seed (ties → smallest neighbour index): the perpendicular
+    // rows alone are homogeneous, so exactly one unit row fixes the global
+    // scale without biasing any other edge's length.
+    let scale_index = bearings
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.i == seed || b.j == seed)
+        .max_by(|(ia, a), (ib, b)| {
+            a.weight
+                .total_cmp(&b.weight)
+                .then_with(|| a.j.cmp(&b.j).reverse())
+                .then_with(|| ib.cmp(ia))
+        })
+        .map(|(i, _)| i);
+
+    let mut active = vec![true; bearings.len()];
+    if let Some(k) = scale_index {
+        active[k] = false; // handled as the affine rhs row, not part of H
     }
 
-    // Conjugate gradient on H x = rhs, starting from zero positions.
-    let zero_field: HashMap<usize, Vector3<f64>> =
-        members.iter().map(|&i| (i, Vector3::zeros())).collect();
-    let mut positions: HashMap<usize, Vector3<f64>> = zero_field.clone();
-    let h0 = hess_vec(&zero_field);
-    let mut r: HashMap<usize, Vector3<f64>> = rhs
-        .iter()
-        .map(|(k, v)| (*k, *v - h0.get(k).copied().unwrap_or(Vector3::zeros())))
-        .collect();
-    let mut p = r.clone();
-    let mut rs_old: f64 = r.values().map(|g| g.norm_squared()).sum();
-    for _ in 0..cg_iterations.max(1) {
-        if !rs_old.is_finite() || rs_old < 1e-24 {
-            break;
-        }
-        let hp = hess_vec(&p);
-        let denom: f64 = p
+    // RHS from the scale row's unit target: Aᵀ_i b = −w d, Aᵀ_j b = +w d.
+    let mut rhs: HashMap<usize, Vector3<f64>> = HashMap::new();
+    if let Some(k) = scale_index {
+        let b = &bearings[k];
+        *rhs.entry(b.i).or_default() += b.direction.scale(-b.weight);
+        *rhs.entry(b.j).or_default() += b.direction.scale(b.weight);
+    }
+
+    let solve_cg = |active: &[bool],
+                    rhs: &HashMap<usize, Vector3<f64>>,
+                    cg_iterations: usize|
+     -> HashMap<usize, Vector3<f64>> {
+        let zero_field: HashMap<usize, Vector3<f64>> =
+            members.iter().map(|&i| (i, Vector3::zeros())).collect();
+        let positions = zero_field.clone();
+        let h0 = hess_vec(bearings.as_slice(), active, &zero_field);
+        let mut r: HashMap<usize, Vector3<f64>> = rhs
             .iter()
-            .map(|(k, v)| v.dot(&hp.get(k).copied().unwrap_or(Vector3::zeros())))
-            .sum();
-        if !(denom.is_finite() && denom > 1e-30) {
+            .map(|(k, v)| (*k, *v - h0.get(k).copied().unwrap_or(Vector3::zeros())))
+            .collect();
+        let mut p = r.clone();
+        let mut rs_old: f64 = r.values().map(|g| g.norm_squared()).sum();
+        let mut out = positions;
+        for _ in 0..cg_iterations.max(1) {
+            if !rs_old.is_finite() || rs_old < 1e-24 {
+                break;
+            }
+            let hp = hess_vec(bearings.as_slice(), active, &p);
+            let denom: f64 = p
+                .iter()
+                .map(|(k, v)| v.dot(&hp.get(k).copied().unwrap_or(Vector3::zeros())))
+                .sum();
+            if !(denom.is_finite() && denom > 1e-30) {
+                break;
+            }
+            let alpha = rs_old / denom;
+            for (k, v) in &p {
+                *out.entry(*k).or_default() += *v * alpha;
+            }
+            for (k, v) in &hp {
+                *r.entry(*k).or_default() -= *v * alpha;
+            }
+            let rs_new: f64 = r.values().map(|g| g.norm_squared()).sum();
+            if !rs_new.is_finite() {
+                break;
+            }
+            let beta = rs_new / rs_old;
+            for (k, v) in r.iter() {
+                let pk = p.get(k).copied().unwrap_or(Vector3::zeros());
+                *p.entry(*k).or_default() = *v + pk.scale(beta);
+            }
+            rs_old = rs_new;
+        }
+        out
+    };
+
+    let mut positions = solve_cg(&active, &rhs, cg_iterations);
+
+    // IRLS rounds: measure each bearing's angular error against the solved
+    // geometry, deactivate the worst, re-solve.
+    for _ in 0..3 {
+        let mut worst: Vec<(f64, usize)> = Vec::new();
+        for (k, b) in bearings.iter().enumerate() {
+            if !active[k] || k == scale_index.unwrap_or(usize::MAX) {
+                continue;
+            }
+            let ci = positions.get(&b.i).copied().unwrap_or(Vector3::zeros());
+            let cj = positions.get(&b.j).copied().unwrap_or(Vector3::zeros());
+            let disp = cj - ci;
+            let norm = disp.norm();
+            if norm < 1e-9 {
+                worst.push((f64::INFINITY, k));
+                continue;
+            }
+            let cos = (disp.dot(&b.direction) / norm).clamp(-1.0, 1.0);
+            worst.push((cos.acos(), k));
+        }
+        worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let before = active.iter().filter(|&&a| a).count();
+        for &(err, k) in &worst {
+            if err <= MAX_BEARING_ERROR_RAD {
+                break;
+            }
+            active[k] = false;
+        }
+        let after = active.iter().filter(|&&a| a).count();
+        if after == before {
             break;
         }
-        let alpha = rs_old / denom;
-        for (k, v) in &p {
-            *positions.entry(*k).or_default() += *v * alpha;
+        positions = solve_cg(&active, &rhs, cg_iterations);
+    }
+
+    if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+        let mut errs: Vec<f64> = Vec::new();
+        for (k, b) in bearings.iter().enumerate() {
+            if !active[k] {
+                continue;
+            }
+            let ci = positions.get(&b.i).copied().unwrap_or(Vector3::zeros());
+            let cj = positions.get(&b.j).copied().unwrap_or(Vector3::zeros());
+            let disp = (cj - ci).normalize();
+            errs.push(disp.dot(&b.direction).clamp(-1.0, 1.0).acos());
         }
-        for (k, v) in &hp {
-            *r.entry(*k).or_default() -= *v * alpha;
-        }
-        let rs_new: f64 = r.values().map(|g| g.norm_squared()).sum();
-        if !rs_new.is_finite() {
-            break;
-        }
-        let beta = rs_new / rs_old;
-        for (k, v) in r.iter() {
-            let pk = p.get(k).copied().unwrap_or(Vector3::zeros());
-            *p.entry(*k).or_default() = *v + pk.scale(beta);
-        }
-        rs_old = rs_new;
+        errs.sort_by(|a, b| a.total_cmp(b));
+        eprintln!(
+            "global-sfm debug: positions: {} nodes, {}/{} bearings kept, median angular residual {:.2} deg",
+            positions.len(),
+            errs.len(),
+            bearings.len(),
+            errs.get(errs.len() / 2).copied().unwrap_or(f64::NAN).to_degrees()
+        );
     }
 
     // Re-anchor: seed centre becomes exactly the origin.
@@ -516,6 +631,11 @@ pub struct GlobalReconstructionTuning {
     pub min_pair_matches: usize,
     /// Minimum essential inliers per pair for its edge to enter the graph.
     pub min_edge_inliers: usize,
+    /// IRLS trim threshold for rotation averaging (degrees). Edges whose
+    /// implied relative rotation disagrees with the emerging global solution
+    /// by more than this are zeroed; view-graph triangles whose median loop
+    /// error exceeds twice this are dropped outright.
+    pub max_edge_rotation_error_deg: f64,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -526,6 +646,7 @@ impl Default for GlobalReconstructionTuning {
             cg_iterations: 500,
             min_pair_matches: 10,
             min_edge_inliers: 15,
+            max_edge_rotation_error_deg: 10.0,
         }
     }
 }
@@ -615,12 +736,117 @@ pub fn reconstruct_global_sfm(
         });
     }
 
+    // ---- Triplet loop-closure sanitisation ---------------------------------
+    // Wrong-chirality / wrong-pose essential estimates survive per-pair
+    // RANSAC on repetitive real scenes but fail three-edge rotation loops:
+    // R_wu·R_vw·R_uv must be ≈ identity around every triangle. Score each
+    // edge by the MEDIAN loop error over its common-neighbour triangles and
+    // drop edges above twice the IRLS trim threshold.
+    {
+        let mut neighbors: HashMap<usize, HashSet<usize>> = HashMap::new();
+        for e in &edges {
+            neighbors.entry(e.image_i).or_default().insert(e.image_j);
+            neighbors.entry(e.image_j).or_default().insert(e.image_i);
+        }
+        let mut edge_lookup: HashMap<(usize, usize), usize> = HashMap::new();
+        for (index, e) in edges.iter().enumerate() {
+            edge_lookup.insert((e.image_i, e.image_j), index);
+            edge_lookup.insert((e.image_j, e.image_i), index);
+        }
+        let step = |from: usize, index: usize| -> UnitQuaternion<f64> {
+            let e = &edges[index];
+            if e.image_i == from {
+                e.rotation_ij
+            } else {
+                e.rotation_ij.inverse()
+            }
+        };
+        let mut loop_errors: Vec<Vec<f64>> = vec![Vec::new(); edges.len()];
+        for e_index in 0..edges.len() {
+            let (u, v) = (edges[e_index].image_i, edges[e_index].image_j);
+            let Some(common) = neighbors.get(&u) else {
+                continue;
+            };
+            for &w in common {
+                if w == v || !neighbors.get(&v).is_some_and(|nv| nv.contains(&w)) {
+                    continue;
+                }
+                let Some(&vw) = edge_lookup.get(&(v, w)) else {
+                    continue;
+                };
+                let Some(&wu) = edge_lookup.get(&(w, u)) else {
+                    continue;
+                };
+                let loop_r = step(w, wu) * step(v, vw) * step(u, e_index);
+                loop_errors[e_index].push(loop_r.angle());
+            }
+        }
+        let mut dropped = 0usize;
+        for (index, errs) in loop_errors.iter_mut().enumerate() {
+            if errs.is_empty() {
+                continue;
+            }
+            errs.sort_by(|a, b| a.total_cmp(b));
+            let median = errs[errs.len() / 2];
+            if median > tuning.max_edge_rotation_error_deg.to_radians() * 2.0 {
+                dropped += 1;
+                edges[index].weight = -1.0; // marker: dropped
+            }
+        }
+        if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+            eprintln!("global-sfm debug: triplet sanitation dropped {dropped} edges");
+        }
+        edges.retain(|e| e.weight > 0.0);
+    }
+
+    // Seed selection: the caller's seed may sit in a small side component
+    // (courtyard-class view graphs have them); solve the LARGEST connected
+    // component instead.
+    let adjacency_for_seed =
+        build_adjacency(features.len(), &edges).ok_or(GlobalReconstructionError::NoUsableEdges)?;
+    let seed = {
+        let mut seen = vec![false; features.len()];
+        let mut best = (0usize, usize::MAX); // (size, smallest member)
+        let mut preferred_size = None;
+        for start in 0..features.len() {
+            if seen[start] || !adjacency_for_seed.contains_key(&start) {
+                continue;
+            }
+            let mut stack = vec![start];
+            seen[start] = true;
+            let (mut size, mut smallest) = (0usize, usize::MAX);
+            while let Some(node) = stack.pop() {
+                size += 1;
+                smallest = smallest.min(node);
+                if let Some(nbrs) = adjacency_for_seed.get(&node) {
+                    for &(n, _) in nbrs {
+                        if !seen[n] {
+                            seen[n] = true;
+                            stack.push(n);
+                        }
+                    }
+                }
+            }
+            if start == tuning.seed {
+                preferred_size = Some(size);
+            }
+            if (size, std::cmp::Reverse(smallest)) > (best.0, std::cmp::Reverse(best.1)) {
+                best = (size, smallest);
+            }
+        }
+        match preferred_size {
+            Some(size) if size == best.0 => tuning.seed,
+            _ => best.1,
+        }
+    };
+
     let solved = solve_global_sfm(
         features.len(),
         &edges,
-        tuning.seed,
+        seed,
         tuning.sweeps,
         tuning.cg_iterations,
+        tuning.max_edge_rotation_error_deg,
     )
     .ok_or(GlobalReconstructionError::NoUsableEdges)?;
     let poses = solved.poses;
@@ -952,7 +1178,7 @@ mod tests {
     fn global_sfm_recovers_ring_rotations_and_center_geometry() {
         let n = 12usize;
         let (gt_poses, edges) = ring_scene(n, 3.0);
-        let result = solve_global_sfm(n, &edges, 0, 16, 400).expect("graph is usable");
+        let result = solve_global_sfm(n, &edges, 0, 16, 400, 10.0).expect("graph is usable");
         // Every camera solved; rotations match GT directly (seed pins the
         // gauge frame), centre geometry matches up to the monocular scale.
         // The solver's world frame is camera 0's frame (seed w2c = identity),
@@ -997,7 +1223,7 @@ mod tests {
         // Drop every edge touching image 7: the ring becomes a chain over 0..7
         // plus an isolated vertex. Rebuild edges only among 0..=6.
         edges.retain(|e| e.image_i != 7 && e.image_j != 7);
-        let result = solve_global_sfm(9, &edges, 0, 12, 300).expect("graph is usable");
+        let result = solve_global_sfm(9, &edges, 0, 12, 300, 10.0).expect("graph is usable");
         for image in 0..7 {
             assert!(result.poses[image].is_some(), "image {image} should solve");
         }
@@ -1031,7 +1257,7 @@ mod tests {
                 }
             })
             .collect();
-        let result = solve_global_sfm(n, &noisy, 0, 16, 600).unwrap();
+        let result = solve_global_sfm(n, &noisy, 0, 16, 600, 10.0).unwrap();
         assert!(
             result.mean_bearing_residual_rad < 0.15,
             "residual {} too large under small noise",
@@ -1050,7 +1276,7 @@ mod tests {
         // globally consistent by construction).
         let (poses, edges) = ring_scene(3, 3.0);
         let adjacency = build_adjacency(3, &edges).unwrap();
-        let averaged = average_rotations(3, &edges, &adjacency, 0, 24);
+        let averaged = average_rotations(3, &edges, &adjacency, 0, 24, 10.0).0;
         let gauge = poses[0].world_to_camera.rotation.inverse();
         for (image, rotation) in averaged.iter().enumerate() {
             let q = rotation.expect("all three cameras reachable");
@@ -1087,7 +1313,8 @@ mod tests {
                 });
             }
         }
-        let positions = average_positions(&edges, &identity, 0, 500);
+        let weights = vec![1.0; edges.len()];
+        let positions = average_positions(&edges, &weights, &identity, 0, 500);
         // Gauge: seed pinned at the origin and exactly one unit-displacement
         // scale row, so the solution equals the true configuration up to one
         // uniform scale. Align on camera 1 and verify the rest.

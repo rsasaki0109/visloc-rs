@@ -156,9 +156,10 @@ use visloc_rs::vision::vocab_tree::{
     generate_pairs, HkmBuildOptions, VocabTree, VocabTreeOptions, VocabTreePairGeneratorOptions,
 };
 use visloc_rs::{
-    incremental_sfm, read_external_deep_features_txt, write_colmap_reconstruction_for_3dgs,
-    BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher, DescriptorMatch, FeatureSet,
-    IncrementalSfmConfig, Matcher, PairwiseMatches, Pose, TrackSource,
+    incremental_sfm, read_external_deep_features_txt, reconstruct_global_sfm,
+    write_colmap_reconstruction_for_3dgs, BaConfig, BruteForceMatcher, Camera, CrossCheckMatcher,
+    DescriptorMatch, FeatureSet, GlobalReconstructionTuning, IncrementalSfmConfig, Matcher,
+    PairwiseMatches, Pose, TrackSource,
 };
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
@@ -300,6 +301,11 @@ struct Args {
     structureless_registration: bool,
     filter_images: bool,
     verification_mode: VerificationMode,
+    /// `Incremental` (default): the existing grow-from-seed mapper.
+    /// `Global`: GLOMAP-style — per-pair essential relative poses, rotation +
+    /// position averaging, track triangulation, one joint BA
+    /// (`visloc_slam::global_sfm::reconstruct_global_sfm`).
+    mapper: MapperKind,
     /// M2 A/B switch: which algorithm builds feature tracks from the verified
     /// pairs (`docs/colmap_port_plan.md`'s M2 milestone) — the legacy ad hoc
     /// union-find (default) or COLMAP's persistent `CorrespondenceGraph`.
@@ -411,6 +417,7 @@ fn parse_args() -> Result<Args, String> {
     let mut matcher = MatcherKind::Nn;
     let mut lightglue_model: Option<PathBuf> = None;
     let mut feature_extractor = FeatureExtractorKind::Files;
+    let mut mapper = MapperKind::Incremental;
     let mut images_dir: Option<PathBuf> = None;
     let mut sift_max_keypoints = 2048usize;
 
@@ -460,6 +467,15 @@ fn parse_args() -> Result<Args, String> {
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--structureless-registration" => structureless_registration = true,
+            "--mapper" => {
+                mapper = match a.remove(i + 1).as_str() {
+                    "incremental" => MapperKind::Incremental,
+                    "global" => MapperKind::Global,
+                    other => {
+                        return Err(format!("--mapper must be incremental|global, got {other}"))
+                    }
+                };
+            }
             "--filter-images" => filter_images = true,
             "--colmap-verification" => verification_mode = VerificationMode::Full,
             "--verification-mode" => {
@@ -536,6 +552,7 @@ fn parse_args() -> Result<Args, String> {
         refine_distortion,
         colmap_style,
         structureless_registration,
+        mapper,
         filter_images,
         verification_mode,
         track_source,
@@ -553,6 +570,12 @@ fn parse_args() -> Result<Args, String> {
         lightglue_model,
         sift_max_keypoints,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MapperKind {
+    Incremental,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1507,6 +1530,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_source: args.track_source,
         ..IncrementalSfmConfig::default()
     };
+    if args.mapper == MapperKind::Global {
+        let tuning = GlobalReconstructionTuning {
+            min_pair_matches: args.min_matches,
+            ..GlobalReconstructionTuning::default()
+        };
+        let (poses, tracks, mean_reproj) =
+            reconstruct_global_sfm(&args.camera, &features, &pairwise, &tuning, &config)?;
+        let registered = poses.iter().filter(|p| p.is_some()).count();
+        println!(
+            "reconstruction: mapper=global: {} / {} images registered, {} tracks, mean reproj {:.3} px",
+            registered,
+            features.len(),
+            tracks.len(),
+            mean_reproj
+        );
+        // Compact the pose list to only registered images so the shared
+        // COLMAP export path applies unchanged.
+        let mut remap = HashMap::new();
+        for (image, pose) in poses.iter().enumerate() {
+            if pose.is_some() {
+                remap.insert(image, remap.len());
+            }
+        }
+        let poses_out: Vec<Pose> = poses
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| p.is_some() && remap.contains_key(i))
+            .map(|(_, p)| p.clone().unwrap())
+            .collect();
+        let features_out: Vec<FeatureSet> = (0..features.len())
+            .filter(|i| remap.contains_key(i))
+            .map(|i| features[i].clone())
+            .collect();
+        let names_out: Vec<String> = (0..features.len())
+            .filter(|i| remap.contains_key(i))
+            .map(|i| image_names[i].clone())
+            .collect();
+        let landmarks_out: Vec<ExportLandmark> = tracks
+            .iter()
+            .map(|t| {
+                let obs = t
+                    .observations
+                    .iter()
+                    .filter_map(|&(img, kp, px)| remap.get(&img).map(|&ni| (ni, kp, px)))
+                    .collect();
+                (t.position, obs)
+            })
+            .collect();
+        let summary = write_colmap_reconstruction_for_3dgs(
+            &args.out_colmap,
+            &args.camera,
+            &poses_out,
+            &features_out,
+            &landmarks_out,
+            |k| names_out[k].clone(),
+        )?;
+        println!(
+            "wrote COLMAP model to {} ({} images, {} points, {} observations)",
+            args.out_colmap.display(),
+            summary.frame_count,
+            summary.landmark_count,
+            summary.observation_count,
+        );
+        return Ok(());
+    }
     let result = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
     println!(
         "reconstruction ({}): {} / {} images registered, {} tracks, mean reproj {:.3} px",
