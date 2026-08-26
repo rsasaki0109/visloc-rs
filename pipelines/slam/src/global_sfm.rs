@@ -1248,9 +1248,9 @@ pub fn reconstruct_global_sfm(
 
     let solved = {
         // Multi-seed rotation averaging: try the component's highest-degree
-        // nodes (plus the selected seed) and keep the solve with the most
-        // surviving edges / lowest median residual. Escapes flip basins that
-        // a single bad tree-root can lock into on repetitive façades.
+        // nodes and keep the solve that triangulates with the lowest mean
+        // reprojection. Bearing residual alone prefers self-consistent wrong
+        // basins on repetitive façades; image reprojection breaks the tie.
         let trials = tuning.rotation_seed_trials.max(1);
         let mut candidate_seeds = vec![seed];
         if trials > 1 {
@@ -1266,6 +1266,8 @@ pub fn reconstruct_global_sfm(
             }
             candidate_seeds.truncate(trials);
         }
+        let built_for_score =
+            build_tracks_detailed(features.len(), pairwise, mapper.min_track_length);
         let mut best: Option<(GlobalSfmPoses, usize, f64, usize)> = None;
         for &trial_seed in &candidate_seeds {
             let mut trial_edges = edges.clone();
@@ -1281,26 +1283,59 @@ pub fn reconstruct_global_sfm(
             ) else {
                 continue;
             };
-            // Score: prefer more registered cameras, then lower mean bearing
-            // residual.
             let registered = solution.poses.iter().filter(|p| p.is_some()).count();
-            let residual = solution.mean_bearing_residual_rad;
+            let mut track_point = vec![None; built_for_score.tracks.len()];
+            triangulate_pending(
+                camera,
+                features,
+                &built_for_score.tracks,
+                &solution.poses,
+                mapper,
+                &mut track_point,
+            );
+            let (mut reproj_sum, mut reproj_count) = (0.0f64, 0usize);
+            for (track_id, track) in built_for_score.tracks.iter().enumerate() {
+                let Some(position) = track_point[track_id] else {
+                    continue;
+                };
+                for &(image, kp) in track {
+                    let Some(pose) = &solution.poses[image] else {
+                        continue;
+                    };
+                    let Some(pixel) = features[image].keypoints.get(kp).copied() else {
+                        continue;
+                    };
+                    if let Some(error) = reprojection_error_px(camera, pose, &position, &pixel) {
+                        reproj_sum += error;
+                        reproj_count += 1;
+                    }
+                }
+            }
+            let reproj = if reproj_count > 0 {
+                reproj_sum / reproj_count as f64
+            } else {
+                f64::INFINITY
+            };
             let better = match &best {
                 None => true,
-                Some((_, best_reg, best_res, _)) => {
+                Some((_, best_reg, best_reproj, _)) => {
                     registered > *best_reg
-                        || (registered == *best_reg && residual < *best_res)
+                        || (registered == *best_reg && reproj < *best_reproj)
                 }
             };
+            if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+                eprintln!(
+                    "global-sfm debug: seed {trial_seed} registered={registered} pre-BA reproj={reproj:.3} px (n={reproj_count})"
+                );
+            }
             if better {
-                best = Some((solution, registered, residual, trial_seed));
+                best = Some((solution, registered, reproj, trial_seed));
             }
         }
         if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && trials > 1 {
-            if let Some((_, reg, res, chosen)) = &best {
+            if let Some((_, reg, reproj, chosen)) = &best {
                 eprintln!(
-                    "global-sfm debug: multi-seed chose seed {chosen} (registered={reg}, bearing_mean={:.3} deg) from {} trials",
-                    res.to_degrees(),
+                    "global-sfm debug: multi-seed chose seed {chosen} (registered={reg}, pre-BA reproj={reproj:.3} px) from {} trials",
                     candidate_seeds.len()
                 );
             }
