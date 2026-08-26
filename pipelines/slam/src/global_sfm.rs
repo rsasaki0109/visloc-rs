@@ -38,7 +38,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
 
 use visloc_core::geometry::Pose;
 use visloc_core::types::Camera;
@@ -68,6 +68,10 @@ pub struct GlobalSfmEdge {
     pub direction_ij: Vector3<f64>,
     /// Edge weight (e.g., verified inlier count).
     pub weight: f64,
+    /// Sample of inlier pixel correspondences retained so translation can be
+    /// re-estimated under globally-averaged rotations. Empty in synthetic
+    /// fixtures that only exercise averaging.
+    pub inlier_sample: Vec<(Point2<f64>, Point2<f64>)>,
 }
 
 /// Result of the global pose solve.
@@ -93,14 +97,23 @@ pub struct GlobalSfmPoses {
 /// (IRLS-style outlier rejection; 10° is a reasonable default).
 ///
 /// Returns `None` when no valid edge touches any image.
+///
+/// When `refine_translations` is true and `camera` is supplied, after
+/// rotation averaging each edge's `direction_ij` is re-scored under the
+/// consensus relative rotation (and optionally re-estimated from its
+/// inlier sample via a fixed-R epipolar nullspace). This is the lever that
+/// can flip chirality-ambiguous pairwise translations once the rotation
+/// graph has left the wrong basin.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_global_sfm(
     num_images: usize,
-    edges: &[GlobalSfmEdge],
+    edges: &mut [GlobalSfmEdge],
     seed: usize,
     sweeps: usize,
     cg_iterations: usize,
     max_edge_rotation_error_deg: f64,
+    refine_translations: bool,
+    camera: Option<&Camera>,
 ) -> Option<GlobalSfmPoses> {
     let adjacency = build_adjacency(num_images, edges)?;
     let (rotations, edge_weights) = average_rotations(
@@ -141,6 +154,17 @@ pub fn solve_global_sfm(
             kept,
             edges.len()
         );
+    }
+    if refine_translations {
+        if let Some(cam) = camera {
+            let flipped =
+                refine_edge_directions_under_rotations(edges, &rotations, &edge_weights, cam);
+            if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() {
+                eprintln!(
+                    "global-sfm debug: global-R translation refine flipped {flipped} edge directions"
+                );
+            }
+        }
     }
     let centers = average_positions(edges, &edge_weights, &rotations, seed, cg_iterations);
     let mut poses: Vec<Option<Pose>> = vec![None; num_images];
@@ -752,6 +776,151 @@ pub fn average_positions(
     out
 }
 
+/// Re-score each edge's translation direction under the globally-averaged
+/// relative rotation. Candidates are ±the pairwise direction plus an optional
+/// fixed-R epipolar nullspace estimate from the retained inlier sample.
+/// Returns how many edges flipped relative to their incoming direction.
+fn refine_edge_directions_under_rotations(
+    edges: &mut [GlobalSfmEdge],
+    rotations: &[Option<UnitQuaternion<f64>>],
+    edge_weights: &[f64],
+    camera: &Camera,
+) -> usize {
+    let mut flipped = 0usize;
+    for (idx, edge) in edges.iter_mut().enumerate() {
+        if edge_weights.get(idx).copied().unwrap_or(0.0) <= 0.0 {
+            continue;
+        }
+        if edge.inlier_sample.len() < 8 {
+            continue;
+        }
+        let (Some(qi), Some(qj)) = (
+            rotations.get(edge.image_i).copied().flatten(),
+            rotations.get(edge.image_j).copied().flatten(),
+        ) else {
+            continue;
+        };
+        // Consensus relative rotation: R_w2c_j = R_ij · R_w2c_i.
+        let r_ij = qj * qi.inverse();
+        let r_mat: Matrix3<f64> = r_ij.to_rotation_matrix().into_inner();
+        let mut candidates = vec![edge.direction_ij, -edge.direction_ij];
+        if let Some(est) = estimate_direction_fixed_rotation(camera, &r_mat, &edge.inlier_sample) {
+            candidates.push(est);
+            candidates.push(-est);
+        }
+        let mut best_dir = edge.direction_ij;
+        let mut best_score: i64 = -1;
+        for dir in &candidates {
+            let Some(unit) = dir.try_normalize(1e-12) else {
+                continue;
+            };
+            // Camera-j centre in cam-i is `unit`; essential translation t
+            // satisfies C = −Rᵀ t ⇒ t = −R C.
+            let t = -(r_mat * unit);
+            let score = cheirality_count_samples(camera, &r_mat, &t, &edge.inlier_sample);
+            if score > best_score {
+                best_score = score;
+                best_dir = unit;
+            }
+        }
+        if best_score <= 0 {
+            continue;
+        }
+        if best_dir.dot(&edge.direction_ij) < 0.0 {
+            flipped += 1;
+        }
+        edge.direction_ij = best_dir;
+        edge.rotation_ij = r_ij;
+    }
+    flipped
+}
+
+/// Fixed-R epipolar estimate of the camera-j centre direction in cam-i.
+/// Solves `t · (x₂ × R x₁) = 0` over the sample, then `C = −Rᵀ t`.
+fn estimate_direction_fixed_rotation(
+    camera: &Camera,
+    r_mat: &Matrix3<f64>,
+    samples: &[(Point2<f64>, Point2<f64>)],
+) -> Option<Vector3<f64>> {
+    let mut ata = Matrix3::zeros();
+    let mut used = 0usize;
+    for (p1, p2) in samples {
+        let Some(n1) = camera.normalize_pixel(p1) else {
+            continue;
+        };
+        let Some(n2) = camera.normalize_pixel(p2) else {
+            continue;
+        };
+        let x1 = Vector3::new(n1.x, n1.y, 1.0);
+        let x2 = Vector3::new(n2.x, n2.y, 1.0);
+        let rx1 = r_mat * x1;
+        let cross = x2.cross(&rx1);
+        ata += cross * cross.transpose();
+        used += 1;
+    }
+    if used < 8 {
+        return None;
+    }
+    let svd = ata.symmetric_eigen();
+    // Smallest eigenvector of AᵀA.
+    let mut best_i = 0usize;
+    let mut best_v = f64::INFINITY;
+    for i in 0..3 {
+        let v = svd.eigenvalues[i];
+        if v < best_v {
+            best_v = v;
+            best_i = i;
+        }
+    }
+    let t = svd.eigenvectors.column(best_i).into_owned();
+    let t = t.try_normalize(1e-12)?;
+    (-r_mat.transpose() * t).try_normalize(1e-12)
+}
+
+fn cheirality_count_samples(
+    camera: &Camera,
+    r_mat: &Matrix3<f64>,
+    t: &Vector3<f64>,
+    samples: &[(Point2<f64>, Point2<f64>)],
+) -> i64 {
+    use nalgebra::{DMatrix, Matrix3x4};
+    let p_prev = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    let mut p_curr = Matrix3x4::zeros();
+    p_curr.fixed_view_mut::<3, 3>(0, 0).copy_from(r_mat);
+    p_curr.fixed_view_mut::<3, 1>(0, 3).copy_from(t);
+    let mut score = 0i64;
+    for (p1, p2) in samples {
+        let Some(prev) = camera.normalize_pixel(p1) else {
+            continue;
+        };
+        let Some(curr) = camera.normalize_pixel(p2) else {
+            continue;
+        };
+        let mut a = DMatrix::<f64>::zeros(4, 4);
+        for column in 0..4 {
+            a[(0, column)] = prev.x * p_prev[(2, column)] - p_prev[(0, column)];
+            a[(1, column)] = prev.y * p_prev[(2, column)] - p_prev[(1, column)];
+            a[(2, column)] = curr.x * p_curr[(2, column)] - p_curr[(0, column)];
+            a[(3, column)] = curr.y * p_curr[(2, column)] - p_curr[(1, column)];
+        }
+        let svd = a.svd(true, true);
+        let Some(v_t) = svd.v_t else {
+            continue;
+        };
+        let solution = v_t.row(v_t.nrows() - 1);
+        let w = solution[3];
+        if w.abs() < 1e-12 {
+            continue;
+        }
+        let world = Vector3::new(solution[0] / w, solution[1] / w, solution[2] / w);
+        let camera_curr = r_mat * world + t;
+        if world.z > 0.0 && camera_curr.z > 0.0 {
+            score += 1;
+        }
+    }
+    score
+}
+
 /// Tunables for [`reconstruct_global_sfm`] beyond the shared incremental-
 /// mapper config (which supplies triangulation gates and the BA recipe).
 #[derive(Debug, Clone, PartialEq)]
@@ -791,6 +960,11 @@ pub struct GlobalReconstructionTuning {
     /// the most kept edges / lowest median residual wins. `1` = legacy
     /// single-seed behaviour.
     pub rotation_seed_trials: usize,
+    /// After rotation averaging, re-score / re-estimate each edge's
+    /// translation direction under the consensus relative rotation using
+    /// retained inlier samples. Flips chirality-ambiguous pairwise
+    /// translations that survive per-pair RANSAC. Default false.
+    pub refine_translations_with_global_rotations: bool,
 }
 
 impl Default for GlobalReconstructionTuning {
@@ -805,6 +979,7 @@ impl Default for GlobalReconstructionTuning {
             min_edge_parallax_deg: 2.0,
             chirality_harden_edges: false,
             rotation_seed_trials: 1,
+            refine_translations_with_global_rotations: false,
         }
     }
 }
@@ -940,12 +1115,24 @@ pub fn reconstruct_global_sfm(
                 }
             }
         }
+        // Retain a subsample of inliers for post-rotation translation refine.
+        let step = (relative.inliers.len() / 32).max(1);
+        let inlier_sample: Vec<(Point2<f64>, Point2<f64>)> = relative
+            .inliers
+            .iter()
+            .step_by(step)
+            .filter_map(|&idx| {
+                let c = correspondences.get(idx)?;
+                Some((c.previous_xy, c.current_xy))
+            })
+            .collect();
         edges.push(GlobalSfmEdge {
             image_i: pair.image_i,
             image_j: pair.image_j,
             rotation_ij: r_ij,
             direction_ij,
             weight: relative.inliers.len() as f64,
+            inlier_sample,
         });
     }
     if std::env::var_os("VISLOC_GLOBAL_DEBUG").is_some() && tuning.chirality_harden_edges {
@@ -1081,13 +1268,16 @@ pub fn reconstruct_global_sfm(
         }
         let mut best: Option<(GlobalSfmPoses, usize, f64, usize)> = None;
         for &trial_seed in &candidate_seeds {
+            let mut trial_edges = edges.clone();
             let Some(solution) = solve_global_sfm(
                 features.len(),
-                &edges,
+                &mut trial_edges,
                 trial_seed,
                 tuning.sweeps,
                 tuning.cg_iterations,
                 tuning.max_edge_rotation_error_deg,
+                tuning.refine_translations_with_global_rotations,
+                Some(camera),
             ) else {
                 continue;
             };
@@ -1435,6 +1625,7 @@ mod tests {
                     rotation_ij,
                     direction_ij,
                     weight: 100.0,
+                    inlier_sample: Vec::new(),
                 });
             }
         }
@@ -1445,7 +1636,9 @@ mod tests {
     fn global_sfm_recovers_ring_rotations_and_center_geometry() {
         let n = 12usize;
         let (gt_poses, edges) = ring_scene(n, 3.0);
-        let result = solve_global_sfm(n, &edges, 0, 16, 400, 10.0).expect("graph is usable");
+        let mut edges = edges;
+        let result = solve_global_sfm(n, &mut edges, 0, 16, 400, 10.0, false, None)
+            .expect("graph is usable");
         // Every camera solved; rotations match GT directly (seed pins the
         // gauge frame), centre geometry matches up to the monocular scale.
         // The solver's world frame is camera 0's frame (seed w2c = identity),
@@ -1490,7 +1683,9 @@ mod tests {
         // Drop every edge touching image 7: the ring becomes a chain over 0..7
         // plus an isolated vertex. Rebuild edges only among 0..=6.
         edges.retain(|e| e.image_i != 7 && e.image_j != 7);
-        let result = solve_global_sfm(9, &edges, 0, 12, 300, 10.0).expect("graph is usable");
+        let mut edges = edges;
+        let result = solve_global_sfm(9, &mut edges, 0, 12, 300, 10.0, false, None)
+            .expect("graph is usable");
         for image in 0..7 {
             assert!(result.poses[image].is_some(), "image {image} should solve");
         }
@@ -1524,7 +1719,8 @@ mod tests {
                 }
             })
             .collect();
-        let result = solve_global_sfm(n, &noisy, 0, 16, 600, 10.0).unwrap();
+        let mut noisy = noisy;
+        let result = solve_global_sfm(n, &mut noisy, 0, 16, 600, 10.0, false, None).unwrap();
         assert!(
             result.mean_bearing_residual_rad < 0.15,
             "residual {} too large under small noise",
@@ -1577,6 +1773,7 @@ mod tests {
                     rotation_ij: UnitQuaternion::identity(),
                     direction_ij: d.normalize(),
                     weight: 10.0,
+                    inlier_sample: Vec::new(),
                 });
             }
         }
@@ -1603,6 +1800,7 @@ mod tests {
             rotation_ij: UnitQuaternion::identity(),
             direction_ij: Vector3::x(),
             weight: 5.0,
+            inlier_sample: Vec::new(),
         };
         let degenerate = GlobalSfmEdge {
             image_i: 0,
@@ -1622,5 +1820,46 @@ mod tests {
         assert!(build_adjacency(2, &[negative_weight]).is_none());
         assert!(build_adjacency(2, &[good]).is_some());
         let _ = random_rotation(&mut 1u64); // exercised helper stays referenced
+    }
+
+    #[test]
+    fn global_r_translation_refine_unflips_wrong_chirality() {
+        use visloc_core::types::Camera;
+        let camera = Camera::pinhole(1, 640, 480, 500.0, 500.0, 320.0, 240.0);
+        // Cam0 at origin looking +Z; cam1 translated along +X by 0.5.
+        let r = UnitQuaternion::identity();
+        let t_cam = Vector3::new(-0.5, 0.0, 0.0); // world-to-cam translation for cam1
+                                                  // C_1 in cam0 = -R^T t = (0.5, 0, 0)
+        let true_dir = Vector3::new(0.5, 0.0, 0.0).normalize();
+        let mut samples = Vec::new();
+        for xi in -2..=2 {
+            for yi in -2..=2 {
+                let p = Point3::new(xi as f64 * 0.3, yi as f64 * 0.3, 4.0);
+                let p0 = camera.project(&p).unwrap();
+                let p1_cam = r * p + t_cam;
+                let p1 = camera.project(&Point3::from(p1_cam)).unwrap();
+                samples.push((p0, p1));
+            }
+        }
+        assert!(samples.len() >= 8);
+        let mut edges = [GlobalSfmEdge {
+            image_i: 0,
+            image_j: 1,
+            rotation_ij: r,
+            direction_ij: -true_dir, // deliberately flipped
+            weight: samples.len() as f64,
+            inlier_sample: samples,
+        }];
+        let rotations = vec![Some(r), Some(r)];
+        let weights = vec![1.0];
+        let flipped =
+            refine_edge_directions_under_rotations(&mut edges, &rotations, &weights, &camera);
+        assert_eq!(flipped, 1, "must flip the wrong-chirality edge");
+        assert!(
+            edges[0].direction_ij.dot(&true_dir) > 0.9,
+            "refined direction {:?} should align with {:?}",
+            edges[0].direction_ij,
+            true_dir
+        );
     }
 }

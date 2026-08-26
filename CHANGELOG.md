@@ -6,6 +6,8 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Global-R translation refine after rotation averaging (`--refine-global-translations`) (2026-08-27).** Edges retain an inlier pixel sample; after consensus rotations are fixed, each edge's `direction_ij` is re-scored under `R_j R_i⁻¹` (±pairwise dir + fixed-R epipolar nullspace) and chirality-flipped bearings are corrected. Unit test `global_r_translation_refine_unflips_wrong_chirality` pins the synthetic flip case. **Courtyard** (`--mapper global --chirality-harden --rotation-seed-trials 8 --refine-global-translations`): flips ~4–7 edges/trial; **37/38**; Sim(3) RMSE **~457 cm** (prior ~470 cm) — small internal win, GT shape still metres-scale / self-consistent wrong basin.
+
 - **Hessian-Laplace detector + multi-anisotropy proposals (2026-08-27).** `SiftDetector::{Dog, HessianLaplace}` and `SiftConfig::multi_anisotropy` (default off). Hessian-Laplace finds spatial peaks of `|det H|` on the Gaussian pyramid with Laplacian scale selection (Mikolajczyk / VLFeat). Multi-anisotropy (requires `affine`) detects on a few det-1 x-stretches, maps survivors back under strict NMS + budget. Demo: `--sift-detector dog|hessian-laplace`, `--sift-multi-anisotropy`. Unit tests cover blob detection and budgeted extras. Stretch harness with hess+affine+multi still below the ≥4 bar (ignored). **Courtyard** (`--sift-detector hessian-laplace --mapper global --chirality-harden --rotation-seed-trials 8`): **37/38**, Sim(3) RMSE **~470 cm** — parity with DoG; detector swap alone does not straighten the bent shape.
 
 ### Changed
