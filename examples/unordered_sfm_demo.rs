@@ -430,6 +430,10 @@ struct Args {
     sift_max_keypoints: usize,
     /// Enable SIFT affine shape adaptation (descriptor-side Baumberg).
     sift_affine: bool,
+    /// Interest-point operator: `dog` (default) or `hessian-laplace`.
+    sift_detector: String,
+    /// Multi-anisotropy detection proposals (requires `--sift-affine`).
+    sift_multi_anisotropy: bool,
     out_colmap: PathBuf,
     camera: Camera,
     vocab_size: usize,
@@ -585,6 +589,8 @@ fn parse_args() -> Result<Args, String> {
     let mut images_dir: Option<PathBuf> = None;
     let mut sift_max_keypoints = 2048usize;
     let mut sift_affine = false;
+    let mut sift_detector = String::from("dog");
+    let mut sift_multi_anisotropy = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -607,6 +613,8 @@ fn parse_args() -> Result<Args, String> {
                 sift_max_keypoints = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
             "--sift-affine" => sift_affine = true,
+            "--sift-multi-anisotropy" => sift_multi_anisotropy = true,
+            "--sift-detector" => sift_detector = a.remove(i + 1),
             "--feature-suffix" => feature_suffix = a.remove(i + 1),
             "--image-suffix" => image_suffix = a.remove(i + 1),
             "--out-colmap" => out_colmap = Some(PathBuf::from(a.remove(i + 1))),
@@ -748,6 +756,8 @@ fn parse_args() -> Result<Args, String> {
         lightglue_model,
         sift_max_keypoints,
         sift_affine,
+        sift_detector,
+        sift_multi_anisotropy,
     })
 }
 
@@ -769,13 +779,24 @@ fn extract_sift_for_image(
     path: &Path,
     max_keypoints: usize,
     affine: bool,
+    detector: &str,
+    multi_anisotropy: bool,
 ) -> Result<FeatureSet, Box<dyn std::error::Error>> {
-    use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig};
+    use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig, SiftDetector};
     let grayscale = visloc_io::images::read_common_image(path)?;
     let image = GrayImage::new(grayscale.width(), grayscale.height(), grayscale.pixels())?;
+    let detector = match detector {
+        "dog" => SiftDetector::Dog,
+        "hessian-laplace" | "hessian" => SiftDetector::HessianLaplace,
+        other => {
+            return Err(format!("unknown --sift-detector {other} (dog|hessian-laplace)").into())
+        }
+    };
     let config = SiftConfig {
         max_keypoints,
         affine,
+        detector,
+        multi_anisotropy: multi_anisotropy && affine,
         ..SiftConfig::default()
     };
     let (keypoints, descriptors) = extract_sift(&image, &config)?;
@@ -791,6 +812,8 @@ fn load_images_with_sift(
     _dir: &Path,
     _max_keypoints: usize,
     _affine: bool,
+    _detector: &str,
+    _multi_anisotropy: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     Err("--feature-extractor sift requires building with --features image-io".into())
 }
@@ -801,6 +824,8 @@ fn load_images_with_sift(
     dir: &Path,
     max_keypoints: usize,
     affine: bool,
+    detector: &str,
+    multi_anisotropy: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     const IMAGE_SUFFIXES: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"];
     let mut files: Vec<String> = std::fs::read_dir(dir)?
@@ -819,7 +844,13 @@ fn load_images_with_sift(
     let mut features = Vec::new();
     let mut names = Vec::new();
     for f in &files {
-        features.push(extract_sift_for_image(&dir.join(f), max_keypoints, affine)?);
+        features.push(extract_sift_for_image(
+            &dir.join(f),
+            max_keypoints,
+            affine,
+            detector,
+            multi_anisotropy,
+        )?);
         names.push(f.to_string());
     }
     Ok((features, names))
@@ -1691,7 +1722,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("error: --feature-extractor sift requires --images-dir");
                 std::process::exit(2);
             });
-            load_images_with_sift(&dir, args.sift_max_keypoints, args.sift_affine)?
+            load_images_with_sift(
+                &dir,
+                args.sift_max_keypoints,
+                args.sift_affine,
+                &args.sift_detector,
+                args.sift_multi_anisotropy,
+            )?
         }
     };
     if features.len() < 2 {

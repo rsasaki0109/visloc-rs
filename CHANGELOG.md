@@ -4,6 +4,10 @@ All notable changes to `visloc-rs` will be documented here.
 
 ## Unreleased
 
+### Added
+
+- **Hessian-Laplace detector + multi-anisotropy proposals (2026-08-27).** `SiftDetector::{Dog, HessianLaplace}` and `SiftConfig::multi_anisotropy` (default off). Hessian-Laplace finds spatial peaks of `|det H|` on the Gaussian pyramid with Laplacian scale selection (Mikolajczyk / VLFeat). Multi-anisotropy (requires `affine`) detects on a few det-1 x-stretches, maps survivors back under strict NMS + budget. Demo: `--sift-detector dog|hessian-laplace`, `--sift-multi-anisotropy`. Unit tests cover blob detection and budgeted extras. Stretch harness with hess+affine+multi still below the ≥4 bar (ignored). **Courtyard** (`--sift-detector hessian-laplace --mapper global --chirality-harden --rotation-seed-trials 8`): **37/38**, Sim(3) RMSE **~470 cm** — parity with DoG; detector swap alone does not straighten the bent shape.
+
 ### Changed
 
 - **SIFT affine path: VLFeat covdet ordering + location refine (2026-08-27).** When `SiftConfig::affine` / `--sift-affine` is on: (1) estimate Baumberg shape first, (2) refine the detection locus inside the affine-normalized patch via peak squared-gradient search, (3) assign orientation on canonical-axis gradients, (4) describe through `A`. Shape adaptation gains VLFeat-style min-singular-value hold, anisotropy cap (6×), and convergence gate. Cross-stretch harness improves plain=1 → **affine=3** mutual matches (still ignored; ≥4 bar not met). **Courtyard honest negative** (`--mapper global --sift-affine --chirality-harden --rotation-seed-trials 8`): verified pairs drop (158/703), registration **22/38** (was 37/38 without affine), Sim(3) RMSE still metres-scale — descriptor-side+ordering affine alone thins the view graph on this façade scene; fuller multi-anisotropy detection remains open.
@@ -14,7 +18,7 @@ All notable changes to `visloc-rs` will be documented here.
   - `CheiralityOptions` / `recover_relative_pose_with_options` / `RelativePoseRecovery` in `visloc_vision::two_view`: min triangulation angle, ambiguity rejection (`second/best` ratio), and minimum positive-depth fraction. `CheiralityOptions::hardened()` = 1° / 0.85 / 0.5. Default options keep the legacy positive-depth-only selector byte-identical.
   - `GlobalReconstructionTuning::{chirality_harden_edges, rotation_seed_trials}` (defaults `false` / `1`) plus demo flags `--chirality-harden` / `--rotation-seed-trials N`. Multi-seed tries the component's highest-degree nodes and keeps the solve with most cameras / lowest mean bearing residual.
   - `average_positions` now runs an MST-guided translation-sign repair before graduated Huber: off-tree bearings anti-aligned with the tree placement are flipped.
-  - Demo also exposes `--sift-affine` (descriptor-side Baumberg already in `SiftConfig::affine`).
+  - Demo also exposes `--sift-affine` (see Changed entry above for the 2026-08-27 covdet-ordering upgrade).
   - **COLMAP CLI shim** `examples/colmap.rs` (required-features `image-io`): drop-in `feature_extractor` / `exhaustive_matcher` / `mapper` / `model_converter` driving the same pipeline library; state under `<db>.d/`, sparse model via `write_colmap_reconstruction_for_3dgs`. Smoke-tested on courtyard (1024 kp → 12/38 registered).
   - **Measured on ETH3D courtyard (SIFT@4096, exhaustive, `--mapper global --chirality-harden --rotation-seed-trials 8`)**: chirality-harden rejected 20 pairs (175 edges kept); MST sign-repair flips ~8–9 bearings/trial; multi-seed picks vary by residual; registration **37/38** unchanged; Sim(3) centre RMSE vs GT **~469–473 cm** (prior ~471 cm) — **honest negative: GT shape parity does not move**. Self-consistent wrong basins survive harden + multi-seed + sign repair; the remaining unlock is detector-side affine-covariant sampling (VLFeat covdet; the ignored cross-stretch SIFT test) and/or learned matching.
 

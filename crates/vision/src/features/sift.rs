@@ -25,6 +25,20 @@ use nalgebra::Point2;
 
 use super::FeatureSet;
 
+/// Which interest-point operator feeds the SIFT descriptor pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SiftDetector {
+    /// Classical Lowe Difference-of-Gaussian extrema (default; byte-identical
+    /// to the historical pipeline when [`SiftConfig::affine`] is off).
+    #[default]
+    Dog,
+    /// Hessian determinant peaks with Laplacian scale selection
+    /// (Mikolajczyk & Schmid Hessian-Laplace / VLFeat `HessianLaplace`).
+    /// More repeatable under foreshortening than DoG; pair with
+    /// [`SiftConfig::affine`] for façade-class scenes.
+    HessianLaplace,
+}
+
 /// Tunables mirroring Lowe's defaults.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SiftConfig {
@@ -36,12 +50,14 @@ pub struct SiftConfig {
     pub sigma_input: f64,
     /// Base σ at the doubled first octave (1.6).
     pub sigma_base: f64,
-    /// Minimum |DoG| for an extremum to survive.
+    /// Minimum |DoG| (or scaled |det H|) for an extremum to survive.
     pub contrast_threshold: f64,
-    /// Edge-test curvature ratio threshold (Lowe r = 10).
+    /// Edge-test curvature ratio threshold (Lowe r = 10); DoG path only.
     pub edge_threshold: f64,
     /// Cap on returned keypoints (strongest contrast first when exceeded).
     pub max_keypoints: usize,
+    /// Interest-point operator. Default [`SiftDetector::Dog`].
+    pub detector: SiftDetector,
     /// Estimate an affine (anisotropic) shape per keypoint via structure-
     /// tensor iteration (Baumberg/covdet-style), refine the detection locus
     /// inside the affine-normalized patch, assign orientation on that
@@ -50,6 +66,11 @@ pub struct SiftConfig {
     /// changes. Off by default: the isotropic pipeline is faster and
     /// sufficient for planar-motion data.
     pub affine: bool,
+    /// When true (and [`Self::affine`] is on), also detect on a few
+    /// anisotropically resampled copies of the image and merge survivors
+    /// back under a strict NMS budget. Supplies loci that only peak under
+    /// foreshortening. Off by default.
+    pub multi_anisotropy: bool,
 }
 
 impl Default for SiftConfig {
@@ -62,7 +83,9 @@ impl Default for SiftConfig {
             contrast_threshold: 0.02,
             edge_threshold: 10.0,
             max_keypoints: usize::MAX,
+            detector: SiftDetector::Dog,
             affine: false,
+            multi_anisotropy: false,
         }
     }
 }
@@ -273,34 +296,70 @@ pub fn extract_sift(
             let step = ((target * target - prev_target * prev_target).max(1e-6)).sqrt();
             gaussians.push(blur(gaussians.last().unwrap(), step));
         }
-        let dogs: Vec<Layer> = (0..gaussians.len() - 1)
-            .map(|i| {
-                let (a, b) = (&gaussians[i], &gaussians[i + 1]);
-                Layer {
-                    width: a.width,
-                    height: a.height,
-                    data: (0..a.data.len()).map(|p| b.data[p] - a.data[p]).collect(),
-                }
-            })
-            .collect();
 
-        for di in 1..dogs.len().saturating_sub(1) {
-            let (below, mid, above) = (&dogs[di - 1], &dogs[di], &dogs[di + 1]);
-            for y in 1..mid.height as i64 - 1 {
-                for x in 1..mid.width as i64 - 1 {
-                    detect_extremum(
-                        image,
-                        below,
-                        mid,
-                        above,
-                        x,
-                        y,
-                        config,
-                        oct,
-                        di as i32,
-                        k,
-                        &mut keypoints,
-                    );
+        match config.detector {
+            SiftDetector::Dog => {
+                let dogs: Vec<Layer> = (0..gaussians.len() - 1)
+                    .map(|i| {
+                        let (a, b) = (&gaussians[i], &gaussians[i + 1]);
+                        Layer {
+                            width: a.width,
+                            height: a.height,
+                            data: (0..a.data.len()).map(|p| b.data[p] - a.data[p]).collect(),
+                        }
+                    })
+                    .collect();
+                for di in 1..dogs.len().saturating_sub(1) {
+                    let (below, mid, above) = (&dogs[di - 1], &dogs[di], &dogs[di + 1]);
+                    for y in 1..mid.height as i64 - 1 {
+                        for x in 1..mid.width as i64 - 1 {
+                            detect_extremum(
+                                image,
+                                below,
+                                mid,
+                                above,
+                                x,
+                                y,
+                                config,
+                                oct,
+                                di as i32,
+                                k,
+                                &mut keypoints,
+                            );
+                        }
+                    }
+                }
+            }
+            SiftDetector::HessianLaplace => {
+                // Response = |det H| on each Gaussian; scale selected by
+                // Laplacian extremum across neighbouring scales.
+                let hess: Vec<Layer> = gaussians.iter().map(hessian_det_layer).collect();
+                let laps: Vec<Layer> = gaussians.iter().map(laplacian_layer).collect();
+                for si in 1..gaussians.len().saturating_sub(1) {
+                    let (h_below, h_mid, h_above) = (&hess[si - 1], &hess[si], &hess[si + 1]);
+                    let (l_below, l_mid, l_above) = (&laps[si - 1], &laps[si], &laps[si + 1]);
+                    let gauss_mid = &gaussians[si];
+                    for y in 1..h_mid.height as i64 - 1 {
+                        for x in 1..h_mid.width as i64 - 1 {
+                            detect_hessian_laplace(
+                                image,
+                                h_below,
+                                h_mid,
+                                h_above,
+                                l_below,
+                                l_mid,
+                                l_above,
+                                gauss_mid,
+                                x,
+                                y,
+                                config,
+                                oct,
+                                si as i32,
+                                k,
+                                &mut keypoints,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -313,6 +372,10 @@ pub fn extract_sift(
         }
     }
 
+    if config.affine && config.multi_anisotropy {
+        merge_multi_anisotropy(image, config, &mut keypoints);
+    }
+
     if keypoints.len() > config.max_keypoints {
         keypoints.sort_by(|a, b| b.contrast.total_cmp(&a.contrast));
         keypoints.truncate(config.max_keypoints);
@@ -322,6 +385,220 @@ pub fn extract_sift(
         .map(|kp| describe(image, kp))
         .collect::<Vec<_>>();
     Ok((keypoints, descriptors))
+}
+
+fn hessian_det_layer(g: &Layer) -> Layer {
+    let mut data = vec![0.0; g.data.len()];
+    for y in 1..g.height as i64 - 1 {
+        for x in 1..g.width as i64 - 1 {
+            let lxx = g.get(x + 1, y) + g.get(x - 1, y) - 2.0 * g.get(x, y);
+            let lyy = g.get(x, y + 1) + g.get(x, y - 1) - 2.0 * g.get(x, y);
+            let lxy = (g.get(x + 1, y + 1) - g.get(x + 1, y - 1) - g.get(x - 1, y + 1)
+                + g.get(x - 1, y - 1))
+                / 4.0;
+            data[y as usize * g.width + x as usize] = (lxx * lyy - lxy * lxy).abs();
+        }
+    }
+    Layer {
+        width: g.width,
+        height: g.height,
+        data,
+    }
+}
+
+fn laplacian_layer(g: &Layer) -> Layer {
+    let mut data = vec![0.0; g.data.len()];
+    for y in 1..g.height as i64 - 1 {
+        for x in 1..g.width as i64 - 1 {
+            let lxx = g.get(x + 1, y) + g.get(x - 1, y) - 2.0 * g.get(x, y);
+            let lyy = g.get(x, y + 1) + g.get(x, y - 1) - 2.0 * g.get(x, y);
+            data[y as usize * g.width + x as usize] = (lxx + lyy).abs();
+        }
+    }
+    Layer {
+        width: g.width,
+        height: g.height,
+        data,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_hessian_laplace(
+    image: &GrayImage<'_>,
+    _h_below: &Layer,
+    h_mid: &Layer,
+    _h_above: &Layer,
+    l_below: &Layer,
+    l_mid: &Layer,
+    l_above: &Layer,
+    gauss_mid: &Layer,
+    x: i64,
+    y: i64,
+    config: &SiftConfig,
+    octave: usize,
+    interval: i32,
+    k: f64,
+    out: &mut Vec<SiftKeypoint>,
+) {
+    let value = h_mid.get(x, y);
+    // det(H) on unit-scale imagery is typically 1e-6..1e-2; scale the
+    // shared contrast_threshold down so the same knob remains usable.
+    if value < config.contrast_threshold * 1e-4 {
+        return;
+    }
+    // Spatial maximum of |det H|.
+    for dy in -1i64..=1 {
+        for dx in -1i64..=1 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            if h_mid.get(x + dx, y + dy) >= value {
+                return;
+            }
+        }
+    }
+    // Laplacian scale selection (Hessian-Laplace): |∇²L| peaks here.
+    let lap = l_mid.get(x, y);
+    if lap + 1e-15 < l_below.get(x, y) || lap + 1e-15 < l_above.get(x, y) {
+        return;
+    }
+    assign_orientations(
+        image, gauss_mid, x, y, interval, k, value, octave, config, out,
+    );
+}
+
+/// Detect on a few anisotropically resampled views and merge under a strict
+/// NMS + budget so self-consistency stays intact.
+fn merge_multi_anisotropy(
+    image: &GrayImage<'_>,
+    config: &SiftConfig,
+    keypoints: &mut Vec<SiftKeypoint>,
+) {
+    let budget = (keypoints.len() / 3).max(8).min(config.max_keypoints / 4);
+    let mut candidates: Vec<SiftKeypoint> = Vec::new();
+    // Covers ~×1.3–×1.7 foreshortening (courtyard façades / stretch harness).
+    for &sx in &[0.6f64, 0.75, 1.33, 1.67] {
+        let (warped_px, ww, wh) = warp_anisotropic_x(image, sx);
+        let Ok(warped) = GrayImage::new(ww, wh, &warped_px) else {
+            continue;
+        };
+        let sub = SiftConfig {
+            affine: false,
+            multi_anisotropy: false,
+            max_keypoints: config.max_keypoints,
+            ..config.clone()
+        };
+        let Ok((w_kps, _)) = extract_sift(&warped, &sub) else {
+            continue;
+        };
+        for wk in w_kps {
+            let ox = wk.x / sx;
+            let oy = wk.y;
+            if ox < 2.0
+                || oy < 2.0
+                || ox >= image.width as f64 - 2.0
+                || oy >= image.height as f64 - 2.0
+            {
+                continue;
+            }
+            let covered = keypoints.iter().chain(candidates.iter()).any(|e| {
+                let dx = e.x - ox;
+                let dy = e.y - oy;
+                dx * dx + dy * dy < (1.0 * e.sigma.max(wk.sigma)).powi(2)
+            });
+            if covered {
+                continue;
+            }
+            let shape = estimate_affine_shape(image, ox, oy, wk.sigma);
+            let (rx, ry) = refine_location_affine(image, ox, oy, wk.sigma, shape);
+            // Strongest orientation(s) in the affine-normalized frame.
+            let orients = {
+                let canon_sigma = wk.sigma.max(1.0);
+                let canon_radius = (canon_sigma * 3.0).ceil().max(2.0) as i64;
+                let norm_sq = 2.0 * canon_sigma * canon_sigma;
+                let mut hist = [0.0f64; 36];
+                for dy in -canon_radius..=canon_radius {
+                    for dx in -canon_radius..=canon_radius {
+                        let xi = dx as f64;
+                        let yi = dy as f64;
+                        let (wx, wy) = mat2_apply(shape, (xi, yi));
+                        let px = rx + wx;
+                        let py = ry + wy;
+                        let ex = (shape[0][0], shape[1][0]);
+                        let ey = (shape[0][1], shape[1][1]);
+                        let gx = 0.5
+                            * (sample_bilinear(image, px + ex.0, py + ex.1)
+                                - sample_bilinear(image, px - ex.0, py - ex.1));
+                        let gy = 0.5
+                            * (sample_bilinear(image, px + ey.0, py + ey.1)
+                                - sample_bilinear(image, px - ey.0, py - ey.1));
+                        let magnitude = (gx * gx + gy * gy).sqrt();
+                        if magnitude <= f64::EPSILON {
+                            continue;
+                        }
+                        let weight = (-(xi * xi + yi * yi) / norm_sq).exp();
+                        let angle = gy.atan2(gx).to_degrees().rem_euclid(360.0);
+                        hist[((angle / 10.0) as usize).min(35)] += magnitude * weight;
+                    }
+                }
+                let max_hist = hist.iter().cloned().fold(f64::MIN, f64::max);
+                if max_hist <= 0.0 {
+                    Vec::new()
+                } else {
+                    let mut o = Vec::new();
+                    for bin in 0..36 {
+                        if hist[bin] < 0.8 * max_hist {
+                            continue;
+                        }
+                        let prev = hist[(bin + 35) % 36];
+                        let next = hist[(bin + 1) % 36];
+                        let denom = 2.0 * (hist[bin] * 2.0 - prev - next);
+                        let delta = if denom.abs() > f64::EPSILON {
+                            ((prev - next) / denom).clamp(-0.5, 0.5)
+                        } else {
+                            0.0
+                        };
+                        o.push(((bin as f64 + delta) * 10.0).rem_euclid(360.0).to_radians());
+                    }
+                    o
+                }
+            };
+            for ori in orients.into_iter().take(1) {
+                candidates.push(SiftKeypoint {
+                    x: rx,
+                    y: ry,
+                    sigma: wk.sigma,
+                    orientation: ori,
+                    affine_shape: Some(shape),
+                    contrast: wk.contrast,
+                });
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.contrast.total_cmp(&a.contrast));
+    for c in candidates.into_iter().take(budget) {
+        let covered = keypoints.iter().any(|e| {
+            let dx = e.x - c.x;
+            let dy = e.y - c.y;
+            dx * dx + dy * dy < (1.0 * e.sigma.max(c.sigma)).powi(2)
+        });
+        if !covered {
+            keypoints.push(c);
+        }
+    }
+}
+
+fn warp_anisotropic_x(image: &GrayImage<'_>, sx: f64) -> (Vec<f32>, usize, usize) {
+    let ww = ((image.width as f64 * sx).round() as usize).max(1);
+    let wh = image.height;
+    let mut px = vec![0.0f32; ww * wh];
+    for y in 0..wh {
+        for x in 0..ww {
+            let sx_src = x as f64 / sx;
+            px[y * ww + x] = sample_bilinear(image, sx_src, y as f64) as f32;
+        }
+    }
+    (px, ww, wh)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1049,6 +1326,55 @@ mod affine_tests {
         );
     }
 
+    #[test]
+    fn hessian_laplace_detects_blobs() {
+        let (w, h) = (96usize, 96usize);
+        let px = dot_texture(w, h, 42);
+        let image = GrayImage::new(w, h, &px).unwrap();
+        let config = SiftConfig {
+            octaves: 2,
+            detector: SiftDetector::HessianLaplace,
+            max_keypoints: 64,
+            ..SiftConfig::default()
+        };
+        let (kps, descs) = extract_sift(&image, &config).unwrap();
+        assert!(!kps.is_empty(), "Hessian-Laplace must find blobs");
+        assert_eq!(kps.len(), descs.len());
+        assert!(descs.iter().all(|d| d.len() == 128));
+    }
+
+    #[test]
+    fn multi_anisotropy_adds_bounded_extras() {
+        let (w, h) = (96usize, 96usize);
+        let px = dot_texture(w, h, 7);
+        let image = GrayImage::new(w, h, &px).unwrap();
+        let base = SiftConfig {
+            octaves: 2,
+            detector: SiftDetector::HessianLaplace,
+            affine: true,
+            multi_anisotropy: false,
+            max_keypoints: 128,
+            ..SiftConfig::default()
+        };
+        let multi = SiftConfig {
+            multi_anisotropy: true,
+            ..base.clone()
+        };
+        let (k_base, _) = extract_sift(&image, &base).unwrap();
+        let (k_multi, _) = extract_sift(&image, &multi).unwrap();
+        assert!(
+            k_multi.len() >= k_base.len(),
+            "multi-anisotropy should not drop detections"
+        );
+        // Budget caps extras well below a flood.
+        assert!(
+            k_multi.len() <= k_base.len() + k_base.len() / 2 + 16,
+            "extras must stay budgeted: base={} multi={}",
+            k_base.len(),
+            k_multi.len()
+        );
+    }
+
     /// Progress note (2026-08-27): VLFeat ordering (shape → orientation on
     /// normalized gradients → describe) plus mild location refine lifts
     /// cross-stretch mutual matches from plain=1 to affine=3 at ratio 0.85,
@@ -1056,7 +1382,7 @@ mod affine_tests {
     /// the binding constraint. Kept ignored as the harness for a fuller
     /// multi-anisotropy detector.
     #[test]
-    #[ignore = "detector repeatability across affine warps still below bar (affine=3 vs plain=1)"]
+    #[ignore = "detector repeatability across affine warps still below bar"]
     fn affine_descriptors_survive_anisotropic_stretch_better_than_isotropic() {
         let (w, h) = (96usize, 96usize);
         let base_px = dot_texture(w, h, 99);
@@ -1078,11 +1404,14 @@ mod affine_tests {
 
         let config_affine = SiftConfig {
             octaves: 2,
+            detector: SiftDetector::HessianLaplace,
             affine: true,
+            multi_anisotropy: true,
             ..SiftConfig::default()
         };
         let config_plain = SiftConfig {
             octaves: 2,
+            detector: SiftDetector::Dog,
             affine: false,
             ..SiftConfig::default()
         };
@@ -1096,31 +1425,12 @@ mod affine_tests {
         let matches_plain = mutual_matches(&d_c, &d_d, 0.85);
 
         eprintln!(
-            "affine matches: {} (plain: {}); kps a={} b={}",
+            "affine+hess+multi matches: {} (plain: {}); kps a={} b={}",
             matches_affine.len(),
             matches_plain.len(),
             kp_a.len(),
             kp_b.len()
         );
-        // Shape diagnostics: singular-value ratio of each keypoint's A.
-        for (i, k) in kp_a.iter().enumerate().take(6) {
-            if let Some(a) = k.affine_shape {
-                let s00 = a[0][0] * a[0][0] + a[1][0] * a[1][0];
-                let s11 = a[0][1] * a[0][1] + a[1][1] * a[1][1];
-                eprintln!(
-                    "kp{i} at ({:.1},{:.1}) sigma={:.2} A=[{:.2},{:.2};{:.2},{:.2}] sv^2=({:.2},{:.2})",
-                    k.x, k.y, k.sigma, a[0][0], a[0][1], a[1][0], a[1][1], s00.max(s11).sqrt(), s00.min(s11).sqrt()
-                );
-            }
-        }
-        // Ratio-sensitivity sweep.
-        for r in [0.95f32, 0.9] {
-            eprintln!(
-                "ratio {r}: affine={} plain={}",
-                mutual_matches(&d_a, &d_b, r).len(),
-                mutual_matches(&d_c, &d_d, r).len()
-            );
-        }
         assert!(
             matches_affine.len() > matches_plain.len(),
             "affine adaptation must improve cross-stretch matching \
@@ -1128,7 +1438,6 @@ mod affine_tests {
             matches_affine.len(),
             matches_plain.len()
         );
-        // And at least a handful of true correspondences must survive.
         assert!(
             matches_affine.len() >= 4,
             "too few affine-invariant correspondences: {}",
