@@ -88,6 +88,21 @@ pub struct SiftConfig {
     /// Number of domain sizes pooled when [`Self::domain_size_pooling`] is on
     /// (COLMAP default `10`).
     pub dsp_num_scales: usize,
+    /// Descriptor normalization. [`SiftNormalization::L2`] is Lowe's classic
+    /// clamp-and-renormalize; [`SiftNormalization::L1Root`] is COLMAP's default
+    /// (L1-normalize then element-wise sqrt — RootSIFT / Arandjelović &
+    /// Zisserman). Off-path default stays L2 for byte-identical legacy.
+    pub normalization: SiftNormalization,
+}
+
+/// How the 128-D SIFT histogram is normalized after pooling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SiftNormalization {
+    /// Lowe §6.1: L2 → clip at 0.2 → L2 again.
+    #[default]
+    L2,
+    /// COLMAP `L1_ROOT`: L1-normalize, then √ per bin (Hellinger / RootSIFT).
+    L1Root,
 }
 
 impl Default for SiftConfig {
@@ -107,6 +122,7 @@ impl Default for SiftConfig {
             dsp_min_scale: 1.0 / 6.0,
             dsp_max_scale: 4.0 / 3.0,
             dsp_num_scales: 10,
+            normalization: SiftNormalization::L2,
         }
     }
 }
@@ -1036,7 +1052,7 @@ fn describe(image: &GrayImage<'_>, kp: &SiftKeypoint, config: &SiftConfig) -> Ve
     } else {
         acc = describe_raw(image, kp, 1.0);
     }
-    normalize_sift_descriptor(&mut acc)
+    normalize_sift_descriptor(&mut acc, config.normalization)
 }
 
 /// Unnormalized SIFT histogram at `scale_factor × kp.sigma` domain size.
@@ -1103,21 +1119,39 @@ fn describe_raw(image: &GrayImage<'_>, kp: &SiftKeypoint, scale_factor: f64) -> 
     desc
 }
 
-fn normalize_sift_descriptor(desc: &mut [f64]) -> Vec<f32> {
-    // L2 normalization with the clamp-and-renormalize step (Lowe §6.1).
-    let norm: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if norm > f64::EPSILON {
-        for v in desc.iter_mut() {
-            *v /= norm;
+fn normalize_sift_descriptor(desc: &mut [f64], mode: SiftNormalization) -> Vec<f32> {
+    match mode {
+        SiftNormalization::L2 => {
+            let norm: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm > f64::EPSILON {
+                for v in desc.iter_mut() {
+                    *v /= norm;
+                }
+            }
+            for v in desc.iter_mut() {
+                *v = v.min(0.2);
+            }
+            let clipped: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if clipped > f64::EPSILON {
+                for v in desc.iter_mut() {
+                    *v /= clipped;
+                }
+            }
         }
-    }
-    for v in desc.iter_mut() {
-        *v = v.min(0.2);
-    }
-    let clipped: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if clipped > f64::EPSILON {
-        for v in desc.iter_mut() {
-            *v /= clipped;
+        SiftNormalization::L1Root => {
+            // COLMAP L1_ROOT / RootSIFT: L1 → √ → (optional) L2 for unit length.
+            let l1: f64 = desc.iter().map(|v| v.abs()).sum();
+            if l1 > f64::EPSILON {
+                for v in desc.iter_mut() {
+                    *v = (*v / l1).max(0.0).sqrt();
+                }
+            }
+            let l2: f64 = desc.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if l2 > f64::EPSILON {
+                for v in desc.iter_mut() {
+                    *v /= l2;
+                }
+            }
         }
     }
     desc.iter().map(|&v| v as f32).collect()
@@ -1253,9 +1287,33 @@ mod tests {
             let norm: f32 = d.iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!((norm - 1.0).abs() < 1e-3, "DSP descriptor must be L2-unit");
         }
-        // At least one descriptor should move when domain sizes are pooled.
         let changed = d_p.iter().zip(d_d.iter()).any(|(a, b)| a != b);
         assert!(changed, "DSP pooling should alter at least one descriptor");
+    }
+
+    #[test]
+    fn l1_root_normalization_is_unit_and_differs_from_l2() {
+        let (w, h) = (64usize, 64usize);
+        let pixels = blob_image(w, h, (32.0, 30.0), 4.0);
+        let image = GrayImage::new(w, h, &pixels).unwrap();
+        let l2 = SiftConfig {
+            octaves: 2,
+            normalization: SiftNormalization::L2,
+            ..SiftConfig::default()
+        };
+        let l1 = SiftConfig {
+            normalization: SiftNormalization::L1Root,
+            ..l2.clone()
+        };
+        let (kp_a, d_a) = extract_sift(&image, &l2).unwrap();
+        let (kp_b, d_b) = extract_sift(&image, &l1).unwrap();
+        assert_eq!(kp_a.len(), kp_b.len());
+        assert!(d_a.iter().zip(d_b.iter()).any(|(a, b)| a != b));
+        for d in &d_b {
+            let norm: f32 = d.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3);
+            assert!(d.iter().all(|&v| v >= 0.0));
+        }
     }
 }
 

@@ -438,6 +438,8 @@ struct Args {
     sift_dsp: bool,
     /// DSP scale count when `--sift-dsp` is on (COLMAP default 10).
     sift_dsp_num_scales: usize,
+    /// COLMAP-style L1-root (RootSIFT) descriptor normalization.
+    sift_l1_root: bool,
     out_colmap: PathBuf,
     camera: Camera,
     vocab_size: usize,
@@ -609,6 +611,7 @@ fn parse_args() -> Result<Args, String> {
     let mut sift_multi_anisotropy = false;
     let mut sift_dsp = false;
     let mut sift_dsp_num_scales = 10usize;
+    let mut sift_l1_root = false;
 
     let mut a: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -636,6 +639,7 @@ fn parse_args() -> Result<Args, String> {
             "--sift-dsp-num-scales" => {
                 sift_dsp_num_scales = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
             }
+            "--sift-l1-root" => sift_l1_root = true,
             "--sift-detector" => sift_detector = a.remove(i + 1),
             "--feature-suffix" => feature_suffix = a.remove(i + 1),
             "--image-suffix" => image_suffix = a.remove(i + 1),
@@ -792,6 +796,7 @@ fn parse_args() -> Result<Args, String> {
         sift_multi_anisotropy,
         sift_dsp,
         sift_dsp_num_scales,
+        sift_l1_root,
     })
 }
 
@@ -817,8 +822,11 @@ fn extract_sift_for_image(
     multi_anisotropy: bool,
     dsp: bool,
     dsp_num_scales: usize,
+    l1_root: bool,
 ) -> Result<FeatureSet, Box<dyn std::error::Error>> {
-    use visloc_rs::vision::features::sift::{extract_sift, GrayImage, SiftConfig, SiftDetector};
+    use visloc_rs::vision::features::sift::{
+        extract_sift, GrayImage, SiftConfig, SiftDetector, SiftNormalization,
+    };
     let grayscale = visloc_io::images::read_common_image(path)?;
     let image = GrayImage::new(grayscale.width(), grayscale.height(), grayscale.pixels())?;
     let detector = match detector {
@@ -835,6 +843,11 @@ fn extract_sift_for_image(
         multi_anisotropy: multi_anisotropy && affine,
         domain_size_pooling: dsp,
         dsp_num_scales: if dsp { dsp_num_scales.max(1) } else { 10 },
+        normalization: if l1_root {
+            SiftNormalization::L1Root
+        } else {
+            SiftNormalization::L2
+        },
         ..SiftConfig::default()
     };
     let (keypoints, descriptors) = extract_sift(&image, &config)?;
@@ -854,6 +867,7 @@ fn load_images_with_sift(
     _multi_anisotropy: bool,
     _dsp: bool,
     _dsp_num_scales: usize,
+    _l1_root: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     Err("--feature-extractor sift requires building with --features image-io".into())
 }
@@ -868,6 +882,7 @@ fn load_images_with_sift(
     multi_anisotropy: bool,
     dsp: bool,
     dsp_num_scales: usize,
+    l1_root: bool,
 ) -> Result<(Vec<FeatureSet>, Vec<String>), Box<dyn std::error::Error>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -887,7 +902,7 @@ fn load_images_with_sift(
     paths.sort();
     let total = paths.len();
     eprintln!(
-        "sift: extracting {total} image(s) (dsp={dsp}, dsp_scales={})",
+        "sift: extracting {total} image(s) (dsp={dsp}, dsp_scales={}, l1_root={l1_root})",
         if dsp { dsp_num_scales } else { 0 }
     );
     let results: Result<Vec<_>, Box<dyn std::error::Error + Send>> = paths
@@ -903,6 +918,7 @@ fn load_images_with_sift(
                 multi_anisotropy,
                 dsp,
                 dsp_num_scales,
+                l1_root,
             )
             .map_err(|e| -> Box<dyn std::error::Error + Send> {
                 Box::new(std::io::Error::other(e.to_string()))
@@ -1802,6 +1818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.sift_multi_anisotropy,
                 args.sift_dsp,
                 args.sift_dsp_num_scales,
+                args.sift_l1_root,
             )?
         }
     };
