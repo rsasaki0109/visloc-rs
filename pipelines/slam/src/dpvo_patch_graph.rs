@@ -1460,10 +1460,7 @@ mod tests {
             .iter()
             .position(|frame| frame.arrival_index == parent_arrival)
             .unwrap();
-        let corrected_parent = SE3::new(
-            UnitQuaternion::identity(),
-            Vector3::new(10.0, 2.0, -1.0),
-        );
+        let corrected_parent = SE3::new(UnitQuaternion::identity(), Vector3::new(10.0, 2.0, -1.0));
         graph.frames_mut()[parent_index].pose = corrected_parent.clone();
         let reconstructed = graph
             .reconstruct_pose(folded_arrival, &|arrival| {
@@ -1481,10 +1478,7 @@ mod tests {
             "fold-time snapshot must not freeze ordinary trajectory export"
         );
 
-        let override_pose = SE3::new(
-            UnitQuaternion::identity(),
-            Vector3::new(42.0, 0.0, 0.0),
-        );
+        let override_pose = SE3::new(UnitQuaternion::identity(), Vector3::new(42.0, 0.0, 0.0));
         graph.set_retained_pose_override(folded_arrival, override_pose.clone());
         assert_eq!(
             graph.reconstruct_pose(folded_arrival, &|_| None),

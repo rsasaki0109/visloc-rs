@@ -139,7 +139,10 @@ pub fn write_npy_f32(
 /// deliberately does not).
 fn encode_npy_f32(shape: &[usize], data: &[f32]) -> Result<Vec<u8>, NpzError> {
     let expected_elements: usize =
-        shape.iter().product::<usize>().max(if shape.is_empty() { 1 } else { 0 });
+        shape
+            .iter()
+            .product::<usize>()
+            .max(if shape.is_empty() { 1 } else { 0 });
     if data.len() != expected_elements {
         return Err(NpzError::MalformedNpy(format!(
             "shape {shape:?} implies {expected_elements} elements, got {} data values",
@@ -158,8 +161,7 @@ fn encode_npy_f32(shape: &[usize], data: &[f32]) -> Result<Vec<u8>, NpzError> {
                 .join(", ")
         ),
     };
-    let header_dict =
-        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
+    let header_dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
     // numpy pads the header with spaces + a trailing '\n' so
     // (magic + version + header_len_field + header) is a multiple of 64
     // bytes; not load-bearing for numpy's own reader (it only trusts the

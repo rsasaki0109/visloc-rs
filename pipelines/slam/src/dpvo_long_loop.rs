@@ -1374,8 +1374,8 @@ impl DpvoLongLoopIndex {
                     // space, while still broad enough for real SP matches.
                     let mut options = TwoViewGeometryOptions::for_camera(&camera, 1.0);
                     options.min_num_inliers = self.config.stage2_min_inliers;
-                    let report = TwoViewGeometryVerifier::new(options)
-                        .classify(&correspondences, &camera);
+                    let report =
+                        TwoViewGeometryVerifier::new(options).classify(&correspondences, &camera);
                     outcome.stage2_model = match report.config {
                         ConfigurationType::Undefined => "undefined",
                         ConfigurationType::Degenerate => "degenerate",
@@ -1399,9 +1399,8 @@ impl DpvoLongLoopIndex {
                         let h_rotation = UnitQuaternion::from_rotation_matrix(
                             &Rotation3::from_matrix_unchecked(rotation),
                         );
-                        outcome.stage2_h_rotation_disagreement_deg = Some(
-                            h_rotation.angle_to(&relative_pose.rotation).to_degrees(),
-                        );
+                        outcome.stage2_h_rotation_disagreement_deg =
+                            Some(h_rotation.angle_to(&relative_pose.rotation).to_degrees());
                     }
                 }
                 let stage2_result =
@@ -1524,10 +1523,7 @@ impl DpvoLongLoopIndex {
                         ..PnPRansac::default()
                     };
                     if let Some(report) = pnp.estimate(&pnp_correspondences, &camera) {
-                        let pnp_relative = report
-                            .pose
-                            .world_to_camera
-                            .compose(&old_pose.inverse());
+                        let pnp_relative = report.pose.world_to_camera.compose(&old_pose.inverse());
                         outcome.stage2_pnp_inliers = Some(report.inliers.len());
                         outcome.stage2_pnp_mean_reprojection_error =
                             Some(report.mean_reprojection_error);
@@ -1704,15 +1700,13 @@ impl DpvoLongLoopIndex {
                 stage2_e_rotation_wxyz: outcome.stage2_e_rotation_wxyz,
                 stage2_model: outcome.stage2_model,
                 stage2_h_inliers: outcome.stage2_h_inliers,
-                stage2_h_rotation_disagreement_deg: outcome
-                    .stage2_h_rotation_disagreement_deg,
+                stage2_h_rotation_disagreement_deg: outcome.stage2_h_rotation_disagreement_deg,
                 stage2_diagnostic_umeyama_scale: outcome.stage2_diagnostic_umeyama_scale,
                 stage2_diagnostic_umeyama_inliers: outcome.stage2_diagnostic_umeyama_inliers,
                 stage2_umeyama_vs_e_rotation_deg: outcome.stage2_umeyama_vs_e_rotation_deg,
                 stage2_pnp_correspondences: outcome.stage2_pnp_correspondences,
                 stage2_pnp_inliers: outcome.stage2_pnp_inliers,
-                stage2_pnp_mean_reprojection_error: outcome
-                    .stage2_pnp_mean_reprojection_error,
+                stage2_pnp_mean_reprojection_error: outcome.stage2_pnp_mean_reprojection_error,
                 stage2_pnp_vs_e_rotation_deg: outcome.stage2_pnp_vs_e_rotation_deg,
                 stage2_pnp_scale_ratio: outcome.stage2_pnp_scale_ratio,
                 stage_reached: outcome.stage_reached,
@@ -2772,8 +2766,16 @@ mod tests {
     fn mean_pool_signature_ignores_descriptor_order() {
         // The mean is order-independent — a basic sanity check that this is
         // really a plain arithmetic mean, not something ordering-sensitive.
-        let a = mean_pool(&[vec![1.0f32, 2.0, 3.0], vec![3.0, 2.0, 1.0], vec![0.0, 0.0, 5.0]]);
-        let b = mean_pool(&[vec![3.0f32, 2.0, 1.0], vec![0.0, 0.0, 5.0], vec![1.0, 2.0, 3.0]]);
+        let a = mean_pool(&[
+            vec![1.0f32, 2.0, 3.0],
+            vec![3.0, 2.0, 1.0],
+            vec![0.0, 0.0, 5.0],
+        ]);
+        let b = mean_pool(&[
+            vec![3.0f32, 2.0, 1.0],
+            vec![0.0, 0.0, 5.0],
+            vec![1.0, 2.0, 3.0],
+        ]);
         assert_eq!(a, b);
     }
 
@@ -3146,8 +3148,15 @@ mod tests {
                 None
             }
         };
-        let result =
-            index.find_and_verify_long_range_loop(300, &pose, &intrinsics, &[], 188.0, 120.0, resolve_old);
+        let result = index.find_and_verify_long_range_loop(
+            300,
+            &pose,
+            &intrinsics,
+            &[],
+            188.0,
+            120.0,
+            resolve_old,
+        );
         assert!(
             result.is_none(),
             "no owned patches on either side => bridging must fail => no acceptance"
@@ -3189,7 +3198,9 @@ mod tests {
         let intrinsics = intr();
         let pose = SE3::identity();
         let result =
-            index.find_and_verify_long_range_loop(4, &pose, &intrinsics, &[], 188.0, 120.0, |_| None);
+            index.find_and_verify_long_range_loop(4, &pose, &intrinsics, &[], 188.0, 120.0, |_| {
+                None
+            });
         assert!(result.is_none());
         // A3 stage-1 (`docs/visual_slam_sequential_sfm_plan.md`, "densify
         // query cadence" slice): this IS the zero-candidate case — the
@@ -3316,16 +3327,15 @@ mod tests {
                 index.due(arrival),
                 "query_frequency=1 must make every arrival due, arrival={arrival}"
             );
-            let result =
-                index.find_and_verify_long_range_loop(
-                    arrival,
-                    &pose,
-                    &intrinsics,
-                    &[],
-                    188.0,
-                    120.0,
-                    |_| None,
-                );
+            let result = index.find_and_verify_long_range_loop(
+                arrival,
+                &pose,
+                &intrinsics,
+                &[],
+                188.0,
+                120.0,
+                |_| None,
+            );
             assert!(
                 result.is_none(),
                 "min_temporal_gap=1000 => no candidate ever clears the gap"
@@ -3355,7 +3365,10 @@ mod tests {
         };
         let mut index = DpvoLongLoopIndex::new(cfg);
         index.ingest_frame(7, vec![], frame_descriptors(7, 20, 16));
-        assert!(index.due(7), "first indexed arrival is immediately eligible");
+        assert!(
+            index.due(7),
+            "first indexed arrival is immediately eligible"
+        );
 
         assert!(
             !index.due(47),
@@ -3399,7 +3412,12 @@ mod tests {
         intr: &DpvoIntrinsics,
         world_points: &[Point3<f64>],
         alpha: f64,
-    ) -> (Vec<Point2<f64>>, Vec<DpvoPatch>, Vec<Point2<f64>>, Vec<DpvoPatch>) {
+    ) -> (
+        Vec<Point2<f64>>,
+        Vec<DpvoPatch>,
+        Vec<Point2<f64>>,
+        Vec<DpvoPatch>,
+    ) {
         let c_new = new_pose.inverse().transform_point(&Point3::origin());
         let mut old_keypoints = Vec::with_capacity(world_points.len());
         let mut old_patches = Vec::with_capacity(world_points.len());
@@ -3568,7 +3586,13 @@ mod tests {
         let world_points = spread_world_points(15);
         let alpha = 2.0_f64;
         let (old_keypoints, old_patches, new_keypoints, new_patches) =
-            rigid_2d2d_with_pure_scale_bridge(&old_pose, &new_pose, &intrinsics, &world_points, alpha);
+            rigid_2d2d_with_pure_scale_bridge(
+                &old_pose,
+                &new_pose,
+                &intrinsics,
+                &world_points,
+                alpha,
+            );
 
         let cfg = DpvoLongLoopConfig {
             vocab_bootstrap_frames: 3,
@@ -3796,7 +3820,13 @@ mod tests {
         let world_points = spread_world_points(15);
         let alpha = 2.0_f64; // pure-scale "drift" — see the helper's own doc.
         let (old_keypoints, old_patches, new_keypoints, new_patches) =
-            rigid_2d2d_with_pure_scale_bridge(&old_pose, &new_pose, &intrinsics, &world_points, alpha);
+            rigid_2d2d_with_pure_scale_bridge(
+                &old_pose,
+                &new_pose,
+                &intrinsics,
+                &world_points,
+                alpha,
+            );
 
         let cfg = DpvoLongLoopConfig {
             vocab_bootstrap_frames: 3,
@@ -3882,9 +3912,9 @@ mod tests {
             "the E fit itself should closely match the genuine ~15-degree trusted rotation, \
              got {e_rot_vs_trusted}"
         );
-        let umeyama_vs_trusted = entry
-            .rotation_disagreement_deg
-            .expect("a bridge+RANSAC-passing candidate must log its own Umeyama-vs-trusted disagreement");
+        let umeyama_vs_trusted = entry.rotation_disagreement_deg.expect(
+            "a bridge+RANSAC-passing candidate must log its own Umeyama-vs-trusted disagreement",
+        );
         assert!(
             (5.0..20.0).contains(&umeyama_vs_trusted),
             "expected Umeyama (~0 deg) vs trusted (~15 deg) disagreement inside the OLD gate's \

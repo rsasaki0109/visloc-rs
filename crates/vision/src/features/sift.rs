@@ -287,7 +287,17 @@ pub fn extract_sift(
             for y in 1..mid.height as i64 - 1 {
                 for x in 1..mid.width as i64 - 1 {
                     detect_extremum(
-                        image, below, mid, above, x, y, config, oct, di as i32, k, &mut keypoints,
+                        image,
+                        below,
+                        mid,
+                        above,
+                        x,
+                        y,
+                        config,
+                        oct,
+                        di as i32,
+                        k,
+                        &mut keypoints,
                     );
                 }
             }

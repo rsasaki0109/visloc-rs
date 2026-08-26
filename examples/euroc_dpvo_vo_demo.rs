@@ -916,8 +916,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         return Err("--ll-2d2d-low-baseline-diagnostic requires --ll-2d2d-geometry".into());
     }
     if args.long_loop
-        && (args.ll_index_frequency == 0
-            || args.ll_query_frequency % args.ll_index_frequency != 0)
+        && (args.ll_index_frequency == 0 || args.ll_query_frequency % args.ll_index_frequency != 0)
     {
         return Err(
             "--ll-index-frequency must be positive and divide --ll-query-frequency so every query frame is indexed"
@@ -2779,9 +2778,8 @@ mod tests {
             ((x * 17 + y * 29 + x * y) % 256) as u8
         });
         let intrinsics = [25.0, 24.0, 15.5, 11.5];
-        let distortion =
-            RadialTangential::from_euroc_coefficients(&[-0.22, 0.07, 0.001, -0.0005])
-                .expect("four EuRoC coefficients");
+        let distortion = RadialTangential::from_euroc_coefficients(&[-0.22, 0.07, 0.001, -0.0005])
+            .expect("four EuRoC coefficients");
         let reference = undistort_image_reference(&source, intrinsics, &distortion);
         let remapped = UndistortMap::new(width, height, intrinsics, &distortion).apply(&source);
         assert_eq!(remapped, reference);
@@ -2790,13 +2788,8 @@ mod tests {
     #[test]
     fn identity_undistort_map_preserves_every_pixel() {
         let source = Array2::from_shape_fn((7, 9), |(y, x)| (y * 9 + x) as u8);
-        let remapped = UndistortMap::new(
-            9,
-            7,
-            [10.0, 10.0, 4.0, 3.0],
-            &RadialTangential::IDENTITY,
-        )
-        .apply(&source);
+        let remapped = UndistortMap::new(9, 7, [10.0, 10.0, 4.0, 3.0], &RadialTangential::IDENTITY)
+            .apply(&source);
         assert_eq!(remapped, source);
     }
 }

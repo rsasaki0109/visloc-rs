@@ -583,9 +583,7 @@ fn native_cuda_correlation_matches_frozen_fixture() {
     // scaled copy and compare every selected row against the CPU primitive.
     let target0_scaled = target0.mapv(|value| value * 0.5);
     let target1_scaled = target1.clone();
-    let indexed_targets: Vec<i32> = (0..anchor_shape[0])
-        .map(|edge| (edge % 2) as i32)
-        .collect();
+    let indexed_targets: Vec<i32> = (0..anchor_shape[0]).map(|edge| (edge % 2) as i32).collect();
     let (indexed, _) = runtime
         .run(
             anchor.view(),
@@ -721,9 +719,8 @@ fn native_cuda_correlation_matches_frozen_fixture() {
             for px in 0..3 {
                 for tap in 0..49 {
                     let assembled = ((tap * 3 + py) * 3 + px) * 2;
-                    stable_diff = stable_diff.max(
-                        (stable_second[(edge, assembled)] - expected[(0, py, px, tap)]).abs(),
-                    );
+                    stable_diff = stable_diff
+                        .max((stable_second[(edge, assembled)] - expected[(0, py, px, tap)]).abs());
                 }
             }
         }

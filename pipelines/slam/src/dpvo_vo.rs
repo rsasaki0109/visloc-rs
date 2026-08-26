@@ -3171,12 +3171,7 @@ impl DpvoOdometry {
                 message: "missing cached level1 HWC map on CPU correlation path".into(),
             })
         })?;
-        Ok(corr_pyramid(
-            anchor_gmap,
-            coords_grid_px,
-            level0,
-            level1,
-        ))
+        Ok(corr_pyramid(anchor_gmap, coords_grid_px, level0, level1))
     }
 
     /// `dpvo.py::motion_probe` (lines 240-255): reproject the *previous*
@@ -4487,25 +4482,31 @@ impl DpvoOdometry {
             let level0_frames: Result<Vec<&Array3<f32>>, _> = target_frames
                 .iter()
                 .map(|&frame| {
-                    self.frame_pyramids[frame].level0_chw.as_ref().ok_or_else(|| {
-                        DpvoOdometryError::NativeCudaCorrelation(
-                            NativeCudaCorrelationError::Shape(
-                                "missing cached level0 CHW map".into(),
-                            ),
-                        )
-                    })
+                    self.frame_pyramids[frame]
+                        .level0_chw
+                        .as_ref()
+                        .ok_or_else(|| {
+                            DpvoOdometryError::NativeCudaCorrelation(
+                                NativeCudaCorrelationError::Shape(
+                                    "missing cached level0 CHW map".into(),
+                                ),
+                            )
+                        })
                 })
                 .collect();
             let level1_frames: Result<Vec<&Array3<f32>>, _> = target_frames
                 .iter()
                 .map(|&frame| {
-                    self.frame_pyramids[frame].level1_chw.as_ref().ok_or_else(|| {
-                        DpvoOdometryError::NativeCudaCorrelation(
-                            NativeCudaCorrelationError::Shape(
-                                "missing cached level1 CHW map".into(),
-                            ),
-                        )
-                    })
+                    self.frame_pyramids[frame]
+                        .level1_chw
+                        .as_ref()
+                        .ok_or_else(|| {
+                            DpvoOdometryError::NativeCudaCorrelation(
+                                NativeCudaCorrelationError::Shape(
+                                    "missing cached level1 CHW map".into(),
+                                ),
+                            )
+                        })
                 })
                 .collect();
             let frame_ids: Vec<u64> = target_frames
