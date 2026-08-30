@@ -6,6 +6,4039 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Auto demo-default closure and snapshot compatibility (2026-08-31).** The
+  two SfM demos now omit `--next-image-policy` as `Auto`, while
+  `IncrementalSfmConfig::default()` remains historical `CorrespondenceCount`.
+  Auto compares Count whenever the Visibility candidate is incomplete, then
+  runs post-refinement only from a clean selected candidate and adopts it only
+  for a strict registered-image increase.  On the frozen no-flag caches,
+  South was **127/128 vs 123/128 → post 128/128**, **20,554/93,647**, 1.406 px,
+  0.73 cm; terrace was **12/23 vs 23/23**, selected Count with post skipped,
+  **3,595/10,119**, 1.574 px, 2.56 cm (avoiding the earlier 78.54 cm
+  recovery+post path); office was **17/26 vs 17/26 → post 18/26**,
+  **1,082/3,037**, 1.512 px, 0.45 cm; and courtyard remained **38/38** at
+  **0.5379 cm** with byte-identical champion camera/image/point hashes
+  (`76fc7583…`, `a14ac6b9…`, `d7b680e6…`).  Snapshot import without an explicit
+  policy still forces Count: the low-resolution replay matched its Count
+  control byte-for-byte (**20,649/68,514**, 0.342 px); explicit Auto remains
+  available and reproduces the visibility model (**20,086/66,894**, 0.281 px).
+  Terrace/office same-cache detached comparisons are now separated from their
+  unavailable historical feature-cache arms; EuRoC same-cache classification
+  uses one predeclared `max(5%, 5 mm)` metric delta plus exact pose/update
+  coverage.  Exact commands, run paths, hashes, and pass/inconclusive labels
+  are in [the final non-regression record](docs/nonregression_20260830.md) and
+  [the current handover](docs/codex_handover.md).
+
+- **Final closure audit (historical pre-final-Auto patch, 2026-08-31).** The
+  durable exhaustive courtyard
+  control is confirmed at **38/38, 0.5379 cm** (366/703 verified,
+  43,852/152,432 tracks/observations, 0.579 px) with identical first/repeat
+  model hashes; its 64-entry `SHA256SUMS` digest is
+  `12e91cd3a2e595625ef167d8cd8a2af6310d3ea3cd1e3b1a0c2f8264004fa96b` under
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/artifacts/colmap_highres_exhaustive_allpairs_20260830`.
+  The closure classification is explicit: South default Count is **fail**
+  against strict 128/128 (127/128; opt-in post reaches 128/128), terrace and
+  office are **inconclusive** against their historical 12.37/0.37 cm arms
+  because the archived feature bytes are unavailable, and EuRoC open/loop
+  pass the recorded controls while full/full2v/full2vh/full2vhi remain
+  **inconclusive** numerically because no same-cache tolerance was specified
+  (all retain 2,700/2,700 poses). EuRoC Auto is N/A because the loop runner
+  has no next-image policy. Linux `scripts/check.sh`, fmt, and diff checks
+  pass; the complete table, hashes, exact commands, and remaining caveats are
+  in [the current handover](docs/codex_handover.md).  This entry preserves the
+  pre-final-policy record; the first entry above is authoritative for the
+  current omitted-policy behavior.
+
+- **GT-free automatic next-image fallback (historical pre-final-Auto A/B,
+  2026-08-31).** Added the explicit
+  `--next-image-policy auto` mode to both SfM demos and to the incremental
+  library API. It runs the visibility-pyramid policy first, retries from the
+  same immutable inputs with correspondence-count ranking only when its
+  registered fraction is below the fixed 90% completeness threshold, and
+  selects lexicographically by registered cameras, valid observations, track
+  count, then lower finite mean reprojection (exact ties retain visibility).
+  Only small config values are cloned; feature and match storage remains
+  shared. On the cache-fixed A/B, Auto selected count for terrace
+  (**12/23 -> 23/23, 3,595 tracks / 10,119 observations, 1.574 px, 2.56 cm**)
+  and office (**17/26 for both; visibility 931/2,612 at 1.533 px versus
+  count 1,024/2,904 at 1.531 px, selected count, 0.43 cm**), and retained
+  visibility for South (**127/128, 20,313 / 92,682, 1.409 px, 0.74 cm**) and
+  exhaustive courtyard (**38/38, 43,852 / 152,432, 0.579 px, 0.5379 cm**).
+  The low-resolution verified-pair snapshot also selected visibility
+  (**38/38, 20,086 / 66,894, 0.281 px, 3.42 cm**) and reproduced its model
+  byte-for-byte; explicit count was **38/38, 20,649 / 68,514, 0.342 px,
+  8.78 cm** with different model hashes. Thus Auto is deterministic and
+  useful, but it is intentionally not the new default: changing the
+  snapshot's current Count-default bytes would violate compatibility, so
+  `NextImagePolicy::default()` and omitted CLI options remain Count. The 90%
+  guard can deliberately accept a complete-but-poor visibility candidate
+  without testing Count; the snapshot result (3.42 versus 8.78 cm) supports
+  visibility-first but does not establish global optimality. Observed Auto
+  overhead was negligible when Count was skipped (courtyard 1:28, 1.07 GB
+  peak RSS) and a full second mapper when it fell back (terrace 1:11, 252 MB;
+  office 0:49, 189 MB; South 3:28, 960 MB). Focused unit/CLI tests, release
+  check, formatting, and diff checks pass. Exact commands, logs, artifact
+  paths, hashes, and the deterministic snapshot repeat are in
+  [the cache-fixed A/B record](docs/nonregression_20260830.md).  Its omitted
+  policy was subsequently changed to Auto only after the final closure A/B
+  above; the library Count default and snapshot Count override remain.
+
+- **Unified Auto/recovery/post validation (historical explicit-stack A/B,
+  2026-08-31).** With
+  `--next-image-policy auto --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --pnp-max-iterations 100000 --min-pnp-inliers 8`, the frozen Legacy caches
+  produced terrace **23/23, 3,522 tracks / 9,790 observations, 1.559 px,
+  78.54 cm**, office **20/26, 1,210 / 3,325, 1.502 px, 0.53 cm**, and South
+  **128/128, 21,427 / 98,981, 1.379 px, 0.92 cm**. Courtyard's imported
+  full-verifier/per-image-calibration run retained **38/38, 43,852 / 152,432,
+  0.579 px, 0.54 cm** and matched the champion model hashes; terrace is a
+  clear accuracy non-regression failure, so Auto remains explicit and omitted
+  defaults are unchanged. Terrace/office/South and courtyard repeats were
+  byte-identical. The EuRoC exporter was subsequently completed with the
+  hardened helper: legacy PID 3686761 was stopped gracefully after frame 1848,
+  and disjoint atomic workers repaired `[1849,1966)`, `[1966,2083)`,
+  `[2083,2200)`, `[2200,2450)`, and `[2450,2700)`. The canonical manifest has
+  2,700 left/right feature files, 2,700 stereo files, and 2,699 temporal files
+  (10,799 total), with JSON SHA-256
+  `6c6f9f64551882bd5dafbe98719348879511c10cfeed280dcee25630db97ed38`.
+  Exact range hashes, validation, commands, and paths are in [the
+  non-regression record](docs/nonregression_20260830.md). The final
+  helper-hardening `scripts/check.sh` rerun exited 0 (Python 243 tests, eight
+  skipped); the focused exporter safety suite is 5/5.
+
+- **EuRoC MH_03 same-cache baseline/current ATE-RPE (2026-08-31).** The
+  detached `2a36d44` baseline and current worktree were run against the same
+  frozen 2,700-frame rectified SuperPoint/LightGlue cache. All six variants
+  retained 2,700/2,700 poses. ATE translation RMSE (SE3 / Sim3, metres) for
+  baseline → current was: open `2.384514/2.153919 → 2.401288/2.174040`, loop
+  `0.498364/0.487327 → 0.445577/0.439303`, full
+  `0.084135/0.083063 → 0.087830/0.084345`, full2v
+  `0.058594/0.050140 → 0.058698/0.054061`, full2vh
+  `0.063683/0.053853 → 0.063884/0.056473`, and full2vhi
+  `0.059021/0.050955 → 0.059811/0.053683`. Consecutive one-frame translation
+  RPE (SE3 / Sim3) was respectively `0.068109/0.061289 → 0.068052/0.061246`,
+  `0.069934/0.070975 → 0.070392/0.071137`,
+  `0.073060/0.072916 → 0.073224/0.072961`,
+  `0.071469/0.071164 → 0.071357/0.071129`,
+  `0.071463/0.071122 → 0.071362/0.071064`, and
+  `0.071377/0.071079 → 0.071241/0.070979`.  The benchmark logs/models are
+  retained under `/home/sasaki/euroc_mh03_official_20260830/runs/`; the
+  baseline/current binary hashes and exact command are documented in
+  `docs/nonregression_20260830.md`. This EuRoC loop-closure example has no
+  `NextImagePolicy`/`--next-image-policy` selector, so a separate current
+  “Auto” ATE/RPE run is not applicable; Auto remains evaluated by the ETH3D
+  incremental/SfM A/B. No registration regression was observed, but current
+  full2vhi Sim3 is 2.728 mm worse than baseline, so this is an evidence-only
+  same-cache non-regression record, not a claim of universal improvement. A
+  correctly configured current full2vhi repeat reproduced the `vo_poses.txt`
+  and `est.tum` hashes and all four metrics byte-for-byte; the repeat evidence
+  is retained in the non-regression record.
+
+- **Historical next-image ranking restoration A/B (2026-08-31).** The
+  default `NextImagePolicy` (including both demos when the option is omitted)
+  now uses the historical raw correspondence-count ranking restored
+  from the pre-`9c35f72` semantics; `--next-image-policy visibility` remains an
+  explicit opt-in. Targeted tests, release build, `cargo fmt --check`, and
+  `git diff --check` pass. On identical feature caches, terrace recovered
+  **23/23, 3,595 tracks / 10,119 observations, 1.574 px, 2.56 cm** and office
+  remained **17/26, 1,024 / 2,904, 1.531 px, 0.43 cm**. The same default count
+  policy produced South **123/128, 19,658 / 88,114, 1.411 px, 1.15 cm** versus
+  the current visibility result **127/128, 0.74 cm**, and the exhaustive
+  courtyard control fell from explicit-visibility **38/38, 43,852 / 152,432,
+  0.5379 cm** to **38/38, 42,352 / 142,379, 5.03 cm**. Thus the terrace
+  regression is fixed, but the requested cross-suite/accuracy non-regression
+  gates are not met by this unconditional default switch; no completion claim
+  is made. Full commands and artifacts are recorded in
+  [the cache-fixed A/B record](docs/nonregression_20260830.md).
+
+- **Cross-dataset non-regression follow-up (2026-08-30).** A durable external
+  venv at `/media/sasaki/aiueo1/visloc-rs/envs/nonregression_20260830` was
+  provisioned without changing system or repository manifests: Python 3.12.3,
+  CPU `torch 2.3.1+cpu`/`torchvision 0.18.1+cpu`, LightGlue commit
+  `eb42fee2d71449efb0aa5c10549752b5d75384d8`, `evo 1.31.1`, and current
+  `pip-freeze.txt` SHA-256
+  `dae41bf42ceedf9a214cd040d002f941d88f8dcc036d5ecd1dc637808dad8f9f`.
+  South Building's documented default command was rerun twice on the verified
+  128-image archive: both runs produced **127/128** (the same missing
+  `P1180163.JPG`), 750/872 verified pairs, 277,354 inliers, 20,313 tracks /
+  92,682 observations, 1.409 px mean reprojection, and **0.74 cm**
+  COLMAP-reference Sim(3) RMSE (median 0.60, max 1.59 cm). The model files
+  were byte-identical across repeats; this is one missing registration versus
+  the recorded 128/128, 1.09 cm default control, so it is a registration
+  regression candidate rather than a pass claim. The explicitly separate
+  `--colmap-style` A/B recovered **128/128**, 20,570/93,844 tracks/observations,
+  1.405 px and **0.40 cm**, without changing the default.
+  Terrace/office archives are SHA-256 verified, but their historical cached
+  feature files are unavailable. An explicitly labelled external LightGlue
+  SuperPoint max-dimension-3200 frontend reproduction (CPU, area resize and
+  coordinate unscale) yielded terrace **23/23, 1.528 px, 132.07 cm** and
+  office **18/26, 1.519 px, 1.28 cm**; these are not comparable exact
+  replays of the cached-feature 12.37/0.37 cm controls. Current full-resolution
+  helper A/Bs yielded terrace **23/23, 1.511 px, 130.62 cm** and office
+  **17/26, 1.522 px, 0.35 cm**, confirming that the missing cached frontend
+  prevents a valid regression verdict. Logs/models are under
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/nonregression_20260830/runs/` and the
+  command/config caveat is in
+  [the non-regression record](docs/nonregression_20260830.md). For EuRoC,
+  `evo 1.31.1` and the rectifier were provisioned, but both official legacy
+  MH_03 URLs timed out (`curl` 28), the official Research Collection endpoint
+  returned 403, its metadata reports a 12,096.15 MB Machine Hall archive, and
+  only 4.7 GB durable space remained; the exact runner still lacks
+  `mav0/cam0/sensor.yaml`, so no substitute dataset or ATE/RPE result is
+  claimed. This follow-up adds evidence and identifies the South schedule
+  difference, but does not silently alter default behavior.
+
+- **South regression provenance closure (2026-08-30).** The historical
+  128/128 plain default is the `scripts/run_colmap_sfm_benchmark.sh` result
+  corrected by commit `2a36d44` (the earlier 0.58 cm report was superseded by
+  1.09 cm); the separate registry 128/128, 0.40 cm run used the scratchpad
+  `--colmap-style` command on dirty Windows commit
+  `fd7d06901c15869133f6d72e7b5dc14f4ef24d41`. Neither record contains a
+  feature-cache byte hash, and no historical South feature cache exists in
+  the mounted workspace. The current CPU/LightGlue-v2.3.1 environment and
+  dirty tree therefore do not prove a default-code regression: repeated
+  plain runs have the same graph (872 candidates, 750 verified, 277,354
+  inliers) but stop at **127/128** when `P1180163.JPG` has only **443**
+  track-backed correspondences and PnP gets **3** inliers (635 pair
+  correspondences are available). The existing opt-in
+  `--post-refinement-registration` is the smallest isolated scheduling
+  difference: after final refinement it retries that image with **615**
+  correspondences and **508** inliers, yielding **128/128, 20,554 tracks /
+  93,647 observations, 1.406 px and 0.73 cm**; its cameras/images/points
+  files match the debug repeat byte-for-byte. No default behavior was
+  changed. Terrace/office likewise have only historical scratchpad commands,
+  dirty Windows frontend revisions and dataset tree hashes, not feature bytes;
+  their current 3200-pixel CPU reproductions (132.07/1.28 cm) cannot establish
+  a regression against 12.37/0.37 cm. For EuRoC, the official Machine Hall
+ archive metadata reports **12,096.15 MB**; the durable data disk has only
+ 4.7 GB free (the root disk has about 120 GB), old official sequence URLs
+ timed out and the Research Collection endpoint returned 403, so no valid
+ `MH_03_medium/mav0` or ATE/RPE result is claimed. Full logs and provenance
+ are in [the non-regression record](docs/nonregression_20260830.md).
+
+- **Cache-fixed mapper source A/B (2026-08-30).** Feeding the same durable
+  terrace feature cache and CLI to detached builds localizes the 12/23 default
+  result to the visibility-pyramid next-image ranking introduced by `9c35f72`:
+  `2a36d44`, `c48750a`, `dac1400`, and `e18dea1` each produce 23/23, while
+  `9c35f72` and current `101e5cc` produce 12/23 from the identical
+  147/92/18,561 candidate/verified/inlier graph. A temporary raw-count policy
+  recovers terrace 23/23 and office 17/26, but reduces South from current
+  127/128 to 123/128; it was removed, so no default behavior changed. The
+  cache-fixed comparison, output hashes, and exact detached worktree paths are
+  recorded in [the non-regression record](docs/nonregression_20260830.md).
+
+- **EuRoC official-input closure (2026-08-31).** The exact ETH Research
+  Collection Machine Hall bitstream was retrieved to NVMe via its public DSpace
+  API (`7b2419c1-62b5-4714-b7f8-485e5fe3e5fe`), verified at 12,683,729,426
+  bytes with SHA-256
+  `5ed7d07903f8d19b6c8808e2ae8a0872b281f6e34ef5497023b8ac58c3de0f6f`, and
+  its nested official `MH_03_medium.zip` passed `zipinfo -t` (5,420 files;
+  SHA-256
+  `0f1707dfd6c9cda2c38302f4f7a47abb9a01a622a515dcbd6863730f0990f442`).
+  The frozen OpenCV rectification of 2,700 stereo pairs completed in 34.73 s
+  (`752x480`, `fx=436.2443`, baseline `0.110078 m`). Detached baseline
+  `2a36d44` and current `101e5cc` builds both passed a ten-frame smoke on the
+  same frozen inputs with matching temporal/stereo/PnP count ranges; the full
+  2,700-frame CPU SuperPoint/LightGlue cache is still running resumably, so no
+  full EuRoC ATE/RPE pass claim is made yet. Archive, rectification, build,
+  smoke, and export logs are under
+  `/home/sasaki/euroc_mh03_official_20260830/`; details are in
+  [the non-regression record](docs/nonregression_20260830.md).
+
+- **Exhaustive high-resolution COLMAP SIFT graph audit (2026-08-30).** Removing
+  the overlap-3 candidate restriction and matching all 703 pairs with official
+  COLMAP 4.2 CPU SIFT produced 306,324 raw matches and 428 calibrated geometry
+  rows / 433,279 inliers; the 37 exclusive cross-component images form one
+  connected, rank-4 relative-pose graph (59 strong F-to-E edges, condition
+  about 8.19).  Official COLMAP single and multiple mapper controls reached
+  38/38 at **1.6166 cm** calibration-proxy RMSE (38,422 points / 169,590
+  observations).  The same external features/raw matches in visloc with
+  `--exhaustive` reached reproducible **38/38, 43,852 tracks / 152,432
+  observations, 0.579 px, 0.5379 cm**; a repeated run was byte-identical.
+  The old two-submap direction-constrained merge remained worse (5.37345 cm
+  robust, 9.8599 cm unrobust), so no merge implementation was added.  These are
+  calibration-proxy controls, not a replacement for the supplied 2.842 cm
+  champion or an independent laser-GT result; full commands, hashes, graph
+  inventory, and score caveats are in
+  [the exhaustive high-resolution audit](docs/colmap_highres_exhaustive_audit_20260830.md).
+
+- **Courtyard reproducibility and regression-closure record (2026-08-30).** The
+  38/38 high-resolution all-pairs control is now preserved outside the repo at
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/artifacts/colmap_highres_exhaustive_allpairs_20260830`
+  with a verified 64-entry manifest (`SHA256SUMS` digest
+  `12e91cd3a2e595625ef167d8cd8a2af6310d3ea3cd1e3b1a0c2f8264004fa96b`), both
+  model/log copies, feature/DB provenance, and the exact repeat hashes.  The
+  documented extraction, exhaustive 703-pair matching/import, mapping, and
+  evaluation commands reproduce **366/703 verified pairs, 43,852/152,432
+  tracks/observations, 0.579 px, and 0.5379 cm RMSE**; aligned centre residuals
+  are p25/p50/p75/p90/p95/p99/max = **0.2235/0.3042/0.5017/0.9629/1.0336/
+  1.2526/1.2737 cm**.  The repeat is byte-identical; this remains the local
+  calibration/GT proxy rather than an independent laser-GT score.  South,
+  terrace, office, and EuRoC inputs/attempts are archived, but their exact
+  authoritative runs remain unmeasured (missing `torch`/`lightglue` or valid
+  EuRoC `mav0`); no substitute pass/regression is claimed.  The Linux
+  format/clippy (default and `image-io`)/workspace-test, Python, registry,
+  docs, examples, MSRV, package, and `scripts/check.sh` gates all pass;
+  Windows-only gates were not run.  Exact paths, hashes, blockers, and gate
+  logs are in [the closure record](docs/reproducibility_ci_closure_20260830.md).
+
+- **High-resolution COLMAP submap-merge feasibility audit (2026-08-30).** The official
+  high-resolution multi-model output was checked without using official extrinsics or
+  GT in fitting: model 0 contains `DSC_0286..0308` (23 images) and model 1
+  `DSC_0308..0323` (16 images), with only `DSC_0308` shared.  Among the 330 pairs
+  between the 22+15 exclusive images, only four had raw rows and all four were
+  `rows=0/config=0` (no verified E/F/H), so there were **0 valid exclusive cross-E
+  edges**.  Three valid E edges from the shared camera to the right component
+  confirmed rotations within 0.147--2.952 degrees and translation directions within
+  1.931--11.621 degrees, but a shared-anchor direction system cannot observe relative
+  scale; its apparent 9x4 numerical solve collapsed to the trivial zero-scale solution.
+  A non-GT shared-camera merge scored **128.349 cm** (s=1) or **60.623 cm** using the
+  boundary median-step ratio `s=2.760958293`, versus independent component proxies
+  of **2.964 cm** (23/38) and **2.466 cm** (16/38).  Naively concatenating points also
+  leaves eight same-camera feature conflicts.  No production submap-merge path or BA
+  wiring was added; the next valid experiment is to obtain multiple non-shared,
+  verified cross-component bridges and gate rank/conditioning, cheirality, and
+  direction residual before solving scale.  Full membership, point statistics,
+  cross-edge diagnostics, and the proxy/independent-model caveat are in
+  [the submap merge audit](docs/colmap_highres_submap_merge_audit_20260830.md).
+
+- **Courtyard evaluator/frame audit (2026-08-30).** Read-only independent
+  reimplementation confirmed the scorer's COLMAP convention `C=-Rᵀt` and
+  proper positive-scale Umeyama (synthetic scale 2.75 recovered to `3e-15`
+  max centre error; q/−q is identical).  The local `gt` symlink is byte-identical
+  to `dslr_calibration_undistorted/images.txt`, so official-vs-`gt` is the
+  **0 cm identity proxy**, not an independent laser-camera-pose check; the
+  separate scan-evaluation archive is not present locally.  Recomputed controls
+  are full COLMAP **38/38, 1.709 cm RMSE / 1.170 cm median / 4.132 cm max**,
+  low COLMAP **24/38, 3.590 / 2.488 / 11.487 cm**, and the current
+  COLMAP-feature champion **38/38, 2.842 / 2.243 / 7.091 cm**.  The low model's
+  common set is cam0 `0323` plus cam1's 23 images; missing cameras are not
+  imputed by the scorer.  Full COLMAP's official→model reverse fit is
+  **1.355 cm RMSE**, confirming the expected direction-dependent Sim(3) fit.
+  Four-camera residual groups and all matched-subset tables are in
+  [the evaluator audit](docs/evaluator_audit_20260830.md).  No rig/lever-arm
+  metadata or evaluator bug supports a production correction; sub-cm remains
+  an aspirational target until the independent scan-evaluation pose/GT is
+  provisioned.  The highest-leverage work remains bridge matching,
+  track/PnP basin selection, and mapper/BA stability rather than more
+  completeness-only heuristics.
+
+- **Official high-resolution COLMAP SIFT A/B (2026-08-30).** Docker
+  `colmap/colmap:latest` (`4.2.0.dev0`, image
+  `sha256:b809882552887b6471094dcadd2f2eb01656b010663564c43a5e7f04c0a08f2f`)
+  extracted the 38 original-resolution courtyard images with CPU SIFT,
+  `first_octave=-1`, 4 octaves, `max_num_features=8192`, peak `0.00667`,
+  edge `10`, and max orientations `2`: **439,481 rows** (DB
+  `b676d6fc...6a7acb1`, exact six-column conversion manifest
+  `030b0298...ffd0d2a`).  With per-image calibration, N=3, ratio 0.8,
+  implicit cross-check, guided/full verification, plain PnP(100,000)/min8,
+  recovery/post/final and sequence fallback off, visloc retained **100/108
+  verified pairs / 137,171 inliers**, reached **26/38** (`0298..0323`),
+  **29,639 tracks / 80,632 observations / 0.451 px**, and scored **3.612 cm
+  RMSE** on the audited calibration `gt` proxy.  Focused visloc rows for
+  0307–0308, 0308–0309, 0309–0310 were respectively raw/accepted/E-F-H
+  `357/284/91-284-6`, `699/617/391-617-130`, and
+  `2,012/1,926/1,544-1,926-35`; growth stopped at 0297 (`65→3` PnP
+  inliers).  Official CPU8 COLMAP sequential matching (14.799 min) produced
+  **107 raw/geometry rows** (raw sum 142,214; geometry sum 189,112), with
+  0308–0309 `694/1,276` and 0309–0310 `1,996/2,445`; its single mapper model
+  reached **23/38**, 16,714 points/68,797 observations, 0.668 px and
+  **2.964 cm** proxy RMSE.  A multi-model run covered 23+16 (0308 overlap)
+  but had separate gauges.  This is a genuine source-exact high-res control,
+  not an accuracy-champion update: it does not beat the existing
+  COLMAP-feature **38/38, 2.842 cm** or supplied-model **1.709 cm** controls.
+  Full commands, hashes, logs and the independent-laser-GT caveat are in
+  [the high-resolution feature audit](docs/colmap_highres_feature_audit_20260830.md).
+
+- **Opt-in global E-bearing position initializer audit (2026-08-30).** The
+  existing global mapper was first audited on the high-resolution prefix
+  artifact: its per-edge unit-displacement rows impose one baseline length on
+  every pair, and the legacy run reached **25/38** at **255.89 cm** on its
+  registered subset (versus the incremental control's **23/38, 4.51 cm**).
+  Added default-off `--global-independent-edge-scales`, which selects the
+  verified essential edge stream whenever its minimum support is available
+  (the run used **49** E edges; the remaining retained edges use the existing
+  verified fallback) and eliminates each unknown edge scale via
+  the perpendicular constraint `(I-ddᵀ)(Cj-Ci)=0`; one highest-support edge
+  supplies the global scale row.  Connected cyclic graphs use a deterministic
+  SVD minimum-norm solve for small geometric nullspaces, while sparse trees
+  retain the legacy fallback; CLI parsing and synthetic variable-baseline/tree
+  tests pass.  On prefix8192 with the established per-image-calibration,
+  N=3, ratio-0.8/cross-check/full-verifier, recovery/post/final stack, the
+  corrected path kept **82/101** pairs (**65,784** inliers), reached **38/38**,
+  and produced **1,611 tracks / 3,225 observations / 2.162 px** reprojection,
+  but scored **468.40 cm** full-scene laser-GT Sim(3) RMSE (rank **104/111**;
+  4:15.63, **817,456 kB** peak RSS).  A repeat produced byte-identical
+  cameras/images/points hashes.  Adding the pre-existing joint-track
+  positioning option was also negative (**38/38, 349 tracks / 723 obs,
+  2.508 px, 467.18 cm**).  Thus the correction improves completeness and
+  local reprojection but does not beat the incremental/COLMAP controls; the
+  full 518k-feature run was not launched.  Models/logs are under
+  `/tmp/eth3d_courtyard_highres_cap8192_global_edge_scales_{v4,v5,joint}_20260830`.
+
+- **COLMAP top-scale high-resolution cap audit (2026-08-30).** Audited
+  [`ExtractTopScaleFeatures`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/utils.cc#L65-L95)
+  and [`FeatureKeypoint::ComputeScale`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/types.cc#L127-L141):
+  CPU SIFT keeps the `std::partial_sort` top rows in descending computed
+  scale, copying keypoints and descriptors together.  From the immutable
+  518,015-row high-resolution artifact
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/highres_stream38_20260830`,
+  a non-destructive derivative selected exactly 8,192 rows per image with
+  the same float32 descending partial-sort semantics (manifest
+  `/tmp/eth3d_courtyard_highres_topscale8192_manifest_20260830.sha256`,
+  digest `2b74b86c04860df612894a74f3088ae236a67c303f3050c24eade215d9c11acb`).
+  The sidecar has isotropic sigma rather than COLMAP affine columns, so this
+  is a scale-metadata proxy for `ComputeScale`, not an affine reproduction;
+  all feature/locus rows remain aligned.  The derivative has 311,296 rows,
+  40.0037% endpoint-row overlap with the prefix-8,192 derivative, and all
+  38 per-image selections/manifests validated.  With per-image calibration,
+  N=3, ratio 0.8/cross-check/full verification, plain PnP (100,000; min 8),
+  recovery, post-registration and final refinement, sequence fallback off
+  retained 98/255 candidate pairs and verified 90/98 (89,888 inliers), then
+  stopped at 14/38 (12,597 tracks / 41,917 observations / 0.511 px; 16.10 cm
+  registered-subset laser-GT RMSE; runtime 4:06.80, peak RSS 818,920 kB).
+  The after-post historical-median fallback control promoted 13 edges but
+  stopped at 22/38: 99/256 candidates, 91/99 verified (91,227 inliers),
+  18,639 tracks / 57,748 observations / 0.481 px and 1.58 cm
+  registered-subset RMSE.  Its next consecutive pair had 120 F-supported
+  matches but only 15 selected essential matches, below the 30-match fallback
+  gate, so no provisional pose was admitted; no full-scene score exists.
+  Log/models: `/tmp/eth3d_courtyard_highres_topscale8192_window3_control_20260830.log`
+  and `/tmp/eth3d_courtyard_topscale8192_window3_after_post_median_20260830.log`.
+  This does not reproduce the prefix-8,192 control (23/38, 4.51 cm subset)
+  or full-artifact control (23/38, 5.02 cm subset), and introduced no code or
+  heuristic.
+
+- **Full high-resolution feature reconstruction control (2026-08-30).** The
+  immutable streaming artifact
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/highres_stream38_20260830`
+  contains **518,015 feature rows** across 38 images (76 files); its checked
+  manifest is `/tmp/eth3d_courtyard_highres_stream38_manifest_20260830.sha256`
+  with digest `e63931fef8f9ac8257d552ff97e0bd1b5a1ecd73c56bd114a3046d85c85e42af`.
+  The per-image-calibration, N=3 pair-window control used ratio **0.8**,
+  cross-check/full verification, plain incremental PnP (`100000` iterations,
+  minimum 8 inliers), conflict recovery, post-registration and final
+  refinement, with sequence fallback off.  It retained **99/257 candidate
+  pairs**, verified **92/99** with **141,758 inlier correspondences**, and
+  grew to **23/38** cameras: `DSC_0306` **86→29**, `DSC_0307` **83→64**,
+  `DSC_0308` **20→17** PnP correspondences/inliers; `DSC_0309` and all later
+  images had **0 usable 2D–3D correspondences**.  The model contains
+  **28,014 tracks / 86,304 observations / 0.431 px** mean reprojection; its
+  registered-subset laser-GT score is **5.02 cm RMSE** (23/38, so no full-scene
+  score).  Runtime was **7:05.65** with peak RSS **2,791,864 kB**; log/model:
+  `/tmp/eth3d_courtyard_highres_full_window3_control_20260830[.log]`.
+  A same-input after-post relaxed fallback run reached the fallback gate for
+  `DSC_0309`, but its projected scale was **-1.525542** and was rejected by
+  the required finite-positive policy; later images consequently remained
+  unregistered.  It produced byte-identical cameras/images/points hashes and
+  the same **23/38, 28,014 / 86,304 / 0.431 px / 5.02 cm** result (runtime
+  **7:24.30**, peak RSS **2,791,824 kB**).  This closes the full-artifact
+  control without adding a new heuristic; logs/models:
+  `/tmp/eth3d_courtyard_highres_full_window3_{control_20260830,after_post_relaxed_20260830}`.
+
+- **Full high-resolution median-scale sequence fallback control
+  (2026-08-30).** Reused the immutable 518,015-row artifact and the full
+  per-image-calibration/N=3/ratio-0.8/cross-check/full-verifier/plain-PnP
+  stack above, enabling only `--sequence-relative-pose-fallback
+  --sequence-fallback-after-post` (the historical median-magnitude scale;
+  no constant-velocity or carry flags).  The automatic sequence F→E pass
+  promoted **9** stable edges, including **2** high-support spread overrides;
+  the graph remained **99/257 candidates**, **92/99 verified**, and **141,758
+  inliers**.  Ordinary growth and post-PnP again reached **23/38**:
+  `DSC_0306` **86→29**, `DSC_0307` **83→64**, `DSC_0308` **20→17**, while
+  `DSC_0309` onward had no ordinary usable 2D–3D support.
+  After-post fallback examined `DSC_0309` through stored essential pair 57
+  with **118** selected matches and **118/118** cheirality, but obtained
+  **0** valid triangulations (`valid_ratio=0.000000`), so the ordinary
+  standard gate (`30` minimum and **50%**) rejected it.  The 30% admission
+  exception was not applicable because this edge was not one of the marked
+  high-support override entries; later predecessors consequently remained
+  unregistered.  The output was **23/38**, **28,014 tracks / 86,304
+  observations / 0.431 px**, and registered-subset laser-GT **5.02 cm RMSE**
+  (no full-scene score), with runtime **7:21.31** and peak RSS **2,791,952
+  kB**.  Cameras/images/points hashes matched the sequence-off control
+  exactly.  Log/model:
+  `/tmp/eth3d_courtyard_highres_full_window3_after_post_median_20260830[.log]`.
+  This is a negative structural control; no new heuristic or code change was
+  made.
+
+- **Consecutive provisional scale carry (2026-08-30).** Added the separate
+  default-off `--sequence-fallback-carry-scale` policy for
+  `--sequence-fallback-after-post`.  The first provisional registration still
+  uses the relaxed constant-velocity projection; when no ordinary post/PnP
+  image is inserted, the next consecutive fallback reuses the previous
+  accepted baseline magnitude, subject only to the finite/positive
+  **0.25x–4x** recent-median sanity bound.  Any ordinary post/PnP insertion
+  clears the carry chain, and an invalid/stale carried value falls back to
+  the freshly projected proposal.  CLI validation, deterministic pose-rescale
+  and carry-state tests cover default-off behavior, first projection, carry,
+  reset, invalid fallback, and rotation/convention preservation.
+  On the exact high-resolution cap-8,192/N=3 after-post stack
+  (`--match-ratio 0.8 --verification-mode full --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --sequence-relative-pose-fallback --sequence-fallback-after-post
+  --sequence-relaxed-constant-velocity-scale
+  --sequence-fallback-carry-scale`), `DSC_0309` kept its first-fallback
+  projection **1.146905** (recent median **1.898480**, MAD **0.110514**), and
+  `DSC_0310` reused that carried **1.146905** instead of its fresh projection
+  **1.525837** (recent median **1.581204**, MAD **0.427790**).  The first
+  fallback resumed **0** PnP images; the second resumed **13**, which cleared
+  the carry state and completed **38/38**.  The output had **27,906 tracks /
+  74,962 observations / 0.291 px** mean reprojection and full-scene laser-GT
+  Sim(3) **31.15 cm RMSE** (median **27.66 cm**, max **49.47 cm** at
+  `DSC_0310`, fitted scale **0.694170**), compared with the no-carry
+  after-post result **29.21 cm**.  This is an honest negative accuracy A/B;
+  the flag remains opt-in and no scale blend/sweep was run.  Runtime was
+  **4:41.74**, peak RSS **817,412 kB**; log/model:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_after_post_relaxed_carry_20260830[.log]`.
+  The low-resolution lossless snapshot identity run with the carry flag
+  remained byte-identical to control at **38/38**, **20,777 tracks /
+  72,431 observations / 0.282 px**, and **3.422 cm** laser-GT RMSE
+  (`/tmp/seq_override_snapshot_after_post_relaxed_carry_20260830`; camera,
+  image, and point hashes unchanged).  No further experiment was performed.
+
+- **Sequence-fallback after-post scheduling (2026-08-30).** Added separate
+  default-off `--sequence-fallback-after-post`.  With sequence fallback
+  enabled, ordinary growth no longer admits provisional relative poses; the
+  existing recovery and post-refinement PnP/BA stage runs first, then one
+  validated consecutive fallback is admitted at a time and ordinary PnP is
+  resumed before the next fallback.  The eager sequence mode remains
+  unchanged when this flag is absent, and CLI validation requires both the
+  sequence fallback and post-refinement flags.  Tests cover default/eager
+  scheduling identity, deferred growth gating, CLI defaults, missing
+  dependency, and validation.  On the exact high-resolution cap-8,192/N=3
+  stack with high-support F→E override, 30% admission, relaxed projection,
+  recovery, post-registration and final refinement, ordinary growth stopped
+  at **20/38**; the ordinary post pass then registered `DSC_0306`–`DSC_0308`
+  (**28→25**, **15→15**, **13→12** PnP inliers), reaching **23/38** before
+  sequence fallback.  The corresponding no-fallback 23-camera control was
+  **4.51 cm** RMSE on its registered subset (diagnostic only).  After the
+  post-stage, fallback admitted `DSC_0309` at projected scale **1.146905**
+  (recent median **1.898480**, MAD **0.110514**) and `DSC_0310` at **1.525837**
+  (median **1.581204**, MAD **0.427790**); the first resumed **0** ordinary
+  PnP images and the second resumed **13**, completing **38/38**.  The final
+  model had **27,907 tracks / 74,967 observations / 0.291 px** mean
+  reprojection and full-scene laser-GT Sim(3) **29.21 cm RMSE** (median
+  **25.92 cm**, max **46.56 cm** at `DSC_0310`, fitted scale `0.693343`).
+  This improves the eager relaxed result (**60.42 cm**, also 38/38), but is
+  not an accuracy champion.  Runtime was **4:27.62**, peak RSS **817,492 kB**;
+  log:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_after_post_relaxed_20260830.log`;
+  model:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_after_post_relaxed_20260830`.
+  The low-resolution verified snapshot remained byte-identical to control at
+  **38/38**, **20,777 tracks / 72,431 observations / 0.282 px**, and **3.422
+  cm** laser-GT RMSE, including identical camera/image/point hashes.  No
+  additional scale sweep was performed.
+
+- **Sequence-fallback relaxed constant-velocity scale (2026-08-30).** Added
+  separate default-off `--sequence-relaxed-constant-velocity-scale`; it keeps
+  the positive finite constant-velocity projection but replaces the strict
+  local 3-MAD fence with only a broad **0.25x–4x** recent-median bound.  The
+  strict `--sequence-constant-velocity-scale` policy remains reproducible and
+  the historical median-magnitude policy remains the default; the two
+  projected policies are mutually exclusive.  Tests cover a positive turn
+  admitted by the relaxed policy, broad-bound rejection, finite/positive
+  validation, CLI default-off behavior, missing fallback dependency, and
+  strict/relaxed mutual exclusion.  On the exact high-resolution cap-8,192 /
+  N=3 run with high-support F→E override and 30% admission, relaxed projection
+  admitted `DSC_0306` with projected scale **1.647286** (recent median
+  `1.701457`, MAD `0.009787`), `DSC_0309` with **0.972742** (median
+  `1.623472`, MAD `0.122260`), and `DSC_0310` with **1.304092** (median
+  `1.353605`, MAD `0.380864`).  The projected values were within the broad
+  bounds; the laser-GT step lengths (**1.067104 m**, **0.792290 m**, and
+  **0.693120 m**, consulted only after the run) were not used for admission.
+  The run completed **38/38**, with **27,857 tracks / 74,853 observations /
+  0.295 px** mean reprojection and full-scene laser-GT Sim(3) **60.42 cm RMSE**
+  (median **54.92 cm**, max per-image **92.79 cm**, at `DSC_0298`; fitted
+  scale `0.525782`).  This is materially better than the prior median-scale
+  fallback (**38/38, 143.05 cm**) and reaches full registration, but is not an
+  accuracy champion.  Runtime was **4:21.15**, peak RSS **817,808 kB**; log:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_projected_relaxed_20260830.log`;
+  model:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_projected_relaxed_20260830`.
+  An exact repeat produced the same **38/38**, **27,857 / 74,853 / 0.295 px**,
+  and **60.42 cm** result with byte-identical `cameras.txt`, `images.txt`, and
+  `points3D.txt` hashes (`76fc7583…`, `d279aab7…`, `10eb1fee…`); repeat log/model:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_projected_relaxed_20260830_repeat`.
+  The low-resolution verified-snapshot identity remained byte-identical to
+  control at **38/38**, **20,777 tracks / 72,431 observations / 0.282 px**, and
+  **3.422 cm** laser-GT RMSE.  No further scale-blend sweep was performed.
+
+- **Sequence-fallback constant-velocity projected scale (2026-08-30).** Added
+  default-off `--sequence-constant-velocity-scale`.  For the opt-in sequence
+  fallback only, it predicts a world-frame velocity from the latest one to
+  three registered consecutive steps using component-wise medians, projects
+  it onto the candidate relative-translation direction, and requires a
+  positive finite result inside the existing recent median/3-MAD fence.  The
+  historical median step-magnitude estimator remains the default.  Tests cover
+  straight motion, a bounded turn, negative/near-zero directions, MAD
+  outlier handling, zero-MAD bounding, insufficient history, and CLI
+  default/validation.  On the exact high-resolution cap-8,192/N=3 command,
+  0306 had median `1.706350`, anchored median `1.701457`, MAD `0.009787`, and
+  projected `1.647286` (rejected outside the 3-MAD fence); 0309 had median
+  `2.021362`, anchored median `1.999496`, MAD `0.043732`, and projected
+  `1.042500` (rejected).  No projected fallback pose was admitted, so 0310
+  was not reached; ordinary post-refinement registered 0306–0308 and the run
+  stopped at **23/38**, **16,192 tracks / 46,393 observations / 0.324 px**.
+  Registered-image laser-GT RMSE was **4.51 cm** (not a full-scene score), with
+  runtime **4:29.95** and peak RSS **817,696 kB**.  Log:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_projected_20260830_v2.log`;
+  model:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_projected_20260830_v2`.
+  The low-resolution verified snapshot identity run remained byte-identical
+  to control: **38/38**, **20,777 tracks / 72,431 observations / 0.282 px**,
+  **3.422 cm** laser-GT RMSE, with identical camera/image/point hashes under
+  `/tmp/seq_override_snapshot_control_20260830_v4` and
+  `/tmp/seq_override_snapshot_projected_20260830_v2`.
+  This negative result rejects the projected scale as a replacement for the
+  current high-support median fallback on this turning trajectory; no further
+  heuristic or threshold relaxation was added.
+
+- **Sequence-fallback high-support triangulation admission (2026-08-30).**
+  The opt-in sequence fallback now relaxes its final valid-triangulation
+  fraction from the historical `>=50%` to `>=30%` only for pair entries
+  explicitly marked by the conservative high-support F→E translation-spread
+  override; it still requires at least **100** valid triangulations and the
+  configured seed floor.  Ordinary/strict sequence pairs and all default
+  behavior retain the `>=50%` gate.  Boundary tests cover 100/30% acceptance,
+  99-point and sub-30% rejection, the ordinary 50% path, and the unchanged
+  prior cheirality/reprojection gates.  On the exact high-resolution
+  cap-8,192/N=3 command from the preceding trace, the fallback admitted
+  `DSC_0306` **156/180** (`0.866667`, scale **1.706350**), `DSC_0309`
+  **233/234** (`0.995726`, scale **1.623455**), and the high-support-only
+  `DSC_0310` **221/555** (`0.398198`, scale **1.623455**); the latter was
+  previously rejected at 221 < 278 (half-support).  Subsequent ordinary PnP
+  completed all cameras, yielding **38/38**, **27,854 tracks / 74,848
+  observations / 0.295 px**, but the full-scene laser-GT score was **143.05
+  cm RMSE** (the newly admitted bridge is therefore structural, not an
+  accuracy-champion result).  Runtime was **4:19.20**, peak RSS **817,544 kB**;
+  log: `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_f2e_relaxed30_20260830.log`;
+  model: `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_f2e_relaxed30_20260830`.
+  The low-resolution snapshot identity rerun kept control and sequence-enabled
+  outputs byte-identical: **38/38**, **20,777 tracks / 72,431 observations /
+  0.282 px**, **3.422 cm** laser-GT RMSE, with matching camera/image/point
+  SHA-256 files under `/tmp/seq_override_snapshot_{control,enabled}_20260830_v4`.
+
+- **Per-image COLMAP PINHOLE calibration (2026-08-30).** Added the
+  default-off `--input-colmap-calibration MODEL_DIR` path to
+  `unordered_sfm_demo`.  It reads and validates `cameras.txt` and
+  `images.txt`, maps loaded names by exact name/basename/unique stem, checks
+  feature bounds and (when `--images-dir` is supplied) decoded image
+  dimensions, and supports finite four-parameter `PINHOLE` cameras only.
+  `visloc-slam` now exposes `PerImageCameras` plus incremental/global
+  convenience wrappers: differing intrinsics are converted losslessly to a
+  reference pixel convention for the existing ray/PnP/triangulation/BA
+  implementation, while the multi-camera exporter restores native camera IDs
+  and pixels.  Shared geometry delegates as an exact feature no-op; per-image
+  intrinsics remain fixed and snapshot import/export plus intrinsics
+  refinement are rejected until their manifests/parameter blocks are extended.
+  Focused tests passed (`4` camera-rig tests, `42` two-view tests, `23` CLI
+  tests, and the multi-camera export test); the official high-resolution
+  two-image feature smoke produced **4** CSV rows from the `DSC_0305/0306`
+  cache and, with `--images-dir`, validated the decoded JPEG dimensions
+  against the calibration model.  A full high-resolution reconstruction is
+  not claimed: the bounded pair has insufficient parallax for the default
+  seed gate.
+
+- **Streaming SIFT feature export and no-default target restoration
+  (2026-08-30).** Moved the module-only verified-pair snapshot codec from
+  `examples/verified_pair_snapshot.rs` to `src/verified_pair_snapshot.rs` and
+  imported it from the unordered demo, so
+  `cargo check --workspace --all-targets --no-default-features` no longer
+  discovers a fake standalone example.  Added default-off
+  `--sift-stream-export`, which requires
+  `--feature-extractor sift --export-features-dir DIR --export-features-only`,
+  enumerates supported images lexically, decodes/extracts one image at a time,
+  validates optional per-image COLMAP calibration dimensions, and atomically
+  renames each feature and `_loci.txt` result.  The normal batch path and all
+  defaults are unchanged.  Loader-order, one-at-a-time, default-validation,
+  byte-identity, and extraction-failure/no-partial-file tests pass.  On a
+  Workspace-wide no-default check and clippy also pass; the module-only
+  snapshot is now library support rather than an auto-discovered target.  On
+  1600×1066 `DSC_0305/0306` subset (`max-keypoints=256`, compatible detector /
+  descriptor, bilinear orientations), batch and stream outputs had identical
+  SHA-256 files and **793** total rows; stream time was **9.70 s** with
+  **698,916 kB** peak RSS.  On official-resolution `DSC_0305` (camera 1),
+  `DSC_0308` and `DSC_0309` (camera 3), the stream produced **35,614** rows
+  in **4:04.00** with **10,386,164 kB** peak RSS (about 9.9 GiB), remaining
+  below the 12 GiB single-process budget and validating both camera dimensions.
+  The full 38-image run completed successfully in **52:11.47** with
+  **518,015** keypoints and **10,381,448 kB** peak RSS (about 9.9 GiB).
+  It produced 38 feature/loci pairs (76 files, 664 MiB); all rows had the
+  expected 131 feature fields and four locus fields, and no temporary files
+  remained.  The per-image calibration mapping covered all 38 images and all
+  decoded JPEG dimensions matched their referenced PINHOLE camera.  The
+  reproducible command and log were:
+  `RAYON_NUM_THREADS=1 /usr/bin/time -v target/release/examples/unordered_sfm_demo
+  --feature-extractor sift --images-dir
+  /home/sasaki/datasets/eth3d/courtyard/images/dslr_images_undistorted
+  --input-colmap-calibration
+  /home/sasaki/datasets/eth3d/courtyard/dslr_calibration_undistorted
+  --sift-max-keypoints 8192 --sift-max-orientations 2
+  --sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor
+  --sift-vlfeat-bilinear-orientations --sift-vlfeat-compatible-output-order
+  --export-features-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/highres_stream38_20260830
+  --export-features-only --sift-stream-export --out-colmap
+  /tmp/eth3d_courtyard_highres_stream38_model_20260830 >
+  /tmp/eth3d_courtyard_highres_stream38_run_20260830.log 2>&1`; the
+  76-file SHA-256 manifest is
+  `/tmp/eth3d_courtyard_highres_stream38_manifest_20260830.sha256` (manifest
+  digest `e63931fef8f9ac8257d552ff97e0bd1b5a1ecd73c56bd114a3046d85c85e42af`).
+  Progress was emitted once per completed image.
+
+- **High-resolution capped reconstruction probe (2026-08-30).** Preserved the
+  38-image streaming artifact and created the non-destructive
+  `highres_stream38_cap4096_20260830` derivative by copying the first 4,096
+  feature/locus rows per image.  All 38 feature/locus pairs, 155,648 rows,
+  bounds, coordinates, descriptor/locus ordering, and the 76-file manifest
+  were validated; the manifest digest is
+  `42bf6e26a1ccb3828d772bdfce09d0f840343fbbfa86d0a20cd794becef87805`.
+  With per-image PINHOLE calibration, full verification, ratio `0.8`,
+  `--pair-stem-window 3`, `pnp-max-iterations=100000`, `min-pnp-inliers=8`,
+  conflict recovery, post-registration, and final iterative refinement, the
+  exact capped run retained **108** candidate pairs, verified **57** pairs
+  with **29,644** inliers, and registered **11/38** images (5,302 tracks,
+  17,450 observations, mean reprojection **0.277 px**) in **58.93 s** with
+  **344,104 kB** peak RSS.  The partial 11-camera laser-GT score was
+  **1.33 cm RMSE** (not a full-scene result).  A bounded `window=4`
+  diagnostic added 34 candidate edges; at ratio `0.8` + cross-check, 11 of
+  those edges were verified (2,071 inliers), but the only new edges adjacent
+  to the first stalled transition (0296→0297) had zero accepted inliers
+  (`0293–0297` and `0297–0301`).  Therefore no `window=4` reconstruction or
+  exhaustive run was launched; the immediate bottleneck remains the
+  0296→0297 transition rather than an untested wider window.  The capped
+  reconstruction log is `/tmp/eth3d_courtyard_highres_cap4096_window3_20260830.log`.
+
+- **High-resolution 8,192-feature reconstruction probe (2026-08-30).** A
+  second non-destructive derivative,
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/highres_stream38_cap8192_20260830`,
+  retained the first 8,192 feature/locus rows from each immutable full
+  artifact.  Prefix bytes, 38 feature/locus pairs, 311,296 rows, 131/4
+  fields, coordinates, bounds, and the 76-file manifest were validated; its
+  manifest digest is
+  `39985ad86d14ea2ac73cc9e7970dda87ebf60827dc7e90e73eabd8db7c42ce54`.
+  The per-image-calibrated N=3 run with ratio `0.8` + cross-check, full
+  verification, `pnp-max-iterations=100000`, `min-pnp-inliers=8`, conflict
+  recovery, post-registration, and final iterative refinement retained 108
+  candidate pairs, verified **85** pairs with **66,084** inliers, and selected
+  seed `(2,3)` (`DSC_0288`–`DSC_0289`).  Growth registered `DSC_0290` through
+  `DSC_0305`; the transition diagnostics were `DSC_0296`: **129→108** PnP
+  inliers and `DSC_0297`: **52→40**.  Post-refinement then added
+  `DSC_0306` (**28→25**), `DSC_0307` (**15→15**), and `DSC_0308`
+  (**13→12**).  The final model reached **23/38** images with **16,192**
+  tracks and **0.324 px** mean reprojection error, in **4:24.27** with
+  **813,192 kB** peak RSS; its partial 23-camera laser-GT score was
+  **4.51 cm RMSE** (not a full-scene result).  The exact debug log is
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_20260830.log`.  The focused
+  ratio-`0.9` diagnostic was not run because this cap did not stall at
+  `DSC_0297`; it stalled after the 23-camera post-refinement result instead.
+
+- **High-resolution N=4 window control (2026-08-30).** Re-running the
+  cap-8,192 artifact with the same per-image calibration, ratio `0.8` +
+  cross-check, full verifier, `pnp-max-iterations=100000`, recovery,
+  post-registration, and final refinement retained **142** candidate pairs,
+  verified **102** pairs with **70,369** inliers, and again registered only
+  through `DSC_0308` (**23/38** images).  The model contained **16,241**
+  tracks with **0.333 px** mean reprojection error; runtime was **5:38.68**
+  and peak RSS **812,908 kB**.  Its partial 23-camera laser-GT score was
+  **6.54 cm RMSE**, worse than the N=3 cap-8,192 control's **4.51 cm**.
+  Debug growth selected the same `(2,3)` seed; at the final stage image index
+  23 (`DSC_0309`) had **0** usable 2D–3D correspondences, despite the direct
+  N=4 pair `DSC_0308–DSC_0309` having **310 raw / 236 accepted** matches.
+  Newly admitted gap-4 edges around this boundary included
+  `DSC_0305–DSC_0309` (**43/0**), `DSC_0306–DSC_0310` (**36/0**),
+  `DSC_0307–DSC_0311` (**50/0**), `DSC_0308–DSC_0312` (**42/0**), and
+  `DSC_0309–DSC_0313` (**121/79**, raw/accepted), so the wider window did not
+  provide a reliable new registration bridge.  The focused ratio-`0.9`
+  diagnostic over the 22 pairs internal to `DSC_0306`–`DSC_0313` found
+  **14,578 raw / 9,443 accepted** matches across **14/22** verified pairs;
+  `DSC_0308–DSC_0309` rose to **646/333** and `DSC_0309–DSC_0313` to
+  **336/126**, but several adjacent pairs remained degenerate and the
+  existing ratio-`0.8` edge already had substantial pair support while
+  yielding zero 2D–3D tracks.  No full ratio-`0.9` reconstruction was
+  launched; the evidence points to track/PnP admission rather than raw pair
+  scarcity.  Logs are under `/tmp/eth3d_courtyard_highres_cap8192_window4_20260830.log`
+  and `/tmp/eth3d_courtyard_highres_cap8192_window4_0308_0313_pairs_diagnose_20260830.log`.
+
+- **High-resolution orientation-locus canonicalization control
+  (2026-08-30).** On the cap-8,192 N=3 stack, `DSC_0308` contained 8,192
+  rows but only **7,168** physical `(x,y,scale)` loci (**1,024** collapsed
+  orientation rows; 1,022 loci had multiplicity >1).  The canonicalized run
+  retained the same **85/108** verified pairs and **66,062** inliers versus
+  66,084 in the no-canonicalization control, then reduced the accepted stream
+  from 66,062 to **59,039** (**7,023** deterministic locus-pair
+  deduplications across 82 pairs).  Around the stalled boundary, accepted
+  counts changed from the control's `0306–0308=37` to **34**,
+  `0307–0308=69` to **67**, `0308–0309=236` to **233**, and
+  `0308–0310=41` to **40**; these pair-level reductions are the measurable
+  orientation-alternative collisions (the snapshot codec cannot be combined
+  with per-image calibration, so raw pre-canonical row indices were not
+  exportable without changing the established path).  The resulting model
+  stayed at **23/38** registered images, with **14,193** tracks and **0.331
+  px** mean reprojection error; its partial 23-camera laser-GT score improved
+  from the control's **4.51 cm** to **3.53 cm RMSE**.  Track topology did not
+  gain 3-view support: global length-3-or-longer tracks changed **6,028→5,365**
+  (length-3 exactly **2,715→2,370**), and `DSC_0308` had **20→17** such tracks;
+  `DSC_0309` remained unregistered.  The canonicalization log is
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_locus_20260830.log`.
+
+- **High-resolution `DSC_0308` transition endpoint audit (2026-08-30).** A
+  one-shot `VISLOC_SFM_DEBUG_DUMP_MATCH_INDICES=1` replay of the unchanged
+  cap-8,192/N=3 control captured accepted feature indices for the transition:
+  `0305–0308=0`, `0306–0308=37`, `0307–0308=69`, and `0308–0309=236`.  The
+  registered-side `DSC_0308` set therefore had **89** unique rows (17
+  duplicate rows across the two incident pairs), while the `0309`-side set had
+  **236** rows; their exact row-index intersection was **0**.  Deterministic
+  nearest-neighbor matching between these same-image sets had a minimum xy
+  separation of **724.84 px** (A→B median **2,363 px**; B→A median
+  **2,869 px**), and the one-to-one candidate count was **0** at both 0.5 px
+  and 1.0 px with scale ratio ≤1.25.  As an independent high-resolution
+  COLMAP-model diagnostic, nearest observation distances were median **83.42
+  px** for the registered-side set (2/89 ≤0.5 px) versus **0.301 px** for the
+  `0309` set (143/236 ≤0.5 px); among positive-3D observations within 1 px,
+  the two sets shared **0** COLMAP point IDs.  The endpoint populations are
+  spatially distinct rather than orientation rows of one locus, so no
+  default-off spatial-locus stitching was added; this transition remains a
+  descriptor/match-track recall gap.  The raw diagnostic log is
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_endpoint_control_20260830.log`.
+
+- **Opt-in sequence relative-pose registration fallback (2026-08-30).** Added
+  `--sequence-relative-pose-fallback`, default off, to plain incremental.  It
+  validates unique numeric stems, requires an immediately consecutive posed
+  predecessor, uses a hardened E-derived pose over normalized-Sampson-supported
+  rows with cheirality/parallax gates, and obtains scale from the MAD-filtered
+  median of up to three recent consecutive steps; accepted poses retriangulate
+  before later BA.  The flag also appends missing consecutive retrieval
+  candidates only when enabled.  In the cap-8,192 high-resolution N=3 run all
+  37 consecutive edges were already among the 101 retrieval candidates, no
+  fallback pose passed the gates, and the result remained **23/38**, **16,192**
+  tracks / **46,393** observations / **0.324 px**, partial laser-GT **4.51 cm
+  RMSE**, **4:24.21** runtime, and **817,284 kB** peak RSS; the log is
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback4_20260830.log`.
+  In the low-resolution lossless-snapshot A/B, control and enabled runs were
+  both **38/38**, **20,777/72,431/0.282 px**, **3.422 cm RMSE**, and produced
+  identical camera/image/point SHA-256 outputs.  This is an opt-in structural
+  completion diagnostic, not an accuracy-champion update; no fallback stem
+  was accepted.
+
+- **Sequence fallback F→E rejection diagnosis (2026-08-30).** The high-resolution
+  cap-8,192/N=3 pair probe showed why the direct essential estimate is unsafe at
+  the first missing bridge: `DSC_0308–0309` had **310 raw / 236 accepted**
+  matches and direct-E **60** inliers with p10/p25/median triangulation angles
+  **6.911/6.974/6.984°**, yet its GT-only relative rotation/translation-direction
+  error was **11.70°/160.52°**. Reprojecting the same F winner through the
+  known per-image calibration gave **236 E_F inliers**, **1.000** F-overlap,
+  calibrated-F residual **0.597878 px**, E_F-on-F normalized residual
+  **0.00018501**, cheirality **235/236** (second solution 1), p10/p25/median
+  angles **2.475/2.531/2.574°**, three stable refits, projection distortion
+  **0.000331**, singular-value mismatch **0.000661**, and pose spread
+  **0.571° rotation / 7.952° translation**; the GT-only E_F error was
+  **0.05°/0.98°**. Thus only the existing conservative **5°** global
+  translation-spread gate rejected this otherwise geometrically sound F→E
+  candidate. The neighboring controls were not safe to loosen: `0306–0307`
+  had **444/319** raw/accepted, direct E **158** inliers and F→E **317**
+  inliers but **16.06°** translation spread (GT direct/F→E
+  **2.03°/40.74°** vs **0.15°/1.16°**), while `0307–0308` had only **14**
+  direct-E inliers, cheirality **8/14** and p25 angle **0.023°**, and F→E
+  retained **5/69** matches (invalid quality; GT direct **10.40°/69.40°**).
+  `0309–0310` had F→E translation spread **49.03°** and remains rejected.
+  An opt-in sequence-only promotion therefore retains all other strict gates,
+  uses the sequential-SfM **10°** translation-spread bound, and leaves the
+  ordinary **5°** gate/default graph unchanged. On the exact cap-8,192/N=3
+  run it promoted **5** stable F→E edges and accepted sequence poses for
+  `DSC_0306` (**180** inliers, **156** triangulated, scale **1.706350**) and
+  `DSC_0309` (**236**, **233**, scale **1.623455**), reaching **24/38** vs
+  the no-promotion **23/38** control. The output had **16,427 tracks / 46,865
+  observations / 0.325 px**, partial 24-camera laser-GT **4.39 cm RMSE**,
+  **4:27.66** runtime, and **816,376 kB** peak RSS. This remains an opt-in
+  structural diagnostic rather than an accuracy-champion update; later growth
+  still stopped at `DSC_0310` (image 24, **2 < 6** usable PnP correspondences).
+  Log/model: `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_f2e_20260830.log`.
+
+- **Sequence fallback non-immediate-neighbor audit (2026-08-30).** After the
+  opt-in run reached `DSC_0309`, the three registered-neighbor candidates for
+  `DSC_0310` were checked with the same raw/F/E/F→E and sequence stability
+  diagnostics.  `DSC_0307–0310` (21,24) had only **37** raw matches at the
+  production ratio-0.8/cross-check setting and was `DEGENERATE` (**0** E/F/H
+  inliers); ratio **0.9** and **0.95** cross-check remained degenerate as well.
+  The exploratory ratio-0.95/no-cross-check profile had **3,387** raw,
+  **142 F / 132 E** inliers, but is not the production candidate and was not
+  promoted.  `DSC_0308–0310` (22,24) had **88 raw / 41 F** accepted inliers
+  (**0 E / 0 H**); its F→E probe retained **38 F / 0 E** rows, with
+  projection distortion **0.043776**, singular-value mismatch **0.087636**,
+  F-to-E normalized-residual ratio **43.744628**, no cheirality solution, and
+  **1.108° rotation / 19.177° translation** refit spread.  It therefore has
+  no valid composed pose or scale estimate.  The immediate
+  `DSC_0309–0310` (23,24) edge had **624 raw / 556 F / 318 E / 0 H**
+  inliers; F→E retained **555/556** F rows (**0.998201** overlap), with
+  **555/555** cheirality, direct-E p10/p25/median parallax
+  **0.150/0.246/0.944°**, F→E **1.047/1.528/1.906°**, but
+  **2.955° rotation / 49.094° translation** refit spread.  Although its
+  GT-only direct/F→E relative errors were **2.583°/22.754°** and
+  **0.136°/1.384°** (rotation/translation direction), the 49° spread fails
+  the sequence-only **10°** gate, so it is not a safe fallback edge.  The
+  already accepted fallback scales remain **1.706350** (`DSC_0306`) and
+  **1.623455** (`DSC_0309`), from the recent consecutive-step history; no
+  composed scale/pose was produced for `DSC_0310`.  Thus no non-immediate
+  neighbor passed the existing stability gates, and no neighbor-selection or
+  stem-gap scaling generalization was justified.  The exhaustive quality log
+  is `/tmp/diag_seq_neighbors_exhaustive_quality_20260830.log`; this is a
+  negative structural diagnostic, not an accuracy-champion update.
+
+- **Sequence-only high-support F→E spread override (2026-08-30).** Added a
+  conservative exception inside the existing default-off
+  `--sequence-relative-pose-fallback` path.  It can ignore only the
+  sequence translation-spread bound when all other F→E gates still pass and
+  the candidate has at least **100 F and E inliers**, F/E overlap **≥0.95**,
+  positive-depth ratio **≥0.95**, cheirality winner margin **≥0.75**, p25
+  triangulation angle **≥1°**, finite essential-manifold/residual diagnostics,
+  at least two stable refits, and the existing **5°** rotation-spread limit.
+  The ordinary global 5° gate and sequence 10° gate are unchanged; the
+  override is reported per edge under `VISLOC_SFM_DEBUG`.  On the exact
+  cap-8,192/N=3 high-resolution run it accepted **7** F→E promotions: **5**
+  ordinary stable edges and two spread overrides,
+  `DSC_0306–0307` (**319 F / 317 E**, overlap **0.990596**, cheirality
+  **0.996845**, p25 angle **3.840761°**, spread **1.939°/16.058°**) and
+  `DSC_0309–0310` (**556/555**, overlap **0.998201**, cheirality **1.0**,
+  p25 **1.527653°**, spread **2.955°/49.094°**, rotation/translation).
+  The mapper still accepted sequence poses only for `DSC_0306` and
+  `DSC_0309` (scales **1.706350** and **1.623455**); `DSC_0310` remained at
+  **2 < 6** usable PnP correspondences.  The final result was unchanged at
+  **24/38**, **16,427 tracks / 46,865 observations / 0.325 px**, partial
+  laser-GT **4.39 cm RMSE**, **4:20.16** runtime, and **817,576 kB** peak
+  RSS.  Thus the strong-support override did not unlock the next image and
+  is retained as an opt-in structural diagnostic only.  The low-resolution
+  lossless snapshot control and sequence-enabled A/B remained byte-identical
+  (**38/38**, **20,086 tracks / 66,894 observations / 0.281 px**, **3.422 cm**
+  laser-GT RMSE; identical camera/image/point hashes).  Focused override tests,
+  release check, rustfmt check, and `git diff --check` passed.  Logs/models:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_f2e_override_20260830`
+  and `/tmp/seq_override_snapshot_{control,enabled}_20260830_v2`.
+
+- **Sequence fallback gate-trace for promoted `DSC_0309–0310` (2026-08-30).**
+  Added `VISLOC_SFM_DEBUG`-only rejection records around the opt-in sequence
+  fallback's pair lookup/model availability, predecessor registration, scale
+  history/MAD, stored-E recovery, cheirality, pose composition, and
+  triangulation/admission gates.  The promotion is not diagnostic-only: the
+  trace consumed the same mutable `PairwiseMatches` entry after promotion,
+  showing `image=24 stem=310 pair=53 model=stored_essential direction=23-24`
+  with **555** selected E_F-supported matches.  Both fallback attempts had a
+  valid scale history and stored finite E_F: before final refinement the
+  scale was **1.623455**, hardened cheirality was **504/555**, and
+  triangulation admitted **221/555**; after refinement the scale was
+  **1.571497**, with the same **504/555** and **221/555**.  The candidate was
+  rejected only at the provisional triangulation support gate because 221 is
+  below the required half-support **278** (and not because of lookup,
+  missing-E, scale, pose-finiteness, or cheirality failure).  Consequently
+  `DSC_0310` remained at **2 < 6** PnP correspondences and the fresh
+  cap-8,192/N=3 run remained **24/38**, **16,427 tracks / 46,865 observations /
+  0.325 px**, partial laser-GT **4.39 cm RMSE**, **4:17.08**, peak RSS
+  **817,152 kB**.  The low-resolution snapshot control/enabled rerun stayed
+  byte-identical at **38/38**, **20,086 / 66,894 / 0.281 px**, and **3.422 cm**
+  RMSE (camera/image/point hashes unchanged).  No fallback threshold or
+  plumbing change was made; detailed trace:
+  `/tmp/eth3d_courtyard_highres_cap8192_window3_seqfallback_f2e_trace_20260830.log`.
+
+- **ETH3D courtyard original-resolution source audit (2026-08-30).** The
+  filesystem cache already contains the official-style extracted
+  `courtyard_dslr_undistorted` subset at
+  `/home/sasaki/datasets/eth3d/courtyard`: all **38** files
+  `DSC_0286.JPG`–`DSC_0323.JPG`, **500,762,181** image bytes, with dimensions
+  **6205×4135 (23)**, **6208×4134 (12)**, **6200×4134 (2)**, and **6198×4129
+  (1)**.  Every JPEG dimension agrees with the camera ID referenced by the
+  local `dslr_calibration_undistorted/images.txt`; `cameras.txt` contains the
+  four corresponding undistorted `PINHOLE` blocks (SHA-256
+  `0cf9d1f1615b89eed8e48a92ef0ee44352f0fbadbb1be0c00b12f15d01c1f83c`).  The
+  official datasets page lists the same courtyard as 38 images and its
+  `courtyard_dslr_undistorted.7z` archive as 0.5 GB; a read-only HEAD to
+  `https://www.eth3d.net/data/courtyard_dslr_undistorted.7z` returned
+  `Content-Length: 500990569` and the duplicate download was skipped.  The
+  official evaluation archive is `courtyard_dslr_scan_eval.7z` (listed as
+  0.2 GB; a read-only HEAD returned `Content-Length: 182151847`); it was not
+  duplicated or extracted because no calibration-faithful full-resolution
+  run could be scored.  The local `images.txt`/`points3D.txt` are the
+  COLMAP-derived calibration/triangulation package, not a replacement for
+  the separate laser-evaluation archive.
+  The official [documentation](https://www.eth3d.net/documentation) identifies
+  these as pre-undistorted JPEGs with COLMAP-format calibration, while the
+  [dataset page](https://www.eth3d.net/datasets) supplies the archive and
+  ground-truth links; the [ETH3D license](https://www.eth3d.net/) is CC
+  BY-NC-SA 4.0.  The true COLMAP binary is unavailable in this environment.
+  Scaling each official block anisotropically to the existing 1600×1066
+  working size gives, for the dominant camera-1 block,
+  `(fx,fy,cx,cy)=(879.182595,878.951158,803.264464,532.285896)` (the other
+  blocks give `(878.440722,878.998742,802.757732,534.010818)`,
+  `(879.331613,878.813082,803.310968,532.638994)`, and
+  `(880.650532,880.378135,804.574379,532.488816)`), explaining but not
+  replacing the current approximate shared camera.
+  The demo accepts one global `Camera`, whereas the source calibration has
+  four image-size/intrinsic blocks, so no exact full-resolution reconstruction
+  was claimed.  The exact bounded compatible-SIFT probe command was
+  `RAYON_NUM_THREADS=1 target/release/examples/unordered_sfm_demo
+  --feature-extractor sift --images-dir
+  /tmp/eth3d_courtyard_highres_probe_single2/images --width 6205 --height
+  4135 --fx 3409.58 --fy 3409.44 --cx 3115.16 --cy 2064.73
+  --sift-max-keypoints 8192 --sift-vlfeat-compatible-detector
+  --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations
+  --sift-vlfeat-compatible-output-order --export-features-dir
+  /tmp/eth3d_courtyard_highres_probe_single2/features --export-features-only
+  --out-colmap /tmp/eth3d_courtyard_highres_probe_single2/out`.
+  A bounded probe using the dominant block
+  (`6205×4135`, `fx=3409.58`, `fy=3409.44`, `cx=3115.16`, `cy=2064.73`) and
+  `RAYON_NUM_THREADS=1` took **80.6 s / 76.8 s** for `DSC_0305/0306`, emitted
+  **13,038 / 12,576** rows, and used about **10 GB RSS** per image; the
+  parallel two-image probe reached **19 GB RSS**.  Thus a 38-image
+  8192-keypoint run (and its exhaustive NN matching) is not a bounded,
+  calibration-faithful experiment on this 30-GiB host.  Probe artifacts and
+  manifest are under `/tmp/eth3d_courtyard_highres_probe_single2` and
+  `/tmp/eth3d_courtyard_highres_manifest_20260830`; the current 1600×1066
+  data was not modified and no high-resolution Sim(3) result is asserted.
+
+- **Exact-descriptor length-2 NN audit (2026-08-30).** Recomputed forward
+  and reverse best/second-best L2 distances directly from the immutable
+  COLMAP feature files and mapped them to the split/merge model's **10,989**
+  length-2 tracks.  **10,920** had a direct accepted snapshot edge
+  (**1,093** oracle-positive / **9,827** negative); the remaining 69
+  transitive pairs included **40** oracle positives and were kept separate.
+  On the direct subset, forward Lowe-ratio AUC/AP were only **0.518 / 0.104**,
+  reverse ratio **0.507 / 0.102**, mutual-margin **0.502 / 0.100**, and
+  pair-distribution-normalized absolute distance **0.489 / 0.095**.  The
+  strict matcher-like cut (`ratio <= 0.8`, mutual best, and reverse ratio)
+  retained **10,865 / 1,089** pairs (**10.02% precision / 99.63% recall**);
+  at ratio cutoffs 0.6/0.7/0.8/0.9 its precision/recall were respectively
+  **10.05/50.32%, 10.03/72.46%, 10.02/99.63%, 10.00/99.91%**.  Adding the
+  only useful graph signal, `cycle >= 1`, raised the 0.8-cut subset to
+  **78.72% precision / 24.70% recall**, so it discards most true candidates.
+  Exact ratios/mutual margins were absent from snapshot v1 and are not
+  propagated into tracks; no schema change or final length-2 gate was added.
+  The descriptor-level result confirms that a safe source-standard rule is
+  not supported by the available data.
+
+- **Length-2 track quality audit (2026-08-30).** An oracle-only audit of
+  `/tmp/pose_merge_2px_gate4_selective2_8_9_20260830` labeled its **10,989**
+  length-2 tracks against the valid COLMAP point-track membership: **1,133**
+  pairs were true matches and **9,856** were false, while the COLMAP model
+  contains **1,564** length-2 tracks.  Cycle support was the only useful
+  discriminator (AUC **0.631**); the standard `cycle >= 1` rule retained 407
+  candidates at **75.9% precision / 27.3% recall**.  Other available signals
+  were effectively non-separating (angle AUC **0.531**, descriptor L2 **0.482**,
+  accepted pair support **0.410**, final reprojection **0.464**); for example,
+  angle >=2 degrees retained essentially every candidate at only **10.3%**
+  precision, and reprojection <=1 px gave **10.1% / 94.4%** precision/recall.
+  The lossless snapshot/features do not retain exact Lowe ratios, mutual-NN
+  margins, scale, or orientation, and 69 transitive pairs without a direct
+  snapshot edge include 40 oracle positives.  No default-off final length-2
+  gate was added: available source-standard thresholds cannot retain most
+  true candidates without leaving the false population, so further topology
+  or metadata evidence is required.
+
+- **Pose-guided post-split track merging (2026-08-30).** Added the
+  default-off `--pose-guided-track-merging` pass, available only with
+  `--pose-guided-track-splitting`.  It groups only verified cross-track edges,
+  rejects any same-image overlap, refits the complete union at the fixed
+  poses, and requires finite cheirality-valid reprojections within the
+  split-only gate; accepted unions are ranked by support, independent image
+  pairs, parallax, robust reprojection, and stable observation order, with
+  geometry recomputed after every union.  Unit coverage includes complementary
+  fragments, geometric false-edge rejection, same-image conflict rejection,
+  transitive recomputation, permutation invariance, and default-off identity.
+  On the immutable COLMAP snapshot with seed `(8,9)`, the 2 px no-bridge
+  split/recovery stack tested **857** active cross-track groups and accepted
+  **0** merges.  It therefore retained **21,819 tracks / 76,211 observations**
+  with length histogram `{2: 11,027, 3: 4,426, 4: 1,970, 5: 1,202, 6: 804,
+  7: 571, 8: 524, 9: 447, 10: 283, 11: 188, 12: 169, 13: 86, 14: 36,
+  15: 27, 16: 19, 17: 24, 18: 16}`, **0.256477 px** mean reprojection,
+  38/38 registration, and **2.71 cm** laser-GT RMSE.  Against the valid
+  COLMAP point-track partition (12,983 tracks / 145,204 observation pairs),
+  pair precision/recall remained **84.415% / 91.854%**, identical to the
+  no-merge 2 px control.  The known-pose oracle diagnostic likewise tested
+  **1,086** groups, accepted **0**, and retained **23,409 / 81,474** tracks /
+  observations, **0.256250 px**, **1.20 cm** (38/38), and **84.823% /
+  97.860%** partition precision/recall.  Since the one-edge mode produced no
+  geometrically valid candidate, no two-edge variant was added; reducing the
+  length-2 population requires a new source of valid complementary edges.
+  Commands/models/logs are `/tmp/pose_merge_2px_8_9_20260830_v2` and
+  `/tmp/pose_merge_2px_oracle_20260830`.
+
+- **Separate post-split merge reprojection gate (2026-08-30).** Added the
+  default-off `--pose-guided-merge-max-reproj PX` option.  An omitted value
+  inherits the 2 px split gate; an explicit value gates only candidate-union
+  fitting.  After BA, only merged tracks are checked against the ordinary
+  4 px hard threshold; failing unions restore their exact source fragments
+  and trigger one deterministic retry BA.  A retry failure or an overall
+  support/objective failure still rolls back the complete candidate.  With
+  split=2 px and merge=4 px on the immutable snapshot, the current-pose seed
+  `(8,9)` produced **866** candidates, **31** proposed, **31** good, and
+  **0** restored merges; the accepted output has **21,788 tracks / 76,211
+  observations / 0.259 px / 2.70 cm** at 38/38, with length histogram
+  `{2: 10,989, 3: 4,418, 4: 1,975, 5: 1,202, 6: 805, 7: 574, 8: 528,
+  9: 448, 10: 284, 11: 187, 12: 169, 13: 87, 14: 36, 15: 27, 16: 19,
+  17: 24, 18: 16}` and partition precision/recall **84.396% / 91.986%**.
+  The known-pose oracle tested **1,097** candidates, accepted **38** good
+  unions, restored **0**, and yielded **23,371 / 81,474 / 0.259 px / 1.20
+  cm** at 38/38 with partition precision/recall **84.811% / 98.076%**.
+  No merge required the retry in these runs, so no current union was
+  restored; the selective path avoids rejecting healthy merges because of an
+  unrelated split-track residual.  No additional threshold sweep was run.
+  Models/dumps/logs are under
+  `/tmp/pose_merge_2px_gate4_selective2_{8_9_20260830,oracle_20260830}`.
+
+- **Final minimum track-length gate (2026-08-30).** Added the default-off
+  `--final-min-track-length 3` gate.  It runs only after registration and all
+  configured recovery/splitting passes, removes length-2 landmarks while
+  leaving growth/PnP history untouched, re-triangulates the remaining tracks,
+  and runs a guarded BA; solver errors, non-finite state, registration/support
+  loss, or a non-improving BA objective restore the complete pre-gate state.
+  The initial track-length audit on the immutable COLMAP snapshot showed
+  length-2 fractions of **10,583/20,777 = 50.936%** for legacy,
+  **11,089/21,501 = 51.574%** for pose-split 1 px,
+  **11,062/21,849 = 50.629%** for pose-split 2 px with bridge cuts, versus
+  **1,564/13,379 = 11.690%** in the actual COLMAP membership model.  With
+  seed `(8,9)`, the legacy gate retained 38/38 and produced **10,194
+  tracks / 51,265 observations / 0.289 px / 3.40 cm** laser-GT RMSE versus
+  the no-gate **20,777 / 72,431 / 0.282 px / 3.42 cm** control.  The 2 px
+  no-bridge pose split retained 38/38 with **10,792 / 54,157 / 0.270 px /
+  2.76 cm**, versus **21,819 / 76,211 / 0.256 px / 2.707 cm**; bridge-cut
+  pose split gave **10,787 / 54,117 / 0.269 px / 2.757 cm**, versus
+  **21,849 / 76,241 / 0.256 px / 2.704 cm**.  An actual-COLMAP-pose seeded
+  diagnostic gave **9,827 / 47,332 / 0.296 px / 1.30 cm**; this is an oracle
+  control, not a production result.  The legacy improvement is marginal and
+  both pose-split variants regress, so the gate remains opt-in and is not an
+  accuracy champion.  CLI validation accepts only the first source-motivated
+  value `3`; unit tests cover default identity, short-track removal,
+  length-3 preservation, support validation, determinism, and incompatible
+  `--no-final-ba` usage.  Commands/logs/models are under
+  `/tmp/seed_final_min3_{legacy_8_9,pose2_nobridge_8_9,pose2_bridge_8_9,oracle}_20260830`.
+
+- **Pose-split bridge-cut refinement (2026-08-30).** Added the default-off
+  `--pose-guided-track-splitting-bridge-cuts` subflag.  Before the existing
+  pose-guided splitter, an iterative deterministic Tarjan traversal considers
+  only graph bridges whose two sides each contain at least two distinct posed
+  images and independently fit one finite point under the existing split
+  reprojection gate; the bridge is cut only when the combined observations do
+  not fit one point under that same gate.  Singleton/invalid sides and genuine
+  sparse chains are retained.  The resulting sides then use the unchanged
+  pose-guided split/rollback path.  Synthetic tests cover a false bridge,
+  valid sparse chain, singleton side, permutation invariance, and default-off
+  behavior.  On the immutable COLMAP snapshot with seed `(8,9)`, the
+  recovery→split pre-entry was **72,431 observations / 0.281787 px**.  At 1.0
+  px, **153 bridges in 153 components** were cut (side sizes 2–17), yielding
+  **21,501 tracks / 74,240 observations / 0.209641 px / 2.719 cm** laser-GT
+  RMSE and **84.466% precision / 88.228% recall**; the no-cut composition was
+  **21,461 / 74,207 / 0.209750 px / 2.722 cm**, **84.459% / 88.325%**.  At
+  2.0 px, **133 bridges in 133 components** were cut (side sizes 2–17),
+  yielding **21,849 / 76,241 / 0.256369 px / 2.704 cm** and **84.407% /
+  91.788%**, versus no-cut **21,819 / 76,211 / 0.256477 px / 2.707 cm** and
+  **84.415% / 91.854%**.  Both retained 38/38; the precision/laser gains are
+  only marginal and recall decreases, so this remains an opt-in diagnostic,
+  not an accuracy-champion update.  Logs/models are under
+  `/tmp/seed_bridge_cut_8_9_{1px,2px}_20260830`.
+
+- **Recovery→pose-split composition (2026-08-30).** The default-off
+  `--geometry-guided-conflict-recovery` and
+  `--pose-guided-track-splitting` flags may now be composed on the plain
+  incremental/union-find path.  The mapper snapshots clean and conflicting
+  components before recovery, lets recovery/post/final refinement finish, and
+  then rebuilds the split candidate from that immutable original snapshot
+  (never recursively from recovered tracks), followed by one guarded BA.  The
+  CLI label and parser test cover the composition; a unit test verifies source
+  ownership, imported-membership exclusion, default-off behavior, and
+  deterministic rollback semantics.  On snapshot
+  `/tmp/snapshot_colmap_verified_20260830.vps` with seed `(8,9)`,
+  `--min-pnp-inliers 8 --pnp-max-iterations 100000
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement`, the recovery-only control was **38/38**,
+  **20,777 tracks / 72,431 observations / 0.282 px / 3.42 cm** laser-GT
+  RMSE.  The post-recovery split entry was **72,431 observations / 0.281787
+  px**; the 1.0 px composition accepted **21,461 tracks / 74,207
+  observations / 0.210 px / 2.72 cm**, with partition **84.459% precision /
+  88.325% recall** and guarded objective **0.281787→0.217769→0.209750 px**.
+  The 2.0 px composition accepted **21,819 / 76,211 / 0.256 px / 2.71 cm**,
+  with **84.415% / 91.854%** partition precision/recall and objective
+  **0.281787→0.262582→0.256477 px**; both retained 38/38.  These are opt-in
+  diagnostic results, not a default or accuracy-champion change.  Exact
+  outputs/logs are `/tmp/seed_recovery_8_9_20260830`,
+  `/tmp/seed_comp_8_9_{1px,2px}_20260830`; the 1.0/2.0 px effective-config
+  hashes were `7ca6c9d82954842b`/`dabca888c9b6c891`.  The common invocation
+  was `target/release/examples/unordered_sfm_demo --feature-extractor files
+  --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export
+  --feature-suffix _features.txt --image-suffix .png --width 1600 --height
+  1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6
+  --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps
+  --min-matches 20 --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --pose-guided-track-splitting --pose-guided-split-max-reproj {1.0,2.0}
+  --pose-guided-track-splitting-iterations 1 --seed-pair 8,9 --out-colmap
+  /tmp/seed_comp_8_9_{1px,2px}_20260830` (with separate runs/thresholds).
+
+- **Opt-in pose-guided track splitting (2026-08-30).** Added
+  `--pose-guided-track-splitting` for a complete, posed model: it revisits
+  legacy union components (including the **803** same-image-conflict
+  components), proposes deterministic wide-baseline 3-D hypotheses, keeps at
+  most one observation per image under cheirality/reprojection gates, locally
+  refines fixed-pose points, and validates one rebuilt partition with a
+  rollback guard.  The default union-find path is unchanged; the flag rejects
+  alternate track strategies and leaves incomplete pose models unchanged.  A synthetic
+  two-point/conflicting-edge fixture verifies splitting, outlier pruning,
+  permutation determinism, and default-off behavior.  On the immutable COLMAP
+  snapshot (`/tmp/snapshot_colmap_verified_20260830.vps`, 380 pairs / 140,445
+  accepted edges), the ordinary control was **38/38**, **20,086 tracks /
+  66,894 observations**, **0.281 px**, **3.42 cm** laser-GT RMSE.  The
+  current-pose split accepted **21,954 tracks / 76,885 observations**, **0.289
+  px**, and **3.17 cm** (`/tmp/snapshot_colmap_pose_split_current_20260830e`),
+  with split diagnostics `components=25,306, preserved=20,085, split=1,081,
+  hypotheses=27,223, discarded_obs=7,633`; this is a modest opt-in result,
+  not an accuracy-champion update.  The candidate observation partition had
+  **84.19% pair precision / 92.65% recall** against valid COLMAP point tracks
+  (145,204 reference pairs), so substantial false merges remain.  With all
+  COLMAP camera poses supplied only as an oracle diagnostic (intrinsics matched
+  in a temporary `/tmp` camera header), the split was **38/38**, **23,580 /
+  82,274**, **0.291 px**, **1.45 cm**, versus **1.44 cm** for the no-split
+  oracle-pose control; hence the partition does not independently improve the
+  known-pose basin.  The exact oracle command used
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_POSE_SPLIT_DUMP=/tmp/pose_split_oracle_20260830e.tsv target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps --initial-poses /tmp/colmap_oracle_pose_seed_cam8794_20260830/images.txt --no-final-ba --periodic-ba-min-registered-images 999 --min-matches 20 --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --pose-guided-track-splitting --out-colmap /tmp/snapshot_colmap_pose_split_oracle_20260830e`.
+
+- **Pose-guided graph-support admission (2026-08-30).** Added the separate
+  default-off `--pose-guided-track-splitting-graph-support` subflag.  After a
+  two-view anchor, each added observation must have direct verified edges to
+  two distinct images already in the hypothesis; multi-view emissions also
+  require two independent cross-image supports, while genuine length-2
+  hypotheses remain valid.  The admission order and support histogram are
+  deterministic, and the existing pose-guided result is unchanged when the
+  subflag is omitted.  Synthetic tests cover a single false bridge versus two
+  independent supports, length-2 fallback, permutation invariance, and CLI
+  dependency validation.  On the same immutable snapshot and mapper stack,
+  the prior pose-split result was **21,954 tracks / 76,885 observations / 0.289
+  px / 3.17 cm**; graph support produced **22,347 / 76,299 / 0.280 px / 3.21
+  cm**, with `components=25,306, preserved=20,085, split=1,081,
+  hypotheses=30,038, discarded_obs=8,219, graph_tracks=1,246,
+  graph_len2=1,016, graph_hist=[0,0,1913,1207,723,455,269,317]`.  Candidate
+  partition pair precision/recall against valid COLMAP point tracks changed
+  from **84.19% / 92.65%** to **85.22% / 89.64%** (reference pair set
+  145,204): precision improved only about one percentage point while recall
+  and laser-GT Sim(3) regressed slightly, so this remains an opt-in negative
+  experiment rather than an accuracy-champion change.  The exact graph run
+  used `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_POSE_SPLIT_DUMP=/tmp/pose_split_graph_20260830.tsv target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps --min-matches 20 --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --post-refinement-registration --final-iterative-refinement --pose-guided-track-splitting --pose-guided-track-splitting-graph-support --out-colmap /tmp/snapshot_colmap_pose_split_graph_20260830`.  The oracle-pose diagnostic was **24,035 tracks / 81,547 observations / 0.282 px / 1.47 cm**, versus the prior oracle-pose split **23,580 / 82,274 / 0.291 px / 1.45 cm**; its graph histogram was `[0,0,2293,1379,830,517,313,365]`, so the small precision gain did not survive the known-pose accuracy check.
+
+- **Pose-guided split-only reprojection gate (2026-08-30).** Added the
+  default-off `--pose-guided-split-max-reproj PX` option. `None` reuses the
+  ordinary `--max-reproj` value (4.0 px in this experiment), and the gate is
+  applied only while selecting/refining pose-guided split observations; the
+  ordinary mapper, PnP, and final BA thresholds are unchanged. CLI validation
+  rejects non-positive/non-finite values and use without
+  `--pose-guided-track-splitting`; the default config remains `None`. On the
+  immutable 380-pair COLMAP snapshot with the base pose-split stack, the
+  current/4.0 px control was **21,954 tracks / 76,885 observations / 0.289 px /
+  3.17 cm**, with candidate partition pair precision/recall **84.187% /
+  92.650%**. The only two bounded tests were 1.0 px (**21,461 / 74,207 /
+  0.210 px / 2.72 cm**, **84.459% / 88.325%**, `discarded_obs=10,311`) and
+  2.0 px (**21,819 / 76,211 / 0.256 px / 2.71 cm**, **84.415% / 91.854%**,
+  `discarded_obs=8,307`); all remained 38/38. With the temporary known-pose
+  diagnostic, the corresponding results were 1.0 px **22,998 / 79,239 /
+  0.208 px / 1.10 cm** and 2.0 px **23,409 / 81,474 / 0.256 px / 1.20 cm**,
+  versus the prior 4.0 px oracle split **23,580 / 82,274 / 0.291 px / 1.45
+  cm**; these oracle numbers are not a deployable accuracy claim. The
+  candidate partition reference was 12,983 valid COLMAP points and 145,204
+  observation pairs. Neither threshold loses registration, so no length-2
+  fallback was added; the modest score gain remains an opt-in diagnostic, not
+  an accuracy-champion update. The exact current-pose 1.0 px command was
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_POSE_SPLIT_DUMP=/tmp/pose_split_threshold_1px_20260830.tsv target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps --min-matches 20 --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --post-refinement-registration --final-iterative-refinement --pose-guided-track-splitting --pose-guided-split-max-reproj 1.0 --out-colmap /tmp/pose_split_threshold_1px_20260830` (the 2.0 px A/B changed only the threshold and output paths).
+
+- **Bounded pose-guided split iterations (2026-08-30).** Added
+  `--pose-guided-track-splitting-iterations N` (CLI `1..=8`; omitted means
+  one pass when splitting is enabled). Every pass rebuilds from the original
+  clean/conflicting components with the latest complete poses, never from the
+  previous split output. The first-pass guard is unchanged; later passes also
+  require finite reprojection, unchanged registration/support, and strict
+  improvement over the already accepted model, otherwise that pass is rolled
+  back and iteration stops. Synthetic guards cover N=1 identity, second-pass
+  improvement, support/registration rollback, non-finite input, early stop,
+  determinism, and CLI validation. On the immutable snapshot with the base
+  pose-split stack, N=2 + 1.0 px accepted iteration 1 at **21,461 / 74,207 /
+  0.210 px / 2.72 cm** (candidate P/R **84.459% / 88.325%**); iteration 2
+  proposed **21,440 / 74,027** and **84.448% / 88.080%**, but was rejected
+  because support fell below 74,207 and its candidate mean rose to 0.276 px
+  from 0.210 px. N=2 + 2.0 px accepted iteration 1 at **21,819 / 76,211 /
+  0.256 px / 2.71 cm** (P/R **84.415% / 91.854%**); iteration 2 proposed
+  **21,814 / 76,163** and **84.413% / 91.803%**, and was likewise rejected
+  (support below 76,211; candidate mean 0.407 px versus 0.256 px). Both
+  remained 38/38, so no N=3 run was justified. The explicit N=1 run and the
+  omitted-iterations run produced byte-identical split TSV SHA-256
+  `901d6cf035d2176d7f9697f8cae06a06892409489510f69308bca2d0eef4d081`.
+  Oracle-pose ceiling controls also stopped after iteration 1: 1.0 px
+  **22,998 / 79,239 / 0.208 px / 1.10 cm** and 2.0 px **23,409 / 81,474 /
+  0.256 px / 1.20 cm**. These remain opt-in diagnostic results, not an
+  accuracy-champion update.
+
+- **Pose-split seed replay (2026-08-30).** Replayed only the four existing
+  high-quality seeds `(8,9)`, `(7,8)`, `(7,9)`, and `(10,11)` with the
+  immutable COLMAP verified snapshot
+  `/tmp/snapshot_colmap_verified_20260830.vps` (SHA-256
+  `6511181ac3b099cb9a9c8d7525b1746d28b7d5c7459df27e8460fef27f71f82a`, 380
+  pairs / 140,445 accepted edges), `--min-pnp-inliers 8`,
+  `--post-refinement-registration`, `--final-iterative-refinement`,
+  `--pose-guided-track-splitting --pose-guided-split-max-reproj 1.0
+  --pose-guided-track-splitting-iterations 1`.  The common command was the
+  snapshot-import command with `--seed-pair I,J` and output paths
+  `/tmp/seed_split_{8_9,7_8,7_9,10_11}_1px_20260830`.  All runs reached
+  **38/38**.  Before splitting, the complete-pose models had respectively
+  **66,894 / 66,609 / 67,462 / 66,722** valid observations and split-entry
+  mean reprojection **0.281 / 0.392 / 0.354 / 0.379 px**.  The 1.0 px split
+  results in seed order were: `(8,9)` **21,461 tracks / 74,207 observations /
+  0.210 px / 2.72 cm**, partition **84.459% precision / 88.325% recall**;
+  `(7,8)` **21,490 / 72,369 / 0.248 px / 11.55 cm**, **84.359% / 82.096%**;
+  `(7,9)` **21,749 / 73,618 / 0.232 px / 10.37 cm**, **84.339% / 84.184%**;
+  `(10,11)` **21,391 / 72,526 / 0.265 px / 16.38 cm**, **84.498% /
+  83.462%**.  Final mean reprojection/support ranks `(8,9)` first, then
+  `(7,9)`, `(7,8)`, `(10,11)`, matching the laser-GT ranking on this bounded
+  set; no seed was near/sub-cm, so no duplicate reproducibility run was
+  warranted.  Because `(8,9)` was best but its 1.0 px partition recall was
+  only 88.325%, one bounded 2.0 px A/B was run for that seed only: **21,819 /
+  76,211 / 0.256 px / 2.71 cm**, **84.415% / 91.854%**, still 38/38.  This is
+  a small opt-in diagnostic result, not a default or accuracy-champion
+  update.
+
+- **Fixed-rotation pose-split probe (2026-08-30).** A temporary
+  `--pose-guided-split-fix-rotations` composition reused the existing
+  fixed-rotation BA constraints to hold every registered pose at its
+  pre-split champion rotation while validating the split candidate; only
+  translations and landmarks were optimized.  On seed `(8,9)` and the same
+  snapshot/min8/post/final stack, 1.0 px produced **21,461 tracks / 74,207
+  observations / 0.215 px / 3.36 cm**, with **84.459% / 88.325%** partition
+  precision/recall, versus free-rotation **0.210 px / 2.72 cm**; 2.0 px
+  produced **21,819 / 76,211 / 0.261 px / 3.30 cm**, **84.415% / 91.854%**,
+  versus free-rotation **0.256 px / 2.71 cm**.  Both remained 38/38 and the
+  fixed candidate BA reported maximum rotation change **3.205e-15 degrees**;
+  support and partition membership were unchanged.  Existing actual-COLMAP-
+  pose ceiling artifacts re-score **1.10 cm / 1.20 cm** for their 1.0/2.0 px
+  oracle split supports (**79,239 / 81,474 observations**), and are not a
+  deployable or current-rotation result.  Current-rotation fixing therefore
+  fails the quality gate and the temporary CLI/config code was removed; no
+  persistent flag or default behavior change is shipped.  Logs/models were
+  retained under `/tmp/seed_split_8_9_{1px,2px}_fixrot_20260830`.
+
+- **Lossless verified-pair snapshots (2026-08-30).** Added the explicit,
+  default-off `--export-verified-pairs-snapshot PATH` /
+  `--import-verified-pairs-snapshot PATH` path in
+  `examples/unordered_sfm_demo.rs`.  Schema 1 stores image/feature manifests,
+  intrinsics, effective/verifier configuration hashes and text, exact pair and
+  raw/accepted/essential correspondence order, inlier indices/counts,
+  CALIBRATED flag/configuration, E/F/H matrices, relative pose, ordered and
+  unordered edge hashes, and an FNV-1a payload checksum.  Import validates all
+  manifests, camera values, checksums, pair/index relationships, and hashes,
+  then bypasses matcher/verifier and preserves the stored stream; legacy text
+  import is unchanged.  Codec round-trip, exact float-bit/order, checksum,
+  schema-version, CLI default, and conflict tests pass.  The authoritative
+  COLMAP export command was
+  `SSD=/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard; target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir "$SSD/colmap_features_export" --import-matches-file "$SSD/colmap_matches_import.txt" --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 20 --verification-mode full --mapper incremental --out-colmap /tmp/snapshot_colmap_export_model_20260830 --pnp-max-iterations 100000 --final-iterative-refinement --export-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps`; the separate import replaced the raw-import/export options with `--import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps` and wrote `/tmp/snapshot_colmap_import_model_20260830b`.
+  COLMAP-feature command (raw `colmap_matches_import.txt`, full verification,
+  plain incremental, PnP 100k, final iterative) exported
+  `/tmp/snapshot_colmap_verified_20260830.vps` (SHA-256
+  `6511181ac3b099cb9a9c8d7525b1746d28b7d5c7459df27e8460fef27f71f82a`,
+  380 pairs / 140,445 accepted edges, ordered hash
+  `d8f83d1c42305fcd`, unordered hash `ee3768f65c0c53b4`).  A separate import
+  process reproduced 38/38, 20,086 tracks / 66,894 observations, 0.281 px,
+  laser-GT 3.422 cm, and byte-identical `cameras.txt`, `images.txt`, and
+  `points3D.txt` (SHA-256 respectively
+  `a2132068b1a4dbe21f1ad68a23ff05461026c5a84e0b0de14f06311533e5b958`,
+  `d8cd03627eb77459ed8cfe0cffc5e909f54fa81665f9f0fe0eb7726de7e06d61`,
+  `97f0abfb05ec706e7d11a4939dc034533db2161d3abeddecfab896f1d271d1fe`).
+  The same fresh replay on own-SIFT features used
+  `target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/vlfeat_source_latest_floor_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement`, with export to `/tmp/snapshot_own_verified_20260830.vps` and `/tmp/snapshot_own_export_model_20260830`; the separate import wrote `/tmp/snapshot_own_import_model_20260830b`.
+  `/tmp/vlfeat_source_latest_floor_20260829` exported
+  `/tmp/snapshot_own_verified_20260830.vps` (SHA-256
+  `8293224402c7cd0ddb49f43f9a8f19033194ce2acf09185071df3440b6bdf72b`,
+  639 pairs / 154,857 edges, ordered hash `02cd21957f1636ed`, unordered hash
+  `a67e3c7680522a7c`) and imported to byte-identical 38/38,
+  15,638-track / 52,404-observation, 0.275 px output (laser-GT 61.679 cm).
+  The snapshot path is a reproducibility/diagnostic mechanism; it does not
+  change default reconstruction behavior or claim an accuracy-champion update.
+
+- **Validated-snapshot coordinate override (2026-08-30).** Added the
+  default-off diagnostic `--snapshot-coordinate-override-dir DIR`.  It is only
+  accepted with `--import-verified-pairs-snapshot` (and file features), first
+  validates the base feature manifest through the snapshot, then requires the
+  replacement directory to have identical image-name order, row counts, and
+  descriptor f32 bit patterns before copying only keypoint `x,y`; pair order,
+  indices, models, and ordered/unordered edge hashes are unchanged.  Focused
+  tests cover default-off/dependency validation, coordinate-only replacement,
+  exact descriptor-bit checks, and name-order rejection.  The exact common
+  mapper command was
+  `target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps [--snapshot-coordinate-override-dir DIR] --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 20 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap MODEL`.
+  The immutable snapshot is SHA-256
+  `6511181ac3b099cb9a9c8d7525b1746d28b7d5c7459df27e8460fef27f71f82a` with
+  380 pairs / 140,445 accepted correspondences and ordered/unordered hashes
+  `d8f83d1c42305fcd` / `ee3768f65c0c53b4`.  A (base coordinates) produced
+  38/38, 20,777 tracks / 72,431 observations, 0.282 px, and 3.42 cm laser-GT
+  RMSE; B (`/tmp/colmap_features_subpixel3b_20260829`) preserved both hashes
+  and 38/38 but produced 20,023 / 70,196, 0.451 px, and 22.24 cm.  The
+  existing Rust coordinate artifact
+  `/tmp/rust_subpixel3_exactcv3_20260829` passed the descriptor-bit contract
+  and produced 38/38, 21,060 / 73,538, 0.337 px, and 4.52 cm.  Model text
+  SHA-256 (cameras/images/points3D) was A
+  `a2132068b1a4dbe21f1ad68a23ff05461026c5a84e0b0de14f06311533e5b958` /
+  `c50fb73ce0199b765c99f1431846c752cc1c7943c7f86b22a2119fddf682c030` /
+  `ff6bd0246279744a121c31336d183816ac84866e6b23968cc3ebf928213d9c01`, B
+  `a2132068b1a4dbe21f1ad68a23ff05461026c5a84e0b0de14f06311533e5b958` /
+  `f200164084bfc2099c75c030fa105e91901da04233ad73daf5f0420b6e54374c` /
+  `e6fa8351a24053e02103982bbd98ed209df331124a45d667a7075790c46013b`, and
+  Rust `a2132068b1a4dbe21f1ad68a23ff05461026c5a84e0b0de14f06311533e5b958` /
+  `1ce78635a010fb69406e485b097ef771e8260e111a0270d6e743d84f801c5032` /
+  `996f1ff7fe29366b819d84c88a242006c5a343c0d936d0989e7318940be72df3`.
+  Thus neither coordinate variant justifies a production post-snapshot
+  refinement; the path remains diagnostic-only and does not alter defaults.
+
+- **Opt-in incremental correspondence triangulation (2026-08-30).** Audited
+  the lossless COLMAP 380-pair snapshot before changing the mapper: the
+  pre-unioned closure contained **24,503** conflict-free tracks / **80,698**
+  observations and discarded **803** same-image-conflict components / **9,896**
+  observations, while the actual COLMAP sparse model had **13,379** points /
+  **62,448** observations.  Only **10,018** pre-unioned tracks were exact
+  observation-set matches to COLMAP points (11,459 had at least two shared
+  observations); coverage intersection was **52,946** observations.  The
+  actual model's median/p90 track reprojection was **0.432/0.800 px** and
+  median/p10/p90 triangulation angle was **15.48/4.86/39.91 deg**.
+  Added default-off `--incremental-correspondence-triangulation`: verified
+  edges are physically sorted and added through an explicit
+  observation-to-track map, same-image-conflicting edges are rejected in
+  isolation, and every live point is revisited after registration with a
+  guarded widest-baseline re-triangulation.  The plain seed/growth/PnP
+  schedule is retained and the CLI rejects `--colmap-style` with this mode;
+  create/continue/merge/conflict/retriangulation, permutation, and default
+  no-op tests were added.  On the same snapshot
+  (`/tmp/snapshot_colmap_verified_20260830.vps`, SHA-256
+  `6511181ac3b099cb9a9c8d7525b1746d28b7d5c7459df27e8460fef27f71f82a`), the
+  mode retained **25,965** pre-filter tracks / **90,213** observations with
+  **2,819** edge-level conflicts, reached **38/38** (growth **37/38**, post
+  **+1**), and ended with **20,279 tracks / 68,629 observations / 0.347 px**;
+  laser-GT Sim(3) was **13.22 cm**, versus the plain legacy snapshot control's
+  **3.42 cm / 20,777 tracks / 72,431 observations / 0.282 px**.  This confirms
+  the mode can preserve completeness but its changed topology is a quality
+  regression, so it remains experimental and does not update the accuracy
+  champion; no own-SIFT run was justified after the COLMAP control failed the
+  quality gate.  The actual COLMAP model remains the **1.71 cm** oracle.  The
+  reproducible mode command was `target/release/examples/unordered_sfm_demo
+  --feature-extractor files --features-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export
+  --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066
+  --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6
+  --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps
+  --min-matches 20 --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --incremental-correspondence-triangulation --out-colmap MODEL`; the rebuilt
+  binary reproduced the same 13.22 cm result.
+
+- **COLMAP track-membership oracle replay (2026-08-30).** Added the
+  default-off `--diagnose-colmap-track-membership MODEL/points3D.txt` path.
+  Its sibling `images.txt` maps `IMAGE_ID`/`POINT2D_IDX` to the loaded image
+  and feature-row manifest; only observation membership is imported, while
+  COLMAP XYZ/color/error and camera poses are ignored.  The parser validates
+  image names, `POINTS2D` row counts, bounds, and one observation per image;
+  the actual model's 396 source tracks containing same-image duplicates
+  (3,871 observations) are skipped explicitly, leaving 12,983 valid tracks /
+  58,577 observations from 13,379 points / 62,448 observations.  On the
+  immutable verified snapshot `/tmp/snapshot_colmap_verified_20260830.vps`
+  (380 pairs / 140,445 accepted correspondences), the oracle membership
+  replay used the same plain incremental, PnP-100k, recovery, post-registration,
+  and final-iterative stack and produced 38/38, 12,827 tracks / 58,184
+  observations, 0.307 px mean reprojection, and 2.01 cm laser-GT Sim(3)
+  RMSE (median 1.32 cm).  The same stack with legacy union tracks produced
+  38/38, 20,777 / 72,431, 0.282 px, and 3.42 cm; the actual COLMAP sparse
+  model is a 1.71 cm oracle.  An exact-overlap control retaining only the 933
+  COLMAP points whose complete observation sets matched legacy tracks (3,179
+  observations) reached only 11/38, 816 tracks / 2,863 observations, 0.215 px,
+  and 3.30 cm on its 11-image subset, showing that the full COLMAP partition,
+  not merely a small intersection, is needed for connectivity.  Thus the
+  observation partition explains most of the gap, while the remaining error
+  is in mapper initialization/BA and support details; default reconstruction
+  behavior is unchanged.  Exact
+  oracle command: `target/release/examples/unordered_sfm_demo
+  --feature-extractor files --features-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export
+  --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066
+  --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6
+  --import-verified-pairs-snapshot /tmp/snapshot_colmap_verified_20260830.vps
+  --diagnose-colmap-track-membership
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_oracle_full/sparse_txt/points3D.txt
+  --min-matches 20 --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --out-colmap /tmp/snapshot_colmap_oracle_tracks_20260830`.
+
+- **Post-verification subpixel fixed-stream replay (2026-08-30).** Replayed
+  the exact available imported COLMAP verified stream
+  (`/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_verified_import.txt`:
+  401/703 pairs, 141,698 correspondences; unordered edge FNV-1a64
+  `55009052f64f8520`) while changing only feature coordinates after import;
+  all three runs preserved the pair/match stream and hash.  Original
+  coordinates produced 19,754 tracks / 68,577 observations, 0.408 px mean
+  reprojection, and 23.05 cm laser-GT Sim(3) RMSE; the OpenCV 3x3 artifact
+  produced 20,342 / 69,532, 0.405 px, and 24.43 cm; the existing Rust
+  cornerSubPix-equivalent artifact produced 19,821 / 67,924, 0.427 px, and
+  19.63 cm.  Both refiners moved about 10.8k/208,785 rows by more than 1e-6
+  px (mean 0.0329 px); Rust and OpenCV differed by >0.01 px on 778 rows,
+  so the Rust coordinates do not track the OpenCV artifact exactly.  With
+  actual COLMAP rotations fixed, the same three variants scored 1.95, 2.02,
+  and 2.02 cm respectively (all 38/38), so no variant reached a sub-cm
+  production-quality result.  The artifacts are COLMAP-feature rows
+  (208,785), not the own-SIFT rows (208,746), and therefore cannot be safely
+  applied to the own-SIFT index space.  No `--post-verification-subpixel`
+  path is shipped; the next bottleneck remains order-sensitive track
+  topology and an exact fixed replay of the transient fresh 380-pair stream.
+
+- **Opt-in COLMAP-style guided matching audit (2026-08-30).** Added
+  `--colmap-guided-matching` (requires `--guided-matching`) as an append-only
+  diagnostic path.  It follows COLMAP's `FindGuidedMatches` model choice
+  (calibrated `E`, uncalibrated `F`, planar/panoramic `H`), uses the
+  corresponding pixel/normalized Sampson or homography transfer gate, true
+  descriptor L2 distance with the `.7·512` distance cap, mutual nearest
+  matching, deterministic deduplication, and preserves the pre-guided
+  verified matches.  The implementation is compared with the authoritative
+  [COLMAP SIFT matcher](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc);
+  that source computes a dense geometry-masked distance matrix rather than a
+  separate spatial index, so the compatibility path likewise uses a bounded
+  deterministic full candidate scan.  On focused DSC_0305–0307 features at
+  ratio 0.9, the added matches were 139/125/167 for pairs 0305–0306,
+  0305–0307, and 0306–0307, respectively, but only 11/139 (7.91%),
+  6/125 (4.80%), and 14/167 (8.38%) overlapped the mapped COLMAP raw set
+  (the corresponding verified overlap was 11/139, 7/125, and 14/167).
+  The full reproducible own-SIFT run verified 639/703 pairs and registered
+  38/38, but retained 8,633 tracks / 26,680 observations at 0.327 px mean
+  reprojection and scored 185.26 cm laser-GT Sim(3) centre RMSE, versus
+  31.84 cm for the existing compatible-bilinear control.  Thus guided
+  additions did not improve the accuracy champion; the flag remains
+  default-off and no normal reconstruction behavior changes.
+
+- **GMS local-neighborhood probe (2026-08-30).** A read-only probe
+  (`python3 /tmp/gms_probe.py`) evaluated the own compatible-SIFT feature
+  artifact `/tmp/locus_own_features_reverse_20260829` (208,746 rows with
+  x/y/scale/orientation sidecars) before any production filter was added.
+  It follows the [GMS CVPR 2017 paper](https://openaccess.thecvf.com/content_cvpr_2017/html/Bian_GMS_Grid-based_Motion_CVPR_2017_paper.html)
+  and its [reference implementation](https://github.com/JiawangBian/GMS-Feature-Matcher/blob/master/include/gms_matcher.h):
+  20x20 normalized grids, four half-cell offsets, `THRESH_FACTOR=6`, the
+  prescribed five scale ratios and eight rotation patterns.  The sidecar
+  scale/orientation metadata was also measured per retained match; the
+  reference GMS scale/rotation switches are global grid hypotheses rather
+  than a per-keypoint affine gate.  COLMAP oracle labels used a nearest
+  physical endpoint map with a 0.75 px cutoff, and recall denominators count
+  only mapped endpoints.  On the four critical pairs, own NN ratio-0.9
+  cross-check versus GMS changed raw precision/recall as follows:
+  0305-0306 **94.5/72.9% -> 97.1/43.5%**, 0305-0307
+  **93.2/62.7% -> 100.0/25.4%**, 0306-0307 **94.5/75.9% ->
+  96.7/65.2%**, and 0296-0300 **95.8/75.6% -> 100.0/19.5%**.
+  Across the deterministic 12-pair temporal sample, weighted raw
+  precision/recall changed **94.3/74.3% -> 95.8/54.5%** (verified recall
+  **75.1% -> 59.6%**).  The critical bridge pose was not preserved: for
+  0305-0306 the E rotation/translation error changed **0.119/1.420° ->
+  1.010/6.229°**, and for 0305-0307 **0.577/3.724° -> 16.951/24.461°**;
+  0306-0307 changed **0.448/3.067° -> 0.417/3.260°**.  F-derived diagnostics
+  likewise worsened on 0305-0307 and 0306-0307.  Since the small precision
+  gain costs substantial bridge recall and harms E/F pose quality, no GMS or
+  local-neighborhood pre-verifier is shipped; default matching is unchanged.
+
+- **Numeric stem pair window (2026-08-30).** Added the default-off
+  `--pair-stem-window N` candidate restriction. It validates a unique trailing
+  decimal stem for every loaded image and rejects missing, non-numeric,
+  duplicate, or zero-width values; stable source order is preserved. The
+  window applies consistently to candidate generation, transitive/rescue
+  expansion, imported verified pairs, and optional prior rematching, while
+  omission preserves the historical all-candidate path. Unit coverage
+  includes parser validation, deterministic candidate filtering, default
+  identity, and imported-pair filtering. On the reproducible own compatible-
+  SIFT artifact (208,746 features), N=2 retained **73/703** candidates; all
+  73 verified with **68,358** accepted inliers and a connected 38-image graph,
+  but the safe incremental stack stopped at **21/38** (**13,466 tracks /
+  42,188 observations**, 0.279 px mean reprojection) and scored **24.46 cm**
+  laser-GT Sim(3) centre RMSE (median 19.52, max 44.97). N=3 retained
+  **108/703** candidates; **107** verified with **82,528** accepted inliers
+  and a connected graph, reached **22/38** (**12,540 / 40,343**
+  tracks/observations, 0.283 px), but scored **158.36 cm** (median 122.39,
+  max 370.30). The corresponding COLMAP raw graph retained **73/703** and
+  **108/703** pairs with **67,001** and **81,204** raw matches (verified
+  **72/103**, **64,567/77,589** inliers). These connected restricted graphs
+  do not beat the exhaustive 38/38 controls (31.84 cm historical own-SIFT;
+  14.00 cm reverse-order artifact), and no post-registration long-range
+  observation expansion was enabled. The measured bottleneck is mapper growth
+  after DSC_0304: N=2 gave DSC_0305 **224→4** PnP inliers and DSC_0306
+  **12→4**, while N=3 gave DSC_0306 **20→8** and DSC_0307 **8→4**. The flag
+  remains an opt-in sequence diagnostic; default unordered reconstruction is
+  unchanged.
+
+- **Numeric stem window COLMAP control (2026-08-30).** The same full
+  incremental stack was replayed on the COLMAP feature export plus
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_matches_import.txt`
+  (`pnp-max-iterations=100000`, `min-pnp-inliers=8`, recovery, post, and final
+  iterative refinement). N=2 retained **73/703** candidates, verified
+  **72/73** with **64,394** accepted inliers, and stopped at **22/38** after
+  DSC_0306 **67→22** and DSC_0307 **54→39** PnP inliers; the final model had
+  **13,418 tracks / 42,358 observations**, 0.238 px mean reprojection, and
+  **10.81 cm** laser-GT centre RMSE (median 6.38, max 24.58). N=3 retained
+  **108/703**, verified **103/108** with **77,330** inliers, reached **23/38**
+  after DSC_0306 **192→138**, DSC_0307 **164→127**, and DSC_0308 **10→8**;
+  its final **13,447 / 43,247** tracks/observations had 0.239 px reprojection
+  and **15.28 cm** RMSE (median 7.72, max 57.16). Missing images then had no
+  usable initial support (N=2 image 22 had 2 correspondences; N=3 image 23
+  had 0). Thus COLMAP also fails to produce a full skeleton under either
+  restricted window, despite lower error on its registered prefix. No
+  staged local-skeleton→exhaustive admission or post-registration expansion
+  was justified; the sequence-window strategy is closed as an accuracy path,
+  and the flag remains diagnostic-only with unordered defaults unchanged.
+
+- **CI health audit and feature-gated diagnostics (2026-08-30).** The two
+  image-only diagnostic examples now declare `required-features = ["image-io"]`,
+  preventing no-default workspace targets from compiling feature-gated code.
+  Linux runs of the CI workflow's MSRV, Tier-1 feature matrix, clippy
+  (`-D warnings`), workspace tests, Python/registry/docs/examples/output/docs/package
+  checks passed. `scripts/check.sh` now invokes registry `check-generated` with
+  the same `--readme docs/readme_details.md` argument as CI. The authorized
+  mechanical `cargo fmt --all -- --check` pass now succeeds on the existing
+  dirty Rust implementation; the formatter changed no non-Rust files.
+
+- **Cross-dataset non-regression preflight (2026-08-30).** The exact
+  authoritative commands and controls for South Building, ETH3D terrace/office,
+  and EuRoC MH_03_medium were audited and recorded in
+  `docs/nonregression_20260830.md`. No substitute run was claimed: the local
+  checkout contains only courtyard data, the South/terrace/office/EuRoC inputs
+  and prepared feature artifacts are absent, and the required `torch`,
+  `lightglue`, `evo`, and `colmap` tools are unavailable. Consequently no new
+  registration/ATE/RPE/reprojection number or regression verdict is reported;
+  the archived controls remain the acceptance targets.
+
+- **Opt-in staged/resume incremental poses (2026-08-30).** Added
+  `--initial-poses MODEL/images.txt` for the incremental mapper. It validates
+  image stems, the sibling `PINHOLE` `cameras.txt` dimensions/intrinsics, and
+  at least two finite seed poses; supplied poses are held fixed while the
+  full verified track graph is triangulated and missing images are grown by
+  PnP, then the existing final BA runs with its ordinary gauge handling.
+  `None` remains the legacy path, and focused parser/mapper tests cover stem
+  mapping, invalid inputs, fixed growth, missing-image PnP, final-BA release,
+  and deterministic output. Using the established recovery/post/final stack,
+  COLMAP features plus raw matches seeded from
+  `/tmp/pair_window_colmap_raw_n2_20260830` reached **38/38**, **21,207 tracks
+  / 74,202 observations**, 0.331 px mean reprojection, and **5.94 cm**
+  laser-GT Sim(3) centre RMSE; the 22 seeded cameras were released for final
+  BA and moved by 15.25 cm RMSE relative to their partial-model gauge. Own-SIFT
+  verified pairs seeded from `/tmp/pair_window_own_n2_20260830` also reached
+  **38/38**, but retained **17,459 / 58,072** tracks/observations at 0.558 px
+  and **120.79 cm** RMSE; its 21 seeded cameras shifted by **221.40 cm** RMSE
+  after final-BA release (aligned over their common names). Exact logs/models are
+  `/tmp/staged_colmap_raw_full_20260830[.log]` and
+  `/tmp/staged_own_full_20260830[.log]`. These controls show that seeding
+  recovers completeness but does not preserve the partial basin after release
+  or improve the recorded exhaustive controls (COLMAP 2.84 cm; own historical
+  31.84 cm and current locus-path 24.95 cm); the flag remains default-off.
+
+- **DSP-SIFT domain-size pooling, corrected VLFeat base (2026-08-30).** The
+  default-off `--sift-dsp` path now pools the corrected VLFeat/COLMAP descriptor
+  over the published uniform domain-size preset `λ₁=1/6`, `λ₂=4/3`,
+  `N_σ̂=15`, averages the unnormalized histograms, then applies the existing
+  clamp/renormalize/512-equivalent quantization once. A one-sample request is
+  an exact descriptor identity; repeated extraction is deterministic. The
+  preset follows [Dong & Soatto, CVPR 2015](https://openaccess.thecvf.com/content_cvpr_2015/html/Dong_Domain-Size_Pooling_in_2015_CVPR_paper.html)
+  and the uniform sampling loop in [COLMAP's SIFT extractor](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc).
+  The full command was `target/release/examples/unordered_sfm_demo
+  --feature-extractor sift --images-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/images_1600x1066 --width 1600
+  --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6
+  --sift-max-keypoints 4096 --sift-vlfeat-compatible-detector
+  --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations
+  --sift-dsp --exhaustive --min-matches 15 --match-ratio 0.9
+  --guided-matching --verification-mode full --mapper incremental
+  --pnp-max-iterations 100000 --min-pnp-inliers 8
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement --out-colmap /tmp/dsp_vlfeat_full_20260830`;
+  the focused CSV is `/tmp/dsp_focus_file_diag_20260830.csv` and the full log
+  is `/tmp/dsp_vlfeat_full_20260830.log`.
+  Focused physical-locus replay on DSC_0305–0307 at ratio 0.8 + cross-check
+  gave own/imported raw and direct overlap `354/338/196`, `149/143/65`,
+  `630/598/418` (precision/recall `55.37/57.99%`, `43.62/45.45%`,
+  `66.35/69.90%`); ratio 0.9 gave `583/338/228`, `381/143/82`,
+  `839/598/448` (`39.11/67.46%`, `21.52/57.34%`, `53.40/74.92%`).
+  The fresh full 38-image NN + guided/full-verification + recovery/post/final
+  run used 208,746 keypoints, verified **621/703** pairs and 158,163 inliers,
+  registered **38/38**, retained **17,508 tracks / 57,863 observations** at
+  **0.300 px** mean reprojection, but scored **344.41 cm** laser-GT Sim(3)
+  centre RMSE (273.37 cm versus the COLMAP sparse model). This is an honest
+  negative against the existing compatible-bilinear control (109.74 cm), the
+  historical own-feature control (31.84 cm), and the COLMAP-feature champion
+  (2.84 cm); no default or accuracy champion changed, and descriptor-ensemble
+  follow-up is not justified by the focused overlap.
+
+- **Camera-frame lever-arm oracle diagnostic (2026-08-30).** A read-only
+  NumPy/SciPy fit tested the documented camera-center convention
+  `C=-Rᵀt` and jointly fitted `Yᵢ=sQ(Cᵢ+Rᵢᵀd)+t` (Sim(3) plus one constant
+  camera-frame offset `d`) against the ETH3D laser centers.  The actual
+  COLMAP model (`colmap_oracle_full/sparse_txt/images.txt`) changed from
+  **1.709/1.170/4.132 cm** (RMSE/median/max) to **1.341/0.885/3.785 cm**
+  with `d=(0.67,-8.95,10.39) mm`; the COLMAP-feature champion
+  (`/tmp/ba_champion_control_20260829/images.txt`) changed from
+  **2.842/2.243/7.091 cm** to **2.518/2.178/6.512 cm** with
+  `d=(11.83,-87.04,-0.02) mm`; and the best fixed-rotation subpixel control
+  (`/tmp/colmap_subpixel3_fixedrot_20260829/images.txt`) changed from
+  **1.513/0.883/4.137 cm** to **1.435/0.837/4.168 cm** with
+  `d=(0.89,-22.66,11.05) mm`.  These are oracle fits, not production
+  accuracy claims.  Leave-one-camera-out RMSEs were respectively
+  **1.488/2.806/1.602 cm** with the fitted arm, versus **1.815/3.046/1.619
+  cm** without it; the apparent gains are small relative to model spread.
+  More importantly, half-trajectory fits were unstable: the first/last-half
+  offsets were `(1.63,9.97,13.43)/(−0.02,−27.01,15.54) mm` for COLMAP,
+  `(38.96,43.37,15.87)/(4.72,−111.80,0.15) mm` for the champion, and
+  `(0.45,24.31,20.23)/(0.93,−57.65,19.72) mm` for fixed-rotation best.
+  The dataset contains one camera sensor per COLMAP rig (`rigs.txt` has no
+  sensor pose), no constant-rig calibration file, and no exposure/velocity
+  metadata; GT cameras are independent PINHOLE models.  A world-fixed offset
+  is already absorbed by Sim(3), while the unstable fitted `d` has no
+  documented calibration counterpart.  The alternative `Rᵢd` convention was
+  not consistently better.  Therefore no lever-arm correction or trajectory
+  prior is shipped; the next work should remain focused on mapper/measurement
+  errors rather than fitting this oracle offset.
+
+- **Explicit COLMAP CPU SIFT source-row order (2026-08-30).** Added the
+  default-off `SiftConfig::vlfeat_compatible_output_order` and
+  `--sift-vlfeat-compatible-output-order` (requires
+  `--sift-vlfeat-compatible-detector`).  The opt-in groups retained rows by
+  ascending `(octave, level)` and preserves VLFeat's scan/orientation sequence
+  within each group; it does not introduce a response/scale/descriptor sort.
+  This follows COLMAP `sift.cc`'s complete-DoG-level suffix cap (the cap counts
+  unoriented extrema) and the CPU wrapper's joint keypoint/descriptor
+  permutation, with the source contracts documented in [COLMAP `sift.cc`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc),
+  [COLMAP `sift.h`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.h),
+  and [VLFeat `sift.c`](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c).
+  Synthetic tied-group/reference-order and default-identity tests pass.  On
+  the rounded-gray, corrected-descriptor, bilinear 4096 export command
+  (`--sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor
+  --sift-vlfeat-bilinear-orientations --sift-colmap-compatible-grayscale
+  --sift-vlfeat-compatible-output-order --export-features-only`), **208,819**
+  rows were emitted; the feature-content SHA
+  `3feab3a0a5707ee491a2f4db0b69db2a1caf935300a23a798d7305474205dbed` was
+  byte-identical to the existing rounded-gray export.  A deterministic DB
+  locus join matched **208,590/208,785 (99.9066%)** rows; only **1,422** full
+  rank inversions remained (weighted **0.000244%**; critical `0305/0306/0307`
+  had **0/0/0**), so the previously reported ~0.327% discrepancy is matching
+  ambiguity rather than a missing response/scale key.  Focused ratio-.8
+  cross-check raw/accepted rows were `0305--0306=309/258`,
+  `0305--0307=152/102`, and `0306--0307=585/539`; imported physical-locus
+  remapping accepted `317/122/590` respectively.  With the common ratio-.9,
+  guided/full, recovery+post/final stack, fresh NN verification gave
+  **638/703, 154,858 inliers, 38/38, 14,827 tracks, 0.347 px, 401.95 cm**
+  laser-GT Sim(3) RMSE.  The diagnostic physical-locus COLMAP raw replay
+  retained **161,083/161,301** correspondence rows from **685** pairs and
+  gave **405/703, 140,718 inliers, 38/38, 19,893 tracks, 0.392 px, 17.18 cm**;
+  it is not an accuracy claim because 218 endpoints could not be remapped.
+  The output-order flag therefore preserves the default and does not displace
+  the existing fixed-COLMAP 1.76 cm or rounded-gray controls.
+
+- **Rounded-gray detector parity and physical-locus remap audit
+  (2026-08-30).** A read-only all-image join of the source-order export and
+  the actual COLMAP six-column keypoint rows reproduced **208,819 own / 208,785
+  DB rows / 208,590 row matches**.  The exact unmatched row indices were
+  classified by nearest physical locus: own-only **229 = 186 orientation
+  multiplicity + 3 localization (≤3 px) + 40 no-DB-locus rows**; DB-only
+  **195 = 173 orientation multiplicity + 2 max=4096 level-cap rows + 2
+  localization (≤1.5 px) + 18 no-own-candidate rows**.  The two cap rows are
+  `DSC_0294` DB indices **434,435** (own pre-candidate `(octave=-1,level=1)`,
+  response `-0.033509814`, edge score `6.2913`, present after orientation but
+  removed by the complete-level cap).  No row difference was attributable to
+  duplicate/tie traversal ordering; the 1,422 rank inversions are order-only
+  ambiguity among already matched physical loci.  The only candidate-boundary
+  own-only rows were `DSC_0304[3080]` and `DSC_0319[282]` near the
+  `0.02/3` contrast threshold (absolute responses `0.0066729/0.0066849`),
+  plus 15 rows within 0.1 of the edge limit `12.1`; these are input-sensitive
+  candidates, not a proven source comparison bug.  The per-image exact row
+  lists and category counts were generated with the deterministic spatial
+  join used for this audit.
+
+  The callable upstream VLFeat probe agreed with the compatible detector's
+  pre-orientation candidate set for `DSC_0305` (**4598/4598**) and `DSC_0306`
+  (**3113/3113**) at reciprocal spatial tolerance 0.1 px; `DSC_0307` differed
+  by only two own candidates (**3066** vs callable **3064**), with own responses
+  `-0.023385716` (edge `9.2569`) and `+0.023396332` (edge `4.5857`), far from
+  the contrast/edge rejection boundaries.  Source inspection confirms the
+  exact strict neighbor tests, five-step localization, six histogram smoothing
+  passes, first-two orientation cap, and complete `(octave,level)` suffix cap
+  from COLMAP/VLFeat; no compatible-mode code change was justified.  A direct
+  one-image cap control further showed **9,727 rows at max=8192** versus
+  **5,347 at max=4096**, while the DB row was **5,342**, so the DB's effective
+  extraction is consistent with a 4096-level cap despite the `sift.h` header
+  default of 8192; the exact runtime option is not recoverable from SQLite.
+
+  A physical-locus many-to-one raw remap (same deterministic nearest own row
+  may represent orientation alternatives) retained **161,290/161,301** raw
+  correspondences under distance ≤1 px and `|log σ|≤0.2`; the remaining 11
+  rows require a nonphysical assignment.  Its mapper result was **404/703,
+  140,890 inliers, 38/38, 17,121 tracks, 0.324 px, 12.67 cm** laser-GT
+  Sim(3).  A forced nearest-row file retained all **161,301/161,301** rows but
+  injected those 11 nonphysical assignments and regressed to **404/703,
+  140,890 inliers, 38/38, 17,310 tracks, 0.396 px, 16.03 cm**.  Neither raw
+  file is byte-identical to the original COLMAP index stream (raw SHA differs
+  from `7022ffa2...`), and neither reproduces the fixed-COLMAP raw-import
+  control (**38/38, 1.76 cm**); the experiment is diagnostic only.  No broad
+  threshold/order/cap change was added.
+
+- **Opt-in orientation-locus canonicalization (2026-08-29).** SIFT exports
+  now retain `(x, y, sigma, orientation)` in an optional `_loci.txt` sidecar
+  (and six-column affine feature rows are accepted); legacy feature files
+  without metadata are unchanged.  With
+  `--orientation-locus-canonicalization`, orientation rows sharing one
+  quantized `(x, y, sigma)` locus are reduced to one deterministic
+  representative before track construction, and duplicate accepted
+  locus-pairs keep the best descriptor-distance candidate with geometric and
+  stable-key tie breaks.  On the reproducible all-floor SIFT input this
+  collapsed **30,385** orientation rows from **208,746** rows into **178,361**
+  loci; the accepted stream changed from **154,559** to **136,509** rows
+  (**18,050** locus-pair duplicates across **553** pairs).  The original and
+  reversed metadata-bearing feature orders then produced identical
+  **38/38**, **10,274-track**, **0.405 px** reconstructions and identical
+  laser-GT Sim(3) centre RMSE **223.01 cm** (median **145.07 cm**).  A
+  metadata-free fixed-COLMAP-keypoint raw-import control was unchanged at
+  **38/38**, **21,011 tracks**, **0.289 px**, and **3.01 cm**.  An initial
+  metadata-free trial appeared to improve to **6.02 cm**, but was found to
+  sort an identity-mapped match stream and thereby violate the required
+  legacy no-op; the corrected behavior and proper baseline are recorded
+  below.  This remains a deterministic topology/order diagnostic, not an
+  accuracy champion; the flag remains default-off.  Focused tests cover
+  representative selection, distinct scales, permutation invariance, and the
+  metadata-free no-op behavior.
+
+- **Metadata-free locus no-op and own-SIFT lock-down (2026-08-29).** The
+  canonicalizer now returns before any match sorting when all feature files
+  lack locus metadata, so enabling the diagnostic flag cannot alter legacy
+  traversal.  The exact command used the 38 metadata-free files in
+  `/tmp/vlfeat_source_latest_floor_20260829` (**208,746 rows, 261,602,022
+  bytes, no `_loci.txt` files; name+content SHA-256
+  `a810da800ffb0eae14d034729b85fae8212a8113a538cf57fbbcab5e187f2964`), the
+  verified import `/tmp/repro_31p84_reverse_remapped_verified_e_20260829.txt`
+  (**648 pairs / 154,559 inliers, raw SHA-256
+  `1f6fefdf7d94bc3d25b5b8ce0a9d2775d9fef584d963945accf44c4517dd5c5b`), and
+  the established exhaustive ratio-0.9/guided/full, plain incremental,
+  PnP-100k/min-8, recovery+post+final stack.  The no-flag command was
+  `target/release/examples/unordered_sfm_demo --feature-extractor files
+  --features-dir /tmp/vlfeat_source_latest_floor_20260829 --feature-suffix
+  _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4
+  --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-file
+  /tmp/repro_31p84_reverse_remapped_verified_e_20260829.txt --exhaustive
+  --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode
+  full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement --out-colmap
+  /tmp/locus_own_locked2_run1_20260829`.  The no-flag effective-config
+  snapshot hash was **`ab855aa8f91d4a94`**; both runs had edge FNV
+  **`f38f80a2ef9c2c96`**, track build **25,945 components / 1,479 conflicts /
+  24,466 retained tracks / 78,980 observations**, **36 PnP attempts** (sum
+  **24,607→19,268** correspondences/inliers), growth **38/38**, and final
+  **12,658 tracks / 43,753 observations / 0.569 px**.  Two runs were
+  byte-identical: `cameras.txt` SHA
+  `a2132068b1a4dbe21f1ad68a23ff05461026c5a84e0b0de14f06311533e5b958`,
+  `images.txt` SHA
+  `06f84b547914e97229d76ae95c50005929e027b3ac4526c465409ae3a0a00fcf`, and
+  `points3D.txt` SHA
+  `059d0881a54440e2db0ede91ea0595c3bd4c62385ad211188cf8372333820fe7`.
+  Baseline artifacts are `/tmp/locus_own_locked2_run1_artifact_20260829` and
+  `/tmp/locus_own_locked2_run1_20260829`; the explicit-flag control is
+  `/tmp/locus_own_locked2_flag_20260829`.
+  Explicit `--orientation-locus-canonicalization` (snapshot
+  `f3463e6c0beb3865`) produced the same three model hashes, confirming the
+  metadata-free no-op.  The baseline laser-GT Sim(3) score is **184.01 cm
+  RMSE / 158.03 cm median / 339.83 cm max** (scale **0.385887**), and its
+  COLMAP-model-relative score is **145.51 cm**; the actual COLMAP sparse model
+  is a separate **1.71 cm / 1.17 cm / 4.13 cm** laser-GT control.  Baseline
+  per-image error is largest at `DSC_0323` **339.8 cm**, `DSC_0307` **321.0
+  cm**, `DSC_0316` **290.8 cm**, and `DSC_0317` **253.5 cm**; the complete
+  table is `/tmp/locus_own_locked2_per_image_20260829.txt`.  The exact
+  historical **31.84 cm** run is not the same experiment: it re-extracted
+  the same 208,746-row compatible SIFT configuration and performed fresh NN
+  verification (**639/703, 154,854 inliers; config hash
+  `ce75f7453d787fce`), whereas this lock-down imports the distinct
+  **648/703, 154,559** verified set.  No feature-row or default-SIFT change
+  explains the score difference.
+
+  The one requested intrinsics A/B added only `--refine-intrinsics` (snapshot
+  `b621d11a503b112c`): it retained **38/38**, **12,560 tracks / 43,397
+  observations**, **0.373 px**, and improved the laser-GT score to **168.64
+  cm RMSE / 122.55 cm median**, but worsened the maximum to **371.08 cm**;
+  final `fx/fy/cx/cy=878.72/880.45/802.51/532.03`.  The repeated run was
+  byte-identical (`cameras.txt`
+  `4f9446dbbd7925ee791e2d5912d70076bd7fd527b6d124e25716dabec620118e`,
+  `images.txt`
+  `a11d3d8e38415fe0b4cc57aefc9f8be7118e8ebd35f7faacae3ba3b2ed27124d`,
+  `points3D.txt`
+  `c74f9fe97729ea94c16b9aa37954f49959e644e19f2337f4072d5c0aa87c2073`), so
+  artifacts are `/tmp/locus_own_locked2_refine_run1_artifact_20260829` and
+  `/tmp/locus_own_locked2_refine_20260829`; this is reproducible but not an
+  accuracy champion or a justification to change defaults.
+
+- **Offline affine-normalized multi-view LK subpixel probe (2026-08-29).**
+  A read-only probe used the six-column affine keypoint metadata from
+  `colmap_oracle_full/database.db` to render fixed **9×9 canonical** patches
+  on the normalized images, then ran 10 translation Gauss–Newton iterations
+  in both directions.  A proposal required finite/in-bounds sampling, image
+  shift ≤`1.0 px`, forward/backward endpoint consistency ≤`0.2 px`, and
+  bidirectional ZNCC ≥`0.9`; endpoint proposals were combined by weighted
+  geometric median and retained only with at least two proposals and MAD
+  ≤`0.2 px`.  Across **142,720** COLMAP verified inlier rows, **49,211**
+  proposals passed (**34.48%**), covering **44,556** endpoints; **15,890**
+  endpoints were updated, while **23,020** had fewer than two proposals and
+  **5,646** failed the MAD gate.  Accepted proposal forward/backward-error
+  median/p90/p99 was **0.070/0.165/0.196 px**, and the conservative shift
+  median was **0.227 px** per endpoint.  Focused verified-row acceptance was
+  **90/320**, **19/123**, **228/591**, and **3/22** on
+  `0305--0306`, `0305--0307`, `0306--0307`, and `0306--0308` respectively.
+  Reusing the exact bridge-supplement/champion mapper stack on
+  `/tmp/colmap_features_lk9_20260829` changed verification from **380/703**
+  to **375/703**, produced **38/38, 20,021 tracks, 63,345 observations,
+  0.432 px**, and scored **12.53 cm** laser-GT centre RMSE (median **11.00
+  cm**, max **31.54 cm**, scale **0.56597**) versus the original **2.84 cm**
+  champion and offline cornerSubPix3's **2.01 cm**.  The fixed-COLMAP-rotation
+  oracle reduced reprojection **9.321→0.444 px** but still scored **2.55 cm**
+  (not deployable).  The artifact and logs are
+  `/tmp/colmap_features_lk9_20260829` and
+  `/tmp/{subpixel_lk_full,colmap_lk9_champion,colmap_lk9_fixedrot}_20260829*`.
+  This strict affine/LK update is therefore a reproducible negative result;
+  no Rust implementation or default behavior change is justified.
+
+- **Courtyard camera-model and radial-residual audit (2026-08-29).** The
+  authoritative `colmap_oracle_full/database.db` contains one shared
+  `PINHOLE` camera (1600×1066, prior `fx/fy/cx/cy =
+  879.4/879.4/803.4/532.6`); its optimized sparse model is still `PINHOLE`
+  with `880.1955302/879.3997538/803.4/532.6` and has no distortion slots.
+  The ETH3D `gt` symlink is explicitly
+  `dslr_calibration_undistorted` and its four original-resolution cameras are
+  also `PINHOLE`.  The normalized RGB PNGs are 1600×1066 and carry no EXIF or
+  color-profile metadata; the mixed 1065/1067-height source set is not the
+  authoritative normalized input.  A read-only projection audit over
+  `74,091` observations in `/tmp/ba_champion_control2_20260829` found median /
+  p90 / p99 reprojection `0.170/0.618/1.970 px` (RMSE `0.461 px`), radial
+  residual-versus-normalized-radius correlation `-0.0044`, and the physically
+  constrained `e_r = b0 + b3 r^3` fit `b3=-0.00149±0.00510 px` (`k1=-1.7e-6
+  ±5.8e-6`).  The `/tmp/subpixel_ab_refineintr_delta3_20260829` model was
+  consistent: `72,981` observations, median / p90 / p99 `0.176/0.641/1.954
+  px`, radial correlation `-0.0082`, `b3=-0.00434±0.00522 px` (`k1=-4.9e-6
+  ±5.9e-6`).  Eight 45° angular bins had mean radial and tangential residuals
+  below `0.011 px` in magnitude; the actual COLMAP sparse model showed the
+  same no-outward-growth pattern (radial correlation `-0.0192`).  Therefore
+  the data do not support a new shared/global `k1`/`k2` camera model or a
+  distortion safeguard; the existing opt-in `--refine-distortion` remains
+  untouched and the default pinhole path is unchanged.
+
+- **Offline COLMAP-keypoint subpixel probe (2026-08-29).** A read-only probe
+  preserved feature rows, descriptors, and match indices while applying
+  bounded OpenCV/libpng `cornerSubPix` x/y refinement.  The 3x3 variant kept
+  **380/703 verified pairs, 38/38 registration**, and improved the champion's
+  laser-GT Sim(3) centre RMSE from **2.84 cm to 2.01 cm** (mean reprojection
+  **0.294 px**); 5x5 degraded it to **20.98 cm** (0.447 px).  With COLMAP
+  rotations fixed as an oracle, the 3x3 result was **1.51 cm** (0.290 px),
+  but this is not a deployable solution.  A Rust in-process reimplementation
+  (including the libpng integer gray coefficients and source-style f32 patch
+  sampling) matched the critical pair raw/accepted counts and was numerically
+  within roughly 1e-5 px for most rows, yet its legacy traversal produced
+  **38/38, 20,743 tracks, 0.329 px, 11.68 cm**.  The few unstable corner
+  updates were enough to change order-sensitive track construction, so the
+  experimental CLI/helper was removed; no default behavior changed.  The
+  exact OpenCV-generated feature artifacts remain under
+  `/tmp/colmap_features_subpixel3b_20260829` and
+  `/tmp/colmap_features_subpixel5b_20260829` for reproducibility.
+
+- **Offline subpixel 2x2 BA A/B (2026-08-29).** Reusing the exact
+  `/tmp/colmap_features_subpixel3b_20260829` rows and bridge supplement with
+  the common exhaustive/full-verifier, plain-incremental,
+  `pnp100k + min8 + recovery + post + final-iterative` stack, all four
+  variants retained **380/703 verified pairs, 140,663 inliers, and 38/38
+  registration**.  With fixed intrinsics, δ=`3.0` gave **21,149 tracks,
+  0.294 px, 2.008/1.379/5.237 cm** (RMSE/median/max laser-GT), while
+  δ=`0.5` gave **21,153, 0.291 px, 5.459/3.054/22.727 cm**.  With
+  `--refine-intrinsics`, δ=`3.0` was best at **21,120 tracks, 0.290 px,
+  1.831/1.442/4.011 cm**, ending at
+  `fx/fy/cx/cy=880.4941/879.8661/803.8111/532.2838`; δ=`0.5` gave
+  **21,111, 0.286 px, 4.901/2.429/24.039 cm** and
+  `881.8698/880.1322/803.4380/532.8686`.  The δ=`3.0` + intrinsics result
+  reproduced twice byte-identically (`21,120` tracks and the same model
+  text).  A fixed-COLMAP-rotation oracle run on that best configuration
+  reduced reprojection **1.370850→0.297496 px** and scored **1.643 cm**
+  (median **0.952**, max **4.130 cm**), but is not deployable.  The modest
+  1.831 cm offline result does not justify restoring a Rust subpixel path:
+  the exact in-process reimplementation previously changed order-sensitive
+  tracks and scored 11.68 cm; no default behavior or production feature path
+  is enabled.
+
+- **BA Huber-delta diagnostic (2026-08-29).** Added the default-off
+  `--ba-huber-delta PX` CLI override for the shared periodic/final/global BA
+  Huber threshold; omission remains the historical `delta=3 px` and requires
+  no behavior change.  On the COLMAP-feature recovery+post champion, the
+  final 74,091-observation residual distribution at the control was
+  `median=0.170 px, p90=0.618, p95=0.948, p99=1.970, p99.9=2.973`, with only
+  **0.09%** above 3 px.  The bounded `delta={0.5,1.0,2.0,3.0}` runs kept
+  38/38 registration and 20-iteration caps, but the existing iterative
+  filter/re-triangulation naturally changed support: respectively
+  **21,341/21,405/21,129/21,338 tracks**, **0.281/0.289/0.291/0.283 px**,
+  and **3.60/2.92/3.31/2.34 cm** against the actual COLMAP model (the
+  control is **2.84 cm** against laser GT).  With actual COLMAP rotations
+  fixed on the same diagnostic path, the laser-GT Sim(3) centre RMSE was
+  **1.57/1.89/1.64/1.62 cm** (δ={0.5,1.0,2.0,3.0}; median
+  **1.06/1.33/1.04/1.06 cm**, max **3.52/4.66/3.98/4.04 cm**, scales
+  **0.5742/0.5766/0.5740/0.5760**).  The corresponding scores against the
+  actual COLMAP model were **0.74/1.07/0.62/0.65 cm** with medians
+  **0.57/0.75/0.52/0.51 cm** and maxima **2.45/4.24/1.64/1.56 cm**;
+  the actual COLMAP sparse model itself is **1.71 cm** versus laser GT.
+  Thus no fixed-rotation delta is sub-cm against the authoritative GT;
+  this remains an oracle control, not a production improvement.  Since the residuals are
+  overwhelmingly below 3 px and no delta consistently improves the
+  GT-independent champion while preserving support, the default remains
+  3 px and no new production policy is enabled.  Artifacts:
+  `/tmp/ba_huber_{0p5,1p0,2p0}_20260829` and
+  `/tmp/fixed_rotation_oracle_huber_{0p5,1p0,2p0}_20260829`.
+
+- **Incremental rotation-vs-translation BA decomposition (2026-08-29).**
+  Added the default-off `--diagnose-fixed-rotation-ba SOURCE` diagnostic and
+  `BundleAdjustment::fix_pose_rotation`: `SOURCE=current` freezes the
+  incremental champion rotations, while a COLMAP `images.txt` source is
+  right-aligned to the champion gauge and freezes only those rotations;
+  translations, landmarks, support, and the ordinary gauge anchors remain
+  free.  The fixed-rotation constraint is identity-row projected in the
+  existing six-DoF Schur system, with tests for rotation immutability,
+  translation optimization, and empty-set/default identity.  On the
+  COLMAP-feature champion configuration (`--import-matches-supplement-file
+  colmap_bridge_matches_import.txt --exhaustive --min-matches 20
+  --match-ratio 0.8 --verification-mode full --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement`), B=`current`
+  preserved **38/38, 21,338 tracks, 0.283 px, 2.84 cm**.  A using
+  `colmap_oracle_full/sparse_txt/images.txt` reduced fixed-support reprojection
+  **2.459→0.278 px**, kept rotations within **3.0e-15°**, and scored
+  **1.62 cm** versus laser GT (**0.65 cm** versus the actual COLMAP model).
+  C using `/tmp/global_colmap_raw_ba_diag_20260829/images.txt` reduced
+  reprojection **78.139→4.666 px** but scored **85.58 cm**; its source
+  rotations have **6.74° median / 8.31° p90** error against COLMAP.  Thus the
+  oracle control exposes a rotation-independent translation/measurement floor,
+  but no GT-independent rotation-averaging-to-incremental path is shipped:
+  the existing global rotation average is not accurate enough.  Artifacts:
+  `/tmp/fixed_rotation_{current,oracle,global}_20260829`; the exact controls
+  were run with the command above plus `--diagnose-fixed-rotation-ba
+  {current|/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_oracle_full/sparse_txt/images.txt|/tmp/global_colmap_raw_ba_diag_20260829/images.txt}`.
+
+- **Sequence-aware trajectory-regularization probe (2026-08-29).** A
+  read-only NumPy/SciPy probe ordered the four complete 38-camera models by
+  numeric filename stem (`DSC_0286`--`DSC_0323`; every observed stem gap was
+  1), and fit only the estimated poses—laser ground truth was consulted only
+  after fitting. The inputs were the actual COLMAP model
+  (`colmap_oracle_full/sparse_txt/images.txt`, **1.709 cm** versus laser GT),
+  the COLMAP-feature champion (`/tmp/ba_champion_control_20260829`,
+  **2.842 cm**), the fixed physical-hash traversal candidate
+  (`/tmp/union_hash_fixed_20260829_seed11_reverse`, **1.995 cm** against the
+  actual COLMAP model and **3.011 cm** against laser GT), and the best
+  complete own-SIFT traversal (`/tmp/order_own_reverse_full_20260829`,
+  **9.650 cm**). The apparent historical fixed-traversal **1.99 cm** number
+  is therefore the COLMAP-model comparison, not the laser-GT score.
+
+  Center first differences (median/p90/max, m per stem) were
+  **0.648/1.955/7.069** (COLMAP), **1.402/4.276/15.422** (champion),
+  **1.394/4.292/15.393** (fixed), and **1.506/4.351/15.446** (own). The
+  second-difference norms (median/p90/max, m per stem²) were respectively
+  **0.285/2.832/7.741**, **0.630/6.217/16.901**,
+  **0.632/6.201/16.874**, and **0.769/6.337/16.939**; robust MAD scales were
+  **0.265/0.591/0.594/0.820 m**. Orientation increments were already large
+  and consistent across the models (median/p90/max **24.78/38.94/74.63°**
+  for COLMAP and **24.76/39.11/74.56°** for the champion), with orientation
+  second-difference medians **11.53°** and **11.51°**. In particular, the
+  real path turn at `DSC_0310`/`DSC_0311` produced center second differences
+  **16.48/16.90 m** in the champion (COLMAP itself has **7.55/7.74 m**), so
+  it is not an observation-noise-like high-frequency fluctuation.
+
+  Tested standard local quadratic Savitzky--Golay fits with windows 5 and 7
+  (actual stem coordinates, endpoint samples held fixed) and a
+  second-difference Tikhonov fit
+  `min ||C-C_hat||² + λ||D²C_hat||²`. The latter used fixed Huber weights from
+  the pre-fit acceleration to avoid suppressing large turns and selected λ
+  by GCV. GCV selected the lower tested bound **1e-6** for every robust fit,
+  i.e. a numerically identity result; unweighted GCV selected **0.0562** for
+  COLMAP/champion/fixed and **0.0316** for own, but those fits also over-smoothed
+  the real turn. Laser-GT Sim(3) RMSE (cm) was:
+
+  | model | raw | SG-5 | SG-7 | robust Tikhonov |
+  |---|---:|---:|---:|---:|
+  | COLMAP | 1.709 | 64.479 | 91.687 | 1.709 |
+  | champion | 2.842 | 64.530 | 91.719 | 2.842 |
+  | fixed traversal | 3.011 | 64.578 | 91.732 | 3.011 |
+  | own traversal | 9.650 | 64.683 | 91.749 | 9.650 |
+
+  The champion's SG-5 did improve isolated images (`DSC_0305` **2.90→1.12
+  cm**, `DSC_0307` **1.90→1.40 cm**, `DSC_0308` **5.07→4.00 cm**) but moved
+  `DSC_0310` **1.70→241.45 cm**, `DSC_0311` **4.95→255.86 cm**, and
+  `DSC_0312` **3.64→92.18 cm**; SG-7 sent the first two to **306.07/336.60
+  cm**. Holding original rotations, landmarks, and observations fixed, the
+  same SG-5 center replacement raised model reprojection RMS from
+  **0.461→36.934 px** (champion; COLMAP **0.482→34.768 px**), confirming that
+  an export-only smoothing result is not a valid BA initialization. Since
+  robust GCV correctly collapsed to no-op and both SG windows catastrophically
+  damaged even the actual COLMAP trajectory, no trajectory-prior/refinement
+  CLI or BA path was added; unordered/default behavior is unchanged. The next
+  useful direction remains mapper/observation geometry rather than filename
+  order regularization.
+
+- **Global-SfM independent-initialization audit (2026-08-29).** Re-ran the
+  current `--mapper global` path with `VISLOC_GLOBAL_DEBUG=1` and
+  `VISLOC_SFM_DEBUG_BA=1` on the normalized courtyard. The COLMAP-feature
+  graph used imported COLMAP raw matches plus our full verifier (380/703
+  pairs, **140,445** inliers); the fixed-COLMAP-keypoint corrected-descriptor
+  graph used ordinary NN+ratio-0.8 matching (408/703, **122,211** inliers).
+  Both rotation trees reached **38/38**, but systematic translation-direction
+  error remained: COLMAP graph post-average rotation error **2.5149°**
+  (230/304 kept), translation-sign repair **7/230**, and final position
+  residual **127.36°**; fixed graph **2.7925°** (240/291), **19/240**, and
+  **109.01°** respectively. Representative GT-only bearing diagnostics
+  (not used by mapping) were COLMAP `0305--0306` E=261/R=1.3°/bearing=29.0°,
+  `0306--0307` 477/2.4°/13.5°, and `0305--0307` 0/8.0°/62.5°; fixed was
+  209/0.7°/6.2°, 398/3.4°/28.0°, and 67/4.9°/13.2°. The COLMAP graph's
+  global BA moved only **3/17 accepted steps** (Huber cost
+  `1.512701139e7→1.155881365e7`) and finished **38/38, 2,662 tracks,
+  262.697 px, 440.80 cm** Sim(3) RMSE; fixed BA accepted **6/20** steps
+  (`7.947595948e6→7.537940475e5`) but moved cameras up to **1.053 m** and
+  finished **38/38, 2,120 tracks, 26.919 px, 413.94 cm**. A fixed 401-pair
+  COLMAP verified-import control was also negative (**141.03°** position
+  residual, **506.803 px**, **464.07 cm**). These results reproduce the
+  established global failure against the incremental COLMAP-feature
+  champion (**2.842 cm**) and actual COLMAP (**1.709 cm**): rotation residuals
+  are locally small while translation bearings are globally inconsistent, so
+  no new generic rotation/translation weighting or cycle threshold was
+  shipped; existing default-off robust options remain unchanged. Artifacts:
+  `/tmp/global_colmap_raw_ba_diag_20260829`,
+  `/tmp/global_fixed_vlfeat_ba_diag_20260829`, and
+  `/tmp/global_colmap_verified_20260829`.
+
+- **Seeded physical-edge union traversal replay (2026-08-29).** Extended
+  `--union-traversal-order` with `physical-hash:SEED` and
+  `physical-hash-reverse:SEED`. These modes sort already-verified matches by
+  a seeded FNV-1a key over canonical image IDs and quantized (1e-6 px)
+  endpoint coordinates, then sort pairs by their first physical edge; the
+  descending form reverses both streams. Matching, verification, feature rows,
+  and correspondence values are untouched. The focused CLI test covers
+  decimal/hex seeds, invalid values, default identity, deterministic replay,
+  and the unchanged unordered-edge multiset.
+
+  The replay command template (with `ORDER` set to each listed value and a
+  fresh `OUT` directory) was
+  `target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir FEATURES --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-file VERIFIED --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --union-traversal-order ORDER --out-colmap OUT`.
+  It fixed features and bypassed matching/verifier:
+  own `/tmp/vlfeat_source_latest_floor_20260829` (**208,746** rows) with
+  `/tmp/repro_31p84_reverse_remapped_verified_e_20260829.txt` (**648** pairs,
+  **154,559** edges, **49** calibrated-E references), and fixed COLMAP
+  `/tmp/colmap_fixed_vlfeat_all_l2_20260829` (**208,785** rows) with
+  `colmap_verified_import.txt` (**401** pairs, **141,698** edges, **76**
+  calibrated-E references). For the fixed family the same template used
+  `--match-ratio 0.8` and omitted `--guided-matching`; all other mapper flags
+  were unchanged. Original plus 12 forward and 12 reverse seeds
+  all registered **38/38** and preserved one edge hash per family:
+  own=`f38f80a2ef9c2c96`, fixed=`55009052f64f8520`. Own runtime was
+  **11.31--23.61 s** (tracks **12,314--16,402**, reprojection
+  **0.294--0.631 px**); fixed runtime was **13.41--21.57 s** (tracks
+  **19,256--21,011**, reprojection **0.279--0.413 px**).
+  The same-replay `original` controls were own **12,658 tracks / 0.569 px /
+  145.51 cm** (`12.057710°`) and fixed **19,754 tracks / 0.408 px /
+  17.92 cm** (`15.542829°`).
+
+  For exact candidate traceability, seeds are listed in order `0..11`.
+  Own forward rotation-score degrees were
+  `[14.482310,10.590897,10.058644,10.632620,14.261293,12.095812,9.681233,12.721597,10.615958,13.527809,9.870056,12.048548]`
+  with GT-evaluation Sim(3) cm
+  `[159.48,108.01,187.65,172.11,204.61,187.26,85.71,135.47,134.10,182.40,50.18,140.03]`;
+  reverse was
+  `[10.645807,10.025560,10.092637,12.025894,10.215592,10.388985,9.922394,13.038395,10.045891,10.377913,11.026348,10.511796]`
+  and `[117.85,88.86,20.96,146.67,58.39,143.35,53.60,190.57,108.90,77.62,140.73,181.01]`.
+  Fixed forward was
+  `[15.328568,15.423492,15.325871,15.539681,15.503927,15.529937,15.423235,15.289910,15.505591,15.529937,15.487982,15.542829]`
+  and `[4.91,10.59,2.65,21.19,14.76,17.09,10.58,19.17,15.71,17.09,12.66,17.92]`;
+  reverse was
+  `[15.295781,15.529937,15.480235,15.523372,15.332489,15.542829,15.542829,15.529937,15.505591,15.529937,15.529937,15.321756]`
+  and `[19.00,17.09,15.30,14.44,10.29,17.92,17.92,17.09,15.71,17.09,17.09,1.99]`.
+  The lowest rotation score therefore selected own forward seed 6 (**9.681233°,
+  85.71 cm**) and fixed forward seed 7 (**15.289910°, 19.17 cm**), while the
+  GT-best runs were own reverse seed 2 (**10.092637°, 20.96 cm**) and fixed
+  reverse seed 11 (**15.321756°, 1.99 cm**). Pearson/Spearman score-vs-GT
+  correlations were only **0.638/0.704** (own) and **0.589/0.557** (fixed),
+  so no multi-traversal selector was added. The historical 31.84/14.00 cm
+  and 1.76 cm controls use different internally generated/imported traversal
+  streams and are not silently conflated with this replay. Targeted
+  `cargo check`, 10 `diagnose_cli_tests`, and `git diff --check` pass;
+  `cargo fmt --all -- --check` still reports pre-existing formatting in the
+  shared dirty tree and was not used to rewrite unrelated files.
+
+- **GT-independent multi-model pose-consensus probe (2026-08-29).** Offline
+  replayed the existing 24 complete 38-camera traversal models in each family
+  (12 forward + 12 reverse) without using GT during construction. A medoid was
+  selected by pairwise Sim(3)-normalized centre-shape distance; each model was
+  aligned to the current consensus, camera centres were robustly averaged by
+  weighted geometric median, rotations by deterministic SO(3) quaternion
+  averaging, and the arbitrary zero-scale solution was removed by fixing the
+  medoid centroid/radius. The alternating solve converged in 8 (own) and 5
+  (fixed) iterations. Medoids were own `physical-hash-reverse:6` and fixed
+  `physical-hash-reverse:3`; pair-shape dispersion was median/p90
+  `0.5175/0.7499` (own) and `0.03344/0.06350` (fixed). Centre uncertainty after
+  per-model alignment was median/p90 **156.31/409.47 cm** (own) and
+  **8.82/23.49 cm** (fixed), with largest fixed uncertainty at `DSC_0316`
+  (**52.17/87.78 cm**) and `DSC_0307` (**12.30/91.36 cm**); own was dominated
+  by `DSC_0307` (**355.46/697.81 cm**) and `DSC_0316` (**339.44/669.37 cm**).
+  The deterministic raw consensus scored **80.31 cm** (own) and **16.50 cm**
+  (fixed) Sim(3) centre RMSE. For comparison, the current 24-model individual
+  best/median were **26.83/173.76 cm** (own) and **3.01/21.03 cm** (fixed).
+  Consensus pose files are `/tmp/consensus_20260829/{own,fixed}_gauge_images.txt`
+  (SHA-256 `5413cd27…`/`9b17758e…`).
+
+  As a fixed-support BA control, the existing opt-in
+  `--diagnose-ba-oracle-poses CONSENSUS/images.txt` path was run with each
+  family's medoid traversal and the common verified set; it retained 38/38
+  cameras and ran the unchanged BA, but deliberately reuses/transforms the
+  existing medoid track support rather than changing track membership. The
+  resulting models had own **14,644 tracks / 0.322 px / 89.05 cm** and fixed
+  **20,487 tracks / 0.377 px / 17.06 cm**, both worse than their raw consensus
+  and individual best (fixed BA reprojection **3.3798→0.3766 px**, own
+  **29.0020→0.3221 px**). Since consensus does not approach the existing
+  accuracy champions and BA moves it away, no default-off consensus importer,
+  selector, or retriangulation path was added. Artifacts are under
+  `/tmp/consensus_{20260829,ba_*_gauge_medoid_20260829}`; construction and
+  scoring used no GT, which was consulted only for these final evaluations.
+
+- **Calibrated-E relative-direction model cross-validation (2026-08-29).**
+  Extended the default-off `--diagnose-model-score MODEL/images.txt` report
+  with a GT-independent relative translation-direction check. For every
+  registered pair carrying a calibrated imported E, the diagnostic uses the
+  accepted imported correspondences, hardened cheirality sign selection
+  (positive-depth ratio >=0.5, >=15% winner margin, p25 triangulation angle
+  >=1 degree), and deterministic prefix/suffix/evenly-spaced 8-point refits.
+  References with fewer than two valid refits or >20 degree translation spread
+  are excluded from the stable subset. Pair rows now expose stable rotation and
+  signed translation disagreement, cheirality/parallax/refit counts and
+  rotation/translation refit spreads; summary rows expose pair-balanced
+  translation mean/median/p90/Huber values and image-balanced Huber/coverage.
+  The exact replay command was the existing model-score template with
+  `--feature-extractor files --features-dir FEATURES --feature-suffix
+  _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4
+  --fy 879.4 --cx 803.4 --cy 532.6 --import-verified-pairs-file VERIFIED
+  --diagnose-model-score MODEL/images.txt --out-colmap
+  /tmp/diagnose_model_xval_scratch`; no reconstruction was rerun.
+  Across the 24 own-SIFT traversal candidates (12 forward + 12 reverse), 50
+  calibrated-config rows were available (the legacy rotation decomposition
+  was finite for 49) and 28 passed the stability gate (56.0% pair coverage;
+  59.1% image coverage). Stable-rotation alone selected
+  `seed5` at **0.836339 degrees** (GT **187.26 cm**), translation Huber alone
+  selected `seed6_reverse` at **4.071559 degrees** (GT **53.60 cm**), and the
+  equal-unit stable-rotation + translation-Huber score also selected
+  `seed6_reverse`; the GT-best `seed2_reverse` (**20.96 cm**) ranked 15th.
+  Across the 24 fixed-COLMAP-feature candidates, 76 calibrated-config rows and
+  53 stable references yielded 69.7% pair (63.8% image) coverage. The same
+  equal-unit score selected `seed2` (**2.65 cm** GT), while the GT-best
+  `seed11_reverse` was **1.99 cm** (rank 4); translation Huber alone also
+  selected `seed2`. Thus no selector was added: the new translation scores are
+  near-uncorrelated with own-SIFT basin quality and the minima are not
+  consistent across the two families. Existing default behavior and the
+  reporting-only rotation selector remain unchanged. Logs are under
+  `/tmp/model_xval_translation_{own,fixed}_20260829_*.log`; targeted
+  `diagnose_cli_tests` (11), release check, and `git diff --check` pass.
+
+- **Completed-model correspondence cross-validation diagnostic (2026-08-29).**
+  Added the default-off `--diagnose-model-score MODEL/images.txt` probe. It
+  requires `--import-verified-pairs-file`, exits before matching/reconstruction,
+  and scores the complete imported verified correspondence multiset rather
+  than only observations retained by tracks. Each registered pair reports
+  pose-induced calibrated normalized Sampson residuals, verifier-threshold
+  fraction, positive-depth and ≥1° triangulation-angle feasibility, with
+  overall, pair-balanced, image-balanced, and deterministic 20%-hash-held-out
+  aggregates. When the import contains calibrated E references, the output
+  also reports a GT-independent rotation-only disagreement and a guarded
+  `model_cross_validation_selection_score` (lower is better, ≥3 shared
+  calibrated references; reporting only, no automatic selection).
+  Captured controls used the same camera and complete verified set within each
+  feature family: own-SIFT (648 pairs / 154,559 correspondences, 49 calibrated
+  E references) scored original **31.84 cm** at pair residual/under-depth-angle
+  `(0.125241, 0.601859, 0.572281, 0.564049)`, reverse-feature **14.00 cm** at
+  `(0.124193, 0.601031, 0.571043, 0.563648)`, coordinate **63.59 cm** at
+  `(0.125913, 0.602516, 0.562146, 0.554023)`, and reverse-matches
+  **157.04 cm** at `(0.159302, 0.549580, 0.558341, 0.551448)`; their rotation
+  selection scores were respectively **10.125477°, 10.068295°, 10.259104°,
+  10.569519°**, correctly ordering this small same-set A/B. Fixed COLMAP
+  features (401 pairs / 141,698 correspondences, 76 calibrated E references)
+  scored legacy **1.76 cm** at **15.323840°**, stable **4.52 cm** at
+  **15.333647°**, and cycle **67.07 cm** at **16.776908°**. Raw residual,
+  depth/angle, and held-out fractions were nearly indistinguishable within
+  the fixed family (e.g. pair-under `0.908607/0.908591/0.908606`), so they do
+  not provide a reliable universal basin selector; rotation disagreement is
+  retained only as a candidate score when the correspondence multiset and
+  calibrated references are shared. Logs are `/tmp/model_xval_*_final_20260829.log`.
+
+- **Post-verification union traversal decomposition (2026-08-29).** Added the
+  default-off diagnostic `--union-traversal-order
+  original|reverse-pairs|reverse-matches|reverse-both` to reverse pair and/or
+  accepted-match iteration without changing verified contents or feature
+  indices. The focused unit test confirms default identity, equal
+  correspondence counts, and an identical unordered edge multiset hash. On
+  the reproducible in-process max-orientations=2 input (**208,746** rows), all
+  four runs had **639/703** verified pairs, **154,854** inliers, the same
+  unordered-edge FNV-1a hash **`f1073f360f8e8f1a`**, and the same track-build
+  summary (**25,798** components, **1,500** conflicts, **24,298** retained
+  tracks / **78,425** observations). `original` and `reverse-pairs` were
+  byte-equivalent downstream: growth **37/38**, post-registration completed
+  the set, **15,992/54,303** final tracks/observations, **0.298 px**, and
+  **31.84 cm** Sim(3) RMSE. Reversing accepted matches, with or without pair
+  reversal, produced the same other basin: growth **37/38**, post registered
+  the remaining camera, **15,169/51,485**, **0.318 px**, and **157.04 cm**;
+  the pair-only reversal had no measurable effect. Thus the edge-set hash is
+  invariant, but legacy downstream traversal is strongly match-order
+  sensitive. Logs/artifacts are under
+  `/tmp/repro_31p84_traversal_sift_{original,reverse_pairs,reverse_matches,reverse_both}_20260829.log`
+  and the corresponding `_artifact_20260829` model directories.
+  The historical external reverse-feature **14.00 cm** accepted set was then
+  dumped with its verifier E matrices (**648** pairs / **154,559** matches),
+  and every feature file was verified to be the exact row reversal of the
+  source file; the physical coordinate-level match multiset was identical
+  after `rev_index → count-1-rev_index` remapping. On the fixed reverse-row
+  input, imported `original` reproduced **38/38, 16,057 tracks, 0.331 px,
+  14.00 cm**, while `reverse-matches` gave **38/38, 14,543 tracks, 0.306 px,
+  128.54 cm**. On source-row order after remapping, the same set scored
+  **184.01 cm** (original) versus **237.23 cm** (reverse-matches), exposing
+  feature/observation order interaction in addition to match traversal.
+  These are diagnostic A/B results only; no default or accuracy champion was
+  changed. The E-matrix dump is emitted only with the existing pair-outcome
+  debug gate so the verified-set replay remains self-contained.
+
+- **Current-source own-SIFT traversal replay (2026-08-29).** Re-extracted
+  from the courtyard images (rather than reusing the stale 154,884-row dump)
+  with floor grayscale, `--sift-max-keypoints 4096`,
+  `--sift-max-orientations 1`, the compatible four-octave/source-level
+  detector, corrected VLFeat-compatible descriptor, and bilinear
+  orientations. The current source emitted **178,599** feature rows; this
+  dump is byte-identical across all 38 files to the prior
+  `/tmp/vlfeat_source_latest_floor_o1_20260829` extraction. Its
+  **178,361** unique `(x,y)` loci leave exactly **238** duplicate rows
+  (**236** duplicate loci, maximum multiplicity 3), and every duplicate row
+  is full-row/location/descriptor-identical. Thus the previously reported
+  178,361 figure is a deduplicated-locus count, not a missing feature dump.
+  The feature export has no octave/level/orientation columns; the compatible
+  detector diagnostic associates the duplicate loci with repeated
+  `before_orientation` candidates, primarily octaves -1/0 and levels 0--2.
+  The critical stems 0299--0308 contain respectively 14, 13, 5, 11, 11,
+  10, 6, 9, 4, and 6 duplicate rows. This accounts for the 238-row
+  difference and does not implicate grayscale, cap nondeterminism, or input
+  ordering. The archived **31.84 cm** command also omitted
+  `--sift-max-orientations`; its runtime log records **208,746** loaded rows
+  (the compatible-mode effective cap is 2 when the raw value is 0), not the
+  178,599 max-1 rows. The max-2 dump has the same 178,361 unique loci and
+  adds 30,147 orientation-cap rows. Replaying that
+  exact command at `/tmp/repro_31p84_exact_run1_20260829` and
+  `/tmp/repro_31p84_exact_run2_20260829` produced the same **208,746**,
+  **639/703** verified pairs, **15992** tracks, **0.298 px**, and **31.84 cm**
+  score. The latter log records the complete parsed configuration and its
+  deterministic raw-Args hash `ce75f7453d787fce`; the extraction-only max-1
+  replay records hash `4386796feeb6547c`. The 178,599 max-1 command and the
+  208,746 exact command therefore are not effective-config-equivalent; no
+  compatible-mode default was changed to force the missing 178,361 count.
+  The mapper command used
+  `--exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching
+  --verification-mode full --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement`; original row
+  order produced **591/703 verified pairs, 128,124
+  inliers; 21,927 components, 1,281 conflicts, 20,646 initial tracks/66,118
+  observations; growth 38/38; 11,565 final tracks/39,538 observations,
+  0.355 px, 310.44 cm Sim(3) RMSE** (max **569.44 cm**, DSC_0307).
+  Reversing every feature-file row (same 178,599 rows) produced
+  **571/703, 127,970; 22,003 components, 1,286 conflicts, 20,717 initial
+  tracks/66,053 observations; growth 38/38; 13,902/46,114, 0.359 px,
+  177.12 cm** (max **394.49 cm**, DSC_0307). Image 20/21 PnP changed from
+  **205→85 / 149→74** to **176→73 / 129→65** correspondences/inliers.
+  The reverse result is not cm-class, so no `--refine-intrinsics` A/B was
+  justified. For the fixed COLMAP-keypoint + corrected-descriptor normal
+  matching path (ratio-0.8, no guided matching), the same row reversal gave
+  **403/703, 122,234 inliers; 38/38; 17,935 tracks/60,117 observations,
+  0.382 px, 86.37 cm** (max **321.18 cm**, DSC_0307), versus the historical
+  unpermuted **2.92 cm** control. Thus this is a negative traversal-order
+  result; no selector, default, or accuracy champion changed. Artifacts:
+  `/tmp/vlfeat_source_latest_floor_o1_20260829`,
+  `/tmp/source_latest_floor_o1_original_20260829`,
+  `/tmp/source_latest_floor_o1_reverse_20260829`, and
+  `/tmp/order_fixed_reverse_full_20260829`.
+
+- **Historical max-orientations=2 feature-order A/B replay (2026-08-29).**
+  Starting from the exact **208,746-row** max-2 feature extraction
+  `/tmp/vlfeat_source_latest_floor_20260829`, generated only two temporary
+  row orders: per-image `(x,y)` lexicographic order and complete reverse
+  order. Both runs used the same staging path and the same legacy
+  `UnionFind` track builder; all experimental ordering/track flags remained
+  off. Because an external permutation is required, the replay uses
+  `--feature-extractor files --features-dir /tmp/repro_31p84_order_input_20260829`
+  while retaining the historical camera, ratio/guided/full-verification,
+  PnP-100k/min-8, recovery+post+final settings. The effective-config snapshot
+  hash is **`cda9f5bb8ebf6815` for both orders**; only the staged feature-row
+  contents differ (the original in-process SIFT command's raw-Args hash is
+  `ce75f7453d787fce`). Coordinate order produced **644/703 verified pairs,
+  154,123 inliers; 25,883 components, 1,477 conflicts, 24,406 initial
+  tracks/78,860 observations; growth 36/38; post registered 0306/0307 as
+  225→113 / 187→65; final 16,664 tracks/55,524 observations, 0.307 px,
+  63.59 cm** Sim(3) RMSE (max **290.15 cm**, DSC_0307). Reverse order
+  produced **648/703, 154,559; 25,945 components, 1,479 conflicts, 24,466
+  tracks/78,980 observations; growth 38/38 without post completion; image
+  20/21 PnP 238→90 / 177→76; final 16,057/53,668, 0.331 px, 14.00 cm**
+  (max **68.45 cm**, DSC_0316). The reverse result is a material improvement
+  over the 31.84 cm historical order but remains above the 10 cm threshold,
+  so no intrinsics-refinement A/B was run. A second reverse replay had the
+  same **648/703, 154,559, 38/38, 16,057 tracks, 0.331 px, 14.00 cm**
+  result and byte-identical `cameras.txt`, `images.txt`, and `points3D.txt`
+  (artifacts `/tmp/repro_31p84_reverse_artifact_20260829` and
+  `/tmp/repro_31p84_reverse_repeat_artifact_20260829`; hashes
+  `a2132068…e5b958`, `b8d4afa…346b0`, `60e0ec…5cf8105`). Coordinate and
+  reverse artifacts are `/tmp/repro_31p84_coordinate_artifact_20260829` and
+  the logs are `/tmp/repro_31p84_coordinate_20260829.log`,
+  `/tmp/repro_31p84_reverse_20260829.log`, and
+  `/tmp/repro_31p84_reverse_repeat_20260829.log`.
+
+- **Legacy traversal-order decomposition on all-floor 4-octave bilinear SIFT (2026-08-29).**
+  Reused `/tmp/vlfeat_detector_features_20260829` (154,884 fixed
+  all-floor/VLFeat-compatible-detector + bilinear-orientation rows) and the
+  same exhaustive ratio-0.9/guided/full-verification, plain incremental,
+  PnP-100k/min-8, recovery+post+final stack for the original, coordinate,
+  reverse, and three fixed Blake2b hash row orders. The current-tree control
+  was **603/703 verified, 125,125 inliers, 18,005 retained tracks/59,840
+  observations after 1,175 conflicts**, growth **35/38**, then post completed
+  **38/38**, **11,533 final tracks/38,957 observations, 0.371 px, 142.99 cm**
+  Sim(3). The other orders were:
+
+  | order | verified/inliers | components/conflicts/retained tracks/obs | growth→post | final tracks/obs | reproj | Sim(3) RMSE |
+  |---|---:|---:|---:|---:|---:|---:|
+  | coordinate | 623/125,140 | 19,043/1,173/17,870/59,548 | 36→38 | 12,142/41,675 | 0.366 px | 46.17 cm |
+  | reverse | 613/125,334 | 19,172/1,135/18,037/60,051 | 35→38 | 12,817/43,877 | 0.353 px | 9.65 cm |
+  | hash0 | 602/125,238 | 19,158/1,177/17,981/59,820 | 35→38 | 9,026/33,422 | 0.497 px | 393.76 cm |
+  | hash1 | 603/125,036 | 19,179/1,160/18,019/60,098 | 38→38 | 11,017/38,191 | 0.969 px | 101.87 cm |
+  | hash2 | 607/125,279 | 19,029/1,180/17,849/59,259 | 36→38 | 11,026/38,515 | 0.373 px | 118.49 cm |
+
+  Each full run remained 38/38, but took **210.29 s** for the control and
+  **374.72--551.93 s** for the permutations (peak RSS **1.10--1.19 GB**).
+  Final track count/reprojection roughly ranked the 9.65 cm reverse run, but
+  the pre-growth metrics did not: reverse had fewer conflicts and the most
+  retained observations, while hash1 had the most retained observations and
+  still scored 101.87 cm; coordinate had the most verified pairs but scored
+  46.17 cm. The fixed-COLMAP raw-import control is stronger negative evidence:
+  the exact same **161,301** raw correspondences and identical verifier counts
+  produced legacy **1.76/3.43/5.03/4.86 cm** across original/coordinate/
+  reverse/hash orders, while stable ordering made all permutations **4.52 cm**.
+  Thus a pre-growth support/reprojection selector cannot be justified across
+  both feature sets; selecting the best candidate would require replaying the
+  order-sensitive growth/triangulation/PnP path (or using GT), contrary to the
+  bounded selector goal. No multi-order selector, default change, or new
+  champion was added. Existing historical all-floor 4-octave bilinear
+  **31.84 cm** and fixed raw **1.76 cm** controls remain documented; the
+  current-tree rerun is reported separately rather than silently replacing
+  either control.
+
+- **Opt-in cycle-supported track construction (2026-08-29).** Added
+  `IncrementalSfmConfig::cycle_supported_tracks` and the demo flag
+  `--cycle-supported-tracks`. For each accepted match edge, the strategy
+  counts exact third-view feature cycles and distinct supporting images, then
+  resolves same-image conflicts in that order with calibrated-E residual and
+  pair-support/stable-physical tie-breaks. Legacy, stable, and canonical modes
+  remain unchanged and the new strategy is default-off. Synthetic tests cover
+  a supported three-view edge beating an unsupported conflict, feature/pair
+  permutation invariance, and deterministic no-cycle fallback.
+  On the fixed COLMAP-keypoint/corrected-descriptor raw-import control
+  (404/703 verified pairs, **140,842** inliers), original/coordinate/reverse/
+  hash feature orders were identical under this strategy: **38/38**, **19,147**
+  final tracks, **63,402** observations, **0.379 px**, and **67.07 cm** Sim(3)
+  center RMSE. Initial cycle construction retained **25,900** tracks and
+  **90,350** observations from **26,342** components with zero same-image
+  conflicts. Each run took **20.12--20.75 s** with peak RSS
+  **265,088--265,408 KB**. This is permutation-invariant but regresses the
+  raw-import controls (legacy **21,487 tracks/1.76 cm**, stable
+  **19,929/4.52 cm**), so no default or accuracy champion changed; ordinary
+  matching and full split/all-floor sweeps were not repeated after this
+  negative isolation result. Existing split and 4-octave bilinear controls
+  remain as previously recorded.
+
+- **Feature-index/order sensitivity and opt-in physical ordering (2026-08-29).**
+  A fixed corrected-descriptor/COLMAP-keypoint input (208,785 rows) was
+  permuted per image by coordinate order, reverse order, and a fixed hash
+  shuffle. Ordinary NN matching remained 38/38 but produced **398/703,
+  403/703, and 411/703** verified pairs, with **7.29/86.37/15.90 cm**
+  Sim(3) center RMSE and **18,982/17,935/18,149** tracks; the historical
+  unpermuted control was **2.92 cm**. Exact raw-import correspondence files
+  (all **161,301** remapped rows validated) held verification at **404/703,
+  140,842** inliers for every order, yet final tracks/scores still varied:
+  unpermuted **21,487/1.76 cm**, coordinate **20,782/3.43 cm**, reverse
+  **19,702/5.03 cm**, and hash **19,927/4.86 cm**. This isolates a
+  downstream index/traversal dependency in track construction, triangulation,
+  and PnP rather than only matcher tie-breaking.
+  Added default-off `IncrementalSfmConfig::stable_track_order` and the demo's
+  `--canonical-feature-order`; the latter canonically reorders feature rows
+  by quantized physical coordinates plus descriptor contents and remaps
+  imported raw/verified indices, while stable track ordering canonically sorts
+  observations/tracks/conflicts. With `--stable-track-order`, all four exact
+  raw-import permutations became identical (**404/703, 140,842 inliers,
+  38/38, 19,929 tracks, 0.318 px, 4.52 cm**); canonical feature order gave
+  the same result. Canonical ordinary matching on the original/coordinate/
+  reverse inputs likewise matched exactly at **398/703, 122,132 inliers,
+  18,717 tracks, 0.288 px, 6.37 cm**. Deterministic permutation tests pass,
+  but the opt-in path is not an accuracy champion and defaults remain
+  unchanged; no broad canonical full sweep was accepted as a new result.
+  Separately, the detector/DB metadata join matched **196,677/208,746
+  (94.22%)** own rows, with median per-image rank correlation about **0.998**
+  and weighted inversion fraction **0.327%** (critical 0305/0306/0307:
+  **0.9971/0.9973/0.9968**), so row ranking is largely aligned and does not
+  explain the large reconstruction variance by itself. Existing split and
+  all-floor/bilinear controls are unchanged. Targeted release checks and
+  permutation tests pass; no default reconstruction behavior or champion was
+  changed.
+
+- **Split COLMAP-detector / legacy-descriptor SIFT diagnostic (2026-08-29).**
+  Added the default-off `--sift-split-colmap-detector-grayscale` path. It
+  detects/localizes/orients once on COLMAP's rounded grayscale conversion, then
+  describes those exact keypoints from the legacy floor grayscale; it requires
+  both compatible SIFT modes, rejects the all-rounded flag, preserves keypoint
+  order/counts, and leaves the ordinary path unchanged. The focused
+  `.8+cross-check` raw/accepted counts for DSC_0305--0306, 0305--0307, and
+  0306--0307 were **314/264, 150/100, 580/539**; coordinate-mapped overlap
+  with COLMAP raw matches was **248/353 (79.23% precision, 70.25% recall),
+  100/161 (66.67%, 62.11%), and 523/630 (90.17%, 83.02%)**. At identical
+  rounded detector loci, split descriptors versus all-rounded descriptors had
+  aggregate cosine **0.999891** (median **0.999949**); against COLMAP rows the
+  split descriptor cosine was **0.942506** (12,498 mapped rows; median
+  **0.944755**), so the grayscale choice changes descriptors only marginally.
+  The established full safe stack (compatible detector/descriptor, bilinear
+  orientations, exhaustive `--match-ratio 0.9 --guided-matching`, full
+  verification, `--pnp-max-iterations 100000`, `--min-pnp-inliers 8`, geometry
+  recovery, post registration, final iterative refinement) remained **38/38,
+  15,472 tracks, 0.342 px**, but scored **234.13 cm** Sim(3) center RMSE;
+  this is better than all-rounded grayscale (**382.21 cm**) but worse than the
+  legacy-floor control (**31.84 cm**). Thus split preprocessing is a useful
+  controlled decomposition, not an accuracy champion or default change.
+  Regression coverage includes detector metadata/descriptors equality and CLI
+  validation; release example tests passed (**15/15**).
+
+- **Opt-in COLMAP input grayscale parity probe (2026-08-29).** Audited
+  `colmap_oracle_full/database.db`: its 38 image names and 1600×1066 camera
+  dimensions match the RGB 8-bit PNGs in `images_1600x1066` (those files have
+  no EXIF/profile metadata; the DB itself does not record the source path).
+  COLMAP's `Bitmap::CloneAsGrey` evaluates float32
+  `.2126f*R+.7152f*G+.0722f*B+.5f` then truncates to `uint8_t`, whereas the
+  existing `image` 0.25.5 path uses the same integer coefficients and floors
+  the result. On **64,812,800** pixels, COLMAP-round minus legacy-floor was
+  **0 or +1** (max **1**; +1 in **31,109,482 / 64,812,800 = 47.99898%**;
+  mean absolute **0.47999**, RMS **0.69281** gray levels). Added the
+  default-off `--sift-colmap-compatible-grayscale` loader and exact RGB/RGBA
+  rounding/alpha regression coverage; ordinary image loading is unchanged.
+  A callable upstream VLFeat PGM probe and the compatible detector agreed on
+  the rounded grayscale candidates (0305/0306/0307: **4598/3113/3064** vs
+  **4598/3113/3066** Rust candidates), and the locus join to COLMAP reached
+  **99.87%/99.84%/99.89%** of own detections. However, this is not an
+  accuracy improvement: focused ratio-0.8+cross-check raw/accepted became
+  **309/258, 152/102, 585/539** (0305--0306, 0305--0307, 0306--0307), with
+  mapped COLMAP-raw overlap **246/353, 102/161, 527/630**. The full compatible
+  detector+descriptor+bilinear safe stack
+  (`--exhaustive --match-ratio 0.9 --guided-matching --verification-mode full
+  --pnp-max-iterations 100000 --min-pnp-inliers 8
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement`) remained **38/38**, but yielded **14,934
+  tracks, 0.406 px** and **382.21 cm** Sim(3) center RMSE versus the legacy
+  grayscale control's **38/38, 15,992 tracks, 0.298 px, 31.84 cm**. The
+  conversion is source-correct but rejected as a default or champion path;
+  the remaining discrepancy is downstream descriptor/matching sensitivity.
+  Sources: [COLMAP Bitmap](https://raw.githubusercontent.com/colmap/colmap/main/src/colmap/sensor/bitmap.cc),
+  [COLMAP SIFT options](https://raw.githubusercontent.com/colmap/colmap/main/src/colmap/feature/sift.h),
+  and the [image crate conversion](https://github.com/image-rs/image/blob/0.25.5/src/color.rs).
+
+- **VLFeat/COLMAP detector-metadata decomposition and bilinear orientation mode (2026-08-29).** A deterministic one-to-one oracle join of the VLFeat-compatible detected features to the six-column COLMAP keypoints used `d(x,y) <= 1.0 px` and `|log(sigma_own/sigma_colmap)| <= log(1.25)`. It matched **4,871/5,483 (88.84%)** DSC_0305, **3,342/3,782 (88.37%)** DSC_0306, and **3,188/3,626 (87.92%)** DSC_0307 detections; matched spatial-error medians were **0.0292/0.0311/0.0323 px** and p95 values **0.1561/0.1949/0.1863 px**, while scale-log medians were **0.00381/0.00371/0.00368**. Re-described focused variants (A own metadata, B own xy+COLMAP scale/orientation, C COLMAP xy+own scale/orientation, D own xy/scale+COLMAP orientation, E own xy/orientation+COLMAP scale, F all-COLMAP metadata through our descriptor) showed that xy/scale substitutions were effectively neutral; orientation substitution raised mapped descriptor cosine from **0.8883** (A/C/E aggregate) to **0.9428/0.9429** (D/F), but spatial-only ties can cross co-located orientation rows, so this is not a shippable oracle result. At ratio **0.8 + cross-check**, mapped own-vs-COLMAP raw-match overlap was A **649/946 = 68.6% precision, 56.7% recall**, B **791/936 = 84.5%, 69.1%**, D **786/943 = 83.4%, 68.7%**, and F **871/1,040 = 83.8%, 76.1%**; at ratio **0.9**, A was **753/1,501 = 50.2%, 65.8%**, B **927/1,484 = 62.5%, 81.0%**, and F **1,028/1,683 = 61.1%, 89.9%**. These are diagnostic joins, not accuracy claims or oracle dependencies.
+
+  The authoritative source audit found COLMAP's vendored `src/thirdparty/VLFeat/sift.c` defines `VL_SIFT_BILINEAR_ORIENTATIONS 1` (the vendored define at source line **669**, with the half-bin accumulation around **1636–1645**), whereas upstream VLFeat defaults to nearest-bin orientation accumulation ([COLMAP source](https://github.com/colmap/colmap/blob/main/src/thirdparty/VLFeat/sift.c), [upstream source](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c)). Added default-off `--sift-vlfeat-bilinear-orientations` (requires `--sift-vlfeat-compatible-detector`), with source-equivalent half-bin/circular interpolation, mass-conservation coverage, and default-identity tests. On focused DSC_0305–0307 pairs, bilinear mode produced `.8` raw/accepted **349/294, 156/98, 626/570** and coordinate-mapped oracle overlap **788/964 = 81.7% precision, 68.9% recall**, versus own-metadata A **649/946 = 68.6%, 56.7%**. The full safe stack (`--sift-vlfeat-compatible-detector --sift-vlfeat-compatible-descriptor --sift-vlfeat-bilinear-orientations --exhaustive --match-ratio 0.9 --guided-matching --verification-mode full --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement`) reached **38/38, 15,230 tracks, 0.351 px, 109.74 cm Sim(3) RMSE**; fair current source-cap A (`/tmp/vlfeat_detector_corrected_4096_features_20260829`) reached **38/38, 14,988 tracks, 0.387 px, 276.42 cm**, so bilinear is a material opt-in improvement but neither displaces the COLMAP-feature champion (**38/38, 2.84 cm**) nor proves descriptor parity. The critical-only metadata substitution control reached **38/38, 14,137 tracks, 0.375 px, 290.59 cm**, a negative result despite its focused overlap gain. Artifacts: `/tmp/vlfeat_metadata_variants_20260829`, `/tmp/vlfeat_bilinear_focus.csv`, `/tmp/vlfeat_bilinear_full_20260829.log`, `/tmp/vlfeat_current_A_full_20260829.log`.
+
+- **VLFeat/COLMAP orientation-set parity audit (2026-08-29).** A follow-up
+  unordered circular-angle assignment at strictly matched
+  detector loci found that bilinear mode agrees with COLMAP's orientation
+  multiplicity at **9,702 loci / 11,303 orientation rows** across
+  DSC_0305–0307 (own rows: **5,467/3,780/3,631**; COLMAP rows:
+  **5,354/3,647/3,508**). Bilinear equal-cardinality matches were
+  **4,138/2,809/2,755** loci (single-orientation: **3,454/2,309/2,340**;
+  two-orientation: **684/500/414**; four-orientation: **0/0/1**), with only
+  **2/3/1** two-orientation source-order swaps. Minimum-cost circular angle
+  errors were median **0.185/0.206/0.202°**, aggregate p90 **0.663°**, p95
+  **1.002°**; the remaining **16** loci with >10° errors are localized
+  peak/multiplicity mismatches, not a systematic angle sign or row-order
+  error. The nearest-bin compatible dump had aggregate median **0.543°** and
+  p95 **2.006°**, confirming the COLMAP bilinear switch as the material
+  orientation discrepancy. Source audit matches the vendored implementation:
+  `winf=1.5`, `W=floor(3*sigmaw)`, gradients from the current DoG Gaussian
+  layer, six circular three-tap smoothing passes, strict `>0.8*maxh` local
+  maxima, bounded quadratic interpolation, bin-ascending return order with
+  at most four peaks, then COLMAP's first-two cap and whole-DoG-level global
+  cap (vendored `sift.c` lines **1446–1529**, **1563–1691**; COLMAP wrapper
+  lines **242–258**, **294–331**). The independent reference-vector,
+  circular-boundary, peak-order, cap, and default-identity tests pass; no
+  further orientation mode or oracle dependency was added.
+
+- **VLFeat detector numeric and unmatched-locus audit (2026-08-29).** The
+  vendored implementation stores `vl_sift_pix` as `float` and uses float
+  separable convolution, upsampling, and DoG subtraction, so a focused f64
+  versus f32 probe was run against that contract before considering a numeric
+  compatibility mode. Across the 17 critical stems, strict detector-locus
+  matches were **72,760** (f64) versus **72,759** (f32), own-only loci were
+  **6,890** versus **6,886**, and response/edge-score distributions were
+  unchanged. On DSC_0305--0307, ratio **0.8 + cross-check** produced the same
+  **349/294, 156/98, 626/570** raw/accepted counts; ratio **0.9** changed only
+  0305--0306 by **606/415** (f64) versus **605/417** (f32), with the other two
+  pairs unchanged. Thus f32 arithmetic does not explain the remaining
+  detector gap, and no numeric-compatibility flag was shipped.
+
+  The pre-fix all-image metadata join (the image-size-derived eight-octave
+  detector with a 4096 source-level cap) found **166,001** strict matched
+  loci, **13,896** own-only loci,
+  and **12,359** COLMAP-only loci. Re-running the join before the global cap
+  showed that **3,014 (24.4%)** of the COLMAP-only loci had an own candidate
+  removed by capping/ranking, while **9,345 (75.6%)** had no own candidate even
+  in the unbounded extrema set. Critical bridge images 0305/0306/0307 had
+  essentially no cap loss (detector candidate mismatch dominated). Own-only
+  points were not border artifacts (border-distance median **203 px** versus
+  **203 px** for matched points), had comparable orientation multiplicity,
+  but were closer to the edge-test limit (edge-score median **6.65** versus
+  **5.67**) and had larger nearest-locus displacement (median **7.04 px**).
+  The audit TSV now includes deterministic `edge_score` metadata for these
+  classifications. The source arithmetic and extrema audit follows COLMAP's
+  vendored `sift.c` (`vl_sift_pix`, `_vl_sift_smooth`, upsample, DoG, and
+  strict extrema comparisons); the next bottleneck is source-level detector
+  candidate/localization parity, not a blanket precision change.
+
+- **VLFeat/COLMAP octave-count parity and pyramid probe (2026-08-29).** The
+  source audit found a larger semantic mismatch than arithmetic precision:
+  COLMAP's `SiftExtractionOptions` defaults to `first_octave=-1` and
+  `num_octaves=4`, while the compatible Rust path interpreted `octaves=0` as
+  the image-size-derived eight-octave limit on the 1600×1066 courtyard. The
+  extra coarse octaves changed the whole-DoG-level cap and created own-only
+  detections at octaves **3--6**. A deterministic 64×48 impulse+ramp/noise
+  probe compared the current f64 pyramid formulas with a callable VLFeat
+  (`vl_sift_process_first_octave/process_next_octave`) reference: Gaussian
+  levels differed by at most **1.91e-7** (RMS at most **7.33e-8**), DoG levels
+  by at most **1.90e-7** (RMS at most **4.02e-8**), and the refined extrema
+  sets were identical at every tested level (maximum x/y/σ disagreement
+  **7.5e-5** from the reference's float storage). Thus upsampling, boundary
+  extension, kernel support, subtraction order, and strict 3×3×3 extrema
+  semantics are numerically consistent; no f32 mode was justified.
+
+  The compatible detector now uses the source-compatible default of four
+  octaves when `SiftConfig::octaves=0`; explicit octave counts remain honored,
+  and the legacy detector is untouched. On the all-image metadata join, strict
+  matched loci improved **166,001→168,285**, own-only fell
+  **13,896→10,076**, COLMAP-only fell **12,359→10,075**, and cap-attributed
+  COLMAP-only fell **3,014→730**; the remaining **9,345** detector-only loci
+  are unchanged and all COLMAP-only rows infer to octaves **-1..2**. Per-level
+  detector-only counts are largest at **(-1,2)=2,378**, **(0,0)=1,825**, and
+  **(-1,0)=1,211**; own-only points have response median **0.0127** and
+  edge-score median **7.59** versus matched **0.0204** and **5.66**, so they
+  are not simply low-response border artifacts. Focused ratio-0.8/cross-check
+  raw/accepted rows became **318/265**, **145/82**, and **582/526** for
+  0305--0306, 0305--0307, and 0306--0307 respectively (a matching-density
+  tradeoff despite better locus parity). The full bilinear compatible safe
+  stack reached **38/38, 15,992 tracks, 0.298 px, 31.84 cm Sim(3) RMSE**,
+  improving the prior eight-octave result (**109.74 cm**) but remaining well
+  above the COLMAP-feature champion (**2.84 cm**). Source references are
+  COLMAP's vendored `sift.c` process/detect routines (process-first
+  **977--1059**, process-next **1083--1134**, DoG/extrema **1153--1232**)
+  and `src/colmap/feature/sift.h` defaults (**41--55**); the new octave-count
+  regression test and existing detector tests pass.
+
+- **BA numerical Jacobian and linear-system audit (2026-08-29).** Added the
+  default-off `VISLOC_SFM_DEBUG_BA_JACOBIANS=1` diagnostic (with
+  `VISLOC_SFM_DEBUG_BA=1`) and focused tests for the right-perturbation pose,
+  world-landmark, and pinhole-intrinsics Jacobians. Central differences on
+  synthetic normal, far-depth, low-parallax, and high-residual cases stayed
+  below **4.9e-8 px absolute** (the far-depth landmark relative error was
+  **4.32e-7**); the real 27-camera state audited 64 observations with no
+  invalid samples. Its largest absolute/relative errors were pose
+  **1.63e-7 / 1.32e-10**, landmark **2.48e-7 / 2.48e-5**, and intrinsics
+  **1.41e-10 / 9.78e-11** (the larger relative landmark values occur on
+  near-zero far/low-parallax columns). A Schur-complement solve was compared
+  with the full 9×9 normal system (**<1e-10** difference), and a Huber
+  derivative test confirms `weight(s)=rho'(s)` (**<1e-8** finite-difference
+  error). The audit confirms the residual sign (`prediction-measurement`),
+  right-pose convention, Schur RHS signs, caller-owned gauge anchors, and
+  identity LM damping; no corrected solver or diagonal-scaling option was
+  justified by these checks. The new `VISLOC_SFM_DEBUG_BA_STEPS=1` detail
+  line explains the scoped 27-camera point-only warm-start stall: all five
+  trials failed the objective gate (feasibility passed), with
+  **6.540293608e6→4.069881100e7–4.075306232e7** candidate cost and
+  nonprojectable observations **37→35**. This is a nonlinear/weak-geometry
+  step rejection, not an analytic-Jacobian defect; default reconstruction
+  behavior is unchanged. In a captured full-raw-import 27-camera state, the
+  separated max absolute/relative errors (bucket order normal/far/low/high)
+  were translation **1.11e-7/1.16e-9, 1.11e-7/1.56e-8, 1.50e-7/2.59e-5,
+  1.14e-7/2.76e-5**, rotation **1.24e-7/8.36e-11, 9.67e-8/7.77e-11,
+  1.10e-7/8.63e-11, 1.02e-7/7.64e-11**, landmark **1.73e-7/1.35e-9,
+  9.86e-8/2.54e-8, 1.08e-7/2.16e-5, 1.01e-7/2.69e-5**, and intrinsics
+  **8.30e-11/7.08e-11, 7.94e-11/6.24e-11, 1.34e-10/1.00e-10,
+  9.59e-11/8.06e-11** (64 samples, zero invalid). Reproducible traces:
+  `/tmp/ba_step_detail_20260829.log` and
+  `/tmp/ba_jacobian_27_import_20260829.log`.
+
+- **Point-only landmark BA warm-start A/B (2026-08-29).** Added the
+  default-off `--landmark-ba-warm-start-iterations N` path, with optional
+  `--landmark-ba-warm-start-min-registered-images N` scoping. Before each
+  global/periodic joint BA it builds the same robust reprojection problem with
+  all registered poses and intrinsics fixed, optimizes only landmarks, and
+  copies points back only after finite/non-increasing-cost checks; support and
+  camera states are otherwise untouched. The synthetic test covers camera
+  immutability, cost decrease, deterministic output, and the `0` no-op.
+  On the COLMAP-feature champion (`--landmark-ba-warm-start-iterations 5`),
+  applying the warm start to every global/periodic solve changed the early
+  growth path immediately: the first 7-camera point-only solve accepted all 5
+  steps and moved a point by **1.675e5 m**. The 27-camera joint BA then had
+  oracle centre RMSE **12.7896 cm** (historical schedule **12.2241 cm**), and
+  the full run ended at **38/38, 20,936 tracks, 0.373 px, 37.47 cm** versus
+  the champion's **38/38, 21,338 tracks, 0.283 px, 2.842 cm**. An evidence-
+  scoped run with `--landmark-ba-warm-start-min-registered-images 27` left
+  the target 27-camera solve unchanged (point-only cost
+  **6.540293608e6→6.540293608e6**, zero accepted steps), but later warm starts
+  still yielded **21,325 tracks, 0.283 px, 2.85 cm**; its oracle-pose control
+  scored **1.98 cm** versus the existing **1.95 cm** control, with probe
+  reprojection **1.425801→0.275717 px**. Thus the point-only solve does not
+  safely absorb the ill-conditioned movement and remains opt-in; the default
+  schedule and accuracy champion are unchanged. Trace/score artifacts are
+  `/tmp/landmark_warm5_trace_20260829.log`,
+  `/tmp/landmark_warm5_score_20260829.log`,
+  `/tmp/landmark_warm5_min27_trace_20260829.log`, and
+  `/tmp/landmark_warm5_min27_score_20260829.log`.
+
+- **BA landmark-conditioning diagnosis and opt-in safeguard (2026-08-29).**
+  Added `VISLOC_SFM_DEBUG_BA_LANDMARKS=1` diagnostics for the fixed pre-BA
+  landmark geometry: track length, baseline/depth ratio, widest
+  triangulation angle, robust reprojection residual, a weighted 3x3 point
+  Hessian condition proxy, and post-solve displacement. In the COLMAP-feature
+  champion's 27-camera solve, only **118/15,799** landmarks had widest angle
+  below the existing **2°** triangulation gate, but they accounted for
+  **84.5885%** of total landmark displacement; the **76** points with proxy
+  condition above **1e8** accounted for **40.6845%**. The largest movement was
+  **9.574e3 m** (track 2194, angle **0.0195°**, baseline/depth
+  **6.57e-4**, median residual **227.5 px**), confirming that a small,
+  numerically weak and already-misfitting subset drives the basin jump.
+  Added default-off `--freeze-ill-conditioned-landmarks`; despite its name,
+  the guarded implementation omits only ill-conditioned landmarks whose
+  fixed pre-BA residual is already outside the ordinary reprojection gate,
+  so their bad residual rows cannot pull camera variables. Retaining those
+  rows while freezing the points worsened the 27-camera oracle RMSE to
+  **37.28 cm**. The guarded exclusion reduced the traced 27-camera RMSE to
+  **9.1224 cm** and excluded **213 landmarks / 1,321 observations** there,
+  but its full non-oracle run changed the final support and quality to
+  **38/38, 21,541 tracks, 0.348 px, 7.39 cm**, versus the champion's
+  **38/38, 21,338 tracks, 0.283 px, 2.842 cm**. The flag therefore remains an
+  opt-in diagnostic, with the historical default and accuracy champion
+  unchanged. Focused deterministic conditioning tests, CLI parsing tests,
+  and release example compilation pass; trace artifacts are
+  `/tmp/ba_landmark_condition_trace3_20260829.log`,
+  `/tmp/ba_landmark_conditional_trace_20260829.log`, and
+  `/tmp/ba_landmark_conditional_score_20260829.log`.
+
+- **Periodic BA basin-jump diagnosis and deferred-schedule A/B (2026-08-29).**
+  Added default-off `--periodic-ba-min-registered-images N` for the plain
+  incremental schedule (`0` preserves the historical `ba_every` behavior; the
+  knob does not suppress the configured final BA). With
+  `VISLOC_SFM_DEBUG_BA=1`, the mapper now
+  reports pre/post support, robust and L2 costs, LM trial costs/damping and
+  acceptance, gauge anchors, camera/landmark displacement, and explicit
+  filter/re-triangulation support transitions; `VISLOC_SFM_DEBUG_BA_STEPS=1`
+  enables the per-trial stream. On the COLMAP-feature champion seed `(8,9)`,
+  the 27-camera solve was confirmed as the basin jump **after** BA and before
+  any pruning: support stayed **15,799 tracks / 57,794 observations**, Huber
+  cost was **6.540293608e6→4.697525563e6**, with **5 accepted / 15 rejected**
+  LM trials, final `lambda=1e6`, max camera displacement **0.916 m**, max
+  landmark displacement **9.57e3 m**, and anchors `(0,30)`; oracle-aligned
+  centre RMSE changed **3.7776→12.2241 cm**. The evidence-derived threshold
+  `N=32` defers that 27-camera solve until the next five-camera connectivity
+  boundary, but its first 32-camera solve enters a different basin (oracle
+  RMSE **14.8959 cm** at that point). The controlled A/B used the same
+  exhaustive/full-verification, bridge-supplement, `pnp-max-iterations=100000`,
+  recovery/post/final-refinement configuration: historical schedule produced
+  **38/38, 21,338 tracks, 0.283 px, 2.842 cm**, while `N=32` produced
+  **38/38, 20,435 tracks, 0.301 px, 5.787 cm**. Thus deferral is a useful
+  reproducible diagnostic but a negative accuracy result; no fixed-keypoint
+  follow-up was run, and the option remains opt-in. Trace logs/models are
+  `/tmp/ba_schedule_off_trace2_20260829(.log)` and
+  `/tmp/ba_schedule_defer32_trace_20260829(.log)`; score runs are
+  `/tmp/ba_schedule_off_score_20260829` and
+  `/tmp/ba_schedule_defer32_score_20260829`.
+
+- **Registration-time pose-drift diagnostic (2026-08-29).** Added the
+  default-off `sfm-debug-oracle` transition log, enabled by the existing
+  `--diagnose-ba-oracle-poses` input together with `VISLOC_SFM_DEBUG=1`, and
+  `sfm-debug-pnp-geometry` for selected images (`VISLOC_SFM_DEBUG_IMAGES`).
+  On the COLMAP-feature champion seed `(8,9)`, the first persistent drift was
+  not PnP: after image **11**'s **434→262** PnP (track-length median **5→4**,
+  parallax **20.649°→17.548°**, conditioning **2.84→3.31**, reprojection
+  median **2.528→1.562 px**), the following periodic BA changed aligned
+  centre RMSE **3.7776→12.2241 cm** (**+8.4465 cm**), with worst images
+  **36=31.08 cm, 23=28.69 cm, 11=23.76 cm**.  The failed growth attempts
+  were image **20: 22→7** inliers (median parallax **2.695°→2.482°**,
+  conditioning **13.34→23.09**, reprojection **12.199→2.606 px**) and image
+  **21: 6→3** inliers (median parallax **6.464°→7.107°**, conditioning
+  **8.08→8.08**).  An offline, deterministic high-information subset pose
+  refinement was mixed: image 11 worsened **7.683→7.965 cm**, image 12
+  **12.121→13.936 cm**, image 13 improved **42.031→39.543 cm**, image 17
+  **40.095→39.707 cm**, and image 22 **39.428→36.605 cm**; post-refinement
+  image 20 improved only **3.967→3.883 cm**, while image 21 improved
+  **169.647→132.466 cm** but remained grossly wrong.  Therefore no
+  `geometry_weighted_pnp` policy was enabled: the evidence does not provide
+  a safe GT-independent pose refinement, and the default mapper is unchanged.
+  Exact focused command (output `/tmp/pnp_oracle_trace_focus_20260829`) was:
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=11,12,13,17,20,21,22 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --seed-pair 8,9 --diagnose-ba-oracle-poses /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_oracle_full/sparse_txt/images.txt --out-colmap /tmp/pnp_oracle_trace_focus_20260829`.
+
+- **SIFT-scale heteroscedastic BA diagnostic (2026-08-29).** Read the
+  six-column COLMAP affine keypoints from
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_oracle_full/database.db`
+  (`sigma = sqrt(det(A))`) and joined them to the observation indices in the
+  existing COLMAP-feature champion and oracle-pose-injected controls. The
+  champion's scale quartiles (Q1–Q4, 18,523 observations each) had median
+  scales **1.578, 2.200, 2.707, 4.792** and median reprojection errors
+  **0.133, 0.150, 0.160, 0.294 px** (Q4 p90 **1.076 px** versus Q1 **0.439
+  px**); the oracle-pose-injected control was nearly identical (**0.126,
+  0.141, 0.157, 0.284 px**). Q4 also had longer tracks (mean **5.55** versus
+  **3.80** in Q1) and higher parallax (median **16.71°** versus **8.82°**),
+  so the residual elevation is not an isolated localization-noise measure.
+  Observation-level `corr(log(sigma), residual)` was only **0.297** (oracle
+  **0.300**) and, more importantly, image-level median scale was
+  anti-correlated with aligned camera-centre error: **−0.377** for the
+  champion versus GT (38/38, **2.842 cm**) and **−0.497** for the oracle-BA
+  control versus the actual COLMAP model (**1.658 cm**). The actual COLMAP
+  model versus GT was also **−0.754** (**1.709 cm**), with the largest centre
+  errors on low-scale bridge images (e.g. DSC_0308 scale **1.401**, error
+  **4.132 cm**). Thus scale predicts some high-residual observations but not
+  the camera displacement that matters here; no scale metadata/BA-weighting
+  mode was added, and the default path is unchanged. The next safe weighting
+  probe is track-level residual/geometry quality (with robust whitening), not
+  a uniform `1/sigma` or `1/sigma²` sweep.
+
+- **Track-level parallax/information BA diagnostic (2026-08-29).** A
+  read-only join of the COLMAP-feature champion's **21,338** triangulated
+  tracks / **74,091** observations measured length, widest-baseline
+  `sin²(parallax)`, depth-to-baseline conditioning, and reprojection residuals
+  before any new weighting. Short tracks are the majority (**10,975** length-2
+  tracks; median widest angle **4.956°**, condition **7.95**, information
+  **0.007**, median residual **0.109 px**), while length-≥5 tracks were **4,189**
+  (median **30.911°**, **1.35**, **1.534**, **0.204 px**). The ill-conditioned
+  condition-≥10 bucket contained **4,124** tracks (median angle **3.492°**,
+  information **0.004**, median residual **0.095 px**); low parallax is not
+  simply a high-pixel-residual bucket. Nevertheless, camera-centre drift in
+  the oracle-pose BA control correlated strongly with track geometry: centre
+  error versus track count **−0.740**, widest angle **−0.660**, condition
+  **+0.624**, and information **−0.473** (actual COLMAP-vs-GT gave **−0.598**,
+  **+0.580** for angle/condition). The champion-vs-GT correlations were weaker
+  (**−0.317** for information, **+0.338** for median residual), indicating
+  mapper-basin effects in addition to geometry.
+
+  Added default-off `--geometry-weighted-ba`, which leaves registration and
+  support untouched and runs one final fixed-support BA using pre-solve,
+  median-normalized `sin²(widest parallax)` observation weights clamped to
+  **[0.25, 4]**; tracks with unavailable geometry get weight 1 and track length
+  is not multiplied a second time. On the COLMAP-feature recovery+post stack,
+  off (`/tmp/track_geom_colmap_off_20260829`) was **38/38, 21,338 tracks,
+  74,091 observations, 0.283 px, 2.842 cm**; on
+  (`/tmp/track_geom_colmap_weighted_20260829`) stayed **38/38** with identical
+  support but **0.285 px, 2.993 cm**, so it is not an accuracy-champion update.
+  The oracle-pose control remained **38/38** and improved from the existing
+  ordinary-BA **1.954 cm** (`/tmp/oracle_ba_champion_probe2_20260829`) to
+  **1.774 cm** (`/tmp/track_geom_oracle_weighted_20260829`), while mean
+  reprojection was **1.397976→0.275904 px** versus **1.539402→0.276868 px**;
+  this supports reduced COLMAP-basin drift but does not justify enabling it by
+  default. The fixed-keypoint follow-up was skipped because the champion
+  quality gate regressed; logs are `/tmp/track_geom_colmap_off_20260829.log`,
+  `/tmp/track_geom_colmap_weighted_20260829.log`, and
+  `/tmp/track_geom_oracle_weighted_20260829.log`.
+
+- **COLMAP-basin control and seed replay diagnostic (2026-08-29).** Added
+  default-off `--diagnose-ba-oracle-poses PATH` and `--seed-pair I,J` controls.
+  The former parses the actual COLMAP sparse `images.txt`, Sim(3)-aligns the
+  mapper's existing support into that pose frame, and runs one ordinary
+  fixed-support BA solve; it never changes the normal mapper path. The actual
+  COLMAP sparse model scores **1.71 cm** centre RMSE (38/38), while the
+  COLMAP-feature recovery+post champion scores **2.84 cm** (38/38,
+  **21,338** tracks, **0.283 px**). Injecting the COLMAP poses with the
+  champion's support starts at **1.398 px** mean reprojection and reaches
+  **0.276 px** (**2.160243226e5→1.533969354e4** BA cost, 20 iterations), but
+  scores **1.95 cm** after BA: lowering reprojection does not preserve the
+  1.71 cm COLMAP basin, so the solver/support is a contributor but not the
+  sole mapper gap. The control command used
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --diagnose-ba-oracle-poses /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_oracle_full/sparse_txt/images.txt --out-colmap /tmp/oracle_ba_champion_probe2_20260829`.
+  The source-derived seed replays used the same command/configuration with
+  `--diagnose-ba-oracle-poses` omitted and `--seed-pair 7,8`, `7,9`, or
+  `10,11`, writing to `/tmp/seed_replay_7_8_20260829`,
+  `/tmp/seed_replay_7_9_20260829`, and `/tmp/seed_replay_10_11_20260829`.
+  The normal strongest seed `(8,9)` has **2,507** accepted matches, reaches
+  **36** before the existing post/refinement completion, and ends at
+  **38/38, 21,338 tracks, 0.283 px, 2.84 cm**. The alternatives all reached
+  38/38 during growth but were worse: `(7,8)` (**1,364** matches,
+  **21,198** tracks, **0.298 px, 4.88 cm**), `(7,9)` (**1,107**, **20,819**,
+  **0.406 px, 13.99 cm**), and `(10,11)` (**902**, **20,824**, **0.387 px,
+  14.25 cm**). Since the normal seed also wins the GT-independent support /
+  reprojection criteria, no automatic multi-seed selector was enabled.
+
+- **Final fixed-support L2 BA polish diagnostic (2026-08-29).** Added the
+  default-off `--final-ba-polish-iterations N` path (`0` remains a no-op). It
+  runs after registration, filtering/re-triangulation, recovery, and post-
+  refinement, rebuilding the same gauge anchors and exact existing support,
+  with fixed intrinsics and `RobustKernel::None`; tracks, observations, and
+  registration states are never edited. A solve is committed only when all
+  state/cost values are finite and its pure-L2 SSE is non-increasing; otherwise
+  pose/landmark snapshots are restored. `VISLOC_SFM_DEBUG_BA=1` reports support
+  identity, SSE, accepted/rejected steps, convergence, and final damping.
+  The COLMAP-feature champion command was
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --final-ba-polish-iterations 10 --out-colmap /tmp/ba_champion_polish10_20260829`. It preserved **38/38**, **21,338 tracks**, and **0.283 px**; SSE changed **1.575328576e4→1.574786401e4** in **5/5** accepted steps and converged, but Sim(3) RMSE was **2.85 cm** versus the control's **2.84 cm**. The fixed-keypoint command was
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/colmap_fixed_vlfeat_all_l2_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --final-ba-polish-iterations 10 --out-colmap /tmp/ba_fixed_vlfeat_polish10_20260829`. Its polish had **10/10** rejected steps and SSE **2.443825662e4→2.443825662e4**; the contemporaneous no-polish control was byte-identical (**38/38**, **18,506 tracks**, **0.399 px**, **21.67 cm** Sim(3) RMSE). The historical fixed-keypoint reference remains **2.92 cm** in its prior log, but is not reproduced by this current shared worktree; therefore no accuracy champion/default changed. Focused support/determinism/default-no-op tests pass.
+
+- **Bundle-adjustment iteration-cap diagnostic (2026-08-29).** Added the
+  default-off `--ba-max-iterations <n>` CLI override (the library/default
+  remains **20**) and `VISLOC_SFM_DEBUG_BA=1` solve diagnostics. The logs show
+  the existing Huber-`δ=3` LM/Dense-Schur solver, `λ=1e-4` with accepted-step
+  decay to `1e-9`, and most solves reaching the cap rather than a convergence
+  tolerance. A narrow 40-iteration A/B was negative: the exact COLMAP-feature
+  champion command was
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --ba-max-iterations 40 --out-colmap /tmp/ba_champion_ba40_20260829`, which kept **38/38** but changed **21,338→20,193 tracks**, mean reprojection **0.283→0.354 px**, and Sim(3) center RMSE **2.84→12.12 cm**. The fixed-keypoint compatible-descriptor command was
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_BA=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/colmap_fixed_vlfeat_all_l2_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.8 --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --ba-max-iterations 40 --out-colmap /tmp/ba_fixed_vlfeat_ba40_20260829`, which kept **38/38** but changed the known control's **19,898 tracks/0.271 px/2.92 cm** to **18,652 tracks/0.303 px/19.06 cm**. Since 40 iterations degraded both quality paths despite lower robust costs, the override remains an opt-in diagnostic and no accuracy champion/default was changed. CLI tests cover default `None`, positive `40`, and rejection of `0`.
+
+- **Calibrated-essential primary policy (2026-08-29).** Added the separate,
+  default-off `--calibrated-essential-primary` strategy for full verification.
+  On known-intrinsics `UNCALIBRATED` F-winning pairs it refits the direct E
+  RANSAC support with the deterministic eight-point estimator, rescored all
+  candidates at the calibrated threshold, requires COLMAP's minimum support,
+  at least **50%** of F support, and the source-derived hardened cheirality
+  gates (≥**1°** triangulation angle, ≤**0.85** ambiguity, ≥**50%** positive
+  depth). A passing E becomes the primary track/translation model and is
+  labelled `CALIBRATED`; F/H counts remain in diagnostics. Weak, planar, or
+  pure-rotation candidates fall back to the historical F winner. The existing
+  strict F→E option can still be combined to use its stability-gated fallback
+  only when direct E is not admitted. Default behavior is unchanged; focused
+  tests cover F having more support while healthy E is selected and degenerate
+  E rejection.
+
+  Verification-only diagnostics kept the VLFeat graph connected (**650/703**
+  pairs; all **38** images) and promoted **57** F-winning pairs (effective
+  calibrated-primary edges: **91** classified `CALIBRATED` + **57** promoted).
+  The exact
+  full command was:
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/vlfeat_detector_corrected_4096_features_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --calibrated-essential-primary --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/ce_vlfeat_full_20260829`.
+  It reached **38/38**, but changed the model to **13,894 tracks**, **0.368
+  px** mean reprojection, and Sim(3) RMSE **239.67 cm** (median **156.63 cm**)
+  versus the established F→E fallback run's **117.48 cm**. This is a negative
+  accuracy result despite preserved registration.
+
+  The COLMAP-feature graph likewise stayed connected (**380/703** pairs;
+  **38/38** images) and promoted **41** F-winning pairs (effective
+  calibrated-primary edges: **167** classified `CALIBRATED` + **41** promoted).
+  The exact command was:
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --calibrated-essential-primary --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/ce_colmap_full_20260829`.
+  It preserved **38/38**, with **20,722 tracks**, **0.353 px**, and Sim(3)
+  RMSE **11.38 cm** (median **9.44 cm**) versus the COLMAP-feature champion's
+  **2.84 cm**. Since neither graph disconnected, no post-registration-only
+  fallback tier was added; the policy remains an opt-in diagnostic rather than
+  an accuracy champion. Logs/models:
+  `/tmp/ce_vlfeat_verify_20260829.log`, `/tmp/ce_vlfeat_full_20260829.log`,
+  `/tmp/ce_colmap_full_20260829.log`, `/tmp/ce_vlfeat_full_20260829`, and
+  `/tmp/ce_colmap_full_20260829`.
+
+- **Strict uncalibrated F→E exclusion strategy (2026-08-29).** Added the
+  separate, default-off `--strict-uncalibrated-f-to-essential` strategy. For a
+  known-intrinsics `UNCALIBRATED` F-winning pair it uses the existing strict
+  manifold/support/residual/refit-stability gate: a passing pair is retained
+  with its refined `E_F`, while a failing pair is omitted entirely from
+  translation/track construction (this implementation has no rotation-only
+  edge representation). Pairs without usable intrinsics and non-UNCALIBRATED
+  reports remain on the historical path; the existing
+  `--refine-uncalibrated-f-to-essential` fallback behavior is unchanged. The
+  CLI predicate has focused tests for default-off, strict-pass, strict-fail,
+  calibrated, no-calibration, and deterministic behavior.
+
+  Before mapping, the strict verification probe removed **574 pairs / 75,285
+  F inliers** from the corrected-VLFeat graph; **76 pairs / 80,286 inliers**
+  remained and the graph split into a 26-image component, a 6-image
+  component (`indices 15--20`), and six isolated images (`0307` included),
+  so its critical graph was not connected. The exact full command was:
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/vlfeat_detector_corrected_4096_features_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --strict-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_vlfeat_strict_exclude_20260829`.
+  It reached **26/38** images, with **14,647 tracks**, **0.298 px** mean
+  reprojection, and Sim(3) centre RMSE **81.96 cm** (median **44.02 cm**);
+  only `0309` was added by post-refinement, while `0306`/`0307` had no
+  initial 2D--3D support. This is a registration and accuracy negative versus
+  the connected fallback run, and no post-registration reuse of rejected F
+  edges was added.
+
+  On the COLMAP-feature graph, strict verification removed **200 pairs /
+  35,258 F inliers**, leaving **180 pairs / 105,451 inliers**; the retained
+  graph stayed connected across all **38/38** images (including `0305`,
+  `0306`, and `0307`). The exact full command was:
+  `env VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --strict-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_colmap_strict_exclude_20260829`.
+  It preserved **38/38**, with **20,054 tracks**, **0.273 px**, and Sim(3)
+  RMSE **4.90 cm** (median **3.72 cm**), versus the existing COLMAP champion
+  **2.84 cm**. The opt-in strategy is therefore retained as a principled
+  graph-ablation diagnostic, not promoted as an accuracy champion.
+
+- **Strict F→E candidate-stability gate (2026-08-29).** The opt-in
+  `--refine-uncalibrated-f-to-essential` path now keeps the existing
+  support/cheirality checks and additionally requires a calibrated
+  `Kᵀ F K` projection within **1%** relative Frobenius distance of the
+  essential manifold (`s1/s2` mismatch ≤**2%**, `s3/s2` ≤**5%**), at least
+  **90%** overlap with the F inliers, normalized E/F residual ratio ≤**3**,
+  at least **2/3** deterministic prefix/suffix/evenly-spaced F-refits, and
+  ≤**5°** rotation and translation-direction spread across those refits.
+  `VISLOC_SFM_DEBUG_DUMP_F2E_DIAGNOSTICS=1` logs these singular values,
+  projection/residual fields, cheirality margin, and pose spreads for every
+  `UNCALIBRATED` candidate; no GT is used by the gate. Offline GT
+  analysis found the VLFeat `0306--0307` candidate superficially essential
+  (`projection_distortion=0.001503`, F-overlap **0.988006**) but unstable at
+  **22.055565°** translation spread, while `0305--0306` was stable at
+  **0.689680°**. The broad support-only gate admitted **67/586** VLFeat and
+  **70/218** COLMAP candidates; the strict gate admits **12** and **18**.
+  Across the broad sets, F→E improved/worsened GT translation direction on
+  **54/13** VLFeat and **56/14** COLMAP pairs (diagnostic labels only), so
+  pairwise pose improvement alone is not treated as a mapper-quality gate.
+
+  Focused corrected-VLFeat A/B (`0305--0307`, `0306--0307`) retained
+  `0305--0306` as **424 E_F** and rejected `0306--0307` back to **667 F**;
+  the 0305--0307 projection also fell back to **136 F**, so accepted support
+  stayed **1227** rather than the broad-gate **1219**. Exact full-run command:
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/vlfeat_detector_corrected_4096_features_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --refine-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_vlfeat_strict_20260829`.
+  It accepted **650/703** pairs and **155,571** inlier correspondences,
+  reached **35/38** in growth, then recovery/post-refinement registered the
+  remaining three (**38/38** total). Post-PnP registered `0306` at
+  **189→78** and `0307` at **205→90** inliers. The final model has **14,864
+  tracks**, **0.350 px** mean reprojection, and Sim(3) RMSE **117.48 cm**
+  (median **69.59 cm**), improving both the no-refinement source-cap control
+  (**323.70 cm**) and the preceding broad-gate run (**281.61 cm**).
+
+  COLMAP-feature champion command (same downstream stack, bridge supplement,
+  ratio 0.8):
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --refine-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_colmap_strict_20260829`.
+  It produced **380/703** pairs, **140,709** inlier correspondences,
+  and **18** strict refinements. It preserved **38/38**, **21,342 tracks**,
+  **0.284 px**, and Sim(3) RMSE **3.38 cm** (median **2.67 cm**) versus the
+  champion **21,338 / 0.283 px / 2.84 cm**; this is a small, acceptable A/B
+  delta and avoids the broad-gate regression to **21.43 cm**. The option
+  remains explicitly opt-in. Logs/models:
+  `/tmp/f2e_vlfeat_diagnostics_20260829.log`,
+  `/tmp/f2e_colmap_diagnostics_20260829.log`,
+  `/tmp/f2e_vlfeat_strict_20260829.log`,
+  `/tmp/f2e_colmap_strict_20260829.log`,
+  `/tmp/f2e_vlfeat_strict_20260829`, and
+  `/tmp/f2e_colmap_strict_20260829`.
+
+- **Guarded calibrated F→E refinement (2026-08-29).** Added the opt-in
+  `--refine-uncalibrated-f-to-essential` path to the full verifier. It applies
+  only to an `UNCALIBRATED` (F-winning) report: `E_F = K_jᵀ F K_i` is projected
+  to the essential manifold, every candidate is rescored at the calibrated
+  normalized 4 px threshold, and the pair is replaced only when both support
+  is at least `max(8,min_matches)` and at least 50% of the F support, with
+  ≥75% positive-depth cheirality and second/best cheirality ≤0.25. Invalid or
+  weak projections fall back to the original winning set; calibrated E
+  winners and the default path are unchanged. The resulting `E_F` is exposed
+  through `PairwiseMatches::essential_matrix` and its accepted inlier set is
+  used for tracks only after the guards pass. Synthetic tests cover recovery,
+  invalid/weak fallback, calibrated-input no-op, and CLI default-off parsing.
+
+  Focused corrected VLFeat-feature control (three-image subset,
+  `--match-ratio 0.9 --guided-matching --verification-mode full`) changed
+  `0305--0306` **424 F → 424 E_F** (360/424 positive-depth),
+  `0306--0307` **667 F → 659 E_F** (615/659), and rejected the weak
+  `0305--0307` projection (remained **136 F**); total accepted matches were
+  **1227 → 1219**, with **2/3** pairs refined. The full source-cap run used
+  `/tmp/vlfeat_detector_corrected_4096_features_20260829`, exhaustive ratio
+  0.9 + guided matching, full verification, `pnp-max-iterations=100000`,
+  `min-pnp-inliers=8`, geometry recovery, post-refinement, and final
+  iterative refinement. Exact command:
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /tmp/vlfeat_detector_corrected_4096_features_20260829 --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode full --refine-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_vlfeat_full_20260829`.
+  It accepted **650/703** pairs, **152,685** inlier correspondences, and
+  **67** guarded refinements; 0306/0307 growth had **203→147 / 170→125**
+  PnP inliers. Recovery completed the initial **37/38** growth to **38/38**;
+  the final model has **12,561 tracks**, **0.366 px** mean reprojection, and
+  Sim(3) centre RMSE **281.61 cm** (median **248.84 cm**), improving the
+  no-refinement source-cap control (**12,057 tracks, 0.491 px, 323.70 cm**).
+
+  The COLMAP-feature champion A/B used the bridge supplement, exhaustive
+  ratio 0.8, full verification, and the same mapper stack. Exact command:
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21 target/release/examples/unordered_sfm_demo --feature-extractor files --features-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --import-matches-supplement-file /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full --refine-uncalibrated-f-to-essential --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement --out-colmap /tmp/f2e_colmap_full_20260829`.
+  Refinement accepted **70** pairs: registration stayed **38/38**, but the
+  model changed
+  from the champion **21,338 tracks / 0.283 px / 2.84 cm** to **20,216 tracks /
+  0.313 px / 21.43 cm** (median **9.74 cm**). This is a clear accuracy
+  regression, so the option remains default-off and is not an accuracy
+  champion; use it only for the guarded F→E diagnostic/ablation. Models and
+  logs: `/tmp/f2e_vlfeat_full_20260829` and
+  `/tmp/f2e_colmap_full_20260829` (`/tmp/f2e_colmap_full_20260829.log`).
+
+- **GT-independent essential-pair parallax/cheirality audit (2026-08-29).**
+  Added the default-off `VISLOC_SFM_DEBUG_DUMP_ESSENTIAL_QUALITY=1` probe in
+  `unordered_sfm_demo`. For every attempted full-verifier pair it reports
+  E/F/H support, the four-hypothesis positive-depth count, the second/best
+  cheirality score, p10/p25/median triangulation angle, and the scale-free
+  positive-depth ratio `min(z1,z2)/max(z1,z2)` from a deterministic maximum
+  256-sample E-inlier subset; it exits before mapper/track construction, so
+  ordinary behavior is unchanged. On the VLFeat-compatible 4096 feature
+  graph (`/tmp/vlfeat_detector_features_20260829`, exhaustive, ratio 0.9,
+  guided, full, min-matches 15), **603/703** pairs were admitted and **577**
+  had usable E quality. Pair-level angle quantiles were **3.981°/8.923°/
+  18.715°** (p10/p25/median), cheirality fraction quantiles
+  **0.513/0.667/0.889**, and per-pair depth-ratio p10 quantiles
+  **0.026/0.118/0.435**. The known wrong-translation edge
+  `DSC_0306--DSC_0307` remained apparently healthy (**E/F/H=590/642/201**,
+  cheirality **585/590**, second/best **0.009**, angle
+  **1.265°/2.091°/3.724°**, depth-ratio median **0.933**); other wrong edges
+  were likewise not uniformly weak: `0296--0300` had **E=38**, angle
+  **4.308°/8.464°/9.889°**, and depth-ratio median **0.964**, while
+  `0301--0303` had **E=405**, cheirality **403/405**, and angle median
+  **3.381°**. Across the **502** E-bearing edges that joined the existing
+  oracle bearing diagnostic, median angle correlated only **r=0.226** with
+  translation-bearing error (rotation error **r=0.604**); depth p10 was the
+  strongest aggregate signal (**r=-0.361/-0.690** for translation/rotation),
+  but standard floors did not separate the incidents (median-angle `<2°`
+  rejected only **4/85** edges with translation error ≥45°, while the known
+  80.1° edge passed). The COLMAP-feature bridge-supplement graph used for the
+  **2.84 cm** champion had **380** admitted pairs with **376** usable E rows,
+  angle quantiles **3.242°/6.507°/12.554°**, cheirality
+  **0.857/0.967/0.994**, and per-pair depth-ratio p10
+  **0.408/0.492/0.743**. The
+  compatible full safe run remains **38/38, 0.371 px, 142.99 cm** versus
+  the COLMAP-feature recovery+post champion **38/38, 0.283 px, 2.84 cm**.
+  Therefore no default-off pair eligibility gate was added: low-parallax or
+  weak-cheirality filtering cannot remove the demonstrated false E directions
+  without also removing valid edges. The next exact issue is E/F model
+  selection/accepted-index and track topology (not a generic parallax gate).
+  A current-binary safe-stack rerun of the COLMAP-feature champion preserved
+  **38/38, 21,338 tracks, 0.283 px, and 2.84 cm** (log:
+  `/tmp/essential_quality_colmap_full_20260829.log`; score/model:
+  `/tmp/essential_quality_colmap_full_20260829`).
+  Logs: `/tmp/essential_quality_vlfeat_run_20260829.log`,
+  `/tmp/essential_quality_vlfeat_gt_20260829.log`, and
+  `/tmp/essential_quality_colmap_champion_20260829.log`.
+
+- **Calibrated F→E relative-pose audit (2026-08-29).** Extended the
+  default-off `VISLOC_SFM_DEBUG_DUMP_ESSENTIAL_QUALITY=1` report with the
+  refined-F inlier set, pixel/normalized Sampson residuals, and
+  `E_F = K_jᵀ F K_i` projected to the essential manifold by equalizing its
+  first two singular values. The emitted pose fields are diagnostic only;
+  neither verification nor tracks consume `E_F`. The projection convention
+  is covered by a synthetic `Kᵀ F K` unit test. Direct-E audit found no
+  normalization or cheirality bug: the estimator first calibrates pixels,
+  Hartley-normalizes each side, solves the 8-point `AᵀA` system, projects to
+  equal nonzero singular values, and RANSAC uses 256 iterations/seed 7 with
+  the normalized `4/f = 0.004548` threshold and inlier refit/rescore;
+  decomposition evaluates all four positive-depth hypotheses. Fundamental
+  RANSAC independently uses the pixel 4 px threshold.
+
+  In the VLFeat-compatible graph, **34** rows were `CALIBRATED` and **29**
+  had an 8-point F→E pose. F→E E-inlier count was lower than direct E on
+  **20/29** rows (median delta **−101**, mean **−192**); on the common F
+  inlier set its normalized Sampson residual was lower on **17/29** rows and
+  higher on **12/29**, while cheirality fraction was higher on **22/29**.
+  GT is used only for the audit: paired rotation error mean changed
+  **2.06° → 0.69°** (better **19/29**), but translation changed
+  **13.75° → 9.81°** with only **12/29** improvements and **16/29**
+  regressions (median delta **+0.06°**). In the COLMAP-feature graph,
+  **126** rows were `CALIBRATED` and **105** had an F→E pose; F→E lost E
+  inliers on **72/105** rows (median delta **−112**, mean **−155**), and
+  was lower on the common-F residual for **49/105** versus **56/105**
+  regressions. Rotation mean improved **6.55° → 4.42°**, but translation
+  worsened **17.90° → 21.71°** (better **36/105**, worse **67/105**).
+  Therefore F→E is not a consistent GT-independent selector and no
+  default-off mapper/model-selection switch was added.
+
+  The requested incident edges are `UNCALIBRATED` in both graphs, so they
+  are not eligible for the calibrated branch; their diagnostic direct/F→E
+  E counts and GT pose errors (R/T degrees) were VLFeat
+  `0305--0306: 363/391, .66/.08, 2.03/.90`,
+  `0305--0307: 45/119, 18.22/.59, 154.83/2.44`,
+  `0306--0307: 590/634, .63/.62, 80.12/5.96`, and
+  `0296--0300: 38/0, 91.34/NA, 93.81/NA`; COLMAP
+  `0305--0306: 261/316, 1.33/.04, 28.97/1.50`,
+  `0305--0307: 64/73, 7.98/.92, 62.49/8.29`,
+  `0306--0307: 477/591, 2.37/1.81, 13.52/13.91`, and
+  `0296--0300: 0/0, NA/NA, NA/NA`. These rows explain why F→E is a useful
+  forensic comparison, not a safe global replacement. A no-diagnostic
+  control after the change preserved the established outputs: VLFeat
+  **38/38, 11,533 tracks, 0.371 px** (known Sim(3) RMSE **142.99 cm**) and
+  COLMAP **38/38, 21,338 tracks, 0.283 px, 2.84 cm**. Logs:
+  `/tmp/essential_quality_vlfeat_f2e_pose_20260829.log`,
+  `/tmp/essential_quality_colmap_f2e_pose_20260829.log`,
+  `/tmp/essential_quality_vlfeat_full_f2e_control_20260829.log`, and
+  `/tmp/essential_quality_colmap_full_f2e_control_20260829.log`.
+
+- **VLFeat/COLMAP detector metadata and feature-cap audit (2026-08-29).**
+  Added the explicit `diagnose_sift_vlfeat_detector` API and
+  `examples/vlfeat_detector_diagnostic.rs`, which export x/y/σ/orientation,
+  refined DoG response, octave/level, and orientation index before expansion,
+  after expansion, after the per-locus orientation cap, and after the global
+  cap. The audit used all **38** images in
+  `colmap_oracle_full/database.db`: **208,785** COLMAP six-column rows,
+  **3,508--6,970** rows/image (median **5,366**), all below the header's
+  `max_num_features=8192` default.  The SQLite database stores keypoint blobs,
+  not the SiftExtraction options, so that bound alone does **not** prove that
+  the recorded run used an uncapped 8192-feature setting.  The affine rows are scaled rotations in this
+  database, so `σ=sqrt(det(A))` and `atan2(a21,a11)` are lossless for the
+  isotropic comparison. The unbounded compatible detector produced **334,560**
+  extrema, **393,764** oriented rows, and **392,099** rows with the source
+  default two-orientation cap. Nearest spatial matching found
+  **199,395/208,785=95.50%** of COLMAP rows within 1 px (median/p95
+  **0.0315/0.5918 px**); the matched signed ours-minus-COLMAP offset was only
+  **(+0.00019,+0.00013) px** at the median, with no ±0.5-pixel convention
+  bias. Matched `|log(σ_ours/σ_colmap)|` was **0.00237/0.0252** median/p95
+  overall (critical 0305/0306/0307: **0.00385/0.00375/0.00372** median),
+  while the nearest compatible orientation error was **0.478°/1.85°**
+  median/p95 (critical medians **0.544°/0.562°/0.535°**). Orientation
+  multiplicity was comparable to COLMAP: **29.83%** versus **29.10%** of
+  rows in rounded multi-orientation loci (max four), so duplication is not
+  the missing-feature explanation. A true response-rank comparison is not
+  possible because the COLMAP database does not retain DoG responses; the
+  diagnostic retains our refined response for an explicitly labelled proxy,
+  and reports missing rows by that proxy rather than pretending it is a
+  COLMAP rank. With the explicit proxy definition “per-image top N extrema by
+  `|response|`, then COLMAP-row nearest distance ≤1 px”, all-image hit/missing
+  counts were **52,568/156,217** (N=2048), **104,373/104,412** (4096), and
+  **175,926/32,859** (8192). At N=4096 the corresponding critical counts were
+  0305 **4,401/953**, 0306 **3,392/255**, 0307 **3,228/280**; the late
+  0320/0321/0322 rows were **1,622/3,718**, **1,763/3,115**, and
+  **1,753/3,057**. These are spatial coverage proxies, not source response
+  rank overlap.
+
+  The cap implementation now follows COLMAP `sift.cc`: count unoriented
+  extrema per `(octave, level)`, walk groups from coarse to fine in reverse
+  source order, and retain the complete suffix that crosses the cap; it does
+  not sort/truncate individual orientation copies. This is the source
+  behavior in [COLMAP `sift.cc`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc)
+  (group cap) together with [COLMAP `sift.h`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.h)
+  (`8192`, first octave `-1`, two orientations), while the detector stages
+  follow [VLFeat `sift.c`](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c)
+  (refined response, octave/level order, and orientation peaks). At the
+  justified **4096** cap, source-level suffix retention yielded **210,864**
+  emitted rows and a **93.90%** weighted COLMAP spatial recall proxy versus
+  **154,864** rows and **69.45%** from the previous arbitrary oriented-row
+  truncation. The resulting real-feature focused bridge rows at ratio .9 +
+  cross-check were `0305--0306=611/423`, `0305--0307=362/136`, and
+  `0306--0307=825/667` (raw/accepted); the full compatible safe stack reached
+  **38/38**, **12,057** tracks, **0.491 px**, but **323.70 cm** Sim(3) RMSE.
+  Thus source-correct capping fixes feature-count semantics and preserves
+  registration, but is not an accuracy-champion update (the fixed-endpoint
+  control remains **2.92 cm**). An 8192 source-cap export (**364,373** rows)
+  was generated as the only other source-justified cap; its mapper run was
+  stopped at roughly **4.7 GB RSS** before producing a result, so no score is
+  claimed. Targeted VLFeat detector tests (including stage alignment,
+  determinism, and whole-level cap behavior) pass.
+
+- **VLFeat descriptor support-radius audit and fixed-keypoint A/B
+  (2026-08-29).** The earlier `ceil(3σ)` wording was corrected: that radius
+  belongs to VLFeat's orientation histogram (`sift.c` lines 1579--1580), not
+  the descriptor. The authoritative `vl_sift_calc_keypoint_descriptor` loop
+  sets `sigma=k->sigma/xper`, `SBP=magnif*sigma+VL_EPSILON_D`, and
+  `W=floor(sqrt(2.0)*SBP*(NBP+1)/2.0+0.5)` (`sift.c` lines 1953--1965), then
+  clips samples to `max(-W,1-xi)..min(W,w-xi-2)` and the analogous y range
+  (lines 2006--2010), applies `exp(-(nx²+ny²)/(2*(NBP/2)²))` (lines
+  2027--2033), and uses the `nx-0.5`/`ny-0.5`/`nt` trilinear bins (lines
+  2037--2063). The compatible Rust path now has an explicit, tested
+  `vlfeat_descriptor_window_radius` for that exact support expression,
+  source-equivalent boundary finite differences from `update_gradient`
+  (lines 1447--1529), and the source keypoint scale-to-octave selection
+  (lines 2172--2180); COLMAP's UBC orientation transpose remains its `q={0,7,
+  6,5,4,3,2,1}` assignment (sift.cc lines 118--135). A fixed-keypoint probe
+  (`examples/fixed_sift_descriptor_probe.rs` plus
+  `scripts/compare_sift_descriptors.py`) on identical COLMAP rows reported
+  cosine means **0.942752/0.943360/0.942735** for `0305/0306/0307`, nonzero
+  layout Jaccard **0.820688/0.809097/0.807644**, and **0** exact quantized
+  rows; the best fixed spatial/orientation/sign transform on 2,048 rows was
+  the identity (`cosine=0.945285`). Ratio-0.8 + cross-check focus rows after
+  the correction were **310/261, 150/101, 580/535** (raw/accepted), with
+  COLMAP raw-index overlap **248/353, 101/161, 522/630**; before correction
+  the overlaps were **245/353, 94/161, 516/630**. The full fixed-endpoint
+  command used `--exhaustive --min-matches 15 --match-ratio 0.8
+  --verification-mode full --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement` and reached
+  **409/703** verified pairs, **38/38** images, **19,898** tracks, **0.271
+  px**, and **2.92 cm** Sim(3) centre RMSE (output:
+  `/tmp/visloc_colmap_fixed_vlfeat_after_20260829_pty2_cLpTOv`; prior fixed
+  compatible output was **21.67 cm**). The required detected-compatible
+  follow-up used the same stack with `--feature-extractor sift --sift-max-
+  keypoints 4096 --sift-vlfeat-compatible-detector
+  --sift-vlfeat-compatible-descriptor --match-ratio 0.9 --guided-matching`
+  and reached **37/38**, **9,588 tracks**, **0.363 px**, **192.03 cm**; it is
+  a negative detected-feature result versus the prior **38/38, 142.99 cm**
+  run, so no accuracy champion changed. The exact source references are
+  [VLFeat `sift.c`](https://github.com/vlfeat/vlfeat/blob/master/vl/sift.c)
+  and [COLMAP `sift.cc`](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc).
+
+- **VLFeat-compatible match-level discriminant audit (2026-08-29).** A
+  one-off NumPy probe reimplemented the Rust NN+Lowe-0.9+mutual matcher on
+  the persisted 4096-keypoint files, labelled matches by GT Sampson residual
+  (`<1 px`) and by nearest same-image COLMAP-keypoint mapping (`≤0.5 px`) to
+  COLMAP's verified match set, and examined four representative edges. The
+  aggregate of **1,897** matches gave descriptor-distance / Lowe-ratio /
+  mutual-margin means of **132.3/170.7**, **0.569/0.740**, and
+  **0.381/0.215** for GT-positive/negative matches; the corresponding
+  COLMAP-verified-positive/negative values were **127.6/166.1**,
+  **0.541/0.724**, and **0.410/0.229**. Per-edge positive counts and
+  diagnostics were `0305--0306: 309/243 GT+/- (192/360 COLMAP+/-),
+  distance 135.2/174.1, ratio .606/.747, margin .332/.214, Hough
+  support 6,913`, `0305--0307: 90/226 (59/257), 158.0/184.3, .669/.760,
+  .285/.191, support 1,519`, `0306--0307: 521/298 (432/387), 126.0/152.0,
+  .531/.680, .427/.269, support 18,918`, and `0296--0300: 0/210
+  (11/199), 178.6, .795, .167, support 264`. Support is the match-pair
+  count around the dominant deterministic 4-D similarity Hough bin; the
+  corresponding dominant-bin counts were **1,529/296/5,287/49**, and
+  normalized 8×8 source/target grid entropies were respectively
+  **.920/.874, .901/.873, .860/.863, .800/.758**. Crucially, the known
+  wrong-translation edge `0306--0307` has the *best* descriptor statistics
+  and strongest Hough support, despite its two-view translation-bearing
+  error of **80.1°**; a descriptor-distance, ratio, spatial, or Hough gate
+  would retain it. A ratio `<0.7` gives only **69.6% precision / 74.2%
+  recall** on GT labels (**57.5%/81.4%** on COLMAP labels), while the
+  stronger `margin>0.3` gives **75.7%/62.2%** (**64.9%/70.7%**); these are
+  not safe source-derived admission thresholds, and the poor `0296--0300`
+  edge alone does not justify dataset-specific pair pruning. No new
+  pre-verification gate or A/B was therefore added. The exported feature
+  format contains only `(x,y,score,descriptor)` and `FeatureSet` has already
+  discarded `SiftKeypoint.sigma/orientation`, so log-scale and orientation
+  deltas cannot be measured honestly from this run. The same-keypoint parity
+  audit remains the actionable bottleneck: compatible-descriptor raw-index
+  overlap with actual COLMAP descriptors at ratio .8 + cross-check was only
+  **50.4/37.5/71.5%** on `0305--0306/0305--0307/0306--0307` (mag-3 improved
+  this to **59.4/39.2/80.2%**, mean descriptor cosine **0.942**), far below
+  the COLMAP control. Inputs/logs: `/tmp/vlfeat_detector_features_20260829`,
+  `/tmp/diagnose_pair_match_discriminants_20260829.log`, and the prior fixed
+  endpoint runs under `/tmp/colmap_fixed_oursift_mag8_20260828` and
+  `/tmp/colmap_fixed_oursift_mag3_20260828`. This is diagnostic evidence,
+  not an accuracy-champion update.
+
+- **VLFeat-compatible 38/38 distortion diagnosis and cycle audit
+  (2026-08-29).** The 4096-keypoint VLFeat-compatible detector+descriptor
+  model is registered on all **38/38** images with **11,533** tracks and
+  **0.371 px** mean reprojection, but its aligned centre RMSE is **142.99 cm**
+  (median **89.31 cm**, Sim(3) scale **0.431753**, pair-distance correlation
+  **0.90420**), versus the COLMAP-feature recovery+post model's **2.842 cm**,
+  **0.283 px**, scale **0.577188**, and correlation **0.999965**. Exact
+  aligned centre errors in `images.txt` order (`DSC_0286` through
+  `DSC_0323`, cm) are
+  `19.82,11.85,17.18,28.19,42.34,54.15,65.25,84.14,97.47,110.35,115.15,`
+  `131.71,113.13,90.57,79.71,74.62,80.83,82.42,86.69,93.13,88.06,118.37,`
+  `120.24,34.18,25.28,208.10,189.72,195.93,139.00,158.29,521.67,235.21,`
+  `142.08,100.14,71.56,67.05,66.47,269.68`. This is a distributed/bent
+  pose basin with localized catastrophic cameras (`0311--0317`, especially
+  `0316=521.67 cm`), not a single far-orbit island or a uniform scale-only
+  drift; the low reprojection therefore does not certify the metric pose.
+  The same-run growth log (`/tmp/sift_vlfeat_detector_cycles_20260829.log`)
+  seeded pair `(8,9)` and grew through `0293,0292,0291,0290,0289,0288,0287,`
+  `0286,0310,0296,0309,0318,0297,0312,0313,0317,0323,0311,0314,0315,`
+  `0319,0320,0321,0322,0316,0298,0299,0300,0302,0303,0301,0304,0305,`
+  `0308`; growth stopped at **35/38** and post-refinement added `0304`
+  (**633→490** PnP inliers), `0306` (**188→105**), and `0307`
+  (**172→94**). On the representative bridge edges, focused ratio-0.9
+  NN+cross-check rows were `0305--0306=552 raw/392 accepted, E=363,
+  UNCALIBRATED`, `0305--0307=316/94, E=50, UNCALIBRATED`, and
+  `0306--0307=819/658, E=636, CALIBRATED`; the corresponding same-feature
+  pose probe measured rotation/translation-bearing errors of
+  `0305--0306=(0.7°,2.0°)`, `0305--0307=(18.2°,25.2°)`, and
+  `0306--0307=(0.6°,80.1°)`. The last edge is a high-inlier but wrong
+  translation constraint, while `0296--0300` (`E=38`, `R=91.3°`, bearing
+  `86.2°`), `0301--0303` (`E=405`, `R=7.6°`, bearing `84.1°`), and
+  `0321--0323` (`E=123`, `R=9.5°`, bearing `87.8°`) show that wrong direction
+  hypotheses are distributed through the graph. Descriptor overlap against
+  COLMAP raw matches on the three bridge pairs was only **48.3/45.0%**,
+  **43.2/33.5%**, and **63.5/61.1%** (precision/recall proxy).
+  The full-graph reproduction used
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_DUMP_ROTATION_CYCLES=1
+  target/release/examples/unordered_sfm_demo --feature-extractor files
+  --features-dir /tmp/vlfeat_detector_features_20260829 --width 1600
+  --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive
+  --min-matches 15 --match-ratio 0.9 --guided-matching --verification-mode
+  full --mapper incremental --pnp-max-iterations 100000
+  --min-pnp-inliers 8 --geometry-guided-conflict-recovery
+  --post-refinement-registration --final-iterative-refinement
+  --diagnose-bearing-gt /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/gt/images.txt
+  --out-colmap /tmp/sift_vlfeat_detector_cycles_20260829`; the focused
+  nine-image edge reprobe is `/tmp/sift_vlfeat_detector_edges_focus2_20260829.log`.
+  A GT-independent rotation-cycle dump (`VISLOC_SFM_DEBUG_DUMP_ROTATION_CYCLES=1`)
+  found **502** essential rotations, **3,413** triangles, and globally
+  multimodal contradictions: `0305--0306` had cycle median/p90
+  **17.3°/58.7°**, `0305--0307` **17.3°/111.0°**, and `0306--0307`
+  **93.2°/134.1°**, while the full graph's worst medians reached
+  **174.0°**. Thus no single deterministic cycle threshold is safely
+  supported; the existing post-PnP two-view gate was already a no-op on the
+  38/38 COLMAP-feature basin, so no new mapper rejection policy was enabled.
+  The only code change in this slice is the default-off diagnostic output
+  (including relative-rotation error and essential fallback reporting) in
+  `unordered_sfm_demo`; the next safe intervention is edge-level
+  multi-hypothesis/accepted-index quality analysis rather than arbitrary
+  pruning. This is a diagnostic result, not an accuracy-champion update.
+
+- **Fixed-COLMAP-keypoint descriptor decomposition (2026-08-29).** A
+  descriptor-only probe read all **208,785** six-column COLMAP keypoints and
+  re-described the identical `(x, y)` endpoints on the normalized images with
+  the existing SIFT API at magnification **8.0** and **3.0**; no detector,
+  orientation re-detection, or endpoint reordering was involved. The affine
+  rows map as `sigma = sqrt(det(A))`, `orientation = atan2(a21, a11)` while
+  dropping `A`'s anisotropic shape. In this database every determinant was
+  positive and every matrix was a scaled rotation (`a11=a22`, `a12=-a21` at
+  float32 precision; singular-value ratio median/p90/max **1.0/1.0/1.0**), so
+  an affine-aware sampling extension was not justified. With identical
+  ratio-0.8 + cross-check + full-verifier settings, focused bridge raw/accepted
+  counts for `0305--0306`, `0305--0307`, `0306--0307` were COLMAP
+  **356/321, 163/126, 631/585**, fixed-endpoint our-SIFT@8
+  **224/206, 32/20, 593/563**, and fixed-endpoint our-SIFT@3
+  **207/183, 51/30, 565/526**; raw-index overlap with COLMAP was respectively
+  **50.4/37.5/71.5%** (@8) and **59.4/39.2/80.2%** (@3). The safe full stack
+  (exhaustive, ratio 0.8, full verification, plain incremental,
+  `pnp100k`, min-PnP 8, conflict recovery, post-refinement, final iterative)
+  gave the known COLMAP-descriptor control **382/703, 38/38, 20,392 tracks,
+  0.376 px, 18.62 cm Sim(3) RMSE**, versus fixed-endpoint our-SIFT@8
+  **302/703, 29/38, 9,303, 0.259 px, 387.50 cm** and @3 **285/703, 35/38,
+  16,211, 0.309 px, 117.62 cm**. Thus detector localization is held out of
+  the A/B/C gap; descriptor formulation/sampling (including any remaining
+  scale/orientation convention or quantization difference) is the measured
+  bottleneck, with @3 a material but insufficient improvement. The temporary
+  probe was removed after the run; no default CLI or normal-path behavior was
+  changed. Logs/models are under `/tmp/visloc_colmap_fixed_colmapdesc_20260829`,
+  `/tmp/visloc_colmap_fixed_oursift_mag8_20260828`, and
+  `/tmp/visloc_colmap_fixed_oursift_mag3_20260828` (each has a matching
+  `.log`). Next experiment is COLMAP/VLFeat descriptor parity, not an
+  unsupported affine-shape extension.
+
+- **COLMAP frame/sampling convention audit (2026-08-29).** The authoritative
+  COLMAP `FeatureKeypoint` implementation defines
+  `ComputeScale=(||col_1(A)||+||col_2(A)||)/2` and
+  `ComputeOrientation=atan2(a21,a11)`; its VLFeat extractor adds **+0.5** to
+  exported frame centers. The database/FAQ convention therefore maps a stored
+  COLMAP `(x,y)` to this crate's integer-centered image sampler as
+  `(x-0.5,y-0.5)` while keeping the exported geometry unchanged. This is from
+  COLMAP `main` as fetched 2026-08-29:
+  [types.cc](https://github.com/colmap/colmap/blob/main/src/colmap/feature/types.cc),
+  [sift.cc](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc),
+  [database.rst](https://github.com/colmap/colmap/blob/main/doc/database.rst),
+  and [FAQ pixel convention](https://github.com/colmap/colmap/blob/main/doc/faq.rst).
+  A bounded mag-3 probe on the three bridge pairs compared no offset,
+  `(-0.5,-0.5)` offset, and offset plus reversed orientation. The first two
+  produced raw/accepted `207/183, 51/30, 565/526` versus
+  `223/199, 48/32, 543/511`; COLMAP-raw index overlap precision/recall changed
+  `58.9/34.6, 41.2/13.0, 80.2/71.9%` to
+  `59.2/37.4, 52.1/15.5, 79.9/68.9%` (pair order `0305--0306`,
+  `0305--0307`, `0306--0307`). Reversing the orientation gave only
+  `116/84, 33/0, 379/339`, so the source orientation sign is confirmed; the
+  center offset is semantically correct but not a consistent pair-level gain,
+  and no full reconstruction or default CLI was justified. The mag-8 offset
+  result was likewise mixed (`224/206,32/20,593/563` →
+  `207/192,32/23,590/567`). This audit motivated the cohesive descriptor mode
+  recorded above: VLFeat requires the gradient to be evaluated on the
+  keypoint-scale-smoothed image and its raw implementation uses integer
+  gradient samples plus fractional displacement, while the historical crate
+  path uses direct ±1-pixel central differences on the unsmoothed source. See the
+  [VLFeat descriptor API](https://www.vlfeat.org/api/sift_8c.html) and
+  [reference implementation](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c).
+  The partial scale-adaptive experiment below was retained for comparison, but
+  affine-shape sampling remains unsupported by evidence because this
+  database's matrices are isotropic.
+
+- **Opt-in cohesive VLFeat/COLMAP SIFT descriptor (2026-08-29).** Added
+  `SiftConfig::vlfeat_compatible_descriptor` and the default-off
+  `--sift-vlfeat-compatible-descriptor` path. The mode keeps the legacy
+  detector and all prior experimental flags intact, but selects the complete
+  descriptor contract as one unit: a σ₀/2=0.8 full-resolution base pyramid
+  (octaves downsampled by two), integer central-difference gradients from the
+  rounded VLFeat scale level (finite `ceil(4σ)` Gaussian support with
+  continuity padding, as used by `_vl_sift_smooth`), m=3 support (`SBP=3σ`
+  and VLFeat's finite `W`),
+  `(x-0.5,y-0.5)` COLMAP-center mapping, rotated sample coordinates,
+  2-cell Gaussian window, 4×4×8 trilinear accumulation with circular
+  orientation bins, L2→0.2 clamp→L2 or COLMAP L1-root normalization, and
+  `round(512·d)` uint8-equivalent values followed by COLMAP's
+  VLFeat→UBC orientation permutation. CLI validation rejects the complete
+  mode with the partial scale-adaptive, affine, alternate-bank, or conflicting
+  magnification flags; default behavior remains byte-identical. Focused tests
+  cover bin conservation/orientation wrap, normalization/quantization/layout,
+  pyramid level selection, deterministic output, and default identity.
+  Fixed external COLMAP keypoints on normalized `images_1600x1066` improved
+  ratio-0.8 + cross-check raw/accepted counts for `0305--0306`,
+  `0305--0307`, `0306--0307` to **310/263, 143/95, 580/534**, versus the
+  prior fixed mag-3 **207/183, 51/30, 565/526** and actual COLMAP
+  **356/321, 163/126, 631/585**; descriptor cosine to the corresponding
+  COLMAP rows was **0.942 mean** over all 3-image fixed sets. The full fixed
+  run (`--exhaustive --verification-mode full --min-matches 15
+  --min-pnp-inliers 8 --pnp-max-iterations 100000
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement`) reached **405/703** verified pairs,
+  **38/38** images, **18,873** tracks, **0.385 px** mean reprojection, and
+  **21.67 cm** Sim(3) center RMSE (output:
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/runs/fixed_vlfeat_compatible_l2`,
+  log: `/tmp/fixed_vlfeat_compatible_l2.log`; the COLMAP-descriptor
+  control is 38/38, 0.376 px, 18.62 cm). A detected our-SIFT run with 4096 keypoints,
+  ratio 0.9 + guided matching and the same safe mapper stack reached
+  **542/703**, **24/38**, **5,925** tracks, **0.448 px**, **415.43 cm**;
+  this is a descriptor-parity success on fixed endpoints but not a detected
+  SIFT accuracy champion (output:
+  `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/runs/sift_vlfeat_compatible_l2`,
+  log: `/tmp/sift_vlfeat_compatible_l2.log`; the prior strongest
+  extra-keypoint run was 26/38).
+  The implementation follows the [VLFeat SIFT reference
+  implementation](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c),
+  [VLFeat image convolution](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/imopv.c),
+  [VLFeat descriptor API](https://www.vlfeat.org/api/sift_8c.html), and
+  [COLMAP's CPU SIFT conversion/quantization](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.cc).
+
+- **Opt-in cohesive VLFeat/COLMAP DoG detector (2026-08-29).** Added
+  `SiftConfig::vlfeat_compatible_detector` and
+  `--sift-vlfeat-compatible-detector`. The default-off path mirrors the
+  source detector's first octave `-1` with bilinear 2× upsampling, SIFT's
+  four-sigma separable smoothing, `0.02/S` peak threshold interpretation,
+  strict 3×3×3 extrema, five-iteration 3-D quadratic localization, normalized
+  spatial Hessian edge rejection, Gaussian-layer orientation assignment, and
+  deterministic large-scale-first capping. It exports the refined centers in
+  COLMAP's `+0.5` pixel convention so it composes with the compatible
+  descriptor; affine and the partial orientation-selector flag are rejected
+  for this isotropic mode. Unit tests cover bilinear first-octave upsampling,
+  subpixel/subscale quadratic recovery, edge rejection, cap ordering,
+  determinism, default identity, and CLI validation.
+  At 4096 features/image, the detector produced **154,884** keypoints versus
+  **208,785** COLMAP rows. Nearest-neighbor spatial repeatability (ours→COLMAP)
+  was **92.6% at 0.5 px / 93.3% at 1 px** overall and **91.6% / 92.2%** on
+  `DSC_0297--0308`; among the spatial matches, scale ratio ≤1.25 was **92.6%**
+  overall and **91.5%** on the critical subset. The reverse COLMAP→ours rate
+  was **68.4%** overall and **67.2%** critical at 0.5 px, primarily reflecting
+  the 4096 cap rather than a missing detector locus. Focused ratio-0.8 +
+  cross-check + full-verifier bridge counts were `0305--0306=329/283`,
+  `0305--0307=125/88`, and `0306--0307=606/557` (raw/accepted).
+  Pairing these features with the compatible descriptor and the safe stack
+  (ratio 0.9 + guided/full verification, plain incremental, `pnp100k`, min-PnP
+  8, conflict recovery, post-refinement, final iterative) produced
+  **603/703** verified pairs, **38/38** registered images, **11,533** tracks,
+  **0.371 px** mean reprojection, and **142.99 cm** Sim(3) center RMSE. The
+  same compatible descriptor without the detector mode was **24/38** and
+  **415.43 cm**, so registration count improved materially, but the result is
+  still far behind the fixed-COLMAP-descriptor control (**18.62 cm**) and is
+  not an accuracy-champion update. Features were generated by the detector
+  and saved under `/tmp/vlfeat_detector_features_20260829`; the mapper model
+  and log are `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/runs/sift_vlfeat_detector_descriptor_l2`
+  and `/tmp/sift_vlfeat_detector_descriptor_l2.log`. The implementation follows
+  [VLFeat's SIFT detector](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c),
+  [VLFeat image convolution](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/imopv.c),
+  and [COLMAP's SIFT options](https://github.com/colmap/colmap/blob/main/src/colmap/feature/sift.h).
+
+- **VLFeat/COLMAP detector cap A/B (2026-08-29).** A controlled `4096` vs
+  `8192` compatible-detector/descriptor run found that the larger cap is a
+  negative result, not an accuracy-champion update: features increased from
+  **154,884** to **292,639**, with the 4096 output an exact per-image prefix of
+  the 8192 output, but ours→COLMAP spatial repeatability at 0.5 px fell from
+  **92.57%** to **68.24%** overall (critical `0297--0308`: **91.59%** to
+  **77.50%**), while the reverse rate rose **68.44%** to **94.77%**. On the
+  focused `.8` cross-check bridges, raw/accepted counts changed only
+  `0305--0306: 329/283→350/304`, `0305--0307: 125/88→137/91`, and
+  `0306--0307: 606/557→606/557`. With the identical safe mapper stack, the
+  verified graph changed **603/703→516/703** pairs and **125,125→205,372**
+  inlier correspondences; registration fell **38/38→36/38**, despite tracks
+  rising **11,533→17,884**, and Sim(3) RMSE worsened **142.99→223.79 cm**
+  (mean reprojection **0.371→0.356 px**, center-distance correlation
+  **0.904→0.793**). The current global sigma/contrast ordering is directionally
+  consistent with VLFeat's coarse-level-first source order, but exact COLMAP
+  CPU capping retains complete DoG levels and requires level metadata not yet
+  carried by `SiftKeypoint`; no unvalidated edge-pruning gate was added.
+  Outputs: `/tmp/vlfeat_detector_features_8192_20260829` and
+  `/tmp/sift_vlfeat_detector_descriptor_l2_8192.log`. Next experiment is an
+  exact level-group cap/source-order diagnostic (with per-edge quality data)
+  before any verified-edge quality gate.
+
+- **Opt-in scale-adaptive SIFT gradients (2026-08-29).** Added
+  `SiftConfig::scale_adaptive_gradients` and the default-off
+  `--sift-scale-adaptive-gradients` path. It builds a deterministic
+  original-image Gaussian pyramid from `sigma_input`, computes central
+  differences on each blurred level, maps fixed keypoints into the selected
+  octave (`x,y` divided by `2^octave`), and interpolates adjacent levels in
+  log scale; the legacy direct-source descriptor path is left untouched when
+  the flag is off. Tests cover constant/linear gradients, level selection,
+  octave coordinate round-trip, determinism, descriptor distinction, and
+  default identity; `diagnose_cli_tests` covers the default-off/parseable CLI.
+  A bounded fixed-COLMAP-keypoint mag-3 probe used the existing normalized
+  `images_1600x1066` and COLMAP raw index set on `0305--0306`, `0305--0307`,
+  `0306--0307`. Legacy raw/accepted/overlap(P/R) was
+  **207/183/122 (58.94/34.56%)**, **51/30/21 (41.18/13.04%)**, and
+  **565/526/453 (80.18/71.90%)**; scale-adaptive became
+  **202/156/118 (58.42/33.43%)**, **92/0/20 (21.74/12.42%)**, and
+  **512/453/415 (81.05/65.87%)**. The extra raw matches on `0305--0307`
+  were geometrically degenerate, so no full reconstruction or accuracy
+  champion was claimed. The source contract is the VLFeat
+  [descriptor API](https://www.vlfeat.org/api/sift_8c.html) and its
+  [reference implementation](https://raw.githubusercontent.com/vlfeat/vlfeat/master/vl/sift.c);
+  the next parity step is matching its exact gradient rasterization and
+  descriptor histogram/quantization, not loosening verification. Validation
+  passed with `cargo test --release -p visloc-vision sift --lib`,
+  `cargo test --release --example unordered_sfm_demo diagnose_cli_tests
+  --features image-io`, `cargo check --release --example unordered_sfm_demo
+  --features image-io`, and `git diff --check`; no full reconstruction was
+  run because the focused A/B was not an improvement.
+
+- **Standards-aligned SIFT orientation peaks (2026-08-28).** Added the
+  default-off `SiftConfig::standard_orientation_peaks` and
+  `--sift-standard-orientations` path: six circular three-tap smoothing
+  passes, strict local maxima at least 80% of the dominant peak, and bounded
+  finite-safe parabolic angle interpolation. Focused ratio-0.8 NN+cross-check
+  diagnostics changed `DSC_0305--0306` from **83/64** raw/accepted to
+  **82/65**, `0305--0307` from **13/DEGENERATE-0** to **17/DEGENERATE-0**,
+  and `0306--0307` from **237/201** to **216/192**; at ratio 0.9 the
+  `0305--0307` edge became **73/24 Uncalibrated** (legacy **68/0
+  Degenerate**). The full replacement run used SIFT@4096, exhaustive ratio
+  0.9 + guided/full verification, plain incremental + `pnp100k`, min-PnP 8,
+  geometry recovery + post-refinement + final iterative refinement, and
+  produced **330/703** verified pairs, **42,890** inliers, **28/38** images,
+  **5,368 tracks**, **0.620 px** mean reprojection, and **507.77 cm** Sim(3)
+  centre RMSE (log/model:
+  `/tmp/visloc_oursift_standard_orientation_20260828.log` and
+  `/tmp/visloc_oursift_standard_orientation_20260828`). Legacy no-extra
+  reference was **340/703**, **26/38**, **5,195 tracks**, **0.569 px**, and
+  **499.89 cm**; the standard mode left `DSC_0299--0308` missing and is not
+  an accuracy-champion update. Extracted coordinate-duplicate rows, a proxy
+  for secondary orientations because the feature export omits orientation,
+  fell from **28.91%** to **17.58%** overall and from **24.41%** to **17.24%**
+  on the three bridge images. An append-only corrected-orientation bank was
+  not added: `FeatureSet` has no orientation/scale identity, and duplicating
+  endpoints would alter track topology; a safe bank needs explicit mapped
+  feature identities. Added unit coverage for adjacent-bin collapse, separated
+  peaks, circular boundaries, interpolation/invalid inputs, determinism, and
+  default identity. This remains an opt-in diagnostic result; next candidate
+  is an affine-shape-aware feature bank rather than more orientation copies.
+
+- **SIFT orientation-multiplicity audit (2026-08-28).** The existing
+  `assign_orientations` path already emits every 36-bin histogram bin at or
+  above 80% of the maximum (`max_orientations=0` is the unchanged unlimited
+  default), so no secondary-orientation implementation was added. On the
+  normalized 1600×1066 courtyard set, our SIFT@4096 had **145,188** keypoints
+  over **104,512** same-(x,y) loci, including **40,676** same-scale duplicate
+  orientation rows (**28.02%**; 1.389 orientations/locus). The full COLMAP
+  six-column affine-keypoint database had **208,785 / 178,359** and **30,426**
+  duplicate rows (**14.57%**; 1.171/locus); on critical `DSC_0297–0308`, our
+  duplicate rate was **27.42%** (10,611/38,692) versus COLMAP **14.89%**
+  (9,778/65,668). Our same-scale duplicate angle gaps were **6,408/19,408
+  (33.0%) ≤20°** (critical images 25.1–35.4%), whereas COLMAP affine
+  orientations (`atan2(a21,a11)`) were **283/30,551 (0.93%) ≤20°** with
+  median gap **158.4°**. Thus the current detector over-generates adjacent
+  histogram-bin copies rather than lacking secondary peaks. On three critical
+  raw-oracle bridges, after ≤3 px coordinate transfer, ratio-0.8 mutual-NN
+  oracle hits conditioned on a multi-orientation locus were
+  `0305–0306=14/98` versus no-secondary `13/81`, `0305–0307=3/38` versus
+  `1/31`, and `0306–0307=64/162` versus `57/144`—no consistent benefit.
+  This is a diagnostic negative (no A/B or accuracy-champion update); the
+  next detector candidate is a separately gated local-maximum/smoothing
+  correction or affine-shape path, not more secondary orientations.
+
+- **Per-correspondence geometric confidence track ordering (2026-08-28).**
+  Added default-off `--geometric-confidence-tracks` and
+  `IncrementalSfmConfig::geometric_confidence_tracks`. The opt-in builder sorts
+  E-supported correspondences from `CALIBRATED` pairs by finite normalized
+  Sampson residual, then verified/essential pair support and deterministic
+  endpoint indices; `UNCALIBRATED` (F-won), homography, watermark, multiple,
+  degenerate, missing, invalid, and out-of-range entries use the existing
+  pair-level fallback, so incomparable pixel/model residuals are never mixed.
+  Added stable NaN/degenerate handling, residual-priority conflict and
+  permutation tests, and kept the default track output byte-identical. The
+  strongest our-SIFT stack (SIFT@4096 + threshold-0.01 2048 extras on
+  `DSC_0299--0308, DSC_0320--0321`, append-only extras + descriptor ensemble
+  3.0, exhaustive ratio-0.9 guided/full verification, plain incremental,
+  `pnp100k`, min-PnP 8, recovery + post + final iterative refinement) reached
+  **27/38** (growth 26 then post +1), **6,553 tracks**, **5.866 px** mean
+  reprojection, and **498.60 cm** Sim(3) centre RMSE; `DSC_0306` remained
+  **6→3** PnP inliers and `DSC_0307` had **1** candidate correspondence.
+  Exact our-SIFT invocation: `target/release/examples/unordered_sfm_demo
+  --feature-extractor sift --images-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/images_1600x1066 --width 1600
+  --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive
+  --min-matches 20 --sift-max-keypoints 4096
+  --sift-extra-keypoints-stems DSC_0299,DSC_0300,DSC_0301,DSC_0302,DSC_0303,DSC_0304,DSC_0305,DSC_0306,DSC_0307,DSC_0308,DSC_0320,DSC_0321
+  --sift-extra-keypoints 2048 --sift-extra-contrast-threshold 0.01
+  --sift-extra-matches-append-only --sift-append-descriptor-magnification 3.0
+  --match-ratio 0.9 --guided-matching --verification-mode full --mapper
+  incremental --pnp-max-iterations 100000 --min-pnp-inliers 8
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement --geometric-confidence-tracks
+  --out-colmap /tmp/visloc_oursift_geometric_confidence_20260828` (with
+  `VISLOC_SFM_DEBUG=1 VISLOC_SFM_DEBUG_IMAGES=20,21`). The matching-input
+  comparison used `target/release/examples/unordered_sfm_demo
+  --feature-extractor files --features-dir
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_features_export
+  --feature-suffix _features.txt --image-suffix .png --width 1600 --height 1066
+  --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6
+  --import-matches-supplement-file
+  /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/colmap_bridge_matches_import.txt
+  --exhaustive --min-matches 20 --match-ratio 0.8 --verification-mode full
+  --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8
+  --geometry-guided-conflict-recovery --post-refinement-registration
+  --final-iterative-refinement --geometric-confidence-tracks
+  --out-colmap /tmp/visloc_colmap_geometric_confidence_20260828`.
+  On the COLMAP-feature + 454-pair bridge-supplement recovery+post champion,
+  the mode preserved **38/38** and produced **21,137 tracks / 0.290 px** but
+  scored **4.06 cm**, versus the same-input default legacy builder's
+  **2.84 cm / 0.283 px / 21,338 tracks**. Registration count therefore passes
+  but the quality gate fails; neither result updates the accuracy champion and
+  the strategy remains explicitly opt-in. Logs/models:
+  `/tmp/visloc_colmap_geometric_confidence_20260828.log` and
+  `/tmp/visloc_colmap_geometric_confidence_20260828` (our-SIFT model:
+  `/tmp/visloc_oursift_geometric_confidence_20260828`). Verification:
+  `cargo test --release -p visloc-slam --lib incremental_sfm` (**48 passed**),
+  `cargo test --release --example unordered_sfm_demo --features image-io diagnose_cli_tests`
+  (**4 passed**), `cargo check --release --example unordered_sfm_demo
+  --features image-io`, and `git diff --check`.
+
+- **SIFT descriptor-domain audit and magnification A/B (2026-08-28).** Our
+  descriptors are L2-normalized (norm ≈ **1**) while the imported COLMAP
+  descriptors are quantized uint8 (norm ≈ **512**); the global scale cancels
+  in NN/ratio distances, so quantization is not the primary discrepancy. Our
+  descriptor cell uses **8σ** versus the roughly **3σ** COLMAP/VLFeat domain;
+  however, ratio-0.8 mutual-NN overlap with the transferred 8-px oracle stayed
+  low on temporal bridges (for example `0305--0306`: **21/222** recall,
+  `0306--0307`: **88/366**). Added default-off
+  `--sift-descriptor-magnification` (default **8.0**) with a byte-identical
+  explicit-8 path and deterministic tests, then ran the established
+  normalized-our-SIFT stack at **3.0** with threshold-0.01 append-only extras,
+  ratio **0.9** + guided/full verification, recovery + post, min-PnP **8**,
+  and final iterative refinement (log:
+  `/tmp/visloc_diag_oursift_descmag3_appendonly_20260828.log`). The run had
+  **274/703** verified pairs, **36,567** inlier correspondences, **6,268**
+  tracks, and finished **26/38** at **0.598 px** (append-only 8σ reference:
+  **342/703**, **50,707**, **5,195**, **25/38**, **0.388 px**). It produced
+  nondegenerate accepted edges `19--20=116`, `19--21=20`, and `20--21=354`,
+  but growth still had **0** 2D--3D correspondences for both `DSC_0306/0307`;
+  no verified registered bridge was recovered. This is a diagnostic negative,
+  not an accuracy-champion update. The next code-level frontend candidate is
+  affine-shape-aware descriptor sampling: the COLMAP database keypoints retain
+  six-column affine metadata, whereas this SIFT feature path retains only
+  `(x,y)` for exported matching.
+
+- **Primary-preserving SIFT descriptor ensemble (2026-08-28).** Added the
+  default-off `--sift-append-descriptor-magnification X` NN-only path (it
+  rejects LightGlue): one detector pass produces the established primary
+  descriptors, a second bank is described at `X` for the exact same keypoint
+  indices, and deterministic NN+ratio/cross-check matches from that bank are
+  appended only when neither endpoint is already used by the primary result.
+  Bank lengths are asserted against the feature indices, so no keypoints or
+  tracks are duplicated; the mode composes with
+  `--sift-extra-matches-append-only`. Focused `--diagnose-pair` runs at
+  magnification `8.0 + 3.0`, ratio `0.8`, cross-check, gave primary → ensemble
+  raw/accepted results `0305--0306: 83/64 → 158/118`,
+  `0305--0307: 13/DEGENERATE-0 → 50/21`, and
+  `0306--0307: 237/201 → 342/283` (same **145,188** keypoints); the
+  `0305--0307` bridge is therefore geometrically nondegenerate under the
+  alternate bank, not merely a raw-match increase. The full normalized
+  courtyard command used SIFT@4096, exhaustive/full verification, ratio `0.9`
+  + guided matching, plain incremental + `pnp100k`, min-PnP `8`, geometry
+  recovery + post-refinement + final iterative refinement; the exact no-extra
+  invocation was
+  `unordered_sfm_demo --feature-extractor sift --images-dir .../images_1600x1066 --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --sift-max-keypoints 4096 --sift-append-descriptor-magnification 3.0 --exhaustive --min-matches 20 --match-ratio 0.9 --guided-matching --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement`
+  (log/model: `/tmp/visloc_diag_oursift_descriptor_ensemble_20260828.log`).
+  Without extra keypoints, ensemble verification was **382/703**, growth/post ended at
+  **24/38** (no target post registration), **5,401 tracks**, **0.954 px**,
+  Sim(3) centre RMSE **279.53 cm**; the primary-only comparison was
+  **340/703**, **26/38**, **5,195 tracks**, **0.569 px**, **499.89 cm**.
+  With the established threshold-`0.01` 2048-extra append-only setup on
+  `DSC_0299--0308, DSC_0320--0321`, ensemble verification was **403/703**,
+  growth **26/38**, post added images **11/12** (`70→9` / `79→9` PnP
+  correspondences/inliers), and final **28/38**, **5,956 tracks**, **0.413
+  px**, Sim(3) RMSE **375.53 cm** (log/model:
+  `/tmp/visloc_diag_oursift_descriptor_ensemble_extra_20260828.log`; exact
+  extra flags: `--sift-extra-keypoints-stems DSC_0299,DSC_0300,DSC_0301,DSC_0302,DSC_0303,DSC_0304,DSC_0305,DSC_0306,DSC_0307,DSC_0308,DSC_0320,DSC_0321 --sift-extra-keypoints 2048 --sift-extra-contrast-threshold 0.01 --sift-extra-matches-append-only`; primary-preserving extra-only reference:
+  **342/703**, **25/38**, **5,195 tracks**, **0.388 px**). The target far
+  images still had only **6** track correspondences for `DSC_0306` and none
+  sufficient for `DSC_0307`; descriptor-ensemble gains do not survive track
+  construction/growth and are not an accuracy-champion update.
+
+- **Confidence-ordered conflict-aware track builder (2026-08-28).** Added the
+  default-off `--confidence-ordered-tracks` / `IncrementalSfmConfig::confidence_ordered_tracks`
+  policy. It orders verified correspondence edges by retained pair inlier
+  count, then essential-inlier count and image/keypoint indices, and rejects a
+  merge when the two components already contain the same image. This uses only
+  confidence metadata retained by `PairwiseMatches`; no synthetic per-match
+  score is introduced. Unit tests cover preservation of a strong 3-view chain
+  against a weak conflicting edge, permutation determinism, and the unchanged
+  default union-find result. On the strongest normalized our-SIFT stack
+  (`--sift-max-keypoints 4096`, threshold-`0.01` 2048 extras on
+  `DSC_0299--0308, DSC_0320--0321`, append-only extras, descriptor ensemble
+  `3.0`, exhaustive ratio `0.9` + guided/full verification, plain incremental,
+  `pnp100k`, min-PnP `8`, recovery + post + final iterative refinement), the
+  flag rejected **6,078** conflicting edge merges and increased pre-filter
+  tracks/observations to **21,413/66,570** (baseline
+  **17,253/45,437**). Growth reached **27/38** (baseline **26/38**), post
+  refinement added images **10/12**, and final registration reached **29/38**
+  with registered stems `DSC_0286--0299, DSC_0309--0319, DSC_0320--0323`;
+  only `DSC_0300--0308` remained missing. `DSC_0306` still had only
+  **6** PnP correspondences and `DSC_0307` remained below the candidate floor.
+  Final output was **6,001 tracks**, **4.203 px** mean reprojection, and
+  Sim(3) centre RMSE **458.59 cm**, versus the confidence-off ensemble's
+  **28/38**, **5,956 tracks**, **0.413 px**, **375.53 cm**. The extra
+  registration is therefore a pose/quality regression, not a champion update;
+  the new policy remains explicitly opt-in and the next track change needs a
+  stronger per-match geometric/confidence signal than pair-level inlier count.
+
+- **Far-orbit verifier and track-conflict follow-up (2026-08-28).** The
+  append-only our-SIFT run was rebuilt with
+  `VISLOC_SFM_DEBUG_DUMP_PAIR_OUTCOMES=1` and
+  `VISLOC_SFM_DEBUG_DUMP_MATCH_INDICES=1` (log:
+  `/tmp/visloc_diag_oursift_extra2048_t001_appendonly_outcomes2_20260828.log`).
+  For `DSC_0306` (image 20), every edge to an image in the registered
+  component was rejected as `DEGENERATE` (raw **26--50**) or `TOO_FEW` (raw
+  **15/19**); for `DSC_0307` (image 21), the same held (raw **22--51**),
+  except `10--21` was `UNCALIBRATED`, **15** accepted inliers, and rejected
+  below the **8**-inlier floor. Their useful edges were confined to the
+  unregistered island (`20--21`: **523→379**, `19--20`: **303→185**), so a
+  stem-only verifier relaxation has no geometrically supported registered
+  bridge to admit. For `DSC_0320/0321/0322`, our target endpoint duplicate
+  rates were **33.5/29.8/35.2%**, with **250/205/212** conflict components;
+  COLMAP features were **56.6/53.4/52.7%** duplicate endpoints but only
+  **142/110/104** conflict components. Pair-specific conflicts reached
+  **49--53%** on several near-neighbour edges for our SIFT versus roughly
+  **6--16%** for COLMAP. However, conflict-component co-located target
+  indices within **0.5 px** were only **10/146 (6.8%)**, **9/131 (6.9%)**,
+  and **4/131 (3.1%)** (images 34/35/36), comparable to COLMAP's
+  **6/62 (9.7%)**, **3/52 (5.8%)**, and **3/52 (5.8%)**. Thus the evidence
+  rejects same-image orientation-duplicate canonicalization as the smallest
+  safe fix: the dominant loss is inconsistent descriptor correspondence
+  chains, not co-located-index selection. A low-inlier retry would face only
+  **6/59--62** post-PnP inliers (a **9.7--10.5%** ratio); `0306/0307` have no
+  verified registered-neighbour support, while `0320--0322` have support but
+  no measured pose-consistency margin. No new relaxation or track mutation
+  was therefore added.
+  Existing oracle bridge runs remain the ranked follow-up: derive a
+  production matcher change from the **28/38** 8-px transferred-match upper
+  bound, then test a bounded recovery→PnP retry with reprojection,
+  cheirality, and verified-neighbour consistency gates.
+
+- **Append-only our-SIFT image-level diagnosis (2026-08-28).** Re-ran the
+  primary-preserving extra-keypoint stack with the default-off raw/verified
+  pair dump (`VISLOC_SFM_DEBUG_DUMP_MATCH_STATS=1
+  VISLOC_SFM_DEBUG_DUMP_PAIRS=1`):
+  `--feature-extractor sift --images-dir /media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/images_1600x1066 --width 1600 --height 1066 --fx 879.4 --fy 879.4 --cx 803.4 --cy 532.6 --exhaustive --min-matches 20 --sift-max-keypoints 4096 --sift-extra-keypoints-stems DSC_0299,DSC_0300,DSC_0301,DSC_0302,DSC_0303,DSC_0304,DSC_0305,DSC_0306,DSC_0307,DSC_0308,DSC_0320,DSC_0321 --sift-extra-keypoints 2048 --sift-extra-contrast-threshold 0.01 --sift-extra-matches-append-only --match-ratio 0.9 --guided-matching --verification-mode full --mapper incremental --pnp-max-iterations 100000 --min-pnp-inliers 8 --geometry-guided-conflict-recovery --post-refinement-registration --final-iterative-refinement`. It produced **342/703** verified pairs and **50,707** inlier correspondences; growth stopped at **24/38**, recovery accepted **485 tracks / 2,681 observations**, and the final model remained **25/38**, **5,195 tracks**, **0.388 px**. For the final 25-image component, verified edges touching `DSC_0299–0305/0308` numbered **9/5/2/3/4/3/3/2** of 25 possible registered neighbours; `DSC_0306/0307` had **0/0** verified registered-neighbour edges (raw edges ≥20 existed for **35/37** and **34/37** pairs), and the stop diagnostic reported **0 2D–3D tracks** for both. `DSC_0320/0321/0322` had **14/12/12** verified registered-neighbour edges with **1,129/1,011/1,024** inlier matches, but only **107/102/106** track correspondences and **7/5/7** growth inliers; post-refinement was **59/62/57→6/6/6**. By comparison, the fixed-COLMAP-feature run had **647/697/1,251→529/595/1,132** for `0320/0321/0322` and post placed `0306/0307` at **200→151 / 191→107**, reaching **38/38**. This separates a registered-component verification/connectivity gap for `0306/0307` from mixed sparse verification/topology loss for `0299–0305/0308`, and severe track-topology compression for `0320–0322`; scheduling alone is insufficient. No new low-inlier threshold was enabled: accepting the observed **6/59–62** post inliers without a pose-quality gate is unsafe. The existing append-only switch remains default-off and showed no completeness gain; next ranked work is targeted accepted-index/co-located-keypoint comparison, then bridge augmentation for `0306/0307`, followed by a guarded recovery→PnP retry. Diagnostic result only; **no accuracy champion update**.
+
+- **P0 COLMAP-feature pair/track provenance diagnosis (2026-08-28).** On the fixed COLMAP-feature set, ratio **0.8 + cross-check** raw-match precision/recall was **98.91%/98.98%**; the ratio **0.9** raw increment was **99.43% oracle-external**. `DSC_0306`/`DSC_0307` had **zero verified-pair loss**, yet full-raw PnP was **204→144 / 176→133** versus supplement+NN **22→7 / 6→3**. Provenance support from `DSC_0304`/`DSC_0305` fell **182/188→20/20** (0306) and **114/153→3/4** (0307). Oracle ablation on the `DSC_0315–0317` triangle reached **38/38** with any two of its three added edges, while every single edge remained **36/38**; accepted-set differences were only **~10–12**, exposing track-topology sensitivity. Diagnostic/oracle result only; **no accuracy champion update**. Next: verify co-located orientation-duplicate indices.
+
+- **Graph-track and geometry-conflict-recovery A/B (2026-08-28).** On COLMAP features + the 454-pair bridge supplement + NN fallback + plain incremental + `pnp100k`, `--track-source graph` matched union-find at **36/38**, **22→7** PnP inliers for `DSC_0306`, **6→3** for `DSC_0307`, **18,405 tracks**, and **0.282 px** mean reprojection; only the graph diagnostic's exposed conflict accounting changed (`803`/`9,928` dropped conflict components/observations → `0`/`0`), with the retained track topology unchanged. The new default-off `--geometry-guided-conflict-recovery` proposed **676 tracks / 5,515 observations** and passed its guarded BA (`0.282451→0.281792` clean mean; recovered mean **0.285697**), but remained **36/38** because recovery runs after plain growth/refinement and does not re-run PnP; image 20/21 still had **22→7 / 6→3**. The target provenance contained **43/49** and **23/24** conflicted components/observations. This is a diagnostic result, not a champion update; the next minimal change is a bounded recovery→PnP pass during/after growth, not another track-source swap.
+
+- **Plain post-refinement registration A/B (2026-08-28).** Exposed the existing bounded completion pass as default-off `--post-refinement-registration` and allowed it after plain final refinement as well as COLMAP-style refinement. On the same bridge-supplement B stack, post-only made no registration progress (`DSC_0306` **19→9**; `DSC_0307` stayed below the candidate floor), remaining **36/38**, **18,405 tracks**, **0.282 px**. Geometry recovery + post-refinement tried **DSC_0306 27→9** and **DSC_0307 7→3**, still **36/38**, **19,081 tracks**, **0.282 px**; no final iterative score was warranted. Recovery-added tracks improve structure density but not the missing-image PnP inliers, so the next change must alter/augment correspondence support or use a bounded registration method beyond this single PnP attempt.
+
+- **Post-refinement PnP threshold A/B (2026-08-28).** With `--min-pnp-inliers 8 --post-refinement-registration --pnp-max-iterations 100000` on the same B stack, post-only registered `DSC_0306` (**19→9**) then `DSC_0307` (**69→33**) and reached **38/38**; geometry recovery + post registered **27→9** then **73→27** and also reached **38/38**. Adding `--final-iterative-refinement` and scoring all 38 centres gave **2.92 cm RMSE** (post-only; median **2.33 cm**) and **2.84 cm RMSE** (recovery+post; median **2.24 cm**); final mean reprojection was **0.284/0.283 px**. Sim(3)-aligned per-camera errors for `DSC_0306/0307` were **1.28/1.06 cm** (post-only) and **1.61/1.90 cm** (recovery+post); the worst remained `DSC_0316` at **6.95/7.09 cm**. This is an A/B diagnostic result, not a benchmark champion update; the gain comes from accepting low-inlier PnP, so a later safety gate should validate pose quality before promotion.
+
+- **Our-SIFT low-inlier post-refinement A/B (2026-08-28).** On normalized `images_1600x1066`, SIFT@4096 (145,188 keypoints), exhaustive ratio **0.9** + guided matching, full verification (**340/703**), plain incremental + `pnp100k`, `min-pnp-inliers=8`, and final iterative refinement: post-only reached **25/38** (growth stopped at 25; no post image registered — `DSC_0298`/image 12 was **67→7**), while geometry recovery + post reached **26/38** (recovery **472 tracks / 2,528 observations**, post registered only `DSC_0298`/image 12 at **80→12**). Final reprojection was **3.123/0.569 px**; registered-subset Sim(3) scores were **493.90/499.89 cm RMSE** (25/26 images, not a full-scene score), versus the existing **23/38** pnp100k+final-polish baseline. A gained `DSC_0322` in both runs and `DSC_0298` only with recovery account for the **+2/+3** registrations; missing sets were post-only `DSC_0298–0308, DSC_0320–0321` and recovery+post `DSC_0299–0308, DSC_0320–0321`. The recovery flag adds one image but does not approach 38/38; the low-inlier threshold's extra registrations remain an honest negative for our-SIFT accuracy and require a pose-quality gate.
+
+- **Our-SIFT low-threshold extra-keypoint comparison (2026-08-28).** Added default-off `--sift-extra-contrast-threshold` (`None` preserves the primary extraction and the existing 0.5 px spatial-novel append path). On normalized `images_1600x1066`, ratio **0.9** + guided matching, full verification, plain incremental + `pnp100k`, `min-pnp-inliers=8`, geometry recovery + post-refinement + final iterative refinement, adding **2048** extra keypoints at threshold **0.01** on the 12 missing-stem targets raised total features from **145,188** to **166,044** and verified pairs from **340/703** to **349/703**, but recovery tracks/observations changed **472/2,528→414/1,940** and final registration fell **26/38→25/38** (mean reprojection **0.569→2.857 px**). No post-refinement candidate registered in the extra run; no full-scene score is reported and this is an honest diagnostic negative, not an accuracy-champion update. Lowering the extra-only threshold increases raw/verified support without recovering the missing cameras, so the next test remains co-located orientation-duplicate index validation.
+
+- **Primary-preserving append-only extra matching (2026-08-28).** Added default-off `--sift-extra-matches-append-only`: each image records its actual primary SIFT count before extras; NN+ratio/cross-check matches on those prefixes are preserved exactly, and only deterministic, non-conflicting full-set candidates involving an extra descriptor are appended. A synthetic distractor test demonstrates that ordinary full matching replaces a primary Lowe match while append-only retains it. On the same normalized our-SIFT stack with **2048** extras at threshold **0.01** for `DSC_0299–0308, DSC_0320–0321`, append-only produced **342/703** verified pairs, growth **24/38**, recovery **485 tracks / 2,681 observations**, post registered `DSC_0297` (**82→14**), and final **25/38**, **5,195 tracks**, **0.388 px** mean reprojection. The normal-extra run was **349/703**, **25/38**, **414/1,940**, and **2.857 px**; the prior no-extra B was **340/703**, **26/38**, **472/2,528**, and **0.569 px**. Missing remained `DSC_0299–0308, DSC_0320–0322`; no full-scene score is reported. Preserving the baseline match set avoids the normal-extra replacement effect but does not unlock the far-orbit cameras; the next bottleneck remains sparse/incorrect far-stem support and track topology.
+
+- **GT-gated rematch rejector (`--rematch-max-gt-bearing-deg`, `--rematch-gt-bearing-path`) (2026-08-28).** Oracle ceiling: reject free↔prior rematch E-gains whose essential bearing vs ETH3D GT exceeds threshold. Default off.
+  - Champion baseline (no GT gate): **38/38 @ ~244 cm** (this session rebase).
+  - `--rematch-max-gt-bearing-deg 60` + GT path: rejects **17** E-gains (including load-bearing `0315–0320` @63°, worst bridges `0316–0321` @89°) → **~433 cm** — **honest negative**. Even oracle bearing gate cannot surgically drop only the ~90° wrong-E bridges without breaking graph connectivity; confirms wrong inlier **sets** are load-bearing in the current basin.
+
+- **GT-free rematch quality gates (`--rematch-guided-max-error-px`, `--rematch-require-calibrated`, `--rematch-max-mean-sampson`) (2026-08-28).** Production-facing admission filters on free↔prior rematch E-gains; `pair_essential_mean_sampson_error` in `global_sfm`. Default off.
+  - Champion baseline: **38/38 @ ~244 cm**.
+  - `--rematch-guided-max-error-px 1.0` (default guided gate is 2.0 px): rejects **6** E-gains → **~247 cm** — **near-neutral** (tighter epipolar densify does not straighten wrong-E basin).
+  - `--rematch-require-calibrated`: rejects **47/47** rematch E-gains — **all** far-orbit bridges classify `Uncalibrated` despite non-zero E inliers → **~297 cm** — **honest negative** (Calibrated-only admission drops the entire rematch unlock path).
+  - `--rematch-max-mean-sampson 0.003`: rejects **42** E-gains → **~330 cm** — **honest negative** (wrong-but-self-consistent E inliers still pass low mean Sampson on survivors; threshold at RANSAC floor is too blunt).
+
+- **Rematch-only E/F model selection (`--rematch-min-e-f-inlier-ratio`, `--rematch-calibrated-prefer-essential`) (2026-08-28).** Lower the Calibrated gate and prefer E inliers on free↔prior rematch only (baseline rematch: **47/47** `Uncalibrated` because `E/F ≤ 0.95`). Default off.
+  - `--rematch-min-e-f-inlier-ratio 0.7 --rematch-calibrated-prefer-essential`: **6** rematch gains `Calibrated`, **19** still `Uncalibrated` → **~261 cm** — **honest negative** vs ~244 cm baseline. Promoting F-suppressed pairs to Calibrated/E does not straighten the far-orbit basin; wrong E inlier sets survive the looser gate.
+
+- **Rematch guided Lowe ratio (`--rematch-guided-lowe-ratio`) (2026-08-28).** Tighten the Lowe gate on COLMAP-style guided epipolar densify during free↔prior rematch (default **0.8** when unset). Default off (`None` = 0.8).
+  - `--rematch-guided-lowe-ratio 0.65` on champion stack → **~285 cm** — **honest negative** (fewer guided false matches but still metres-scale; mean reproj **31.5 px** vs ~14.6 baseline).
+
+- **COLMAP-style SIFT knobs on champion stack (2026-08-28).** `--sift-prefer-larger-scale --sift-full-pyramid --sift-max-orientations 2` @4096 kp (coarser-scale-first truncation, full octave walk, 2 ori cap): **38/38 @ ~381 cm** — **honest negative** vs ~244 cm legacy ranking. Detector policy change alone does not unlock courtyard; still need correct far-orbit correspondence set.
+
+- **Incremental prior-ray guided rematch (`--rematch-prior-ray-guided`) (2026-08-28).** Triangulate free centres from incremental prior↔free essentials (`estimate_free_poses_from_prior_rays`), build approximate free poses, then pose-guide epipolar densify on those rematch pairs before standard verify. Default off.
+  - Default `min_rays=2`, `min_e=25`: **4** free poses, **20/42** pairs pose-guided → **38/38 @ ~238 cm** — **near-neutral / slight** vs ~244 cm baseline (mean reproj **15.1 px**). Incremental metric frame yields few free pose estimates; directional but still metres-scale.
+  - `min_e=20` + `--rematch-calibrated-prefer-essential`: still **4** poses → **~237 cm** — **near-neutral**.
+  - `min_rays=1`: still **4** poses → **~237 cm** — **near-neutral** (ray-count not binding; `min_e=25` anchor edges are).
+  - Fix: pose-guided failures now per-pair fallback to standard verify (previously dropped ~22/42 guided attempts with no fallback).
+  - F-won ray expansion (accept `essential_matrix` + F inliers when `essential_matches` empty) @`min_e=15`: **7** free poses, **47/84** pose-guided → **~288 cm** — **honest negative** (reverted; F-won bearings poison incremental pose guide).
+
+- **RootSIFT (`--sift-l1-root`) on champion stack (2026-08-28).** COLMAP-style L1-root descriptor normalization @4096 kp: **38/38 @ ~412 cm** — **honest negative** vs ~244 cm L2 champion (fewer tracks 5447 vs ~6290).
+
+- **Rematch essential-only verify (`--rematch-verification-mode threshold-only`) (2026-08-28).** Skip F/H model selection on free↔prior rematch only (main pass stays `full`). Default off.
+  - Champion stack: **38/38 @ ~393 cm** — **honest negative** vs ~244 cm (E-only rematch drops load-bearing F-supported bridges / wrong E without F cross-check).
+
+- **COLMAP match import for courtyard oracle A/B (`--import-matches-file`, `--import-matches-supplement-file`, `--import-verified-pairs-file`) (2026-08-28).** `export_colmap_matches.py` / `export_colmap_bridge_matches.py` / `export_colmap_verified_pairs.py` on SSD; demo skips NN (`--import-matches-file`), supplements listed pairs with imported raw matches and NN-fallback elsewhere (`--import-matches-supplement-file`; indices must match loaded features — COLMAP export only), or skips verification (`--import-verified-pairs-file`, TVG inliers + config + E). Default off. SSD: `/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/`.
+  External SSD mounted at `/media/sasaki/aiueo1`; courtyard work dir `visloc-rs/eth3d/courtyard/` (images copied/normalized, GT symlinked). `colmap/colmap:latest` Docker image for true COLMAP baseline.
+  - **Bridge-only match supplement on COLMAP features (2026-08-28).** `--feature-extractor files` + our NN + `--import-matches-supplement-file` (454 far-orbit bridge raw-match pairs from COLMAP): **380/703 verified**, plain incremental + `pnp100k + final-iterative-refinement` → **36/38 @ ~2.85 cm** (reproj **0.28 px**). Missing **`DSC_0306`/`DSC_0307`** (low-texture far stems). Same verified-pair count as full COLMAP-match oracle (**380**) but **2 images short of 38/38** — confirms bridge matching is load-bearing for far-orbit **connectivity**, and incremental still needs non-bridge NN quality for the sparsest stems. Full COLMAP-match import remains **38/38 @ ~3.4 cm**.
+  - **Pitfall:** 14/38 PNGs are **1600×1065 or 1600×1067** (not 1066). COLMAP `--ImageReader.single_camera 1` silently skips them (`CAMERA_SINGLE_DIM_ERROR`); visloc-rs forces `--height 1066` and still loads them. First oracle run (mixed dims) registered only **24/38 @ ~3.6 cm** — misleading.
+  - **Normalized images** (`images_1600x1066/`, Lanczos resize): COLMAP 4.1.1 SIFT@4096 + exhaustive match + incremental mapper → **38/38 @ ~1.71 cm** Sim(3) centre RMSE vs ETH3D laser GT (median **1.17 cm**). Confirms sub-cm ceiling is reachable on this scene with true COLMAP.
+  - **COLMAP SIFT features → visloc hybrid champion** (`export_colmap_sift_features.py` from SQLite → `--feature-extractor files`, same hybrid/rematch flags): **38/38 @ ~137 cm** (median **96 cm**), mean reproj **2.35 px**, **382/703** verified pairs, **0** rematch E-gains. **Decisive split:** COLMAP features improve ~**2×** vs our SIFT champion (**~249 cm**) but remain **~80×** worse than true COLMAP mapper — binding gap is **both** frontend correspondence quality **and** global/hybrid positioning (good local reproj does not imply sub-cm Sim(3) centres). Rematch stack is inert on COLMAP features (already strong E bridges).
+  - **COLMAP SIFT + COLMAP raw matches → visloc hybrid** (`--import-matches-file`; skips NN, still runs full verifier): **38/38 @ ~49 cm** (median **42 cm**), **380/703** verified, mean reproj **2.41 px**. **~2.8× better than COLMAP-SIFT+NN (137 cm)** with nearly identical verified-pair count — NN correspondence quality is a real unlock, not just pair coverage.
+  - **COLMAP SIFT + COLMAP TVG inliers → visloc hybrid** (`--import-verified-pairs-file`; bypasses verify): **38/38 @ ~118 cm** (median **27 cm**), **401** pairs, mean reproj **2.99 px** — **honest negative vs raw+verify (49 cm)**. COLMAP's own two-view inlier sets are **not** the right oracle for our global/hybrid mapper; our verifier on raw COLMAP matches filters to a better edge set for bearing-graph positioning. Still **~69×** vs true COLMAP (**1.71 cm**) → **global/hybrid positioning** is the binding residual gap at the best-known correspondence input (**49 cm** floor).
+  - **Mapper split on COLMAP-SIFT + COLMAP-raw-matches + our verify** (same 380 verified pairs, no rematch/champion extras): **incremental 38/38 @ ~66 cm** (mean reproj **0.44 px**, `--colmap-style`), **global 38/38 @ ~440 cm**, **hybrid 38/38 @ ~49 cm**. Global-alone collapses on COLMAP-grade input.
+  - **Incremental BA schedule on COLMAP matches** (2026-08-28): **`--colmap-style` regresses courtyard** on oracle input. **plain incremental** (no `--colmap-style`): **38/38 @ ~8.7 cm** (reproj **0.28 px**) — **~7.5× better than `--colmap-style` (66 cm)** and **~5.6× better than hybrid (49 cm)** on same matches. `--colmap-style --structureless-registration`: still **66 cm**; handover (`+seed-trials 8 +pnp-max-iterations 100000`): **36/38 @ ~35 cm**. Simple one-shot final BA beats COLMAP IncrementalMapper schedule when correspondences are already strong.
+    - **plain incremental knob sweep** (COLMAP matches, no `--colmap-style`): `seed_trials` 8/12/26/36/48/64 → **8.7 cm** (all neutral, identical 20120-track basin); `pnp-max-iterations 100000` → **38/38 @ ~5.6 cm** (reproj 0.28 px, 19506 tracks); `--track-source graph` → **8.7 cm** (neutral). **`--pnp-max-iterations 100000` best oracle so far @ ~5.6 cm** — still **~3.3×** vs true COLMAP (**1.7 cm**).
+    - **`--final-iterative-refinement` (plain growth + COLMAP final polish only) (2026-08-28).** New flag: keeps simple growth schedule but swaps the one-shot final BA for `iterative_global_refinement` (multi-round BA + filter + re-triangulate). Default off. On COLMAP matches + plain incremental + `pnp-max-iterations 100000`: **38/38 @ ~3.4 cm** (reproj 0.28 px) — **~2×** vs true COLMAP (**1.7 cm**), **~1.6× better than pnp100k alone (5.6 cm)**. Confirms colmap-style **growth** regresses courtyard but colmap-style **final polish** is load-bearing.
+    - **Our SIFT + new incremental stack (honest negative, 2026-08-28).** Same normalized images, `--verification-mode full`, `--mapper incremental` (no hybrid): plain **22/38 @ ~54 cm** (211/703 verified); **`pnp100k + final-iterative-refinement` → 21/38 @ ~421 cm**; **`--colmap-style` → 22/38 @ ~300 cm**. Oracle polish stack **requires COLMAP-grade correspondence density** (380 verified pairs); our SIFT still stops at 211/703 — **hybrid champion (38/38 @ ~249 cm) remains the completeness baseline** until matching unlocks far-orbit bridges.
+    - **Our SIFT matching knobs (2026-08-28).** `--match-ratio 0.9` (default 0.8): **340/703 verified** (+62% vs 211), but plain incremental still **22/38** — same 16 missing far-orbit stems (`0297–0309`, `0320–0322`); registered subset Sim(3) **~40 cm** (vs ~54 cm @0.8). `--guided-matching` alone: **211/703**, **22/38 @ ~233 cm** — **neutral on pair count**. Ratio+guided: same 340/703 as ratio alone. **Diagnosis:** COLMAP verifies **183 bridge pairs** incident to far-orbit stems; our extra 129 verified pairs are mostly within the near component — incremental completeness still blocked on far-orbit bridges, not raw pair count. COLMAP extracts **~5200–5700 kp/image** vs our **4096 cap** (several far stems fall to **1500–2700 kp** at contrast=0.02). Hybrid+guided on default ratio: **38/38 @ ~357 cm** (211 verified + rematch).
+    - **Our SIFT ratio0.9 + oracle incremental stack (2026-08-28).** Same 340/703 verified, `--match-ratio 0.9 --guided-matching`: **`pnp-max-iterations 100000` → 23/38 @ ~152 cm** (adds **`DSC_0309`** only vs 22/38 baseline); **`+ --final-iterative-refinement` → 23/38 @ ~185 cm** — **honest negative** (final polish regresses when graph is incomplete; reproj 6.4 px vs 0.35 px). **`--rescue-bridging` + final polish → 23/38** — **neutral** (verify graph already **1 connected component / 38**; rescue has nothing to bridge — failure is incremental registration/PnP on far orbit, not verify-graph fragmentation). **ratio0.9 + hybrid champion + final polish → 38/38 @ ~318 cm** — **honest negative** vs ~249 cm champion @ratio0.8 (more verified pairs do not straighten hybrid basin). **`--sift-max-keypoints 8192` + ratio0.9 + guided:** **391/703 verified** (+51 vs 4096 cap) but plain incremental still **22/38 @ ~148 cm** — **honest negative** (more kp does not unlock far-orbit bridge verification; still blocked on wrong/missing bridge pair set, not total density).
+
+- **Rematch E-gain admission gates (`--rematch-min-chirality-margin`, `--rematch-prior-anchor`) (2026-08-28).** Before accepting free↔prior rematch E-gains, optionally require essential chirality margin ≥ threshold and/or that primary chirality points at a triangulation anchor from two other prior↔free essentials (`rematch_essential_admission_ok` in `global_sfm`). Default off.
+  - Champion stack baseline (no new flags): **38/38 @ ~245 cm** (rebase variance vs historical ~230–241).
+  - `--rematch-min-chirality-margin 0.15`: rejects **7** E-gains → **~254 cm** — **honest negative** (drops load-bearing bridges including `0311–0322`, `0312–0320`, `0317–0321`).
+  - `--rematch-prior-anchor`: rejects **17** E-gains → **~256 cm** — **honest negative** (anchor rays share the same wrong basin).
+  - Both gates default off; champion rematch admission unchanged.
+
+- **Metric-prior chirality at global edge construction (`--metric-prior-chirality-edges`) (2026-08-28).** Triangulate free-camera centres from prior↔free essentials in the incremental metric frame (`estimate_free_centres_from_prior_rays`), then flip prior↔free edge chirality when the alternate bearing aligns better with that anchor (requires `--multi-hypothesis-edges`). Default off.
+  - `min_rays=3` (5 anchors, 9 flips): **38/38 @ ~250 cm** — **honest negative** vs ~245 cm baseline.
+  - `min_rays=2` (6 anchors, 11 flips): **~248 cm** — **honest negative**. Incremental metric frame cannot break the self-consistent far-orbit basin when anchor rays share the same flipped chirality.
+
+- **GT bearing diagnostic + chirality oracle (`--diagnose-bearing-gt`, `--gt-chirality-oracle`) (2026-08-28).** Compare essential bearings vs ETH3D GT centres on far-orbit stems; oracle flips primary/alternate at edge build when alternate aligns better with GT.
+  - **Post-rematch (40 E pairs):** mean primary error **25.1°**; **`alt_would_help=0/40`** — wrong bearings are **not** chirality-ambiguous (primary ≈ alternate error; e.g. `0316–0321` **89°** both hypotheses).
+  - **GT chirality oracle:** **0** edge flips → **~248 cm** — same as baseline variance. **Decisive finding:** metres-scale RMSE is **not** unlocked by perfect chirality pick; rematch bridges carry **~90°** essential bearing error from **wrong E / wrong inliers**, not antipodal flip.
+  - Worst post-rematch: `0316–0321` 89°, `0310–0322` 82°, `0316–0322` 78°. Best far-orbit: `0320–0321` 1.4°, `0319–0322` 1.2°. Next unlock: **match quality / verifier inlier set** on rematch pairs, not global chirality surgery.
+
+- **Stored verifier E on `PairwiseMatches` + prior-guided free chirality (2026-08-28).** `PairwiseMatches::essential_matrix` records the full-verifier essential matrix; rematch paths populate it. Global edge construction was tested decomposing this matrix directly for prefer-E edges (instead of re-running E RANSAC on the E-inlier subset) — **38/38 @ ~267 cm** on the champion stack — **honest negative** (reverted to legacy `RelativePoseEstimator` path; field kept for future gated experiments). New default-off `--prior-guided-free-chirality`: before rotation averaging, flip prior↔free edges to the chirality alternate when multi-view prior rays to the same free camera agree better (requires `--multi-hypothesis-edges`). On champion stack: **40** candidate edges, **0** flips (wrong basin is self-consistent across prior rays) — **near-neutral** (~217–243 cm run variance vs ~239 cm baseline). Anchor-triangulation scoring variant (14 flips) → **~243 cm** — **honest negative** (not shipped).
+
+- **Pre-global PnP seed priors (`--repnp-seed-free-as-priors`) (2026-08-28).** Triangulate prior-only structure, PnP free cams, promote successes to hard pose priors before averaging. Dropped hub stems (`--hybrid-drop-prior-stems`) are excluded from re-pinning. Default off.
+  - `min_corrs=6` (no exclude): seeds `0296`+`0320` → **~309 cm** — **honest negative** (re-pins dropped hub; weak 0320 @6 inliers).
+  - `min_corrs=25` (no exclude): seeds only `0296` → **~346 cm** — **honest negative**.
+  - Exclude drop-stems + `min_corrs=6`: seeds `0320` @6 inliers → **~273 cm** — **honest negative**.
+  - Exclude + `min_corrs=12`/`25`: **0** seeds → **~242 / ~244 cm** — **near-neutral** (champion variance). Far free cams have ~40–50 prior-anchored corrs but PnP rejects — prior structure still cannot place the far orbit.
+  - `--essential-edge-weight-boost 3`/`5` on champion stack: **~375 / ~393 cm** — **honest negatives** (over-weighting rematch E bearings fights the prior metric frame).
+  - `--calibrated-view-edges-only` (strict): **32/38 @ ~318 cm** — **honest negative** (drops F-won `10-11` and rematch bridges).
+  - Same flag after allowing Uncalibrated pairs that still carry strong `essential_matches`: keeps `10-11` (138 E) but **37/38 @ ~319 cm** — **honest negative** vs champion ~230–241; F-only drop alone does not straighten the far orbit.
+
+- **Pass-2 free-edge surgery from pass-1 poses (2026-08-28).** Diagnosis: far-orbit pairs (`0319–0322`, `0315–0322`, …) show **~90°** est-vs-GT relative bearings (chirality/antipodal contamination). New default-off flags: `--repair-free-edges-from-solved`, `--repair-free-edges-only-flipped`, `--repair-free-edges-stems`, `--drop-free-edges-antipodal`. On champion stack:
+  - Rewrite all free-incident (71 edges, 26 flipped): **~318 cm** — **honest negative** (pass-1 basin wrong).
+  - Rewrite flipped-only (24): **~349 cm**; far stems only (8): **~361 cm** — **honest negatives**.
+  - Drop antipodal far stems (8): **~345 cm** — **honest negative**. Pass-1 geometry cannot fix flipped bearings; unlock remains at **two-view edge admission** before averaging.
+
+- **Pose-guided post-global rematch + detector oracles (2026-08-28).** `--rematch-pose-guided-after-global` re-matches free↔prior under E from estimated absolute poses after the first hybrid global, accepts E-gains, re-runs global. `--rematch-pose-guided-gt PATH` substitutes COLMAP `images.txt` poses for guidance only (GT/oracle). Default off.
+  - Est-pose guide on ~230–241 champion stack: **0** E-gain pairs → **~256 cm** (run variance vs rebase **~241 cm**) — no-op.
+  - **GT-pose guide** (perfect E for Sampson): improved **1** pair (`0311–0321` E 0→41) → **~240 cm** — **near-neutral; does not unlock**. Correct epipolar guidance barely densifies calibrated bridges beyond the pre-global rematch; descriptor/admission quality remains binding.
+  - GT guide + rematch **all** free (empty stems) pre-global: **~402 cm** — **honest negative**.
+  - Drop prior `DSC_0323` (only far rematch-stem that is still an incremental prior) + rematch as free: **~336 cm** — **honest negative**.
+  - `--require-essential-stems DSC_0320,DSC_0321,DSC_0322` @min_e=25 on champion stack: **~240 cm** — **near-neutral** (drops 6 F-only incident edges; does not straighten far free).
+  - **OpenCV SIFT oracle** (files extractor, same hybrid stack): **~246 cm** @38/38 — still metres-scale; Rust SIFT champion slightly better. OpenCV + drop far priors `0296,0320–0323`: **~260 cm** — **honest negative**. Detector swap alone does not clear sub-cm.
+
+- **Far-orbit free↔prior rematch (2026-08-28).** Extending `--rematch-free-vs-priors` stems to `DSC_0297,DSC_0320,DSC_0321,DSC_0322,DSC_0323` @0.9 guided on the stem-E base (with re-PnP optional):
+  - All E-gains prefer-E + re-PnP: **38/38**, Sim(3) **~244 cm** (`0320` 924→315); worst `0321` ~642.
+  - `--rematch-prefer-min-e-inliers 25` + re-PnP: **~230 cm** — **new hybrid champion** (drops weak E=23 bridge; keeps `0297` bridges at E=25–39). Hub `0296` ~139 / `0297` ~340; worst `0320` ~506 / `0315` ~490.
+  - Same far stems, no re-PnP, `min_e=0`: **~231 cm** — ties champion; re-PnP not required for this basin.
+  - `min_e=50` / `80`: **~383 / ~358 cm** — **honest negatives** (filters out load-bearing `0297` E=25–39 bridges).
+  - `0297+0320` only / `0320` only: **~308 / ~336 cm** — need the full far free set. Still metres-scale; `0320–0319` E·GT≈0.996 confirms true E was F-suppressed.
+  - Drop prior `0315` / `0315+0319` / `0315+0316+0317` on the ~230 stack: **~292 / ~392 / ~386 cm** — **honest negatives** (0315 prior is load-bearing despite high Sim3 residual).
+  - Rematch all free cams: **~309 cm** — **honest negative** (0314→76 cm locally but poisons `0298` cluster). Far+`0314` prefer-all: **~393 cm**. Far+`0314` with `--rematch-prefer-strong-stems DSC_0314` @50/@80: **~255 / ~311 cm** — still behind ~230; 0314 improves locally without unlocking sub-cm.
+  - Far @0.95: **~289 cm** — **honest negative**.
+  - Drop `0315` prior + rematch it as free (± strong prefer): **~353–379 cm**; drop `0315+0319` + rematch: **~350 cm** — **honest negatives** (unpinning 0315 without a better free placement loses the metric frame).
+  - `--rematch-tracks-use-essential` on the ~230 stack: **~274 cm** — **honest negative** (E-only tracks thin prior-anchored support; `0297` re-PnP still fails @8 corrs).
+
+- **Free↔prior rematch + re-PnP stack (2026-08-28).** Combining `--rematch-free-vs-priors --rematch-guided` @0.9 on `DSC_0297` with `--repnp-free-from-priors --repnp-free-min-corrs 6` on the stem-E champion base: **38/38**, Sim(3) **~251 cm** — prior champion. Re-PnP accepts `0297` (16→8 inliers) and one other free cam; hub **`0297` ~205 cm / `0296` ~132 cm**, but **`DSC_0320` ~924 cm** still absorbs the bend. Prefer-E subsets / `min_e` filters / forcing `11-29,11-30` only all regress (**~262–462 cm**). Still metres-scale.
+  - Same stack @0.85 + re-PnP: **~258 cm** (0297 PnP still fails @10 corrs) — near prior champion.
+  - `--sift-contrast-threshold 0.0067` (COLMAP `0.02/3`) on the ~251 stack: **14/38** @ ~125 cm over registered — **honest negative** (completeness). @0.01: **36/38** @ ~455 cm — **honest negative**. Looser peak gate displaces the load-bearing 4096 set / stem-E graph.
+
+- **Post-prior free↔prior rematch (`--rematch-free-vs-priors`) (2026-08-27).** After hybrid incremental priors (and stem drops) are known, rematch `--rematch-stems` (or all non-priors) only against prior cameras; accept only when **E inliers increase**; auto-`prefer-essential-pairs` on those gains. Skips pre-incremental stem rematch when this flag is on (avoids free–free densify). Guided seed prefers E inliers when ≥8. Default off. **Courtyard A/B** on stem-E champion stack:
+  - Diagnosis: early `--rematch-guided` `0297` @0.85 only improved free–free `0297–0298` (E 82→123) → ~276–282 cm; not a prior bridge.
+  - F-only free↔prior accept (pre-E-gate): 11 pairs, all E=0 → **~312–370 cm** — **honest negative**.
+  - E-gated + auto prefer-E, `DSC_0297` @0.85 guided: improved `0297–0315`/`0316` (E 0→31/27); **38/38**, Sim(3) **~258 cm** (ties historical champion); `0297` **~555 cm** (was ~720–746). Pairwise median rel-err **~34%**.
+  - Same @0.9: E gains on `0313/0315/0317`; **~259 cm**; pairwise median **~25%** — **ties champion**, best pairwise among near-champion runs. Per-cam hub **`0297` ~164 cm / `0296` ~155 cm** (huge local win) but error moves to **`DSC_0320` ~976 cm** — redistributes the bend rather than clearing it.
+  - `--rematch-prefer-min-e-inliers 30` @0.85 (prefer only `11-29`/`0297–0315`): **~261 cm** but `0297` **~775 cm** — **near-neutral overall / hub regresses**; both E bridges were load-bearing for the hub win.
+  - `--rematch-prefer-min-e-inliers 35` @0.9 (prefer only `0315`): **~372 cm** — **honest negative**.
+  - Tracks-only (`min_e=999`, no prefer-E): **~289 cm** — **near-neutral**; denser F/E matches without edge prefer-E do not move GT shape.
+  - Stems `0297,0298,0299` @0.85: 6 prefer-E pairs → **~338 cm** — **honest negative** (over-bridge).
+  - Still metres-scale: prior↔hub E bridges help the hub locally but do not unlock sub-cm until far-camera contamination is controlled.
+
+- **Stem-local SIFT extras (`--sift-extra-keypoints-stems` / `--sift-extra-keypoints`) (2026-08-27).** Raise the DoG budget only on listed stems. Implementation appends spatially novel keypoints from a denser extract onto an intact primary `--sift-max-keypoints` prefix (so non-stem images and the stem primary set stay byte-identical to champion). Default off. **Courtyard A/B** on stem-E champion stack:
+  - Budget-raise (pre-append; displaces prefix): `0297`+2048 → **~320 cm**; `0296,0297`+2048 → **~433 cm** — **honest negatives** (also thinned stem-E to 4 pairs / contaminated `10-11`).
+  - Append-only: `0297`+2048 (`5437` kp, stem-E still **5** pairs, `10-11` E=153) → **~381 cm**; both stems → **~359 cm** — **honest negatives**. Extra fine/coarse peaks on the free hub densify matches but do not straighten GT shape; unlock is still true prior↔hub bridges, not more hub-local texture.
+  - Rematch without cross-check (`--rematch-stems DSC_0297 --rematch-no-cross-check`): @0.85 improved **0** pairs → **~304 cm** (no-op / champion variance); @0.9 improved **1** → **~452 cm** — **honest negative**. Diagnose-only raw densification without CC does not convert into better verified E on the hub.
+  - Stem-local guided rematch (`--rematch-guided`, main pass unguided): `DSC_0297` @0.85 improved **1** pair → **~282 cm** (**near-neutral / slight** vs today’s champion ~303; historical best ~258). Per-cam `0297` **746→584 cm** — directional hub help, still metres-scale. @0.9 improved **3** → **~403 cm**; stems `0297,0298,0299` @0.85 improved **9** → **~425 cm** — **honest negatives** (over-densify contaminates). Keep as optional probe, not default.
+
+- **Re-PnP free cameras from prior structure (`--repnp-free-from-priors`) (2026-08-27).** After hybrid BA, optionally re-estimate free (non-prior) poses via PnP on tracks also observed by an anchor camera. Anchors = hard pose priors ∪ soft-anchors from `--prefer-essential-stems` (so a dropped hub like `DSC_0296` can still support neighbours). `--repnp-free-min-corrs N` (0 = mapper `min_pnp_inliers`). Default off. **Courtyard A/B** on stem-E champion stack (drop-`0296` + prefer-E `0296` + repair + metric):
+  - Soft-anchor + `min_corrs=6`: **38/38**, Sim(3) **~272 cm** — only `image 28` replaced (accepts worse prior-anchored reproj); hub `0297` still fails PnP on ~8 corrs; most free cams have **0** prior-anchored tracks. **Near-neutral / no unlock** vs champion variance (~258–303 cm).
+  - Soft-anchor + `min_corrs=8`: **38/38**, Sim(3) **~394 cm** — **honest negative** (same lone replace of `image 28` poisons the gauge).
+  - Diagnosis unchanged: bent free hub is structurally isolated from prior-anchored triangulations; positioning polish cannot invent the missing bridges.
+
+- **Pair-local essential edges by stem / free endpoints (2026-08-27).** Extends edge-only E preference beyond `--prefer-essential-inliers`:
+  - `--prefer-essential-free-endpoints` → `prefer_essential_edge_matches_free_endpoints` (E only when ≥1 endpoint lacks a pose prior).
+  - `--prefer-essential-stems STEM,…` → `prefer_essential_edge_image_indices` (E only on edges incident to those images).
+  - `--prefer-essential-stem-clique` / `--prefer-essential-pairs I-J,…` / `--require-essential-selected-edges` / `--require-essential-stems` / `--require-essential-min-e-inliers` / `--essential-edge-weight-boost` / `--rematch-stems`+`--rematch-ratio` for tighter hub surgery.
+  - Precedence: all → **union of** explicit pairs **and** stems → free-endpoints (pairs no longer replace stems).
+  **Courtyard A/B** on drop-`DSC_0296` + repair + metric stack:
+  - Free-endpoints (E on **37** edges): **~314 cm** — **honest negative**.
+  - Stems `DSC_0296` only (E on **5** edges: `8-10,9-10,10-11,10-13,10-26`): **38/38**, Sim(3) **~258 cm** (repeat) — **current hybrid champion**. `DSC_0297` still ~720 cm.
+  - Stem `0296` ∪ pairs `11-12` / `11-12,11-13` / `+12-13`: **~279–298 cm** — **honest negatives**; additive 0297-neighbour E does not unlock the free hub.
+  - `--require-essential-stems DSC_0297` (drop F-only 0297 edges; prefer-E still on 0296): **~370 cm** / with global E≥50 store **~285 cm** (0296 per-cam **~164 cm** but overall regresses) / require-min-E 50–100: **~291–418 cm** — **honest negatives**. Isolating 0297 helps the hub locally sometimes but not global GT shape.
+  - `--rematch-stems DSC_0297` @0.9 (3 pairs densified; `10-11` E 138→218): **~399 cm** — **honest negative** (looser matches contaminate E). @0.85: **~259 cm** — **near-neutral** vs champion ~258.
+  - Clique / curated pairs / drop weak `10-26` / weight-boost / max-ori=2 / guided / DSP: **~279–442 cm** — **honest negatives**.
+
+- **SIFT `max_orientations` + orientation-order stability (2026-08-27).** `SiftConfig::max_orientations` / `--sift-max-orientations N` (COLMAP default 2; `0` = unlimited legacy). Cap keeps strongest peaks then restores ascending-bin order. **Bug:** an intermediate sort-all-peaks path reshuffled multi-orientation keypoints at the 4096 truncate boundary and collapsed the stem-E champion to **~414 cm**. Restoring bin order when uncapped recovers **~258 cm**.
+
+- **SIFT COLMAP-style keypoint budget (`--sift-prefer-larger-scale`, `--sift-full-pyramid`) (2026-08-27).** `prefer_larger_scale` prunes by σ↓ (covdet-like); `full_pyramid` disables the fine-octave early break before truncation. Unit test `prefer_larger_scale_keeps_coarser_keypoints_when_capped`. **Courtyard** on champion stack:
+  - `--sift-prefer-larger-scale`: **37/38**, Sim(3) **~338 cm** — **honest negative** (completeness + RMSE; loses strong `10-11` E).
+  - `--sift-full-pyramid`: **38/38**, denser (211 pairs / 28.7k inliers / reproj **14 px**) but Sim(3) **~428 cm** — **honest negative**; also loses `10-11`. Fine-octave contrast set that feeds hub E is load-bearing.
+
+- **GLOMAP-style joint track positioning (`--joint-global-positioning`) (2026-08-27).** After pairwise bearing `average_positions`, optionally refine camera centres jointly with track midpoints via Huber IRLS on ray residuals `||û × (X−c)||` (`refine_centers_joint_tracks`); pose priors stay pinned. Demo flag default off. **Courtyard A/B** (SIFT@4096 / multi-hyp / `--refine-global-translations` / `--chirality-harden` / 8 seeds):
+  - `--mapper global`: **38/38**, Sim(3) **~399 cm** (plain global ~437 cm) — small global-only win, still metres-scale.
+  - `--mapper hybrid`: **38/38**, Sim(3) **~469 cm** (hybrid champion **~352 cm**) — **honest negative**: joint rays fight the incremental metric frame / scale gauge (hybrid mean reproj ~22 px; seed basin still 38/38). Positioning-only polish does not unlock courtyard sub-cm; edge/matching quality remains the binding constraint.
+
+- **Prefer essential inliers (`--prefer-essential-inliers`) (2026-08-27).** `TwoViewGeometryReport` exposes `essential_inliers` + E/F/H counts; `PairwiseMatches::essential_matches` stores the E subset alongside the winning F/H set. Flag drives `GlobalReconstructionTuning::prefer_essential_edge_matches` so global/hybrid *edges* re-estimate relative pose from E inliers while tracks/incremental keep the denser winning set.
+  - Replace-all matches with E: **38/38**, Sim(3) **~425 cm**, priors **20/38** — **honest negative** vs champion ~356 cm.
+  - Edge-only (142/210 pairs used E; priors **22/38**; verified inliers stay **27 694**): **38/38**, Sim(3) **~352 cm** — ties champion within variance; does **not** move GT shape off metres-scale (`DSC_0296` hub remains).
+
+- **Prior–prior edge repair (`--repair-prior-edges`) (2026-08-27).** For hybrid edges whose both endpoints have incremental pose priors, rewrite `R_ij` / `direction_ij` from the prior metric frame and 2×-boost weight (`repair_edges_from_pose_priors`). Unit test `prior_edge_repair_unflips_prior_pair_direction`. **Courtyard** hybrid multi-hyp: rewrote **80** edges (flipped **5**); **38/38**, Sim(3) **~352 cm** (prior champion ~356 cm) — pairwise median rel-err 44%→**38%**, but **DSC_0296** still ~803 cm. **Near-neutral alone**.
+
+- **Metric scale from prior–prior baseline (`--metric-prior-scale`) (2026-08-27).** `average_positions_with_priors` sets the position-averaging displacement row from the highest-weight prior–prior edge's true metric length (instead of a unit seed edge). Demo flag default off.
+  - Alone: **38/38**, Sim(3) **~411 cm** — **honest negative** vs champion ~356 cm (wrong gauge without prior-consistent bearings).
+  - With `--repair-prior-edges` (single highest-weight prior–prior row, len≈1.41): **38/38**, Sim(3) **~311 cm** (**≈−45 cm** vs ~356 cm) — prior hybrid best; still metres-scale. `DSC_0296` 825→**685 cm**.
+  - All prior–prior metric rows (80 edges, median len≈7.52) + repair: **38/38**, Sim(3) **~353 cm** — **honest negative** vs single-row ~311 cm; conflicting incremental lengths over-constrain the free cameras. Kept single-row.
+
+- **Surgical hybrid prior drop (`--hybrid-drop-prior-stems`) (2026-08-27).** Clear incremental pose priors whose image stem matches a comma-separated list (default empty). Unlike `--hybrid-filter-priors` (mass drop by track quality → ~428 cm), this isolates bent hubs. **Courtyard** repair+metric champion stack:
+  - Drop `DSC_0296` only (21/38 priors): **38/38**, Sim(3) **~270 cm** (**≈−41 cm** vs ~311 cm) — new hybrid best; free placement of the worst pinned hub helps GT shape without discarding the rest of the incremental frame. Per-cam still metres-scale (`DSC_0296`/`DSC_0297` ~667 cm).
+  - Drop `DSC_0296,DSC_0322,DSC_0297`: **38/38**, Sim(3) **~279 cm** — **near-neutral / slight regression** vs 0296-only (~270); `0322`/`0297` were not incremental priors (still 21 pinned), so this is mostly run variance.
+  - Drop `DSC_0296,DSC_0323,DSC_0319,DSC_0317` (18/38 priors): **38/38**, Sim(3) **~336 cm** — **honest negative** vs 0296-only; over-thinning the prior frame loses the metric gauge that made ~270 work.
+
+- **GT-free inconsistent-prior drop (`--hybrid-drop-inconsistent-priors`) (2026-08-27).** Tries to automate the `DSC_0296` unpin win without GT stems.
+  - Edge-bearing disagreement (`filter_pose_priors_by_edge_disagreement`): dropped **DSC_0316** (flip frac ~0.65) not 0296 → **38/38**, Sim(3) **~395 cm** — **honest negative** vs manual 0296-only ~270 / repair+metric ~311. Bent hub is self-consistent with wrong essentials, so translation antipodes hit the wrong camera.
+  - Leave-one-out free-centre Sim(3) residual vs rotation-pinned probe (`filter_pose_priors_by_free_centre_residual`): dropped **DSC_0315** not 0296 → **38/38**, Sim(3) **~360 cm** — **honest negative**. Manual `--hybrid-drop-prior-stems DSC_0296` (~270 cm) remains the champion; GT-free prior ranking does not yet recover that stem.
+
+- **Post-PnP two-view registration gate (`--verify-registration-two-view`) (2026-08-27).** After successful PnP, require the absolute pose to agree (same translation hemisphere) with independent essentials vs already-registered neighbours (`pose_agrees_with_two_view_neighbors`). Targets chirality-flipped incremental hubs that still have low local reproj. **Diagnosis:** incremental `DSC_0296` alone is already **~864 cm** after Sim(3) on the 22-prior set (local mean reproj ~0.3 px) — wrong absolute pose, locally consistent. **Courtyard A/B** (repair+metric stack, no stem drop): **0 rejects**, priors still **22/38**, **38/38**, Sim(3) **~352 cm** — **honest negative** / no-op vs ~311 cm; the bent hub agrees with its two-view neighbours (self-consistent wrong basin), so hemisphere checks cannot unmask it. Unlock remains matching/detection quality that breaks the false consensus, not more pose-consistency gates on the same essentials.
+
+- **COLMAP `multiple_models` (`--multiple-models`) (2026-08-27).** Wires `TwoViewGeometryOptions::multiple_models` through the full verifier. When ≥2 non-watermark sub-models peel out, keep the strongest **Calibrated** (else largest) sub-model's inliers/pose and label `Multiple` — do **not** concatenate incompatible inlier sets (that poisoned later essential RANSAC). Unit tests for single-model path unchanged. **Courtyard A/B** on champion stack (`--repair-prior-edges --metric-prior-scale --hybrid-drop-prior-stems DSC_0296`): MULTIPLE=**47** / CALIBRATED=39 / UNCALIBRATED=173; priors **20/38**; **38/38**; Sim(3) **~425 cm** — **honest negative** vs champion ~270 cm (stricter multi-model peel thins good bridges and does not straighten the free hub).
+
+- **Stricter Lowe ratio on champion stack (`--match-ratio 0.7`) (2026-08-27).** Same drop-0296 + repair + metric stack with tighter NN ratio. Verified **115/703** (vs ~210); priors **11/38**; registration **23/38**; Sim(3) **~208 cm** over the registered 23 only — **honest negative** on completeness (fails the 38/38 gate); thinner matches do not unlock a full courtyard model.
+
+- **CorrespondenceGraph tracks on champion (`--track-source graph`) (2026-08-27).** Same drop-0296 + repair + metric stack with M2 `CorrespondenceGraph` track builder. Priors **21/38**; **38/38**; Sim(3) **~270 cm** — **near-neutral** vs union-find champion ~270 cm (within run variance); track source alone does not move GT shape.
+
+- **Essential-inlier pushes on champion stack (2026-08-27).** Hub diagnosis: `DSC_0296`–neighbour pairs at ratio 0.8 all classify **Uncalibrated** (F-dominant; E/F ratio fails COLMAP's 0.95 gate).
+  - `--prefer-essential-inliers` (edges only): **38/38**, Sim(3) **~305 cm** — **honest negative** vs ~270 cm.
+  - `--force-essential-matches` (tracks+edges use E when available): priors **19/38**; **38/38**; Sim(3) **~388 cm** — **honest negative**; forcing E thins support without straightening the free hub.
+
+- **Hub E-vs-GT diagnosis + selective force-E (`--force-essential-min-ef-ratio`) (2026-08-27).** Diagnose now prints E/F/H counts and E-recovered translation direction. On courtyard @ratio 0.8:
+  - `DSC_0296`–`0297`: E=138 F=190 (ratio 0.73), **E·GT = 0.997** (near-perfect).
+  - `DSC_0296`–`0295`: E=110 F=116 (ratio 0.95), **E·GT = 0.968**.
+  - `DSC_0296`–`0300`: E=12 F=23, E·GT ≈ 0 (weak-E / wrong).
+  Gate: use E matches only when E/F ≥ threshold (default 0.7). **Courtyard A/B**:
+  - Selective E @0.7 + drop `0296`: **38/38**, Sim(3) **~379 cm** — **honest negative** vs ~270.
+  - Selective E @0.7, no stem drop: **38/38**, Sim(3) **~384 cm**; `DSC_0296` err **~376 cm** (was ~685–864 when F-pinned) — E helps the hub locally but overall shape regresses; worst cameras move to `DSC_0323`/`0322`.
+  - Selective E @0.7 + drop `0323,0322,0316`: only **1** prior dropped (`0323`; others not incremental) → **~399 cm** — **honest negative**.
+  - Selective E @0.7 + drop `0296,0323`: **~402 cm** — **honest negative**.
+  - RootSIFT (`--sift-l1-root`) + drop `0296`: **~344 cm** — **honest negative**.
+  - SIFT@8192 + drop `0296`: **~375 cm** — **honest negative** (0296 often not in the denser incremental prior set).
+  Unlock: E is the right model for the close hub, but naïvely promoting it globally fights other pairs; need pair-local or detector-side changes that raise E without poisoning the rest of the graph.
+
+- **Stronger pair-local E gates (2026-08-27).** Added `--force-essential-min-e-inliers`, `--force-essential-uncalibrated-only`, `--min-e-f-inlier-ratio`, `--calibrated-prefer-essential` (Calibrated branch keeps E even when F has more inliers).
+  - Uncalibrated-only force-E (E/F≥0.7, E≥100): swapped **18** pairs; **~414 cm** (no drop) / **~422 cm** (+drop `0296`) — **honest negative**.
+  - Strong-E for **edges only** (`--prefer-essential-inliers` + E≥100 + E/F≥0.7) + drop `0296`: used E on **58** edges; **38/38**, Sim(3) **~333 cm** — still **honest negative** vs ~270 (closer than track swaps).
+  - `--min-e-f-inlier-ratio 0.7 --calibrated-prefer-essential` + drop `0296`: CALIBRATED **50→119**; **37/38**, Sim(3) **~448 cm** — **honest negative** (completeness regression). Raising Calibrated admissions alone does not unlock sub-cm.
+
+- **Calibrated-only view-graph edges (`--calibrated-view-edges-only`) (2026-08-27).** `PairwiseMatches::two_view_config` records COLMAP `ConfigurationType` from full verification; global SfM drops edges that are not `Calibrated`/`Multiple` (orphan rescue respects the same gate). Demo flag default off. Unit test `calibrated_view_edges_only_skips_uncalibrated_pairs`. **Courtyard A/B** (hybrid multi-hyp stack): pre-fix labels were inverted (see Changed §ConfigurationType swap) — first run **37/38 @ ~421 cm** kept the wrong 209 F-dominant edges. **After fix** (CALIBRATED=50 / UNCALIBRATED=209): **31/38**, Sim(3) **~432 cm** — **honest negative**: the 50 E/F-agreement edges alone do not span the courtyard graph; champion still **38/38 @ ~356 cm** with all 210 verified pairs.
+
+- **SIFT affine + multi-anisotropy on hybrid (`--sift-affine --sift-multi-anisotropy`) (2026-08-27).** Re-ran hybrid multi-hyp stack with covdet-ordered affine descriptors + budgeted multi-anisotropy proposals. Verified **160/703** (vs plain **210/703**); incremental priors **13/38** (was **22/38**); **24/38** registered; Sim(3) **~189 cm** over the registered 24 only — **honest negative**: affine detection thins the view graph on this façade scene (same diagnosis as prior global-only `--sift-affine` **22/38** run); completeness and GT shape both regress vs SIFT hybrid champion **38/38 @ ~352 cm**.
+
+- **SuperPoint+NN courtyard A/B vs SIFT hybrid champion (2026-08-27).** Exported SuperPoint@4096 (`scripts/export_superpoint_lightglue.py --mono-dir`, CPU) for ETH3D courtyard; ran `--feature-extractor files --matcher nn` through the hybrid multi-hyp stack. **38/38**, verified **195/703** (48k inliers), incremental priors **24/38**, mean reproj **4.37 px** (SIFT hybrid ~22–27 px) — denser tracks — but Sim(3) centre RMSE **~394 cm** vs SIFT champion **~352 cm**. **Honest negative**: SuperPoint+NN alone does not beat SIFT on courtyard GT shape.
+
+- **SuperPoint+LightGlue ONNX courtyard A/B (2026-08-27).** Exported `models/lightglue_courtyard.onnx` (1600×1066). Demo gains `--onnx-backend auto|cuda|cpu` (use `cpu` when no NVIDIA driver — `auto` hangs in CUDA EP registration) and `--lightglue-max-keypoints N` (score-sorted prefix; CPU 4096×4096 is multi-minute/pair). LightGlue pair verification runs **sequentially** (rayon+ORT threadpool deadlocks). Requires `ORT_DYLIB_PATH` → matching ORT (`onnxruntime-linux-x64-1.23.2` verified). **Courtyard** hybrid multi-hyp:
+  - `@512`: verified **313/703** (22k inliers); priors **9/38**; **38/38**; Sim(3) **~458 cm**.
+  - `@1024`: verified **463/703** (70k inliers); priors **12/38**; **37/38** (missing **DSC_0301**); Sim(3) **~458 cm**.
+  Both worse than SIFT hybrid champion **~352 cm** / SP+NN **~394 cm** — **honest negative** (more pairs ≠ better GT shape; thin incremental seed).
+
+- **Hybrid rotation-only priors (`--hybrid-rotation-priors-only`) (2026-08-27).** Pins incremental orientations during global rotation averaging but keeps globally bearing-averaged centres for prior cameras (not incremental centres). Gauge: median inter-prior distance scale (≥3 prior pairs) + seed-prior translation anchor. Default off (= full pose priors). Unit test `rotation_only_priors_keep_global_centres_not_incremental` on a 6-camera ring. **Courtyard A/B** (same hybrid multi-hyp stack): **38/38**, Sim(3) **~471 cm** (full-prior champion **~352 cm**) — **honest negative**: incremental inter-prior distances live in a bent layout; median scale gauge collapses (~0) and freeing bad centres (e.g. **DSC_0296**) without better edges does not beat pinning the partial incremental metric frame.
+
+- **Translation-refine flip count on `GlobalSfmPoses` + multi-seed debug (2026-08-27).** `GlobalSfmPoses::translation_refine_flips` records how many edge directions [`refine_edge_directions_under_rotations`] flipped; multi-seed debug logs include `trans_flips`. **Courtyard A/B** (same SIFT@4096 / multi-hyp / `--refine-global-translations` stack): global-only seed ranking that *preferred* fewer flips chose seed 3 (`trans_flips=2`) over the prior seed 26 basin (`flip_alts=true`) → **38/38**, Sim(3) **~474 cm** (prior global ~437 cm) — **honest negative**: low flip count tracks self-consistent chirality repair, not GT shape. Hybrid unchanged in basin choice (seed 0 / `flip_alts=false` / 2 flips) at Sim(3) **~357 cm** (prior ~352 cm, within run variance). Flip count is diagnostic-only; not used in seed ranking.
+
+- **Hybrid incremental→global mapper (`--mapper hybrid`) + pose-prior gauge (2026-08-27).** Runs incremental SfM first, then `reconstruct_global_sfm_with_priors` pins those cameras' absolute orientations/centres while global averaging places the remaining images. `solve_global_sfm` accepts optional pose priors; MST rotation seeding grows from the prior set; Sim(3) centre alignment onto priors after position averaging. Demo: `--mapper hybrid`. **Courtyard** (same global multi-hyp stack as champion): incremental **22/38** priors → hybrid **38/38**; Sim(3) centre RMSE **~352 cm** (global-only ~437 cm) — partial GT win, still metres-scale / not sub-cm. **Diagnosis:** incremental priors are not uniformly good — **DSC_0296** is pinned at **864 cm** GT error (1.92 px / 13 obs locally); 16 hybrid-only images still mean **~426 cm**. Honest negatives: `--hybrid-filter-priors` (13/22 kept @0.45 px) **~428 cm**; pin+Sim(3) centre averaging **~360 cm**; `--guided-matching` on hybrid **~416 cm**; global+guided **~467 cm**; RMS-normalized Sim(3) fallback **~472 cm**.
+
+- **Opt-in hybrid prior quality gate (`--hybrid-filter-priors`, `--hybrid-prior-min-obs`, `--hybrid-prior-max-reproj`) (2026-08-27).** `filter_pose_priors_by_track_quality` drops incremental priors with too few track observations or high local mean reprojection before global placement. Default off. Courtyard @min_obs=50,max_reproj=0.45: keeps **13/22** priors (drops **DSC_0296** among others) → Sim(3) **~428 cm** (worse than unfiltered ~352 cm). Looser gate @max_reproj=1.0 keeps **17/22** → **~374 cm** — still regresses; unfiltered hybrid priors remain the courtyard champion among hybrid variants.
+
+- **Global mapper CLI: `--min-edge-parallax-deg` (2026-08-27).** Wires `GlobalReconstructionTuning::min_edge_parallax_deg` (default 2.0°). **Courtyard honest negative** at `--min-edge-parallax-deg 5`: **38/38** but Sim(3) **~470 cm** (default ~437 cm); view graph thins to 78 edges / median bearing residual explodes — stricter parallax alone does not straighten the bent basin here.
+
+- **Guided matching on global mapper (`--guided-matching --mapper global`) (2026-08-27).** Same COLMAP-style epipolar rematch as incremental (210 verified pairs, 27k inliers vs plain 193/703). **Courtyard honest negative**: **38/38** but Sim(3) **~467 cm** (plain global ~437 cm) — denser correspondences alone do not escape the bent global basin on this façade set.
+
 - **COLMAP L1-root / RootSIFT descriptor normalization (`--sift-l1-root`) (2026-08-27).** `SiftNormalization::{L2,L1Root}` — L1-normalize then √ per bin (Arandjelović & Zisserman / COLMAP `descriptor_normalization=l1_root`), then unit L2. Default remains L2 (byte-identical). Demo: `--sift-l1-root`. Unit test `l1_root_normalization_is_unit_and_differs_from_l2`. **Courtyard** (`--sift-l1-root` + global multi-hyp stack): verified 193/703; **38/38**; Sim(3) **~439 cm** (prior plain-L2 ~396 cm) — **honest negative**: COLMAP's default norm alone does not straighten the façade basin here.
 
 - **DSP-SIFT domain-size pooling (`--sift-dsp`) (2026-08-27).** `SiftConfig::{domain_size_pooling,dsp_min_scale,dsp_max_scale,dsp_num_scales}` averages unnormalized SIFT histograms over a geometric scale range then L2-normalizes once (Dong & Soatto / COLMAP). Default range follows the paper (`1/6…4/3`); sampling stride keeps cost ~O(num_scales). Demo: `--sift-dsp`, `--sift-dsp-num-scales N` (default 10). Parallel image extraction with progress logs. Unit test `dsp_sift_keeps_dimension_and_differs_from_plain`. **Courtyard** (`--sift-dsp --sift-dsp-num-scales 5` + global multi-hyp stack): **38/38**; Sim(3) **~438 cm** (prior plain ~396 cm); mean reproj 122 px — **honest negative**: DSP alone does not straighten the bent basin on this façade set (and slightly worsens GT).
@@ -23,6 +4056,8 @@ All notable changes to `visloc-rs` will be documented here.
 - **Hessian-Laplace detector + multi-anisotropy proposals (2026-08-27).** `SiftDetector::{Dog, HessianLaplace}` and `SiftConfig::multi_anisotropy` (default off). Hessian-Laplace finds spatial peaks of `|det H|` on the Gaussian pyramid with Laplacian scale selection (Mikolajczyk / VLFeat). Multi-anisotropy (requires `affine`) detects on a few det-1 x-stretches, maps survivors back under strict NMS + budget. Demo: `--sift-detector dog|hessian-laplace`, `--sift-multi-anisotropy`. Unit tests cover blob detection and budgeted extras. Stretch harness with hess+affine+multi still below the ≥4 bar (ignored). **Courtyard** (`--sift-detector hessian-laplace --mapper global --chirality-harden --rotation-seed-trials 8`): **37/38**, Sim(3) RMSE **~470 cm** — parity with DoG; detector swap alone does not straighten the bent shape.
 
 ### Changed
+
+- **`TwoViewGeometryVerifier` ConfigurationType labels swapped (2026-08-27).** In `classify_single`, the E/F-agreement branch (`tvg.cc:877-898`) was labelling pairs `Uncalibrated` and the F-only branch (`:899-914`) `Calibrated` — inverted vs COLMAP. Fixed; unit test `general_scene_classifies_calibrated_or_uncalibrated` now expects `Calibrated` on a general 3D scene. **Courtyard** verification counts flip to **CALIBRATED=50 / UNCALIBRATED=209** (was 209/50); hybrid champion unchanged **38/38**, Sim(3) **~356 cm** (prior mislabelled run ~352 cm, within variance) — pair *admission* is unchanged (both configs stay in the keep-list), but config-aware filters (e.g. `--calibrated-view-edges-only`) now target the intended edges.
 
 - **SIFT affine path: VLFeat covdet ordering + location refine (2026-08-27).** When `SiftConfig::affine` / `--sift-affine` is on: (1) estimate Baumberg shape first, (2) refine the detection locus inside the affine-normalized patch via peak squared-gradient search, (3) assign orientation on canonical-axis gradients, (4) describe through `A`. Shape adaptation gains VLFeat-style min-singular-value hold, anisotropy cap (6×), and convergence gate. Cross-stretch harness improves plain=1 → **affine=3** mutual matches (still ignored; ≥4 bar not met). **Courtyard honest negative** (`--mapper global --sift-affine --chirality-harden --rotation-seed-trials 8`): verified pairs drop (158/703), registration **22/38** (was 37/38 without affine), Sim(3) RMSE still metres-scale — descriptor-side+ordering affine alone thins the view graph on this façade scene; fuller multi-anisotropy detection remains open.
 

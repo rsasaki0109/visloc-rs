@@ -1,4 +1,5 @@
 use nalgebra::{Point2, Point3, Quaternion, UnitQuaternion, Vector3};
+use std::collections::BTreeMap;
 use std::fs;
 use std::num::{ParseFloatError, ParseIntError};
 use std::path::Path;
@@ -638,6 +639,155 @@ where
     })
 }
 
+/// Write a merged-track COLMAP text model with one calibrated camera per
+/// output image.  This is the multi-camera counterpart to
+/// [`write_colmap_reconstruction_for_3dgs`]; all camera ids and intrinsics are
+/// retained, and each `images.txt` header points at the camera corresponding
+/// to that frame.  The legacy single-camera writer is intentionally untouched.
+pub fn write_colmap_reconstruction_for_3dgs_with_cameras<F>(
+    out_dir: impl AsRef<Path>,
+    cameras: &[Camera],
+    poses: &[Pose],
+    left_features: &[FeatureSet],
+    landmarks: &[ReconstructionLandmark],
+    image_name: F,
+) -> Result<ColmapExportSummary, ColmapError>
+where
+    F: Fn(usize) -> String,
+{
+    if cameras.len() != poses.len() || poses.len() != left_features.len() {
+        return Err(ColmapError::InvalidExportInput(format!(
+            "input length mismatch: cameras={}, poses={}, left_features={}",
+            cameras.len(),
+            poses.len(),
+            left_features.len(),
+        )));
+    }
+    let mut unique_cameras = BTreeMap::<u64, Camera>::new();
+    for camera in cameras {
+        colmap_id_from_camera_model(&camera.model)?;
+        if camera.width == 0 || camera.height == 0 || camera.params.iter().any(|p| !p.is_finite()) {
+            return Err(ColmapError::InvalidExportInput(format!(
+                "camera {} has invalid dimensions or non-finite parameters",
+                camera.id
+            )));
+        }
+        if let Some(previous) = unique_cameras.insert(camera.id, camera.clone()) {
+            if previous != *camera {
+                return Err(ColmapError::InvalidExportInput(format!(
+                    "camera id {} is assigned incompatible definitions",
+                    camera.id
+                )));
+            }
+        }
+    }
+
+    let out_dir = out_dir.as_ref();
+    fs::create_dir_all(out_dir)?;
+
+    let mut cameras_text = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
+    for camera in unique_cameras.values() {
+        cameras_text.push_str(&format!(
+            "{} {} {} {}",
+            camera.id,
+            camera_model_to_colmap_name(&camera.model),
+            camera.width,
+            camera.height,
+        ));
+        for param in &camera.params {
+            cameras_text.push_str(&format!(" {}", format_f64(*param)));
+        }
+        cameras_text.push('\n');
+    }
+    fs::write(out_dir.join("cameras.txt"), cameras_text)?;
+
+    let mut frame_kp_to_point: Vec<BTreeMap<usize, u64>> = vec![BTreeMap::new(); poses.len()];
+    let mut observation_count = 0usize;
+    let mut points3d_text =
+        String::from("# POINT3D_ID X Y Z R G B ERROR TRACK[] as IMAGE_ID POINT2D_IDX\n");
+    for (landmark_index, (position, observations)) in landmarks.iter().enumerate() {
+        let point_id = landmark_index as u64 + 1;
+        points3d_text.push_str(&format!(
+            "{} {} {} {} 255 255 255 0",
+            point_id,
+            format_f64(position.x),
+            format_f64(position.y),
+            format_f64(position.z),
+        ));
+        for &(frame, keypoint, _) in observations {
+            if frame >= poses.len() || keypoint >= left_features[frame].keypoints.len() {
+                return Err(ColmapError::InvalidExportInput(format!(
+                    "landmark {} references invalid observation ({}, {})",
+                    point_id, frame, keypoint
+                )));
+            }
+            if frame_kp_to_point[frame]
+                .insert(keypoint, point_id)
+                .is_some()
+            {
+                return Err(ColmapError::InvalidExportInput(format!(
+                    "keypoint ({}, {}) belongs to multiple exported landmarks",
+                    frame, keypoint
+                )));
+            }
+            points3d_text.push_str(&format!(" {} {}", frame, keypoint));
+            observation_count += 1;
+        }
+        points3d_text.push('\n');
+    }
+    fs::write(out_dir.join("points3D.txt"), points3d_text)?;
+
+    let mut images_text = String::from(
+        "# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n# POINTS2D[] as X Y POINT3D_ID\n",
+    );
+    for (frame, ((pose, features), camera)) in
+        poses.iter().zip(left_features).zip(cameras).enumerate()
+    {
+        let q = pose.world_to_camera.rotation.quaternion();
+        let t = pose.world_to_camera.translation;
+        let name = image_name(frame);
+        validate_colmap_image_name(&name, frame)?;
+        images_text.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {}\n",
+            frame,
+            format_f64(q.w),
+            format_f64(q.i),
+            format_f64(q.j),
+            format_f64(q.k),
+            format_f64(t.x),
+            format_f64(t.y),
+            format_f64(t.z),
+            camera.id,
+            name,
+        ));
+        let point_ids = &frame_kp_to_point[frame];
+        let points = features
+            .keypoints
+            .iter()
+            .enumerate()
+            .map(|(keypoint, pixel)| {
+                format!(
+                    "{} {} {}",
+                    format_f64(pixel.x),
+                    format_f64(pixel.y),
+                    point_ids
+                        .get(&keypoint)
+                        .map_or_else(|| "-1".to_owned(), ToString::to_string)
+                )
+            })
+            .collect::<Vec<_>>();
+        images_text.push_str(&points.join(" "));
+        images_text.push('\n');
+    }
+    fs::write(out_dir.join("images.txt"), images_text)?;
+
+    Ok(ColmapExportSummary {
+        frame_count: poses.len(),
+        landmark_count: landmarks.len(),
+        observation_count,
+    })
+}
+
 pub fn format_cameras_txt(map: &VisualMap) -> String {
     let mut output = String::from("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n");
     let mut cameras = map.cameras.values().collect::<Vec<_>>();
@@ -1046,6 +1196,71 @@ fn camera_model_from_colmap_id(model_id: i32) -> Result<(CameraModel, usize), Co
             file: "cameras.bin",
             message: format!("unsupported camera model id {other}"),
         }),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod multi_camera_writer_tests {
+    use super::*;
+
+    #[test]
+    fn reconstruction_writer_preserves_per_image_camera_ids() {
+        let root =
+            std::env::temp_dir().join(format!("visloc_multi_camera_writer_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cameras = vec![
+            Camera::pinhole(7, 100, 80, 50.0, 50.0, 50.0, 40.0),
+            Camera::pinhole(9, 200, 160, 100.0, 80.0, 100.0, 80.0),
+        ];
+        let poses = vec![Pose::default(), Pose::default()];
+        let features = vec![
+            FeatureSet::new(vec![Point2::new(50.0, 40.0)], vec![vec![1.0]]).unwrap(),
+            FeatureSet::new(vec![Point2::new(100.0, 80.0)], vec![vec![2.0]]).unwrap(),
+        ];
+        let landmarks = vec![
+            (
+                Point3::new(0.0, 0.0, 5.0),
+                vec![(0usize, 0usize, Point2::new(50.0, 40.0))],
+            ),
+            (
+                Point3::new(0.0, 0.0, 5.0),
+                vec![(1usize, 0usize, Point2::new(100.0, 80.0))],
+            ),
+        ];
+        let summary = write_colmap_reconstruction_for_3dgs_with_cameras(
+            &root,
+            &cameras,
+            &poses,
+            &features,
+            &landmarks,
+            |index| format!("image_{index}.png"),
+        )
+        .unwrap();
+        assert_eq!(summary.frame_count, 2);
+        assert_eq!(
+            parse_cameras_txt(&fs::read_to_string(root.join("cameras.txt")).unwrap())
+                .unwrap()
+                .iter()
+                .map(|camera| camera.id)
+                .collect::<Vec<_>>(),
+            vec![7, 9]
+        );
+        let headers = fs::read_to_string(root.join("images.txt"))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .step_by(2)
+            .map(|line| {
+                line.split_whitespace()
+                    .nth(8)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(headers, vec![7, 9]);
+        let _ = fs::remove_dir_all(root);
     }
 }
 

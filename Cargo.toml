@@ -153,6 +153,16 @@ name = "euroc_dpvo_vo_demo"
 path = "examples/euroc_dpvo_vo_demo.rs"
 required-features = ["image-io", "onnx-inference"]
 
+[[example]]
+name = "fixed_sift_descriptor_probe"
+path = "examples/fixed_sift_descriptor_probe.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "vlfeat_detector_diagnostic"
+path = "examples/vlfeat_detector_diagnostic.rs"
+required-features = ["image-io"]
+
 [dev-dependencies]
 # 7-Scenes relocalization benchmark needs raw 16-bit depth PNGs (mm); the io
 # crate's grayscale loader normalizes to [0,1] and loses metric depth, so the

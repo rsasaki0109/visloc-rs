@@ -161,9 +161,33 @@ pub fn read_common_image(path: impl AsRef<Path>) -> Result<GrayscaleImage, Commo
     dynamic_image_to_grayscale(image::open(path)?)
 }
 
+/// Read an image using the 8-bit RGB-to-gray conversion used by COLMAP's
+/// `Bitmap::CloneAsGrey`.
+///
+/// The ordinary [`read_common_image`] path intentionally retains the
+/// `image` crate's historical integer/floor conversion.  COLMAP first reads
+/// RGB bytes and evaluates `.2126f * R + .7152f * G + .0722f * B + .5f`,
+/// truncating the result to `uint8_t`.  Keeping this as a separate opt-in
+/// entry point makes the preprocessing contract explicit without changing
+/// existing callers.
+#[cfg(feature = "image-io")]
+pub fn read_common_image_colmap_grayscale(
+    path: impl AsRef<Path>,
+) -> Result<GrayscaleImage, CommonImageError> {
+    dynamic_image_to_colmap_grayscale(image::open(path)?)
+}
+
 #[cfg(feature = "image-io")]
 pub fn decode_common_image(bytes: &[u8]) -> Result<GrayscaleImage, CommonImageError> {
     dynamic_image_to_grayscale(image::load_from_memory(bytes)?)
+}
+
+/// Decode bytes using [`read_common_image_colmap_grayscale`]'s conversion.
+#[cfg(feature = "image-io")]
+pub fn decode_common_image_colmap_grayscale(
+    bytes: &[u8],
+) -> Result<GrayscaleImage, CommonImageError> {
+    dynamic_image_to_colmap_grayscale(image::load_from_memory(bytes)?)
 }
 
 #[cfg(feature = "image-io")]
@@ -432,6 +456,31 @@ fn dynamic_image_to_grayscale(
     let luma = dynamic.to_luma8();
     let (width, height) = luma.dimensions();
     GrayscaleImage::from_luma_u8(width as usize, height as usize, luma.into_raw())
+        .map_err(CommonImageError::from)
+}
+
+#[cfg(feature = "image-io")]
+fn dynamic_image_to_colmap_grayscale(
+    dynamic: image::DynamicImage,
+) -> Result<GrayscaleImage, CommonImageError> {
+    let rgb = dynamic.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let pixels = rgb
+        .as_raw()
+        .chunks_exact(3)
+        .map(|channels| {
+            // Keep the operation order and f32 constants aligned with
+            // COLMAP's Bitmap::CloneAsGrey implementation.  `as u8` is a
+            // truncating conversion, matching static_cast<uint8_t> for this
+            // non-negative luminance value.
+            let luminance = 0.2126f32 * f32::from(channels[0])
+                + 0.7152f32 * f32::from(channels[1])
+                + 0.0722f32 * f32::from(channels[2])
+                + 0.5f32;
+            luminance as u8
+        })
+        .collect();
+    GrayscaleImage::from_luma_u8(width as usize, height as usize, pixels)
         .map_err(CommonImageError::from)
 }
 

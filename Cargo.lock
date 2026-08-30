@@ -789,6 +789,7 @@ dependencies = [
  "ndarray",
  "rand",
  "rayon",
+ "thiserror",
  "visloc-core",
  "visloc-localization",
  "visloc-mapping",

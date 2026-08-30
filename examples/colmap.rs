@@ -295,6 +295,9 @@ fn cmd_exhaustive_matcher(args: &Args) -> Result<(), String> {
                     image_i: i,
                     image_j: j,
                     matches,
+                    two_view_config: None,
+                    essential_matches: None,
+                    essential_matrix: None,
                 });
             }
             if done % 100 == 0 {
@@ -386,6 +389,9 @@ fn cmd_mapper(args: &Args) -> Result<(), String> {
             image_i: head[0],
             image_j: head[1],
             matches,
+            two_view_config: None,
+            essential_matches: None,
+            essential_matrix: None,
         });
     }
 

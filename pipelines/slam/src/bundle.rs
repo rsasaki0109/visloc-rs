@@ -70,8 +70,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{
-    DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix4x3, Matrix4x6,
-    Matrix6, Matrix6x3, Point2, Point3, Vector2, Vector3, Vector4, Vector6,
+    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix4x3,
+    Matrix4x6, Matrix6, Matrix6x3, Point2, Point3, Vector2, Vector3, Vector4, Vector6,
 };
 
 use visloc_core::geometry::{Pose, SE3, SO3};
@@ -83,6 +83,16 @@ use visloc_mapping::{
 use crate::gnc::{GncConfig, GncState};
 use crate::imu_preintegration::ImuPreintegrationFactor;
 use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
+
+/// Keep solver-step diagnostics opt-in even when a caller already enables a
+/// higher-level SFM trace.  This flag is intentionally read here rather than
+/// threaded through [`BaConfig`], so the public/default optimizer state stays
+/// byte-identical and a diagnostic cannot accidentally become a production
+/// behavior switch.
+fn ba_step_debug_enabled() -> bool {
+    std::env::var_os("VISLOC_SFM_DEBUG_BA").is_some()
+        && std::env::var_os("VISLOC_SFM_DEBUG_BA_STEPS").is_some()
+}
 
 /// Convert optional normalized matcher confidences into relative BA
 /// information weights without changing the visual factor group's mean scale.
@@ -500,6 +510,12 @@ pub struct BundleAdjustment {
     pub camera: Camera,
     /// Pose ids whose `Pose` is held constant during optimization.
     pub fixed_poses: BTreeSet<u64>,
+    /// Pose ids whose rotation is held constant while their translation may
+    /// still be optimized.  The six-dimensional pose slot is retained for
+    /// the Schur system, but the rotation rows/columns are constrained to
+    /// zero by [`Self::optimize`].  An empty set preserves the historical
+    /// pose/structure solve exactly.
+    pub fixed_pose_rotations: BTreeSet<u64>,
     /// Landmark ids whose `Point3` is held constant during optimization.
     pub fixed_landmarks: BTreeSet<u64>,
     /// Rectified-stereo baseline in metric units. The right camera is at
@@ -581,6 +597,7 @@ impl BundleAdjustment {
             general_stereo_observations: Vec::new(),
             camera,
             fixed_poses: BTreeSet::new(),
+            fixed_pose_rotations: BTreeSet::new(),
             fixed_landmarks: BTreeSet::new(),
             stereo_baseline: None,
             gravity_prior: None,
@@ -754,6 +771,14 @@ impl BundleAdjustment {
 
     pub fn fix_pose(&mut self, id: u64) {
         self.fixed_poses.insert(id);
+    }
+
+    /// Pin only the rotation of `id` during bundle adjustment.  Translation
+    /// remains a variable, which is useful for diagnostic decompositions that
+    /// separate rotational from translational error.  Calling this for a
+    /// fully fixed pose is harmless.
+    pub fn fix_pose_rotation(&mut self, id: u64) {
+        self.fixed_pose_rotations.insert(id);
     }
 
     pub fn add_landmark(&mut self, id: u64, xyz: Point3<f64>) {
@@ -2130,7 +2155,7 @@ impl BundleAdjustment {
         let mut converged = false;
 
         for iteration in 0..config.max_iterations {
-            let system = build_normal_equations(
+            let mut system = build_normal_equations(
                 self,
                 &intrinsics,
                 &pose_index,
@@ -2141,6 +2166,7 @@ impl BundleAdjustment {
                 gnc_weights,
                 config.parallel,
             );
+            constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, &mut system);
 
             // Build the reduced (Schur-complement) camera system. λ is added
             // to both the pose and landmark diagonals before reduction so the
@@ -2192,7 +2218,12 @@ impl BundleAdjustment {
             let vel_offset_in_delta = pose_index.len() * 6;
             let bias_offset_in_delta = vel_offset_in_delta + velocity_index.len() * 3;
             for (&id, &i) in &pose_index {
-                let xi = delta_poses.fixed_rows::<6>(i * 6).into_owned();
+                let mut xi = delta_poses.fixed_rows::<6>(i * 6).into_owned();
+                if self.fixed_pose_rotations.contains(&id) {
+                    xi[3] = 0.0;
+                    xi[4] = 0.0;
+                    xi[5] = 0.0;
+                }
                 let xi_vec: Vector6<f64> = xi;
                 let step = xi_vec.norm();
                 if step > max_pose_step {
@@ -2244,6 +2275,34 @@ impl BundleAdjustment {
                 Some(_) => cost_after < cost_before,
             };
             let step_accepted = cost_accepted && nonprojectable_after <= current_nonprojectable;
+
+            // In particular, expose the two independent acceptance gates for
+            // camera-fixed (landmark-only) solves.  A high robust cost can be
+            // dominated by observations that are already down-weighted; a
+            // candidate can also lower that cost while making more points
+            // non-projectable, in which case the feasibility gate correctly
+            // rejects it.  This line is diagnostic-only and is never emitted
+            // unless both explicit BA step environment flags are set.
+            if ba_step_debug_enabled() && (pose_index.is_empty() || !step_accepted) {
+                eprintln!(
+                    concat!(
+                        "sfm-debug-ba-step-detail: poses={} landmarks={} iteration={} ",
+                        "accepted={} cost_gate={} feasibility_gate={} ",
+                        "nonprojectable={}->{} cost={:.9e}->{:.9e} lambda={:.3e}"
+                    ),
+                    pose_index.len(),
+                    landmark_index.len(),
+                    iteration,
+                    step_accepted,
+                    cost_accepted,
+                    nonprojectable_after <= current_nonprojectable,
+                    current_nonprojectable,
+                    nonprojectable_after,
+                    cost_before,
+                    cost_after,
+                    lambda,
+                );
+            }
 
             if !step_accepted {
                 self.poses = saved_poses;
@@ -2509,6 +2568,12 @@ pub enum BaError {
     },
     /// An external visual weight is negative, NaN, or infinite.
     InvalidObservationWeight(usize),
+    /// A fixed-rotation diagnostic supplied a vector that is not aligned with
+    /// the pose vector being optimized.
+    InvalidFixedRotationCount {
+        expected: usize,
+        actual: usize,
+    },
     /// Confidence-weighted joint intrinsics refinement is not implemented.
     ObservationWeightsWithIntrinsicsRefinement,
     /// Reduced camera system was singular even after λ damping. Usually
@@ -2541,6 +2606,10 @@ impl std::fmt::Display for BaError {
             BaError::InvalidObservationWeight(index) => write!(
                 f,
                 "observation weight at index {index} must be finite and non-negative"
+            ),
+            BaError::InvalidFixedRotationCount { expected, actual } => write!(
+                f,
+                "fixed-rotation pose count mismatch: expected {expected}, got {actual}"
             ),
             BaError::ObservationWeightsWithIntrinsicsRefinement => write!(
                 f,
@@ -3733,6 +3802,46 @@ fn build_normal_equations(
     }
 }
 
+/// Project a normal-equation system onto the subspace in which selected pose
+/// rotations are fixed.  Pose blocks intentionally remain six-dimensional so
+/// the existing Schur and linear-solver layouts are unchanged.  The
+/// constrained rotation rows/columns are made identity rows with zero right
+/// hand side; this is equivalent to removing those variables and is also
+/// well-defined for an undamped Gauss--Newton solve.  Landmark cross blocks
+/// are cleared for the same rows so the translation/landmark solve cannot
+/// use a discarded rotation update.
+fn constrain_fixed_pose_rotations(
+    fixed_rotations: &BTreeSet<u64>,
+    pose_index: &BTreeMap<u64, usize>,
+    system: &mut NormalEquationsBa,
+) {
+    for &image_id in fixed_rotations {
+        let Some(&pose_slot) = pose_index.get(&image_id) else {
+            continue;
+        };
+        for component in 3..6 {
+            let index = pose_slot * 6 + component;
+            for column in 0..system.h_pp.ncols() {
+                system.h_pp[(index, column)] = 0.0;
+            }
+            for row in 0..system.h_pp.nrows() {
+                system.h_pp[(row, index)] = 0.0;
+            }
+            system.h_pp[(index, index)] = 1.0;
+            system.b_p[index] = 0.0;
+            for landmark in &mut system.landmarks {
+                for (landmark_pose_slot, cross) in &mut landmark.cross {
+                    if *landmark_pose_slot == pose_slot {
+                        for column in 0..3 {
+                            cross[(component, column)] = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_step(
     system: &NormalEquationsBa,
@@ -3806,8 +3915,9 @@ fn solve_step(
 
     // Per-landmark Schur reduction. Each landmark contributes:
     //   S -= H_PL_l · H_LL_l^{-1} · H_PL_l^T
-    //   b_S -= H_PL_l · H_LL_l^{-1} · b_l
-    // Both updates only touch the rows/cols of S corresponding to poses
+    //   b_S = -b_P + H_PL_l · H_LL_l^{-1} · b_l
+    // (the RHS starts at -b_P, so each landmark contributes with a plus
+    // sign). Both updates only touch the rows/cols of S corresponding to poses
     // that observed this landmark, so we never materialize the full H_PL.
     // Flag-gated, work-gated parallel reduction (see the module's
     // "Parallelism" section): bit-identical to the plain loop below at any
@@ -4064,6 +4174,373 @@ fn project_pinhole(intrinsics: &(f64, f64, f64, f64), xc: &Point3<f64>) -> Optio
     }
     let (fx, fy, cx, cy) = *intrinsics;
     Some(Point2::new(fx * xc.x / xc.z + cx, fy * xc.y / xc.z + cy))
+}
+
+/// Maximum absolute and relative (symmetric, Frobenius-normalized) error
+/// between two small Jacobians.  This is intentionally a diagnostic helper,
+/// not part of the optimizer: it reports both an absolute error (important
+/// when a derivative is close to zero) and a scale-free error (important when
+/// comparing translation, rotation, point, and intrinsics columns).
+fn jacobian_error<I>(pairs: I) -> (f64, f64)
+where
+    I: IntoIterator<Item = (f64, f64)>,
+{
+    let mut max_abs = 0.0_f64;
+    let mut diff_squared = 0.0_f64;
+    let mut scale_squared = 0.0_f64;
+    for (analytic, numerical) in pairs {
+        if !analytic.is_finite() || !numerical.is_finite() {
+            return (f64::INFINITY, f64::INFINITY);
+        }
+        let diff = analytic - numerical;
+        max_abs = max_abs.max(diff.abs());
+        diff_squared += diff * diff;
+        let scale = analytic.abs().max(numerical.abs());
+        scale_squared += scale * scale;
+    }
+    let scale = scale_squared.sqrt().max(1.0e-15);
+    (max_abs, diff_squared.sqrt() / scale)
+}
+
+/// Finite-difference audit of the visual pinhole residual Jacobians for one
+/// observation.  The production assembly has two deliberately duplicated
+/// fast paths (serial and rayon), so this helper mirrors their formulas while
+/// evaluating the residual through the public `Camera::project` API.  It is
+/// only called by the explicit `VISLOC_SFM_DEBUG_BA_JACOBIANS` diagnostic and
+/// by focused unit tests; it never participates in normal BA.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BaVisualJacobianCase {
+    pub residual_norm: f64,
+    pub depth: f64,
+    pub pose_max_abs: f64,
+    pub pose_relative: f64,
+    pub pose_translation_max_abs: f64,
+    pub pose_translation_relative: f64,
+    pub pose_rotation_max_abs: f64,
+    pub pose_rotation_relative: f64,
+    pub landmark_max_abs: f64,
+    pub landmark_relative: f64,
+    pub intrinsics_max_abs: f64,
+    pub intrinsics_relative: f64,
+}
+
+/// Compare the analytic right-pose, world-landmark, and pinhole-intrinsics
+/// Jacobians to central differences at one state.  Intrinsics are reported for
+/// the four-parameter pinhole/OpenCV layout; radial distortion is deliberately
+/// rejected because the ordinary BA path uses a separate distortion-aware
+/// Jacobian in its joint-intrinsics solver.
+pub(crate) fn audit_visual_jacobian_case(
+    camera: &Camera,
+    pose: &Pose,
+    point: &Point3<f64>,
+    measured: &Point2<f64>,
+    epsilon: f64,
+) -> Option<BaVisualJacobianCase> {
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return None;
+    }
+    if !matches!(camera.model, CameraModel::Pinhole | CameraModel::OpenCv)
+        || camera.params.len() < 4
+        || camera
+            .radial_distortion()
+            .is_some_and(|(k1, k2)| k1 != 0.0 || k2 != 0.0)
+    {
+        return None;
+    }
+    let intrinsics = camera.intrinsics()?;
+    let point_camera = pose.transform_world_point(point);
+    let predicted = camera.project(&point_camera)?;
+    let residual = predicted - *measured;
+    let j_projection = pinhole_projection_jacobian(&intrinsics, &point_camera)?;
+    let rotation = pose
+        .world_to_camera
+        .rotation
+        .to_rotation_matrix()
+        .into_inner();
+    let mut dpoint_dpose = Matrix3x6::<f64>::zeros();
+    dpoint_dpose
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&rotation);
+    dpoint_dpose
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-rotation * skew(&point.coords)));
+    let analytic_pose = j_projection * dpoint_dpose;
+    let analytic_landmark = j_projection * rotation;
+    let x = point_camera.x / point_camera.z;
+    let y = point_camera.y / point_camera.z;
+    let analytic_intrinsics = Matrix2x4::new(x, 0.0, 1.0, 0.0, 0.0, y, 0.0, 1.0);
+
+    let mut numerical_pose = Matrix2x6::<f64>::zeros();
+    for axis in 0..6 {
+        let mut plus = pose.clone();
+        let mut minus = pose.clone();
+        let mut delta = Vector6::<f64>::zeros();
+        delta[axis] = epsilon;
+        plus.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&delta));
+        delta[axis] = -epsilon;
+        minus.world_to_camera = pose.world_to_camera.compose(&SE3::exp(&delta));
+        let plus = camera.project(&plus.transform_world_point(point))?;
+        let minus = camera.project(&minus.transform_world_point(point))?;
+        let derivative = (plus - minus) / (2.0 * epsilon);
+        numerical_pose[(0, axis)] = derivative.x;
+        numerical_pose[(1, axis)] = derivative.y;
+    }
+
+    let mut numerical_landmark = Matrix2x3::<f64>::zeros();
+    for axis in 0..3 {
+        let mut plus = point.coords;
+        let mut minus = point.coords;
+        plus[axis] += epsilon;
+        minus[axis] -= epsilon;
+        let plus = camera.project(&pose.transform_world_point(&Point3::from(plus)))?;
+        let minus = camera.project(&pose.transform_world_point(&Point3::from(minus)))?;
+        let derivative = (plus - minus) / (2.0 * epsilon);
+        numerical_landmark[(0, axis)] = derivative.x;
+        numerical_landmark[(1, axis)] = derivative.y;
+    }
+
+    let mut numerical_intrinsics = Matrix2x4::<f64>::zeros();
+    for axis in 0..4 {
+        let parameter_epsilon = epsilon * camera.params[axis].abs().max(1.0);
+        let mut plus = camera.clone();
+        let mut minus = camera.clone();
+        plus.params[axis] += parameter_epsilon;
+        minus.params[axis] -= parameter_epsilon;
+        let plus = plus.project(&point_camera)?;
+        let minus = minus.project(&point_camera)?;
+        let derivative = (plus - minus) / (2.0 * parameter_epsilon);
+        numerical_intrinsics[(0, axis)] = derivative.x;
+        numerical_intrinsics[(1, axis)] = derivative.y;
+    }
+
+    let (pose_max_abs, pose_relative) = jacobian_error(
+        analytic_pose
+            .iter()
+            .copied()
+            .zip(numerical_pose.iter().copied()),
+    );
+    let pose_error = |columns: std::ops::Range<usize>| {
+        jacobian_error((0..2).flat_map(|row| {
+            columns
+                .clone()
+                .map(move |column| (analytic_pose[(row, column)], numerical_pose[(row, column)]))
+        }))
+    };
+    let (pose_translation_max_abs, pose_translation_relative) = pose_error(0..3);
+    let (pose_rotation_max_abs, pose_rotation_relative) = pose_error(3..6);
+    let (landmark_max_abs, landmark_relative) = jacobian_error(
+        analytic_landmark
+            .iter()
+            .copied()
+            .zip(numerical_landmark.iter().copied()),
+    );
+    let (intrinsics_max_abs, intrinsics_relative) = jacobian_error(
+        analytic_intrinsics
+            .iter()
+            .copied()
+            .zip(numerical_intrinsics.iter().copied()),
+    );
+    Some(BaVisualJacobianCase {
+        residual_norm: residual.norm(),
+        depth: point_camera.z,
+        pose_max_abs,
+        pose_relative,
+        pose_translation_max_abs,
+        pose_translation_relative,
+        pose_rotation_max_abs,
+        pose_rotation_relative,
+        landmark_max_abs,
+        landmark_relative,
+        intrinsics_max_abs,
+        intrinsics_relative,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct BaVisualJacobianBucket {
+    pub samples: usize,
+    pub pose_max_abs: f64,
+    pub pose_relative_max: f64,
+    pub pose_translation_max_abs: f64,
+    pub pose_translation_relative_max: f64,
+    pub pose_rotation_max_abs: f64,
+    pub pose_rotation_relative_max: f64,
+    pub landmark_max_abs: f64,
+    pub landmark_relative_max: f64,
+    pub intrinsics_max_abs: f64,
+    pub intrinsics_relative_max: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct BaVisualJacobianAudit {
+    pub observations_seen: usize,
+    pub samples_audited: usize,
+    pub invalid_samples: usize,
+    pub normal: BaVisualJacobianBucket,
+    pub far_depth: BaVisualJacobianBucket,
+    pub low_parallax: BaVisualJacobianBucket,
+    pub high_residual: BaVisualJacobianBucket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaJacobianBucketKind {
+    Normal,
+    FarDepth,
+    LowParallax,
+    HighResidual,
+}
+
+fn update_jacobian_bucket(bucket: &mut BaVisualJacobianBucket, case: &BaVisualJacobianCase) {
+    bucket.samples += 1;
+    bucket.pose_max_abs = bucket.pose_max_abs.max(case.pose_max_abs);
+    bucket.pose_relative_max = bucket.pose_relative_max.max(case.pose_relative);
+    bucket.pose_translation_max_abs = bucket
+        .pose_translation_max_abs
+        .max(case.pose_translation_max_abs);
+    bucket.pose_translation_relative_max = bucket
+        .pose_translation_relative_max
+        .max(case.pose_translation_relative);
+    bucket.pose_rotation_max_abs = bucket.pose_rotation_max_abs.max(case.pose_rotation_max_abs);
+    bucket.pose_rotation_relative_max = bucket
+        .pose_rotation_relative_max
+        .max(case.pose_rotation_relative);
+    bucket.landmark_max_abs = bucket.landmark_max_abs.max(case.landmark_max_abs);
+    bucket.landmark_relative_max = bucket.landmark_relative_max.max(case.landmark_relative);
+    bucket.intrinsics_max_abs = bucket.intrinsics_max_abs.max(case.intrinsics_max_abs);
+    bucket.intrinsics_relative_max = bucket.intrinsics_relative_max.max(case.intrinsics_relative);
+}
+
+fn observation_jacobian_bucket(
+    ba: &BundleAdjustment,
+    obs_idx: usize,
+    point_camera: &Point3<f64>,
+    residual_norm: f64,
+) -> BaJacobianBucketKind {
+    // A large residual is the most useful disjoint bucket for checking the
+    // robust-weighting path.  For geometric conditioning, estimate the widest
+    // ray angle to another observation of the same landmark.  This is a
+    // deterministic, diagnostic-only proxy; no optimizer decision uses it.
+    if residual_norm > 10.0 {
+        return BaJacobianBucketKind::HighResidual;
+    }
+    let observation = &ba.observations[obs_idx];
+    let Some(anchor_pose) = ba.poses.get(&observation.keyframe_id) else {
+        return BaJacobianBucketKind::Normal;
+    };
+    let point = &ba.landmarks[&observation.landmark_id];
+    let anchor_ray = point.coords - anchor_pose.camera_center_world().coords;
+    let mut max_angle = None;
+    for (other_idx, other) in ba.observations.iter().enumerate() {
+        if other_idx == obs_idx || other.landmark_id != observation.landmark_id {
+            continue;
+        }
+        let Some(other_pose) = ba.poses.get(&other.keyframe_id) else {
+            continue;
+        };
+        let other_ray = point.coords - other_pose.camera_center_world().coords;
+        let (Some(a), Some(b)) = (
+            anchor_ray.try_normalize(1.0e-15),
+            other_ray.try_normalize(1.0e-15),
+        ) else {
+            continue;
+        };
+        let cosine = a.dot(&b).clamp(-1.0, 1.0);
+        let angle = cosine.acos();
+        if angle.is_finite() {
+            max_angle = Some(max_angle.map_or(angle, |current: f64| current.max(angle)));
+        }
+    }
+    if max_angle.is_some_and(|angle| angle.to_degrees() < 1.0) {
+        BaJacobianBucketKind::LowParallax
+    } else if point_camera.z > 100.0 {
+        BaJacobianBucketKind::FarDepth
+    } else {
+        BaJacobianBucketKind::Normal
+    }
+}
+
+/// Audit a deterministic, small sample from a live BA state.  The function is
+/// intentionally `pub(crate)` so the incremental SFM diagnostic can invoke it
+/// without exposing a new public solver API.  It returns no result used by the
+/// optimizer and is never called unless the explicit debug environment flag is
+/// enabled by the caller.
+pub(crate) fn audit_bundle_visual_jacobians(
+    ba: &BundleAdjustment,
+    max_samples: usize,
+) -> BaVisualJacobianAudit {
+    let mut report = BaVisualJacobianAudit {
+        observations_seen: ba.observations.len(),
+        ..BaVisualJacobianAudit::default()
+    };
+    if max_samples == 0 {
+        return report;
+    }
+
+    // Reserve an equal deterministic quota for each conditioning bucket, so a
+    // long track ordered entirely by one region cannot hide the other cases.
+    let quota = max_samples.div_ceil(4);
+    let mut candidates: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
+    for (obs_idx, observation) in ba.observations.iter().enumerate() {
+        let (Some(pose), Some(point)) = (
+            ba.poses.get(&observation.keyframe_id),
+            ba.landmarks.get(&observation.landmark_id),
+        ) else {
+            continue;
+        };
+        let point_camera = pose.transform_world_point(point);
+        let Some(predicted) = ba.camera.project(&point_camera) else {
+            continue;
+        };
+        let residual_norm = (predicted - observation.xy).norm();
+        let kind = observation_jacobian_bucket(ba, obs_idx, &point_camera, residual_norm);
+        let slot = match kind {
+            BaJacobianBucketKind::Normal => 0,
+            BaJacobianBucketKind::FarDepth => 1,
+            BaJacobianBucketKind::LowParallax => 2,
+            BaJacobianBucketKind::HighResidual => 3,
+        };
+        if candidates[slot].len() < quota {
+            candidates[slot].push(obs_idx);
+        }
+    }
+
+    for indices in candidates {
+        for obs_idx in indices {
+            if report.samples_audited >= max_samples {
+                break;
+            }
+            let observation = &ba.observations[obs_idx];
+            let (Some(pose), Some(point)) = (
+                ba.poses.get(&observation.keyframe_id),
+                ba.landmarks.get(&observation.landmark_id),
+            ) else {
+                report.invalid_samples += 1;
+                continue;
+            };
+            let Some(case) =
+                audit_visual_jacobian_case(&ba.camera, pose, point, &observation.xy, 1.0e-6)
+            else {
+                report.invalid_samples += 1;
+                continue;
+            };
+            let point_camera = pose.transform_world_point(point);
+            let kind = observation_jacobian_bucket(ba, obs_idx, &point_camera, case.residual_norm);
+            match kind {
+                BaJacobianBucketKind::Normal => update_jacobian_bucket(&mut report.normal, &case),
+                BaJacobianBucketKind::FarDepth => {
+                    update_jacobian_bucket(&mut report.far_depth, &case)
+                }
+                BaJacobianBucketKind::LowParallax => {
+                    update_jacobian_bucket(&mut report.low_parallax, &case)
+                }
+                BaJacobianBucketKind::HighResidual => {
+                    update_jacobian_bucket(&mut report.high_residual, &case)
+                }
+            }
+            report.samples_audited += 1;
+        }
+    }
+    report
 }
 
 fn pinhole_projection_jacobian(
@@ -4352,6 +4829,212 @@ impl LocalRefiner for BundleAdjustmentRefiner {
             keyframe_count,
             landmark_count,
         }
+    }
+}
+
+#[cfg(test)]
+mod visual_jacobian_audit_tests {
+    use super::*;
+    use nalgebra::UnitQuaternion;
+
+    fn audit_camera() -> Camera {
+        Camera::pinhole(1, 1600, 1066, 879.4, 879.4, 803.4, 532.6)
+    }
+
+    fn audit_pose() -> Pose {
+        Pose::from_world_to_camera(
+            UnitQuaternion::from_euler_angles(0.08, -0.11, 0.17),
+            Vector3::new(0.24, -0.13, 0.31),
+        )
+    }
+
+    fn assert_case_is_accurate(label: &str, case: BaVisualJacobianCase) {
+        eprintln!(
+            "ba-jacobian-test: case={label} residual={:.3e} depth={:.3e} pose=(abs {:.3e},rel {:.3e}; trans {:.3e}/{:.3e}; rot {:.3e}/{:.3e}) landmark=(abs {:.3e},rel {:.3e}) intrinsics=(abs {:.3e},rel {:.3e})",
+            case.residual_norm,
+            case.depth,
+            case.pose_max_abs,
+            case.pose_relative,
+            case.pose_translation_max_abs,
+            case.pose_translation_relative,
+            case.pose_rotation_max_abs,
+            case.pose_rotation_relative,
+            case.landmark_max_abs,
+            case.landmark_relative,
+            case.intrinsics_max_abs,
+            case.intrinsics_relative,
+        );
+        assert!(
+            case.pose_max_abs < 1.0e-5 && case.pose_relative < 1.0e-6,
+            "{label} pose Jacobian mismatch: {:?}",
+            case
+        );
+        assert!(
+            case.landmark_max_abs < 1.0e-5 && case.landmark_relative < 1.0e-6,
+            "{label} landmark Jacobian mismatch: {:?}",
+            case
+        );
+        assert!(
+            case.intrinsics_max_abs < 1.0e-6 && case.intrinsics_relative < 1.0e-8,
+            "{label} intrinsics Jacobian mismatch: {:?}",
+            case
+        );
+    }
+
+    #[test]
+    fn analytic_visual_jacobians_match_finite_differences_across_regimes() {
+        let camera = audit_camera();
+        let pose = audit_pose();
+        let normal_point = Point3::new(0.45, -0.35, 4.8);
+        let normal_measurement = camera
+            .project(&pose.transform_world_point(&normal_point))
+            .unwrap();
+        assert_case_is_accurate(
+            "normal",
+            audit_visual_jacobian_case(&camera, &pose, &normal_point, &normal_measurement, 1.0e-6)
+                .unwrap(),
+        );
+
+        let far_point = Point3::new(15.0, -8.0, 10_000.0);
+        let far_measurement = camera
+            .project(&pose.transform_world_point(&far_point))
+            .unwrap();
+        assert_case_is_accurate(
+            "far-depth",
+            audit_visual_jacobian_case(&camera, &pose, &far_point, &far_measurement, 1.0e-6)
+                .unwrap(),
+        );
+
+        // A very small camera baseline relative to depth is the low-parallax
+        // regime that made the captured 27-camera point block ill-conditioned.
+        // The per-observation Jacobian itself remains well-defined, so this
+        // case checks that no special-case branch changes its numerical value.
+        let low_parallax_point = Point3::new(-0.15, 0.12, 100.0);
+        let low_parallax_measurement = camera
+            .project(&pose.transform_world_point(&low_parallax_point))
+            .unwrap();
+        assert_case_is_accurate(
+            "low-parallax",
+            audit_visual_jacobian_case(
+                &camera,
+                &pose,
+                &low_parallax_point,
+                &low_parallax_measurement,
+                1.0e-6,
+            )
+            .unwrap(),
+        );
+
+        let high_residual_measurement = normal_measurement + Vector2::new(80.0, -55.0);
+        assert_case_is_accurate(
+            "high-residual",
+            audit_visual_jacobian_case(
+                &camera,
+                &pose,
+                &normal_point,
+                &high_residual_measurement,
+                1.0e-6,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn bundle_audit_reports_low_parallax_and_high_residual_buckets() {
+        let camera = audit_camera();
+        let pose0 = Pose::identity();
+        let pose1 =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.01, 0.0, 0.0));
+        let point = Point3::new(0.2, -0.1, 100.0);
+        let mut ba = BundleAdjustment::new(camera.clone());
+        ba.add_pose(0, pose0.clone());
+        ba.add_pose(1, pose1);
+        ba.add_landmark(0, point);
+        let exact0 = camera
+            .project(&pose0.transform_world_point(&point))
+            .unwrap();
+        let exact1 = camera
+            .project(&ba.poses[&1].transform_world_point(&point))
+            .unwrap();
+        ba.add_observation(BaObservation {
+            keyframe_id: 0,
+            landmark_id: 0,
+            xy: exact0,
+        });
+        ba.add_observation(BaObservation {
+            keyframe_id: 1,
+            landmark_id: 0,
+            xy: exact1 + Vector2::new(25.0, 0.0),
+        });
+        let report = audit_bundle_visual_jacobians(&ba, 16);
+        assert_eq!(report.observations_seen, 2);
+        assert_eq!(report.samples_audited, 2);
+        assert_eq!(report.low_parallax.samples, 1);
+        assert_eq!(report.high_residual.samples, 1);
+        assert_eq!(report.invalid_samples, 0);
+    }
+
+    #[test]
+    fn huber_weight_is_the_derivative_of_the_squared_residual_cost() {
+        let kernel = RobustKernel::Huber { delta: 3.0 };
+        for squared_residual in [1.0, 4.0, 16.0, 100.0] {
+            let epsilon = 1.0e-6 * squared_residual;
+            let numerical = (kernel.cost(squared_residual + epsilon)
+                - kernel.cost(squared_residual - epsilon))
+                / (2.0 * epsilon);
+            let analytic = kernel.weight(squared_residual);
+            assert!(
+                (analytic - numerical).abs() < 1.0e-8,
+                "s={squared_residual}: rho'={analytic}, finite difference={numerical}"
+            );
+        }
+    }
+
+    #[test]
+    fn schur_rhs_and_back_substitution_match_the_full_normal_system() {
+        let mut h_pp = DMatrix::<f64>::zeros(6, 6);
+        for i in 0..6 {
+            h_pp[(i, i)] = 10.0 + i as f64;
+        }
+        let mut h_ll = Matrix3::<f64>::zeros();
+        h_ll[(0, 0)] = 4.0;
+        h_ll[(1, 1)] = 5.0;
+        h_ll[(2, 2)] = 6.0;
+        let cross = Matrix6x3::<f64>::from_fn(|r, c| 0.03 * (r as f64 + 1.0) * (c as f64 + 2.0));
+        let b_p = DVector::from_iterator(6, (0..6).map(|i| 0.2 * (i as f64 + 1.0)));
+        let b_l = Vector3::new(-0.4, 0.3, 0.2);
+        let system = NormalEquationsBa {
+            h_pp: h_pp.clone(),
+            b_p: b_p.clone(),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l,
+                cross: vec![(0, cross)],
+            }],
+        };
+
+        let (delta_p, delta_l) =
+            solve_step(&system, 1, 1, 0, 0, 0.0, LinearSolver::Dense, false).unwrap();
+
+        let mut full_h = DMatrix::<f64>::zeros(9, 9);
+        full_h.view_mut((0, 0), (6, 6)).copy_from(&h_pp);
+        for r in 0..6 {
+            for c in 0..3 {
+                full_h[(r, 6 + c)] = cross[(r, c)];
+                full_h[(6 + c, r)] = cross[(r, c)];
+            }
+        }
+        full_h.view_mut((6, 6), (3, 3)).copy_from(&h_ll);
+        let mut full_rhs = DVector::<f64>::zeros(9);
+        for i in 0..6 {
+            full_rhs[i] = -b_p[i];
+        }
+        for i in 0..3 {
+            full_rhs[6 + i] = -b_l[i];
+        }
+        let full_delta = solve_normal_equations(&full_h, &full_rhs).unwrap();
+        assert!((delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
+        assert!((delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
     }
 }
 

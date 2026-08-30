@@ -2,11 +2,11 @@
 
 use std::io::Cursor;
 
-use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgba};
 use visloc_io::images::{
-    common_image_sequence_summary, decode_common_image, parse_timestamp_nanoseconds_txt,
-    read_common_image, read_common_image_sequence, read_common_image_sequence_dir,
-    read_common_image_sequence_dir_with_timestamp_file,
+    common_image_sequence_summary, decode_common_image, decode_common_image_colmap_grayscale,
+    parse_timestamp_nanoseconds_txt, read_common_image, read_common_image_sequence,
+    read_common_image_sequence_dir, read_common_image_sequence_dir_with_timestamp_file,
     read_common_image_sequence_dir_with_timestamps, read_common_image_sequence_with_timestamps,
     read_timestamp_nanoseconds_txt, validate_common_image_sequence_dimensions,
     validate_common_image_sequence_timestamps, write_png_gray, ImageSequenceError,
@@ -49,6 +49,28 @@ fn decodes_jpeg_as_grayscale_image() {
     assert_eq!(image.width(), 3);
     assert_eq!(image.height(), 2);
     assert!(image.pixels()[0] > image.pixels()[1]);
+}
+
+#[test]
+fn colmap_grayscale_uses_float_rounding_and_ignores_alpha() {
+    // The blue-only pixel exercises the observable difference from the
+    // image crate's integer/floor conversion: 0.0722*7 is below one, but
+    // COLMAP's +0.5f rounds it to one.
+    let buffer = ImageBuffer::from_fn(3, 1, |x, _| match x {
+        0 => Rgba([0, 0, 7, 0]),
+        1 => Rgba([10, 20, 30, 255]),
+        _ => Rgba([255, 255, 255, 17]),
+    });
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .unwrap();
+
+    let image = decode_common_image_colmap_grayscale(bytes.get_ref()).unwrap();
+    let legacy = decode_common_image(bytes.get_ref()).unwrap();
+
+    assert_eq!(image.pixels(), &[1.0 / 255.0, 19.0 / 255.0, 1.0]);
+    assert_eq!(legacy.pixels()[0], 0.0);
 }
 
 #[test]

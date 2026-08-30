@@ -491,6 +491,26 @@ where
         )
     }
 
+    /// Estimate a relative pose when the two images have different pinhole
+    /// calibrations.  Each endpoint is first converted to its own normalized
+    /// bearing and the existing deterministic estimator then runs in a unit
+    /// pinhole convention.  Inlier indices and pose conventions are identical
+    /// to [`Self::estimate`]; no descriptor or correspondence order changes.
+    pub fn estimate_with_cameras(
+        &self,
+        correspondences: &[TwoViewCorrespondence],
+        previous_camera: &Camera,
+        current_camera: &Camera,
+    ) -> Option<RelativePose> {
+        let normalized = normalize_correspondences_with_cameras(
+            correspondences,
+            previous_camera,
+            current_camera,
+        )?;
+        let unit_camera = Camera::pinhole(0, 1, 1, 1.0, 1.0, 0.0, 0.0);
+        self.estimate(&normalized, &unit_camera)
+    }
+
     /// PROSAC-flavoured variant: order RANSAC sampling by `weights` (e.g.
     /// matcher confidence) so high-confidence correspondences anchor early
     /// iterations. Falls back to the uniform path when `weights` is the
@@ -787,6 +807,22 @@ fn normalize_pairs(
         .collect()
 }
 
+fn normalize_correspondences_with_cameras(
+    correspondences: &[TwoViewCorrespondence],
+    previous_camera: &Camera,
+    current_camera: &Camera,
+) -> Option<Vec<TwoViewCorrespondence>> {
+    correspondences
+        .iter()
+        .map(|correspondence| {
+            Some(TwoViewCorrespondence::new(
+                previous_camera.normalize_pixel(&correspondence.previous_xy)?,
+                current_camera.normalize_pixel(&correspondence.current_xy)?,
+            ))
+        })
+        .collect()
+}
+
 fn score_inliers(
     essential: &Matrix3<f64>,
     correspondences: &[TwoViewCorrespondence],
@@ -923,6 +959,40 @@ mod tests {
         );
         assert!(pose.inliers.len() >= 8);
         assert!(pose.mean_sampson_error < 5.0e-3);
+    }
+
+    #[test]
+    fn essential_ransac_accepts_distinct_pinhole_cameras() {
+        // The two endpoint images deliberately have different sizes and
+        // focal lengths.  A shared-camera call would interpret the right
+        // pixels with the wrong bearing; the camera-aware entry point must
+        // normalize each endpoint before running the unchanged estimator.
+        let previous_camera = synthetic_camera();
+        let current_camera = Camera::pinhole(2, 800, 600, 700.0, 680.0, 400.0, 300.0);
+        let previous =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(0.0, 0.0, 0.0));
+        let current =
+            Pose::from_world_to_camera(UnitQuaternion::identity(), Vector3::new(-0.3, 0.0, 0.0));
+        let correspondences = synthetic_world_points()
+            .iter()
+            .map(|point| {
+                TwoViewCorrespondence::new(
+                    project(&previous, &previous_camera, point),
+                    project(&current, &current_camera, point),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let estimated = RelativePoseEstimator::default()
+            .estimate_with_cameras(&correspondences, &previous_camera, &current_camera)
+            .expect("distinct pinhole calibrations must still recover a pose");
+        assert!(estimated.inliers.len() >= 8);
+        assert!(estimated.previous_to_current.rotation.angle() < 5.0e-3);
+        assert!(
+            (estimated.translation_unit - Vector3::new(-1.0, 0.0, 0.0)).norm() < 5.0e-3,
+            "translation direction drifted: {:?}",
+            estimated.translation_unit
+        );
     }
 
     #[test]

@@ -55,6 +55,13 @@ pub use visloc_core::types::{
     PoseEstimationFailureDiagnostics, PoseEstimationFailureReason, PoseEstimatorDiagnostics,
     QueryImage, VisualMap, VisualMapValidationIssue, VisualMapValidationReport,
 };
+
+/// Lossless verified-pair snapshot codec shared by the SfM diagnostics.
+///
+/// This lives in the library rather than directly under `examples/` so Cargo
+/// does not discover the module-only implementation as a standalone example.
+pub mod verified_pair_snapshot;
+
 pub use visloc_fusion::{
     FramePriorSource, FramePriorSyncEvaluationConfig, FramePriorSyncEvaluationFailure,
     FramePriorSyncEvaluationResult, FramePriorSyncSummary, FrameTimestampIndex, GnssMeasurement,
@@ -68,7 +75,8 @@ pub use visloc_io::calibration::{
 };
 pub use visloc_io::colmap::{
     write_colmap_binary_model_for_3dgs, write_colmap_reconstruction_for_3dgs,
-    write_colmap_text_model_for_3dgs, ColmapError, ColmapExportSummary, ColmapMapProvider,
+    write_colmap_reconstruction_for_3dgs_with_cameras, write_colmap_text_model_for_3dgs,
+    ColmapError, ColmapExportSummary, ColmapMapProvider,
 };
 pub use visloc_io::external_deep::{
     parse_external_deep_features_txt, parse_external_deep_matches_txt,
@@ -124,20 +132,27 @@ pub use visloc_mapping::{
     TriangulationConfig, TriangulationFailureReason, Triangulator,
 };
 pub use visloc_slam::{
-    appearance_loop_candidate_descriptor_store, build_appearance_loop_candidates,
-    build_appearance_loop_candidates_with_diagnostics, close_loops_on_vo_trajectory,
-    close_loops_on_vo_trajectory_with_globals,
+    appearance_loop_candidate_descriptor_store, bearing_alignment_error_deg,
+    build_appearance_loop_candidates, build_appearance_loop_candidates_with_diagnostics,
+    close_loops_on_vo_trajectory, close_loops_on_vo_trajectory_with_globals,
     close_loops_on_vo_trajectory_with_globals_and_loop_matches,
     close_loops_on_vo_trajectory_with_loop_matches, correspondences_2d3d_for_loop_candidate,
-    correspondences_for_loop_candidate, detect_loop_candidates, estimate_gravity_and_velocities,
-    estimate_gyro_bias, generate_ordered_pairs, incremental_sfm,
+    correspondences_for_loop_candidate, detect_loop_candidates,
+    estimate_free_poses_from_prior_rays, estimate_gravity_and_velocities, estimate_gyro_bias,
+    filter_pose_priors_by_edge_disagreement, filter_pose_priors_by_free_centre_residual,
+    filter_pose_priors_by_track_quality, generate_ordered_pairs, gt_bearing_in_prior_frame,
+    incremental_sfm, incremental_sfm_with_initial_poses, incremental_sfm_with_per_image_cameras,
+    incremental_sfm_with_sequence_fallback_overrides, incremental_sfm_with_track_membership,
     loop_closure_constraints_from_candidates, online_ba_imu_state_rows,
-    online_slam_results_to_html_report, pairwise_pose_factors_from_loop_closures,
-    parse_stereo_vo_imu_samples_txt, preview_track_build_stats, reconstruct_global_sfm,
+    online_slam_results_to_html_report, pair_correspondences, pair_essential_mean_sampson_error,
+    pairwise_pose_factors_from_loop_closures, parse_stereo_vo_imu_samples_txt,
+    preview_track_build_stats, prior_free_essential_gt_bearing_error_deg, reconstruct_global_sfm,
+    reconstruct_global_sfm_with_per_image_cameras, reconstruct_global_sfm_with_priors,
     reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
     refine_visual_map_with_covisibility_ba,
-    refine_visual_map_with_covisibility_ba_and_neighbor_allowlist, relative_world_to_camera,
-    scan_pairwise_loop_closures, select_covisibility_local_ba_window,
+    refine_visual_map_with_covisibility_ba_and_neighbor_allowlist, relative_pose_from_essential,
+    relative_world_to_camera, rematch_essential_admission_ok, scan_pairwise_loop_closures,
+    select_covisibility_local_ba_window,
     select_covisibility_local_ba_window_with_neighbor_allowlist, slice_imu_samples_for_keyframes,
     verify_loop_closure_candidates, verify_loop_closure_candidates_hybrid,
     verify_loop_closure_candidates_pnp, write_online_ba_imu_state_csv,
@@ -173,21 +188,22 @@ pub use visloc_slam::{
     OnlineSlamRelocalizationStats, OnlineSlamResult, OnlineSlamViInitConfig, OnlineStereoVoBa,
     OnlineStereoVoBaConfig, OrderedPairCandidate, OrderedPairGeneratorConfig, OrderedPairHints,
     OrderedPairSource, PairwiseKeyframeView, PairwiseLoopClosureScannerConfig, PairwiseMatches,
-    PairwisePoseFactor, PerPoseGravityObservation, PerPoseGravityPrior, PnPLoopClosureVerifier,
-    PnPLoopClosureVerifierConfig, PoseGraph, PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError,
-    PoseGraphOptimizationStep, PoseGraphParseError, PoseGraphSe3Config, PoseGraphSe3IterationStats,
-    PoseGraphSe3Result, PositionPrior, PositionPriorObservation, ReconstructedLandmark,
-    RobustKernel, SfmTrack, Sim3Edge, Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig,
-    Sim3PoseGraphIterationStats, Sim3PoseGraphResult, SparseFactorGraph, SparseFactorGraphConfig,
-    SparseFactorGraphUpdateStats, SparseFactorInactiveReason, SparseFactorKey, SparseFactorKind,
-    SparseFactorMeasurement, SparseFactorState, SparseKeyframeFactor, StationaryRejectionReason,
-    StereoVoBaConfig, StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement,
-    StereoVoBaImuSample, StereoVoBaRefinement, StereoVoReconstruction, SubmapId, SubmapIdRemap,
-    SubmapMergeEvidence, SubmapMergeQuality, SubmapMergeVerificationConfig, TrackBuildStats,
-    TrackSource, VerifiedSubmapMerge, ViInitFallback, ViInitializationEvent,
-    ViInitializationStatus, Viba2Config, Viba2Stats, VisualInertialInitializationResult,
-    VisualInertialInitializer, VisualInertialInitializerConfig, VoLoopClosureConfig,
-    VoLoopClosureError, VoLoopClosureResult,
+    PairwisePoseFactor, PerImageCameraError, PerImageCameraGlobalError,
+    PerImageCameraIncrementalError, PerImageCameras, PerPoseGravityObservation,
+    PerPoseGravityPrior, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph,
+    PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
+    PoseGraphParseError, PoseGraphSe3Config, PoseGraphSe3IterationStats, PoseGraphSe3Result,
+    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RobustKernel, SfmTrack,
+    Sim3Edge, Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats,
+    Sim3PoseGraphResult, SparseFactorGraph, SparseFactorGraphConfig, SparseFactorGraphUpdateStats,
+    SparseFactorInactiveReason, SparseFactorKey, SparseFactorKind, SparseFactorMeasurement,
+    SparseFactorState, SparseKeyframeFactor, StationaryRejectionReason, StereoVoBaConfig,
+    StereoVoBaError, StereoVoBaImuInput, StereoVoBaImuRefinement, StereoVoBaImuSample,
+    StereoVoBaRefinement, StereoVoReconstruction, SubmapId, SubmapIdRemap, SubmapMergeEvidence,
+    SubmapMergeQuality, SubmapMergeVerificationConfig, TrackBuildStats, TrackSource,
+    VerifiedSubmapMerge, ViInitFallback, ViInitializationEvent, ViInitializationStatus,
+    Viba2Config, Viba2Stats, VisualInertialInitializationResult, VisualInertialInitializer,
+    VisualInertialInitializerConfig, VoLoopClosureConfig, VoLoopClosureError, VoLoopClosureResult,
 };
 pub use visloc_tracking::{
     tracking_results_to_csv, tracking_results_to_html_report, umeyama_similarity_transform,

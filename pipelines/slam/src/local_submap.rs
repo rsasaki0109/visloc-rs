@@ -990,6 +990,9 @@ mod tests {
                         image_i,
                         image_j,
                         matches,
+                        two_view_config: None,
+                        essential_matches: None,
+                        essential_matrix: None,
                     });
                 }
             }
@@ -1066,6 +1069,9 @@ mod tests {
             image_i: 0,
             image_j: 2,
             matches: Vec::new(),
+            two_view_config: None,
+            essential_matches: None,
+            essential_matrix: None,
         }];
         let error = LocalSubmapBuilder::default()
             .build(&camera, &[7, 8], &features, &pairwise)
