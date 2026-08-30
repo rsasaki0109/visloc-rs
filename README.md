@@ -11,6 +11,23 @@
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
 </p>
 
+## Measured courtyard SfM control
+
+<p align="center">
+  <img src="docs/assets/courtyard_sfm_comparison.gif" alt="Measured 38-camera courtyard reconstruction: visloc-rs and official COLMAP camera centres and sparse points in one aligned frame" width="820">
+</p>
+
+**38/38 cameras registered at 0.5379 cm centre RMSE for visloc-rs, versus 1.6166 cm for official COLMAP CPU SIFT — 66.7% lower (3.01×).** Both results use the same 38 official high-resolution courtyard images, exhaustive 703-pair features/matches, and per-image PINHOLE calibration; only downstream verification/mapping differs.
+
+| Metric | visloc-rs | Official COLMAP CPU |
+| --- | ---: | ---: |
+| Registered cameras | **38/38** | **38/38** |
+| Sparse structure | 43,852 tracks / 152,432 observations | 38,422 points / 169,590 observations |
+| Reported mean reprojection / point error | 0.579 px | 0.744758 px |
+| Camera-centre RMSE after Sim(3) alignment | **0.5379 cm** | 1.6166 cm |
+
+<p align="center"><sub>Lower centre RMSE is better. The plot is aligned to the supplied calibration proxy; tracks versus points and reprojection reports are not identical accounting schemes. <a href="#courtyard-control-details">Details, provenance, and reproduction</a>.</sub></p>
+
 <p align="center">
   <img src="docs/assets/hero_euroc_mh01_slam.gif" alt="Online stereo SLAM on EuRoC MH_01: onboard camera footage beside the live map — estimated trajectory vs ground truth as stereo landmark replenishment grows the landmark map" width="820"><br>
   <sub>Online stereo SLAM on EuRoC MH_01 — onboard camera and the live map growing in real time: uninterrupted tracking throughout the shown 583-frame measured segment (100% coverage, 0.344 m rigid ATE RMSE), with the landmark map grown by stereo landmark replenishment. Still version: <a href="docs/assets/hero_euroc_mh01_light.png">light</a> · <a href="docs/assets/hero_euroc_mh01_dark.png">dark</a>.</sub>
@@ -38,6 +55,50 @@ see the [registered run evidence](docs/generated/registered_runs.md) and
 - **TUM RGB-D fr1_xyz / fr1_desk** — indoor handheld via **virtual stereo** (depth as a synthetic right image, zero backend changes): **0.014 m / 0.026 m** ATE, compared against published ORB-SLAM2 RGB-D ranges in the claim matrix; loop closure is a **6x** lever on the revisit-heavy desk.
 - **Sequential SfM vs COLMAP (metric video)** — same 2700-frame EuRoC flight, same evo scoring: visloc stereo VO + loop SfM **6 min, 0.13 m** (trajectory 0.066 m, metric) vs COLMAP mono incremental **11.7 h, 2.18 m** (scale-free) - **~117x faster, ~17-33x more accurate, metric scale**. (Stereo-vs-mono: the win is the metric-video regime, not COLMAP's unordered-photo home turf.)
 - **Unordered SfM (real photo collections)** — Orderless monocular photos -> VLAD view graph -> incremental reconstruction (robust multi-seed init, P3P register, scale-gauge-fixed BA, iterative track filter), vs **COLMAP's own model** with an independent SuperPoint frontend: **COLMAP South Building** (128 photos) **128/128 reg, 1.09 cm**; **Gerrard Hall** (100 photos, 5616x3744 OPENCV) **98/100, 0.68 cm** (3/100 single-seed) - both **0.1 % of extent**. EuRoC V2_03 orbit **31/31, 1.08 cm**
+
+### Courtyard control details
+
+The central apples-to-apples control uses the same 38 official high-resolution
+courtyard images, official CPU-SIFT features, exhaustive 703-pair raw matches,
+and per-image PINHOLE calibration. The downstream verification/mapping
+implementation differs; no features are re-extracted. Camera centres in the
+plot are independently Sim(3)-aligned to the supplied
+calibration model, so both trajectories share one frame and scale.
+
+![Measured courtyard SfM camera centres, sparse points, and per-camera residuals](docs/assets/courtyard_sfm_comparison.png)
+
+The centre RMSE is lower by **66.7% (3.01×)** for this measured control;
+lower is better. “Tracks” versus “points” and the two reprojection reports are
+not claimed to be identical accounting schemes. The centre reference is the
+supplied ETH3D calibration proxy, not an independent laser-camera ground-truth
+archive. Reproduction details, hashes, and the exact COLMAP 4.2 CPU commands
+are in [`docs/colmap_highres_exhaustive_audit_20260830.md`](docs/colmap_highres_exhaustive_audit_20260830.md)
+and [`docs/reproducibility_ci_closure_20260830.md`](docs/reproducibility_ci_closure_20260830.md).
+The committed visuals can be regenerated with
+[`scripts/generate_courtyard_readme_visuals.py`](scripts/generate_courtyard_readme_visuals.py)
+(`numpy`, `matplotlib`, and `Pillow` are optional asset-generation dependencies):
+
+```bash
+python3 scripts/generate_courtyard_readme_visuals.py \
+  --visloc-model <visloc_model> \
+  --colmap-model <colmap_model> \
+  --reference-model <calibration_model> \
+  --output-dir docs/assets
+```
+
+Secondary frozen-cache measurements are kept separate from that central
+control:
+
+| Suite | Current measured result | Provenance / caveat |
+| --- | --- | --- |
+| South Building | **128/128**, 1.406 px, 0.73 cm | Demo no-flag `Auto`; frozen cache and calibration-proxy score |
+| ETH3D terrace | **23/23**, 1.574 px, 2.56 cm | Current frozen cache; historical 12.37 cm feature cache is unavailable |
+| ETH3D office | **18/26**, 1.512 px, 0.45 cm | Auto adds one camera and lowers reprojection; reference RMSE is 0.43→0.45 cm vs Count, so no accuracy gain is claimed; historical cache unavailable |
+| EuRoC MH_03 | **2,700/2,700** poses; ATE Sim(3) 2.1740 m (open), 0.4393 m (loop), 0.0843 m (full), 0.0537 m (full2vhi) | Same-cache baseline/current non-regression pass under one fixed `max(5%, 5 mm)` rule; this runner has no Auto policy |
+
+See the [current handover](docs/codex_handover.md) and [full non-regression
+record](docs/nonregression_20260830.md) for exact commands, artifacts, and
+classification of unavailable historical caches.
 
 ## Documentation
 

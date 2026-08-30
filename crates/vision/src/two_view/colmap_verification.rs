@@ -130,6 +130,10 @@ pub struct TwoViewGeometryOptions {
     /// found... the configuration type is `MULTIPLE` if multiple models
     /// could be estimated." COLMAP default `false` (`:118`).
     pub multiple_models: bool,
+    /// When true and the pair classifies as Calibrated, keep E inliers even
+    /// if F has a larger count (COLMAP picks max(E,F)). Useful when known
+    /// intrinsics make E the metric model. Default false.
+    pub calibrated_prefer_essential: bool,
 }
 
 impl Default for TwoViewGeometryOptions {
@@ -148,6 +152,7 @@ impl Default for TwoViewGeometryOptions {
             ransac_iterations: 256,
             seed: 7,
             multiple_models: false,
+            calibrated_prefer_essential: false,
         }
     }
 }
@@ -190,6 +195,14 @@ pub struct TwoViewGeometryReport {
     /// `(rotation, translation)` from PLANAR/PANORAMIC homography
     /// decomposition (`pose_from_homography_matrix`), when resolved.
     pub relative_pose: Option<(Matrix3<f64>, Vector3<f64>)>,
+    /// Essential-matrix RANSAC inliers (indices into the input
+    /// correspondences), even when the winning config selected F/H inliers
+    /// for [`Self::inliers`]. Empty when E failed. Used by opt-in
+    /// `--prefer-essential-inliers` so global edges are built from E, not F.
+    pub essential_inliers: Vec<usize>,
+    pub e_inlier_count: usize,
+    pub f_inlier_count: usize,
+    pub h_inlier_count: usize,
 }
 
 fn degenerate_report() -> TwoViewGeometryReport {
@@ -200,6 +213,10 @@ fn degenerate_report() -> TwoViewGeometryReport {
         fundamental: None,
         homography: None,
         relative_pose: None,
+        essential_inliers: Vec::new(),
+        e_inlier_count: 0,
+        f_inlier_count: 0,
+        h_inlier_count: 0,
     }
 }
 
@@ -315,10 +332,10 @@ impl TwoViewGeometryVerifier {
             e_f_inlier_ratio > opts.min_e_f_inlier_ratio && e_inliers >= opts.min_num_inliers
         }) {
             // `tvg.cc:877-898`: calibrated configuration — use whichever of
-            // E/F has more inliers.
+            // E/F has more inliers (unless `calibrated_prefer_essential`).
             let mut num_inliers = e_inliers;
             chosen_inliers = e.clone();
-            if f_inliers > e_inliers {
+            if !opts.calibrated_prefer_essential && f_inliers > e_inliers {
                 if let Some(f) = &f_inlier_indices {
                     num_inliers = f_inliers;
                     chosen_inliers = f.clone();
@@ -332,7 +349,7 @@ impl TwoViewGeometryVerifier {
                     }
                 }
             } else {
-                config = ConfigurationType::Uncalibrated;
+                config = ConfigurationType::Calibrated;
             }
         } else if f_inliers >= opts.min_num_inliers {
             // `tvg.cc:899-914`: uncalibrated configuration (E did not agree
@@ -354,7 +371,7 @@ impl TwoViewGeometryVerifier {
                     }
                 }
             } else {
-                config = ConfigurationType::Calibrated;
+                config = ConfigurationType::Uncalibrated;
             }
         } else if h_inliers >= opts.min_num_inliers {
             // `tvg.cc:915-919`: only the homography cleared the gate. Same
@@ -384,6 +401,7 @@ impl TwoViewGeometryVerifier {
             config = ConfigurationType::Watermark;
         }
 
+        let essential_inliers = e_inlier_indices.clone().unwrap_or_default();
         let mut report = TwoViewGeometryReport {
             config,
             inliers: chosen_inliers,
@@ -391,6 +409,10 @@ impl TwoViewGeometryVerifier {
             fundamental: f_report.map(|r| r.fundamental),
             homography: h_report.map(|r| r.homography),
             relative_pose: None,
+            essential_inliers,
+            e_inlier_count: e_inliers,
+            f_inlier_count: f_inliers,
+            h_inlier_count: h_inliers,
         };
 
         if report.config == ConfigurationType::PlanarOrPanoramic {
@@ -483,18 +505,26 @@ impl TwoViewGeometryVerifier {
         } else if geometries.len() == 1 {
             geometries.into_iter().next().unwrap()
         } else {
-            let mut all_inliers = Vec::new();
-            for geometry in &geometries {
-                all_inliers.extend_from_slice(&geometry.inliers);
-            }
-            TwoViewGeometryReport {
-                config: ConfigurationType::Multiple,
-                inliers: all_inliers,
-                essential: None,
-                fundamental: None,
-                homography: None,
-                relative_pose: None,
-            }
+            // SfM must not concatenate incompatible models into one inlier set
+            // (that poisons a later essential RANSAC). Prefer the strongest
+            // Calibrated (E) sub-model; otherwise the largest inlier set.
+            // Still label `Multiple` so callers can see multi-model admission.
+            let best_idx = geometries
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, g)| {
+                    let calibrated_bonus = if matches!(g.config, ConfigurationType::Calibrated) {
+                        1_000_000usize
+                    } else {
+                        0
+                    };
+                    calibrated_bonus + g.inliers.len()
+                })
+                .map(|(i, _)| i)
+                .expect("geometries non-empty");
+            let mut best = geometries.swap_remove(best_idx);
+            best.config = ConfigurationType::Multiple;
+            best
         }
     }
 }
@@ -644,15 +674,16 @@ mod tests {
         let verifier =
             TwoViewGeometryVerifier::new(TwoViewGeometryOptions::for_camera(&camera, 4.0));
         let report = verifier.classify(&correspondences, &camera);
-        assert!(
-            matches!(
-                report.config,
-                ConfigurationType::Calibrated | ConfigurationType::Uncalibrated
-            ),
-            "expected a real-parallax 3D scene to classify as CALIBRATED/UNCALIBRATED, got {:?}",
-            report.config
+        assert_eq!(
+            report.config,
+            ConfigurationType::Calibrated,
+            "general 3D parallax with known intrinsics should classify CALIBRATED when E/F agree"
         );
         assert!(!report.inliers.is_empty());
+        assert!(
+            !report.essential_inliers.is_empty() && report.e_inlier_count > 0,
+            "essential RANSAC must expose its inlier set for prefer-essential-inliers"
+        );
     }
 
     #[test]

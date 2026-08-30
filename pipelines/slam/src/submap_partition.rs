@@ -261,6 +261,9 @@ pub fn remap_pairs_to_submap(
             image_i: pair.image_i - image_range.start,
             image_j: pair.image_j - image_range.start,
             matches: pair.matches.clone(),
+            two_view_config: pair.two_view_config,
+            essential_matches: pair.essential_matches.clone(),
+            essential_matrix: pair.essential_matrix,
         })
         .collect()
 }
@@ -481,11 +484,7 @@ mod tests {
     use super::*;
 
     fn pair(i: usize, j: usize, count: usize) -> PairwiseMatches {
-        PairwiseMatches {
-            image_i: i,
-            image_j: j,
-            matches: (0..count).map(|k| (k, k)).collect(),
-        }
+        PairwiseMatches::new(i, j, (0..count).map(|k| (k, k)).collect())
     }
 
     fn config() -> AdaptiveSubmapPartitionConfig {

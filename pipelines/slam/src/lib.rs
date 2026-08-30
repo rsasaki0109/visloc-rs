@@ -19,6 +19,13 @@ pub use bundle::{
     PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 
+pub mod camera_rig;
+pub use camera_rig::{
+    incremental_sfm_with_per_image_cameras, reconstruct_global_sfm_with_per_image_cameras,
+    PerImageCameraError, PerImageCameraGlobalError, PerImageCameraIncrementalError,
+    PerImageCameras,
+};
+
 pub mod covisibility_ba;
 pub use covisibility_ba::{
     behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,
@@ -32,7 +39,10 @@ pub use covisibility_ba::{
 
 pub mod incremental_sfm;
 pub use incremental_sfm::{
-    incremental_sfm, preview_track_build_stats, IncrementalSfmConfig, IncrementalSfmError,
+    incremental_sfm, incremental_sfm_with_initial_poses,
+    incremental_sfm_with_sequence_fallback_overrides, incremental_sfm_with_track_membership,
+    preview_track_build_stats, run_fixed_rotation_support_bundle_adjustment,
+    run_fixed_support_bundle_adjustment, IncrementalSfmConfig, IncrementalSfmError,
     IncrementalSfmResult, NextImagePolicy, PairwiseMatches, SfmTrack, TrackBuildStats, TrackSource,
 };
 
@@ -94,8 +104,14 @@ pub use ordered_view_graph::{
 
 pub mod global_sfm;
 pub use global_sfm::{
-    average_positions, average_rotations, reconstruct_global_sfm, GlobalReconstructionError,
-    GlobalReconstructionTuning, GlobalSfmEdge, GlobalSfmPoses,
+    average_positions, average_rotations, bearing_alignment_error_deg,
+    estimate_free_centres_from_prior_rays, estimate_free_poses_from_prior_rays,
+    filter_pose_priors_by_edge_disagreement, filter_pose_priors_by_free_centre_residual,
+    filter_pose_priors_by_track_quality, gt_bearing_in_prior_frame, pair_correspondences,
+    pair_essential_mean_sampson_error, prior_free_essential_gt_bearing_error_deg,
+    reconstruct_global_sfm, reconstruct_global_sfm_with_priors, relative_pose_from_essential,
+    rematch_essential_admission_ok, GlobalReconstructionError, GlobalReconstructionTuning,
+    GlobalSfmEdge, GlobalSfmPoses,
 };
 
 pub mod imu_preintegration;

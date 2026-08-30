@@ -242,6 +242,7 @@ impl EssentialMatrixVisualOdometryFrontend {
                 },
             },
             default_translation_scale: config.default_translation_scale,
+            ..RelativePoseEstimator::default()
         };
         Self {
             estimator,

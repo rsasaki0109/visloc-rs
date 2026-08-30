@@ -383,6 +383,82 @@ fn bundle_optimize_jointly_with_yaw_drift() {
 }
 
 #[test]
+fn fixed_pose_rotation_keeps_rotation_and_optimizes_translation() {
+    // The two fixed reference poses pin the rigid/scale gauge.  Pose 30 starts
+    // with both a translation and yaw error, but its yaw is deliberately held
+    // fixed; the remaining translation/landmark variables must still lower
+    // the reprojection cost.
+    let camera = pinhole();
+    let mut ba = BundleAdjustment::new(camera);
+    let truth_poses = [
+        (10u64, pose_at(Vector3::new(0.0, 0.0, 0.0))),
+        (20u64, pose_at(Vector3::new(0.5, 0.0, 0.0))),
+        (30u64, pose_at(Vector3::new(1.0, 0.0, 0.0))),
+    ];
+    for (id, pose) in &truth_poses {
+        ba.add_pose(*id, pose.clone());
+    }
+    for (id, point) in world_grid() {
+        ba.add_landmark(id, point);
+    }
+    for (id, pose) in &truth_poses {
+        for (landmark_id, point) in world_grid() {
+            let xy = ba
+                .camera
+                .project(&pose.transform_world_point(&point))
+                .unwrap();
+            ba.add_observation(BaObservation {
+                keyframe_id: *id,
+                landmark_id,
+                xy,
+            });
+        }
+    }
+    ba.fix_pose(10);
+    ba.fix_pose(20);
+    let drifted = pose_with_yaw(Vector3::new(1.08, -0.03, 0.02), 0.08);
+    let initial_rotation = drifted.world_to_camera.rotation;
+    let initial_center = drifted.camera_center_world();
+    ba.poses.insert(30, drifted);
+    ba.fix_pose_rotation(30);
+    let cost_before = ba.cost();
+    let result = ba
+        .optimize(&BaConfig::default())
+        .expect("fixed-rotation BA");
+    let final_pose = &ba.poses[&30];
+    let rotation_delta = (initial_rotation.inverse() * final_pose.world_to_camera.rotation).angle();
+    assert!(
+        rotation_delta < 1.0e-12,
+        "rotation changed by {rotation_delta}"
+    );
+    assert!(result.final_cost < cost_before, "cost did not decrease");
+    assert!(
+        (final_pose.camera_center_world() - initial_center).norm() > 1.0e-6,
+        "translation remained fixed despite a nonzero residual"
+    );
+}
+
+#[test]
+fn empty_fixed_rotation_set_is_a_noop_for_ba_state() {
+    let mut ordinary = truth_bundle();
+    let mut explicit_empty = ordinary.clone();
+    ordinary.fix_pose(10);
+    ordinary.fix_pose(20);
+    explicit_empty.fix_pose(10);
+    explicit_empty.fix_pose(20);
+    assert!(explicit_empty.fixed_pose_rotations.is_empty());
+    let config = BaConfig {
+        max_iterations: 4,
+        ..BaConfig::default()
+    };
+    let ordinary_result = ordinary.optimize(&config).unwrap();
+    let empty_result = explicit_empty.optimize(&config).unwrap();
+    assert_eq!(ordinary_result, empty_result);
+    assert_eq!(ordinary.poses, explicit_empty.poses);
+    assert_eq!(ordinary.landmarks, explicit_empty.landmarks);
+}
+
+#[test]
 fn bundle_sparse_solver_matches_dense_on_small_scene() {
     let truth = truth_bundle();
     let mut dense = truth.clone();
@@ -699,6 +775,14 @@ fn bundle_robust_cost_clips_large_residuals_below_quadratic() {
         (huber - 1314.0).abs() < 1.0,
         "Huber cost matches analytic value 1314: {huber}"
     );
+}
+
+#[test]
+fn huber_weight_is_one_below_delta_and_scales_by_residual_norm_above() {
+    let kernel = RobustKernel::Huber { delta: 2.0 };
+    assert_eq!(kernel.weight(0.0), 1.0);
+    assert_eq!(kernel.weight(4.0), 1.0);
+    assert!((kernel.weight(9.0) - (2.0 / 3.0)).abs() < 1.0e-12);
 }
 
 #[test]

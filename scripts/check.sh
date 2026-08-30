@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 "$PYTHON" -m unittest discover -s tests -p 'test_*.py'
 "$PYTHON" scripts/benchmark_registry.py validate benchmarks/registry/readme_claims_v1.json benchmarks/registry/claim_matrix_v1.json benchmarks/registry/runs
-"$PYTHON" scripts/benchmark_registry.py check-generated
+"$PYTHON" scripts/benchmark_registry.py check-generated --readme docs/readme_details.md
 sh scripts/check_docs_links.sh
 sh scripts/check_release_metadata.sh
 scripts/run_examples.sh
