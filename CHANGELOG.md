@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Memory-bounded Electro snapshot replay (2026-09-01).** Added the explicit,
+  default-off `--snapshot-keypoints-only` path for file-backed verified-pair
+  snapshot replay with the plain incremental mapper. It retains keypoints and
+  row shape, drops descriptor payloads image-by-image, and re-reads one file at
+  a time after calibration to reproduce the original descriptor-bound manifest
+  hash. Unsafe descriptor-dependent modes fail closed. Two complete 1,200-image
+  runs reproduced the accepted cameras/images/points hashes exactly at
+  1200/1200 and 0.03501 m RMSE. Median peak RSS fell **63.6%**, from 4,011,160
+  KiB to **1,459,194 KiB (1.39 GiB)**, passing the 2 GiB M3 gate; conservative
+  snapshot-to-model wall was 336.90 s, still **14.63x faster** than the
+  same-pair COLMAP mapper.
+
 - **Quality-gated Electro BA schedule (2026-09-01).** Added the explicit
   `--global-ba-max-refinements` control without changing its five-round
   default. The frozen 1,200-image champion passes at zero follow-up rounds and

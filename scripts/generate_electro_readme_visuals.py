@@ -20,9 +20,9 @@ Example::
         --colmap-model /path/to/colmap/model \
         --reference-model /path/to/rig_calibration_undistorted \
         --output-dir docs/assets \
-        --visloc-wall-seconds 268.49 \
-        --visloc-core-seconds 212.925 \
-        --visloc-peak-rss-kib 4011160 \
+        --visloc-wall-seconds 336.895 \
+        --visloc-core-seconds 230.3015 \
+        --visloc-peak-rss-kib 1459194 \
         --visloc-registered 1200 \
         --visloc-rmse-m 0.0350113265 \
         --visloc-median-m 0.0172787756 \

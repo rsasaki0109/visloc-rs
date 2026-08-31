@@ -32,10 +32,11 @@ solves accepted zero LM steps, RMSE exceeded the predeclared 6 cm Competitive
 limit, and one camera had 1.87 m error. This is the quality cliff that bounds
 the chosen schedule.
 
-Peak RSS remains effectively flat at 4,011,160 KiB median versus COLMAP's
-1,255,996 KiB. The speed milestone is closed, but the 2 GiB memory target is
-not; descriptor/keypoint ownership, track storage, snapshot lifetime, and
-factorization transients remain the next M3 work.
+At the time of this schedule audit, peak RSS remained effectively flat at
+4,011,160 KiB median versus COLMAP's 1,255,996 KiB. The subsequent
+[`snapshot-keypoints-only` audit](electro_snapshot_memory_audit.md) retained the
+exact model while reducing the two-run median peak to 1,459,194 KiB, closing
+the 2 GiB M3 memory target.
 
 Commands, both run arrays, scores, hashes, the rejected control, and external
 artifact roots are recorded in
