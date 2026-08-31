@@ -12,6 +12,7 @@
 //! from 2D reprojection residuals.
 
 pub mod bundle;
+mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
     BaResult, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner,
