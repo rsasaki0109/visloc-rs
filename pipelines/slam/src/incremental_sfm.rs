@@ -6556,6 +6556,7 @@ where
 /// The IDs let the correspondence-count selector update its per-image score
 /// cache in proportion to newly-created points rather than rescanning every
 /// unregistered image after each successful PnP.
+#[allow(clippy::too_many_arguments)]
 fn triangulate_pending_for_image_with_new_tracks(
     camera: &Camera,
     features: &[FeatureSet],
@@ -6583,6 +6584,7 @@ fn triangulate_pending_for_image_with_new_tracks(
 }
 
 /// Seed update with the IDs that became 3D points during the pass.
+#[allow(clippy::too_many_arguments)]
 fn triangulate_pending_for_images_with_new_tracks(
     camera: &Camera,
     features: &[FeatureSet],
