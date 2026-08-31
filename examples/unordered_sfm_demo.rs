@@ -17,6 +17,17 @@
 //!      optional `--candidate-budget` retains local pairs first, then the
 //!      highest-scoring retrieval pairs.  It is an explicit, bounded M3
 //!      schedule and never consults raw matches or verification outcomes.
+//!      `--rig-local-grouping` makes the local schedule camera-aware for
+//!      names of the form `<camera-prefix>_<numeric-timestamp>`: temporal
+//!      edges stay within a camera and bounded same-timestamp cross-camera
+//!      rig edges are added deterministically.
+//!    - `temporal-pyramid`: a rig-aware temporal pyramid.  Within each
+//!      camera it proposes positional offsets 1, 2, 4, … up to
+//!      `--temporal-pyramid-max-offset` (default 32), then adds pairs with
+//!      the same timestamp across cameras, and finally fills a bounded
+//!      `--candidate-budget` with highest-scoring VLAD retrieval pairs.
+//!      This is deterministic and GT-free; it is useful when numeric
+//!      timestamps are irregular or have large nanosecond gaps.
 //!    - `vocab-tree`: `visloc_rs::vision::vocab_tree`'s hierarchical-k-means
 //!      vocabulary + TF-IDF/Hamming-embedding inverted-file retrieval
 //!      (COLMAP's `VocabTreePairGenerator`-equivalent, M3 in
@@ -157,6 +168,11 @@
 //! its feature and `_loci.txt` files through same-directory atomic renames,
 //! then releases that image before continuing.  It accepts the same optional
 //! per-image calibration and validates each decoded image's dimensions.
+//! Add `--sift-stream-resume` to opt into per-image completion sidecars.  A
+//! sidecar is published only after both output files are complete and records
+//! a stable extractor/configuration hash plus source, feature, and locus-file
+//! byte hashes.  A later run resumes only when every recorded value validates;
+//! missing, malformed, stale, or tampered sidecars are re-extracted.
 //!
 //! The optional Python `scripts/export_superpoint_lightglue.py` helper supports
 //! the same safe resume contract for stereo/mono exports: use
@@ -174,6 +190,13 @@
 //! and verified.  It applies to imported verified pairs and all opt-in pair
 //! expansion paths as well; omitted means the historical candidate set.
 //!
+//! `--rig-local-grouping` is an explicit `vlad-union` option for multi-camera
+//! names such as `cam4_1474975187520882738.png`.  It avoids treating the same
+//! timestamp in different cameras as a duplicate global stem: local edges
+//! connect timestamps within each camera (up to `--local-stem-window`) and
+//! each timestamp contributes at most one canonical edge per camera pair.
+//! The generated candidate manifest records this policy in validated metadata.
+//!
 //! `--candidate-manifest PATH` imports a versioned, image-name-bound list of
 //! candidate pairs and bypasses pair generation.  `--export-candidate-manifest
 //! PATH` writes the generated list atomically and exits before matching.  The
@@ -181,6 +204,11 @@
 //! cheap retrieval result while validating that it still belongs to the same
 //! image order.  Candidate manifests contain no descriptors, raw matches, or
 //! ground-truth information.
+//!
+//! `--max-mapper-matches-per-pair N` is an explicit resource guard for dense
+//! feature sets.  It keeps the verifier/snapshot stream complete, then passes
+//! only the first `N` deterministic inliers from each pair to the mapper;
+//! omitted means the historical unbounded mapper input.
 //!
 //! `--initial-poses MODEL/images.txt` is an explicit, default-off staged
 //! incremental seed.  The model's image names are matched by stem and its
@@ -208,6 +236,9 @@
 //! camera, then bypasses matching and verification without reordering the
 //! stored stream.  The older `--import-verified-pairs-file` text format is
 //! unchanged.
+//! `--export-verified-pairs-only` pairs with the export flag for resumable
+//! matching shards: it writes the snapshot and exits before track building or
+//! mapping.  It is default-off and requires an export path.
 //! `--snapshot-coordinate-override-dir DIR` is a diagnostic-only companion to
 //! snapshot import: after the snapshot validates against the base features, it
 //! checks that `DIR` has the same image names, row counts, and descriptor bits,
@@ -360,6 +391,8 @@
 //! schedule diagnostic: it defers periodic BA until `N` cameras are registered
 //! (`0` keeps the historical schedule), without suppressing the configured
 //! final BA.
+//! `--ba-linear-solver dense|sparse` is a default-off solver A/B for the
+//! Schur-reduced BA system; omission keeps the historical dense backend.
 //! `--diagnose-model-score MODEL/images.txt` reads a completed COLMAP model and
 //! scores every imported verified correspondence against its pose-induced
 //! calibrated epipolar geometry, including a deterministic hash-held-out
@@ -382,8 +415,10 @@
 #![allow(clippy::type_complexity)]
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
+#[cfg(feature = "image-io")]
+use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -423,10 +458,11 @@ use visloc_rs::{
     rematch_essential_admission_ok, triangulate_two_view_left_frame,
     write_colmap_reconstruction_for_3dgs, write_colmap_reconstruction_for_3dgs_with_cameras,
     BaConfig, BruteForceMatcher, Camera, CameraModel, CrossCheckMatcher, DescriptorMatch,
-    FeatureSet, GlobalReconstructionTuning, IncrementalSfmConfig, Matcher, NextImagePolicy,
-    PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
+    FeatureSet, GlobalReconstructionTuning, IncrementalSfmConfig, LinearSolver, Matcher,
+    NextImagePolicy, PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
 };
 
+use visloc_rs::slam::incremental_sfm::log_process_memory;
 use visloc_rs::verified_pair_snapshot::{
     self, PairRecord as SnapshotPairRecord, Snapshot as VerifiedPairSnapshot,
 };
@@ -484,6 +520,9 @@ enum PairSource {
     /// Union of a bounded numeric-stem local schedule and flat-VLAD
     /// retrieval.  Local edges are retained first when a budget is applied.
     VladUnion,
+    /// Rig-aware temporal-pyramid offsets, same-timestamp cross-camera edges,
+    /// and a VLAD fill pass under an optional candidate budget.
+    TemporalPyramid,
     /// Hierarchical-k-means vocab-tree retrieval (M3).
     VocabTree,
     /// COLMAP's `TransitivePairGenerator` port: propose pairs through the
@@ -501,10 +540,11 @@ impl std::str::FromStr for PairSource {
             "vlad" => Ok(Self::Vlad),
             "vlad-mutual" => Ok(Self::VladMutual),
             "vlad-union" => Ok(Self::VladUnion),
+            "temporal-pyramid" => Ok(Self::TemporalPyramid),
             "vocab-tree" => Ok(Self::VocabTree),
             "transitive" => Ok(Self::Transitive),
             other => Err(format!(
-                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|vocab-tree|transitive)"
+                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|temporal-pyramid|vocab-tree|transitive)"
             )),
         }
     }
@@ -1959,6 +1999,12 @@ struct Args {
     /// `--export-features-dir`, and `--export-features-only`; omitted keeps the
     /// historical in-memory batch extractor.
     sift_stream_export: bool,
+    /// Resume an SIFT stream export only from per-image sidecars whose
+    /// extractor configuration, source bytes, and both output hashes validate.
+    /// Requires `--sift-stream-export`; invalid or missing sidecars are
+    /// re-extracted and republished atomically.
+    #[cfg_attr(not(feature = "image-io"), allow(dead_code))]
+    sift_stream_resume: bool,
     /// COLMAP `two_view_geometries` oracle (`export_colmap_verified_pairs.py`):
     /// bypasses NN matching and verification; feeds inliers + config + E
     /// directly into the mapper.
@@ -1969,6 +2015,10 @@ struct Args {
     /// Import a checksummed verified-pair snapshot and bypass matching and
     /// verification.  The loaded image/feature manifest and camera must match.
     import_verified_pairs_snapshot: Option<PathBuf>,
+    /// Write a verified-pair snapshot and exit before track building/mapping.
+    /// This is the opt-in match-shard worker mode and requires
+    /// `export_verified_pairs_snapshot`.
+    export_verified_pairs_only: bool,
     /// Diagnostic-only coordinate replacement after a validated snapshot
     /// import.  The override directory must have the same image names, row
     /// counts, and descriptor bit patterns as the snapshot's base features;
@@ -2030,6 +2080,11 @@ struct Args {
     match_ratio: f32,
     min_matches: usize,
     min_pnp_inliers: usize,
+    /// Optional deterministic cap on accepted correspondences from each
+    /// verified pair before the mapper consumes the stream.  Matching,
+    /// verification, and an exported verified-pair snapshot remain complete;
+    /// `None` preserves the historical mapper input exactly.
+    max_mapper_matches_per_pair: Option<usize>,
     max_reproj: f64,
     next_image_policy: NextImagePolicy,
     final_ba: bool,
@@ -2059,6 +2114,9 @@ struct Args {
     /// Optional final/global BA Huber threshold in input pixels. `None`
     /// preserves the historical 3 px Huber configuration.
     ba_huber_delta: Option<f64>,
+    /// Optional Schur-reduced BA linear solver. `None` preserves the dense
+    /// historical backend; `sparse` is an explicit large-model experiment.
+    ba_linear_solver: Option<LinearSolver>,
     /// Defer plain-growth periodic BA until this many cameras are registered;
     /// `0` preserves the historical `ba_every` schedule.
     periodic_ba_min_registered_images: usize,
@@ -2344,12 +2402,23 @@ struct Args {
     /// with the guarded geometry-guided recovery pass. Default off.
     geometry_guided_conflict_recovery: bool,
     /// M3 A/B switch: which candidate-pair source feeds verification — flat
-    /// VLAD top-K (default), a bounded local+VLAD union, or the hierarchical vocab-tree
+    /// VLAD top-K (default), a bounded local+VLAD union, a rig-aware temporal
+    /// pyramid plus VLAD fill, or the hierarchical vocab-tree
     /// (`docs/colmap_port_plan.md`'s M3 milestone).
     pair_source: PairSource,
     /// Numeric-stem local overlap window for `--pair-source vlad-union`.
     /// This schedule is cheap and is evaluated before any pair matching.
     local_stem_window: Option<u64>,
+    /// Interpret image names as `<camera-prefix>_<numeric-timestamp>` for the
+    /// `vlad-union` local schedule.  This opt-in keeps temporal edges within
+    /// each camera and adds only same-timestamp cross-camera rig edges.
+    rig_local_grouping: bool,
+    /// Maximum positional offset for the rig-aware temporal-pyramid
+    /// candidate source.  Powers of two from 1 through this value are used;
+    /// the default is 32.  This is deliberately a positional offset rather
+    /// than a raw timestamp difference because ETH3D timestamps are in
+    /// nanoseconds and are not consecutive integers.
+    temporal_pyramid_max_offset: u64,
     /// Optional upper bound on generated candidate pairs.  Under
     /// `vlad-union`, local pairs have priority, then retrieval pairs by
     /// descending similarity and stable pair key.  `None` preserves the full
@@ -2463,13 +2532,17 @@ fn effective_config_snapshot(args: &Args) -> String {
 /// `DefaultHasher` is deliberately avoided because its implementation is not
 /// a public cross-version serialization contract.  FNV-1a is sufficient here:
 /// this is a reproducibility label, not a cryptographic integrity check.
-fn effective_config_hash(snapshot: &str) -> u64 {
+fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in snapshot.as_bytes() {
+    for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3u64);
     }
     hash
+}
+
+fn effective_config_hash(snapshot: &str) -> u64 {
+    fnv1a64_bytes(snapshot.as_bytes())
 }
 
 /// Reorder only the already-verified traversal stream.  This deliberately
@@ -2624,6 +2697,43 @@ fn apply_union_traversal_order_with_features(
         }
         pairwise.reverse();
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MapperMatchCapStats {
+    pairs_capped: usize,
+    matches_before: usize,
+    matches_after: usize,
+    essential_before: usize,
+    essential_after: usize,
+}
+
+/// Bound the correspondence stream consumed by the mapper while preserving
+/// the complete verified stream for diagnostics and snapshot export.  The
+/// verifier's deterministic inlier order is retained (rather than choosing
+/// by a post-hoc score), so this option cannot introduce a second geometry
+/// ranking policy.  `None`/the caller's omission is the historical path.
+fn cap_mapper_pair_matches(pairwise: &mut [PairwiseMatches], limit: usize) -> MapperMatchCapStats {
+    let mut stats = MapperMatchCapStats::default();
+    for pair in pairwise {
+        stats.matches_before += pair.matches.len();
+        stats.essential_before += pair.essential_matches.as_ref().map_or(0, Vec::len);
+        let pair_matches_capped = pair.matches.len() > limit;
+        let essential_capped = pair
+            .essential_matches
+            .as_ref()
+            .is_some_and(|matches| matches.len() > limit);
+        if pair_matches_capped || essential_capped {
+            stats.pairs_capped += 1;
+        }
+        pair.matches.truncate(limit);
+        if let Some(matches) = pair.essential_matches.as_mut() {
+            matches.truncate(limit);
+        }
+        stats.matches_after += pair.matches.len();
+        stats.essential_after += pair.essential_matches.as_ref().map_or(0, Vec::len);
+    }
+    stats
 }
 
 /// Stable FNV-1a hash of the multiset of verified `(image, keypoint)` edges.
@@ -2982,6 +3092,247 @@ fn numeric_stem_values(image_names: &[String]) -> Result<Vec<u64>, String> {
     Ok(values)
 }
 
+/// Return the camera-prefix and trailing timestamp from a rig image name.
+///
+/// Rig-aware local grouping is deliberately opt-in because a flat image set
+/// does not otherwise have a reliable camera-name convention.  The accepted
+/// form is `<prefix>_<decimal-timestamp>` (with the normal image extension
+/// still present in `name`); the prefix is retained verbatim and is compared
+/// case-sensitively.  A duplicate `(prefix, timestamp)` is rejected, while
+/// the same timestamp across distinct prefixes is the expected stereo/rig
+/// case.
+fn rig_camera_timestamp(name: &str) -> Result<(String, u64), String> {
+    let stem = image_stem(name);
+    let Some(separator) = stem.rfind('_') else {
+        return Err(format!(
+            "rig-local grouping requires image {name:?} to use <camera-prefix>_<numeric-timestamp>"
+        ));
+    };
+    let prefix = &stem[..separator];
+    let timestamp = &stem[separator + 1..];
+    if prefix.is_empty() || timestamp.is_empty() {
+        return Err(format!(
+            "rig-local grouping requires image {name:?} to use <camera-prefix>_<numeric-timestamp>"
+        ));
+    }
+    let timestamp = timestamp.parse::<u64>().map_err(|error| {
+        format!(
+            "rig-local grouping image {name:?} has invalid numeric timestamp {timestamp:?}: {error}"
+        )
+    })?;
+    Ok((prefix.to_owned(), timestamp))
+}
+
+/// Build deterministic camera-aware local edges for a multi-camera rig.
+///
+/// Within each camera prefix, timestamps within `window` are connected.  At
+/// each timestamp, every pair of distinct camera prefixes is connected once;
+/// this is bounded by the number of camera pairs at that instant and does not
+/// create the quadratic cross-product between neighbouring timestamps.  The
+/// returned pairs use canonical image indices and are sorted by pair key.
+fn rig_local_pairs(image_names: &[String], window: u64) -> Result<Vec<(usize, usize)>, String> {
+    if window == 0 {
+        return Err("--local-stem-window must be at least 1".into());
+    }
+    let mut by_camera = BTreeMap::<String, Vec<(u64, usize)>>::new();
+    let mut by_timestamp = BTreeMap::<u64, Vec<(String, usize)>>::new();
+    let mut seen = HashSet::<(String, u64)>::new();
+    for (index, name) in image_names.iter().enumerate() {
+        let (camera, timestamp) = rig_camera_timestamp(name)?;
+        if !seen.insert((camera.clone(), timestamp)) {
+            return Err(format!(
+                "rig-local grouping repeats timestamp {timestamp} for camera prefix {camera:?}"
+            ));
+        }
+        by_camera
+            .entry(camera.clone())
+            .or_default()
+            .push((timestamp, index));
+        by_timestamp
+            .entry(timestamp)
+            .or_default()
+            .push((camera, index));
+    }
+
+    let mut pairs = HashSet::<(usize, usize)>::new();
+    for entries in by_camera.values_mut() {
+        entries.sort_unstable_by_key(|&(timestamp, index)| (timestamp, index));
+        let mut first = 0usize;
+        for right in 0..entries.len() {
+            let right_timestamp = entries[right].0;
+            while first < right && right_timestamp.abs_diff(entries[first].0) > window {
+                first += 1;
+            }
+            for left in first..right {
+                let pair = (
+                    entries[left].1.min(entries[right].1),
+                    entries[left].1.max(entries[right].1),
+                );
+                pairs.insert(pair);
+            }
+        }
+    }
+    for entries in by_timestamp.values_mut() {
+        entries.sort_unstable();
+        for left in 0..entries.len() {
+            for right in left + 1..entries.len() {
+                // Duplicate `(camera,timestamp)` values were rejected above,
+                // so every pair here is a distinct-camera rig edge.
+                let pair = (
+                    entries[left].1.min(entries[right].1),
+                    entries[left].1.max(entries[right].1),
+                );
+                pairs.insert(pair);
+            }
+        }
+    }
+    let mut pairs: Vec<_> = pairs.into_iter().collect();
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+/// Build the two deterministic rig-aware components of the temporal-pyramid
+/// schedule.  Temporal offsets are positions in a camera's timestamp-sorted
+/// sequence, not differences between the nanosecond timestamp values.  This
+/// distinction matters for ETH3D, where captures are not numbered by a dense
+/// integer frame counter.  Same-timestamp cross-camera pairs are returned
+/// separately so the caller can give them a stable priority after temporal
+/// edges and before VLAD fill edges.
+fn rig_temporal_pyramid_pairs(
+    image_names: &[String],
+    max_offset: u64,
+) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
+    if max_offset == 0 {
+        return Err("--temporal-pyramid-max-offset must be at least 1".into());
+    }
+    let mut by_camera = BTreeMap::<String, Vec<(u64, usize)>>::new();
+    let mut by_timestamp = BTreeMap::<u64, Vec<(String, usize)>>::new();
+    let mut seen = HashSet::<(String, u64)>::new();
+    for (index, name) in image_names.iter().enumerate() {
+        let (camera, timestamp) = rig_camera_timestamp(name)?;
+        if !seen.insert((camera.clone(), timestamp)) {
+            return Err(format!(
+                "temporal-pyramid grouping repeats timestamp {timestamp} for camera prefix {camera:?}"
+            ));
+        }
+        by_camera
+            .entry(camera.clone())
+            .or_default()
+            .push((timestamp, index));
+        by_timestamp
+            .entry(timestamp)
+            .or_default()
+            .push((camera, index));
+    }
+
+    // Generate adjacent edges first, then progressively longer pyramid
+    // levels.  That gives a bounded budget the most local support while
+    // retaining every level when no budget is requested.
+    let mut offsets = Vec::new();
+    let mut offset = 1u64;
+    loop {
+        offsets.push(offset as usize);
+        if offset > max_offset / 2 {
+            break;
+        }
+        offset *= 2;
+    }
+    let mut temporal = Vec::new();
+    let mut temporal_seen = HashSet::<(usize, usize)>::new();
+    for &offset in &offsets {
+        for entries in by_camera.values() {
+            for left in 0..entries.len().saturating_sub(offset) {
+                let right = left + offset;
+                let pair = (
+                    entries[left].1.min(entries[right].1),
+                    entries[left].1.max(entries[right].1),
+                );
+                if temporal_seen.insert(pair) {
+                    temporal.push(pair);
+                }
+            }
+        }
+    }
+
+    let mut cross_camera = Vec::new();
+    let mut cross_seen = HashSet::<(usize, usize)>::new();
+    for entries in by_timestamp.values_mut() {
+        entries.sort_unstable();
+        for left in 0..entries.len() {
+            for right in left + 1..entries.len() {
+                // A duplicate `(camera,timestamp)` was rejected above, so
+                // every edge here is between distinct camera prefixes.
+                let pair = (
+                    entries[left].1.min(entries[right].1),
+                    entries[left].1.max(entries[right].1),
+                );
+                if cross_seen.insert(pair) {
+                    cross_camera.push(pair);
+                }
+            }
+        }
+    }
+    Ok((temporal, cross_camera))
+}
+
+fn temporal_pyramid_offsets_string(max_offset: u64) -> String {
+    let mut values = Vec::new();
+    let mut offset = 1u64;
+    loop {
+        values.push(offset.to_string());
+        if offset > max_offset / 2 {
+            break;
+        }
+        offset *= 2;
+    }
+    values.join(",")
+}
+
+/// Candidate pairs from a rig-aware temporal pyramid plus a deterministic
+/// VLAD fill.  Temporal edges are selected first, same-timestamp rig edges
+/// second, and retrieval-only edges by descending VLAD score last.  The
+/// final stream is sorted by canonical pair key after this priority selection
+/// so the archived manifest is stable and independent of map iteration.
+fn candidate_pairs_temporal_pyramid(
+    features: &[FeatureSet],
+    image_names: &[String],
+    vocab_size: usize,
+    topk: usize,
+    max_offset: u64,
+    budget: Option<usize>,
+) -> Result<Vec<(usize, usize)>, String> {
+    let (temporal, cross_camera) = rig_temporal_pyramid_pairs(image_names, max_offset)?;
+    let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
+    let mut selected = Vec::new();
+    let mut seen = HashSet::<(usize, usize)>::new();
+    for pair in temporal.into_iter().chain(cross_camera) {
+        if seen.insert(pair) {
+            selected.push(pair);
+        }
+    }
+    if let Some(budget) = budget {
+        selected.truncate(budget);
+        if selected.len() < budget {
+            for (pair, _) in retrieval {
+                if seen.insert(pair) {
+                    selected.push(pair);
+                    if selected.len() == budget {
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        for (pair, _) in retrieval {
+            if seen.insert(pair) {
+                selected.push(pair);
+            }
+        }
+    }
+    selected.sort_unstable();
+    Ok(selected)
+}
+
 fn pair_within_stem_window(
     pair: (usize, usize),
     stem_values: &[u64],
@@ -3054,6 +3405,17 @@ fn parse_candidate_manifest(
     path: &Path,
     image_names: &[String],
 ) -> Result<Vec<(usize, usize)>, String> {
+    parse_candidate_manifest_with_metadata(path, image_names).map(|(pairs, _)| pairs)
+}
+
+/// Parse a candidate manifest and retain its optional deterministic policy
+/// metadata.  Metadata is deliberately a tiny `metadata KEY VALUE` block so
+/// older readers can still reject unsupported extensions rather than silently
+/// changing the candidate schedule.
+fn parse_candidate_manifest_with_metadata(
+    path: &Path,
+    image_names: &[String],
+) -> Result<(Vec<(usize, usize)>, BTreeMap<String, String>), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read candidate manifest {path:?}: {error}"))?;
     let lines: Vec<&str> = text
@@ -3111,6 +3473,28 @@ fn parse_candidate_manifest(
             ));
         }
     }
+    let mut metadata = BTreeMap::new();
+    while let Some(line) = lines.get(cursor).copied() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first().copied() != Some("metadata") {
+            break;
+        }
+        if fields.len() != 3 || fields[1].is_empty() || fields[2].is_empty() {
+            return Err(format!(
+                "candidate manifest {path:?} metadata must be metadata KEY VALUE"
+            ));
+        }
+        if metadata
+            .insert(fields[1].to_owned(), fields[2].to_owned())
+            .is_some()
+        {
+            return Err(format!(
+                "candidate manifest {path:?} repeats metadata key {:?}",
+                fields[1]
+            ));
+        }
+        cursor += 1;
+    }
     let pair_header = next(&mut cursor, "pair count")?;
     let pair_fields: Vec<&str> = pair_header.split_whitespace().collect();
     if pair_fields.len() != 2 || pair_fields[0] != "pairs" {
@@ -3155,16 +3539,29 @@ fn parse_candidate_manifest(
             "candidate manifest {path:?} has unexpected trailing data"
         ));
     }
-    Ok(pairs)
+    Ok((pairs, metadata))
 }
 
 /// Write a candidate manifest through a same-directory temporary file and
 /// rename.  This keeps an interrupted cheap retrieval pass from leaving a
 /// file that a later benchmark could mistake for a complete schedule.
+#[cfg(test)]
 fn write_candidate_manifest(
     path: &Path,
     image_names: &[String],
     pairs: &[(usize, usize)],
+) -> Result<(), String> {
+    write_candidate_manifest_with_metadata(path, image_names, pairs, &BTreeMap::new())
+}
+
+/// Write a candidate manifest with a canonical metadata block.  Keys are
+/// sorted by `BTreeMap`, making the bytes stable across runs and suitable for
+/// the hash-bound shard index.
+fn write_candidate_manifest_with_metadata(
+    path: &Path,
+    image_names: &[String],
+    pairs: &[(usize, usize)],
+    metadata: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| {
@@ -3186,6 +3583,18 @@ fn write_candidate_manifest(
             ));
         }
         text.push_str(&format!("image {index} {name}\n"));
+    }
+    for (key, value) in metadata {
+        if key.is_empty()
+            || value.is_empty()
+            || key.chars().any(char::is_whitespace)
+            || value.chars().any(char::is_whitespace)
+        {
+            return Err(format!(
+                "candidate manifest metadata must use non-empty whitespace-free KEY VALUE (got {key:?}={value:?})"
+            ));
+        }
+        text.push_str(&format!("metadata {key} {value}\n"));
     }
     text.push_str(&format!("pairs {}\n", pairs.len()));
     let mut seen = HashSet::with_capacity(pairs.len());
@@ -3349,6 +3758,7 @@ where
     let mut match_ratio = 0.8f32;
     let mut min_matches = 30usize;
     let mut min_pnp_inliers = 12usize;
+    let mut max_mapper_matches_per_pair: Option<usize> = None;
     let mut max_reproj = 4.0f64;
     // The demo's no-flag workflow uses the robust two-stage policy; the public
     // library default remains CorrespondenceCount for API/snapshot identity.
@@ -3360,6 +3770,8 @@ where
     let mut seed_pair: Option<(usize, usize)> = None;
     let mut pair_stem_window: Option<u64> = None;
     let mut local_stem_window: Option<u64> = None;
+    let mut rig_local_grouping = false;
+    let mut temporal_pyramid_max_offset = 32u64;
     let mut candidate_budget: Option<usize> = None;
     let mut refine_intrinsics = false;
     let mut refine_distortion = false;
@@ -3438,6 +3850,7 @@ where
     let mut pnp_max_iterations = 128usize;
     let mut ba_max_iterations: Option<usize> = None;
     let mut ba_huber_delta: Option<f64> = None;
+    let mut ba_linear_solver: Option<LinearSolver> = None;
     let mut periodic_ba_min_registered_images = 0usize;
     let mut final_ba_polish_iterations = 0usize;
     let mut geometry_weighted_ba = false;
@@ -3475,9 +3888,11 @@ where
     let mut export_features_dir: Option<PathBuf> = None;
     let mut export_features_only = false;
     let mut sift_stream_export = false;
+    let mut sift_stream_resume = false;
     let mut import_verified_pairs_file: Option<PathBuf> = None;
     let mut export_verified_pairs_snapshot: Option<PathBuf> = None;
     let mut import_verified_pairs_snapshot: Option<PathBuf> = None;
+    let mut export_verified_pairs_only = false;
     let mut candidate_manifest: Option<PathBuf> = None;
     let mut export_candidate_manifest: Option<PathBuf> = None;
     let mut snapshot_coordinate_override_dir: Option<PathBuf> = None;
@@ -3699,6 +4114,21 @@ where
                 a.remove(i + 1);
                 local_stem_window = Some(window);
             }
+            "--rig-local-grouping" => rig_local_grouping = true,
+            "--temporal-pyramid-max-offset" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--temporal-pyramid-max-offset requires a positive integer")?
+                    .clone();
+                let offset: u64 = raw.parse().map_err(|error| {
+                    format!("--temporal-pyramid-max-offset must be a positive integer: {error}")
+                })?;
+                if offset == 0 {
+                    return Err("--temporal-pyramid-max-offset must be at least 1".into());
+                }
+                a.remove(i + 1);
+                temporal_pyramid_max_offset = offset;
+            }
             "--candidate-budget" => {
                 let raw = a
                     .get(i + 1)
@@ -3717,6 +4147,20 @@ where
             "--min-matches" => min_matches = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--min-pnp-inliers" => {
                 min_pnp_inliers = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?
+            }
+            "--max-mapper-matches-per-pair" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--max-mapper-matches-per-pair requires a positive integer")?
+                    .clone();
+                let limit: usize = raw.parse().map_err(|error| {
+                    format!("--max-mapper-matches-per-pair must be a positive integer: {error}")
+                })?;
+                if limit == 0 {
+                    return Err("--max-mapper-matches-per-pair must be at least 1".into());
+                }
+                a.remove(i + 1);
+                max_mapper_matches_per_pair = Some(limit);
             }
             "--max-reproj" => max_reproj = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--next-image-policy" => {
@@ -3974,6 +4418,23 @@ where
                 a.remove(i + 1);
                 ba_huber_delta = Some(delta);
             }
+            "--ba-linear-solver" => {
+                let solver = a
+                    .get(i + 1)
+                    .ok_or("--ba-linear-solver requires dense or sparse")?
+                    .as_str();
+                let parsed = match solver {
+                    "dense" => LinearSolver::Dense,
+                    "sparse" => LinearSolver::Sparse,
+                    other => {
+                        return Err(format!(
+                            "--ba-linear-solver must be dense or sparse, got {other:?}"
+                        ))
+                    }
+                };
+                a.remove(i + 1);
+                ba_linear_solver = Some(parsed);
+            }
             "--periodic-ba-min-registered-images" => {
                 periodic_ba_min_registered_images =
                     a.remove(i + 1).parse().map_err(|e| format!("{e}"))?;
@@ -4114,6 +4575,7 @@ where
             "--export-features-dir" => export_features_dir = Some(PathBuf::from(a.remove(i + 1))),
             "--export-features-only" => export_features_only = true,
             "--sift-stream-export" => sift_stream_export = true,
+            "--sift-stream-resume" => sift_stream_resume = true,
             "--import-verified-pairs-file" => {
                 import_verified_pairs_file = Some(PathBuf::from(a.remove(i + 1)))
             }
@@ -4139,6 +4601,7 @@ where
                 a.remove(i + 1);
                 import_verified_pairs_snapshot = Some(PathBuf::from(raw));
             }
+            "--export-verified-pairs-only" => export_verified_pairs_only = true,
             "--candidate-manifest" => {
                 let raw = a
                     .get(i + 1)
@@ -4364,6 +4827,20 @@ where
                 .into(),
         );
     }
+    if sift_stream_resume && !sift_stream_export {
+        return Err("--sift-stream-resume requires --sift-stream-export".into());
+    }
+    if export_verified_pairs_only && export_verified_pairs_snapshot.is_none() {
+        return Err(
+            "--export-verified-pairs-only requires --export-verified-pairs-snapshot PATH".into(),
+        );
+    }
+    if export_verified_pairs_only && import_verified_pairs_snapshot.is_some() {
+        return Err(
+            "--export-verified-pairs-only cannot be combined with --import-verified-pairs-snapshot"
+                .into(),
+        );
+    }
     if candidate_manifest.is_some() && export_candidate_manifest.is_some() {
         return Err(
             "--candidate-manifest and --export-candidate-manifest are mutually exclusive".into(),
@@ -4372,23 +4849,50 @@ where
     if local_stem_window.is_some() && pair_source != PairSource::VladUnion {
         return Err("--local-stem-window requires --pair-source vlad-union".into());
     }
+    if rig_local_grouping && pair_source != PairSource::VladUnion {
+        return Err("--rig-local-grouping requires --pair-source vlad-union".into());
+    }
+    if pair_source == PairSource::TemporalPyramid
+        && (local_stem_window.is_some() || rig_local_grouping)
+    {
+        return Err(
+            "--pair-source temporal-pyramid owns rig grouping; do not combine it with --local-stem-window or --rig-local-grouping".into(),
+        );
+    }
     if pair_source == PairSource::VladUnion && local_stem_window.is_none() {
         return Err("--pair-source vlad-union requires --local-stem-window N".into());
     }
     if pair_source == PairSource::VladUnion && exhaustive {
         return Err("--pair-source vlad-union cannot be combined with --exhaustive".into());
     }
-    if candidate_budget.is_some() && pair_source != PairSource::VladUnion {
-        return Err("--candidate-budget currently requires --pair-source vlad-union".into());
+    if pair_source == PairSource::TemporalPyramid && exhaustive {
+        return Err("--pair-source temporal-pyramid cannot be combined with --exhaustive".into());
+    }
+    if candidate_budget.is_some()
+        && !matches!(
+            pair_source,
+            PairSource::VladUnion | PairSource::TemporalPyramid
+        )
+    {
+        return Err(
+            "--candidate-budget currently requires --pair-source vlad-union or temporal-pyramid"
+                .into(),
+        );
     }
     if pair_source == PairSource::VladUnion && pair_stem_window.is_some() {
         return Err(
             "--pair-source vlad-union uses --local-stem-window; do not combine it with --pair-stem-window".into(),
         );
     }
+    if pair_source == PairSource::TemporalPyramid && pair_stem_window.is_some() {
+        return Err(
+            "--pair-source temporal-pyramid uses rig timestamps; do not combine it with --pair-stem-window".into(),
+        );
+    }
     if candidate_manifest.is_some()
         && (exhaustive
             || local_stem_window.is_some()
+            || rig_local_grouping
             || candidate_budget.is_some()
             || pair_stem_window.is_some()
             || pair_source == PairSource::Transitive)
@@ -4614,6 +5118,7 @@ where
         }
         if pair_stem_window.is_some()
             || local_stem_window.is_some()
+            || rig_local_grouping
             || candidate_budget.is_some()
             || candidate_manifest.is_some()
             || export_candidate_manifest.is_some()
@@ -4649,14 +5154,6 @@ where
         // change model bytes merely because the demo default is Auto.
         next_image_policy = NextImagePolicy::CorrespondenceCount;
     }
-    if input_colmap_calibration.is_some()
-        && (import_verified_pairs_snapshot.is_some() || export_verified_pairs_snapshot.is_some())
-    {
-        return Err(
-            "verified-pair snapshots currently record one shared camera; do not combine snapshot import/export with --input-colmap-calibration"
-                .into(),
-        );
-    }
     validate_diagnose_options(
         diagnose_pairs_csv.as_deref(),
         &diagnose_pair_stems,
@@ -4687,10 +5184,13 @@ where
         exhaustive,
         pair_stem_window,
         local_stem_window,
+        rig_local_grouping,
+        temporal_pyramid_max_offset,
         candidate_budget,
         match_ratio,
         min_matches,
         min_pnp_inliers,
+        max_mapper_matches_per_pair,
         max_reproj,
         next_image_policy,
         final_ba,
@@ -4706,6 +5206,7 @@ where
         pnp_max_iterations,
         ba_max_iterations,
         ba_huber_delta,
+        ba_linear_solver,
         periodic_ba_min_registered_images,
         final_ba_polish_iterations,
         geometry_weighted_ba,
@@ -4856,9 +5357,11 @@ where
         export_features_dir,
         export_features_only,
         sift_stream_export,
+        sift_stream_resume,
         import_verified_pairs_file,
         export_verified_pairs_snapshot,
         import_verified_pairs_snapshot,
+        export_verified_pairs_only,
         snapshot_coordinate_override_dir,
         diagnose_ba_oracle_poses_file,
         diagnose_fixed_rotation_ba,
@@ -5387,6 +5890,7 @@ fn stream_export_images_with_sift(
     extra_stems: &[String],
     extra_keypoints: usize,
     extra_contrast_threshold: Option<f64>,
+    resume: bool,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let paths = list_sift_image_paths(dir)?;
     let image_names = paths
@@ -5404,11 +5908,20 @@ fn stream_export_images_with_sift(
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let extra_want: HashSet<&str> = extra_stems.iter().map(String::as_str).collect();
     eprintln!(
-        "sift-stream: extracting {} image(s) (output={output_dir:?}, calibration={}, dsp={dsp}, contrast={contrast_threshold}, vlfeat_detector={vlfeat_compatible_detector})",
+        "sift-stream: extracting {} image(s) (output={output_dir:?}, calibration={}, resume={resume}, dsp={dsp}, contrast={contrast_threshold}, vlfeat_detector={vlfeat_compatible_detector})",
         image_names.len(),
         calibration.is_some(),
     );
-    let total_keypoints = stream_export_features_with_loader(&paths, output_dir, |index, path| {
+    let mut stems = HashSet::new();
+    for name in &image_names {
+        let stem = image_stem(name);
+        if !stems.insert(stem.to_owned()) {
+            return Err(format!("duplicate source image stem {stem:?}").into());
+        }
+    }
+    std::fs::create_dir_all(output_dir)?;
+    let mut total_keypoints = 0usize;
+    for (index, path) in paths.iter().enumerate() {
         let stem = image_stem(&image_names[index]);
         let extra = if extra_keypoints > 0 && extra_want.contains(stem) {
             extra_keypoints
@@ -5419,6 +5932,70 @@ fn stream_export_images_with_sift(
             let camera = &loaded.native_cameras[index];
             (camera.width, camera.height)
         });
+        let expected_camera = calibration
+            .as_ref()
+            .map(|loaded| &loaded.native_cameras[index]);
+        let config_hash = sift_stream_config_hash(
+            &image_names[index],
+            max_keypoints,
+            affine,
+            detector,
+            multi_anisotropy,
+            dsp,
+            dsp_num_scales,
+            l1_root,
+            max_orientations,
+            standard_orientations,
+            prefer_larger_scale,
+            full_pyramid,
+            contrast_threshold,
+            descriptor_magnification,
+            scale_adaptive_gradients,
+            vlfeat_compatible_descriptor,
+            vlfeat_compatible_detector,
+            vlfeat_bilinear_orientations,
+            vlfeat_compatible_output_order,
+            colmap_compatible_grayscale,
+            split_colmap_detector_grayscale,
+            append_descriptor_magnification,
+            extra,
+            extra_contrast_threshold,
+            expected_dimensions,
+            expected_camera,
+        );
+        let feature_path = output_dir.join(format!("{stem}_features.txt"));
+        let metadata_path = output_dir.join(format!("{stem}_loci.txt"));
+        let manifest_path = sift_stream_manifest_path(output_dir, stem);
+        let source_digest = if resume {
+            Some(file_fnv1a64(path)?)
+        } else {
+            None
+        };
+        if let Some(source_digest) = source_digest {
+            if let Some(rows) = validate_sift_stream_manifest(
+                &manifest_path,
+                config_hash,
+                source_digest,
+                &feature_path,
+                &metadata_path,
+            )? {
+                total_keypoints = total_keypoints.saturating_add(rows);
+                eprintln!(
+                    "sift-stream: [{}/{}] {} -> {} kp (resumed)",
+                    index + 1,
+                    image_names.len(),
+                    image_names[index],
+                    rows,
+                );
+                continue;
+            }
+            eprintln!(
+                "sift-stream: [{}/{}] {} has no valid completion sidecar; re-extracting",
+                index + 1,
+                image_names.len(),
+                image_names[index],
+            );
+        }
         let started = std::time::Instant::now();
         let (features, _primary_count, _alternate, loci) = extract_sift_for_image(
             path,
@@ -5447,6 +6024,29 @@ fn stream_export_images_with_sift(
             extra_contrast_threshold,
             expected_dimensions,
         )?;
+        if features.keypoints.len() != loci.len() {
+            return Err(format!(
+                "SIFT extractor returned {} keypoints but {} locus rows for {path:?}",
+                features.keypoints.len(),
+                loci.len()
+            )
+            .into());
+        }
+        write_stream_file_atomically(&feature_path, &feature_export_text(&features))?;
+        write_stream_file_atomically(&metadata_path, &locus_metadata_text(&loci))?;
+        if let Some(source_digest) = source_digest {
+            let feature_digest = file_fnv1a64(&feature_path)?;
+            let metadata_digest = file_fnv1a64(&metadata_path)?;
+            write_sift_stream_manifest_atomically(
+                &manifest_path,
+                config_hash,
+                source_digest,
+                features.len(),
+                feature_digest,
+                metadata_digest,
+            )?;
+        }
+        total_keypoints = total_keypoints.saturating_add(features.len());
         eprintln!(
             "sift-stream: [{}/{}] {} -> {} kp in {:.1}s",
             index + 1,
@@ -5455,8 +6055,7 @@ fn stream_export_images_with_sift(
             features.len(),
             started.elapsed().as_secs_f64()
         );
-        Ok((features, loci))
-    })?;
+    }
     Ok(total_keypoints)
 }
 
@@ -5473,6 +6072,56 @@ fn export_features_to_dir(
     features: &[FeatureSet],
     locus_metadata: &[Option<Vec<FeatureLocusMetadata>>],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    export_features_to_dir_impl(dir, image_names, features, None, locus_metadata)
+}
+
+/// Export canonical descriptors with a parallel native-pixel keypoint sidecar.
+/// This is the calibration-aware counterpart to [`export_features_to_dir`];
+/// descriptors remain owned by the mapper feature bank and are never cloned
+/// merely to restore native coordinates for export.
+fn export_features_to_dir_with_native_keypoints(
+    dir: &Path,
+    image_names: &[String],
+    features: &[FeatureSet],
+    native_keypoints: &[Vec<Point2<f64>>],
+    locus_metadata: &[Option<Vec<FeatureLocusMetadata>>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    export_features_to_dir_impl(
+        dir,
+        image_names,
+        features,
+        Some(native_keypoints),
+        locus_metadata,
+    )
+}
+
+fn export_features_to_dir_impl(
+    dir: &Path,
+    image_names: &[String],
+    features: &[FeatureSet],
+    native_keypoints: Option<&[Vec<Point2<f64>>]>,
+    locus_metadata: &[Option<Vec<FeatureLocusMetadata>>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(native_keypoints) = native_keypoints {
+        if native_keypoints.len() != features.len() {
+            return Err(format!(
+                "native feature export: {} keypoint sets but {} feature sets",
+                native_keypoints.len(),
+                features.len()
+            )
+            .into());
+        }
+        for (image, (feature_set, keypoints)) in features.iter().zip(native_keypoints).enumerate() {
+            if feature_set.descriptors.len() != keypoints.len() {
+                return Err(format!(
+                    "native feature export: image {image} has {} descriptors but {} keypoints",
+                    feature_set.descriptors.len(),
+                    keypoints.len()
+                )
+                .into());
+            }
+        }
+    }
     std::fs::create_dir_all(dir)?;
     for (image_index, (name, feat)) in image_names.iter().zip(features).enumerate() {
         let stem = Path::new(name)
@@ -5480,7 +6129,13 @@ fn export_features_to_dir(
             .and_then(|s| s.to_str())
             .unwrap_or(name);
         let path = dir.join(format!("{stem}_features.txt"));
-        std::fs::write(&path, feature_export_text(feat))?;
+        let keypoints = native_keypoints
+            .map(|all| all[image_index].as_slice())
+            .unwrap_or(feat.keypoints.as_slice());
+        std::fs::write(
+            &path,
+            feature_export_text_with_keypoints(keypoints, &feat.descriptors),
+        )?;
         if let Some(loci) = locus_metadata
             .get(image_index)
             .and_then(|loci| loci.as_ref())
@@ -5492,9 +6147,17 @@ fn export_features_to_dir(
     Ok(())
 }
 
+#[cfg_attr(not(feature = "image-io"), allow(dead_code))]
 fn feature_export_text(features: &FeatureSet) -> String {
+    feature_export_text_with_keypoints(&features.keypoints, &features.descriptors)
+}
+
+fn feature_export_text_with_keypoints(
+    keypoints: &[Point2<f64>],
+    descriptors: &[Vec<f32>],
+) -> String {
     let mut out = String::from("# visloc external-deep feature export\n");
-    for (kp, desc) in features.keypoints.iter().zip(features.descriptors.iter()) {
+    for (kp, desc) in keypoints.iter().zip(descriptors.iter()) {
         out.push_str(&format!("{:.6} {:.6} {:.6}", kp.x, kp.y, 1.0));
         for value in desc.as_slice() {
             out.push_str(&format!(" {value:.6}"));
@@ -5536,11 +6199,246 @@ fn write_stream_file_atomically(
     Ok(())
 }
 
+/// Per-image completion marker for resumable SIFT stream exports.  The
+/// marker is deliberately separate from the feature/locus files: it is
+/// atomically installed last, so its presence never by itself makes a
+/// partially written pair look complete.
+#[cfg(feature = "image-io")]
+const SIFT_STREAM_MANIFEST_MAGIC: &str = "visloc_sift_stream_manifest_v1";
+
+#[cfg(feature = "image-io")]
+fn sift_stream_manifest_path(output_dir: &Path, stem: &str) -> PathBuf {
+    output_dir.join(format!("{stem}_sift_stream_manifest.txt"))
+}
+
+/// Return `(byte_count, FNV-1a-64)` for one completed source or output file.
+/// This is a stable corruption/configuration guard, not a cryptographic
+/// authenticity claim; the benchmark's top-level manifests use SHA-256 when
+/// a stronger artifact identity is required.
+#[cfg(feature = "image-io")]
+fn file_fnv1a64(path: &Path) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    let mut hash = 0xcbf29ce484222325u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| format!("file {path:?} is too large to hash"))?;
+        hash = fnv1a64_bytes_with_seed(hash, &buffer[..read]);
+    }
+    Ok((bytes, hash))
+}
+
+#[cfg(feature = "image-io")]
+fn fnv1a64_bytes_with_seed(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3u64);
+    }
+    hash
+}
+
+#[cfg(feature = "image-io")]
+#[allow(clippy::too_many_arguments)]
+fn sift_stream_config_hash(
+    image_name: &str,
+    max_keypoints: usize,
+    affine: bool,
+    detector: &str,
+    multi_anisotropy: bool,
+    dsp: bool,
+    dsp_num_scales: usize,
+    l1_root: bool,
+    max_orientations: usize,
+    standard_orientations: bool,
+    prefer_larger_scale: bool,
+    full_pyramid: bool,
+    contrast_threshold: f64,
+    descriptor_magnification: f64,
+    scale_adaptive_gradients: bool,
+    vlfeat_compatible_descriptor: bool,
+    vlfeat_compatible_detector: bool,
+    vlfeat_bilinear_orientations: bool,
+    vlfeat_compatible_output_order: bool,
+    colmap_compatible_grayscale: bool,
+    split_colmap_detector_grayscale: bool,
+    append_descriptor_magnification: Option<f64>,
+    extra_keypoints: usize,
+    extra_contrast_threshold: Option<f64>,
+    expected_dimensions: Option<(u32, u32)>,
+    expected_camera: Option<&Camera>,
+) -> u64 {
+    // Keep this explicit rather than hashing `Args`: `--sift-stream-resume`
+    // itself must not make a previously completed export stale, while every
+    // extraction-affecting option and per-image camera assignment must.
+    let snapshot = format!(
+        "visloc_sift_stream_resume_v1;image_name={image_name:?};max_keypoints={max_keypoints};affine={affine};detector={detector:?};multi_anisotropy={multi_anisotropy};dsp={dsp};dsp_num_scales={dsp_num_scales};l1_root={l1_root};max_orientations={max_orientations};standard_orientations={standard_orientations};prefer_larger_scale={prefer_larger_scale};full_pyramid={full_pyramid};contrast_threshold={contrast_threshold:?};descriptor_magnification={descriptor_magnification:?};scale_adaptive_gradients={scale_adaptive_gradients};vlfeat_compatible_descriptor={vlfeat_compatible_descriptor};vlfeat_compatible_detector={vlfeat_compatible_detector};vlfeat_bilinear_orientations={vlfeat_bilinear_orientations};vlfeat_compatible_output_order={vlfeat_compatible_output_order};colmap_compatible_grayscale={colmap_compatible_grayscale};split_colmap_detector_grayscale={split_colmap_detector_grayscale};append_descriptor_magnification={append_descriptor_magnification:?};extra_keypoints={extra_keypoints};extra_contrast_threshold={extra_contrast_threshold:?};expected_dimensions={expected_dimensions:?};expected_camera={expected_camera:?}"
+    );
+    effective_config_hash(&snapshot)
+}
+
+#[cfg(feature = "image-io")]
+fn parse_sift_stream_u64(fields: &HashMap<String, String>, key: &str) -> Option<u64> {
+    fields.get(key)?.parse().ok()
+}
+
+#[cfg(feature = "image-io")]
+fn parse_sift_stream_hex(fields: &HashMap<String, String>, key: &str) -> Option<u64> {
+    u64::from_str_radix(fields.get(key)?, 16).ok()
+}
+
+#[cfg(feature = "image-io")]
+fn count_sift_stream_rows(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path)?;
+    let mut rows = 0usize;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let line = line.trim();
+        if !line.is_empty() && !line.starts_with('#') {
+            rows = rows
+                .checked_add(1)
+                .ok_or_else(|| format!("row count overflow in {path:?}"))?;
+        }
+    }
+    Ok(rows)
+}
+
+#[cfg(feature = "image-io")]
+fn write_sift_stream_manifest_atomically(
+    path: &Path,
+    config_hash: u64,
+    source_digest: (u64, u64),
+    feature_rows: usize,
+    feature_digest: (u64, u64),
+    loci_digest: (u64, u64),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = format!(
+        "{SIFT_STREAM_MANIFEST_MAGIC}\nconfig_fnv1a64={config_hash:016x}\nsource_bytes={}\nsource_fnv1a64={:016x}\nfeature_rows={feature_rows}\nfeature_bytes={}\nfeature_fnv1a64={:016x}\nloci_bytes={}\nloci_fnv1a64={:016x}\n",
+        source_digest.0,
+        source_digest.1,
+        feature_digest.0,
+        feature_digest.1,
+        loci_digest.0,
+        loci_digest.1,
+    );
+    write_stream_file_atomically(path, &contents)
+}
+
+/// Validate a completion marker and all files it covers.  `Ok(None)` means
+/// that the output is absent, malformed, stale, or tampered and must be
+/// re-extracted; filesystem errors unrelated to absence remain hard errors.
+#[cfg(feature = "image-io")]
+fn validate_sift_stream_manifest(
+    path: &Path,
+    expected_config_hash: u64,
+    expected_source_digest: (u64, u64),
+    feature_path: &Path,
+    loci_path: &Path,
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut lines = text.lines();
+    if lines.next() != Some(SIFT_STREAM_MANIFEST_MAGIC) {
+        return Ok(None);
+    }
+    let mut fields = HashMap::new();
+    for line in lines {
+        let Some((key, value)) = line.split_once('=') else {
+            return Ok(None);
+        };
+        if key.is_empty()
+            || value.is_empty()
+            || fields.insert(key.to_owned(), value.to_owned()).is_some()
+        {
+            return Ok(None);
+        }
+    }
+    if fields.len() != 8 {
+        return Ok(None);
+    }
+    let config_hash = parse_sift_stream_hex(&fields, "config_fnv1a64");
+    let source_bytes = parse_sift_stream_u64(&fields, "source_bytes");
+    let source_hash = parse_sift_stream_hex(&fields, "source_fnv1a64");
+    let rows = fields
+        .get("feature_rows")
+        .and_then(|value| value.parse().ok());
+    let feature_bytes = parse_sift_stream_u64(&fields, "feature_bytes");
+    let feature_hash = parse_sift_stream_hex(&fields, "feature_fnv1a64");
+    let loci_bytes = parse_sift_stream_u64(&fields, "loci_bytes");
+    let loci_hash = parse_sift_stream_hex(&fields, "loci_fnv1a64");
+    let (
+        Some(config_hash),
+        Some(source_bytes),
+        Some(source_hash),
+        Some(rows),
+        Some(feature_bytes),
+        Some(feature_hash),
+        Some(loci_bytes),
+        Some(loci_hash),
+    ) = (
+        config_hash,
+        source_bytes,
+        source_hash,
+        rows,
+        feature_bytes,
+        feature_hash,
+        loci_bytes,
+        loci_hash,
+    )
+    else {
+        return Ok(None);
+    };
+    if config_hash != expected_config_hash || (source_bytes, source_hash) != expected_source_digest
+    {
+        return Ok(None);
+    }
+    let actual_feature = match file_fnv1a64(feature_path) {
+        Ok(digest) => digest,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let actual_loci = match file_fnv1a64(loci_path) {
+        Ok(digest) => digest,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    if actual_feature != (feature_bytes, feature_hash) || actual_loci != (loci_bytes, loci_hash) {
+        return Ok(None);
+    }
+    if count_sift_stream_rows(feature_path)? != rows || count_sift_stream_rows(loci_path)? != rows {
+        return Ok(None);
+    }
+    Ok(Some(rows))
+}
+
 /// Streaming counterpart to [`export_features_to_dir`].  The loader callback
 /// is invoked exactly once per path and its result is consumed and dropped
 /// before the next callback, so source images, pyramids, and descriptor banks
 /// are never accumulated across the directory.
 #[cfg(feature = "image-io")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn stream_export_features_with_loader<F>(
     paths: &[PathBuf],
     output_dir: &Path,
@@ -5673,26 +6571,26 @@ fn canonicalize_feature_order(
     Ok(old_to_new)
 }
 
-/// Apply an already-computed old-index → new-index permutation to a second
-/// feature representation (the native-pixel copy used by the multi-camera
-/// exporter).  Computing a fresh order from native pixels would be wrong when
-/// camera intrinsics differ, so this function consumes the mapper's exact map.
-fn remap_feature_sets_by_old_to_new(
-    features: &mut [FeatureSet],
+/// Apply the mapper's old-index → new-index permutation to the native pixel
+/// sidecar used by the multi-camera exporter.  Descriptors are intentionally
+/// absent from this sidecar: canonicalization changes only keypoint pixels,
+/// so the mapper's descriptor bank remains the single owner of each row.
+fn remap_feature_keypoints_by_old_to_new(
+    keypoints: &mut [Vec<Point2<f64>>],
     old_to_new: &[Vec<usize>],
 ) -> Result<(), String> {
-    if features.len() != old_to_new.len() {
+    if keypoints.len() != old_to_new.len() {
         return Err(format!(
-            "native feature order: {} feature sets but {} index maps",
-            features.len(),
+            "native keypoint order: {} feature sets but {} index maps",
+            keypoints.len(),
             old_to_new.len()
         ));
     }
-    for (image, (set, map)) in features.iter_mut().zip(old_to_new).enumerate() {
-        if set.len() != map.len() || map.iter().any(|&new| new >= map.len()) {
+    for (image, (image_keypoints, map)) in keypoints.iter_mut().zip(old_to_new).enumerate() {
+        if image_keypoints.len() != map.len() || map.iter().any(|&new| new >= map.len()) {
             return Err(format!(
-                "native feature order: image {image} has {} rows but map has {} entries",
-                set.len(),
+                "native keypoint order: image {image} has {} rows but map has {} entries",
+                image_keypoints.len(),
                 map.len()
             ));
         }
@@ -5700,20 +6598,54 @@ fn remap_feature_sets_by_old_to_new(
         for &new_index in map {
             if std::mem::replace(&mut seen[new_index], true) {
                 return Err(format!(
-                    "native feature order: image {image} permutation contains duplicate index {new_index}"
+                    "native keypoint order: image {image} permutation contains duplicate index {new_index}"
                 ));
             }
         }
-        let old_keypoints = std::mem::take(&mut set.keypoints);
-        let old_descriptors = std::mem::take(&mut set.descriptors);
-        let mut keypoints = vec![Point2::new(0.0, 0.0); map.len()];
-        let mut descriptors = vec![Vec::new(); map.len()];
+        let old_keypoints = std::mem::take(image_keypoints);
+        let mut reordered = vec![Point2::new(0.0, 0.0); map.len()];
         for (old_index, &new_index) in map.iter().enumerate() {
-            keypoints[new_index] = old_keypoints[old_index];
-            descriptors[new_index] = old_descriptors[old_index].clone();
+            reordered[new_index] = old_keypoints[old_index];
         }
-        set.keypoints = keypoints;
-        set.descriptors = descriptors;
+        *image_keypoints = reordered;
+    }
+    Ok(())
+}
+
+/// Replace compacted mapper feature keypoints with native-pixel coordinates
+/// for COLMAP's multi-camera exporter.  The descriptor vectors are retained
+/// from `output_features`; the writer consumes only the keypoint coordinates.
+fn replace_feature_keypoints_from_native(
+    output_features: &mut [FeatureSet],
+    source_indices: &[usize],
+    native_keypoints: &[Vec<Point2<f64>>],
+) -> Result<(), String> {
+    if output_features.len() != source_indices.len() {
+        return Err(format!(
+            "native export: {} output feature sets but {} source indices",
+            output_features.len(),
+            source_indices.len()
+        ));
+    }
+    for (output_index, (&source_index, output)) in source_indices
+        .iter()
+        .zip(output_features.iter_mut())
+        .enumerate()
+    {
+        let source = native_keypoints.get(source_index).ok_or_else(|| {
+            format!(
+                "native export: source image {source_index} is outside 0..{}",
+                native_keypoints.len()
+            )
+        })?;
+        if source.len() != output.descriptors.len() {
+            return Err(format!(
+                "native export: output image {output_index} has {} descriptors but source image {source_index} has {} keypoints",
+                output.descriptors.len(),
+                source.len()
+            ));
+        }
+        output.keypoints = source.clone();
     }
     Ok(())
 }
@@ -7614,6 +8546,7 @@ fn candidate_pairs_vlad_mutual(
 /// Candidate pairs from a bounded union of local numeric-stem overlap and
 /// VLAD retrieval. Local edges are selected before retrieval edges under a
 /// budget, then retrieval-only edges are ranked by pre-match VLAD score.
+#[cfg(test)]
 fn candidate_pairs_vlad_union(
     features: &[FeatureSet],
     image_names: &[String],
@@ -7622,8 +8555,31 @@ fn candidate_pairs_vlad_union(
     local_window: u64,
     budget: Option<usize>,
 ) -> Result<Vec<(usize, usize)>, String> {
-    let local =
-        filter_pairs_by_stem_window(all_pairs(features.len()), image_names, Some(local_window))?;
+    candidate_pairs_vlad_union_with_grouping(
+        features,
+        image_names,
+        vocab_size,
+        topk,
+        local_window,
+        budget,
+        false,
+    )
+}
+
+fn candidate_pairs_vlad_union_with_grouping(
+    features: &[FeatureSet],
+    image_names: &[String],
+    vocab_size: usize,
+    topk: usize,
+    local_window: u64,
+    budget: Option<usize>,
+    rig_local_grouping: bool,
+) -> Result<Vec<(usize, usize)>, String> {
+    let local = if rig_local_grouping {
+        rig_local_pairs(image_names, local_window)?
+    } else {
+        filter_pairs_by_stem_window(all_pairs(features.len()), image_names, Some(local_window))?
+    };
     let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
     let local_set: HashSet<(usize, usize)> = local.iter().copied().collect();
     let mut ranked: Vec<((usize, usize), bool, f32)> = retrieval
@@ -7741,13 +8697,22 @@ fn candidate_pairs(
             args.retrieval_topk,
             args.exhaustive,
         )),
-        PairSource::VladUnion => candidate_pairs_vlad_union(
+        PairSource::VladUnion => candidate_pairs_vlad_union_with_grouping(
             features,
             image_names,
             args.vocab_size,
             args.retrieval_topk,
             args.local_stem_window
                 .expect("validated vlad-union local window"),
+            args.candidate_budget,
+            args.rig_local_grouping,
+        ),
+        PairSource::TemporalPyramid => candidate_pairs_temporal_pyramid(
+            features,
+            image_names,
+            args.vocab_size,
+            args.retrieval_topk,
+            args.temporal_pyramid_max_offset,
             args.candidate_budget,
         ),
         PairSource::VocabTree | PairSource::Transitive => Ok(candidate_pairs_vocab_tree(
@@ -7758,6 +8723,77 @@ fn candidate_pairs(
             args.exhaustive,
         )),
     }
+}
+
+/// Metadata written beside generated candidate pairs.  It is intentionally
+/// descriptive rather than used to reconstruct pairs: the image-name-bound
+/// pair list remains the authority, while this block makes an archived
+/// manifest auditable and lets sharding tools preserve the exact schedule.
+fn candidate_manifest_metadata(args: &Args) -> BTreeMap<String, String> {
+    let mut metadata = BTreeMap::new();
+    let (policy, pair_source) = match args.pair_source {
+        PairSource::Vlad => ("vlad-topk-v1", "vlad"),
+        PairSource::VladMutual => ("vlad-mutual-v1", "vlad-mutual"),
+        PairSource::VladUnion => ("vlad-union-v1", "vlad-union"),
+        PairSource::TemporalPyramid => ("temporal-pyramid-v1", "temporal-pyramid"),
+        PairSource::VocabTree => ("vocab-tree-v1", "vocab-tree"),
+        PairSource::Transitive => ("transitive-v1", "transitive"),
+    };
+    metadata.insert("candidate_policy".to_owned(), policy.to_owned());
+    metadata.insert("pair_source".to_owned(), pair_source.to_owned());
+    metadata.insert("retrieval_topk".to_owned(), args.retrieval_topk.to_string());
+    if args.pair_source == PairSource::VladUnion {
+        metadata.insert(
+            "local_grouping".to_owned(),
+            if args.rig_local_grouping {
+                "rig-prefix-timestamp-v1"
+            } else {
+                "unique-numeric-stem-v1"
+            }
+            .to_owned(),
+        );
+        metadata.insert(
+            "cross_camera_rule".to_owned(),
+            if args.rig_local_grouping {
+                "same-timestamp"
+            } else {
+                "none"
+            }
+            .to_owned(),
+        );
+        metadata.insert(
+            "local_stem_window".to_owned(),
+            args.local_stem_window
+                .expect("validated vlad-union local window")
+                .to_string(),
+        );
+        metadata.insert(
+            "candidate_budget".to_owned(),
+            args.candidate_budget
+                .map_or_else(|| "none".to_owned(), |budget| budget.to_string()),
+        );
+    }
+    if args.pair_source == PairSource::TemporalPyramid {
+        metadata.insert(
+            "local_grouping".to_owned(),
+            "rig-prefix-timestamp-v1".to_owned(),
+        );
+        metadata.insert("cross_camera_rule".to_owned(), "same-timestamp".to_owned());
+        metadata.insert(
+            "temporal_offsets".to_owned(),
+            temporal_pyramid_offsets_string(args.temporal_pyramid_max_offset),
+        );
+        metadata.insert(
+            "temporal_pyramid_max_offset".to_owned(),
+            args.temporal_pyramid_max_offset.to_string(),
+        );
+        metadata.insert(
+            "candidate_budget".to_owned(),
+            args.candidate_budget
+                .map_or_else(|| "none".to_owned(), |budget| budget.to_string()),
+        );
+    }
+    metadata
 }
 
 /// One round of COLMAP's `TransitivePairGenerator` (`src/colmap/pairing.cc`):
@@ -12696,6 +13732,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &args.sift_extra_keypoints_stems,
                 args.sift_extra_keypoints,
                 args.sift_extra_contrast_threshold,
+                args.sift_stream_resume,
             )?;
             println!(
                 "streaming SIFT export complete: {} image(s), {} keypoints -> {}",
@@ -12764,13 +13801,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?
         }
     };
+    log_process_memory("example-after-feature-load");
     // A per-image COLMAP calibration is represented internally by converting
     // each native pixel to the first image's pinhole convention.  This keeps
     // descriptor/index identity and the established mapper API intact while
     // making every normalized ray use its own focal length/principal point.
-    // Retain native feature pixels for the multi-camera COLMAP export.
+    // Retain only native feature pixels for the multi-camera COLMAP export.
+    // Descriptors are unchanged by calibration and remain in `features`.
     let mut per_image_calibration: Option<LoadedPerImageCalibration> = None;
-    let mut native_features_for_export: Option<Vec<FeatureSet>> = None;
+    let mut native_keypoints_for_export: Option<Vec<Vec<Point2<f64>>>> = None;
     if let Some(model_dir) = args.input_colmap_calibration.as_deref() {
         let loaded = load_input_colmap_calibration(
             model_dir,
@@ -12778,8 +13817,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &features,
             args.images_dir.as_deref(),
         )?;
-        let native_features = features.clone();
-        features = loaded.rig.canonicalize_features(&features)?;
+        if !loaded.rig.has_shared_geometry() {
+            native_keypoints_for_export = Some(
+                features
+                    .iter()
+                    .map(|feature_set| feature_set.keypoints.clone())
+                    .collect(),
+            );
+        }
+        loaded.rig.canonicalize_features_in_place(&mut features)?;
         args.camera = loaded.rig.reference_camera().clone();
         println!(
             "per-image calibration: {} image cameras, {} unique camera definitions, reference CAMERA_ID={} (internal ray canonicalization; intrinsics fixed)",
@@ -12792,8 +13838,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .len(),
             args.camera.id,
         );
-        native_features_for_export = Some(native_features);
         per_image_calibration = Some(loaded);
+        log_process_memory("example-after-calibration-canonicalization");
     }
     let config_snapshot = effective_config_snapshot(&args);
     println!(
@@ -12810,8 +13856,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let canonical_feature_index_map =
         if args.canonical_feature_order || canonicalize_locus_feature_order {
             let map = canonicalize_feature_order(&mut features, &mut alternate_descriptors)?;
-            if let Some(native_features) = native_features_for_export.as_mut() {
-                remap_feature_sets_by_old_to_new(native_features, &map)?;
+            if let Some(native_keypoints) = native_keypoints_for_export.as_mut() {
+                remap_feature_keypoints_by_old_to_new(native_keypoints, &map)?;
             }
             remap_locus_metadata(&mut locus_metadata, &map).map_err(|error| error.to_string())?;
             println!(
@@ -12888,8 +13934,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if let Some(dir) = &args.export_features_dir {
-        let export_features = native_features_for_export.as_ref().unwrap_or(&features);
-        export_features_to_dir(dir, &image_names, export_features, &locus_metadata)?;
+        if let Some(native_keypoints) = native_keypoints_for_export.as_ref() {
+            export_features_to_dir_with_native_keypoints(
+                dir,
+                &image_names,
+                &features,
+                native_keypoints,
+                &locus_metadata,
+            )?;
+        } else {
+            export_features_to_dir(dir, &image_names, &features, &locus_metadata)?;
+        }
         println!(
             "export features: {} file(s) -> {}",
             image_names.len(),
@@ -12934,7 +13989,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // camera, pair order, and correspondence hashes; once it succeeds the
     // mapper receives the stored stream verbatim and no descriptor matcher or
     // verifier is consulted.
-    let imported_snapshot = if let Some(path) = args.import_verified_pairs_snapshot.as_deref() {
+    let mut imported_snapshot = if let Some(path) = args.import_verified_pairs_snapshot.as_deref() {
         let snapshot = verified_pair_snapshot::read(path).map_err(std::io::Error::other)?;
         let pairwise = validate_snapshot_for_run(&snapshot, &image_names, &features, &args.camera)
             .map_err(|error| {
@@ -12951,10 +14006,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ordered_pairwise_edge_hash(&pairwise),
             unordered_pairwise_edge_hash(&pairwise),
         );
-        Some((snapshot, pairwise))
+        let stats = verification_stats_from_snapshot(&snapshot)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        // Snapshot metadata is needed only when the caller explicitly asks to
+        // re-export a snapshot.  Ordinary replay feeds PairwiseMatches to the
+        // mapper and must not retain the lossless raw-match/index streams.
+        let metadata = if args.export_verified_pairs_snapshot.is_some() {
+            snapshot_metadata_map_from_snapshot(&snapshot)
+        } else {
+            HashMap::new()
+        };
+        // `validate_snapshot_for_run` has completed all manifest, camera,
+        // configuration, and pair-order/hash checks.  PairwiseMatches owns
+        // the mapper stream now; release the decoded snapshot before any
+        // candidate/matcher/mapper state is built.
+        drop(snapshot);
+        log_process_memory("example-after-snapshot-release");
+        Some((pairwise, stats, metadata))
     } else {
         None
     };
+    let snapshot_imported = imported_snapshot.is_some();
+    log_process_memory("example-after-snapshot-import");
 
     // Coordinate overrides are intentionally applied only after the immutable
     // snapshot has validated against the base features.  The replacement
@@ -12962,7 +14035,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // imported pair stream remains an exact topology/model control: only the
     // pixels used for track triangulation/BA change.
     if let Some(override_dir) = args.snapshot_coordinate_override_dir.as_deref() {
-        let Some((_, imported_pairs)) = imported_snapshot.as_ref() else {
+        let Some((imported_pairs, _, _)) = imported_snapshot.as_ref() else {
             return Err(
                 "--snapshot-coordinate-override-dir requires a validated snapshot import".into(),
             );
@@ -13014,7 +14087,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // diagnostics keep their historical no-model/no-extra-work behavior.
     let mut alternate_descriptors = Some(alternate_descriptors);
     let mut prebuilt_pair_matcher =
-        if imported_snapshot.is_none() && args.sift_append_descriptor_magnification.is_some() {
+        if !snapshot_imported && args.sift_append_descriptor_magnification.is_some() {
             Some(build_matcher(
                 &args,
                 &primary_keypoint_counts,
@@ -13136,7 +14209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // candidate-pair generation step below.
     let pair_matcher = match prebuilt_pair_matcher.take() {
         Some(matcher) => matcher,
-        None if imported_snapshot.is_some() => PairMatcher::Nn,
+        None if snapshot_imported => PairMatcher::Nn,
         None => build_matcher(
             &args,
             &primary_keypoint_counts,
@@ -13145,7 +14218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "pair matcher: {}",
-        if imported_snapshot.is_some() {
+        if snapshot_imported {
             "snapshot (matching/verifier bypassed)"
         } else {
             match args.matcher {
@@ -13169,7 +14242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let generated = candidate_pairs(&features, &image_names, &args)?;
         let generated =
             filter_pairs_by_stem_window(generated, &image_names, args.pair_stem_window)?;
-        write_candidate_manifest(path, &image_names, &generated)?;
+        let metadata = candidate_manifest_metadata(&args);
+        write_candidate_manifest_with_metadata(path, &image_names, &generated, &metadata)?;
         println!(
             "candidate manifest: exported {} pairs for {} images to {}",
             generated.len(),
@@ -13178,14 +14252,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    let mut all_candidates = if imported_snapshot.is_some() {
+    let mut all_candidates = if snapshot_imported {
         Vec::new()
     } else if let Some(path) = args.candidate_manifest.as_deref() {
         parse_candidate_manifest(path, &image_names)?
     } else {
         candidate_pairs(&features, &image_names, &args)?
     };
-    if imported_snapshot.is_none() && args.sequence_relative_pose_fallback {
+    if !snapshot_imported && args.sequence_relative_pose_fallback {
         let before = all_candidates.len();
         let added = append_consecutive_stem_candidates(&mut all_candidates, &image_names)?;
         if added > 0 {
@@ -13196,7 +14270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let candidate_count_before_window = all_candidates.len();
-    let candidates = if imported_snapshot.is_some() {
+    let candidates = if snapshot_imported {
         Vec::new()
     } else {
         filter_pairs_by_stem_window(all_candidates, &image_names, args.pair_stem_window)?
@@ -13223,26 +14297,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match args.pair_source {
                 PairSource::Vlad => "VLAD top-k",
                 PairSource::VladMutual => "VLAD mutual top-k",
-                PairSource::VladUnion => "local stem + VLAD union",
+                PairSource::VladUnion => {
+                    if args.rig_local_grouping {
+                        "rig-local stem + VLAD union"
+                    } else {
+                        "local stem + VLAD union"
+                    }
+                }
+                PairSource::TemporalPyramid => "temporal pyramid + VLAD fill",
                 PairSource::VocabTree => "vocab-tree",
                 PairSource::Transitive => "transitive (vocab-tree base)",
             }
         },
     );
 
-    let (mut pairwise, mut verification_stats, mut snapshot_metadata) = if let Some((
-        snapshot,
-        imported,
-    )) =
-        imported_snapshot.as_ref()
-    {
-        let stats = verification_stats_from_snapshot(snapshot)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        (
-            imported.clone(),
-            stats,
-            snapshot_metadata_map_from_snapshot(snapshot),
-        )
+    let (mut pairwise, mut verification_stats, mut snapshot_metadata) = if snapshot_imported {
+        imported_snapshot
+            .take()
+            .expect("snapshot_imported is true only when the import state exists")
     } else if let Some(path) = &args.import_verified_pairs_file {
         if args.import_matches_file.is_some() || args.import_matches_supplement_file.is_some() {
             return Err(
@@ -13342,6 +14414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         (pairwise, stats, metadata)
     };
+    log_process_memory("example-after-pairwise-materialization");
     if std::env::var_os("VISLOC_SFM_DEBUG_DUMP_ESSENTIAL_QUALITY").is_some() {
         // `verify_pairs` emitted one bounded, machine-readable quality row per
         // attempted report.  Stop before rematching/track construction so the
@@ -13355,8 +14428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if imported_snapshot.is_none() && !args.rematch_stems.is_empty() && !args.rematch_free_vs_priors
-    {
+    if !snapshot_imported && !args.rematch_stems.is_empty() && !args.rematch_free_vs_priors {
         let n = rematch_stem_pairs(
             &features,
             &image_names,
@@ -13382,7 +14454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.rematch_stems, args.rematch_ratio, args.rematch_cross_check, n
         );
     }
-    if imported_snapshot.is_none() && args.pair_source == PairSource::Transitive {
+    if !snapshot_imported && args.pair_source == PairSource::Transitive {
         let mut all_proposed: HashSet<(usize, usize)> = candidates.iter().copied().collect();
         for _ in 0..TRANSITIVE_ROUNDS {
             let extension = filter_pairs_by_stem_window(
@@ -13428,7 +14500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pairwise.extend(more);
         }
     }
-    let sequence_fallback_high_support_override_pair_indices = if imported_snapshot.is_none()
+    let sequence_fallback_high_support_override_pair_indices = if !snapshot_imported
         && args.sequence_relative_pose_fallback
     {
         if args.sequence_constant_velocity_scale {
@@ -13466,7 +14538,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new()
     };
     let verified_matches: usize = pairwise.iter().map(|p| p.matches.len()).sum();
-    let attempted_pairs = if imported_snapshot.is_some() {
+    let attempted_pairs = if snapshot_imported {
         pairwise.len()
     } else {
         candidates.len()
@@ -13603,7 +14675,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // bridge pairs are appended to `pairwise`, the same list `incremental_sfm`
     // consumes below, so a successful bridge participates in track building
     // exactly like any other verified pair.
-    if imported_snapshot.is_none() && args.rescue_bridging {
+    if !snapshot_imported && args.rescue_bridging {
         let bridges = rescue_bridging(
             &features,
             &image_names,
@@ -13615,7 +14687,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pairwise.extend(bridges);
     }
 
-    if imported_snapshot.is_none() && args.orientation_locus_canonicalization {
+    if !snapshot_imported && args.orientation_locus_canonicalization {
         let locus_stats = canonicalize_pairwise_loci(
             &features,
             &locus_metadata,
@@ -13640,7 +14712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // apply the explicit legacy-union diagnostic before any mapper consumes
     // the verified stream.  The default `Original` path is a no-op.
     let edge_hash_before = unordered_pairwise_edge_hash(&pairwise);
-    if imported_snapshot.is_none() {
+    if !snapshot_imported {
         apply_union_traversal_order_with_features(
             &mut pairwise,
             args.union_traversal_order,
@@ -13695,6 +14767,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_or(default_ba_config.robust_kernel, |delta| {
                     RobustKernel::Huber { delta }
                 }),
+            linear_solver: args
+                .ba_linear_solver
+                .unwrap_or(default_ba_config.linear_solver),
             refine_distortion: args.refine_distortion,
             ..default_ba_config
         },
@@ -13759,6 +14834,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path.display(),
         );
     }
+    // Snapshot metadata is needed for export and sequence-fallback decisions
+    // only.  Both have completed before mapping starts; do not carry the
+    // lossless raw-match/index copies into track building or BA.
+    drop(snapshot_metadata);
+    if snapshot_imported {
+        log_process_memory("example-after-snapshot-metadata-release");
+    }
+    if args.export_verified_pairs_only {
+        // This mode is the resumable match-shard worker.  The complete
+        // verified stream is durable at this point; track construction and
+        // mapping intentionally happen only once after all shards merge.
+        println!(
+            "verified-pair export-only: mapping skipped; snapshot is complete at {}",
+            args.export_verified_pairs_snapshot
+                .as_deref()
+                .expect("validated export-only path")
+                .display(),
+        );
+        return Ok(());
+    }
+    if let Some(limit) = args.max_mapper_matches_per_pair {
+        let cap_stats = cap_mapper_pair_matches(&mut pairwise, limit);
+        println!(
+            "mapper match cap: limit={} pairs_capped={} matches {}=>{} essential {}=>{} (verified snapshot/diagnostics retain full stream)",
+            limit,
+            cap_stats.pairs_capped,
+            cap_stats.matches_before,
+            cap_stats.matches_after,
+            cap_stats.essential_before,
+            cap_stats.essential_after,
+        );
+    }
+    log_process_memory("example-after-mapper-cap");
     let gt_path = args
         .gt_chirality_oracle_path
         .as_ref()
@@ -13801,6 +14909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.mapper == MapperKind::Global || args.mapper == MapperKind::Hybrid {
         let mut rematch_prefer_e_pairs: Vec<(usize, usize)> = Vec::new();
         let pose_priors = if args.mapper == MapperKind::Hybrid {
+            log_process_memory("example-before-incremental-mapper");
             let inc = incremental_sfm(&args.camera, &features, &pairwise, &config)?;
             let mut priors = if args.hybrid_filter_priors {
                 let (filtered, kept) = filter_pose_priors_by_track_quality(
@@ -14098,6 +15207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("hybrid: metric scale row from prior–prior baseline");
         }
         let gt_slice = gt_poses_aligned.as_deref();
+        log_process_memory("example-before-global-mapper");
         let (mut poses, mut tracks, mut mean_reproj) = match pose_priors.as_ref() {
             Some(priors) => reconstruct_global_sfm_with_priors(
                 &args.camera,
@@ -14110,6 +15220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?,
             None => reconstruct_global_sfm(&args.camera, &features, &pairwise, &tuning, &config)?,
         };
+        log_process_memory("example-after-global-mapper");
         if args.rematch_pose_guided_after_global {
             if let Some(priors) = pose_priors.as_ref() {
                 let gt_guide = match args.rematch_pose_guided_gt.as_ref() {
@@ -14196,7 +15307,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("hybrid: rematch-pose-guided-after-global skipped (no pose priors)");
             }
         }
-        let registered = poses.iter().filter(|p| p.is_some()).count();
+        let registered_indices: Vec<usize> = poses
+            .iter()
+            .enumerate()
+            .filter_map(|(image, pose)| pose.is_some().then_some(image))
+            .collect();
+        let registered = registered_indices.len();
         println!(
             "reconstruction: mapper={}: {} / {} images registered, {} tracks, mean reproj {:.3} px",
             match args.mapper {
@@ -14211,41 +15327,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Compact the pose list to only registered images so the shared
         // COLMAP export path applies unchanged.
-        let mut remap = HashMap::new();
-        for (image, pose) in poses.iter().enumerate() {
-            if pose.is_some() {
-                remap.insert(image, remap.len());
-            }
+        let mut remap = HashMap::with_capacity(registered_indices.len());
+        for (output_index, &image) in registered_indices.iter().enumerate() {
+            remap.insert(image, output_index);
         }
-        let poses_out: Vec<Pose> = poses
+        let poses_out: Vec<Pose> = registered_indices
             .iter()
-            .enumerate()
-            .filter(|(i, p)| p.is_some() && remap.contains_key(i))
-            .map(|(_, p)| p.clone().unwrap())
+            .map(|&image| poses[image].clone().expect("registered pose is present"))
             .collect();
-        let features_out: Vec<FeatureSet> = (0..features.len())
-            .filter(|i| remap.contains_key(i))
-            .map(|i| features[i].clone())
+        let mut features_out: Vec<FeatureSet> = registered_indices
+            .iter()
+            .map(|&image| features[image].clone())
             .collect();
-        let export_features_out: Vec<FeatureSet> = native_features_for_export
-            .as_ref()
-            .map(|native| {
-                (0..features.len())
-                    .filter(|i| remap.contains_key(i))
-                    .map(|i| native[i].clone())
-                    .collect()
-            })
-            .unwrap_or_else(|| features_out.clone());
+        if let Some(native_keypoints) = native_keypoints_for_export.as_ref() {
+            replace_feature_keypoints_from_native(
+                &mut features_out,
+                &registered_indices,
+                native_keypoints,
+            )
+            .map_err(std::io::Error::other)?;
+        }
         let export_cameras_out: Option<Vec<Camera>> =
             per_image_calibration.as_ref().map(|loaded| {
-                (0..features.len())
-                    .filter(|i| remap.contains_key(i))
-                    .map(|i| loaded.native_cameras[i].clone())
+                registered_indices
+                    .iter()
+                    .map(|&image| loaded.native_cameras[image].clone())
                     .collect()
             });
-        let names_out: Vec<String> = (0..features.len())
-            .filter(|i| remap.contains_key(i))
-            .map(|i| image_names[i].clone())
+        let names_out: Vec<String> = registered_indices
+            .iter()
+            .map(|&image| image_names[image].clone())
             .collect();
         let landmarks_out: Vec<ExportLandmark> = tracks
             .iter()
@@ -14263,7 +15374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &args.out_colmap,
                 cameras_out,
                 &poses_out,
-                &export_features_out,
+                &features_out,
                 &landmarks_out,
                 |k| names_out[k].clone(),
             )?
@@ -14286,6 +15397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    log_process_memory("example-before-incremental-mapper");
     let mut result = if let Some(membership) = colmap_track_membership.as_ref() {
         incremental_sfm_with_track_membership(
             &args.camera,
@@ -14314,6 +15426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_poses.as_deref(),
         )?
     };
+    log_process_memory("example-after-incremental-mapper");
     if let Some(oracle_path) = args.diagnose_ba_oracle_poses_file.as_deref() {
         let (scale, initial_reprojection, final_reprojection, ba_result) =
             run_oracle_pose_ba_probe(
@@ -14451,11 +15564,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|&i| result.poses[i].clone().unwrap())
         .collect();
-    let features_out: Vec<FeatureSet> = registered.iter().map(|&i| features[i].clone()).collect();
-    let export_features_out: Vec<FeatureSet> = native_features_for_export
-        .as_ref()
-        .map(|native| registered.iter().map(|&i| native[i].clone()).collect())
-        .unwrap_or_else(|| features_out.clone());
+    let mut features_out: Vec<FeatureSet> =
+        registered.iter().map(|&i| features[i].clone()).collect();
+    if let Some(native_keypoints) = native_keypoints_for_export.as_ref() {
+        replace_feature_keypoints_from_native(&mut features_out, &registered, native_keypoints)
+            .map_err(std::io::Error::other)?;
+    }
     let names_out: Vec<String> = registered.iter().map(|&i| image_names[i].clone()).collect();
     let export_cameras_out: Option<Vec<Camera>> = per_image_calibration.as_ref().map(|loaded| {
         registered
@@ -14481,7 +15595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &args.out_colmap,
             cameras_out,
             &poses_out,
-            &export_features_out,
+            &features_out,
             &landmarks_out,
             |k| names_out[k].clone(),
         )?
@@ -14510,25 +15624,29 @@ mod diagnose_cli_tests {
     use super::{
         apply_snapshot_coordinate_override, apply_union_traversal_order,
         apply_union_traversal_order_with_features, candidate_pairs_vlad_union,
-        canonicalize_feature_order, canonicalize_pairwise_loci, colmap_guided_geometry,
-        colmap_guided_matches, descriptor_squared_distance, effective_config_hash,
-        effective_config_snapshot, filter_imported_verified_pairs_by_stem_window,
-        filter_pairs_by_stem_window, imported_reference_quality_is_strong,
-        initial_poses_from_colmap_images_txt,
+        canonicalize_feature_order, canonicalize_pairwise_loci, cap_mapper_pair_matches,
+        colmap_guided_geometry, colmap_guided_matches, descriptor_squared_distance,
+        effective_config_hash, effective_config_snapshot,
+        filter_imported_verified_pairs_by_stem_window, filter_pairs_by_stem_window,
+        imported_reference_quality_is_strong, initial_poses_from_colmap_images_txt,
         initial_poses_from_colmap_images_txt_with_expected_cameras, load_input_colmap_calibration,
         match_candidate_cmp, model_cross_validation_is_held_out,
         model_cross_validation_is_held_out_for_pixels, model_cross_validation_selection_score,
-        parse_args_from, parse_candidate_manifest, parse_colmap_image_camera_assignments,
-        parse_colmap_track_membership, parse_diagnose_stems, robust_huber_mean,
-        summarize_model_cross_validation_bucket, translation_direction_delta_deg,
-        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
-        write_candidate_manifest, Camera, ColmapTrackMembership, ConfigurationType,
-        EssentialPairQuality, FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig,
+        parse_args_from, parse_candidate_manifest, parse_candidate_manifest_with_metadata,
+        parse_colmap_image_camera_assignments, parse_colmap_track_membership, parse_diagnose_stems,
+        remap_feature_keypoints_by_old_to_new, replace_feature_keypoints_from_native,
+        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean,
+        summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
+        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
+        verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
+        Camera, ColmapTrackMembership, ConfigurationType, EssentialPairQuality,
+        FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver,
         ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
         RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
     };
     use nalgebra::{Matrix3, Point2, Vector3};
     use std::cmp::Ordering as CmpOrdering;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use visloc_rs::vision::features::FeatureSet;
     use visloc_rs::DescriptorMatch;
@@ -14597,6 +15715,33 @@ mod diagnose_cli_tests {
     }
 
     #[test]
+    fn mapper_match_cap_is_opt_in_and_preserves_verified_prefixes() {
+        let defaults = parse_args_from(minimal_args(&[])).unwrap();
+        assert!(defaults.max_mapper_matches_per_pair.is_none());
+        assert!(parse_args_from(minimal_args(&["--max-mapper-matches-per-pair", "0",])).is_err());
+
+        let mut pairwise = vec![PairwiseMatches {
+            image_i: 0,
+            image_j: 1,
+            matches: vec![(0, 10), (1, 11), (2, 12)],
+            two_view_config: Some(ConfigurationType::Calibrated),
+            essential_matches: Some(vec![(0, 10), (2, 12)]),
+            essential_matrix: Some(Matrix3::identity()),
+        }];
+        let stats = cap_mapper_pair_matches(&mut pairwise, 2);
+        assert_eq!(stats.pairs_capped, 1);
+        assert_eq!(stats.matches_before, 3);
+        assert_eq!(stats.matches_after, 2);
+        assert_eq!(stats.essential_before, 2);
+        assert_eq!(stats.essential_after, 2);
+        assert_eq!(pairwise[0].matches, vec![(0, 10), (1, 11)]);
+        assert_eq!(
+            pairwise[0].essential_matches.as_deref(),
+            Some(&[(0, 10), (2, 12)][..])
+        );
+    }
+
+    #[test]
     fn candidate_manifest_round_trip_binds_image_order_and_rejects_duplicates() {
         let root =
             std::env::temp_dir().join(format!("visloc_candidate_manifest_{}", std::process::id()));
@@ -14645,9 +15790,48 @@ mod diagnose_cli_tests {
         assert!(matches!(union.pair_source, super::PairSource::VladUnion));
         assert_eq!(union.local_stem_window, Some(3));
         assert_eq!(union.candidate_budget, Some(200));
+        let rig = parse_args_from(minimal_args(&[
+            "--pair-source",
+            "vlad-union",
+            "--local-stem-window",
+            "3",
+            "--rig-local-grouping",
+        ]))
+        .unwrap();
+        assert!(rig.rig_local_grouping);
         assert!(parse_args_from(minimal_args(&["--pair-source", "vlad-union",])).is_err());
         assert!(parse_args_from(minimal_args(&["--local-stem-window", "3",])).is_err());
+        assert!(parse_args_from(minimal_args(&["--rig-local-grouping",])).is_err());
         assert!(parse_args_from(minimal_args(&["--candidate-budget", "0",])).is_err());
+
+        let temporal = parse_args_from(minimal_args(&[
+            "--pair-source",
+            "temporal-pyramid",
+            "--temporal-pyramid-max-offset",
+            "64",
+            "--candidate-budget",
+            "12000",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            temporal.pair_source,
+            super::PairSource::TemporalPyramid
+        ));
+        assert_eq!(temporal.temporal_pyramid_max_offset, 64);
+        assert_eq!(temporal.candidate_budget, Some(12000));
+        assert!(parse_args_from(minimal_args(&[
+            "--pair-source",
+            "temporal-pyramid",
+            "--temporal-pyramid-max-offset",
+            "0",
+        ]))
+        .is_err());
+        assert!(parse_args_from(minimal_args(&[
+            "--pair-source",
+            "temporal-pyramid",
+            "--rig-local-grouping",
+        ]))
+        .is_err());
     }
 
     #[test]
@@ -14667,6 +15851,104 @@ mod diagnose_cli_tests {
         assert_eq!(first, second);
         assert!(first.len() <= 3);
         assert!(first.iter().all(|&(i, j)| i < j && j < features.len()));
+    }
+
+    #[test]
+    fn rig_local_grouping_keeps_temporal_edges_per_camera_and_adds_same_timestamp_edges() {
+        let names = vec![
+            "cam4_100.png".to_owned(),
+            "cam4_102.png".to_owned(),
+            "cam4_110.png".to_owned(),
+            "cam5_100.png".to_owned(),
+            "cam5_103.png".to_owned(),
+            "cam6_100.png".to_owned(),
+        ];
+        let pairs = rig_local_pairs(&names, 3).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, 1), // cam4 temporal, difference 2
+                (0, 3), // cam4/cam5 same timestamp
+                (0, 5), // cam4/cam6 same timestamp
+                (3, 4), // cam5 temporal, difference 3
+                (3, 5), // cam5/cam6 same timestamp
+            ]
+        );
+        assert!(!pairs.contains(&(1, 3))); // different timestamps/cameras
+        assert!(!pairs.contains(&(2, 3))); // outside cam4 temporal window
+    }
+
+    #[test]
+    fn rig_local_grouping_rejects_duplicate_timestamp_within_one_camera() {
+        let names = vec![
+            "cam4_100.png".to_owned(),
+            "cam4_100.jpg".to_owned(),
+            "cam5_100.png".to_owned(),
+        ];
+        let error = rig_local_pairs(&names, 3).unwrap_err();
+        assert!(error.contains("repeats timestamp 100"));
+    }
+
+    #[test]
+    fn temporal_pyramid_uses_positional_offsets_and_same_timestamp_rig_edges() {
+        let names = vec![
+            "cam4_100.png".to_owned(),
+            "cam4_300.png".to_owned(),
+            "cam4_900.png".to_owned(),
+            "cam4_1400.png".to_owned(),
+            "cam5_100.png".to_owned(),
+            "cam5_900.png".to_owned(),
+        ];
+        let (temporal, cross) = rig_temporal_pyramid_pairs(&names, 2).unwrap();
+        // Offset 1 connects adjacent positions even though timestamp gaps
+        // are irregular; offset 2 connects the first and third positions.
+        assert_eq!(
+            temporal,
+            vec![(0, 1), (1, 2), (2, 3), (4, 5), (0, 2), (1, 3)]
+        );
+        assert_eq!(cross, vec![(0, 4), (2, 5)]);
+        assert_eq!(temporal_pyramid_offsets_string(64), "1,2,4,8,16,32,64");
+    }
+
+    #[test]
+    fn temporal_pyramid_rejects_duplicate_timestamp_within_camera_but_allows_rig_duplicate() {
+        let names = vec![
+            "cam4_100.png".to_owned(),
+            "cam4_100.jpg".to_owned(),
+            "cam5_100.png".to_owned(),
+        ];
+        let error = rig_temporal_pyramid_pairs(&names, 32).unwrap_err();
+        assert!(error.contains("repeats timestamp 100"));
+        let names = vec!["cam4_100.png".to_owned(), "cam5_100.png".to_owned()];
+        let (temporal, cross) = rig_temporal_pyramid_pairs(&names, 32).unwrap();
+        assert!(temporal.is_empty());
+        assert_eq!(cross, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn candidate_manifest_metadata_is_canonical_and_round_trips() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_candidate_manifest_metadata_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("pairs.txt");
+        let names = vec!["cam4_100.png".to_owned(), "cam5_100.png".to_owned()];
+        let mut metadata = BTreeMap::new();
+        metadata.insert("pair_source".to_owned(), "vlad-union".to_owned());
+        metadata.insert(
+            "local_grouping".to_owned(),
+            "rig-prefix-timestamp-v1".to_owned(),
+        );
+        write_candidate_manifest_with_metadata(&path, &names, &[(0, 1)], &metadata).unwrap();
+        let (pairs, parsed) = parse_candidate_manifest_with_metadata(&path, &names).unwrap();
+        assert_eq!(pairs, vec![(0, 1)]);
+        assert_eq!(parsed, metadata);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("metadata local_grouping rig-prefix-timestamp-v1\n"));
+        assert!(text.contains("metadata pair_source vlad-union\n"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -15020,6 +16302,28 @@ mod diagnose_cli_tests {
         assert_eq!(first_alternate, second_alternate);
         assert_eq!(first_map[0], vec![1, 0]);
         assert_eq!(second_map[0], vec![0, 1]);
+    }
+
+    #[test]
+    fn native_keypoint_sidecar_reorders_without_copying_descriptors() {
+        let mut native = vec![vec![Point2::new(100.0, 1.0), Point2::new(200.0, 2.0)]];
+        remap_feature_keypoints_by_old_to_new(&mut native, &[vec![1, 0]]).unwrap();
+        assert_eq!(
+            native[0],
+            vec![Point2::new(200.0, 2.0), Point2::new(100.0, 1.0)]
+        );
+
+        let mut output = vec![FeatureSet::new(
+            vec![Point2::new(10.0, 1.0), Point2::new(20.0, 2.0)],
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+        )
+        .unwrap()];
+        let descriptor_storage = output[0].descriptors.as_ptr();
+        let descriptors = output[0].descriptors.clone();
+        replace_feature_keypoints_from_native(&mut output, &[0], &native).unwrap();
+        assert_eq!(output[0].keypoints, native[0]);
+        assert_eq!(output[0].descriptors, descriptors);
+        assert_eq!(output[0].descriptors.as_ptr(), descriptor_storage);
     }
 
     #[test]
@@ -15771,6 +17075,18 @@ mod diagnose_cli_tests {
             );
         }
         assert!(parse_args_from(minimal_args(&["--ba-huber-delta"])).is_err());
+        let sparse_solver =
+            parse_args_from(minimal_args(&["--ba-linear-solver", "sparse"])).unwrap();
+        assert_eq!(sparse_solver.ba_linear_solver, Some(LinearSolver::Sparse));
+        let dense_solver = parse_args_from(minimal_args(&["--ba-linear-solver", "dense"])).unwrap();
+        assert_eq!(dense_solver.ba_linear_solver, Some(LinearSolver::Dense));
+        for invalid_solver in ["", "foo", "DENSE"] {
+            assert!(
+                parse_args_from(minimal_args(&["--ba-linear-solver", invalid_solver])).is_err(),
+                "invalid BA linear solver {invalid_solver:?} was accepted"
+            );
+        }
+        assert!(parse_args_from(minimal_args(&["--ba-linear-solver"])).is_err());
         let periodic_deferred =
             parse_args_from(minimal_args(&["--periodic-ba-min-registered-images", "32"])).unwrap();
         assert_eq!(periodic_deferred.periodic_ba_min_registered_images, 32);
@@ -16006,6 +17322,14 @@ mod diagnose_cli_tests {
         ]))
         .is_err());
         assert!(parse_args_from(minimal_args(&["--import-verified-pairs-snapshot", "",])).is_err());
+        let export_only = parse_args_from(minimal_args(&[
+            "--export-verified-pairs-snapshot",
+            "/tmp/pairs.vps",
+            "--export-verified-pairs-only",
+        ]))
+        .unwrap();
+        assert!(export_only.export_verified_pairs_only);
+        assert!(parse_args_from(minimal_args(&["--export-verified-pairs-only"])).is_err());
     }
 
     #[test]
@@ -16369,6 +17693,7 @@ mod diagnose_cli_tests {
         assert!(matches!(first.track_source, super::TrackSource::UnionFind));
         assert!(!first.export_features_only);
         assert!(!first.sift_stream_export);
+        assert!(!first.sift_stream_resume);
         assert!(first.import_matches_file.is_none());
         assert!(first.import_matches_supplement_file.is_none());
         assert!(!first.sift_stream_export);
@@ -16415,9 +17740,12 @@ mod diagnose_cli_tests {
             "/tmp/sift-features",
             "--export-features-only",
             "--sift-stream-export",
+            "--sift-stream-resume",
         ]))
         .unwrap();
         assert!(stream.sift_stream_export);
+        assert!(stream.sift_stream_resume);
+        assert!(parse_args_from(minimal_args(&["--sift-stream-resume"])).is_err());
         assert!(parse_args_from(minimal_args(&["--sift-stream-export"])).is_err());
         assert!(parse_args_from(minimal_args(&[
             "--export-features-dir",
@@ -16951,7 +18279,12 @@ mod append_only_matcher_tests {
 
 #[cfg(all(test, feature = "image-io"))]
 mod sift_stream_tests {
-    use super::{export_features_to_dir, stream_export_features_with_loader, FeatureLocusMetadata};
+    use super::{
+        export_features_to_dir, export_features_to_dir_with_native_keypoints, feature_export_text,
+        feature_export_text_with_keypoints, file_fnv1a64, locus_metadata_text,
+        sift_stream_manifest_path, stream_export_features_with_loader,
+        validate_sift_stream_manifest, write_sift_stream_manifest_atomically, FeatureLocusMetadata,
+    };
     use nalgebra::Point2;
     use std::cell::Cell;
     use std::fs;
@@ -17060,6 +18393,129 @@ mod sift_stream_tests {
         assert!(!output_dir.join("b_features.txt").exists());
         assert!(!output_dir.join("a_loci.txt").exists());
         assert!(!output_dir.join(".a_features.txt.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_coordinate_export_reuses_canonical_descriptor_rows() {
+        let root = test_root("native-coordinate-export");
+        let output_dir = root.join("features");
+        let names = vec!["image.png".to_owned()];
+        let features = vec![FeatureSet::new(
+            vec![Point2::new(10.0, 20.0), Point2::new(30.0, 40.0)],
+            vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+        )
+        .unwrap()];
+        let native_keypoints = vec![vec![Point2::new(100.0, 200.0), Point2::new(300.0, 400.0)]];
+        let loci = vec![None];
+        export_features_to_dir_with_native_keypoints(
+            &output_dir,
+            &names,
+            &features,
+            &native_keypoints,
+            &loci,
+        )
+        .unwrap();
+        let exported = fs::read_to_string(output_dir.join("image_features.txt")).unwrap();
+        assert_eq!(
+            exported,
+            feature_export_text_with_keypoints(&native_keypoints[0], &features[0].descriptors)
+        );
+        assert!(exported.contains("100.000000 200.000000"));
+        assert!(exported.contains("0.100000 0.200000"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resume_manifest_requires_matching_config_source_and_outputs() {
+        let root = test_root("resume-manifest");
+        let source = root.join("source.png");
+        let output_dir = root.join("features");
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(&source, b"source-image-bytes").unwrap();
+        let (features, loci) = sample_features(3);
+        let feature_path = output_dir.join("source_features.txt");
+        let loci_path = output_dir.join("source_loci.txt");
+        fs::write(&feature_path, feature_export_text(&features)).unwrap();
+        fs::write(&loci_path, locus_metadata_text(&loci)).unwrap();
+        let source_digest = file_fnv1a64(&source).unwrap();
+        let feature_digest = file_fnv1a64(&feature_path).unwrap();
+        let loci_digest = file_fnv1a64(&loci_path).unwrap();
+        let manifest = sift_stream_manifest_path(&output_dir, "source");
+        write_sift_stream_manifest_atomically(
+            &manifest,
+            0x1234,
+            source_digest,
+            features.len(),
+            feature_digest,
+            loci_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_sift_stream_manifest(
+                &manifest,
+                0x1234,
+                source_digest,
+                &feature_path,
+                &loci_path,
+            )
+            .unwrap(),
+            Some(features.len())
+        );
+
+        let mut tampered = fs::read(&feature_path).unwrap();
+        let last = tampered.len() - 1;
+        tampered[last] = if tampered[last] == b'\n' { b' ' } else { b'\n' };
+        fs::write(&feature_path, tampered).unwrap();
+        assert_eq!(
+            validate_sift_stream_manifest(
+                &manifest,
+                0x1234,
+                source_digest,
+                &feature_path,
+                &loci_path,
+            )
+            .unwrap(),
+            None
+        );
+        fs::write(&feature_path, feature_export_text(&features)).unwrap();
+        assert!(validate_sift_stream_manifest(
+            &manifest,
+            0x9999,
+            source_digest,
+            &feature_path,
+            &loci_path,
+        )
+        .unwrap()
+        .is_none());
+        assert!(validate_sift_stream_manifest(
+            &manifest,
+            0x1234,
+            (source_digest.0 + 1, source_digest.1),
+            &feature_path,
+            &loci_path,
+        )
+        .unwrap()
+        .is_none());
+        let mut changed_source = fs::read(&source).unwrap();
+        changed_source[0] ^= 1;
+        fs::write(&source, changed_source).unwrap();
+        let changed_source_digest = file_fnv1a64(&source).unwrap();
+        assert!(validate_sift_stream_manifest(
+            &manifest,
+            0x1234,
+            changed_source_digest,
+            &feature_path,
+            &loci_path,
+        )
+        .unwrap()
+        .is_none());
+        assert!(!manifest
+            .with_file_name(format!(
+                ".{}.tmp",
+                manifest.file_name().unwrap().to_string_lossy()
+            ))
+            .exists());
         let _ = fs::remove_dir_all(root);
     }
 }
