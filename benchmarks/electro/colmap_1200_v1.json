@@ -1,0 +1,71 @@
+{
+  "schema": "visloc_electro_colmap_control_config_v1",
+  "benchmark": {
+    "id": "eth3d-electro-colmap-candidate-12000-v1",
+    "scene": "electro",
+    "description": "Official COLMAP CPU-SIFT control using exactly the frozen 12000-pair visloc candidate list."
+  },
+  "protocol": {
+    "image_count": 1200,
+    "camera_count": 4,
+    "candidate_budget": 12000,
+    "candidate_policy": "temporal-pyramid-v1",
+    "candidate_source": "validated candidates/index.json; no reference poses or points",
+    "pair_schedule": "matches_importer match_type=pairs; one pair per line; candidate order preserved",
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "colmap": {
+    "version": "3.9.1",
+    "feature_extractor": {
+      "algorithm": "SIFT",
+      "use_gpu": false,
+      "threads": 8,
+      "max_num_features": 2048,
+      "max_image_size": 5000,
+      "first_octave": -1,
+      "peak_threshold": 0.0066666667,
+      "max_num_orientations": 2,
+      "camera_model": "PINHOLE",
+      "intrinsics": "official undistorted cameras.txt, one feature_extractor invocation per camera"
+    },
+    "matching": {
+      "command": "matches_importer",
+      "match_type": "pairs",
+      "use_gpu": false,
+      "threads": 8,
+      "max_ratio": 0.8,
+      "cross_check": true,
+      "min_num_inliers": 8,
+      "max_error_px": 4.0,
+      "multiple_models": true
+    },
+    "mapper": {
+      "command": "mapper",
+      "multiple_models": false,
+      "min_model_size": 10,
+      "threads": 8,
+      "abs_pose_min_num_inliers": 8,
+      "ba_refine_focal_length": false,
+      "ba_refine_principal_point": false,
+      "ba_refine_extra_params": false
+    }
+  },
+  "timing": {
+    "wrapper": "/usr/bin/time -v",
+    "phase_files": [
+      "timing/feature_cam4.time.txt",
+      "timing/feature_cam5.time.txt",
+      "timing/feature_cam6.time.txt",
+      "timing/feature_cam7.time.txt",
+      "timing/matches_importer.time.txt",
+      "timing/mapper.time.txt"
+    ],
+    "comparison_rule": "sum the four feature phases; compare exact pair matching and mapper phases separately"
+  },
+  "scoring": {
+    "command": "scripts/score_electro_model.py",
+    "reference_role": "post-mapping score only",
+    "metrics": ["registered", "common", "sim3_scale", "rmse_m", "median_m", "p95_m", "max_m", "relative_rmse"],
+    "name_key": "(camera number, numeric timestamp)"
+  }
+}
