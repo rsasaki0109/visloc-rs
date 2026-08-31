@@ -2,8 +2,8 @@
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
-**ブランチ:** `perf/ba-block-reduced-system`
-**現在地:** M0/M1/M2 は main へ統合済み。M3 items 1–2 は実装・Electro A/B済みでPR前。純visual BAのdirect 6x6 block Schur + direct Cholesky transfer + symbolic reuseにより、1,200枚championをbyte-identicalに保ったままBA中央値 **15.0%短縮**（153.764→130.681 s）、mapper wall **1366.75 s / COLMAP比3.61×高速**。peak RSSは3.83 GiBのままなので、次はM3 item 3以降とfeature/snapshot常駐メモリ削減。M2 qualityは **1200/1200、RMSE 0.03224 m**（COLMAP: 1200/1200、0.04679 m）。
+**ブランチ:** `perf/electro-m3-global-ba-audit`
+**現在地:** M0/M1/M2 とM3 items 1–2は main へ統合済み。M3 item 5のquality-gated BA scheduleはPR前。`--global-ba-max-refinements 0 --ba-max-iterations 8`により9 solveを4 solveへ減らし、2回のbyte-identical runで **1200/1200、RMSE 0.03501 m、mapper core中央212.925 s、wall中央268.49 s**。同一12,000 pairのCOLMAP mapperより **18.36×高速**。5-iteration controlはRMSE 0.06788 mで不採用。peak RSSは3.83 GiBのままなので、次はM3のfeature/snapshot/track/factor所有権を直接監査し、2 GiBを狙う。
 
 今後の実装順、数値ゲート、PR境界、停止条件は
 [`docs/electro_performance_roadmap.md`](electro_performance_roadmap.md) を正とする。

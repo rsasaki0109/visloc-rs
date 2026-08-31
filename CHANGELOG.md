@@ -6,6 +6,15 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Quality-gated Electro BA schedule (2026-09-01).** Added the explicit
+  `--global-ba-max-refinements` control without changing its five-round
+  default. The frozen 1,200-image champion passes at zero follow-up rounds and
+  eight LM iterations: two byte-identical runs register 1200/1200 at 0.03501 m
+  RMSE, with 212.93 s median mapper core and 268.49 s median wall. That is
+  18.36x faster than the same-pair COLMAP mapper and 80.4% below the prior
+  visloc wall. The five-iteration control was rejected at 0.06788 m RMSE.
+  Peak RSS remains 3.83 GiB and is still open work.
+
 - **Pure-visual block Schur BA and symbolic reuse (2026-09-01).** Sparse
   pure-visual BA now assembles deterministic 6x6 pose blocks directly, retains
   only the lower Schur triangle, moves those blocks into the Cholesky numeric

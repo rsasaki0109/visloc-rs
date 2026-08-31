@@ -391,6 +391,11 @@
 //! schedule diagnostic: it defers periodic BA until `N` cameras are registered
 //! (`0` keeps the historical schedule), without suppressing the configured
 //! final BA.
+//! `--global-ba-max-refinements N` overrides the maximum number of follow-up
+//! global BA → complete → filter rounds used by `--colmap-style` or
+//! `--final-iterative-refinement`; `0` keeps the initial global BA and skips
+//! follow-up rounds.  Omission preserves [`IncrementalSfmConfig`]'s default of
+//! `5`, and this control does not affect the ordinary one-shot final BA.
 //! `--ba-linear-solver dense|sparse` is a default-off solver A/B for the
 //! Schur-reduced BA system; omission keeps the historical dense backend.
 //! `--diagnose-model-score MODEL/images.txt` reads a completed COLMAP model and
@@ -2100,6 +2105,9 @@ struct Args {
     /// Plain-growth final pass: iterative global BA + filter + re-triangulate
     /// (COLMAP final polish without colmap-style per-registration local BA).
     final_iterative_global_refinement: bool,
+    /// Optional cap on follow-up global BA → complete → filter rounds in the
+    /// iterative refinement schedule. `None` preserves the library default.
+    global_ba_max_refinements: Option<usize>,
     /// After final refinement, give each missing image one bounded PnP attempt
     /// against the tightened structure. Default off.
     post_refinement_registration: bool,
@@ -3777,6 +3785,7 @@ where
     let mut refine_distortion = false;
     let mut colmap_style = false;
     let mut final_iterative_global_refinement = false;
+    let mut global_ba_max_refinements: Option<usize> = None;
     let mut post_refinement_registration = false;
     let mut structureless_registration = false;
     let mut guided_matching = false;
@@ -4204,6 +4213,17 @@ where
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
             "--final-iterative-refinement" => final_iterative_global_refinement = true,
+            "--global-ba-max-refinements" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--global-ba-max-refinements requires a non-negative integer")?
+                    .clone();
+                let refinements: usize = raw.parse().map_err(|error| {
+                    format!("--global-ba-max-refinements must be a non-negative integer: {error}")
+                })?;
+                a.remove(i + 1);
+                global_ba_max_refinements = Some(refinements);
+            }
             "--post-refinement-registration" => post_refinement_registration = true,
             "--structureless-registration" => structureless_registration = true,
             "--sequence-relative-pose-fallback" => sequence_relative_pose_fallback = true,
@@ -5201,6 +5221,7 @@ where
         refine_distortion,
         colmap_style,
         final_iterative_global_refinement,
+        global_ba_max_refinements,
         post_refinement_registration,
         structureless_registration,
         pnp_max_iterations,
@@ -14754,7 +14775,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let default_ba_config = IncrementalSfmConfig::default().ba_config;
+    let default_sfm_config = IncrementalSfmConfig::default();
+    let default_ba_config = default_sfm_config.ba_config;
     let config = IncrementalSfmConfig {
         min_seed_matches: args.min_matches,
         min_pnp_inliers: args.min_pnp_inliers,
@@ -14786,6 +14808,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         final_ba_polish_iterations: args.final_ba_polish_iterations,
         colmap_style_mapper: args.colmap_style,
         final_iterative_global_refinement: args.final_iterative_global_refinement,
+        global_ba_max_refinements: args
+            .global_ba_max_refinements
+            .unwrap_or(default_sfm_config.global_ba_max_refinements),
         structureless_registration: args.structureless_registration,
         verify_registration_two_view: args.verify_registration_two_view,
         sequence_relative_pose_fallback: args.sequence_relative_pose_fallback,
@@ -17074,6 +17099,23 @@ mod diagnose_cli_tests {
         let ba_enabled = parse_args_from(minimal_args(&["--ba-max-iterations", "40"])).unwrap();
         assert_eq!(ba_enabled.ba_max_iterations, Some(40));
         assert!(parse_args_from(minimal_args(&["--ba-max-iterations", "0"])).is_err());
+        let global_ba_rounds =
+            parse_args_from(minimal_args(&["--global-ba-max-refinements", "0"])).unwrap();
+        assert_eq!(global_ba_rounds.global_ba_max_refinements, Some(0));
+        let global_ba_rounds_explicit =
+            parse_args_from(minimal_args(&["--global-ba-max-refinements", "3"])).unwrap();
+        assert_eq!(global_ba_rounds_explicit.global_ba_max_refinements, Some(3));
+        for invalid_rounds in ["-1", "not-a-number"] {
+            assert!(
+                parse_args_from(minimal_args(&[
+                    "--global-ba-max-refinements",
+                    invalid_rounds
+                ]))
+                .is_err(),
+                "invalid global BA refinement cap {invalid_rounds:?} was accepted"
+            );
+        }
+        assert!(parse_args_from(minimal_args(&["--global-ba-max-refinements"])).is_err());
         let huber_enabled = parse_args_from(minimal_args(&["--ba-huber-delta", "1.0"])).unwrap();
         assert_eq!(huber_enabled.ba_huber_delta, Some(1.0));
         for invalid_delta in ["0", "-1", "NaN", "inf"] {
@@ -17632,6 +17674,7 @@ mod diagnose_cli_tests {
         assert!(!first.refine_distortion);
         assert!(!first.colmap_style);
         assert!(!first.final_iterative_global_refinement);
+        assert_eq!(first.global_ba_max_refinements, None);
         assert!(!first.post_refinement_registration);
         assert!(!first.structureless_registration);
         assert!(!first.guided_matching);
