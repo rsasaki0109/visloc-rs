@@ -1604,7 +1604,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
                 Ok(post) => {
                     if sfm_debug_enabled() {
                         eprintln!(
-                            "sfm-auto: post completion rejected policy={selected_policy:?} registered={}/{} -> {}/{} (strict increase required) elapsed={:.3}s total={:.3}s",
+                            "sfm-auto: post completion rejected policy={selected_policy:?} registered={}/{} -> {}/{} (strict increase and non-increasing finite reprojection required) elapsed={:.3}s total={:.3}s",
                             selected.registered_images,
                             features.len(),
                             post.registered_images,
@@ -10175,14 +10175,24 @@ fn next_image_auto_post_candidate_is_needed(registered_images: usize, total_imag
 }
 
 /// Post-refinement completion is a registration-only fallback.  A candidate
-/// is adopted only when it strictly adds registered images; equal-support
-/// results retain the untouched pre-post candidate, including its tracks,
-/// poses, and BA state.
+/// is adopted only when it strictly adds registered images without worsening
+/// the finite mean reprojection error.  Equal-support results retain the
+/// untouched pre-post candidate, including its tracks, poses, and BA state.
 fn next_image_auto_post_candidate_is_better(
     candidate: &IncrementalSfmResult,
     incumbent: &IncrementalSfmResult,
 ) -> bool {
-    candidate.registered_images > incumbent.registered_images
+    if candidate.registered_images <= incumbent.registered_images {
+        return false;
+    }
+
+    let candidate_error = candidate.mean_reprojection_px;
+    if !candidate_error.is_finite() {
+        return false;
+    }
+
+    let incumbent_error = incumbent.mean_reprojection_px;
+    !incumbent_error.is_finite() || candidate_error <= incumbent_error
 }
 
 /// Compare two completed Auto candidates in the documented lexicographic
@@ -15845,6 +15855,17 @@ mod tests {
             &candidate, &baseline
         ));
 
+        // A registration gain must not be allowed to replace a materially
+        // cleaner incumbent with a finite but much worse post candidate.
+        candidate.mean_reprojection_px = 100.0;
+        assert!(!next_image_auto_post_candidate_is_better(
+            &candidate, &baseline
+        ));
+        candidate.mean_reprojection_px = 1.0;
+        assert!(next_image_auto_post_candidate_is_better(
+            &candidate, &baseline
+        ));
+
         // A post pass may improve reprojection or change tracks while leaving
         // registration unchanged. Auto must retain the untouched candidate in
         // that case, so the primary model's bytes/trajectory are stable.
@@ -15856,6 +15877,20 @@ mod tests {
 
         candidate.registered_images = baseline.registered_images.saturating_sub(1);
         assert!(!next_image_auto_post_candidate_is_better(
+            &candidate, &baseline
+        ));
+        candidate.registered_images = baseline.registered_images + 1;
+        candidate.mean_reprojection_px = f64::NAN;
+        assert!(!next_image_auto_post_candidate_is_better(
+            &candidate, &baseline
+        ));
+
+        // A finite post candidate can repair an incumbent whose aggregate
+        // reprojection metric is unavailable, while a non-finite candidate
+        // can never be adopted.
+        baseline.mean_reprojection_px = f64::NAN;
+        candidate.mean_reprojection_px = 0.5;
+        assert!(next_image_auto_post_candidate_is_better(
             &candidate, &baseline
         ));
         baseline.registered_images = 0;

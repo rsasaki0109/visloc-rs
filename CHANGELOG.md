@@ -6,6 +6,89 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Milestone 4 large-scale unordered-SfM plan (2026-08-31).** Added a
+  planning-only, primary-source-linked runbook for scaling from the frozen
+  courtyard control to ETH3D `electro` (300-image probe, then 1,200 images),
+  10k+ scene-sharded validation, and optional 100k+/million-image datasets.
+  It defines licensing/availability caveats, O(NK) retrieval, bounded
+  candidate manifests, atomic resumable feature/match shards, component
+  recovery, resource ceilings, metrics, stop/go gates, and preservation of the
+  exhaustive 38/38 / 0.005379 m courtyard gate. No dataset was downloaded or
+  large run launched.
+
+- **Bounded pre-match candidate schedules (2026-08-31).** Milestone 3 adds
+  deterministic `vlad-mutual` and bounded `vlad-union` candidate sources plus
+  the image-name-bound, atomic `visloc_candidate_manifest_v1` export/import
+  path. Selection uses only numeric-stem local overlap and pre-match VLAD
+  retrieval; frozen raw matches are consumed only after selection for
+  verification replay, with no GT or extrinsic input. On the immutable
+  high-resolution courtyard artifact, exhaustive control was **703** candidates,
+  **366** verified / **261,724** inliers, **38/38**, **43,852 tracks / 152,432
+  observations**, 0.579 px and **0.5379 cm**. The local-window≤3 + VLAD top-8
+  union capped at **200** candidates (**172** verified / **199,871** inliers)
+  and retained **38/38**, **45,016 / 148,192**, 0.537 px and **0.66 cm**
+  (71.6% fewer proposed pairs; manifest SHA-256
+  `2d654b9e…5ed32c1`). Non-mutual VLAD top-8 used 188 candidates and reached
+  38/38 but 14.17 cm; mutual top-8 used 116 and reached 13/38 (33.97 cm on
+  its partial subset); sequential stem≤3 used 108 and reached 23/38 (1.08 cm
+  on its partial subset); vocab-tree top-4 used 104 and reached 38/38 but was
+  slower and not a ≤1 cm result. The Python benchmark now exposes named
+  schedules, manifest validation, `--allow-incomplete` negative A/B JSON,
+  candidate/verification/mapping counters and elapsed time; exhaustive remains
+  the default/control and the reduced 200-pair result is not the README
+  champion.
+
+- **Office milestone-2 evidence and Auto post quality guard (2026-08-31).** On
+  the frozen `office-authoritative-venv` feature cache, exhaustive `.8` +
+  cross-check raised the candidate graph to **325 pairs**, but the safe
+  verified graph still had a 23-image component and isolated `DSC_0238`–
+  `DSC_0240`; the exact current Auto run remained **17/26** before post and
+  **18/26** after one post-registration addition (`1,082` tracks / `3,037`
+  observations, `1.512 px`).  The missing no-flag images were
+  `DSC_0236`–`DSC_0241`, `DSC_0253`, and `DSC_0254`; `.8` cross-check had zero
+  verified support for `DSC_0238`–`DSC_0240`.  A bounded `.9` cross-check
+  control reached **21/26** but still left `DSC_0237`–`DSC_0241` incomplete;
+  no-cross-check rescue connected the graph but was rejected for unsafe
+  conflicts.  Auto post candidates now require both a strict registration
+  increase and finite, non-increasing mean reprojection error, so extra
+  registrations cannot silently replace a cleaner model.  The change is
+  general/default-safe and does not lower PnP thresholds or admit unverified
+  bridges; focused Auto tests, release example check, and the frozen Office
+  rerun passed.  Under safe `.8` verification, the graph gives a hard
+  connectivity ceiling below 26/26; no unsupported pose was fabricated.
+
+- **Office high-density frontend rescue diagnostic (2026-08-31).** A genuine
+  `colmap/colmap:latest` CPU run (COLMAP `4.2.0.dev0`) on the full-resolution
+  26-image Office set, with supplied PINHOLE intrinsics only, produced
+  **167,891** SIFT rows, **325/325** raw pairs and **173** non-empty verified
+  pairs (**83,438** inliers).  Official COLMAP mapping reached **26/26** with
+  13,425 points / 44,979 observations and 0.50 cm calibration-reference
+  centre RMSE.  The same exported keypoints/descriptors through visloc's
+  existing NN/full-verifier path reached **26/26**, 17,772 tracks / 47,503
+  observations, 0.380 px mean reprojection, and 0.34 cm centre RMSE.
+  Bounded SuperPoint/LightGlue rematching of the frozen cache reached only
+  **21/26** (88/325 verified, 7,641 inliers), with `DSC_0238`–`DSC_0240`
+  still lacking raw support.  The existing explicit supplement/import path
+  is the reusable deterministic artifact-merge mechanism; no automatic
+  cross-frontend trigger is added because the successful official SIFT arm is
+  a separate diagnostic frontend and the learned rescue does not provide a
+  safe complete candidate.  Durable models, DB, feature export, hashes and
+  logs are under
+  `runs/office-colmap-sift8192-20260831`; exact commands and per-image
+  support are recorded in the current handover.
+
+- **Courtyard benchmark automation (2026-08-31).** Added the
+  hash-pinned `scripts/benchmark_courtyard.sh` / JSON manifest entry point.
+  Its dependency-free verify-only smoke validates the durable 38-image,
+  439,481-feature, exhaustive 703-pair / 306,324-raw-match artifact, both
+  38/38 text models, and the README PNG/GIF/table claims; the stored visloc
+  control is **0.005379 m** centre RMSE (under the **0.01 m** gate). `--full`
+  reruns the recorded per-image-calibration mapping and emits deterministic
+  JSON/logs, with optional COLMAP validation/run and visual regeneration.
+  Large dataset-derived files remain external; hosted CI runs only parser,
+  hash/threshold tests and shell syntax, with self-hosted instructions in
+  [the benchmark guide](docs/courtyard_benchmark.md).
+
 - **Auto demo-default closure and snapshot compatibility (2026-08-31).** The
   two SfM demos now omit `--next-image-policy` as `Auto`, while
   `IncrementalSfmConfig::default()` remains historical `CorrespondenceCount`.
