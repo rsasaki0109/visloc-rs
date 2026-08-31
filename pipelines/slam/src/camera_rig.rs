@@ -329,27 +329,44 @@ impl PerImageCameras {
         &self,
         features: &[FeatureSet],
     ) -> Result<Vec<FeatureSet>, PerImageCameraError> {
+        // Preserve the borrowed-input API and its atomic-on-error behavior,
+        // while letting owned callers canonicalize without copying the
+        // descriptor bank.  Only the keypoint vectors are temporary here.
+        let mut canonical = features.to_vec();
+        self.canonicalize_features_in_place(&mut canonical)?;
+        Ok(canonical)
+    }
+
+    /// Canonicalize feature pixels in place without cloning descriptors.
+    ///
+    /// The per-image calibration changes only pixel coordinates; descriptor
+    /// rows and their indices remain byte-for-byte untouched.  All converted
+    /// keypoints are computed before the input is modified, so an invalid
+    /// conversion leaves the caller's feature sets unchanged, matching the
+    /// error behavior of [`Self::canonicalize_features`].
+    pub fn canonicalize_features_in_place(
+        &self,
+        features: &mut [FeatureSet],
+    ) -> Result<(), PerImageCameraError> {
         self.validate_features(features)?;
         if self.has_shared_geometry() {
-            return Ok(features.to_vec());
+            return Ok(());
         }
-        features
+        let canonical_keypoints = features
             .iter()
             .enumerate()
             .map(|(image, feature_set)| {
-                let keypoints = feature_set
+                feature_set
                     .keypoints
                     .iter()
                     .map(|pixel| self.to_reference_pixel(image, pixel))
-                    .collect::<Result<Vec<_>, _>>()?;
-                FeatureSet::new(keypoints, feature_set.descriptors.clone()).map_err(|error| {
-                    PerImageCameraError::InvalidFeatures {
-                        image,
-                        message: error.to_string(),
-                    }
-                })
+                    .collect::<Result<Vec<_>, _>>()
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        for (feature_set, keypoints) in features.iter_mut().zip(canonical_keypoints) {
+            feature_set.keypoints = keypoints;
+        }
+        Ok(())
     }
 }
 
@@ -444,6 +461,33 @@ mod tests {
         let normalized_after = first.normalize_pixel(&converted[1].keypoints[0]).unwrap();
         assert!((normalized_before.x - normalized_after.x).abs() < 1e-12);
         assert!((normalized_before.y - normalized_after.y).abs() < 1e-12);
+    }
+
+    #[test]
+    fn in_place_canonicalization_keeps_descriptor_storage_and_matches_owned() {
+        let first = camera(1, 100, 80, 50.0, 50.0);
+        let second = camera(2, 200, 160, 100.0, 80.0);
+        let cameras = PerImageCameras::new(vec![first, second]).unwrap();
+        let input = vec![
+            features(vec![Point2::new(50.0, 40.0)]),
+            features(vec![Point2::new(100.0, 80.0)]),
+        ];
+        let mut in_place = input.clone();
+        let descriptor_storage: Vec<*const Vec<f32>> = in_place
+            .iter()
+            .map(|feature_set| feature_set.descriptors.as_ptr())
+            .collect();
+        cameras
+            .canonicalize_features_in_place(&mut in_place)
+            .unwrap();
+        let owned = cameras.canonicalize_features(&input).unwrap();
+
+        assert_eq!(in_place, owned);
+        for (feature_set, storage) in in_place.iter().zip(descriptor_storage) {
+            assert_eq!(feature_set.descriptors.as_ptr(), storage);
+        }
+        assert_eq!(in_place[0].descriptors, input[0].descriptors);
+        assert_eq!(in_place[1].descriptors, input[1].descriptors);
     }
 
     #[test]
