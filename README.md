@@ -11,6 +11,32 @@
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
 </p>
 
+## 1,200-image Electro scale checkpoint
+
+<p align="center">
+  <img src="docs/assets/electro_1200_sfm_comparison.gif" alt="Measured ETH3D Electro 1,200-image reconstruction: visloc-rs and COLMAP camera centres, sparse structure, residuals, mapper time, and peak memory" width="820">
+</p>
+
+**The current visloc-rs mapper is 9.61× faster than COLMAP on the same frozen
+1,200 images and deterministic 12,000-pair schedule.** This is an honest
+in-progress scale checkpoint: matching is still 4.43× slower, mapper peak RSS
+is 3.17× higher, and registration/accuracy have not reached COLMAP parity.
+
+| Same-input phase / result | visloc-rs | COLMAP 3.9.1 CPU | Current outcome |
+| --- | ---: | ---: | --- |
+| Exact-pair matching | 2,085.89 s | **471.37 s** | 4.43× slower |
+| Mapper wall time | **513.05 s** | 4,929.56 s | **9.61× faster** |
+| Mapper peak RSS | 3.79 GiB | **1.20 GiB** | 3.17× higher |
+| Registered cameras | 1193/1200 | **1200/1200** | 7-camera gap |
+| Camera-centre RMSE | 11.94 cm | **4.68 cm** | 2.55× higher |
+
+<p align="center"><sub>The camera-centre plot uses the 1,193 stems shared by
+both models and Sim(3) alignment to the supplied calibration proxy. Ground
+truth is score-only. Feature extraction is not yet measured under the same
+contract, so this is not an end-to-end speed claim. See the
+<a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
+and <a href="benchmarks/electro/visloc_1200_v1.json">frozen result manifest</a>.</sub></p>
+
 ## Measured courtyard SfM control
 
 <p align="center">
