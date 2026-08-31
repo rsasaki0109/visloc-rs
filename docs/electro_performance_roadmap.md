@@ -120,6 +120,16 @@ baseline commit that introduced the discrepancy.
 
 ## 4. Milestone 1 — calibrate measurement and restart behavior
 
+**Status (2026-09-01): complete.** The K=64 bounded probe retains 3,878 of
+3,883 exhaustive verified pairs (99.871%) and registers 200/300 images versus
+202/300 exhaustive (0.667 percentage-point loss). Two complete runs reproduce
+candidate, feature, snapshot, and model hashes. Feature and match SIGKILL
+resume paths reproduce uninterrupted artifacts, and same-size snapshot
+corruption now fails closed. Peak process RSS was 198,056 KiB and the final
+feature-plus-run footprint was 334,263,515 bytes. Evidence is frozen in
+benchmarks/electro/electro-300-phase-ledger.json and
+benchmarks/electro/electro-300-failure-injection.log.
+
 **Purpose:** prove the runner and resource accounting on the 300-image probe
 before expensive quality or performance searches on 1,200 images.
 

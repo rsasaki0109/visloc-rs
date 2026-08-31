@@ -147,6 +147,19 @@ class ElectroColmapControlTests(unittest.TestCase):
         with self.assertRaises(score.ScoreError):
             score.image_key("frame_0001.png")
 
+    def test_score_loads_numeric_staging_aliases_with_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            aliases_path = Path(directory) / "image_aliases.tsv"
+            aliases_path.write_text(
+                "index\talias\tsource_name\n"
+                "0\t000000.png\t1474975187520882738.png\n",
+                encoding="utf-8",
+            )
+            aliases = score.load_aliases(aliases_path, camera=4)
+            self.assertEqual(
+                aliases, {"000000.png": "cam4_1474975187520882738.png"}
+            )
+
     def test_score_rejects_identity_staging_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

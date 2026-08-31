@@ -70,7 +70,42 @@ def _rotation(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
     )
 
 
-def load_centres(path: Path) -> dict[tuple[int, int], np.ndarray]:
+def load_aliases(path: Path, *, camera: int | None = None) -> dict[str, str]:
+    """Load ``alias -> canonical electro name`` from a staging TSV."""
+
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ScoreError(f"cannot read image aliases {path}: {exc}") from exc
+    if not rows or rows[0].split("\t") != ["index", "alias", "source_name"]:
+        raise ScoreError(f"image aliases {path} have an unsupported header")
+    aliases: dict[str, str] = {}
+    for line_number, row in enumerate(rows[1:], 2):
+        fields = row.split("\t")
+        if len(fields) != 3 or not fields[0].isdigit():
+            raise ScoreError(f"image alias row {path}:{line_number} is malformed")
+        alias, source_name = fields[1:]
+        canonical = source_name
+        try:
+            image_key(canonical)
+        except ScoreError:
+            stem = Path(source_name).stem
+            if camera is None or not stem.isdigit():
+                raise ScoreError(
+                    f"image alias source {source_name!r} needs --query-alias-camera"
+                )
+            canonical = f"cam{camera}_{source_name}"
+        if not alias or alias in aliases:
+            raise ScoreError(f"image aliases {path} contain an empty or duplicate alias")
+        aliases[alias] = canonical
+    if not aliases:
+        raise ScoreError(f"image aliases {path} contain no mappings")
+    return aliases
+
+
+def load_centres(
+    path: Path, aliases: dict[str, str] | None = None
+) -> dict[tuple[int, int], np.ndarray]:
     """Load camera centres from a COLMAP text ``images.txt``."""
 
     try:
@@ -100,6 +135,13 @@ def load_centres(path: Path) -> dict[tuple[int, int], np.ndarray]:
         except ValueError as exc:
             raise ScoreError(f"COLMAP pose row {path}:{line_number} is not numeric") from exc
         name = fields[9]
+        if aliases is not None:
+            try:
+                name = aliases[name]
+            except KeyError as exc:
+                raise ScoreError(
+                    f"COLMAP image {fields[9]!r} is absent from the query aliases"
+                ) from exc
         key = image_key(name)
         if key in centres:
             raise ScoreError(f"COLMAP model contains duplicate electro image key {key}: {path}")
@@ -156,10 +198,15 @@ def validate_reference_geometry(reference: dict[tuple[int, int], np.ndarray]) ->
     return extent
 
 
-def score(reference_path: Path, query_path: Path) -> dict[str, Any]:
+def score(
+    reference_path: Path,
+    query_path: Path,
+    *,
+    query_aliases: dict[str, str] | None = None,
+) -> dict[str, Any]:
     reference = load_centres(reference_path)
     reference_extent = validate_reference_geometry(reference)
-    query = load_centres(query_path)
+    query = load_centres(query_path, query_aliases)
     common = sorted(set(reference) & set(query))
     if len(common) < 3:
         raise ScoreError(
@@ -206,6 +253,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reference", type=Path, help="official electro model images.txt")
     parser.add_argument("query", type=Path, help="completed COLMAP model images.txt")
+    parser.add_argument("--query-aliases", type=Path, help="staging image_aliases.tsv")
+    parser.add_argument(
+        "--query-alias-camera",
+        type=int,
+        help="camera number when alias source names contain only a timestamp",
+    )
     parser.add_argument("--output-json", type=Path, help="write the score object to this path")
     return parser
 
@@ -213,7 +266,16 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = score(args.reference.resolve(), args.query.resolve())
+        aliases = None
+        if args.query_aliases:
+            aliases = load_aliases(
+                args.query_aliases.resolve(), camera=args.query_alias_camera
+            )
+        elif args.query_alias_camera is not None:
+            raise ScoreError("--query-alias-camera requires --query-aliases")
+        result = score(
+            args.reference.resolve(), args.query.resolve(), query_aliases=aliases
+        )
         if args.output_json:
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
             args.output_json.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
