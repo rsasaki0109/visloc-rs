@@ -59,6 +59,7 @@ use visloc_vision::two_view::{
     RelativePoseEstimator, TwoViewCorrespondence,
 };
 
+use crate::process_memory;
 use crate::{BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, RobustKernel};
 
 /// Gate for the mapper's diagnostic `eprintln!`s (seed-sweep reach, growth
@@ -72,6 +73,27 @@ use crate::{BaConfig, BaError, BaObservation, BaResult, BundleAdjustment, Robust
 /// lines to those image indices while keeping the summary diagnostics enabled.
 fn sfm_debug_enabled() -> bool {
     std::env::var_os("VISLOC_SFM_DEBUG").is_some()
+}
+
+/// Enable the bounded phase/progress timing stream without enabling the very
+/// verbose per-image debug/provenance stream.  This is intentionally a
+/// separate opt-in so large mapper runs can expose their growth intervals
+/// without producing one record for every failed PnP attempt.
+fn sfm_timing_enabled() -> bool {
+    std::env::var_os("VISLOC_SFM_TIMING").is_some()
+}
+
+fn sfm_timing_or_debug_enabled() -> bool {
+    sfm_debug_enabled() || sfm_timing_enabled()
+}
+
+/// Emit an opt-in process-memory sample for benchmark phase boundaries.
+///
+/// The sampler is inactive unless `VISLOC_SFM_MEMORY=1` is present, and is
+/// exposed so the example runner can mark feature/snapshot ownership stages
+/// before entering the mapper. It never affects reconstruction state.
+pub fn log_process_memory(stage: &str) {
+    process_memory::log(stage);
 }
 
 /// Emit one compact diagnostic record for every BA invocation when explicitly
@@ -1706,6 +1728,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
         stats: track_build_stats,
     } = track_build;
     let track_build_seconds = started.elapsed().as_secs_f64();
+    process_memory::log("mapper-after-track-build");
     if sfm_debug_enabled() {
         eprintln!(
             "sfm-debug: track build source={:?} input={} components={} \
@@ -1728,6 +1751,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
             obs_by_image[image].push((kp, track_id));
         }
     }
+    process_memory::log("mapper-after-observation-index");
 
     // ---- 2. Seed selection: try several candidate seeds, keep the largest ----
     // The highest-match pair is not always a good seed. On repetitive structure
@@ -1814,7 +1838,11 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
             // updated in lockstep below.
             let mut best_pi: Option<usize> = None;
             let mut grows = 0usize;
+            let mut seed_attempted = 0usize;
+            let mut seed_zero_reach = 0usize;
             for &pi in &seed_order {
+                seed_attempted += 1;
+                let trial_started = std::time::Instant::now();
                 let (trial_poses, trial_points, reach, trial_cam) =
                     grow_from_seed_with_sequence_overrides(
                         camera,
@@ -1829,12 +1857,29 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
                         None,
                         sequence_override_pair_indices,
                     )?;
+                if reach == 0 {
+                    seed_zero_reach += 1;
+                }
                 if sfm_debug_enabled() {
                     eprintln!(
                         "sfm-debug: seed trial {pi} pair=({}, {}) matches={} -> reach={reach}",
                         pairwise[pi].image_i,
                         pairwise[pi].image_j,
                         pairwise[pi].matches.len(),
+                    );
+                }
+                // Failed baseline-gated candidates are common on the ETH3D
+                // orbit and are deliberately summarized rather than emitted
+                // one-by-one when timing is enabled.  A successful trial is
+                // still useful as a bounded checkpoint because it is the
+                // expensive part of seed selection.
+                if sfm_timing_enabled() && reach > 0 {
+                    eprintln!(
+                        "sfm-timing-seed-trial: index={pi} pair=({}, {}) reach={reach} \
+                         elapsed={:.3}s",
+                        pairwise[pi].image_i,
+                        pairwise[pi].image_j,
+                        trial_started.elapsed().as_secs_f64(),
                     );
                 }
                 if reach == 0 {
@@ -1852,6 +1897,19 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
                     break;
                 }
             }
+            if sfm_timing_enabled() {
+                let winner_reach = best.as_ref().map_or(0, |(reach, _, _, _)| *reach);
+                eprintln!(
+                    "sfm-timing-seed-summary: candidates={} attempted={} zero_reach={} \
+                     successful={} winner_reach={} elapsed={:.3}s",
+                    seed_order.len(),
+                    seed_attempted,
+                    seed_zero_reach,
+                    grows,
+                    winner_reach,
+                    seed_growth_started.elapsed().as_secs_f64(),
+                );
+            }
             let (_, poses, track_point, grown_cam) = best.ok_or(IncrementalSfmError::NoSeedPair)?;
             let winning_pi = best_pi.expect("set together with `best` on every assignment above");
             let seed_image_i = pairwise[winning_pi].image_i;
@@ -1867,6 +1925,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
             )
         };
     let seed_growth_seconds = seed_growth_started.elapsed().as_secs_f64();
+    process_memory::log("mapper-after-seed-growth");
 
     // ---- 4 + 5. Final refinement ----
     // When intrinsics refinement is on, growth already co-evolved them into
@@ -1875,6 +1934,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
     // there; `cam` expresses the output poses/tracks/reprojection and is returned
     // to the caller for export.
     let final_refinement_started = std::time::Instant::now();
+    process_memory::log("mapper-before-final-refinement");
     let mut cam = grown_cam;
     let mut ba_result = if config.colmap_style_mapper {
         // COLMAP's final pass IS an iterative global refinement (global BA →
@@ -1926,11 +1986,15 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
         } else {
             None
         };
-        let refine_rounds = if config.retriangulate {
-            config.track_filter_iterations.max(1)
-        } else {
-            config.track_filter_iterations
-        };
+        // `--no-final-ba` is used for a growth-only timing/control run.  The
+        // historical loop below could still enter a post-filter BA when the
+        // filter removed an observation, even though `final_global_ba` was
+        // disabled.  That made the flag misleading and, on large models,
+        // paid for expensive solves after the caller explicitly requested no
+        // final solve.  Post-BA filtering/retriangulation is part of the
+        // final refinement contract, so keep it together with the initial
+        // final BA.  The default (`final_global_ba=true`) is unchanged.
+        let refine_rounds = simple_final_refinement_rounds(config);
         for round in 0..refine_rounds {
             let support_before = sfm_ba_debug_enabled().then(|| {
                 (
@@ -2633,9 +2697,11 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
         );
     }
     let final_refinement_seconds = final_refinement_started.elapsed().as_secs_f64();
+    process_memory::log("mapper-after-final-refinement");
 
     // ---- Assemble output tracks (only triangulated, registered observations) ----
     let assembly_started = std::time::Instant::now();
+    process_memory::log("mapper-before-output-assembly");
     let mut out_tracks = Vec::new();
     let mut reproj_sum = 0.0;
     let mut reproj_count = 0usize;
@@ -2669,7 +2735,7 @@ fn incremental_sfm_with_initial_poses_and_track_membership_and_sequence_override
     } else {
         f64::NAN
     };
-    if sfm_debug_enabled() {
+    if sfm_timing_or_debug_enabled() {
         eprintln!(
             "sfm-timing: total={:.3}s track_build={track_build_seconds:.3}s \
              seed_growth={seed_growth_seconds:.3}s final_refinement={final_refinement_seconds:.3}s \
@@ -4136,6 +4202,19 @@ fn sequence_fallback_enabled_during_growth(config: &IncrementalSfmConfig) -> boo
     config.sequence_relative_pose_fallback && !config.sequence_fallback_after_post
 }
 
+/// Whether the support-preserving targeted growth fast path is valid. It is
+/// intentionally restricted to the plain mapper: correspondence-mode points
+/// can be replaced, COLMAP-style local/global BA can complete tracks outside
+/// the newly registered image, and sequence fallback has its own full-scan
+/// commit helper. All of those modes therefore retain the historical full
+/// pending-track scan.
+fn targeted_plain_growth_enabled(config: &IncrementalSfmConfig, has_initial_poses: bool) -> bool {
+    !has_initial_poses
+        && !config.colmap_style_mapper
+        && !config.incremental_correspondence_triangulation
+        && !config.sequence_relative_pose_fallback
+}
+
 /// Bootstrap from `seed_pair` and grow the reconstruction by repeatedly
 /// registering the best next image, running the periodic global bundle
 /// adjustment every `ba_every` registrations. Returns the per-image poses,
@@ -4166,6 +4245,15 @@ fn grow_from_seed_with_sequence_overrides(
     let mut pnp_attempts = 0usize;
     let mut local_ba_calls = 0usize;
     let mut global_refinement_calls = 0usize;
+    let mut triangulation_full_calls = 0usize;
+    let mut triangulation_targeted_calls = 0usize;
+    let mut triangulation_targeted_tracks = 0usize;
+    let timing_enabled = sfm_timing_enabled();
+    let mut last_progress_elapsed = 0.0;
+    let mut last_progress_select = 0.0;
+    let mut last_progress_pnp = 0.0;
+    let mut last_progress_triangulation = 0.0;
+    let mut last_progress_ba = 0.0;
     let n_images = features.len();
     let mut poses: Vec<Option<Pose>> = initial_poses
         .map(|poses| poses.to_vec())
@@ -4189,16 +4277,43 @@ fn grow_from_seed_with_sequence_overrides(
         ));
     }
     let started = std::time::Instant::now();
-    triangulate_pending_with_config_and_state(
-        &cam,
-        features,
-        tracks,
-        &poses,
-        config,
-        &mut track_point,
-        correspondence_state.as_mut(),
-    );
+    if !targeted_plain_growth_enabled(config, initial_poses.is_some()) {
+        triangulate_pending_with_config_and_state(
+            &cam,
+            features,
+            tracks,
+            &poses,
+            config,
+            &mut track_point,
+            correspondence_state.as_mut(),
+        );
+        triangulation_full_calls += 1;
+    } else if let Some(seed_pair) = seed_pair {
+        let (visited, _) = triangulate_pending_for_images_with_new_tracks(
+            &cam,
+            features,
+            tracks,
+            &poses,
+            config,
+            &mut track_point,
+            obs_by_image,
+            &[seed_pair.image_i, seed_pair.image_j],
+        );
+        triangulation_targeted_tracks += visited;
+        triangulation_targeted_calls += 1;
+    }
     triangulation_seconds += started.elapsed().as_secs_f64();
+
+    // The cache is deliberately limited to the plain, non-COLMAP-style
+    // count-policy growth path. Correspondence-mode triangulation can replace existing points,
+    // and sequence fallback can add a point through a separate commit helper;
+    // those modes retain their historical fresh-scan semantics. In the
+    // ordinary path a point's Some/None state only changes from None to Some,
+    // which is exactly what the targeted update reports below.
+    let mut correspondence_count_cache = (config.next_image_policy
+        == NextImagePolicy::CorrespondenceCount
+        && targeted_plain_growth_enabled(config, initial_poses.is_some()))
+    .then(|| build_correspondence_count_cache(features, obs_by_image, &track_point));
 
     // `trials[i]` counts PnP attempts on image `i`. In the simple schedule one
     // failed attempt is permanent (the cap is 1); the COLMAP schedule retries up
@@ -4210,6 +4325,11 @@ fn grow_from_seed_with_sequence_overrides(
     };
     let mut trials: Vec<usize> = vec![0; n_images];
     let mut registrations_since_ba = 0usize;
+    // A BA can move every camera, so the next successful registration must
+    // perform one historical full pending scan before targeted updates
+    // resume. Keeping this deferred until after selection preserves the
+    // original registration ordering exactly.
+    let mut needs_full_triangulation_after_ba = false;
     // COLMAP triggers a global refinement once the registered-image count has
     // grown by `global_ba_images_ratio` since the last one.
     let mut reg_at_last_global = poses.iter().filter(|p| p.is_some()).count();
@@ -4262,6 +4382,7 @@ fn grow_from_seed_with_sequence_overrides(
             &trials,
             max_trials,
             &track_point,
+            correspondence_count_cache.as_deref(),
         );
         select_seconds += started.elapsed().as_secs_f64();
         if let Some((next_image, corrs)) = selection.as_ref() {
@@ -4594,15 +4715,61 @@ fn grow_from_seed_with_sequence_overrides(
             config.debug_oracle_poses.as_deref(),
         );
         let started = std::time::Instant::now();
-        triangulate_pending_with_config_and_state(
-            &cam,
-            features,
-            tracks,
-            &poses,
-            config,
-            &mut track_point,
-            correspondence_state.as_mut(),
-        );
+        if !targeted_plain_growth_enabled(config, initial_poses.is_some()) {
+            triangulate_pending_with_config_and_state(
+                &cam,
+                features,
+                tracks,
+                &poses,
+                config,
+                &mut track_point,
+                correspondence_state.as_mut(),
+            );
+            triangulation_full_calls += 1;
+        } else if needs_full_triangulation_after_ba {
+            let newly_triangulated = triangulate_pending_track_ids(
+                &cam,
+                features,
+                tracks,
+                &poses,
+                config,
+                &mut track_point,
+                0..tracks.len(),
+            );
+            triangulation_full_calls += 1;
+            if let Some(counts) = correspondence_count_cache.as_mut() {
+                update_correspondence_count_cache(
+                    features,
+                    tracks,
+                    &track_point,
+                    &newly_triangulated,
+                    counts,
+                );
+            }
+            needs_full_triangulation_after_ba = false;
+        } else {
+            let (visited, newly_triangulated) = triangulate_pending_for_image_with_new_tracks(
+                &cam,
+                features,
+                tracks,
+                &poses,
+                config,
+                &mut track_point,
+                obs_by_image,
+                next_image,
+            );
+            triangulation_targeted_tracks += visited;
+            triangulation_targeted_calls += 1;
+            if let Some(counts) = correspondence_count_cache.as_mut() {
+                update_correspondence_count_cache(
+                    features,
+                    tracks,
+                    &track_point,
+                    &newly_triangulated,
+                    counts,
+                );
+            }
+        }
         triangulation_seconds += started.elapsed().as_secs_f64();
 
         if initial_poses.is_none() && config.colmap_style_mapper {
@@ -4728,15 +4895,42 @@ fn grow_from_seed_with_sequence_overrides(
                     );
                 }
                 registrations_since_ba = 0;
+                needs_full_triangulation_after_ba = true;
             }
+        }
+
+        // Emit a bounded checkpoint stream for long runs.  The phase deltas
+        // cover the registrations since the previous checkpoint, which makes
+        // the dominant interval visible without enabling per-PnP provenance.
+        let registered_now = poses.iter().filter(|pose| pose.is_some()).count();
+        if timing_enabled && (registered_now <= 4 || registered_now % 64 == 0) {
+            let elapsed = grow_started.elapsed().as_secs_f64();
+            let ba_seconds = local_ba_seconds + global_refinement_seconds;
+            eprintln!(
+                "sfm-timing-progress: registered={registered_now}/{n_images} \
+                 image={next_image} interval={:.3}s select={:.3}s pnp={:.3}s \
+                 triangulate={:.3}s ba={:.3}s",
+                elapsed - last_progress_elapsed,
+                select_seconds - last_progress_select,
+                pnp_seconds - last_progress_pnp,
+                triangulation_seconds - last_progress_triangulation,
+                ba_seconds - last_progress_ba,
+            );
+            last_progress_elapsed = elapsed;
+            last_progress_select = select_seconds;
+            last_progress_pnp = pnp_seconds;
+            last_progress_triangulation = triangulation_seconds;
+            last_progress_ba = ba_seconds;
         }
     }
 
     let registered = poses.iter().filter(|p| p.is_some()).count();
-    if sfm_debug_enabled() {
+    if sfm_timing_or_debug_enabled() {
         eprintln!(
             "sfm-timing: grow total={:.3}s select={select_seconds:.3}s \
              pnp={pnp_seconds:.3}s/{pnp_attempts} triangulate={triangulation_seconds:.3}s \
+             triangulation_scans={triangulation_full_calls} targeted_calls={triangulation_targeted_calls} \
+             targeted_tracks={triangulation_targeted_tracks} \
              local_ba={local_ba_seconds:.3}s/{local_ba_calls} \
              global_refinement={global_refinement_seconds:.3}s/{global_refinement_calls}",
             grow_started.elapsed().as_secs_f64(),
@@ -4779,6 +4973,7 @@ pub(crate) fn post_refinement_registration_pass(
         &trials,
         1,
         track_point,
+        None,
     ) {
         trials[image] = 1;
         let report = match config.pnp_solver {
@@ -6297,7 +6492,42 @@ pub(crate) fn triangulate_pending(
     config: &IncrementalSfmConfig,
     track_point: &mut [Option<Point3<f64>>],
 ) {
-    for (track_id, track) in tracks.iter().enumerate() {
+    triangulate_pending_track_ids(
+        camera,
+        features,
+        tracks,
+        poses,
+        config,
+        track_point,
+        0..tracks.len(),
+    );
+}
+
+/// Triangulate only the supplied track ids. In the ordinary, non-COLMAP-style
+/// mapper a track that already has a point is never replaced during growth,
+/// and an untriangulated track can only gain a newly registered observation
+/// from the image just accepted. The growth loop therefore uses this helper
+/// for the common path and falls back to a full scan immediately after a BA
+/// (where every camera pose may have moved). COLMAP-style growth deliberately
+/// retains its historical full scan because local/global BA and completion
+/// can change support outside the newly registered image.
+fn triangulate_pending_track_ids<I>(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    config: &IncrementalSfmConfig,
+    track_point: &mut [Option<Point3<f64>>],
+    track_ids: I,
+) -> Vec<usize>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let mut newly_triangulated = Vec::new();
+    for track_id in track_ids {
+        let Some(track) = tracks.get(track_id) else {
+            continue;
+        };
         if track_point[track_id].is_some() {
             continue;
         }
@@ -6316,6 +6546,125 @@ pub(crate) fn triangulate_pending(
         }
         if let Some(point) = triangulate_track(camera, poses, &obs, config) {
             track_point[track_id] = Some(point);
+            newly_triangulated.push(track_id);
+        }
+    }
+    newly_triangulated
+}
+
+/// Targeted image update with the IDs that became 3D points during the pass.
+/// The IDs let the correspondence-count selector update its per-image score
+/// cache in proportion to newly-created points rather than rescanning every
+/// unregistered image after each successful PnP.
+fn triangulate_pending_for_image_with_new_tracks(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    config: &IncrementalSfmConfig,
+    track_point: &mut [Option<Point3<f64>>],
+    obs_by_image: &[Vec<(usize, usize)>],
+    image: usize,
+) -> (usize, Vec<usize>) {
+    let Some(observations) = obs_by_image.get(image) else {
+        return (0, Vec::new());
+    };
+    let count = observations.len();
+    let newly_triangulated = triangulate_pending_track_ids(
+        camera,
+        features,
+        tracks,
+        poses,
+        config,
+        track_point,
+        observations.iter().map(|&(_, track_id)| track_id),
+    );
+    (count, newly_triangulated)
+}
+
+/// Seed update with the IDs that became 3D points during the pass.
+fn triangulate_pending_for_images_with_new_tracks(
+    camera: &Camera,
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    poses: &[Option<Pose>],
+    config: &IncrementalSfmConfig,
+    track_point: &mut [Option<Point3<f64>>],
+    obs_by_image: &[Vec<(usize, usize)>],
+    images: &[usize],
+) -> (usize, Vec<usize>) {
+    let mut track_ids = HashSet::new();
+    for &image in images {
+        if let Some(observations) = obs_by_image.get(image) {
+            track_ids.extend(observations.iter().map(|&(_, track_id)| track_id));
+        }
+    }
+    let count = track_ids.len();
+    let newly_triangulated = triangulate_pending_track_ids(
+        camera,
+        features,
+        tracks,
+        poses,
+        config,
+        track_point,
+        track_ids,
+    );
+    (count, newly_triangulated)
+}
+
+/// Build the exact count-policy ranking key once from the current point map.
+/// The ordinary count selector used to recompute this join for every
+/// registration attempt.  A track becomes a point at most once during plain
+/// growth, so the cache can then be maintained from the small set returned by
+/// each targeted triangulation pass.
+fn build_correspondence_count_cache(
+    features: &[FeatureSet],
+    obs_by_image: &[Vec<(usize, usize)>],
+    track_point: &[Option<Point3<f64>>],
+) -> Vec<usize> {
+    obs_by_image
+        .iter()
+        .enumerate()
+        .map(|(image, observations)| {
+            observations
+                .iter()
+                .filter(|&&(kp, track_id)| {
+                    track_point.get(track_id).is_some_and(Option::is_some)
+                        && features
+                            .get(image)
+                            .is_some_and(|set| set.keypoints.get(kp).is_some())
+                })
+                .count()
+        })
+        .collect()
+}
+
+/// Add newly triangulated observations to the count-policy ranking cache.
+/// `newly_triangulated` is unique per pass, so every observation contributes
+/// exactly once, matching a fresh count scan.
+fn update_correspondence_count_cache(
+    features: &[FeatureSet],
+    tracks: &[Vec<(usize, usize)>],
+    track_point: &[Option<Point3<f64>>],
+    newly_triangulated: &[usize],
+    counts: &mut [usize],
+) {
+    for &track_id in newly_triangulated {
+        if track_point.get(track_id).is_none_or(Option::is_none) {
+            continue;
+        }
+        let Some(track) = tracks.get(track_id) else {
+            continue;
+        };
+        for &(image, kp) in track {
+            if features
+                .get(image)
+                .is_some_and(|set| set.keypoints.get(kp).is_some())
+            {
+                if let Some(count) = counts.get_mut(image) {
+                    *count = count.saturating_add(1);
+                }
+            }
         }
     }
 }
@@ -8701,7 +9050,54 @@ fn select_next_image(
     trials: &[usize],
     max_trials: usize,
     track_point: &[Option<Point3<f64>>],
+    cached_counts: Option<&[usize]>,
 ) -> Option<(usize, Vec<Correspondence2D3D>)> {
+    if policy == NextImagePolicy::CorrespondenceCount {
+        // The historical count policy ranks only by the number of valid
+        // triangulated observations.  Avoid allocating a correspondence
+        // vector for every unregistered image on every iteration; build the
+        // winning image's rows once after the rank scan.  This is exactly the
+        // same key/tie order as the general path below (image order is the
+        // stable tie breaker because equal keys are not replaced).
+        let mut best: Option<(usize, usize)> = None;
+        for (image, observations) in obs_by_image.iter().enumerate() {
+            if poses[image].is_some() || trials[image] >= max_trials {
+                continue;
+            }
+            let count = cached_counts
+                .and_then(|counts| counts.get(image).copied())
+                .unwrap_or_else(|| {
+                    observations
+                        .iter()
+                        .filter(|&&(kp, track_id)| {
+                            track_point[track_id].is_some()
+                                && features[image].keypoints.get(kp).is_some()
+                        })
+                        .count()
+                });
+            if count < 6 {
+                continue;
+            }
+            if best.is_none_or(|(_, best_count)| count > best_count) {
+                best = Some((image, count));
+            }
+        }
+        let (image, _) = best?;
+        let corrs = obs_by_image[image]
+            .iter()
+            .filter_map(|&(kp, track_id)| {
+                let point3d = track_point[track_id]?;
+                let point2d = features[image].keypoints.get(kp).copied()?;
+                Some(Correspondence2D3D {
+                    point2d,
+                    point3d,
+                    confidence: None,
+                })
+            })
+            .collect();
+        return Some((image, corrs));
+    }
+
     // COLMAP's `IncrementalMapper::RankNextImages`: rank candidate images not by
     // the raw *count* of 2D–3D correspondences but by a multi-resolution
     // **visibility-pyramid score** that rewards correspondences *well distributed*
@@ -10657,6 +11053,8 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
     geometry_weighted: bool,
     fixed_rotation_images: Option<&BTreeSet<usize>>,
 ) -> Result<(BaResult, Option<Camera>), BaError> {
+    let timing_enabled = std::env::var_os("VISLOC_SFM_TIMING").is_some();
+    let total_started = std::time::Instant::now();
     let oracle_poses_before = config.debug_oracle_poses.as_ref().map(|_| poses.to_vec());
     let ba_debug = sfm_ba_debug_enabled();
     let ba_step_debug = sfm_ba_step_debug_enabled();
@@ -10670,6 +11068,7 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
     let poses_before = ba_debug.then(|| poses.to_vec());
     let points_before = ba_debug.then(|| track_point.to_vec());
     let registered_before = poses.iter().filter(|pose| pose.is_some()).count();
+    let warm_start_started = std::time::Instant::now();
     let warm_start_stats = if config.landmark_ba_warm_start_iterations > 0
         && registered_before >= config.landmark_ba_warm_start_min_registered_images
     {
@@ -10690,6 +11089,9 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
         }
         None
     };
+    let warm_start_seconds = warm_start_started.elapsed().as_secs_f64();
+    let assembly_started = std::time::Instant::now();
+    process_memory::log("ba-before-assembly");
     let mut ba = BundleAdjustment::new(camera.clone());
     let ba_config = BaConfig {
         refine_intrinsics,
@@ -10825,6 +11227,7 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
         );
     }
 
+    process_memory::log("ba-after-assembly");
     let initial_l2 = ba_debug.then(|| ba.robust_cost(&RobustKernel::None));
     let initial_robust = ba_debug.then(|| ba.robust_cost(&ba_config.robust_kernel));
     let observation_weights = if geometry_weighted && !refine_intrinsics {
@@ -10837,11 +11240,15 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
     } else {
         None
     };
+    let pre_optimize_seconds = assembly_started.elapsed().as_secs_f64();
+    let optimize_started = std::time::Instant::now();
     let result = if let Some(weights) = observation_weights.as_deref() {
         ba.optimize_with_observation_weights(&ba_config, weights)?
     } else {
         ba.optimize(&ba_config)?
     };
+    let optimize_seconds = optimize_started.elapsed().as_secs_f64();
+    process_memory::log("ba-after-optimize");
 
     if !landmark_diagnostics.is_empty() {
         for diagnostic in &mut landmark_diagnostics {
@@ -11008,6 +11415,7 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
         }
     }
 
+    let writeback_started = std::time::Instant::now();
     for (image, pose) in poses.iter_mut().enumerate() {
         if pose.is_some() {
             if let Some(refined) = ba.poses.get(&(image as u64)) {
@@ -11021,6 +11429,26 @@ fn run_bundle_adjustment_impl_with_fixed_rotations(
                 *point = Some(*refined);
             }
         }
+    }
+    if timing_enabled {
+        let accepted = result
+            .iterations
+            .iter()
+            .filter(|iteration| iteration.step_accepted)
+            .count();
+        eprintln!(
+            "sfm-timing-ba: registered={} landmarks={} observations={} warm_start={:.3}s assemble={:.3}s solve={:.3}s writeback={:.3}s total={:.3}s iterations={} accepted={}",
+            ba.poses.len(),
+            ba.landmarks.len(),
+            ba.observations.len(),
+            warm_start_seconds,
+            pre_optimize_seconds,
+            optimize_seconds,
+            writeback_started.elapsed().as_secs_f64(),
+            total_started.elapsed().as_secs_f64(),
+            result.iterations.len(),
+            accepted,
+        );
     }
     sfm_debug_oracle_transition(
         &format!(
@@ -11847,6 +12275,20 @@ fn periodic_ba_due(
     ba_every > 0
         && registrations_since_ba >= ba_every
         && (minimum_registered == 0 || registered >= minimum_registered)
+}
+
+/// Number of post-BA filter/retriangulation rounds for the plain final pass.
+/// A disabled final BA also disables this post-BA stage: running it anyway can
+/// discover outliers and launch a second global solve after the caller asked
+/// for a growth-only result. The default final-BA schedule is unchanged.
+fn simple_final_refinement_rounds(config: &IncrementalSfmConfig) -> usize {
+    if !config.final_global_ba {
+        0
+    } else if config.retriangulate {
+        config.track_filter_iterations.max(1)
+    } else {
+        config.track_filter_iterations
+    }
 }
 
 /// COLMAP `Reconstruction::FilterImages`: de-register registered images whose
@@ -12773,6 +13215,80 @@ mod tests {
         assert!(!periodic_ba_due(5, 32, 5, 27));
         assert!(periodic_ba_due(5, 32, 10, 32));
         assert!(!periodic_ba_due(0, 32, 10, 32));
+    }
+
+    #[test]
+    fn disabled_final_ba_does_not_run_post_ba_refinement_rounds() {
+        let mut config = IncrementalSfmConfig::default();
+        assert_eq!(simple_final_refinement_rounds(&config), 2);
+
+        config.final_global_ba = false;
+        assert_eq!(
+            simple_final_refinement_rounds(&config),
+            0,
+            "a growth-only run must not launch post-filter BA"
+        );
+
+        config.retriangulate = true;
+        config.track_filter_iterations = 0;
+        assert_eq!(simple_final_refinement_rounds(&config), 0);
+
+        config.final_global_ba = true;
+        assert_eq!(simple_final_refinement_rounds(&config), 1);
+    }
+
+    #[test]
+    fn targeted_growth_fast_path_excludes_support_changing_modes() {
+        let defaults = IncrementalSfmConfig::default();
+        assert!(targeted_plain_growth_enabled(&defaults, false));
+        assert!(!targeted_plain_growth_enabled(&defaults, true));
+
+        let mut colmap = defaults.clone();
+        colmap.colmap_style_mapper = true;
+        assert!(!targeted_plain_growth_enabled(&colmap, false));
+
+        let mut correspondence = defaults.clone();
+        correspondence.incremental_correspondence_triangulation = true;
+        assert!(!targeted_plain_growth_enabled(&correspondence, false));
+
+        let mut sequence = defaults;
+        sequence.sequence_relative_pose_fallback = true;
+        assert!(!targeted_plain_growth_enabled(&sequence, false));
+    }
+
+    #[test]
+    fn correspondence_count_cache_matches_fresh_scan_after_point_additions() {
+        let feature = |count| {
+            FeatureSet::new(
+                (0..count)
+                    .map(|index| Point2::new(index as f64, index as f64))
+                    .collect(),
+                (0..count).map(|_| vec![0.0f32]).collect(),
+            )
+            .expect("synthetic feature set")
+        };
+        let features = vec![feature(2), feature(2), feature(2)];
+        let tracks = vec![vec![(0, 0), (1, 0)], vec![(1, 1), (2, 1)]];
+        let obs_by_image = vec![vec![(0, 0)], vec![(0, 0), (1, 1)], vec![(1, 1)]];
+        let mut points = vec![None, None];
+        let mut cache = build_correspondence_count_cache(&features, &obs_by_image, &points);
+        assert_eq!(cache, vec![0, 0, 0]);
+
+        points[0] = Some(Point3::new(0.0, 0.0, 1.0));
+        update_correspondence_count_cache(&features, &tracks, &points, &[0], &mut cache);
+        assert_eq!(cache, vec![1, 1, 0]);
+        assert_eq!(
+            cache,
+            build_correspondence_count_cache(&features, &obs_by_image, &points)
+        );
+
+        points[1] = Some(Point3::new(0.0, 0.0, 1.0));
+        update_correspondence_count_cache(&features, &tracks, &points, &[1], &mut cache);
+        assert_eq!(cache, vec![1, 2, 1]);
+        assert_eq!(
+            cache,
+            build_correspondence_count_cache(&features, &obs_by_image, &points)
+        );
     }
 
     fn pose_with_world_center(x: f64) -> Pose {
