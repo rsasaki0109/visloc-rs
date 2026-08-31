@@ -36,6 +36,7 @@ CANDIDATE_INDEX_SCHEMA = "visloc_electro_candidate_shards_v1"
 MATCH_INDEX_SCHEMA = "visloc_electro_match_shards_v1"
 FEATURE_MANIFEST_SCHEMA = "visloc_electro_feature_manifest_v1"
 SHA256_RE = set("0123456789abcdef")
+GNU_TIME = Path("/usr/bin/time")
 
 
 class ValidationError(RuntimeError):
@@ -541,15 +542,108 @@ def validate_feature_manifest(
     }
 
 
-def _run_command(command: list[str], log_path: Path, *, cwd: Path = REPO_ROOT) -> float:
+def parse_gnu_time(path: Path) -> dict[str, Any]:
+    """Parse the stable resource fields emitted by ``/usr/bin/time -v``."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValidationError(f"cannot read GNU time report {path}: {exc}") from exc
+    fields: dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, value = line.strip().split(":", 1)
+        fields[key] = value.strip()
+
+    def number(key: str, *, integer: bool = False) -> float | int:
+        value = fields.get(key)
+        if value is None:
+            raise ValidationError(f"GNU time report {path} is missing {key!r}")
+        try:
+            return int(value) if integer else float(value)
+        except ValueError as exc:
+            raise ValidationError(
+                f"GNU time report {path} has invalid {key!r}: {value!r}"
+            ) from exc
+
+    return {
+        "user_s": number("User time (seconds)"),
+        "system_s": number("System time (seconds)"),
+        "peak_rss_kib": number("Maximum resident set size (kbytes)", integer=True),
+        "major_page_faults": number("Major (requiring I/O) page faults", integer=True),
+        "minor_page_faults": number("Minor (reclaiming a frame) page faults", integer=True),
+        "filesystem_inputs": number("File system inputs", integer=True),
+        "filesystem_outputs": number("File system outputs", integer=True),
+        "exit_status": number("Exit status", integer=True),
+        "report": str(path.resolve()),
+        "report_sha256": sha256_file(path),
+    }
+
+
+def measured_phase(path: Path, elapsed_s: float) -> dict[str, Any]:
+    measurement = parse_gnu_time(path)
+    measurement["elapsed_s"] = elapsed_s
+    return measurement
+
+
+def carry_forward_phase_ledger(
+    current: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Keep completed phase measurements across prepare/match/map invocations."""
+
+    if not isinstance(previous, dict):
+        return current
+    result = dict(current)
+    for key in ("candidate_generation", "candidate_sharding", "merge", "mapping"):
+        if result.get(key) is None and previous.get(key) is not None:
+            result[key] = previous[key]
+    return result
+
+
+def tree_bytes(path: Path) -> int:
+    """Return allocated artifact bytes without following symlinks."""
+
+    total = 0
+    if not path.exists():
+        return total
+    for entry in path.rglob("*"):
+        if entry.is_file() and not entry.is_symlink():
+            try:
+                total += entry.stat().st_size
+            except OSError as exc:
+                raise ValidationError(f"cannot stat artifact {entry}: {exc}") from exc
+    return total
+
+
+def _run_command(
+    command: list[str],
+    log_path: Path,
+    *,
+    cwd: Path = REPO_ROOT,
+    timing_path: Path | None = None,
+) -> float:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    executed = command
+    if timing_path is not None:
+        if not GNU_TIME.is_file():
+            raise ValidationError(f"GNU time executable is missing: {GNU_TIME}")
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        executed = [str(GNU_TIME), "-v", "-o", str(timing_path), "--", *command]
     started = time.monotonic()
-    print(f"$ {shlex.join(command)}", file=sys.stderr)
+    print(f"$ {shlex.join(executed)}", file=sys.stderr)
     try:
         with log_path.open("w", encoding="utf-8") as log:
-            result = subprocess.run(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, check=False)
+            result = subprocess.run(
+                executed,
+                cwd=cwd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                env={**os.environ, "LC_ALL": "C"},
+            )
     except OSError as exc:
-        raise ValidationError(f"cannot execute {command[0]}: {exc}") from exc
+        raise ValidationError(f"cannot execute {executed[0]}: {exc}") from exc
     if result.returncode != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
         raise ValidationError(f"command failed ({result.returncode}): {shlex.join(command)}\n" + "\n".join(tail))
@@ -745,7 +839,12 @@ def prepare_match_index(candidate_index_path: Path, output_dir: Path) -> dict[st
     return index
 
 
-def validate_match_index(index_path: Path, candidate_index_path: Path) -> dict[str, Any]:
+def validate_match_index(
+    index_path: Path,
+    candidate_index_path: Path,
+    *,
+    require_complete: bool = False,
+) -> dict[str, Any]:
     candidate = validate_candidate_shards(candidate_index_path)
     index_path = index_path.resolve()
     index = _load_json(index_path, "match index")
@@ -766,6 +865,10 @@ def validate_match_index(index_path: Path, candidate_index_path: Path) -> dict[s
         status = entry.get("status")
         if status not in {"pending", "running", "complete", "failed"}:
             raise ValidationError(f"match index shard {expected_id} has invalid status {status!r}")
+        if require_complete and status != "complete":
+            raise ValidationError(
+                f"match shard {expected_id} is not complete (status {status!r})"
+            )
         if status == "complete":
             snapshot_path = index_path.parent / _safe_relative(entry.get("snapshot_path", ""), f"match shard {expected_id} snapshot path")
             expected_hash = _sha256(entry.get("snapshot_sha256"), f"match shard {expected_id} snapshot hash")
@@ -817,13 +920,25 @@ def run_match_shards(
             match_ratio=match_ratio,
         )
         try:
-            elapsed = _run_command(command, root / f"match-{shard_id:06d}.log")
+            timing_path = root / "timing" / f"match-{shard_id:06d}.time.txt"
+            elapsed = _run_command(
+                command,
+                root / f"match-{shard_id:06d}.log",
+                timing_path=timing_path,
+            )
             digest = sha256_file(snapshot_path)
         except (ValidationError, OSError):
             entry["status"] = "failed"
             atomic_json(match_index_path, index)
             raise
-        entry.update({"status": "complete", "snapshot_sha256": digest, "elapsed_s": elapsed})
+        entry.update(
+            {
+                "status": "complete",
+                "snapshot_sha256": digest,
+                "elapsed_s": elapsed,
+                "measurement": measured_phase(timing_path, elapsed),
+            }
+        )
         atomic_json(match_index_path, index)
     validated = validate_match_index(match_index_path, candidate_index_path)
     complete = [entry for entry in validated["index"]["shards"] if entry["status"] == "complete"]
@@ -855,8 +970,19 @@ def merge_match_shards(match_index_path: Path, *, merge_binary: Path, output: Pa
         if sha256_file(path) != expected:
             raise ValidationError(f"match snapshot hash mismatch: {path}")
         snapshots.append(path)
-    elapsed = _run_command(build_merge_command(merge_binary, output, snapshots), root / "merge.log")
-    return {"output": str(output), "sha256": sha256_file(output), "shards": len(snapshots), "elapsed_s": elapsed}
+    timing_path = root / "timing" / "merge.time.txt"
+    elapsed = _run_command(
+        build_merge_command(merge_binary, output, snapshots),
+        root / "merge.log",
+        timing_path=timing_path,
+    )
+    return {
+        "output": str(output),
+        "sha256": sha256_file(output),
+        "shards": len(snapshots),
+        "elapsed_s": elapsed,
+        "measurement": measured_phase(timing_path, elapsed),
+    }
 
 
 def _binary(path: str | None, default: Path) -> Path:
@@ -930,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValidationError(f"features directory is missing: {features_dir}")
         if not calibration_dir.is_dir():
             raise ValidationError(f"calibration directory is missing: {calibration_dir}")
+        feature_validation_started = time.monotonic()
         feature_manifest_path = (args.feature_manifest or artifact_root / "features.json").resolve()
         if feature_manifest_path.is_file():
             feature_summary = validate_feature_manifest(
@@ -940,6 +1067,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValidationError(f"feature manifest is missing: {feature_manifest_path}")
             feature_summary = feature_manifest(features_dir, feature_suffix=args.feature_suffix, source_dir=args.images_dir)
             write_feature_manifest(feature_manifest_path, feature_summary)
+            feature_summary = validate_feature_manifest(
+                feature_manifest_path, features_dir, source_dir=args.images_dir
+            )
+        feature_validation_elapsed = time.monotonic() - feature_validation_started
         candidate_source = args.candidate_manifest
         if candidate_source is None:
             candidate_source = artifact_root / "candidates.txt"
@@ -952,10 +1083,15 @@ def main(argv: list[str] | None = None) -> int:
             merge_binary = _binary(args.merge_binary, REPO_ROOT / "target" / "release" / "examples" / "merge_verified_pair_snapshots")
         candidate_dir = artifact_root / "candidates"
         candidate_index_path = candidate_dir / "index.json"
+        candidate_measurement = None
+        candidate_sharding_elapsed = None
+        merge_result = None
+        mapping_measurement = None
         if mode in {"prepare", "run"}:
             if not candidate_source.is_file():
                 candidate_source.parent.mkdir(parents=True, exist_ok=True)
-                _run_command(
+                candidate_timing_path = artifact_root / "timing" / "candidate-generation.time.txt"
+                candidate_elapsed = _run_command(
                     build_candidate_command(
                         binary,
                         features_dir=features_dir,
@@ -972,7 +1108,12 @@ def main(argv: list[str] | None = None) -> int:
                         temporal_pyramid_max_offset=args.temporal_pyramid_max_offset,
                     ),
                     artifact_root / "candidate-generation.log",
+                    timing_path=candidate_timing_path,
                 )
+                candidate_measurement = measured_phase(
+                    candidate_timing_path, candidate_elapsed
+                )
+            sharding_started = time.monotonic()
             split_candidate_manifest(
                 candidate_source,
                 candidate_dir,
@@ -995,6 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
             )
+            candidate_sharding_elapsed = time.monotonic() - sharding_started
         if mode in {"verify", "match", "map"} and not candidate_index_path.is_file():
             raise ValidationError(f"candidate index is missing: {candidate_index_path}; run --prepare first")
         candidate_summary = validate_candidate_shards(candidate_index_path)
@@ -1005,6 +1147,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         match_dir = artifact_root / "matches"
         match_index_path = match_dir / "index.json"
+        if mode == "verify" and match_index_path.is_file():
+            validate_match_index(
+                match_index_path, candidate_index_path, require_complete=True
+            )
         if mode in {"match", "run"}:
             if not match_index_path.is_file() or args.no_resume:
                 prepare_match_index(candidate_index_path, match_dir)
@@ -1022,14 +1168,17 @@ def main(argv: list[str] | None = None) -> int:
                 resume=not args.no_resume,
             )
             merged_snapshot = artifact_root / "mapping" / "verified-merged.vps"
-            merge_match_shards(match_index_path, merge_binary=merge_binary, output=merged_snapshot)
+            merge_result = merge_match_shards(
+                match_index_path, merge_binary=merge_binary, output=merged_snapshot
+            )
         else:
             merged_snapshot = artifact_root / "mapping" / "verified-merged.vps"
         if mode in {"map", "run"}:
             if not merged_snapshot.is_file():
                 raise ValidationError(f"merged snapshot is missing: {merged_snapshot}; run --match first")
             output_model = artifact_root / "mapping" / "colmap"
-            _run_command(
+            mapping_timing_path = artifact_root / "timing" / "mapping.time.txt"
+            mapping_elapsed = _run_command(
                 build_mapping_command(
                     binary,
                     features_dir=features_dir,
@@ -1044,7 +1193,48 @@ def main(argv: list[str] | None = None) -> int:
                     final_ba=not args.no_final_ba,
                 ),
                 artifact_root / "mapping.log",
+                timing_path=mapping_timing_path,
             )
+            mapping_measurement = measured_phase(mapping_timing_path, mapping_elapsed)
+        match_measurements = []
+        if match_index_path.is_file():
+            match_index = _load_json(match_index_path, "match index")
+            match_measurements = [
+                entry["measurement"]
+                for entry in match_index.get("shards", [])
+                if isinstance(entry, dict) and isinstance(entry.get("measurement"), dict)
+            ]
+        phase_ledger = {
+            "feature_manifest_validation": {
+                "elapsed_s": feature_validation_elapsed,
+                "feature_extraction_included": False,
+            },
+            "candidate_generation": candidate_measurement,
+            "candidate_sharding": (
+                {"elapsed_s": candidate_sharding_elapsed}
+                if candidate_sharding_elapsed is not None
+                else None
+            ),
+            "match_shards": match_measurements,
+            "matching_elapsed_sum_s": sum(
+                float(entry.get("elapsed_s", 0.0)) for entry in match_measurements
+            ),
+            "matching_peak_rss_kib": max(
+                (int(entry.get("peak_rss_kib", 0)) for entry in match_measurements),
+                default=0,
+            ),
+            "merge": merge_result["measurement"] if merge_result else None,
+            "mapping": mapping_measurement,
+        }
+        previous_summary_path = artifact_root / "summary.json"
+        previous_phase_ledger = None
+        if previous_summary_path.is_file():
+            previous_summary = _load_json(previous_summary_path, "previous run summary")
+            if previous_summary.get("schema") == "visloc_electro_run_summary_v1":
+                previous_phase_ledger = previous_summary.get("phase_ledger")
+        phase_ledger = carry_forward_phase_ledger(
+            phase_ledger, previous_phase_ledger
+        )
         summary = {
             "schema": "visloc_electro_run_summary_v1",
             "mode": mode,
@@ -1055,6 +1245,8 @@ def main(argv: list[str] | None = None) -> int:
             "match_index": str(match_index_path) if match_index_path.is_file() else None,
             "merged_snapshot": str(merged_snapshot) if merged_snapshot.is_file() else None,
             "merged_snapshot_sha256": sha256_file(merged_snapshot) if merged_snapshot.is_file() else None,
+            "phase_ledger": phase_ledger,
+            "artifact_bytes": tree_bytes(artifact_root),
             "ground_truth_used_for_selection_or_mapping": False,
         }
         atomic_json(artifact_root / "summary.json", summary)

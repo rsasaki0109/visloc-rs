@@ -694,3 +694,26 @@ exhaustive championではない。manifest replay runのhashは
 10k級へ進む前に候補recall・登録率・再現hash・RSS/disk上限を確認する。
 この計画はdownload/large runを含まず、courtyard exhaustive 703-pair / 38/38 /
 0.005379 m gateとM3 200-pair A/Bを変更しない。
+
+## 18. Electro roadmap M0/M1 closure (2026-09-01)
+
+M0の6依存PRはmainへ統合済みで、README冒頭にはElectro 1,200画像のGIF・PNG・
+COLMAP比較表、courtyardのGIF・比較表、SfM demo commandを配置した。Electroの
+主張はmapper 9.61倍高速というphase claimに限定し、matching 4.43倍遅いこと、
+RSS 3.17倍、登録7画像差、feature extraction未計測のためend-to-end claimでは
+ないことを同じ表で明示している。
+
+M1の300画像single-camera probeはK=64、local stem window 3、cap512、10,634
+candidateで凍結した。exhaustive 44,850 candidate / 3,883 verifiedに対して
+3,878 verified（99.871% recall）、登録200/300対202/300（loss 0.667 percentage
+point）で両gateを満たす。独立2 runのcandidate index、feature manifest、merged
+snapshot、cameras/images/points3D hashは完全一致した。feature SIGKILLでは4画像の
+sidecarを再利用して900 fileがuninterrupted runと一致し、match SIGKILL resumeも
+merged snapshotが一致した。同サイズ1-byte破損が当初verify-onlyを通る不具合を
+発見し、complete match indexをverify modeでも再検証するよう修正した。
+
+証跡は benchmarks/electro/electro-300-phase-ledger.json と
+benchmarks/electro/electro-300-failure-injection.log。次はroadmap M2で、同じ
+12,000 pairのElectro 1,200画像における7未登録画像をfirst-divergence ledgerと
+cap32/64/96/128/uncapped controlで切り分ける。M1の300画像absolute RMSE 0.533 mは
+quality championではなく、M2で改善する対象である。

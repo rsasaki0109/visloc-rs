@@ -7222,7 +7222,6 @@ fn snapshot_metadata_matches_pair(pair: &PairwiseMatches, metadata: &SnapshotPai
 
 fn write_verified_pair_snapshot(
     path: &Path,
-    effective_config: &str,
     image_names: &[String],
     features: &[FeatureSet],
     camera: &Camera,
@@ -7248,6 +7247,7 @@ fn write_verified_pair_snapshot(
         })
         .collect();
     let verifier_config = snapshot_verifier_config(args);
+    let snapshot_config = snapshot_export_config(args);
     let snapshot = VerifiedPairSnapshot {
         schema_version: verified_pair_snapshot::SCHEMA_VERSION,
         image_names: image_names.to_vec(),
@@ -7257,8 +7257,13 @@ fn write_verified_pair_snapshot(
         width: u64::from(camera.width),
         height: u64::from(camera.height),
         intrinsics_bits: snapshot_intrinsics_bits(camera)?,
-        effective_config_hash: effective_config_hash(effective_config),
-        effective_config: effective_config.to_owned(),
+        // The full Args debug snapshot is already in the phase log. It
+        // contains candidate/output paths, so storing it here made otherwise
+        // identical snapshots differ across resumable run roots. Keep the
+        // binary envelope path-independent; pair hashes and the runner index
+        // retain the data/provenance bindings.
+        effective_config_hash: effective_config_hash(&snapshot_config),
+        effective_config: snapshot_config,
         verifier_config_hash: effective_config_hash(&verifier_config),
         verifier_config,
         pair_order_hash: ordered_pairwise_edge_hash(pairwise),
@@ -7341,6 +7346,10 @@ fn snapshot_verifier_config(args: &Args) -> String {
         args.force_essential_uncalibrated_only,
         args.colmap_guided_matching,
     )
+}
+
+fn snapshot_export_config(args: &Args) -> String {
+    format!("verified-pair-export-v1;{}", snapshot_verifier_config(args))
 }
 
 /// Hash the exact pair and correspondence order consumed by track building.
@@ -14817,7 +14826,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = args.export_verified_pairs_snapshot.as_deref() {
         write_verified_pair_snapshot(
             path,
-            &config_snapshot,
             &image_names,
             &features,
             &args.camera,
@@ -15635,7 +15643,7 @@ mod diagnose_cli_tests {
         parse_args_from, parse_candidate_manifest, parse_candidate_manifest_with_metadata,
         parse_colmap_image_camera_assignments, parse_colmap_track_membership, parse_diagnose_stems,
         remap_feature_keypoints_by_old_to_new, replace_feature_keypoints_from_native,
-        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean,
+        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean, snapshot_export_config,
         summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
         translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
         verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
@@ -17603,6 +17611,18 @@ mod diagnose_cli_tests {
             effective_config_hash(""),
             0xcbf29ce484222325,
             "the snapshot label uses the stable FNV-1a offset basis"
+        );
+        let mut path_a = parse_args_from(minimal_args(&[])).unwrap();
+        let mut path_b = parse_args_from(minimal_args(&[])).unwrap();
+        path_a.out_colmap = PathBuf::from("/tmp/electro-repeat-a/model");
+        path_b.out_colmap = PathBuf::from("/tmp/electro-repeat-b/model");
+        assert_ne!(
+            effective_config_snapshot(&path_a),
+            effective_config_snapshot(&path_b)
+        );
+        assert_eq!(
+            snapshot_export_config(&path_a),
+            snapshot_export_config(&path_b)
         );
 
         // Every experimental mapper/verification switch is opt-in. Values

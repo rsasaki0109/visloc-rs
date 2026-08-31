@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,111 @@ class ElectroBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
                 benchmark.validate_candidate_shards(root / "candidates" / "index.json")
 
+    def test_measured_command_records_peak_rss_and_exit_status(self) -> None:
+        if not benchmark.GNU_TIME.is_file():
+            self.skipTest("GNU time is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timing = root / "true.time.txt"
+            elapsed = benchmark._run_command(
+                ["/bin/true"], root / "true.log", cwd=root, timing_path=timing
+            )
+            measurement = benchmark.measured_phase(timing, elapsed)
+            self.assertEqual(measurement["exit_status"], 0)
+            self.assertGreaterEqual(measurement["peak_rss_kib"], 0)
+            self.assertGreaterEqual(measurement["elapsed_s"], 0.0)
+
+    def test_phase_ledger_keeps_completed_prior_phases(self) -> None:
+        current = {
+            "candidate_generation": None,
+            "candidate_sharding": None,
+            "merge": None,
+            "mapping": {"elapsed_s": 3.0},
+        }
+        previous = {
+            "candidate_generation": {"elapsed_s": 1.0},
+            "candidate_sharding": {"elapsed_s": 0.1},
+            "merge": {"elapsed_s": 2.0},
+            "mapping": None,
+        }
+        self.assertEqual(
+            benchmark.carry_forward_phase_ledger(current, previous),
+            {
+                "candidate_generation": {"elapsed_s": 1.0},
+                "candidate_sharding": {"elapsed_s": 0.1},
+                "merge": {"elapsed_s": 2.0},
+                "mapping": {"elapsed_s": 3.0},
+            },
+        )
+
+    def test_interrupted_match_shard_is_rerun_and_corruption_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / "candidates", 10)
+            candidate_index = root / "candidates" / "index.json"
+            benchmark.prepare_match_index(candidate_index, root / "matches")
+            match_index = root / "matches" / "index.json"
+
+            def interrupted(command, _log_path, **_kwargs):
+                snapshot = Path(command[command.index("--export-verified-pairs-snapshot") + 1])
+                snapshot.write_bytes(b"partial")
+                raise benchmark.ValidationError("injected interruption")
+
+            with mock.patch.object(benchmark, "_run_command", side_effect=interrupted):
+                with self.assertRaisesRegex(benchmark.ValidationError, "injected"):
+                    benchmark.run_match_shards(
+                        candidate_index,
+                        match_index,
+                        binary=Path("/bin/visloc"),
+                        features_dir=root,
+                        calibration_dir=root,
+                    )
+            failed = json.loads(match_index.read_text(encoding="utf-8"))
+            self.assertEqual(failed["shards"][0]["status"], "failed")
+
+            def completed(command, _log_path, *, timing_path=None, **_kwargs):
+                snapshot = Path(command[command.index("--export-verified-pairs-snapshot") + 1])
+                snapshot.write_bytes(b"complete")
+                assert timing_path is not None
+                timing_path.parent.mkdir(parents=True, exist_ok=True)
+                timing_path.write_text(
+                    "\n".join(
+                        [
+                            "User time (seconds): 0.01",
+                            "System time (seconds): 0.00",
+                            "Maximum resident set size (kbytes): 1024",
+                            "Major (requiring I/O) page faults: 0",
+                            "Minor (reclaiming a frame) page faults: 1",
+                            "File system inputs: 0",
+                            "File system outputs: 8",
+                            "Exit status: 0",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return 0.01
+
+            with mock.patch.object(benchmark, "_run_command", side_effect=completed):
+                benchmark.run_match_shards(
+                    candidate_index,
+                    match_index,
+                    binary=Path("/bin/visloc"),
+                    features_dir=root,
+                    calibration_dir=root,
+                )
+            complete = json.loads(match_index.read_text(encoding="utf-8"))
+            self.assertEqual(complete["shards"][0]["status"], "complete")
+            self.assertEqual(complete["shards"][0]["measurement"]["peak_rss_kib"], 1024)
+
+            snapshot = root / "matches" / complete["shards"][0]["snapshot_path"]
+            payload = bytearray(snapshot.read_bytes())
+            payload[0] ^= 1
+            snapshot.write_bytes(payload)
+            with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
+                benchmark.validate_match_index(match_index, candidate_index)
+
     def test_candidate_metadata_survives_sharding_and_tampering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -66,9 +172,26 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertEqual(parsed[2], metadata)
             benchmark.validate_candidate_shards(root / "candidates" / "index.json")
             shard = root / "candidates" / "candidate-000000.txt"
-            shard.write_text(shard.read_text(encoding="utf-8").replace("same-timestamp", "other"), encoding="utf-8")
+            shard.write_text(
+                shard.read_text(encoding="utf-8").replace("same-timestamp", "other"),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
                 benchmark.validate_candidate_shards(root / "candidates" / "index.json")
+
+    def test_complete_verification_rejects_pending_match_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / "candidates", 10)
+            candidate_index = root / "candidates" / "index.json"
+            benchmark.prepare_match_index(candidate_index, root / "matches")
+            with self.assertRaisesRegex(benchmark.ValidationError, "not complete"):
+                benchmark.validate_match_index(
+                    root / "matches" / "index.json",
+                    candidate_index,
+                    require_complete=True,
+                )
 
     def test_resume_rewrites_corrupt_candidate_shard_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -237,6 +360,52 @@ class ElectroBenchmarkTests(unittest.TestCase):
             )
             summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
             self.assertFalse(summary["ground_truth_used_for_selection_or_mapping"])
+
+    def test_verify_mode_rejects_corrupt_complete_match_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            features = root / "features"
+            features.mkdir()
+            for image_id in range(2):
+                (features / f"{image_id:06d}_features.txt").write_text(
+                    "0 0 1 2\n", encoding="utf-8"
+                )
+            feature_manifest = benchmark.feature_manifest(features)
+            benchmark.write_feature_manifest(root / "features.json", feature_manifest)
+            source = root / "source.txt"
+            benchmark.write_candidate_manifest(
+                source, ["000000.png", "000001.png"], [(0, 1)]
+            )
+            benchmark.split_candidate_manifest(source, root / "candidates", 1)
+            candidate_index = root / "candidates" / "index.json"
+            benchmark.prepare_match_index(candidate_index, root / "matches")
+            match_index = root / "matches" / "index.json"
+            index = json.loads(match_index.read_text(encoding="utf-8"))
+            snapshot = root / "matches" / index["shards"][0]["snapshot_path"]
+            snapshot.write_bytes(b"complete")
+            index["shards"][0].update(
+                {
+                    "status": "complete",
+                    "snapshot_sha256": benchmark.sha256_file(snapshot),
+                }
+            )
+            benchmark.atomic_json(match_index, index)
+            snapshot.write_bytes(b"Xomplete")
+
+            self.assertEqual(
+                benchmark.main(
+                    [
+                        "--verify-only",
+                        "--features-dir",
+                        str(features),
+                        "--calibration-dir",
+                        str(root),
+                        "--artifact-root",
+                        str(root),
+                    ]
+                ),
+                1,
+            )
 
 
 if __name__ == "__main__":

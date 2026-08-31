@@ -1,0 +1,35 @@
+ETH3D electro 300-image M1 failure-injection record
+Recorded: 2026-09-01
+
+FEATURE EXTRACTION SIGKILL / RESUME
+- Injection: timeout --signal=KILL 8s, RAYON_NUM_THREADS=1, resumable SIFT stream export.
+- Exit status: 137.
+- Durable outputs at kill: 4 feature files, 4 loci files, 4 completion sidecars.
+- Temporary final-name files after kill: 0.
+- Resume log reused exactly 4 images; all remaining images were extracted.
+- Resumed and uninterrupted roots each contain 900 files.
+- Relative-path SHA-256 lists are byte-identical:
+  07609d6c6bbc2b1995b8a339cceb89dde5ceffdb39fa79c75b23d368d90f7f11
+
+MATCH SHARD SIGKILL / RESUME
+- Injection: timeout --signal=KILL 2s while shard 0 was running.
+- Exit status: 137; index retained shard 0 as running and shards 1..7 as pending.
+- Resume reran the incomplete shard and completed all 8 shards.
+- Resumed merged snapshot SHA-256:
+  b1c8897271af7ec435fe3ec735a30231ea3b4befaf61cebb6d99bf84dd237bbd
+- Two uninterrupted reference runs produced the same merged snapshot hash.
+
+SAME-SIZE CORRUPTION
+- Copied a completed artifact root, then replaced byte 0 of verified-000000.vps.
+- Size before and after: 1,441,640 bytes.
+- SHA-256 before:
+  12982752bd2e97ec2ab956bc999d322290ea9f5e1e060918048921cb2e621b27
+- SHA-256 after:
+  4ea595dfa6f82ca6e49d18eea2385d2d6646682a5dd27207e5c8debb3a24cab7
+- Before the runner fix, --verify-only incorrectly returned 0. A regression test and
+  complete-match-index validation were added.
+- After the fix, the valid root returned 0 and the corrupt root returned 1 with:
+  error: match shard 0 snapshot hash mismatch
+
+All failure injections used copies or dedicated external artifact roots. Ground truth
+was not available to feature extraction, candidate generation, matching, or mapping.

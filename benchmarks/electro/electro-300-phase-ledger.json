@@ -1,0 +1,135 @@
+{
+  "schema": "visloc_electro_probe_phase_ledger_v1",
+  "recorded_at": "2026-09-01",
+  "benchmark": {
+    "id": "eth3d-electro-cam4-sequential-300-k64-cap512-v1",
+    "scene": "electro",
+    "image_count": 300,
+    "camera_count": 1,
+    "source_revision_base": "4eef6989ae50f58db01ad25284ae9eb293fef171",
+    "source_branch": "feat/electro-probe-reliability",
+    "source_had_uncommitted_changes": true,
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "host": {
+    "cpu": "11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz",
+    "logical_cpus": 8,
+    "memory_bytes": 33237082112,
+    "kernel": "Linux 7.0.0-30-generic x86_64"
+  },
+  "inputs": {
+    "feature_rows": 153600,
+    "feature_manifest_sha256": "8d259be603174613220a2395984893dbe2ab76ca69c1990032495a333e722315",
+    "candidate_policy": "vlad-union-v1",
+    "retrieval_topk": 64,
+    "local_stem_window": 3,
+    "candidate_pairs": 10634,
+    "candidate_manifest_sha256": "d2c1025c988570e21f9a2c78dcf73a8d51dbebad69d84cc5bd2aaf67cc933d5a",
+    "candidate_index_sha256": "90d69f73f5c150ca543bbeffb311f6384970778cd93b7f16ff64285346aa1b2b",
+    "candidate_shards": 16,
+    "pairs_per_shard": 700,
+    "verified_pairs": 3878,
+    "verified_correspondences": 271703,
+    "merged_snapshot_sha256": "14fc78c260dec0f9de9a88ad39125d443d84c796d80258ff7219c46520b4b762"
+  },
+  "phases": {
+    "feature_extraction_uninterrupted": {
+      "wall_s": 630.76,
+      "peak_rss_kib": 196984,
+      "output_files": 900,
+      "output_bytes": 292381375,
+      "file_list_sha256": "07609d6c6bbc2b1995b8a339cceb89dde5ceffdb39fa79c75b23d368d90f7f11"
+    },
+    "feature_extraction_resumed": {
+      "resume_wall_s": 626.29,
+      "peak_rss_kib": 198056,
+      "reused_images": 4,
+      "output_files": 900,
+      "file_list_sha256": "07609d6c6bbc2b1995b8a339cceb89dde5ceffdb39fa79c75b23d368d90f7f11"
+    },
+    "candidate_generation": {
+      "wall_s": 31.16,
+      "peak_rss_kib": 108200
+    },
+    "candidate_sharding": {
+      "wall_s": 0.030620871984865516
+    },
+    "matching": {
+      "shard_elapsed_sum_s": 90.65220290893922,
+      "peak_rss_kib": 121284
+    },
+    "merge": {
+      "wall_s": 0.15581606497289613,
+      "peak_rss_kib": 86036
+    },
+    "mapping": {
+      "wall_s": 75.97479640995152,
+      "peak_rss_kib": 173744
+    },
+    "scoring": {
+      "wall_s": 0.26,
+      "peak_rss_kib": 110320,
+      "reference_used_only_post_mapping": true
+    }
+  },
+  "determinism": {
+    "complete_runs": 2,
+    "candidate_index_exact": true,
+    "feature_manifest_exact": true,
+    "snapshot_exact": true,
+    "model_exact": true,
+    "cameras_txt_sha256": "7aa640a7e06329e63adb4d089bc5f4e2f0d53f43f77d8ec2b81483a1eae5cb81",
+    "images_txt_sha256": "3ee567a4c9173d4aa131f86ddff7e5d203b1346b1d94fd328ceed8247e2bb6ff",
+    "points3d_txt_sha256": "9bad99c530eeb6528e36a7ad4d4920241809bc37591d0221c0fd71097cf2b4f4"
+  },
+  "quality": {
+    "registered_images": 200,
+    "registered_fraction": 0.6666666666666666,
+    "tracks": 5863,
+    "mean_reprojection_px": 0.768,
+    "score": {
+      "rmse_m": 0.5333205811388725,
+      "median_m": 0.5105903120219273,
+      "p95_m": 0.8260768932038765,
+      "max_m": 1.044889163055154
+    }
+  },
+  "exhaustive_control": {
+    "candidate_pairs": 44850,
+    "candidate_manifest_sha256": "a1f1f0b80fd0a7f698ed31171256d5a8d4dbbaaec3691aea193999cc996d0850",
+    "verified_pairs": 3883,
+    "merged_snapshot_sha256": "92cfd3354bce99479429b82a47d412e615f18f2c607040dfd378c2b2751c8a88",
+    "registered_images": 202,
+    "verified_pair_recall": 0.998712335822817,
+    "registration_loss_percentage_points": 0.6666666666666666,
+    "score_rmse_m": 0.5409516970876312
+  },
+  "resource_gates": {
+    "max_process_peak_rss_kib": 198056,
+    "rss_limit_kib": 16777216,
+    "final_feature_plus_run_bytes": 334263515,
+    "disk_limit_bytes": 53687091200,
+    "rss_pass": true,
+    "disk_pass": true
+  },
+  "failure_injection": {
+    "feature_sigkill_exit_status": 137,
+    "feature_complete_sidecars_before_resume": 4,
+    "feature_temporary_files_after_kill": 0,
+    "match_sigkill_exit_status": 137,
+    "resumed_snapshot_matches_uninterrupted": true,
+    "same_size_corruption_rejected": true,
+    "details": "benchmarks/electro/electro-300-failure-injection.log"
+  },
+  "binaries": {
+    "unordered_sfm_demo_sha256": "50cf76ac8b017e05656bda9dd947116a0f4d9e07bb41eac6b5dfd457acaf47f6",
+    "merge_verified_pair_snapshots_sha256": "0572a6b0da938d136f30f2f2427cab7a84af7e13734012cd9806d37315678271",
+    "inspect_verified_pair_snapshot_sha256": "106f181bc76054024e577cb068558ec42570c6d714b96fd3d5803a4389851487"
+  },
+  "external_artifact_root": "/home/sasaki/datasets/eth3d/large_scale/electro/probe300_cam4_20260831",
+  "notes": [
+    "External paths are descriptive provenance only; dataset and generated artifacts are not committed.",
+    "The 300-image single-camera sequential probe is a reliability and resource gate, not the 1,200-image quality target.",
+    "The absolute camera-centre error remains an M2 optimization target."
+  ]
+}

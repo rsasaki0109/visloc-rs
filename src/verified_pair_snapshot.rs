@@ -44,9 +44,10 @@ pub struct PairRecord {
     pub relative_translation_bits: Option<[u64; 3]>,
 }
 
-/// Complete snapshot envelope.  Manifest/configuration hashes are checked on
-/// import; the textual forms remain in the file so a failed validation can be
-/// diagnosed without guessing which command produced the snapshot.
+/// Complete snapshot envelope. Manifest/configuration hashes are checked on
+/// import. The embedded configuration is deliberately path-independent so
+/// the same inputs produce identical bytes in different resumable run roots;
+/// full command paths remain in the runner log and shard index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub schema_version: u32,

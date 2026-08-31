@@ -37,6 +37,30 @@ contract, so this is not an end-to-end speed claim. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
 and <a href="benchmarks/electro/visloc_1200_v1.json">frozen result manifest</a>.</sub></p>
 
+<p align="center"><sub><a href="docs/assets/electro_1200_sfm_comparison.png">Open the full-resolution still comparison</a>.</sub></p>
+
+### 300-image reliability gate
+
+Before another 1,200-image tuning run, the resumable pipeline was killed,
+restarted, corrupted, and repeated on a frozen 300-image probe. The bounded
+K=64 schedule retained **99.871%** of exhaustive verified pairs and lost only
+**0.667 percentage point** of registration; two complete runs reproduced the
+same candidate, feature, snapshot, and COLMAP-model hashes.
+
+| Measured probe result | Bounded K=64 | Exhaustive control |
+| --- | ---: | ---: |
+| Candidate / verified pairs | 10,634 / 3,878 | 44,850 / 3,883 |
+| Verified-pair recall | **99.871%** | 100% |
+| Registered cameras | 200/300 | 202/300 |
+| Matching / mapper wall | 90.65 s / 75.97 s | 160.58 s / 90.38 s |
+| Mapper peak RSS | **169.7 MiB** | 170.2 MiB |
+
+<p align="center"><sub>Feature extraction was 630.76 s with 193.4 MiB peak
+RSS; the full generated feature + run footprint was 318.8 MiB. Same-size
+corruption is rejected and SIGKILL resume reproduces uninterrupted hashes. See the
+<a href="benchmarks/electro/electro-300-phase-ledger.json">phase ledger</a>
+and <a href="benchmarks/electro/electro-300-failure-injection.log">failure-injection record</a>.</sub></p>
+
 ## Measured courtyard SfM control
 
 <p align="center">
