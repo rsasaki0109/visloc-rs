@@ -1,0 +1,236 @@
+{
+  "schema": "visloc_electro_quality_attribution_v1",
+  "recorded_at": "2026-09-01",
+  "benchmark": {
+    "scene": "electro",
+    "images": 1200,
+    "candidate_pairs": 12000,
+    "verified_pairs": 11625,
+    "verified_correspondences": 7475384,
+    "snapshot_sha256": "93bf51451866cc066718b827d0ecec8f498ffc23842bd2c1e3902fd7a2697a86",
+    "ground_truth_used_for_mapping": false
+  },
+  "cap_matrix": [
+    {
+      "cap": 32,
+      "stage": "growth_only",
+      "registered": 1180,
+      "rmse_m": 0.6239457478479358
+    },
+    {
+      "cap": 32,
+      "stage": "final_refinement",
+      "registered": 1180,
+      "rmse_m": 0.6597060592657024
+    },
+    {
+      "cap": 64,
+      "stage": "growth_only",
+      "registered": 1193,
+      "rmse_m": 0.24135467368596303
+    },
+    {
+      "cap": 64,
+      "stage": "final_refinement",
+      "registered": 1193,
+      "rmse_m": 0.11939865699624604,
+      "peak_rss_kib": 3977652
+    },
+    {
+      "cap": 64,
+      "stage": "final_refinement_and_post_registration",
+      "registered": 1199,
+      "rmse_m": 0.11940081347660196,
+      "peak_rss_kib": 3990376
+    },
+    {
+      "cap": 96,
+      "stage": "growth_only",
+      "registered": 1191,
+      "rmse_m": 0.06803942264197782,
+      "median_m": 0.026075911510134716,
+      "peak_rss_kib": 3967644
+    },
+    {
+      "cap": 96,
+      "stage": "final_refinement_and_post_registration",
+      "registered": 1200,
+      "rmse_m": 0.03223683965638911,
+      "median_m": 0.017189092000874227,
+      "p95_m": 0.07150356606790832,
+      "max_m": 0.13988926929985415,
+      "mean_reprojection_px": 0.309,
+      "tracks": 83909,
+      "observations": 433018,
+      "mapper_wall_s": 1490.07,
+      "sfm_core_s": 1425.985,
+      "peak_rss_kib": 4016264
+    },
+    {
+      "cap": 128,
+      "stage": "growth_only",
+      "registered": 1185,
+      "rmse_m": 0.14882869494519294
+    },
+    {
+      "cap": null,
+      "stage": "growth_only",
+      "registered": 1197,
+      "rmse_m": 0.47039372214704195,
+      "median_m": 0.3684581272608041,
+      "peak_rss_kib": 4009768
+    }
+  ],
+  "baseline_missing_images": [
+    {
+      "index": 169,
+      "name": "cam4_1474975200054642738.png",
+      "feature_rows": 2755,
+      "candidate_degree": 15,
+      "verified_degree": 15,
+      "raw_matches": 11048,
+      "accepted_matches": 10810,
+      "first_pnp_correspondences": 66,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 106,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 226,
+      "name": "cam4_1474975204257138738.png",
+      "feature_rows": 3540,
+      "candidate_degree": 15,
+      "verified_degree": 14,
+      "raw_matches": 13540,
+      "accepted_matches": 13234,
+      "first_pnp_correspondences": 43,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 101,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 417,
+      "name": "cam5_1474975196147058738.png",
+      "feature_rows": 2431,
+      "candidate_degree": 29,
+      "verified_degree": 29,
+      "raw_matches": 20193,
+      "accepted_matches": 19919,
+      "first_pnp_correspondences": 301,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 360,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 474,
+      "name": "cam5_1474975200423282738.png",
+      "feature_rows": 2505,
+      "candidate_degree": 15,
+      "verified_degree": 15,
+      "raw_matches": 11491,
+      "accepted_matches": 11255,
+      "first_pnp_correspondences": 70,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 96,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 599,
+      "name": "cam5_1474975209639282738.png",
+      "feature_rows": 1727,
+      "candidate_degree": 9,
+      "verified_degree": 5,
+      "raw_matches": 1225,
+      "accepted_matches": 1096,
+      "first_pnp_correspondences": 52,
+      "first_pnp_inliers": 6,
+      "final_available_correspondences": 52,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 938,
+      "name": "cam7_1474975190322546738.png",
+      "feature_rows": 922,
+      "candidate_degree": 15,
+      "verified_degree": 15,
+      "raw_matches": 3125,
+      "accepted_matches": 2988,
+      "first_pnp_correspondences": 125,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 142,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    },
+    {
+      "index": 946,
+      "name": "cam7_1474975190912370738.png",
+      "feature_rows": 697,
+      "candidate_degree": 15,
+      "verified_degree": 15,
+      "raw_matches": 2899,
+      "accepted_matches": 2794,
+      "first_pnp_correspondences": 127,
+      "first_pnp_inliers": 3,
+      "final_available_correspondences": 141,
+      "first_divergence": "pnp_rejected_then_trial_exhausted"
+    }
+  ],
+  "attribution": {
+    "registration_gap": "The plain growth schedule permanently spent its one PnP trial before later registrations exposed stronger 2D-3D support. The bounded post-refinement pass recovered 6/7 baseline misses at cap64 and 9/9 misses at cap96.",
+    "accuracy_gap": "The cap64 mapper stream discarded too much geometric support. Raising the cap to 96 reduced growth-only RMSE by 71.8%; iterative refinement then removed the remaining isolated pose error. Cap128 and uncapped growth were both worse, so more correspondences are not monotonically better with the current union-find conflict policy.",
+    "selected_policy": "Electro uses an explicit cap96 plus the existing bounded post-refinement registration pass. The cap remains opt-in and is not a repository-wide default.",
+    "stop_reason": "Cap128 and uncapped were two consecutive quality regressions after cap96; no higher-cap final refinement was run."
+  },
+  "colmap_control": {
+    "registered": 1200,
+    "rmse_m": 0.0467931596971499,
+    "mapper_wall_s": 4929.56,
+    "peak_rss_kib": 1255996
+  },
+  "champion": {
+    "quality_level": "quality_parity",
+    "registered_delta_vs_colmap": 0,
+    "rmse_reduction_vs_colmap_percent": 31.1079,
+    "mapper_speedup_vs_colmap": 3.3083,
+    "peak_rss_gib": 3.8302,
+    "cameras_txt_sha256": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+    "images_txt_sha256": "4849067445eb20a085cec0c4815ca8fe1837c6b4183d7f2a7160ec20763fdd22",
+    "points3d_txt_sha256": "5c0a96baf78e3de52cf82e402ead6c17f519dfded5dceb11c6ba93b41ff5304d",
+    "score_json_sha256": "cb2bf921aedb5a2c13c9ca47864d325463ae8eed37c4048eaffb1353f212cfe6"
+  },
+  "preservation": {
+    "courtyard_default": {
+      "registered": 38,
+      "rmse_m": 0.005378896321459265,
+      "passed": true
+    },
+    "courtyard_fixed_cap96_negative": {
+      "registered": 38,
+      "rmse_m": 0.346318,
+      "passed": false,
+      "consequence": "fixed cap96 remains an Electro-specific opt-in resource setting"
+    },
+    "south_building_default": {
+      "registered": 128,
+      "rmse_m": 0.0073,
+      "model_byte_identical_to_frozen_control": true,
+      "passed": true,
+      "images_txt_sha256": "b8bee737605fe67ed2b5f6d7357d89d28a06a99d62331a7ef7cee612ee808885"
+    }
+  },
+  "decision_trace": {
+    "generator": "scripts/summarize_electro_decision_trace.py",
+    "champion_growth_attempts": 1198,
+    "champion_growth_accepted": 1189,
+    "champion_post_attempts": 9,
+    "champion_post_accepted": 9,
+    "champion_refinement_rounds": 9
+  },
+  "readme_visuals": {
+    "png_sha256": "62e655b28f0df0033b060b91f2c3f8495f5d91ad47c870a0e7aec50685ec2eb2",
+    "png_dimensions": [1525, 930],
+    "gif_sha256": "875fcfadbf2ad8091d287f03f75d9c70487a32082f7f95208e8808df00dbb153",
+    "gif_dimensions": [772, 432],
+    "gif_frames": 24
+  },
+  "external_artifact_root": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000"
+}

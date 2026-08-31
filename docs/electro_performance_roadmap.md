@@ -23,17 +23,17 @@ The merged verified-pair snapshot contains 11,625 verified pairs and
 7,475,384 correspondences; its SHA-256 is
 `93bf51451866cc066718b827d0ecec8f498ffc23842bd2c1e3902fd7a2697a86`.
 
-| phase / metric | visloc-rs current | COLMAP 3.9.1 CPU | gap |
+| phase / metric | visloc-rs M2 champion | COLMAP 3.9.1 CPU | gap |
 | --- | ---: | ---: | ---: |
 | feature extraction | not yet comparable | 304.12 s | measurement missing |
 | exact-pair matching | 2,085.89 s | 471.37 s | visloc 4.43x slower |
-| mapper wall | 513.05 s | 4,929.56 s | visloc 9.61x faster |
-| mapper peak RSS | 3,977,652 KiB | 1,255,996 KiB | visloc 3.17x higher |
-| registered images | 1193 / 1200 | 1200 / 1200 | visloc misses 7 |
-| centre RMSE after Sim(3) | 0.1194 m | 0.0468 m | visloc 2.55x worse |
-| median / p95 | 0.1099 / 0.1436 m | 0.0316 / 0.0968 m | accuracy gap |
+| mapper wall | 1,490.07 s | 4,929.56 s | visloc 3.31x faster |
+| mapper peak RSS | 4,016,264 KiB | 1,255,996 KiB | visloc 3.20x higher |
+| registered images | 1200 / 1200 | 1200 / 1200 | parity |
+| centre RMSE after Sim(3) | 0.03224 m | 0.04679 m | visloc 31.1% lower |
+| median / p95 | 0.01719 / 0.07150 m | 0.03156 / 0.09681 m | visloc lower |
 
-The current visloc model and its pre-memory-optimization control are
+The frozen cap64 baseline and its pre-memory-optimization control are
 byte-identical. The memory work reduced peak RSS from 8,485,216 KiB to
 3,977,652 KiB without changing the official score.
 
@@ -157,6 +157,19 @@ before expensive quality or performance searches on 1,200 images.
   regression tests. Any silent reuse or hash mismatch blocks 1,200-image work.
 
 ## 5. Milestone 2 — attribute the quality gap
+
+**Status (2026-09-01): complete.** The first registration divergence was an
+early one-shot PnP failure followed by permanent trial exhaustion. The existing
+bounded post-refinement pass closes that gap. The accuracy divergence was the
+cap64 mapper stream: cap96 plus the bounded pass reaches 1200/1200 at
+0.03224 m RMSE, 0.07150 m p95, 1,490.07 s mapper wall, and 4,016,264 KiB peak
+RSS. This beats the same-pair COLMAP control in registration parity, centre
+RMSE, and mapper time. Cap128 and uncapped growth are consecutive regressions,
+so cap96 is frozen as an explicit Electro setting rather than a global default.
+Courtyard default remains 38/38 at 0.005379 m, and South Building remains
+128/128 at 0.73 cm with byte-identical model hashes. Evidence:
+[`quality-attribution.json`](../benchmarks/electro/quality-attribution.json) and
+[`electro_quality_attribution.md`](electro_quality_attribution.md).
 
 **Purpose:** determine why the same 12,000 candidate pairs yield seven fewer
 cameras and 2.55x higher centre RMSE. Faster BA is not useful if it freezes the
