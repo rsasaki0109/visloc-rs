@@ -67,11 +67,204 @@ pub struct Snapshot {
     pub pairs: Vec<PairRecord>,
 }
 
+/// Merge complete, hash-validated shard payloads without changing the pair
+/// order inside any shard.
+///
+/// A snapshot shard carries the complete image/feature/configuration envelope
+/// even when it contains only a subset of candidate pairs.  This helper is
+/// intentionally strict about that envelope and rejects overlapping pairs so
+/// a resumed run cannot silently double-count a shard.  The returned snapshot
+/// uses the argument order as its deterministic pair order and recomputes the
+/// two stream-integrity hashes and accepted-match count.
+pub fn merge(snapshots: &[Snapshot]) -> Result<Snapshot, String> {
+    let first = snapshots
+        .first()
+        .ok_or_else(|| "cannot merge an empty verified-pair snapshot list".to_owned())?;
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if snapshot.schema_version != SCHEMA_VERSION {
+            return Err(format!(
+                "snapshot shard {index} has unsupported schema {} (expected {SCHEMA_VERSION})",
+                snapshot.schema_version
+            ));
+        }
+        if snapshot.image_names != first.image_names {
+            return Err(format!(
+                "snapshot shard {index} image manifest differs from shard 0"
+            ));
+        }
+        if snapshot.feature_manifest_hash != first.feature_manifest_hash
+            || snapshot.feature_counts != first.feature_counts
+            || snapshot.image_manifest_hash != first.image_manifest_hash
+        {
+            return Err(format!(
+                "snapshot shard {index} feature/image manifest differs from shard 0"
+            ));
+        }
+        if snapshot.width != first.width
+            || snapshot.height != first.height
+            || snapshot.intrinsics_bits != first.intrinsics_bits
+        {
+            return Err(format!(
+                "snapshot shard {index} camera envelope differs from shard 0"
+            ));
+        }
+        // `effective_config` is the complete CLI diagnostic and therefore
+        // includes shard-specific candidate/output paths.  Stream
+        // compatibility is defined by the path-independent verifier config;
+        // retain shard 0's diagnostic envelope in the merged snapshot while
+        // the runner's index records every shard command/path separately.
+        if snapshot.verifier_config_hash != first.verifier_config_hash
+            || snapshot.verifier_config != first.verifier_config
+        {
+            return Err(format!(
+                "snapshot shard {index} matcher/verifier configuration differs from shard 0"
+            ));
+        }
+    }
+
+    let image_count = first.image_names.len();
+    let mut pairs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for snapshot in snapshots {
+        for pair in &snapshot.pairs {
+            let image_i = usize::try_from(pair.image_i)
+                .map_err(|_| "snapshot pair image_i does not fit usize".to_owned())?;
+            let image_j = usize::try_from(pair.image_j)
+                .map_err(|_| "snapshot pair image_j does not fit usize".to_owned())?;
+            if image_i >= image_count || image_j >= image_count || image_i == image_j {
+                return Err(format!(
+                    "snapshot pair has invalid image indices ({image_i},{image_j})"
+                ));
+            }
+            let key = (image_i.min(image_j), image_i.max(image_j));
+            if !seen.insert(key) {
+                return Err(format!(
+                    "snapshot shards overlap at image pair ({},{})",
+                    key.0, key.1
+                ));
+            }
+            pairs.push(pair.clone());
+        }
+    }
+
+    let accepted_match_count = pairs
+        .iter()
+        .map(|pair| pair.matches.len() as u64)
+        .sum::<u64>();
+    Ok(Snapshot {
+        schema_version: SCHEMA_VERSION,
+        image_names: first.image_names.clone(),
+        image_manifest_hash: first.image_manifest_hash,
+        feature_manifest_hash: first.feature_manifest_hash,
+        feature_counts: first.feature_counts.clone(),
+        width: first.width,
+        height: first.height,
+        intrinsics_bits: first.intrinsics_bits,
+        effective_config_hash: first.effective_config_hash,
+        effective_config: first.effective_config.clone(),
+        verifier_config_hash: first.verifier_config_hash,
+        verifier_config: first.verifier_config.clone(),
+        pair_order_hash: ordered_pair_hash(&pairs),
+        unordered_edge_hash: unordered_edge_hash(&pairs),
+        accepted_match_count,
+        pairs,
+    })
+}
+
+/// Write a complete snapshot through a same-directory temporary file and an
+/// atomic rename.  A caller may safely retry after an interrupted write; only
+/// the final path is considered complete.
+pub fn write_atomic(path: &Path, snapshot: &Snapshot) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create snapshot directory {}: {error}", parent.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("snapshot path has no valid filename: {}", path.display()))?;
+    let temporary = parent.join(format!(".{filename}.tmp-{}", std::process::id()));
+    write(&temporary, snapshot)?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("install snapshot {}: {error}", path.display())
+    })
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn hash_u64(mut hash: u64, value: u64) -> u64 {
+    for byte in value.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn ordered_pair_hash(pairs: &[PairRecord]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    hash = hash_u64(hash, pairs.len() as u64);
+    for pair in pairs {
+        hash = hash_u64(hash, pair.image_i);
+        hash = hash_u64(hash, pair.image_j);
+        hash = hash_u64(hash, u64::from(pair.config));
+        hash = hash_u64(hash, pair.matches.len() as u64);
+        for &(left, right) in &pair.matches {
+            hash = hash_u64(hash, left);
+            hash = hash_u64(hash, right);
+        }
+        if let Some(matches) = &pair.essential_matches {
+            hash = hash_u64(hash, 1);
+            hash = hash_u64(hash, matches.len() as u64);
+            for &(left, right) in matches {
+                hash = hash_u64(hash, left);
+                hash = hash_u64(hash, right);
+            }
+        } else {
+            hash = hash_u64(hash, 0);
+        }
+        if let Some(matrix) = pair.essential_matrix_bits {
+            hash = hash_u64(hash, 1);
+            for value in matrix {
+                hash = hash_u64(hash, value);
+            }
+        } else {
+            hash = hash_u64(hash, 0);
+        }
+    }
+    hash
+}
+
+fn unordered_edge_hash(pairs: &[PairRecord]) -> u64 {
+    let mut edges = Vec::new();
+    for pair in pairs {
+        let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
+            (pair.image_i, pair.image_j, false)
+        } else {
+            (pair.image_j, pair.image_i, true)
+        };
+        for &(left, right) in &pair.matches {
+            let (left, right) = if swapped {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            edges.push((image_i, image_j, left, right));
+        }
+    }
+    edges.sort_unstable();
+    let mut hash = 0xcbf29ce484222325u64;
+    for (image_i, image_j, left, right) in edges {
+        hash = hash_u64(hash, image_i);
+        hash = hash_u64(hash, image_j);
+        hash = hash_u64(hash, left);
+        hash = hash_u64(hash, right);
     }
     hash
 }
@@ -488,7 +681,7 @@ pub fn read(path: &Path) -> Result<Snapshot, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read, write, PairRecord, Snapshot, SCHEMA_VERSION};
+    use super::{merge, read, write, PairRecord, Snapshot, SCHEMA_VERSION};
     use std::path::PathBuf;
 
     fn sample() -> Snapshot {
@@ -574,5 +767,55 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         assert!(read(&path).unwrap_err().contains("schema"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn merge_preserves_shard_order_recomputes_integrity_and_rejects_overlap() {
+        let mut first = sample();
+        first.pairs[0].image_i = 0;
+        first.pairs[0].image_j = 1;
+        first.pair_order_hash = super::ordered_pair_hash(&first.pairs);
+        first.unordered_edge_hash = super::unordered_edge_hash(&first.pairs);
+
+        let mut second = first.clone();
+        second.pairs[0].image_i = 0;
+        second.pairs[0].image_j = 0;
+        // Use a distinct valid pair with a third image in a small synthetic
+        // envelope.  The source sample has only two names, so extend the
+        // image manifest consistently for this merge-only test.
+        first.image_names.push("c.png".into());
+        first.feature_counts.push(5);
+        second.image_names = first.image_names.clone();
+        second.feature_counts = first.feature_counts.clone();
+        second.pairs[0].image_i = 1;
+        second.pairs[0].image_j = 2;
+        second.pair_order_hash = super::ordered_pair_hash(&second.pairs);
+        second.unordered_edge_hash = super::unordered_edge_hash(&second.pairs);
+
+        let merged = merge(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(merged.pairs.len(), 2);
+        assert_eq!((merged.pairs[0].image_i, merged.pairs[0].image_j), (0, 1));
+        assert_eq!((merged.pairs[1].image_i, merged.pairs[1].image_j), (1, 2));
+        assert_eq!(merged.accepted_match_count, 4);
+        assert_eq!(
+            merged.pair_order_hash,
+            super::ordered_pair_hash(&merged.pairs)
+        );
+        assert_eq!(
+            merged.unordered_edge_hash,
+            super::unordered_edge_hash(&merged.pairs)
+        );
+
+        let overlap = merge(&[first, second.clone(), second]).unwrap_err();
+        assert!(overlap.contains("overlap"));
+    }
+
+    #[test]
+    fn merge_rejects_configuration_mismatch() {
+        let first = sample();
+        let mut second = first.clone();
+        second.verifier_config = "different".into();
+        let error = merge(&[first, second]).unwrap_err();
+        assert!(error.contains("configuration"));
     }
 }
