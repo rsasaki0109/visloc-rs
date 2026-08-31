@@ -1,0 +1,83 @@
+{
+  "schema": "visloc_electro_ba_schedule_audit_v1",
+  "recorded_at": "2026-09-01",
+  "scene": "electro",
+  "images": 1200,
+  "candidate_pairs": 12000,
+  "frozen_configuration": "cap96 + sparse BA + bounded post-refinement registration",
+  "baseline": {
+    "global_ba_solves": 9,
+    "ba_max_iterations": 20,
+    "ba_median_seconds": 130.681,
+    "mapper_core_seconds": 1310.111,
+    "mapper_wall_seconds": 1366.75,
+    "peak_rss_kib": 4016460,
+    "registered": 1200,
+    "rmse_m": 0.03223683965638911
+  },
+  "accepted": {
+    "global_ba_max_followup_refinements": 0,
+    "global_ba_solves": 4,
+    "ba_max_iterations": 8,
+    "ba_seconds_run_1": [51.168, 50.938, 51.026, 52.600],
+    "ba_seconds_run_2": [51.989, 51.044, 51.286, 53.326],
+    "ba_median_seconds": 51.227,
+    "ba_median_reduction_percent": 60.8,
+    "mapper_core_seconds": [211.847, 214.003],
+    "mapper_core_median_seconds": 212.925,
+    "mapper_core_reduction_percent": 83.7476,
+    "mapper_wall_seconds": [267.56, 269.42],
+    "mapper_wall_median_seconds": 268.49,
+    "mapper_wall_reduction_percent": 80.3556,
+    "peak_rss_kib": [4011540, 4010780],
+    "peak_rss_median_kib": 4011160,
+    "registered": 1200,
+    "tracks": 83840,
+    "observations": 431833,
+    "mean_reprojection_px": 0.556,
+    "rmse_m": 0.03501132650718982,
+    "median_m": 0.017278775570320322,
+    "p95_m": 0.07709687017668192,
+    "max_m": 0.2860141234138742,
+    "cameras_txt_sha256": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+    "images_txt_sha256": "b7a4d3c9f160340232e29c0258e07045acfba358bdf8f48e97c88bda086d0099",
+    "points3d_txt_sha256": "e73ad63944034d43f24a94408d8cc3c0b11e1d95bfe025d0d6a32e8788929fbe",
+    "repeat_model_byte_identical": true
+  },
+  "rejected": {
+    "ba_max_iterations": 5,
+    "mapper_core_seconds": 102.411,
+    "mapper_wall_seconds": 156.72,
+    "registered": 1200,
+    "rmse_m": 0.06788445423581455,
+    "max_m": 1.865416063619211,
+    "reason": "RMSE exceeded the predeclared 0.060 m Competitive gate and all three solves accepted zero LM steps"
+  },
+  "colmap_control": {
+    "mapper_wall_seconds": 4929.56,
+    "accepted_visloc_speedup": 18.3603,
+    "peak_rss_kib": 1255996,
+    "registered": 1200,
+    "rmse_m": 0.0467931597
+  },
+  "readme_visuals": {
+    "generator": "scripts/generate_electro_readme_visuals.py",
+    "png_sha256": "1173dc54dfffeb702bb4e81f9a7d2ed22e3b4ecd75bb0f8abe9d8ddd3644a9d4",
+    "png_dimensions": [1690, 936],
+    "gif_sha256": "9c54b5b031f9df50c6fc6fa8c4d3a32ced3dec4f73b1f4937bb323e40ea5f2e1",
+    "gif_dimensions": [864, 486],
+    "gif_frames": 24,
+    "repeat_generation_byte_identical": true
+  },
+  "gate": {
+    "minimum_registered": 1198,
+    "maximum_rmse_m": 0.060,
+    "maximum_mapper_median_seconds": 300.0,
+    "passed": true,
+    "peak_rss_target_still_open": true
+  },
+  "external_artifacts": [
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-global-ba-followup0-i8",
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-global-ba-followup0-i8-repeat"
+  ]
+}

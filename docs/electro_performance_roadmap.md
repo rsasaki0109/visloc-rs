@@ -224,7 +224,8 @@ tuning continues only on exact-behavior paths.
 
 ## 6. Milestone 3 — mapper speed and BA memory
 
-**Status (2026-09-01): in progress; items 1–2 complete.** Pure-visual sparse
+**Status (2026-09-01): in progress; items 1–2 and 5 complete; items 3–4 stopped
+at their evidence gates.** Pure-visual sparse
 BA now builds the Schur camera system directly in deterministic 6x6 lower
 blocks, transfers those blocks into Cholesky without scalar COO duplication,
 and reuses symbolic analysis while the observation pattern is unchanged. The
@@ -232,9 +233,16 @@ Electro champion remains byte-identical. Across its nine 20-iteration global
 BAs, median BA time fell from 153.764 s to 130.681 s (**15.0%**); mapper core
 fell from 1425.985 s to 1310.111 s and external wall from 1490.07 s to 1366.75
 s. Peak RSS remains effectively unchanged at 4,016,460 KiB, so the 2 GiB
-memory target is still open. Evidence:
+memory target is still open. A quality-gated schedule audit then reduced nine
+20-iteration global solves to four 8-iteration solves. Two byte-identical runs
+produced a 212.925 s median mapper core and 268.49 s median wall time, while
+retaining 1200/1200 cameras at 0.03501 m RMSE. This closes the mapper speed
+target at 18.36x the same-pair COLMAP mapper; RSS remains the active M3 gate.
+Evidence:
 [`ba-block-system.json`](../benchmarks/electro/ba-block-system.json) and
-[`electro_ba_block_system.md`](electro_ba_block_system.md).
+[`electro_ba_block_system.md`](electro_ba_block_system.md), plus
+[`ba-schedule-audit.json`](../benchmarks/electro/ba-schedule-audit.json) and
+[`electro_ba_schedule_audit.md`](electro_ba_schedule_audit.md).
 
 **Purpose:** reduce the 452.90 s final-refinement cost while retaining the
 Milestone-2 quality champion.
