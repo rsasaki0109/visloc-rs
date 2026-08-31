@@ -112,9 +112,9 @@
 //! bare-count gate regressed them — gating on work recovers that and adds
 //! ≈5 % end-to-end on `torus3D`/`rim`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use nalgebra::{DMatrix, DVector, SMatrix, SVector};
+use nalgebra::{DMatrix, DVector, Matrix6, SMatrix, SVector};
 
 const NONE: usize = usize::MAX;
 
@@ -182,6 +182,68 @@ pub(crate) fn solve_spd_block(
         INTRA_MIN_CONTRIB,
         INTRA_MIN_WORK,
     )
+}
+
+/// Solve a 6×6-block SPD system supplied directly as lower-triangular block
+/// columns. Ownership is consumed so the numeric factor can reuse the same
+/// values without an intermediate scalar COO buffer or a second block scatter.
+/// Direct-block counterpart of [`solve_spd_block_cached`]. The cache is
+/// refreshed automatically if a behind-camera observation changes the block
+/// pattern, so callers may retain it across all LM iterations safely.
+pub(crate) fn solve_spd_blocks6_cached(
+    cache: &mut Option<BlockSymbolic>,
+    columns: Vec<BTreeMap<usize, Matrix6<f64>>>,
+    rhs: &DMatrix<f64>,
+) -> Result<DMatrix<f64>, ()> {
+    let n = columns.len();
+    let mut block_lower = vec![Vec::new(); n];
+    let mut a_pattern = Vec::with_capacity(n);
+    for (column, rows) in columns.iter().enumerate() {
+        let pattern: Vec<usize> = rows.keys().copied().filter(|&row| row >= column).collect();
+        debug_assert!(pattern.binary_search(&column).is_ok());
+        for &row in pattern.iter().filter(|&&row| row > column) {
+            block_lower[row].push(column);
+        }
+        a_pattern.push(pattern);
+    }
+    let pattern_matches = cache
+        .as_ref()
+        .is_some_and(|sym| sym.block_size == 6 && sym.n == n && sym.a_pattern == a_pattern);
+    if !pattern_matches {
+        let (col_rows, contributors, parent) = symbolic(&block_lower, n);
+        let (levels, col_level) = build_levels(&contributors, n);
+        *cache = Some(BlockSymbolic {
+            block_size: 6,
+            n,
+            col_rows,
+            contributors,
+            levels,
+            a_pattern,
+            parent,
+            col_level,
+        });
+    }
+    let sym = cache.as_ref().expect("block symbolic cache initialized");
+    let a_lower: Vec<Vec<(usize, Matrix6<f64>)>> = columns
+        .into_iter()
+        .enumerate()
+        .map(|(column, rows)| rows.into_iter().filter(|(row, _)| *row >= column).collect())
+        .collect();
+    let (col_vals, diag_inv) = factor_from_lower::<6>(
+        sym,
+        &a_lower,
+        default_thread_count(),
+        PARALLEL_MIN_LEVEL_WORK,
+        INTRA_MIN_CONTRIB,
+        INTRA_MIN_WORK,
+    )?;
+    let mut out = DMatrix::<f64>::zeros(n * 6, rhs.ncols());
+    for column in 0..rhs.ncols() {
+        let b = DVector::from_column_slice(rhs.column(column).as_slice());
+        let x = solve_block_system::<6>(&sym.col_rows, &col_vals, &diag_inv, n, &b);
+        out.set_column(column, &x);
+    }
+    Ok(out)
 }
 
 /// Like [`solve_spd_block`], but reuse a previously computed [`BlockSymbolic`]
@@ -616,10 +678,6 @@ fn refactor_numeric<const B: usize>(
     min_intra_contrib: usize,
     min_intra_work: usize,
 ) -> Result<(Vec<Vec<SMatrix<f64, B, B>>>, Vec<SMatrix<f64, B, B>>), ()> {
-    let n = sym.n;
-    let col_rows = &sym.col_rows;
-    let contributors = &sym.contributors;
-
     // Original lower-triangular block values laid out on the cached pattern: a
     // direct scatter (binary search into the small per-column row list) replaces
     // the per-iteration `BTreeMap` assembly.
@@ -652,6 +710,29 @@ fn refactor_numeric<const B: usize>(
         }
     }
 
+    factor_from_lower::<B>(
+        sym,
+        &a_lower,
+        threads,
+        min_level_work,
+        min_intra_contrib,
+        min_intra_work,
+    )
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn factor_from_lower<const B: usize>(
+    sym: &BlockSymbolic,
+    a_lower: &[Vec<(usize, SMatrix<f64, B, B>)>],
+    threads: usize,
+    min_level_work: usize,
+    min_intra_contrib: usize,
+    min_intra_work: usize,
+) -> Result<(Vec<Vec<SMatrix<f64, B, B>>>, Vec<SMatrix<f64, B, B>>), ()> {
+    let n = sym.n;
+    let col_rows = &sym.col_rows;
+    let contributors = &sym.contributors;
+
     let mut col_vals: Vec<Vec<SMatrix<f64, B, B>>> = col_rows
         .iter()
         .map(|rows| vec![SMatrix::<f64, B, B>::zeros(); rows.len()])
@@ -675,7 +756,7 @@ fn refactor_numeric<const B: usize>(
             // worker reading the (already-finalized) lower levels and writing
             // back after the parallel section.
             let computed =
-                factor_level_parallel::<B>(level, n, col_rows, contributors, &a_lower, &col_vals)?;
+                factor_level_parallel::<B>(level, n, col_rows, contributors, a_lower, &col_vals)?;
             for (j, vals, inv) in computed {
                 col_vals[j] = vals;
                 diag_inv[j] = inv;

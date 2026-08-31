@@ -2,8 +2,8 @@
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
-**ブランチ:** `feat/electro-quality-attribution`
-**現在地:** M0/M1 は main へ統合済み。M2 champion は同一12,000候補pairのETH3D `electro` 1,200枚で **1200/1200、RMSE 0.03224 m、mapper 3.31×高速**（COLMAP: 1200/1200、0.04679 m）。cap96 + bounded post-refinement registration は peak RSS 3.83 GiB。courtyard default は38/38 @ 0.5379 cm、South Building default は128/128 @ 0.73 cmで非退行。次はM3のBA速度/RSS削減。
+**ブランチ:** `perf/ba-block-reduced-system`
+**現在地:** M0/M1/M2 は main へ統合済み。M3 items 1–2 は実装・Electro A/B済みでPR前。純visual BAのdirect 6x6 block Schur + direct Cholesky transfer + symbolic reuseにより、1,200枚championをbyte-identicalに保ったままBA中央値 **15.0%短縮**（153.764→130.681 s）、mapper wall **1366.75 s / COLMAP比3.61×高速**。peak RSSは3.83 GiBのままなので、次はM3 item 3以降とfeature/snapshot常駐メモリ削減。M2 qualityは **1200/1200、RMSE 0.03224 m**（COLMAP: 1200/1200、0.04679 m）。
 
 今後の実装順、数値ゲート、PR境界、停止条件は
 [`docs/electro_performance_roadmap.md`](electro_performance_roadmap.md) を正とする。
