@@ -1,9 +1,9 @@
 # visloc-rs COLMAP parity — Codex 引き継ぎ資料
 
-**更新:** 2026-08-31
+**更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
-**ブランチ:** `docs/electro-readme-showcase`（M0 の依存PR列を統合中）
-**現在地:** ETH3D courtyard は **38/38 @ 0.5379 cm Sim(3) centre RMSE** で閉じた。同一12,000候補pairのETH3D `electro` 1,200枚について、snapshot/runner/mapper/BA/CLIを分割済み。凍結checkpointは mapper **9.61×高速**、一方でmatching **4.43×低速**、RSS **3.17×**、1193/1200・RMSE 0.1194 mであり、COLMAPに対する精度・end-to-end速度・メモリparityを継続する。
+**ブランチ:** `feat/electro-quality-attribution`
+**現在地:** M0/M1 は main へ統合済み。M2 champion は同一12,000候補pairのETH3D `electro` 1,200枚で **1200/1200、RMSE 0.03224 m、mapper 3.31×高速**（COLMAP: 1200/1200、0.04679 m）。cap96 + bounded post-refinement registration は peak RSS 3.83 GiB。courtyard default は38/38 @ 0.5379 cm、South Building default は128/128 @ 0.73 cmで非退行。次はM3のBA速度/RSS削減。
 
 今後の実装順、数値ゲート、PR境界、停止条件は
 [`docs/electro_performance_roadmap.md`](electro_performance_roadmap.md) を正とする。

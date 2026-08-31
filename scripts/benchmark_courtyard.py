@@ -934,6 +934,15 @@ def build_mapping_command(
         "--pnp-max-iterations", str(mapping.get("pnp_max_iterations", 100000)),
         "--min-pnp-inliers", str(mapping.get("min_pnp_inliers", 8)),
     ])
+    max_mapper_matches = mapping.get("max_mapper_matches_per_pair")
+    if max_mapper_matches is not None:
+        if not isinstance(max_mapper_matches, int) or max_mapper_matches <= 0:
+            raise ValidationError(
+                "mapping.max_mapper_matches_per_pair must be a positive integer"
+            )
+        command.extend(
+            ["--max-mapper-matches-per-pair", str(max_mapper_matches)]
+        )
     for key, flag in (("geometry_guided_conflict_recovery", "--geometry-guided-conflict-recovery"), ("post_refinement_registration", "--post-refinement-registration"), ("final_iterative_refinement", "--final-iterative-refinement")):
         if mapping.get(key, False):
             command.append(flag)
@@ -1094,12 +1103,23 @@ def make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="full mode: report a reduced schedule even when it does not register every reference image",
     )
+    parser.add_argument(
+        "--max-mapper-matches-per-pair",
+        type=int,
+        help="override the mapper correspondence cap without changing matching/verification",
+    )
     return parser
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
+    if args.max_mapper_matches_per_pair is not None:
+        if args.max_mapper_matches_per_pair <= 0:
+            raise ValidationError("--max-mapper-matches-per-pair must be positive")
+        config["mapping"]["max_mapper_matches_per_pair"] = (
+            args.max_mapper_matches_per_pair
+        )
     root = resolve_artifact_root(config, args.artifact_root)
     schedule = resolve_candidate_schedule(config, args.candidate_strategy)
     configured_manifest = resolve_schedule_manifest(root, schedule)

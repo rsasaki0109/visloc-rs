@@ -230,6 +230,7 @@ class CourtyardBenchmarkTests(unittest.TestCase):
 
     def test_mapping_command_contains_only_mapping_inputs(self) -> None:
         config = benchmark.load_config(ROOT / "benchmarks" / "courtyard" / "exhaustive_control.json")
+        config["mapping"]["max_mapper_matches_per_pair"] = 96
         command = benchmark.build_mapping_command(
             config,
             binary=Path("/bin/visloc-demo"),
@@ -242,8 +243,23 @@ class CourtyardBenchmarkTests(unittest.TestCase):
         self.assertIn("--import-matches-file", command)
         self.assertIn("--input-colmap-calibration", command)
         self.assertIn("--next-image-policy", command)
+        self.assertEqual(
+            command[command.index("--max-mapper-matches-per-pair") + 1], "96"
+        )
         self.assertNotIn("--gt", command)
         self.assertNotIn("points3D.txt", command)
+
+        config["mapping"]["max_mapper_matches_per_pair"] = 0
+        with self.assertRaisesRegex(benchmark.ValidationError, "positive integer"):
+            benchmark.build_mapping_command(
+                config,
+                binary=Path("/bin/visloc-demo"),
+                features_dir=Path("/external/features"),
+                images_dir=Path("/external/images"),
+                calibration_dir=Path("/external/calibration"),
+                matches_path=Path("/external/matches_import.txt"),
+                output_model=Path("/external/out"),
+            )
 
     def test_config_rejects_unknown_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -251,6 +267,12 @@ class CourtyardBenchmarkTests(unittest.TestCase):
             path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
             with self.assertRaisesRegex(benchmark.ValidationError, "unsupported"):
                 benchmark.load_config(path)
+
+    def test_mapper_cap_override_is_parseable(self) -> None:
+        args = benchmark.make_parser().parse_args(
+            ["--verify-only", "--max-mapper-matches-per-pair", "96"]
+        )
+        self.assertEqual(args.max_mapper_matches_per_pair, 96)
 
 
 if __name__ == "__main__":

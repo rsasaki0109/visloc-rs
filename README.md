@@ -17,25 +17,28 @@
   <img src="docs/assets/electro_1200_sfm_comparison.gif" alt="Measured ETH3D Electro 1,200-image reconstruction: visloc-rs and COLMAP camera centres, sparse structure, residuals, mapper time, and peak memory" width="820">
 </p>
 
-**The current visloc-rs mapper is 9.61× faster than COLMAP on the same frozen
-1,200 images and deterministic 12,000-pair schedule.** This is an honest
-in-progress scale checkpoint: matching is still 4.43× slower, mapper peak RSS
-is 3.17× higher, and registration/accuracy have not reached COLMAP parity.
+**visloc-rs now registers all 1,200 cameras with 31.1% lower centre RMSE than
+COLMAP, while its mapper is 3.31× faster on the same frozen images and
+deterministic 12,000-pair schedule.** This is an honest phase-level result:
+matching is still 4.43× slower, mapper peak RSS is 3.20× higher, and feature
+extraction has not yet been measured under the same contract.
 
 | Same-input phase / result | visloc-rs | COLMAP 3.9.1 CPU | Current outcome |
 | --- | ---: | ---: | --- |
 | Exact-pair matching | 2,085.89 s | **471.37 s** | 4.43× slower |
-| Mapper wall time | **513.05 s** | 4,929.56 s | **9.61× faster** |
-| Mapper peak RSS | 3.79 GiB | **1.20 GiB** | 3.17× higher |
-| Registered cameras | 1193/1200 | **1200/1200** | 7-camera gap |
-| Camera-centre RMSE | 11.94 cm | **4.68 cm** | 2.55× higher |
+| Mapper wall time | **1,490.07 s** | 4,929.56 s | **3.31× faster** |
+| Mapper peak RSS | 3.83 GiB | **1.20 GiB** | 3.20× higher |
+| Registered cameras | **1200/1200** | **1200/1200** | parity |
+| Camera-centre RMSE | **3.22 cm** | 4.68 cm | **31.1% lower** |
 
-<p align="center"><sub>The camera-centre plot uses the 1,193 stems shared by
-both models and Sim(3) alignment to the supplied calibration proxy. Ground
-truth is score-only. Feature extraction is not yet measured under the same
-contract, so this is not an end-to-end speed claim. See the
+<p align="center"><sub>The camera-centre plot uses all 1,200 stems and Sim(3)
+alignment to the supplied calibration proxy. Ground truth is score-only. The
+quality champion uses an explicit 96-correspondence mapper cap plus one bounded
+post-refinement registration pass; the cap is not a global default. Feature
+extraction is not yet measured under the same contract, so this is not an
+end-to-end speed claim. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
-and <a href="benchmarks/electro/visloc_1200_v1.json">frozen result manifest</a>.</sub></p>
+and <a href="benchmarks/electro/quality-attribution.json">quality-attribution ledger</a>.</sub></p>
 
 <p align="center"><sub><a href="docs/assets/electro_1200_sfm_comparison.png">Open the full-resolution still comparison</a>.</sub></p>
 

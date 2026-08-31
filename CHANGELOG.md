@@ -6,6 +6,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Electro 1,200-image quality parity and decision trace (2026-09-01).** On
+  the frozen 12,000-pair snapshot, an explicit mapper cap of 96 plus the
+  existing bounded post-refinement registration pass reaches **1200/1200** at
+  **0.03224 m** centre RMSE, versus COLMAP's 1200/1200 at 0.04679 m. The
+  visloc mapper remains **3.31x faster** (1490.07 s vs 4929.56 s) with a
+  3.83 GiB peak RSS. Attribution separated early one-shot PnP exhaustion from
+  the cap64 accuracy loss; cap128 and uncapped growth were consecutive
+  regressions. Added a compact deterministic debug/timing trace summarizer,
+  machine-readable attribution ledger, report, and refreshed README PNG/GIF.
+  Fixed cap96 is deliberately not a default: its courtyard negative regressed
+  accuracy, while the unchanged default reproduced courtyard 38/38 at
+  0.005379 m and South Building 128/128 at 0.73 cm with exact model hashes.
+
 - **Milestone 4 large-scale unordered-SfM plan (2026-08-31).** Added a
   planning-only, primary-source-linked runbook for scaling from the frozen
   courtyard control to ETH3D `electro` (300-image probe, then 1,200 images),
