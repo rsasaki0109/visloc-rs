@@ -28,6 +28,55 @@
 
 <p align="center"><sub>Lower centre RMSE is better. The plot is aligned to the supplied calibration proxy; tracks versus points and reprojection reports are not identical accounting schemes. <a href="#courtyard-control-details">Details, provenance, and reproduction</a>.</sub></p>
 
+## Run the SfM demo
+
+Build the example with the `image-io` feature. The unordered demo accepts a
+directory of photos, estimates SIFT features in process, and writes a COLMAP
+text model (`cameras.txt`, `images.txt`, and `points3D.txt`) to the path given
+by `--out-colmap`. Supply either scalar intrinsics, as below, or a validated
+per-image model with `--input-colmap-calibration`; datasets and calibration
+files are external inputs and are not bundled with this repository.
+
+```bash
+cargo run --release --example unordered_sfm_demo --features image-io -- \
+  --feature-extractor sift \
+  --images-dir /path/to/my_photos \
+  --width 1920 --height 1080 --fx 1400 --fy 1400 --cx 960 --cy 540 \
+  --sift-max-keypoints 4096 \
+  --retrieval-topk 12 --min-matches 30 --match-ratio 0.8 \
+  --verification-mode full --mapper incremental \
+  --next-image-policy auto --post-refinement-registration \
+  --final-iterative-refinement \
+  --out-colmap /path/to/runs/my-photos-sfm
+```
+
+For the measured courtyard control, keep the artifact, image, and calibration
+paths explicit. `--verify-only` is fast and read-only; `--full` starts a fresh
+mapping run and writes its JSON summary/model under `--output-dir`.
+
+```bash
+ARTIFACT_ROOT=/path/to/colmap_highres_exhaustive_allpairs_20260830
+IMAGES_DIR=/path/to/dslr_images_undistorted
+CALIBRATION_MODEL=/path/to/dslr_calibration_undistorted
+
+scripts/benchmark_courtyard.sh --verify-only \
+  --artifact-root "$ARTIFACT_ROOT" \
+  --images-dir "$IMAGES_DIR" \
+  --calibration-model "$CALIBRATION_MODEL" \
+  --colmap-control validate --visuals check
+
+scripts/benchmark_courtyard.sh --full --no-build \
+  --artifact-root "$ARTIFACT_ROOT" \
+  --images-dir "$IMAGES_DIR" \
+  --calibration-model "$CALIBRATION_MODEL" \
+  --output-dir /path/to/runs/courtyard-sfm \
+  --colmap-control validate --visuals skip
+```
+
+The example header documents the complete unordered-SfM option set; the
+[courtyard benchmark guide](docs/courtyard_benchmark.md) documents artifact
+validation, candidate schedules, and reproducible large-run details.
+
 <p align="center">
   <img src="docs/assets/hero_euroc_mh01_slam.gif" alt="Online stereo SLAM on EuRoC MH_01: onboard camera footage beside the live map — estimated trajectory vs ground truth as stereo landmark replenishment grows the landmark map" width="820"><br>
   <sub>Online stereo SLAM on EuRoC MH_01 — onboard camera and the live map growing in real time: uninterrupted tracking throughout the shown 583-frame measured segment (100% coverage, 0.344 m rigid ATE RMSE), with the landmark map grown by stereo landmark replenishment. Still version: <a href="docs/assets/hero_euroc_mh01_light.png">light</a> · <a href="docs/assets/hero_euroc_mh01_dark.png">dark</a>.</sub>
@@ -85,6 +134,11 @@ python3 scripts/generate_courtyard_readme_visuals.py \
   --reference-model <calibration_model> \
   --output-dir docs/assets
 ```
+
+For a hash-checked, one-command validation or fresh rerun of this control, see
+[`docs/courtyard_benchmark.md`](docs/courtyard_benchmark.md) and run
+[`scripts/benchmark_courtyard.sh`](scripts/benchmark_courtyard.sh). Large
+dataset-derived artifacts remain external to the repository.
 
 Secondary frozen-cache measurements are kept separate from that central
 control:

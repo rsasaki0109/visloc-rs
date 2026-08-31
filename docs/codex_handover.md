@@ -401,8 +401,8 @@ CLI 省略時は `NextImagePolicy::Auto`、`IncrementalSfmConfig::default()` は
 API/ライブラリ互換性のため `CorrespondenceCount` のままである。Auto は
 Visibility を先に試し、未登録画像が一つでもあれば同じ feature/pair 入力で
 Count も評価する。選択後に未完なら clean state から post-refinement を一度
-試し、登録画像数が strict に増えた時だけ採用する。tie または減少時は
-post 前のモデルを保持する。
+試し、登録画像数が strict に増え、かつ平均 reprojection が有限で既存以下の
+時だけ採用する。tie、減少、または誤差悪化時は post 前のモデルを保持する。
 
 凍結 cache の no-flag 実測（各 run の `run.log` に完全なコマンドと
 `effective-config: ... next_image_policy: Auto` を保存）は次の通り。
@@ -466,3 +466,226 @@ release build、および `sh scripts/check.sh` と `git diff --check` である
 Windows-only gate は Linux host のため未実行である。未コミットの既存
 SfM/SIFT/BA/CLI/docs 差分は保持し、repo 内に feature/db/log/temp/secret は
 追加していない。
+
+## 14. Office milestone 2 connectivity audit (2026-08-31)
+
+対象は固定した同一 cache
+`/media/sasaki/aiueo1/visloc-rs/eth3d/nonregression_20260830/runs/office-authoritative-venv/features`
+と、全画像共通の PINHOLE `6221x4146, fx=3437.84, fy=3435.95,
+cx=3127.19, cy=2066.98` である。Auto no-flag の完全な未登録画像は
+`DSC_0236, DSC_0237, DSC_0238, DSC_0239, DSC_0240, DSC_0241,
+DSC_0253, DSC_0254`。初期 Visibility/Count はともに 17/26 で、Count
+選択後の clean post pass は `DSC_0223` を 52 correspondences / 13 PnP
+inliers で追加し、18/26、1,082 tracks / 3,037 observations、1.512 px
+となった。再実行でも同じ結果を得た。
+
+### Verified-graph upper-bound evidence
+
+全探索 `.8` + cross-check の診断は 325 candidate pairs、92 verified pairs、
+5,686 accepted inliers。検証済みグラフは 23-image component と孤立した
+`DSC_0238`–`DSC_0240` で、後者は raw matches が各 24/40/30 ある一方
+accepted inliers はすべて 0。従って `.8` の安全な verifier/track graph
+だけでは 26/26 を支える幾何辺が存在しない。`.9` + cross-check は
+`DSC_0238` を `DSC_0237` 経由で 15 inliers まで増やし、21/26 の実再構成
+になったが、`DSC_0239` と `DSC_0240` はなお孤立（安全上の上限は 24-image
+connectivity）。`.95` no-cross-check は全26画像を接続したものの、relaxed
+bridges の同一画像 conflict が増え、rescue 実測は 18/26・967 tracks /
+2,619 observations・1.492 px に悪化したため採用しない。
+
+### A/B and implementation disposition
+
+detached baseline `2a36d44`、current Count、Visibility、Auto、全探索 `.8`
+recovery/post、`.9` control の入力 artifacts は同一である。候補 coverage
+だけを増やしても `DSC_0238`–`DSC_0240` の verifier failure は解消せず、
+track/PnP 側だけで 26/26 を作るのは GT-free では安全でない。今回の最小
+実装は Auto post の clean-candidate 採用条件のみであり、Count/Visibility
+および `IncrementalSfmConfig::default()`、PnP 閾値、cross-check semantics
+は変更していない。`next_image_auto_post_candidate_is_better` の focused
+unit tests は、登録増分・finite error・非悪化を確認する。
+
+実測コマンドと durable run paths は CHANGELOG の Office entry と
+`docs/nonregression_20260830.md` に残し、`.8` safe graph での次の候補は
+検証失敗理由を改善する descriptor/geometry parity の診断である。false
+pose を追加する一般緩和は停止条件とした。
+
+## 15. Office milestone 2 high-density frontend rescue (2026-08-31)
+
+### Genuine official COLMAP CPU control
+
+固定 cache の上限を結論にしないため、公式の full-resolution Office 26画像
+（各 `6221x4146`）を新規 DB へ再抽出した。mapping へ渡したのは supplied
+ calibration の PINHOLE intrinsics (`fx=3437.84, fy=3435.95,
+ cx=3127.19, cy=2066.98`) だけで、extrinsics/laser GT は入力していない。
+使用コンテナは `colmap/colmap:latest`、`COLMAP 4.2.0.dev0 (Commit Unknown
+ on Unknown with CUDA)` だが、全工程で GPU を無効化した。
+
+再現コマンド（`$IMG` は source image directory、`$OUT` は空の新規 directory）:
+
+```sh
+docker run --rm -v "$IMG:/input:ro" -v "$OUT:/output" \
+  colmap/colmap:latest colmap feature_extractor \
+  --database_path /output/database.db --image_path /input \
+  --ImageReader.camera_model PINHOLE --ImageReader.single_camera 1 \
+  --ImageReader.camera_params 3437.84,3435.95,3127.19,2066.98 \
+  --FeatureExtraction.use_gpu 0 --SiftExtraction.max_num_features 8192 \
+  --SiftExtraction.first_octave -1 --SiftExtraction.num_octaves 4 \
+  --SiftExtraction.octave_resolution 3 --SiftExtraction.peak_threshold 0.00667 \
+  --SiftExtraction.edge_threshold 10 --SiftExtraction.max_num_orientations 2
+docker run --rm -v "$IMG:/input:ro" -v "$OUT:/output" \
+  colmap/colmap:latest colmap exhaustive_matcher \
+  --database_path /output/database.db --FeatureMatching.use_gpu 0 \
+  --SiftMatching.max_ratio 0.8 --SiftMatching.cross_check 1 \
+  --FeatureMatching.guided_matching 1
+mkdir -p "$OUT/sparse"
+docker run --rm -v "$IMG:/input:ro" -v "$OUT:/output" \
+  colmap/colmap:latest colmap mapper \
+  --database_path /output/database.db --image_path /input \
+  --output_path /output/sparse --Mapper.min_num_matches 15 \
+  --Mapper.multiple_models 1 --Mapper.max_num_models 50 \
+  --Mapper.num_threads 4 --Mapper.ba_use_gpu 0
+```
+
+実測は `167,891` keypoint/descriptor rows、`325/325` raw pairs、
+`173` non-empty verified pairs、`83,438` accepted inliers だった。画像ごとの
+全対 raw/verified graph support は次の通りで、従来の8欠落画像にも安全な
+geometry edge が存在する。
+
+| image | raw matches | verified degree | verified inliers |
+|---|---:|---:|---:|
+| `DSC_0236` | 11,696 | 11 | 14,686 |
+| `DSC_0237` | 11,060 | 7 | 15,392 |
+| `DSC_0238` | 7,310 | 5 | 10,590 |
+| `DSC_0239` | 5,164 | 5 | 6,775 |
+| `DSC_0240` | 6,177 | 5 | 8,993 |
+| `DSC_0241` | 10,231 | 11 | 14,736 |
+| `DSC_0253` | 1,702 | 16 | 4,194 |
+| `DSC_0254` | 1,336 | 15 | 3,014 |
+
+公式 COLMAP mapper は **26/26** を登録し、`13,425` points / `44,979`
+observations を出力した。supplied calibration extrinsics との診断 score は
+center RMSE **0.50 cm**（median `0.25 cm`, max `1.94 cm`）である。これは
+公式 mapper の feasibility control であり、extrinsics/GT を mapping に
+注入した結果ではない。
+
+### Same official features through visloc
+
+COLMAP DB の keypoint/uint8 descriptor rows を text feature files へ変換し、
+同じ入力を visloc の `NN + ratio .8 + exhaustive + full verifier`、per-image
+calibration、`pnp100k/min8 + geometry-guided-conflict-recovery +
+post-refinement-registration + final-iterative-refinement + Auto` へ渡した。
+DB export は外部の検証済み converter で行った。
+
+```sh
+python3 /media/sasaki/aiueo1/visloc-rs/scripts/export_colmap_sift_features.py \
+  --database "$OUT/database.db" --out-dir "$FEATURES"
+target/release/examples/unordered_sfm_demo \
+  --feature-extractor files --features-dir "$FEATURES" \
+  --feature-suffix _features.txt --image-suffix .JPG \
+  --images-dir "$IMG" --input-colmap-calibration "$CAL" \
+  --exhaustive --min-matches 30 --match-ratio 0.8 \
+  --verification-mode full --mapper incremental \
+  --pnp-max-iterations 100000 --min-pnp-inliers 8 \
+  --geometry-guided-conflict-recovery --post-refinement-registration \
+  --final-iterative-refinement --next-image-policy auto \
+  --out-colmap "$VISLOC_OUT/colmap"
+```
+
+ここで `$IMG` は source image directory、`$CAL` は per-image calibration
+directory、`$OUT` は official COLMAP run、`$FEATURES` は text export、
+`$VISLOC_OUT` は空の新規 output directory である。
+この run は **121/325 verified**、`45,285` verifier inlier correspondences、
+初期 track build `18,704` tracks を経て、最終 **26/26**、`17,772` tracks /
+`47,503` observations、mean reprojection **0.380 px**、calibration-reference
+center RMSE **0.34 cm**（median `0.22 cm`, max `0.67 cm`）となった。欠落8画像の
+PnP は次の通りで、raw support だけでなく登録可能な 2D--3D support も得ている。
+
+| image | PnP correspondences | PnP inliers | ratio |
+|---|---:|---:|---:|
+| `DSC_0236` | 54 | 50 | 0.926 |
+| `DSC_0237` | 2,014 | 1,962 | 0.974 |
+| `DSC_0238` | 1,581 | 1,562 | 0.988 |
+| `DSC_0239` | 1,577 | 1,572 | 0.997 |
+| `DSC_0240` | 1,667 | 1,656 | 0.993 |
+| `DSC_0241` | 47 | 36 | 0.766 |
+| `DSC_0253` | 121 | 75 | 0.620 |
+| `DSC_0254` | 118 | 78 | 0.661 |
+
+従って、凍結 SuperPoint cache の no-flag `17/26 -> post 18/26`、bounded
+LightGlue supplement の `21/26` に対し、公式 SIFT は frontend 起因の
+observability gap を埋めて `26/26` にする。ただし official SIFT は現行の
+SuperPoint/LightGlue extractor の単なる sparse rematch ではなく別 frontend
+である。LightGlue の 31 bounded candidate supplement は `88/325` verified /
+`7,641` inliers、最終 `21/26` で、`DSC_0238`--`DSC_0240` は raw support 不足
+のままだった。
+
+### Artifact and implementation disposition
+
+全成果物（公式 DB、text features、公式/visloc text models、LightGlue
+supplement、logs、SHA-256）は次に隔離保存した。
+
+```text
+/media/sasaki/aiueo1/visloc-rs/eth3d/nonregression_20260830/
+  runs/office-colmap-sift8192-20260831/
+```
+
+主要 hash は DB `f904a0dc3cb22e1e019e4dafcd74d77a9b4a9f18daa19c3ab2eeed710135fbde`、
+公式 `sparse_txt/images.txt` `9d98833d40ea3d3bc9a0f257c2a764f19dde336db917d999f4c8658c43796702`、
+visloc `colmap/images.txt` `93e7262792016c8a3877d26ded38d2892b458cb42067151bd34114460910e8d4`
+である。既存の `--import-matches-supplement-file` と file-feature input は、
+candidate を限定した高密度 artifact を deterministic に追加する再利用可能な
+merge path であり、今回の LightGlue run でも使用した。一方、公式 SIFT の成功は
+別 extractor の置換結果であり、未登録画像だけを自動再抽出して選択する品質保証
+（同じ row/provenance を保ったまま全 suite で候補を比較する仕組み）はまだない。
+したがって今回は Auto の暗黙 trigger や dataset-specific rescue を追加せず、
+公式 SIFT result を frontend feasibility ceiling として記録する。次の実装候補は
+この既存 supplement interface に、validated feature-manifest/provenance と bounded
+per-image rematch selection を一般化して加えることだが、現データだけで既定動作を
+変更する根拠にはしない。
+
+## 16. Milestone 3 bounded candidate scheduling (2026-08-31)
+
+候補生成をmatch/verifier前に限定するM3実装を追加した。`PairSource` の
+`vlad-mutual` と、numeric stemのlocal windowとVLAD retrievalを決定的に併合して
+budgetで切る `vlad-union` を追加し、`visloc_candidate_manifest_v1`（画像名・順序を
+束縛したpair-only manifest、重複/範囲検証、同一ディレクトリのatomic rename）を
+`--export-candidate-manifest` / `--candidate-manifest` で再利用できるようにした。
+通常のpair source/defaultは変更していない。
+
+候補選択は画像順/filename stemと事前VLADだけを使う。凍結したraw match importは
+候補選択後のverification replayにのみ使い、GT、official extrinsics、raw/inlier数を
+候補順位付けへ渡していない。`scripts/benchmark_courtyard.py` はconfigの名前付き
+schedule、manifest hash/row validation、`--allow-incomplete` negative A/B、候補数・
+verified/inlier数・tracks/observations・reprojection・mapping elapsedとJSON gateを
+提供する。exhaustive 703-pair controlは引き続き既定である。
+
+### Frozen courtyard A/B
+
+共通条件はofficial high-resolution SIFT features、per-image calibration、ratio .8、
+cross-check/full verifier、geometry recovery、post/final incremental mapperである。
+
+| schedule | candidates | verified / inliers | registration | tracks / observations | reprojection | centre RMSE |
+|---|---:|---:|---:|---:|---:|---:|
+| exhaustive control | 703 | 366 / 261,724 | 38/38 | 43,852 / 152,432 | 0.579 px | 0.5379 cm |
+| local stem≤3 + VLAD top-8, budget 200 | 200 | 172 / 199,871 | 38/38 | 45,016 / 148,192 | 0.537 px | 0.66 cm |
+| VLAD top-8, non-mutual | 188 | 158 / 187,191 | 38/38 | 44,800 / 135,485 | 0.502 px | 14.17 cm |
+| VLAD top-8, mutual | 116 | 112 / 156,140 | 13/38 | 16,646 / 50,278 | 0.478 px | 33.97 cm* |
+| sequential stem≤3 | 108 | 100 / 136,553 | 23/38 | 25,315 / 77,273 | 0.499 px | 1.08 cm* |
+| vocab-tree base top-4 | 104 | 89 / 129,766 | 38/38 | 44,002 / 121,742 | 0.425 px | exploratory |
+
+`*` は登録済みsubsetだけの診断scoreであり、full gateではない。200-pair unionは
+703から503 pair（71.6%）を削減しながら38/38・1cm以下を維持したが、最小RMSEの
+exhaustive championではない。manifest replay runのhashは
+`2d654b9ed124ec1732d65f4f3829dfadba5e3e978b085844b59c1ee5e5ed32c1` である。候補
+生成31.4秒、manifestからのmapping57.3秒（RAYON_NUM_THREADS=1）をJSONへ保存した。
+このM3結果をOffice/South/terrace/EuRoCの品質主張へ流用せず、各suiteのfrontend/cache
+比較は従来の記録を使う。
+
+## 17. Milestone 4 large-scale unordered-SfM plan (2026-08-31)
+
+大規模化はまだ実行せず、候補データセット、公式一次情報、段階的なresource/runbook、
+候補budget・shard・atomic resume・component recovery・評価ゲートを
+[`docs/large_scale_unordered_sfm_plan.md`](large_scale_unordered_sfm_plan.md) に整理した。
+最初の対象は公式ETH3D low-res many-view `electro`（300画像probe → 1,200画像）で、
+10k級へ進む前に候補recall・登録率・再現hash・RSS/disk上限を確認する。
+この計画はdownload/large runを含まず、courtyard exhaustive 703-pair / 38/38 /
+0.005379 m gateとM3 200-pair A/Bを変更しない。

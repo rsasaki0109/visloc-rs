@@ -17,6 +17,7 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 
 cargo fmt --all -- --check
+sh -n scripts/benchmark_courtyard.sh
 sh scripts/check_msrv.sh
 sh scripts/check_feature_matrix.sh
 cargo clippy --workspace --all-targets -- -D warnings

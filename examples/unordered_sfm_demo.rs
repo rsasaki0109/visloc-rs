@@ -12,6 +12,11 @@
 //!    - `vlad`: a VLAD vocabulary over all descriptors gives each image a
 //!      global descriptor; the top-K most similar images per image become
 //!      candidate pairs.
+//!    - `vlad-union`: a deterministic union of a numeric-stem local-overlap
+//!      schedule (`--local-stem-window`) and the VLAD retrieval pairs.  The
+//!      optional `--candidate-budget` retains local pairs first, then the
+//!      highest-scoring retrieval pairs.  It is an explicit, bounded M3
+//!      schedule and never consults raw matches or verification outcomes.
 //!    - `vocab-tree`: `visloc_rs::vision::vocab_tree`'s hierarchical-k-means
 //!      vocabulary + TF-IDF/Hamming-embedding inverted-file retrieval
 //!      (COLMAP's `VocabTreePairGenerator`-equivalent, M3 in
@@ -168,6 +173,14 @@
 //! stem, only pairs whose numeric stem difference is at most `N` are matched
 //! and verified.  It applies to imported verified pairs and all opt-in pair
 //! expansion paths as well; omitted means the historical candidate set.
+//!
+//! `--candidate-manifest PATH` imports a versioned, image-name-bound list of
+//! candidate pairs and bypasses pair generation.  `--export-candidate-manifest
+//! PATH` writes the generated list atomically and exits before matching.  The
+//! manifest is deliberately small and hashable, so a benchmark can cache the
+//! cheap retrieval result while validating that it still belongs to the same
+//! image order.  Candidate manifests contain no descriptors, raw matches, or
+//! ground-truth information.
 //!
 //! `--initial-poses MODEL/images.txt` is an explicit, default-off staged
 //! incremental seed.  The model's image names are matched by stem and its
@@ -466,6 +479,11 @@ impl std::str::FromStr for VerificationMode {
 enum PairSource {
     /// Flat-VLAD top-K cosine retrieval (pre-M3 behaviour, unchanged).
     Vlad,
+    /// VLAD top-K pairs retained only when retrieval is mutual.
+    VladMutual,
+    /// Union of a bounded numeric-stem local schedule and flat-VLAD
+    /// retrieval.  Local edges are retained first when a budget is applied.
+    VladUnion,
     /// Hierarchical-k-means vocab-tree retrieval (M3).
     VocabTree,
     /// COLMAP's `TransitivePairGenerator` port: propose pairs through the
@@ -481,10 +499,12 @@ impl std::str::FromStr for PairSource {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "vlad" => Ok(Self::Vlad),
+            "vlad-mutual" => Ok(Self::VladMutual),
+            "vlad-union" => Ok(Self::VladUnion),
             "vocab-tree" => Ok(Self::VocabTree),
             "transitive" => Ok(Self::Transitive),
             other => Err(format!(
-                "unknown --pair-source {other:?} (expected vlad|vocab-tree|transitive)"
+                "unknown --pair-source {other:?} (expected vlad|vlad-mutual|vlad-union|vocab-tree|transitive)"
             )),
         }
     }
@@ -2324,9 +2344,17 @@ struct Args {
     /// with the guarded geometry-guided recovery pass. Default off.
     geometry_guided_conflict_recovery: bool,
     /// M3 A/B switch: which candidate-pair source feeds verification — flat
-    /// VLAD top-K (default) or the hierarchical vocab-tree
+    /// VLAD top-K (default), a bounded local+VLAD union, or the hierarchical vocab-tree
     /// (`docs/colmap_port_plan.md`'s M3 milestone).
     pair_source: PairSource,
+    /// Numeric-stem local overlap window for `--pair-source vlad-union`.
+    /// This schedule is cheap and is evaluated before any pair matching.
+    local_stem_window: Option<u64>,
+    /// Optional upper bound on generated candidate pairs.  Under
+    /// `vlad-union`, local pairs have priority, then retrieval pairs by
+    /// descending similarity and stable pair key.  `None` preserves the full
+    /// generated set.
+    candidate_budget: Option<usize>,
     /// Vocab-tree hierarchical-k-means branching factor (M3; ignored under
     /// `--pair-source vlad`). See `vocab_tree::hkm::HkmBuildOptions`.
     vocab_tree_branching: usize,
@@ -2338,6 +2366,11 @@ struct Args {
     /// (`VocabTreePairingOptions::num_images`). Ignored under
     /// `--pair-source vlad`.
     vocab_tree_num_images: usize,
+    /// Import a validated, image-name-bound candidate manifest and bypass
+    /// candidate generation.  Matching/verification still run for its pairs.
+    candidate_manifest: Option<PathBuf>,
+    /// Export the generated candidate manifest and exit before matching.
+    export_candidate_manifest: Option<PathBuf>,
     /// M5 (`docs/colmap_port_plan.md`): run the opt-in rescue-bridging pass
     /// after initial verification (see the file header's step 4).
     rescue_bridging: bool,
@@ -3001,6 +3034,181 @@ fn filter_pairs_by_stem_window(
         .collect()
 }
 
+const CANDIDATE_MANIFEST_MAGIC: &str = "visloc_candidate_manifest_v1";
+
+/// Parse a small, image-name-bound candidate-pair manifest.  The format is
+/// intentionally line-oriented so it can be inspected, hashed, and generated
+/// without a JSON dependency in the Rust example:
+///
+/// visloc_candidate_manifest_v1
+/// images 2
+/// image 0 first.JPG
+/// image 1 second.JPG
+/// pairs 1
+/// pair 0 1
+///
+/// Pair order is preserved, while duplicate/reversed pairs are rejected.  A
+/// manifest is a candidate schedule only; it contains no raw matches or
+/// verification outcomes.
+fn parse_candidate_manifest(
+    path: &Path,
+    image_names: &[String],
+) -> Result<Vec<(usize, usize)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read candidate manifest {path:?}: {error}"))?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let mut cursor = 0usize;
+    let next = |cursor: &mut usize, label: &str| -> Result<&str, String> {
+        let line = lines.get(*cursor).copied().ok_or_else(|| {
+            format!("candidate manifest {path:?} is truncated while reading {label}")
+        })?;
+        *cursor += 1;
+        Ok(line)
+    };
+    if next(&mut cursor, "header")? != CANDIDATE_MANIFEST_MAGIC {
+        return Err(format!(
+            "candidate manifest {path:?} has unsupported header (expected {CANDIDATE_MANIFEST_MAGIC})"
+        ));
+    }
+    let image_header = next(&mut cursor, "image count")?;
+    let image_fields: Vec<&str> = image_header.split_whitespace().collect();
+    if image_fields.len() != 2 || image_fields[0] != "images" {
+        return Err(format!(
+            "candidate manifest {path:?} image count must be images N"
+        ));
+    }
+    let image_count: usize = image_fields[1].parse().map_err(|error| {
+        format!("candidate manifest {path:?} image count is not numeric: {error}")
+    })?;
+    if image_count != image_names.len() {
+        return Err(format!(
+            "candidate manifest {path:?} image count {} differs from loaded {}",
+            image_count,
+            image_names.len()
+        ));
+    }
+    for expected_index in 0..image_count {
+        let line = next(&mut cursor, "image entry")?;
+        let mut fields = line.splitn(3, char::is_whitespace);
+        let kind = fields.next().unwrap_or_default();
+        let index = fields.next().unwrap_or_default();
+        let name = fields.next().unwrap_or_default().trim();
+        if kind != "image" || name.is_empty() {
+            return Err(format!(
+                "candidate manifest {path:?} image entry must be image INDEX NAME"
+            ));
+        }
+        let index: usize = index.parse().map_err(|error| {
+            format!("candidate manifest {path:?} image index is not numeric: {error}")
+        })?;
+        if index != expected_index || name != image_names[index] {
+            return Err(format!(
+                "candidate manifest {path:?} image entry {expected_index} does not match loaded image order"
+            ));
+        }
+    }
+    let pair_header = next(&mut cursor, "pair count")?;
+    let pair_fields: Vec<&str> = pair_header.split_whitespace().collect();
+    if pair_fields.len() != 2 || pair_fields[0] != "pairs" {
+        return Err(format!(
+            "candidate manifest {path:?} pair count must be pairs N"
+        ));
+    }
+    let pair_count: usize = pair_fields[1].parse().map_err(|error| {
+        format!("candidate manifest {path:?} pair count is not numeric: {error}")
+    })?;
+    let mut pairs = Vec::with_capacity(pair_count);
+    let mut seen = HashSet::with_capacity(pair_count);
+    for pair_number in 0..pair_count {
+        let line = next(&mut cursor, "pair entry")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 3 || fields[0] != "pair" {
+            return Err(format!(
+                "candidate manifest {path:?} pair {pair_number} must be pair I J"
+            ));
+        }
+        let i: usize = fields[1].parse().map_err(|error| {
+            format!("candidate manifest {path:?} pair {pair_number} first index is not numeric: {error}")
+        })?;
+        let j: usize = fields[2].parse().map_err(|error| {
+            format!("candidate manifest {path:?} pair {pair_number} second index is not numeric: {error}")
+        })?;
+        if i >= image_names.len() || j >= image_names.len() || i >= j {
+            return Err(format!(
+                "candidate manifest {path:?} pair {pair_number} must satisfy 0 <= I < J < {}",
+                image_names.len()
+            ));
+        }
+        if !seen.insert((i, j)) {
+            return Err(format!(
+                "candidate manifest {path:?} repeats pair ({i},{j})"
+            ));
+        }
+        pairs.push((i, j));
+    }
+    if cursor != lines.len() {
+        return Err(format!(
+            "candidate manifest {path:?} has unexpected trailing data"
+        ));
+    }
+    Ok(pairs)
+}
+
+/// Write a candidate manifest through a same-directory temporary file and
+/// rename.  This keeps an interrupted cheap retrieval pass from leaving a
+/// file that a later benchmark could mistake for a complete schedule.
+fn write_candidate_manifest(
+    path: &Path,
+    image_names: &[String],
+    pairs: &[(usize, usize)],
+) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!("cannot create candidate manifest directory {parent:?}: {error}")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("candidate manifest path has no valid filename: {path:?}"))?;
+    let temporary = parent.join(format!(".{file_name}.tmp"));
+    let mut text = String::new();
+    text.push_str(CANDIDATE_MANIFEST_MAGIC);
+    text.push('\n');
+    text.push_str(&format!("images {}\n", image_names.len()));
+    for (index, name) in image_names.iter().enumerate() {
+        if name.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "candidate manifest cannot encode whitespace in image name {name:?}"
+            ));
+        }
+        text.push_str(&format!("image {index} {name}\n"));
+    }
+    text.push_str(&format!("pairs {}\n", pairs.len()));
+    let mut seen = HashSet::with_capacity(pairs.len());
+    for &(i, j) in pairs {
+        if i >= image_names.len() || j >= image_names.len() || i >= j {
+            return Err(format!(
+                "candidate pair ({i},{j}) is outside canonical image order"
+            ));
+        }
+        if !seen.insert((i, j)) {
+            return Err(format!("candidate pair ({i},{j}) is duplicated"));
+        }
+        text.push_str(&format!("pair {i} {j}\n"));
+    }
+    std::fs::write(&temporary, text).map_err(|error| {
+        format!("cannot write temporary candidate manifest {temporary:?}: {error}")
+    })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        format!("cannot atomically install candidate manifest {path:?}: {error}")
+    })?;
+    Ok(())
+}
+
 /// Add the numeric-consecutive edges required by the opt-in sequence
 /// relative-pose fallback.  Retrieval remains the normal source for every
 /// other edge; only missing consecutive pairs are appended, so the flag does
@@ -3151,6 +3359,8 @@ where
     let mut seed_trials = 12usize;
     let mut seed_pair: Option<(usize, usize)> = None;
     let mut pair_stem_window: Option<u64> = None;
+    let mut local_stem_window: Option<u64> = None;
+    let mut candidate_budget: Option<usize> = None;
     let mut refine_intrinsics = false;
     let mut refine_distortion = false;
     let mut colmap_style = false;
@@ -3268,6 +3478,8 @@ where
     let mut import_verified_pairs_file: Option<PathBuf> = None;
     let mut export_verified_pairs_snapshot: Option<PathBuf> = None;
     let mut import_verified_pairs_snapshot: Option<PathBuf> = None;
+    let mut candidate_manifest: Option<PathBuf> = None;
+    let mut export_candidate_manifest: Option<PathBuf> = None;
     let mut snapshot_coordinate_override_dir: Option<PathBuf> = None;
     let mut diagnose_ba_oracle_poses_file: Option<PathBuf> = None;
     let mut diagnose_fixed_rotation_ba: Option<String> = None;
@@ -3472,6 +3684,34 @@ where
                 }
                 a.remove(i + 1);
                 pair_stem_window = Some(window);
+            }
+            "--local-stem-window" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--local-stem-window requires a positive integer N")?
+                    .clone();
+                let window: u64 = raw.parse().map_err(|error| {
+                    format!("--local-stem-window must be a positive integer: {error}")
+                })?;
+                if window == 0 {
+                    return Err("--local-stem-window must be at least 1".into());
+                }
+                a.remove(i + 1);
+                local_stem_window = Some(window);
+            }
+            "--candidate-budget" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--candidate-budget requires a positive integer")?
+                    .clone();
+                let budget: usize = raw.parse().map_err(|error| {
+                    format!("--candidate-budget must be a positive integer: {error}")
+                })?;
+                if budget == 0 {
+                    return Err("--candidate-budget must be at least 1".into());
+                }
+                a.remove(i + 1);
+                candidate_budget = Some(budget);
             }
             "--match-ratio" => match_ratio = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--min-matches" => min_matches = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
@@ -3899,6 +4139,28 @@ where
                 a.remove(i + 1);
                 import_verified_pairs_snapshot = Some(PathBuf::from(raw));
             }
+            "--candidate-manifest" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--candidate-manifest requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--candidate-manifest requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                candidate_manifest = Some(PathBuf::from(raw));
+            }
+            "--export-candidate-manifest" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--export-candidate-manifest requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--export-candidate-manifest requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                export_candidate_manifest = Some(PathBuf::from(raw));
+            }
             "--snapshot-coordinate-override-dir" => {
                 let raw = a
                     .get(i + 1)
@@ -4100,6 +4362,49 @@ where
         return Err(
             "--sift-stream-export requires --export-features-only so extracted banks are not retained in memory"
                 .into(),
+        );
+    }
+    if candidate_manifest.is_some() && export_candidate_manifest.is_some() {
+        return Err(
+            "--candidate-manifest and --export-candidate-manifest are mutually exclusive".into(),
+        );
+    }
+    if local_stem_window.is_some() && pair_source != PairSource::VladUnion {
+        return Err("--local-stem-window requires --pair-source vlad-union".into());
+    }
+    if pair_source == PairSource::VladUnion && local_stem_window.is_none() {
+        return Err("--pair-source vlad-union requires --local-stem-window N".into());
+    }
+    if pair_source == PairSource::VladUnion && exhaustive {
+        return Err("--pair-source vlad-union cannot be combined with --exhaustive".into());
+    }
+    if candidate_budget.is_some() && pair_source != PairSource::VladUnion {
+        return Err("--candidate-budget currently requires --pair-source vlad-union".into());
+    }
+    if pair_source == PairSource::VladUnion && pair_stem_window.is_some() {
+        return Err(
+            "--pair-source vlad-union uses --local-stem-window; do not combine it with --pair-stem-window".into(),
+        );
+    }
+    if candidate_manifest.is_some()
+        && (exhaustive
+            || local_stem_window.is_some()
+            || candidate_budget.is_some()
+            || pair_stem_window.is_some()
+            || pair_source == PairSource::Transitive)
+    {
+        return Err(
+            "--candidate-manifest cannot be combined with generated candidate filters or transitive expansion".into(),
+        );
+    }
+    if export_candidate_manifest.is_some()
+        && (import_matches_file.is_some()
+            || import_matches_supplement_file.is_some()
+            || import_verified_pairs_file.is_some()
+            || import_verified_pairs_snapshot.is_some())
+    {
+        return Err(
+            "--export-candidate-manifest cannot be combined with imported pair streams".into(),
         );
     }
     if diagnose_colmap_track_membership.is_some() && mapper != MapperKind::Incremental {
@@ -4307,9 +4612,15 @@ where
                 "--import-verified-pairs-snapshot cannot be combined with raw match imports".into(),
             );
         }
-        if pair_stem_window.is_some() || pair_source == PairSource::Transitive {
+        if pair_stem_window.is_some()
+            || local_stem_window.is_some()
+            || candidate_budget.is_some()
+            || candidate_manifest.is_some()
+            || export_candidate_manifest.is_some()
+            || pair_source == PairSource::Transitive
+        {
             return Err(
-                "--import-verified-pairs-snapshot cannot filter or transitively expand pairs"
+                "--import-verified-pairs-snapshot cannot generate, filter, or transitively expand pairs"
                     .into(),
             );
         }
@@ -4375,6 +4686,8 @@ where
         retrieval_topk,
         exhaustive,
         pair_stem_window,
+        local_stem_window,
+        candidate_budget,
         match_ratio,
         min_matches,
         min_pnp_inliers,
@@ -4494,6 +4807,8 @@ where
         pose_guided_track_merging,
         pose_guided_merge_max_reproj,
         pair_source,
+        candidate_manifest,
+        export_candidate_manifest,
         vocab_tree_branching,
         vocab_tree_depth,
         vocab_tree_num_images,
@@ -7208,39 +7523,130 @@ fn all_pairs(n: usize) -> Vec<(usize, usize)> {
 /// Candidate image pairs `(i, j)` with `i < j` from flat-VLAD top-K cosine
 /// retrieval (or all pairs when `exhaustive`) — the pre-M3 pair source,
 /// unchanged.
-fn candidate_pairs_vlad(
+fn candidate_pairs_vlad_scored(
     features: &[FeatureSet],
     vocab_size: usize,
     topk: usize,
     exhaustive: bool,
-) -> Vec<(usize, usize)> {
+    mutual: bool,
+) -> Vec<((usize, usize), f32)> {
     let n = features.len();
     if exhaustive || n <= topk + 1 {
-        return all_pairs(n);
+        return all_pairs(n).into_iter().map(|pair| (pair, 0.0)).collect();
     }
 
     let sample = sampled_training_descriptors(features);
     let Some(vocab) = Vocabulary::build(&sample, vocab_size, 10, 0) else {
         // Fall back to exhaustive if the vocabulary cannot be built.
-        return all_pairs(n);
+        return all_pairs(n).into_iter().map(|pair| (pair, 0.0)).collect();
     };
     let globals: Vec<Vec<f32>> = features
         .iter()
         .map(|f| vlad(&f.descriptors, &vocab))
         .collect();
 
-    let mut set: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    let mut scores = std::collections::BTreeMap::<(usize, usize), f32>::new();
+    let mut neighbors = vec![HashSet::<usize>::new(); n];
     for i in 0..n {
         let mut sims: Vec<(usize, f32)> = (0..n)
             .filter(|&j| j != i)
             .map(|j| (j, cosine_similarity(&globals[i], &globals[j])))
             .collect();
-        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        for &(j, _) in sims.iter().take(topk) {
-            set.insert((i.min(j), i.max(j)));
+        sims.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for &(j, score) in sims.iter().take(topk) {
+            neighbors[i].insert(j);
+            let pair = (i.min(j), i.max(j));
+            if !mutual || neighbors[j].contains(&i) {
+                scores
+                    .entry(pair)
+                    .and_modify(|best| *best = best.max(score))
+                    .or_insert(score);
+            }
         }
     }
-    set.into_iter().collect()
+    if mutual {
+        // The first pass can see only one side of a pair.  Rebuild the score
+        // map from the completed neighbour sets so pair admission is exactly
+        // symmetric and independent of image traversal order.
+        scores.clear();
+        for i in 0..n {
+            let mut sims: Vec<(usize, f32)> = (0..n)
+                .filter(|&j| j != i && neighbors[i].contains(&j) && neighbors[j].contains(&i))
+                .map(|j| (j, cosine_similarity(&globals[i], &globals[j])))
+                .collect();
+            sims.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            for (j, score) in sims {
+                let pair = (i.min(j), i.max(j));
+                scores
+                    .entry(pair)
+                    .and_modify(|best| *best = best.max(score))
+                    .or_insert(score);
+            }
+        }
+    }
+    scores.into_iter().collect()
+}
+
+fn candidate_pairs_vlad(
+    features: &[FeatureSet],
+    vocab_size: usize,
+    topk: usize,
+    exhaustive: bool,
+) -> Vec<(usize, usize)> {
+    candidate_pairs_vlad_scored(features, vocab_size, topk, exhaustive, false)
+        .into_iter()
+        .map(|(pair, _)| pair)
+        .collect()
+}
+
+fn candidate_pairs_vlad_mutual(
+    features: &[FeatureSet],
+    vocab_size: usize,
+    topk: usize,
+    exhaustive: bool,
+) -> Vec<(usize, usize)> {
+    candidate_pairs_vlad_scored(features, vocab_size, topk, exhaustive, true)
+        .into_iter()
+        .map(|(pair, _)| pair)
+        .collect()
+}
+
+/// Candidate pairs from a bounded union of local numeric-stem overlap and
+/// VLAD retrieval. Local edges are selected before retrieval edges under a
+/// budget, then retrieval-only edges are ranked by pre-match VLAD score.
+fn candidate_pairs_vlad_union(
+    features: &[FeatureSet],
+    image_names: &[String],
+    vocab_size: usize,
+    topk: usize,
+    local_window: u64,
+    budget: Option<usize>,
+) -> Result<Vec<(usize, usize)>, String> {
+    let local =
+        filter_pairs_by_stem_window(all_pairs(features.len()), image_names, Some(local_window))?;
+    let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
+    let local_set: HashSet<(usize, usize)> = local.iter().copied().collect();
+    let mut ranked: Vec<((usize, usize), bool, f32)> = retrieval
+        .into_iter()
+        .map(|(pair, score)| (pair, local_set.contains(&pair), score))
+        .collect();
+    let mut seen: HashSet<(usize, usize)> = ranked.iter().map(|(pair, _, _)| *pair).collect();
+    for pair in local {
+        if seen.insert(pair) {
+            ranked.push((pair, true, f32::NEG_INFINITY));
+        }
+    }
+    ranked.sort_by(|lhs, rhs| {
+        rhs.1
+            .cmp(&lhs.1)
+            .then_with(|| rhs.2.total_cmp(&lhs.2))
+            .then_with(|| lhs.0.cmp(&rhs.0))
+    });
+    if let Some(budget) = budget {
+        ranked.truncate(budget);
+    }
+    ranked.sort_unstable_by_key(|(pair, _, _)| *pair);
+    Ok(ranked.into_iter().map(|(pair, _, _)| pair).collect())
 }
 
 /// Candidate image pairs `(i, j)` with `i < j` from the M3 hierarchical
@@ -7317,21 +7723,40 @@ const TRANSITIVE_ROUNDS: usize = 2;
 /// the transitive expansion happens in [`expand_transitive`] after those
 /// base pairs are verified, mirroring COLMAP's generator running against
 /// an existing match table.
-fn candidate_pairs(features: &[FeatureSet], args: &Args) -> Vec<(usize, usize)> {
+fn candidate_pairs(
+    features: &[FeatureSet],
+    image_names: &[String],
+    args: &Args,
+) -> Result<Vec<(usize, usize)>, String> {
     match args.pair_source {
-        PairSource::Vlad => candidate_pairs_vlad(
+        PairSource::Vlad => Ok(candidate_pairs_vlad(
             features,
             args.vocab_size,
             args.retrieval_topk,
             args.exhaustive,
+        )),
+        PairSource::VladMutual => Ok(candidate_pairs_vlad_mutual(
+            features,
+            args.vocab_size,
+            args.retrieval_topk,
+            args.exhaustive,
+        )),
+        PairSource::VladUnion => candidate_pairs_vlad_union(
+            features,
+            image_names,
+            args.vocab_size,
+            args.retrieval_topk,
+            args.local_stem_window
+                .expect("validated vlad-union local window"),
+            args.candidate_budget,
         ),
-        PairSource::VocabTree | PairSource::Transitive => candidate_pairs_vocab_tree(
+        PairSource::VocabTree | PairSource::Transitive => Ok(candidate_pairs_vocab_tree(
             features,
             args.vocab_tree_branching,
             args.vocab_tree_depth,
             args.vocab_tree_num_images,
             args.exhaustive,
-        ),
+        )),
     }
 }
 
@@ -11812,11 +12237,12 @@ fn diagnose_pairs_for_csv(
     args: &Args,
 ) -> Result<Vec<(usize, usize)>, String> {
     if args.diagnose_pair_stems.is_empty() {
-        return filter_pairs_by_stem_window(
-            candidate_pairs(features, args),
-            image_names,
-            args.pair_stem_window,
-        );
+        let generated = if let Some(path) = args.candidate_manifest.as_deref() {
+            parse_candidate_manifest(path, image_names)?
+        } else {
+            candidate_pairs(features, image_names, args)?
+        };
+        return filter_pairs_by_stem_window(generated, image_names, args.pair_stem_window);
     }
     filter_pairs_by_stem_window(
         all_pairs(features.len())
@@ -12739,10 +13165,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    if let Some(path) = args.export_candidate_manifest.as_deref() {
+        let generated = candidate_pairs(&features, &image_names, &args)?;
+        let generated =
+            filter_pairs_by_stem_window(generated, &image_names, args.pair_stem_window)?;
+        write_candidate_manifest(path, &image_names, &generated)?;
+        println!(
+            "candidate manifest: exported {} pairs for {} images to {}",
+            generated.len(),
+            image_names.len(),
+            path.display()
+        );
+        return Ok(());
+    }
     let mut all_candidates = if imported_snapshot.is_some() {
         Vec::new()
+    } else if let Some(path) = args.candidate_manifest.as_deref() {
+        parse_candidate_manifest(path, &image_names)?
     } else {
-        candidate_pairs(&features, &args)
+        candidate_pairs(&features, &image_names, &args)?
     };
     if imported_snapshot.is_none() && args.sequence_relative_pose_fallback {
         let before = all_candidates.len();
@@ -12770,7 +13211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "view graph: {} candidate pairs ({})",
         candidates.len(),
-        if args.exhaustive {
+        if args.candidate_manifest.is_some() {
+            "candidate manifest"
+        } else if args.exhaustive {
             if args.pair_stem_window.is_some() {
                 "exhaustive + stem window"
             } else {
@@ -12779,6 +13222,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             match args.pair_source {
                 PairSource::Vlad => "VLAD top-k",
+                PairSource::VladMutual => "VLAD mutual top-k",
+                PairSource::VladUnion => "local stem + VLAD union",
                 PairSource::VocabTree => "vocab-tree",
                 PairSource::Transitive => "transitive (vocab-tree base)",
             }
@@ -14064,18 +14509,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod diagnose_cli_tests {
     use super::{
         apply_snapshot_coordinate_override, apply_union_traversal_order,
-        apply_union_traversal_order_with_features, canonicalize_feature_order,
-        canonicalize_pairwise_loci, colmap_guided_geometry, colmap_guided_matches,
-        descriptor_squared_distance, effective_config_hash, effective_config_snapshot,
-        filter_imported_verified_pairs_by_stem_window, filter_pairs_by_stem_window,
-        imported_reference_quality_is_strong, initial_poses_from_colmap_images_txt,
+        apply_union_traversal_order_with_features, candidate_pairs_vlad_union,
+        canonicalize_feature_order, canonicalize_pairwise_loci, colmap_guided_geometry,
+        colmap_guided_matches, descriptor_squared_distance, effective_config_hash,
+        effective_config_snapshot, filter_imported_verified_pairs_by_stem_window,
+        filter_pairs_by_stem_window, imported_reference_quality_is_strong,
+        initial_poses_from_colmap_images_txt,
         initial_poses_from_colmap_images_txt_with_expected_cameras, load_input_colmap_calibration,
         match_candidate_cmp, model_cross_validation_is_held_out,
         model_cross_validation_is_held_out_for_pixels, model_cross_validation_selection_score,
-        parse_args_from, parse_colmap_image_camera_assignments, parse_colmap_track_membership,
-        parse_diagnose_stems, robust_huber_mean, summarize_model_cross_validation_bucket,
-        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
-        verified_pair_oracle_map, Camera, ColmapTrackMembership, ConfigurationType,
+        parse_args_from, parse_candidate_manifest, parse_colmap_image_camera_assignments,
+        parse_colmap_track_membership, parse_diagnose_stems, robust_huber_mean,
+        summarize_model_cross_validation_bucket, translation_direction_delta_deg,
+        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
+        write_candidate_manifest, Camera, ColmapTrackMembership, ConfigurationType,
         EssentialPairQuality, FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig,
         ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
         RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
@@ -14147,6 +14594,79 @@ mod diagnose_cli_tests {
         assert_eq!(snapshot_auto.next_image_policy, NextImagePolicy::Auto);
         assert!(parse_args_from(minimal_args(&["--next-image-policy", "pyramid"])).is_err());
         assert!(parse_args_from(minimal_args(&["--next-image-policy"])).is_err());
+    }
+
+    #[test]
+    fn candidate_manifest_round_trip_binds_image_order_and_rejects_duplicates() {
+        let root =
+            std::env::temp_dir().join(format!("visloc_candidate_manifest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("pairs.txt");
+        let names = vec![
+            "DSC_0001.JPG".to_owned(),
+            "DSC_0002.JPG".to_owned(),
+            "DSC_0003.JPG".to_owned(),
+        ];
+        let pairs = vec![(0, 2), (0, 1)];
+        write_candidate_manifest(&path, &names, &pairs).unwrap();
+        assert_eq!(parse_candidate_manifest(&path, &names).unwrap(), pairs);
+
+        let mut wrong_names = names.clone();
+        wrong_names.swap(0, 1);
+        assert!(parse_candidate_manifest(&path, &wrong_names)
+            .unwrap_err()
+            .contains("image entry"));
+
+        std::fs::write(
+            &path,
+            "visloc_candidate_manifest_v1\nimages 3\n\
+             image 0 DSC_0001.JPG\nimage 1 DSC_0002.JPG\nimage 2 DSC_0003.JPG\n\
+             pairs 2\npair 0 1\npair 1 0\n",
+        )
+        .unwrap();
+        assert!(parse_candidate_manifest(&path, &names)
+            .unwrap_err()
+            .contains("must satisfy"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn candidate_schedule_flags_are_explicit_and_validated() {
+        let union = parse_args_from(minimal_args(&[
+            "--pair-source",
+            "vlad-union",
+            "--local-stem-window",
+            "3",
+            "--candidate-budget",
+            "200",
+        ]))
+        .unwrap();
+        assert!(matches!(union.pair_source, super::PairSource::VladUnion));
+        assert_eq!(union.local_stem_window, Some(3));
+        assert_eq!(union.candidate_budget, Some(200));
+        assert!(parse_args_from(minimal_args(&["--pair-source", "vlad-union",])).is_err());
+        assert!(parse_args_from(minimal_args(&["--local-stem-window", "3",])).is_err());
+        assert!(parse_args_from(minimal_args(&["--candidate-budget", "0",])).is_err());
+    }
+
+    #[test]
+    fn bounded_local_vlad_schedule_is_deterministic_and_respects_budget() {
+        let features: Vec<FeatureSet> = (0..5)
+            .map(|index| {
+                FeatureSet::new(
+                    vec![Point2::new(index as f64, 0.0)],
+                    vec![vec![1.0, index as f32 + 1.0]],
+                )
+                .unwrap()
+            })
+            .collect();
+        let names: Vec<String> = (0..5).map(|index| format!("DSC_{index:04}.JPG")).collect();
+        let first = candidate_pairs_vlad_union(&features, &names, 4, 12, 1, Some(3)).unwrap();
+        let second = candidate_pairs_vlad_union(&features, &names, 4, 12, 1, Some(3)).unwrap();
+        assert_eq!(first, second);
+        assert!(first.len() <= 3);
+        assert!(first.iter().all(|&(i, j)| i < j && j < features.len()));
     }
 
     #[test]

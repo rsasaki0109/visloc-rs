@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "benchmark": {
+    "id": "courtyard-colmap-exhaustive-v1",
+    "name": "ETH3D courtyard exhaustive high-resolution control",
+    "description": "The official high-resolution CPU-SIFT feature/match control used by the README courtyard comparison."
+  },
+  "artifact_root": "/media/sasaki/aiueo1/visloc-rs/eth3d/courtyard/artifacts/colmap_highres_exhaustive_allpairs_20260830",
+  "inputs": {
+    "features": {
+      "manifest": {
+        "path": "features_sixcol/MANIFEST.tsv",
+        "sha256": "030b02982e263f3b5e3d94d1edd873b757894b4c20a9609feef264cadffd0d2a"
+      },
+      "file_count": 38,
+      "total_rows": 439481,
+      "row_order": "source COLMAP row order is preserved"
+    },
+    "matches": {
+      "path": "exhaustive/matches_import.txt",
+      "sha256": "3c6956571ebca49dff647c187beea2f602292f892d31f42500368d620011d986",
+      "pair_count": 703,
+      "raw_match_count": 306324,
+      "candidate_semantics": "all unordered pairs (38*37/2)"
+    },
+    "images": {
+      "directory": "/home/sasaki/datasets/eth3d/courtyard/images/dslr_images_undistorted",
+      "suffix": ".JPG",
+      "file_count": 38,
+      "sha256": {
+        "DSC_0286.JPG": "e06f96bb23ec05f92d28ee72022656e2f9df82aff470792c757b25596e7972f9",
+        "DSC_0287.JPG": "cf956f640104131e83f5bd3ff78adb734bbd1aab7519c55b77d59eceeb628729",
+        "DSC_0288.JPG": "e7f3d4f8e22995748ff68ad1891650ab2625c023c3d974e7b8245ecb98b11803",
+        "DSC_0289.JPG": "d9e8740ad9ed5736d27845a37761988ef988e2b7088c36ed4f4bd5dc9aa6e5fb",
+        "DSC_0290.JPG": "3accbd742bf34dd6e11bbc472efd69fddcf66724bbc871c028f021b8664d1f59",
+        "DSC_0291.JPG": "adc9601acef932c60474f6135a31b3566bb82f6ae5a5793fbb5823859d5fbf9f",
+        "DSC_0292.JPG": "c1cbfecf7f275ec65cc3651d91f7c9e5d4be6f96791a3c9ceb45e89006a07ba2",
+        "DSC_0293.JPG": "872e5bfac80d0f365fc371c5ac8685ee21c58197fbb64340efc63ed799aa88fb",
+        "DSC_0294.JPG": "bdeac021227c0b8ba9efb2e4fd148faf909f0fcabef610cb8e0dda0e0794ef68",
+        "DSC_0295.JPG": "ec36831bef9e38bcc2ec560d166c06d73389b7b73b879be9f775479ba281c572",
+        "DSC_0296.JPG": "a41bbcced9d332ae90a7ea81b3fb0d04565e4190661aa614b271ca915db30100",
+        "DSC_0297.JPG": "1c549f40ab2f500077c29023eb7590befaf46d201690dd5f506ac701ff949eae",
+        "DSC_0298.JPG": "1512a1b88df659e5db0c9dead7b567f8c77e984d3ba82442aca60d44f5d3b5a9",
+        "DSC_0299.JPG": "953b00ae237d1e8502e12341aea71ddabac713ff489011aa62fc832ad361f08e",
+        "DSC_0300.JPG": "7680b5a1f2525704f16979f1fbea2b935381d14e4d415faf465a6e082c23ed82",
+        "DSC_0301.JPG": "907de706d2bf95dafc3fd8968f1d0a0c76d34755ba29d70e6dd6779beeca46b3",
+        "DSC_0302.JPG": "26b6f823cbfdc3d7b821ddd4857c72f63355cf246b164b82326cbd2408fac891",
+        "DSC_0303.JPG": "7ddb837f50dbaf3ae49de0a18613411bc1bb017a663254275b264f33dd21941d",
+        "DSC_0304.JPG": "63104e1cad5f18658b0e9aa6b89c3546cbc8fe4fb8b37305a92bc9217c535d20",
+        "DSC_0305.JPG": "e2bebb6883b7db2e1448a1897fe6be86cedd2c43802e5fb47f89ad25afd3bb57",
+        "DSC_0306.JPG": "fceff602dd59c7bf96c0663f795d08c188a1188d2a2b105b3f001a1a265ed934",
+        "DSC_0307.JPG": "1c04b2bc2595b2e38fd095f7aef3e5cb40874a716a57a7b4dcd56c6facf3450c",
+        "DSC_0308.JPG": "d73e78ea4216e1bf32dcd19bb00edfc0cfb2842c83e84b80cd56cbcbbf146fc1",
+        "DSC_0309.JPG": "1794c28ed2b65c1085925216c3c4c6310bef56e5092ffa1abc29de3b5e654be7",
+        "DSC_0310.JPG": "b207988862e4e67a719c3a2ffd172514f2e78339e0429c51d72152456d8bc84a",
+        "DSC_0311.JPG": "112c1e981145042a528b926473dfd9013db7c6f403bb00ba7aad9cfcfd22f8bb",
+        "DSC_0312.JPG": "6ea452300bf67145c56d277c803d42aa134e36a476fc7d353bedf158e001e02e",
+        "DSC_0313.JPG": "0f14c27ef8b79939d19b40a28a0a0beee6fe0a7d0300fe7cf0d86ce4b90464a4",
+        "DSC_0314.JPG": "d2e6494d3e50bdd1a8c22b86cc110f3583ba348c84ab311654fefc533d6c6541",
+        "DSC_0315.JPG": "cff88f395b25887547e7359b1b540af797d66aa0a8da755d7c231f4f7e488142",
+        "DSC_0316.JPG": "433efa90ab766e07ff912f4b1bd8ff8f3d2455271fd62c385671cc5cf7a2b6a1",
+        "DSC_0317.JPG": "b77d5da14fbc812721c122e11c83f4094ae92b1f51d1fa945304b7ec36accc88",
+        "DSC_0318.JPG": "234d2c5fa16a7b9316505cc7867470712750f58f31912baaf43ef41de9db6a6a",
+        "DSC_0319.JPG": "d0f26268a5642fe36a5fa33ae2416e0ec0af863950b811e9da80afda7506c9f4",
+        "DSC_0320.JPG": "94ad73b669e5b147ca9f66863c410abe8e77076c2d386903fbc0e1b377f6e675",
+        "DSC_0321.JPG": "363db10460ae2157ebcc6c11d148bad2dc95c3dc0a77b3a84dc65719a1a2d219",
+        "DSC_0322.JPG": "0694af517a104252d8635d85e2c977db0513d172066e0a12851dcad49066198c",
+        "DSC_0323.JPG": "2c81ba423cc705a3e16fcd1ed452cd92415abd1f00b635dc7acb6016bab195cb"
+      }
+    },
+    "calibration": {
+      "model_dir": "/home/sasaki/datasets/eth3d/courtyard/dslr_calibration_undistorted",
+      "files": {
+        "cameras.txt": "0cf9d1f1615b89eed8e48a92ef0ee44352f0fbadbb1be0c00b12f15d01c1f83c",
+        "images.txt": "1afcc917c0538cf7168ca9c045574a786402553712be0ad2ae5affdc52b87f02",
+        "points3D.txt": "43e43c438a3abdb9b162fac935a77f87733efafb16b6cdc65983d6da00232b9d"
+      },
+      "registered": 38
+    }
+  },
+  "models": {
+    "visloc": {
+      "path": "visloc_model",
+      "files": {
+        "cameras.txt": "76fc758375228319300a5c076b6bcc84a88413d69cf3613eb40c980b60e8cc9c",
+        "images.txt": "a14ac6b958bf09481bfcc0ae72b59671d8e6405cd880e4711ff14c5c9432852e",
+        "points3D.txt": "d7b680e6d51a403a4962920e8f0e0615f382646a1ac9836f160ecb44622a3293"
+      },
+      "registered": 38,
+      "tracks": 43852,
+      "observations": 152432,
+      "reprojection_px": 0.579,
+      "score_file": {
+        "path": "visloc_model_score.txt",
+        "sha256": "e393a004fae4e448b34e6b219971601f7a0f0b9ddbe89a77d90c3cf71596e37b"
+      },
+      "score_rmse_m": 0.005379
+    },
+    "colmap": {
+      "path": "calibrated_mapper/sparse_single_txt",
+      "files": {
+        "cameras.txt": "1e612c4b481e01797aec1164c1e30e2f8982cd1eebfe3153c9eea247be08e879",
+        "images.txt": "4c6c5e52a57d59bc8494a3b5c50e61b73d5386590ad957764fa22bce6a4a6454",
+        "points3D.txt": "f91574c58a241cf446a692b2ab2c89c93b8a939ae0947488a6199cffe9a623bd"
+      },
+      "registered": 38,
+      "points": 38422,
+      "observations": 169590,
+      "reprojection_px": 0.744758,
+      "score_rmse_m": 0.016166
+    }
+  },
+  "expected": {
+    "image_count": 38,
+    "pair_count": 703,
+    "feature_file_count": 38,
+    "feature_row_count": 439481,
+    "visloc_registered": 38,
+    "visloc_rmse_m": 0.005379,
+    "max_rmse_m": 0.01,
+    "colmap_registered": 38,
+    "colmap_rmse_m": 0.016166
+  },
+  "mapping": {
+    "feature_suffix": "_features.txt",
+    "image_suffix": ".JPG",
+    "min_matches": 20,
+    "match_ratio": 0.8,
+    "verification_mode": "full",
+    "mapper": "incremental",
+    "pnp_max_iterations": 100000,
+    "min_pnp_inliers": 8,
+    "next_image_policy": "visibility",
+    "exhaustive": true,
+    "geometry_guided_conflict_recovery": true,
+    "post_refinement_registration": true,
+    "final_iterative_refinement": true
+  },
+  "candidate_schedules": {
+    "exhaustive": {
+      "strategy": "exhaustive",
+      "candidate_count": 703
+    },
+    "sequential-n3": {
+      "strategy": "sequential",
+      "stem_window": 3,
+      "candidate_count": 108
+    },
+    "vlad-topk-4": {
+      "strategy": "vlad",
+      "retrieval_topk": 4,
+      "candidate_count": 99
+    },
+    "vlad-topk-8": {
+      "strategy": "vlad",
+      "retrieval_topk": 8,
+      "candidate_count": 188
+    },
+    "vlad-topk-12": {
+      "strategy": "vlad",
+      "retrieval_topk": 12,
+      "candidate_count": 259
+    },
+    "vlad-mutual-topk-8": {
+      "strategy": "vlad-mutual",
+      "retrieval_topk": 8,
+      "candidate_count": 116
+    },
+    "local-vlad-union-3-8-200": {
+      "strategy": "vlad-union",
+      "local_stem_window": 3,
+      "retrieval_topk": 8,
+      "candidate_budget": 200,
+      "candidate_count": 200
+    },
+    "adaptive-vocab4": {
+      "strategy": "adaptive",
+      "vocab_tree_num_images": 4,
+      "candidate_count": 104,
+      "note": "transitive expansion is intentionally measured separately; the base candidate pass is cacheable"
+    }
+  },
+  "runtime": {
+    "rayon_threads": 1
+  },
+  "colmap_control": {
+    "database": "exhaustive/database_calibrated.db",
+    "note": "--colmap-control run is optional and writes a new external model; validate is the default."
+  },
+  "visuals": {
+    "readme": "README.md",
+    "assets": {
+      "png": {
+        "path": "docs/assets/courtyard_sfm_comparison.png",
+        "sha256": "d5d33b1a986debb1b6a99e64bbf937b8b07e8639d867789f01eae1446cb84665",
+        "width": 1458,
+        "height": 883
+      },
+      "gif": {
+        "path": "docs/assets/courtyard_sfm_comparison.gif",
+        "sha256": "a2b76c47f8680265872240caaba7fee6615a63f12b61e3021e9b1c91b98b2b8e",
+        "width": 772,
+        "height": 432,
+        "frames": 24
+      }
+    },
+    "readme_needles": [
+      "38/38 cameras registered at 0.5379 cm centre RMSE",
+      "versus 1.6166 cm for official COLMAP CPU SIFT",
+      "43,852 tracks / 152,432 observations",
+      "38,422 points / 169,590 observations",
+      "0.579 px",
+      "0.744758 px",
+      "docs/assets/courtyard_sfm_comparison.gif",
+      "docs/assets/courtyard_sfm_comparison.png"
+    ]
+  },
+  "future_scale": {
+    "feature_shards": null,
+    "candidate_manifest": {
+      "format": "visloc_candidate_manifest_v1",
+      "last_verified_sha256": "2d654b9ed124ec1732d65f4f3829dfadba5e3e978b085844b59c1ee5e5ed32c1",
+      "pairs": 200,
+      "provenance": "generated from pre-match VLAD top-8 plus numeric-stem window-3 local edges, budget 200"
+    },
+    "note": "The exhaustive control validates all 703 pairs. Candidate schedules are optional pre-match reductions; a versioned image-bound manifest can be generated with --write-candidate-manifest and replayed with --candidate-manifest."
+  },
+  "artifact_manifest": {
+    "path": "SHA256SUMS",
+    "sha256": "12e91cd3a2e595625ef167d8cd8a2af6310d3ea3cd1e3b1a0c2f8264004fa96e"
+  }
+}
