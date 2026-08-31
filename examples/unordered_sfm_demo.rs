@@ -245,6 +245,13 @@
 //! then replaces only keypoint `(x,y)` coordinates.  Pair order, indices,
 //! models, and hashes remain those of the immutable snapshot.  It requires
 //! `--import-verified-pairs-snapshot` and is default-off.
+//! `--snapshot-keypoints-only` is an explicit memory-saving replay mode for
+//! `--import-verified-pairs-snapshot`: it is limited to file-backed features
+//! and the plain incremental mapper, keeps only keypoints/row counts in the
+//! mapper feature bank, and re-reads one feature file at a time to reproduce
+//! the exact descriptor-bound manifest hash.  It cannot be combined with
+//! coordinate overrides, feature/snapshot export, canonical row ordering,
+//! orientation-locus canonicalization, or model-score diagnostics.
 //!
 //! For machine-readable NN diagnostics (and an early exit without
 //! reconstruction), add `--diagnose-pairs-csv /tmp/pairs.csv`; it uses the
@@ -2020,6 +2027,12 @@ struct Args {
     /// Import a checksummed verified-pair snapshot and bypass matching and
     /// verification.  The loaded image/feature manifest and camera must match.
     import_verified_pairs_snapshot: Option<PathBuf>,
+    /// Replay an imported snapshot while retaining keypoints and zero-sized
+    /// descriptor rows only.  The original descriptor files are re-read one
+    /// at a time after calibration to reproduce the exact feature manifest
+    /// hash.  This is opt-in because descriptor-dependent diagnostics and
+    /// alternate mapper modes are intentionally unavailable.
+    snapshot_keypoints_only: bool,
     /// Write a verified-pair snapshot and exit before track building/mapping.
     /// This is the opt-in match-shard worker mode and requires
     /// `export_verified_pairs_snapshot`.
@@ -3901,6 +3914,7 @@ where
     let mut import_verified_pairs_file: Option<PathBuf> = None;
     let mut export_verified_pairs_snapshot: Option<PathBuf> = None;
     let mut import_verified_pairs_snapshot: Option<PathBuf> = None;
+    let mut snapshot_keypoints_only = false;
     let mut export_verified_pairs_only = false;
     let mut candidate_manifest: Option<PathBuf> = None;
     let mut export_candidate_manifest: Option<PathBuf> = None;
@@ -4621,6 +4635,7 @@ where
                 a.remove(i + 1);
                 import_verified_pairs_snapshot = Some(PathBuf::from(raw));
             }
+            "--snapshot-keypoints-only" => snapshot_keypoints_only = true,
             "--export-verified-pairs-only" => export_verified_pairs_only = true,
             "--candidate-manifest" => {
                 let raw = a
@@ -5130,6 +5145,51 @@ where
                 .into(),
         );
     }
+    if snapshot_keypoints_only {
+        if import_verified_pairs_snapshot.is_none() {
+            return Err(
+                "--snapshot-keypoints-only requires --import-verified-pairs-snapshot PATH".into(),
+            );
+        }
+        if feature_extractor != FeatureExtractorKind::Files {
+            return Err(
+                "--snapshot-keypoints-only currently requires --feature-extractor files".into(),
+            );
+        }
+        if mapper != MapperKind::Incremental || colmap_style {
+            return Err(
+                "--snapshot-keypoints-only currently requires the plain incremental mapper (remove --mapper global|hybrid and --colmap-style)".into(),
+            );
+        }
+        if snapshot_coordinate_override_dir.is_some() {
+            return Err(
+                "--snapshot-keypoints-only cannot be combined with --snapshot-coordinate-override-dir".into(),
+            );
+        }
+        if export_features_dir.is_some() || export_features_only {
+            return Err("--snapshot-keypoints-only cannot be combined with feature export".into());
+        }
+        if export_verified_pairs_snapshot.is_some() {
+            return Err(
+                "--snapshot-keypoints-only cannot be combined with --export-verified-pairs-snapshot".into(),
+            );
+        }
+        if canonical_feature_order || orientation_locus_canonicalization {
+            return Err(
+                "--snapshot-keypoints-only cannot be combined with feature-order or orientation-locus canonicalization".into(),
+            );
+        }
+        if diagnose_model_score_file.is_some() {
+            return Err(
+                "--snapshot-keypoints-only cannot be combined with --diagnose-model-score".into(),
+            );
+        }
+        if stable_track_order {
+            return Err(
+                "--snapshot-keypoints-only cannot be combined with --stable-track-order (descriptor tie-breaks require descriptor payloads)".into(),
+            );
+        }
+    }
     if import_verified_pairs_snapshot.is_some() {
         if import_matches_file.is_some() || import_matches_supplement_file.is_some() {
             return Err(
@@ -5382,6 +5442,7 @@ where
         import_verified_pairs_file,
         export_verified_pairs_snapshot,
         import_verified_pairs_snapshot,
+        snapshot_keypoints_only,
         export_verified_pairs_only,
         snapshot_coordinate_override_dir,
         diagnose_ba_oracle_poses_file,
@@ -7334,6 +7395,82 @@ fn snapshot_feature_manifest_hash(features: &[FeatureSet]) -> u64 {
     hash
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotFeatureValidation {
+    feature_counts: Vec<usize>,
+    feature_manifest_hash: u64,
+}
+
+/// Reconstruct the exact v1 feature-manifest hash without retaining the
+/// descriptor bank.  The first pass records a compact bitwise fingerprint for
+/// every source file before dropping its descriptors.  This pass re-parses one
+/// file at a time, verifies that the source is unchanged, and feeds the
+/// calibrated in-memory keypoints plus the original descriptor bits through
+/// the same hash stream as [`snapshot_feature_manifest_hash`].
+fn snapshot_feature_validation_from_files(
+    paths: &[PathBuf],
+    features: &[FeatureSet],
+    fingerprints: &[SnapshotFeatureFileFingerprint],
+) -> Result<SnapshotFeatureValidation, String> {
+    if paths.len() != features.len() || paths.len() != fingerprints.len() {
+        return Err(format!(
+            "snapshot feature replay manifest mismatch: {} source paths, {} feature sets, {} fingerprints",
+            paths.len(),
+            features.len(),
+            fingerprints.len()
+        ));
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    hash = physical_hash_mix(hash, features.len() as u64);
+    for (image, ((path, feature_set), expected)) in
+        paths.iter().zip(features).zip(fingerprints).enumerate()
+    {
+        if feature_set.keypoints.len() != feature_set.descriptors.len() {
+            return Err(format!(
+                "snapshot keypoint-only image {image} has {} keypoints but {} placeholder descriptor rows",
+                feature_set.keypoints.len(),
+                feature_set.descriptors.len()
+            ));
+        }
+        let source = read_feature_set(path).map_err(|error| {
+            format!("cannot re-read snapshot feature source image {image} ({path:?}): {error}")
+        })?;
+        let observed = snapshot_feature_file_fingerprint(&source);
+        if observed != *expected {
+            return Err(format!(
+                "snapshot feature source image {image} ({path:?}) changed between loads"
+            ));
+        }
+        if observed.keypoint_count != feature_set.keypoints.len()
+            || observed.descriptor_count != feature_set.descriptors.len()
+        {
+            return Err(format!(
+                "snapshot feature source image {image} ({path:?}) has {} keypoints / {} descriptor rows, loaded {} / {}",
+                observed.keypoint_count,
+                observed.descriptor_count,
+                feature_set.keypoints.len(),
+                feature_set.descriptors.len(),
+            ));
+        }
+        hash = physical_hash_mix(hash, feature_set.keypoints.len() as u64);
+        hash = physical_hash_mix(hash, source.descriptors.len() as u64);
+        for keypoint in &feature_set.keypoints {
+            hash = physical_hash_mix(hash, keypoint.x.to_bits());
+            hash = physical_hash_mix(hash, keypoint.y.to_bits());
+        }
+        for descriptor in &source.descriptors {
+            hash = physical_hash_mix(hash, descriptor.len() as u64);
+            for value in descriptor {
+                hash = physical_hash_mix(hash, u64::from(value.to_bits()));
+            }
+        }
+    }
+    Ok(SnapshotFeatureValidation {
+        feature_counts: features.iter().map(FeatureSet::len).collect(),
+        feature_manifest_hash: hash,
+    })
+}
+
 fn snapshot_intrinsics_bits(camera: &Camera) -> Result<[u64; 4], String> {
     let Some((fx, fy, cx, cy)) = camera.intrinsics() else {
         return Err("verified-pair snapshot requires a camera with intrinsics".into());
@@ -7435,6 +7572,7 @@ fn validate_snapshot_for_run(
     image_names: &[String],
     features: &[FeatureSet],
     camera: &Camera,
+    precomputed_feature_validation: Option<&SnapshotFeatureValidation>,
 ) -> Result<Vec<PairwiseMatches>, String> {
     if snapshot.schema_version != verified_pair_snapshot::SCHEMA_VERSION {
         return Err(format!(
@@ -7447,7 +7585,10 @@ fn validate_snapshot_for_run(
             "verified-pair snapshot image manifest names do not match loaded images".into(),
         );
     }
-    let feature_counts: Vec<usize> = features.iter().map(|f| f.keypoints.len()).collect();
+    let computed_feature_counts: Vec<usize> = features.iter().map(|f| f.keypoints.len()).collect();
+    let feature_counts = precomputed_feature_validation
+        .map(|validation| validation.feature_counts.as_slice())
+        .unwrap_or(computed_feature_counts.as_slice());
     let snapshot_counts: Vec<usize> = snapshot
         .feature_counts
         .iter()
@@ -7468,7 +7609,10 @@ fn validate_snapshot_for_run(
             snapshot.image_manifest_hash
         ));
     }
-    let feature_hash = snapshot_feature_manifest_hash(features);
+    let feature_hash = precomputed_feature_validation.map_or_else(
+        || snapshot_feature_manifest_hash(features),
+        |validation| validation.feature_manifest_hash,
+    );
     if snapshot.feature_manifest_hash != feature_hash {
         return Err(format!(
             "verified-pair snapshot feature manifest hash mismatch: stored {:016x}, loaded {feature_hash:016x}",
@@ -7490,7 +7634,7 @@ fn validate_snapshot_for_run(
     if effective_config_hash(&snapshot.verifier_config) != snapshot.verifier_config_hash {
         return Err("verified-pair snapshot verifier-config checksum is invalid".into());
     }
-    let pairwise = pairwise_from_snapshot(snapshot, &feature_counts)?;
+    let pairwise = pairwise_from_snapshot(snapshot, feature_counts)?;
     let ordered_hash = ordered_pairwise_edge_hash(&pairwise);
     if snapshot.pair_order_hash != ordered_hash {
         return Err(format!(
@@ -7994,6 +8138,61 @@ fn read_six_column_locus_features(
     Ok(Some((FeatureSet::new(keypoints, descriptors)?, metadata)))
 }
 
+/// Read one feature file with the same parser used by the historical batch
+/// loader.  The keypoint-only snapshot replay deliberately calls this helper
+/// once per file, so the descriptor payload is released before the next image
+/// is parsed.
+fn read_feature_set(path: &Path) -> Result<FeatureSet, Box<dyn std::error::Error>> {
+    if let Some((feature_set, _)) = read_six_column_locus_features(path)? {
+        return Ok(feature_set);
+    }
+    Ok(read_external_deep_features_txt(path)?.into_feature_set()?)
+}
+
+fn list_feature_files(
+    dir: &Path,
+    feature_suffix: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut files: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(feature_suffix))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotFeatureFileFingerprint {
+    keypoint_hash: u64,
+    descriptor_hash: u64,
+    keypoint_count: usize,
+    descriptor_count: usize,
+}
+
+fn snapshot_feature_file_fingerprint(feature_set: &FeatureSet) -> SnapshotFeatureFileFingerprint {
+    let mut keypoint_hash = 0xcbf29ce484222325u64;
+    keypoint_hash = physical_hash_mix(keypoint_hash, feature_set.keypoints.len() as u64);
+    for keypoint in &feature_set.keypoints {
+        keypoint_hash = physical_hash_mix(keypoint_hash, keypoint.x.to_bits());
+        keypoint_hash = physical_hash_mix(keypoint_hash, keypoint.y.to_bits());
+    }
+    let mut descriptor_hash = 0xcbf29ce484222325u64;
+    descriptor_hash = physical_hash_mix(descriptor_hash, feature_set.descriptors.len() as u64);
+    for descriptor in &feature_set.descriptors {
+        descriptor_hash = physical_hash_mix(descriptor_hash, descriptor.len() as u64);
+        for value in descriptor {
+            descriptor_hash = physical_hash_mix(descriptor_hash, u64::from(value.to_bits()));
+        }
+    }
+    SnapshotFeatureFileFingerprint {
+        keypoint_hash,
+        descriptor_hash,
+        keypoint_count: feature_set.keypoints.len(),
+        descriptor_count: feature_set.descriptors.len(),
+    }
+}
+
 /// Read every `*<feature_suffix>` file in `dir`, sorted lexically, returning the
 /// per-image feature sets and their COLMAP image names.
 fn load_images(
@@ -8008,12 +8207,7 @@ fn load_images(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut files: Vec<String> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.ends_with(feature_suffix))
-        .collect();
-    files.sort();
+    let files = list_feature_files(dir, feature_suffix)?;
     let mut features = Vec::new();
     let mut names = Vec::new();
     let mut locus_metadata = Vec::new();
@@ -8035,6 +8229,83 @@ fn load_images(
         names.push(image_name_for(f, feature_suffix, image_suffix));
     }
     Ok((features, names, locus_metadata))
+}
+
+/// The memory-bounded feature representation used by explicit snapshot
+/// replay.  `paths` preserves the exact lexical source order so the original
+/// descriptor-bound feature manifest can be recomputed after calibration.
+#[derive(Debug)]
+struct SnapshotKeypointsOnlyLoad {
+    features: Vec<FeatureSet>,
+    image_names: Vec<String>,
+    locus_metadata: Vec<Option<Vec<FeatureLocusMetadata>>>,
+    paths: Vec<PathBuf>,
+    fingerprints: Vec<SnapshotFeatureFileFingerprint>,
+}
+
+/// Load file-backed features one image at a time while retaining only pixels,
+/// locus metadata, and one empty descriptor row per keypoint.  Keeping the
+/// outer descriptor row count is intentional: downstream row-index validation
+/// treats it as part of the feature shape, while ordinary incremental mapping
+/// never reads descriptor values after an imported snapshot.
+fn load_images_keypoints_only(
+    dir: &Path,
+    feature_suffix: &str,
+    image_suffix: &str,
+) -> Result<SnapshotKeypointsOnlyLoad, Box<dyn std::error::Error>> {
+    let files = list_feature_files(dir, feature_suffix)?;
+    let mut features = Vec::with_capacity(files.len());
+    let mut image_names = Vec::with_capacity(files.len());
+    let mut locus_metadata = Vec::with_capacity(files.len());
+    let mut paths = Vec::with_capacity(files.len());
+    let mut fingerprints = Vec::with_capacity(files.len());
+    for file_name in files {
+        let feature_path = dir.join(&file_name);
+        let (feature_set, metadata) = if let Some(parsed) =
+            read_six_column_locus_features(&feature_path)?
+        {
+            parsed
+        } else {
+            let feature_set = read_external_deep_features_txt(&feature_path)?.into_feature_set()?;
+            let stem = file_name.strip_suffix(feature_suffix).unwrap_or(&file_name);
+            let metadata_path = dir.join(format!("{stem}_loci.txt"));
+            let metadata = read_locus_sidecar(&metadata_path, feature_set.len())?;
+            (feature_set, metadata.unwrap_or_default())
+        };
+        let fingerprint = snapshot_feature_file_fingerprint(&feature_set);
+        let FeatureSet {
+            keypoints,
+            descriptors,
+        } = feature_set;
+        let descriptor_rows = descriptors.len();
+        if descriptor_rows != keypoints.len() {
+            return Err(format!(
+                "{}: parser returned {} descriptors for {} keypoints",
+                feature_path.display(),
+                descriptor_rows,
+                keypoints.len()
+            )
+            .into());
+        }
+        // Moving `keypoints` out and replacing the descriptor rows drops the
+        // parsed payload before the next loop iteration.
+        let row_count = keypoints.len();
+        features.push(FeatureSet {
+            keypoints,
+            descriptors: (0..row_count).map(|_| Vec::new()).collect(),
+        });
+        locus_metadata.push((!metadata.is_empty()).then_some(metadata));
+        image_names.push(image_name_for(&file_name, feature_suffix, image_suffix));
+        paths.push(feature_path);
+        fingerprints.push(fingerprint);
+    }
+    Ok(SnapshotKeypointsOnlyLoad {
+        features,
+        image_names,
+        locus_metadata,
+        paths,
+        fingerprints,
+    })
 }
 
 /// Replace only keypoint coordinates after a verified-pair snapshot has been
@@ -13777,6 +14048,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--sift-stream-export requires building with --features image-io".into());
         }
     }
+    let mut snapshot_feature_paths: Option<Vec<PathBuf>> = None;
+    let mut snapshot_feature_fingerprints: Option<Vec<SnapshotFeatureFileFingerprint>> = None;
     let (
         mut features,
         image_names,
@@ -13785,8 +14058,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mut locus_metadata,
     ) = match args.feature_extractor {
         FeatureExtractorKind::Files => {
-            let (features, image_names, locus_metadata) =
-                load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?;
+            let (features, image_names, locus_metadata) = if args.snapshot_keypoints_only {
+                let loaded = load_images_keypoints_only(
+                    &args.features_dir,
+                    &args.feature_suffix,
+                    &args.image_suffix,
+                )?;
+                snapshot_feature_paths = Some(loaded.paths);
+                snapshot_feature_fingerprints = Some(loaded.fingerprints);
+                (loaded.features, loaded.image_names, loaded.locus_metadata)
+            } else {
+                load_images(&args.features_dir, &args.feature_suffix, &args.image_suffix)?
+            };
             let primary_keypoint_counts = features.iter().map(FeatureSet::len).collect();
             let alternate_descriptors = vec![None; features.len()];
             (
@@ -13871,6 +14154,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         per_image_calibration = Some(loaded);
         log_process_memory("example-after-calibration-canonicalization");
     }
+    let snapshot_feature_validation = if args.snapshot_keypoints_only {
+        let paths = snapshot_feature_paths
+            .as_deref()
+            .ok_or("--snapshot-keypoints-only did not retain feature source paths")?;
+        let fingerprints = snapshot_feature_fingerprints
+            .as_deref()
+            .ok_or("--snapshot-keypoints-only did not retain feature source fingerprints")?;
+        let validation = snapshot_feature_validation_from_files(paths, &features, fingerprints)
+            .map_err(std::io::Error::other)?;
+        println!(
+            "snapshot keypoints-only replay: retained {} keypoint sets; descriptor payloads re-read one file at a time (feature-manifest-fnv1a64={:016x})",
+            features.len(),
+            validation.feature_manifest_hash,
+        );
+        log_process_memory("example-after-keypoints-only-feature-fingerprint");
+        Some(validation)
+    } else {
+        None
+    };
     let config_snapshot = effective_config_snapshot(&args);
     println!(
         "effective-config: fnv1a64={:016x} {config_snapshot}",
@@ -14021,13 +14323,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // verifier is consulted.
     let mut imported_snapshot = if let Some(path) = args.import_verified_pairs_snapshot.as_deref() {
         let snapshot = verified_pair_snapshot::read(path).map_err(std::io::Error::other)?;
-        let pairwise = validate_snapshot_for_run(&snapshot, &image_names, &features, &args.camera)
-            .map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid verified-pair snapshot {}: {error}", path.display()),
-                )
-            })?;
+        let pairwise = validate_snapshot_for_run(
+            &snapshot,
+            &image_names,
+            &features,
+            &args.camera,
+            snapshot_feature_validation.as_ref(),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid verified-pair snapshot {}: {error}", path.display()),
+            )
+        })?;
         println!(
             "import verified-pair snapshot: {} pairs, {} accepted correspondences from {} (matching/verifier bypassed; ordered-edge-fnv1a64={:016x}, unordered-edge-fnv1a64={:016x})",
             pairwise.len(),
@@ -15662,19 +15970,21 @@ mod diagnose_cli_tests {
         effective_config_hash, effective_config_snapshot,
         filter_imported_verified_pairs_by_stem_window, filter_pairs_by_stem_window,
         imported_reference_quality_is_strong, initial_poses_from_colmap_images_txt,
-        initial_poses_from_colmap_images_txt_with_expected_cameras, load_input_colmap_calibration,
-        match_candidate_cmp, model_cross_validation_is_held_out,
-        model_cross_validation_is_held_out_for_pixels, model_cross_validation_selection_score,
-        parse_args_from, parse_candidate_manifest, parse_candidate_manifest_with_metadata,
-        parse_colmap_image_camera_assignments, parse_colmap_track_membership, parse_diagnose_stems,
-        remap_feature_keypoints_by_old_to_new, replace_feature_keypoints_from_native,
-        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean, snapshot_export_config,
-        summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
-        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
-        verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
-        Camera, ColmapTrackMembership, ConfigurationType, EssentialPairQuality,
-        FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver,
-        ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
+        initial_poses_from_colmap_images_txt_with_expected_cameras, load_images,
+        load_images_keypoints_only, load_input_colmap_calibration, match_candidate_cmp,
+        model_cross_validation_is_held_out, model_cross_validation_is_held_out_for_pixels,
+        model_cross_validation_selection_score, parse_args_from, parse_candidate_manifest,
+        parse_candidate_manifest_with_metadata, parse_colmap_image_camera_assignments,
+        parse_colmap_track_membership, parse_diagnose_stems, remap_feature_keypoints_by_old_to_new,
+        replace_feature_keypoints_from_native, rig_local_pairs, rig_temporal_pyramid_pairs,
+        robust_huber_mean, snapshot_export_config, snapshot_feature_manifest_hash,
+        snapshot_feature_validation_from_files, summarize_model_cross_validation_bucket,
+        temporal_pyramid_offsets_string, translation_direction_delta_deg,
+        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
+        write_candidate_manifest, write_candidate_manifest_with_metadata, Camera,
+        ColmapTrackMembership, ConfigurationType, EssentialPairQuality, FeatureLocusMetadata,
+        ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver, ModelCrossValidationBucket,
+        ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches, PerImageCameras,
         RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
     };
     use nalgebra::{Matrix3, Point2, Vector3};
@@ -17380,6 +17690,145 @@ mod diagnose_cli_tests {
         .unwrap();
         assert!(export_only.export_verified_pairs_only);
         assert!(parse_args_from(minimal_args(&["--export-verified-pairs-only"])).is_err());
+    }
+
+    #[test]
+    fn snapshot_keypoints_only_is_opt_in_and_rejects_unsafe_combinations() {
+        let defaults = parse_args_from(minimal_args(&[])).unwrap();
+        assert!(!defaults.snapshot_keypoints_only);
+        let enabled = parse_args_from(minimal_args(&[
+            "--import-verified-pairs-snapshot",
+            "/tmp/pairs.vps",
+            "--snapshot-keypoints-only",
+        ]))
+        .unwrap();
+        assert!(enabled.snapshot_keypoints_only);
+
+        for extra in [
+            vec!["--snapshot-keypoints-only", "--feature-extractor", "sift"],
+            vec!["--snapshot-keypoints-only", "--mapper", "global"],
+            vec!["--snapshot-keypoints-only", "--mapper", "hybrid"],
+            vec!["--snapshot-keypoints-only", "--colmap-style"],
+            vec![
+                "--snapshot-keypoints-only",
+                "--snapshot-coordinate-override-dir",
+                "/tmp/override",
+            ],
+            vec![
+                "--snapshot-keypoints-only",
+                "--export-features-dir",
+                "/tmp/features",
+            ],
+            vec!["--snapshot-keypoints-only", "--export-features-only"],
+            vec![
+                "--snapshot-keypoints-only",
+                "--export-verified-pairs-snapshot",
+                "/tmp/other.vps",
+            ],
+            vec!["--snapshot-keypoints-only", "--canonical-feature-order"],
+            vec![
+                "--snapshot-keypoints-only",
+                "--orientation-locus-canonicalization",
+            ],
+            vec![
+                "--snapshot-keypoints-only",
+                "--diagnose-model-score",
+                "/tmp/model/images.txt",
+            ],
+            vec!["--snapshot-keypoints-only", "--stable-track-order"],
+        ] {
+            let mut args = vec!["--import-verified-pairs-snapshot", "/tmp/pairs.vps"];
+            args.extend(extra);
+            assert!(
+                parse_args_from(minimal_args(&args)).is_err(),
+                "unsafe snapshot-keypoints-only combination was accepted: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_keypoints_only_loader_matches_full_feature_hash_and_geometry_shape() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_snapshot_keypoints_only_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("a_features.txt"),
+            "# feature file\n1.0 2.0 0.9 0.0 -0.0 0.25\n3.0 4.0 0.8 1.0 2.0 3.0\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("b_features.txt"), "5.0 6.0 0.7 -1.0 4.0 8.0\n").unwrap();
+
+        let (full, names, _) = load_images(&root, "_features.txt", ".png").unwrap();
+        let loaded = load_images_keypoints_only(&root, "_features.txt", ".png").unwrap();
+        assert_eq!(loaded.image_names, names);
+        assert_eq!(loaded.features.len(), full.len());
+        assert!(loaded
+            .features
+            .iter()
+            .all(|set| set.keypoints.len() == set.descriptors.len()
+                && set.descriptors.iter().all(Vec::is_empty)));
+        let validation = snapshot_feature_validation_from_files(
+            &loaded.paths,
+            &loaded.features,
+            &loaded.fingerprints,
+        )
+        .unwrap();
+        assert_eq!(
+            validation.feature_counts,
+            full.iter().map(FeatureSet::len).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            validation.feature_manifest_hash,
+            snapshot_feature_manifest_hash(&full)
+        );
+
+        // Per-image calibration changes only the in-memory keypoints; the
+        // descriptor re-read must still produce the same exact stream as a
+        // full feature bank carrying those transformed keypoints.
+        let mut calibrated = loaded.features;
+        calibrated[0].keypoints[0].x += 0.125;
+        let mut full_calibrated = full.clone();
+        full_calibrated[0].keypoints[0].x += 0.125;
+        assert_eq!(
+            snapshot_feature_validation_from_files(
+                &loaded.paths,
+                &calibrated,
+                &loaded.fingerprints,
+            )
+            .unwrap()
+            .feature_manifest_hash,
+            snapshot_feature_manifest_hash(&full_calibrated)
+        );
+
+        // Empty descriptor rows remain a valid feature shape for the camera
+        // rig, preserving the mapper's row-index geometry contract.
+        let rig = PerImageCameras::new(vec![
+            Camera::pinhole(0, 100, 100, 50.0, 50.0, 50.0, 50.0),
+            Camera::pinhole(1, 100, 100, 50.0, 50.0, 50.0, 50.0),
+        ])
+        .unwrap();
+        rig.validate_features(&calibrated).unwrap();
+
+        std::fs::write(
+            root.join("a_features.txt"),
+            "# feature file\n1.0 2.0 0.9 9.0 -0.0 0.25\n3.0 4.0 0.8 1.0 2.0 3.0\n",
+        )
+        .unwrap();
+        let error = snapshot_feature_validation_from_files(
+            &loaded.paths,
+            &calibrated,
+            &loaded.fingerprints,
+        )
+        .unwrap_err();
+        assert!(error.contains("changed between loads"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

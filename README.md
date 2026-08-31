@@ -18,33 +18,39 @@
 </p>
 
 **visloc-rs now registers all 1,200 cameras with 25.2% lower centre RMSE than
-COLMAP, while its mapper is 18.36× faster on the same frozen images and
-deterministic 12,000-pair schedule.** This is an honest phase-level result:
-matching is still 4.43× slower, mapper peak RSS is 3.20× higher, and feature
-extraction has not yet been measured under the same contract.
+COLMAP. Its memory-bounded snapshot replay is 14.63× faster on the same frozen
+12,000-pair workload while peaking at 1.39 GiB; the fastest exact-model replay
+remains 18.36× faster.** Matching is still 4.43× slower and feature extraction
+has not yet been measured under the same contract, so this is a phase-level
+result rather than an end-to-end speed claim.
 
-| Same-input phase / result | visloc-rs | COLMAP 3.9.1 CPU | Current outcome |
-| --- | ---: | ---: | --- |
-| Exact-pair matching | 2,085.89 s | **471.37 s** | 4.43× slower |
-| Mapper wall time (2-run median) | **268.49 s** | 4,929.56 s | **18.36× faster** |
-| Median 8-iteration BA | **51.23 s** | — | **60.8% below prior visloc** |
-| Mapper peak RSS | 3.83 GiB | **1.20 GiB** | 3.20× higher |
-| Registered cameras | **1200/1200** | **1200/1200** | parity |
-| Camera-centre RMSE | **3.50 cm** | 4.68 cm | **25.2% lower** |
+| Same-input phase / result | Memory-bounded visloc | Fastest visloc | COLMAP 3.9.1 CPU |
+| --- | ---: | ---: | ---: |
+| Exact-pair matching | 2,085.89 s | 2,085.89 s | **471.37 s** |
+| Snapshot-to-model / mapper wall (2-run median) | **336.90 s (14.63×)** | **268.49 s (18.36×)** | 4,929.56 s |
+| Peak RSS | **1.39 GiB** | 3.83 GiB | **1.20 GiB** |
+| Registered cameras | **1200/1200** | **1200/1200** | **1200/1200** |
+| Camera-centre RMSE | **3.50 cm** | **3.50 cm** | 4.68 cm |
+| Model reproducibility | byte-identical ×2 | byte-identical ×2 | frozen control |
 
 <p align="center"><sub>The camera-centre plot uses all 1,200 stems and Sim(3)
 alignment to the supplied calibration proxy. Ground truth is score-only. The
-speed champion uses an explicit 96-correspondence mapper cap, one bounded
-post-refinement registration pass, four 8-iteration global solves, and no
-follow-up global-refinement rounds; these controls are not global defaults.
-Feature extraction is not yet measured under the same contract, so this is not an
-end-to-end speed claim. See the
+two visloc columns use the same explicit 96-correspondence mapper cap, one
+bounded post-refinement registration pass, four 8-iteration global solves, and
+no follow-up global-refinement rounds; these controls are not global defaults.
+The memory-bounded replay additionally re-reads one feature file at a time to
+validate the descriptor-bound snapshot hash, then keeps keypoints only. Its
+1,459,194 KiB median peak is 63.6% below the prior visloc run and 1.16× the
+COLMAP peak. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
 and <a href="benchmarks/electro/quality-attribution.json">quality-attribution ledger</a>.</sub></p>
 <p align="center"><sub>BA implementation and all nine A/B timings:
 <a href="docs/electro_ba_block_system.md">direct-block Schur report</a>.</sub></p>
 <p align="center"><sub>Quality-gated BA schedule audit and two-run hashes:
 <a href="docs/electro_ba_schedule_audit.md">four-solve speed report</a>.</sub></p>
+<p align="center"><sub>Descriptor-lifetime audit, two-run memory trace, and
+exact-model proof: <a href="docs/electro_snapshot_memory_audit.md">1.39 GiB
+snapshot replay report</a>.</sub></p>
 
 <p align="center"><sub><a href="docs/assets/electro_1200_sfm_comparison.png">Open the full-resolution still comparison</a>.</sub></p>
 

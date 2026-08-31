@@ -1,0 +1,114 @@
+{
+  "schema": "visloc_electro_snapshot_memory_audit_v1",
+  "recorded_at": "2026-09-01",
+  "scene": "electro",
+  "images": 1200,
+  "candidate_pairs": 12000,
+  "verified_pairs": 11625,
+  "accepted_correspondences": 7475384,
+  "execution": {
+    "implementation_parent_commit": "f7717475196b3c55fa8bdd0fe4e163ede71f45d5",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "rayon_num_threads": 8,
+    "timing_enabled": true,
+    "memory_logging_enabled": true,
+    "debug_logging_enabled": true,
+    "feature_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/features_vlfeat2048",
+    "image_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/images",
+    "calibration_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/calibration",
+    "verified_pair_snapshot": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/verified-merged.vps"
+  },
+  "mode": {
+    "flag": "--snapshot-keypoints-only",
+    "default_enabled": false,
+    "feature_extractor": "files",
+    "snapshot_import": true,
+    "mapper": "incremental",
+    "descriptor_manifest_validation": "one-file-at-a-time reparse after calibration"
+  },
+  "frozen_mapper": {
+    "max_matches_per_pair": 96,
+    "linear_solver": "sparse",
+    "ba_max_iterations": 8,
+    "global_ba_max_followup_refinements": 0,
+    "post_refinement_registration": true
+  },
+  "runs": [
+    {
+      "mapper_core_seconds": 225.656,
+      "snapshot_to_model_wall_seconds": 324.61,
+      "peak_rss_kib": 1459516,
+      "registered": 1200,
+      "tracks": 83840,
+      "observations": 431833,
+      "mean_reprojection_px": 0.556
+    },
+    {
+      "mapper_core_seconds": 234.947,
+      "snapshot_to_model_wall_seconds": 349.18,
+      "peak_rss_kib": 1458872,
+      "registered": 1200,
+      "tracks": 83840,
+      "observations": 431833,
+      "mean_reprojection_px": 0.556
+    }
+  ],
+  "median": {
+    "mapper_core_seconds": 230.3015,
+    "snapshot_to_model_wall_seconds": 336.895,
+    "peak_rss_kib": 1459194,
+    "peak_rss_gib": 1.3915958404541016
+  },
+  "quality": {
+    "registered": 1200,
+    "rmse_m": 0.03501132650718982,
+    "median_m": 0.017278775570320322,
+    "p95_m": 0.07709687017668192,
+    "max_m": 0.2860141234138742,
+    "cameras_txt_sha256": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+    "images_txt_sha256": "b7a4d3c9f160340232e29c0258e07045acfba358bdf8f48e97c88bda086d0099",
+    "points3d_txt_sha256": "e73ad63944034d43f24a94408d8cc3c0b11e1d95bfe025d0d6a32e8788929fbe",
+    "repeat_model_byte_identical": true,
+    "matches_accepted_speed_champion": true
+  },
+  "comparison": {
+    "prior_visloc_peak_rss_kib": 4011160,
+    "peak_rss_reduction_percent": 63.621645608751585,
+    "prior_visloc_wall_seconds": 268.49,
+    "bounded_replay_wall_overhead_percent": 25.477671421654424,
+    "colmap_mapper_wall_seconds": 4929.56,
+    "colmap_peak_rss_kib": 1255996,
+    "speedup_vs_colmap": 14.632333516377509,
+    "rss_ratio_vs_colmap": 1.1617823623642114
+  },
+  "memory_checkpoints_kib": {
+    "run_1_after_feature_load": 271136,
+    "run_1_after_calibration": 361240,
+    "run_1_after_manifest_replay": 366128,
+    "run_1_internal_hwm": 1459516,
+    "run_2_after_feature_load": 270924,
+    "run_2_internal_hwm": 1458872
+  },
+  "gate": {
+    "maximum_peak_rss_kib": 2097152,
+    "minimum_registered": 1198,
+    "maximum_rmse_m": 0.060,
+    "model_must_match_accepted_champion": true,
+    "passed": true
+  },
+  "readme_visuals": {
+    "generator": "scripts/generate_electro_readme_visuals.py",
+    "png_sha256": "4a98f145b479ceb8b1ffc2e489847f5129803d8b20f618e3a9883fbb940f459b",
+    "png_dimensions": [1690, 936],
+    "gif_sha256": "13e2fd25e45811c14f851badefb8101f0ba69f0fdd20a51e4145aba0b68efb82",
+    "gif_dimensions": [864, 486],
+    "gif_frames": 24,
+    "repeat_generation_byte_identical": true,
+    "visually_inspected": true
+  },
+  "external_artifacts": [
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-snapshot-keypoints-only-i8",
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-snapshot-keypoints-only-i8-repeat"
+  ]
+}

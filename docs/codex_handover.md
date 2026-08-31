@@ -2,8 +2,8 @@
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
-**ブランチ:** `perf/electro-m3-global-ba-audit`
-**現在地:** M0/M1/M2 とM3 items 1–2は main へ統合済み。M3 item 5のquality-gated BA scheduleはPR前。`--global-ba-max-refinements 0 --ba-max-iterations 8`により9 solveを4 solveへ減らし、2回のbyte-identical runで **1200/1200、RMSE 0.03501 m、mapper core中央212.925 s、wall中央268.49 s**。同一12,000 pairのCOLMAP mapperより **18.36×高速**。5-iteration controlはRMSE 0.06788 mで不採用。peak RSSは3.83 GiBのままなので、次はM3のfeature/snapshot/track/factor所有権を直接監査し、2 GiBを狙う。
+**ブランチ:** `perf/electro-m3-snapshot-memory`
+**現在地:** M0/M1/M2とM3の速度PRはmainへ統合済み。M3 memory PRではdefault-offの`--snapshot-keypoints-only`を追加し、Electro 1200枚の2回の完全runで **1200/1200、RMSE 0.03501 m、既存championと3 model hashが完全一致、peak RSS中央値1,459,194 KiB (1.39 GiB)** を確認した。旧3.83 GiBから63.6%削減し、2 GiB gateを通過。descriptor hashは較正後に1ファイルずつ再読込して既存snapshot manifestと完全照合する。snapshot-to-model wall中央値336.90 sで同一pairのCOLMAP mapperより14.63倍高速。次はこのPRのCI/merge後にM4 persistent matcherとend-to-end計測へ進む。
 
 今後の実装順、数値ゲート、PR境界、停止条件は
 [`docs/electro_performance_roadmap.md`](electro_performance_roadmap.md) を正とする。
