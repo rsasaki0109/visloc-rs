@@ -82,6 +82,7 @@ use visloc_mapping::{
 
 use crate::gnc::{GncConfig, GncState};
 use crate::imu_preintegration::ImuPreintegrationFactor;
+use crate::process_memory::log as log_process_memory;
 use crate::{solve_normal_equations, LinearSolver, PoseGraphError, RobustKernel};
 
 /// Keep solver-step diagnostics opt-in even when a caller already enables a
@@ -2167,6 +2168,7 @@ impl BundleAdjustment {
                 config.parallel,
             );
             constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, &mut system);
+            log_process_memory("ba-after-normal-equations");
 
             // Build the reduced (Schur-complement) camera system. λ is added
             // to both the pose and landmark diagonals before reduction so the
@@ -2177,9 +2179,10 @@ impl BundleAdjustment {
             let saved_velocities = self.velocities.clone();
             let saved_biases = self.biases.clone();
             let cost_before = current_cost;
+            log_process_memory("ba-before-solve-step");
 
             let (delta_poses, delta_landmarks) = match solve_step(
-                &system,
+                &mut system,
                 pose_index.len(),
                 landmark_index.len(),
                 velocity_index.len(),
@@ -2209,6 +2212,7 @@ impl BundleAdjustment {
                 }
                 Err(e) => return Err(e),
             };
+            log_process_memory("ba-after-solve-step");
 
             // Apply tentative update. `delta_poses` packs pose slots
             // first (`i * 6 .. i * 6 + 6`), then velocity slots
@@ -3844,7 +3848,7 @@ fn constrain_fixed_pose_rotations(
 
 #[allow(clippy::too_many_arguments)]
 fn solve_step(
-    system: &NormalEquationsBa,
+    system: &mut NormalEquationsBa,
     p_count: usize,
     l_count: usize,
     v_count: usize,
@@ -3905,7 +3909,13 @@ fn solve_step(
     // perturbations; the final 6B are bias perturbations.
     let pose_dim = p_count * 6;
     let total_dim = pose_dim + v_count * 3 + b_count * 6;
-    let mut s = system.h_pp.clone();
+    // `h_pp` is not needed after this solve step. Move it into the reduced
+    // system instead of retaining the original dense matrix alongside an
+    // equally-sized Schur copy. The empty replacement preserves the
+    // `NormalEquationsBa` layout for the rest of this function, which only
+    // reads landmarks and b_p after this point.
+    let mut s = std::mem::take(&mut system.h_pp);
+    log_process_memory("ba-after-reduced-system-take");
     if lambda > 0.0 {
         for k in 0..total_dim {
             s[(k, k)] += lambda;
@@ -3970,6 +3980,8 @@ fn solve_step(
             (h_ll_inv_cache, b_l_cache)
         };
 
+    log_process_memory("ba-after-schur-reduction");
+
     // Solve the reduced pose system. The dense path uses Cholesky/LU; the
     // sparse path goes through CscCholesky on S as a CSC matrix.
     let delta_p = match linear_solver {
@@ -3992,6 +4004,11 @@ fn solve_step(
                     }
                 }
             }
+            // Sparse back-ends consume the triplets, not the dense reduced
+            // matrix. Release S before allocating/factoring the sparse
+            // representation so those large temporaries do not overlap.
+            drop(std::mem::take(&mut s));
+            log_process_memory("ba-sparse-before-factor");
             let rhs = DMatrix::from_column_slice(dim, 1, b_reduced.as_slice());
 
             // Pose and IMU-bias variables are 6×6 diagonal blocks, so when the
@@ -4015,9 +4032,17 @@ fn solve_step(
                 let chol = CscCholesky::factor(&csc).map_err(|_| BaError::SingularSystem)?;
                 chol.solve(&rhs)
             };
-            DVector::from_column_slice(sol.as_slice())
+            let delta = DVector::from_column_slice(sol.as_slice());
+            drop(sol);
+            drop(triplets);
+            delta
         }
     };
+    // The dense path still needs S until the solve returns; release it before
+    // allocating/back-substituting the landmark updates. In the sparse path S
+    // was already replaced with an empty matrix before factorization.
+    drop(s);
+    log_process_memory("ba-after-linear-solve");
 
     // Back-substitute landmark updates:
     //   δ_L[l] = h_ll_inv · (-b_l - Σ_p H_pl^T · δ_p)
@@ -5003,7 +5028,7 @@ mod visual_jacobian_audit_tests {
         let cross = Matrix6x3::<f64>::from_fn(|r, c| 0.03 * (r as f64 + 1.0) * (c as f64 + 2.0));
         let b_p = DVector::from_iterator(6, (0..6).map(|i| 0.2 * (i as f64 + 1.0)));
         let b_l = Vector3::new(-0.4, 0.3, 0.2);
-        let system = NormalEquationsBa {
+        let mut system = NormalEquationsBa {
             h_pp: h_pp.clone(),
             b_p: b_p.clone(),
             landmarks: vec![LandmarkBlock {
@@ -5014,7 +5039,28 @@ mod visual_jacobian_audit_tests {
         };
 
         let (delta_p, delta_l) =
-            solve_step(&system, 1, 1, 0, 0, 0.0, LinearSolver::Dense, false).unwrap();
+            solve_step(&mut system, 1, 1, 0, 0, 0.0, LinearSolver::Dense, false).unwrap();
+
+        let mut sparse_system = NormalEquationsBa {
+            h_pp: h_pp.clone(),
+            b_p: b_p.clone(),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l,
+                cross: vec![(0, cross)],
+            }],
+        };
+        let (sparse_delta_p, sparse_delta_l) = solve_step(
+            &mut sparse_system,
+            1,
+            1,
+            0,
+            0,
+            0.0,
+            LinearSolver::Sparse,
+            false,
+        )
+        .unwrap();
 
         let mut full_h = DMatrix::<f64>::zeros(9, 9);
         full_h.view_mut((0, 0), (6, 6)).copy_from(&h_pp);
@@ -5035,6 +5081,8 @@ mod visual_jacobian_audit_tests {
         let full_delta = solve_normal_equations(&full_h, &full_rhs).unwrap();
         assert!((delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
         assert!((delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
+        assert!((sparse_delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
+        assert!((sparse_delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
     }
 }
 
