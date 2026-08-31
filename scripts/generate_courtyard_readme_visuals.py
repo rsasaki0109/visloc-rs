@@ -29,11 +29,29 @@ from pathlib import Path
 
 
 STEM_RE = re.compile(r"(\d+)$")
+RIG_DIR_RE = re.compile(r"images_rig_(cam\d+)_undistorted$")
 
 
 def stem_key(stem: str) -> tuple[int, object]:
     match = STEM_RE.search(stem)
     return (0, int(match.group(1))) if match else (1, stem)
+
+
+def canonical_image_name(raw_name: str) -> str:
+    """Normalize ETH3D rig directories to the benchmark's flat names."""
+    path = Path(raw_name)
+    match = RIG_DIR_RE.search(path.parent.as_posix())
+    if match:
+        return f"{match.group(1)}_{path.stem}"
+    return path.stem
+
+
+def plot_label(name: str, index: int) -> str:
+    """Keep dense rig plots legible while retaining short legacy labels."""
+    camera = name.split("_", 1)[0]
+    if re.fullmatch(r"cam\d+", camera):
+        return f"{camera}·{index}"
+    return name[-4:]
 
 
 def read_images(path: Path) -> dict[str, tuple[object, object]]:
@@ -70,7 +88,9 @@ def read_images(path: Path) -> dict[str, tuple[object, object]]:
             ],
             dtype=float,
         )
-        name = Path(fields[9]).stem
+        # Keep camera identity so synchronized rig frames with identical
+        # timestamp stems remain distinct across calibration/model layouts.
+        name = canonical_image_name(fields[9])
         if name in result:
             raise ValueError(f"duplicate image stem {name!r} in {path}")
         result[name] = (-rotation.T @ translation, image_id)
@@ -153,6 +173,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-model", type=Path, required=True, help="shared calibration model directory")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--prefix", default="courtyard_sfm_comparison")
+    parser.add_argument("--scene-title", default="Courtyard")
+    parser.add_argument(
+        "--summary-label",
+        default="Official high-resolution SIFT / 703 exhaustive pairs",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="align and plot the image stems shared by both reconstructions",
+    )
+    parser.add_argument("--visloc-mapper-seconds", type=float)
+    parser.add_argument("--colmap-mapper-seconds", type=float)
+    parser.add_argument("--visloc-peak-rss-kib", type=float)
+    parser.add_argument("--colmap-peak-rss-kib", type=float)
     parser.add_argument("--max-points", type=int, default=4500)
     parser.add_argument("--frames", type=int, default=24)
     parser.add_argument("--fps", type=int, default=8)
@@ -178,7 +212,16 @@ def main() -> int:
 
     try:
         reference = read_images(args.reference_model / "images.txt")
-        names = sorted(reference, key=stem_key)
+        reference_names = sorted(reference, key=stem_key)
+        names = reference_names
+        if args.allow_partial:
+            visloc_names = set(read_images(args.visloc_model / "images.txt"))
+            colmap_names = set(read_images(args.colmap_model / "images.txt"))
+            names = [
+                name
+                for name in reference_names
+                if name in visloc_names and name in colmap_names
+            ]
         if len(names) < 3:
             raise ValueError("reference model must contain at least three images")
         reference_centres = np.asarray([reference[name][0] for name in names], dtype=float)
@@ -208,11 +251,11 @@ def main() -> int:
             keep = np.argsort(distances, kind="stable")[: args.max_points]
             aligned_points = aligned_points[keep]
         print(
-            f"visloc: {visloc_image_count}/{len(names)} cameras, {len(visloc_points)} points, "
+            f"visloc: {visloc_image_count}/{len(reference_names)} cameras, {len(visloc_points)} points, "
             f"{visloc_observations} observations, centre RMSE {np.sqrt(np.mean(visloc_errors**2))*100:.4f} cm"
         )
         print(
-            f"colmap: {colmap_image_count}/{len(names)} cameras, {len(colmap_points)} points, "
+            f"colmap: {colmap_image_count}/{len(reference_names)} cameras, {len(colmap_points)} points, "
             f"{colmap_observations} observations, centre RMSE {np.sqrt(np.mean(colmap_errors**2))*100:.4f} cm"
         )
     except (OSError, ValueError) as exc:
@@ -258,15 +301,16 @@ def main() -> int:
     trajectory.plot(colmap_2d[:, 0], colmap_2d[:, 1], color="#e07a24", lw=1.5, ls="--", marker="o", ms=3.0, label="COLMAP CPU")
     trajectory.plot(visloc_2d[:, 0], visloc_2d[:, 1], color="#087f8c", lw=2.0, marker="o", ms=3.2, label="visloc-rs")
     trajectory.scatter(reference_2d[:, 0], reference_2d[:, 1], marker="*", s=42, facecolors="white", edgecolors="#252a30", linewidths=0.8, zorder=5)
+    label_stride = max(6, len(names) // 12)
     for index, name in enumerate(names):
-        if index in (0, len(names) - 1) or index % 6 == 0:
-            trajectory.annotate(name[-4:], (reference_2d[index, 0], reference_2d[index, 1]), xytext=(3, 3), textcoords="offset points", fontsize=7, color="#343a40")
+        if index in (0, len(names) - 1) or index % label_stride == 0:
+            trajectory.annotate(plot_label(name, index), (reference_2d[index, 0], reference_2d[index, 1]), xytext=(3, 3), textcoords="offset points", fontsize=7, color="#343a40")
     trajectory.set_xlim(*xlim)
     trajectory.set_ylim(*ylim)
     trajectory.set_aspect("equal", adjustable="box")
     trajectory.set_xlabel("PCA axis 1 [m]")
     trajectory.set_ylabel("PCA axis 2 [m]")
-    trajectory.set_title("Courtyard camera centres and sparse cloud")
+    trajectory.set_title(f"{args.scene_title} camera centres and sparse cloud")
     trajectory.grid(True, ls=":", alpha=0.35)
     trajectory.legend(loc="best", fontsize=8, framealpha=0.94)
 
@@ -275,19 +319,43 @@ def main() -> int:
     residuals.bar(positions - width / 2, colmap_errors * 100.0, width, color="#e07a24", alpha=0.9, label="COLMAP")
     residuals.bar(positions + width / 2, visloc_errors * 100.0, width, color="#087f8c", alpha=0.9, label="visloc-rs")
     residuals.set_xticks(positions[:: max(1, len(positions) // 6)])
-    residuals.set_xticklabels([names[i][-4:] for i in positions[:: max(1, len(positions) // 6)]], rotation=45, ha="right", fontsize=7)
+    residuals.set_xticklabels([plot_label(names[i], int(i)) for i in positions[:: max(1, len(positions) // 6)]], rotation=45, ha="right", fontsize=7)
     residuals.set_ylabel("centre error [cm]")
     residuals.set_title("Per-camera residual to calibration")
     residuals.grid(True, axis="y", ls=":", alpha=0.35)
     residuals.legend(fontsize=8)
 
     summary.axis("off")
-    summary.text(0.0, 0.98, "Official high-resolution SIFT / 703 exhaustive pairs", transform=summary.transAxes, va="top", fontweight="bold", color="#252a30")
+    summary.text(0.0, 0.98, args.summary_label, transform=summary.transAxes, va="top", fontweight="bold", color="#252a30")
     summary.text(0.0, 0.79, f"visloc-rs   {visloc_rmse:.4f} cm centre RMSE\nCOLMAP      {colmap_rmse:.4f} cm centre RMSE", transform=summary.transAxes, va="top", family="monospace", color="#087f8c")
-    summary.text(0.0, 0.49, f"{improvement:.1f}% lower RMSE  ·  {ratio:.2f}× lower\n38/38 cameras in both models", transform=summary.transAxes, va="top", fontweight="bold", color="#252a30")
-    summary.text(0.0, 0.20, "Centre RMSE is Sim(3)-aligned to the supplied\ncalibration proxy; it is not an independent laser-GT score.\nTracks/points and reprojection reports use different pipelines.", transform=summary.transAxes, va="top", fontsize=8, color="#4e5964")
+    if improvement >= 0.0:
+        quality_text = f"{improvement:.1f}% lower RMSE  ·  {ratio:.2f}× lower"
+    else:
+        quality_text = f"quality gap: {visloc_rmse / colmap_rmse:.2f}× COLMAP RMSE"
+    camera_text = (
+        f"{visloc_image_count}/{len(reference_names)} visloc cameras  ·  "
+        f"{colmap_image_count}/{len(reference_names)} COLMAP cameras"
+    )
+    summary.text(0.0, 0.49, f"{quality_text}\n{camera_text}", transform=summary.transAxes, va="top", fontweight="bold", color="#252a30")
+    performance_lines = []
+    if args.visloc_mapper_seconds and args.colmap_mapper_seconds:
+        performance_lines.append(
+            f"mapper: {args.visloc_mapper_seconds:.0f}s vs {args.colmap_mapper_seconds:.0f}s "
+            f"({args.colmap_mapper_seconds / args.visloc_mapper_seconds:.1f}× faster)"
+        )
+    if args.visloc_peak_rss_kib and args.colmap_peak_rss_kib:
+        performance_lines.append(
+            f"peak RSS: {args.visloc_peak_rss_kib / 1048576:.2f} vs "
+            f"{args.colmap_peak_rss_kib / 1048576:.2f} GiB"
+        )
+    if performance_lines:
+        summary.text(0.0, 0.22, "\n".join(performance_lines), transform=summary.transAxes, va="top", fontsize=8, fontweight="bold", color="#087f8c")
+        note_y = 0.02
+    else:
+        note_y = 0.20
+    summary.text(0.0, note_y, "Centre RMSE is Sim(3)-aligned to the supplied calibration proxy.\nTracks/points and reprojection reports use different pipelines.", transform=summary.transAxes, va="top", fontsize=7.5, color="#4e5964")
 
-    fig.suptitle("Measured courtyard SfM comparison", fontsize=14, fontweight="bold", y=0.98)
+    fig.suptitle(f"Measured {args.scene_title} SfM comparison", fontsize=14, fontweight="bold", y=0.98)
     fig.savefig(png_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -323,7 +391,7 @@ def main() -> int:
     animation_error_ax.barh(positions, colmap_errors * 100.0, color="#e07a24", alpha=0.82, height=0.62, label="COLMAP")
     animation_error_ax.barh(positions, visloc_errors * 100.0, color="#087f8c", alpha=0.82, height=0.34, label="visloc-rs")
     animation_error_ax.set_yticks(positions[:: max(1, len(positions) // 6)])
-    animation_error_ax.set_yticklabels([names[i][-4:] for i in positions[:: max(1, len(positions) // 6)]], fontsize=7)
+    animation_error_ax.set_yticklabels([plot_label(names[i], int(i)) for i in positions[:: max(1, len(positions) // 6)]], fontsize=7)
     animation_error_ax.legend(fontsize=7, loc="lower right")
 
     def update(frame: int):
@@ -331,7 +399,7 @@ def main() -> int:
         estimated_line.set_data(visloc_2d[:count, 0], visloc_2d[:count, 1])
         colmap_line.set_data(colmap_2d[:count, 0], colmap_2d[:count, 1])
         current_marker.set_data([visloc_2d[count - 1, 0]], [visloc_2d[count - 1, 1]])
-        animation_figure.suptitle(f"Courtyard SfM · {count}/{len(names)} cameras revealed", fontsize=12, fontweight="bold")
+        animation_figure.suptitle(f"{args.scene_title} SfM · {count}/{len(names)} cameras revealed", fontsize=12, fontweight="bold")
         return estimated_line, colmap_line, current_marker
 
     animation = FuncAnimation(animation_figure, update, frames=args.frames, interval=1000 / args.fps, blit=False, repeat=True)
@@ -339,7 +407,10 @@ def main() -> int:
     plt.close(animation_figure)
     print(f"wrote {png_path} ({png_path.stat().st_size} bytes)")
     print(f"wrote {gif_path} ({gif_path.stat().st_size} bytes, {args.frames} frames)")
-    print(f"visloc improvement: {improvement:.2f}% lower centre RMSE ({ratio:.3f}x lower)")
+    if improvement >= 0.0:
+        print(f"visloc improvement: {improvement:.2f}% lower centre RMSE ({ratio:.3f}x lower)")
+    else:
+        print(f"visloc quality gap: {visloc_rmse / colmap_rmse:.3f}x COLMAP centre RMSE")
     return 0
 
 

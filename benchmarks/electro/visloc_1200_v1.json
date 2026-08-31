@@ -1,0 +1,89 @@
+{
+  "schema": "visloc_electro_baseline_v1",
+  "recorded_at": "2026-08-31",
+  "benchmark": {
+    "id": "eth3d-electro-visloc-temporal12000-cap64-sparse-v1",
+    "scene": "electro",
+    "image_count": 1200,
+    "camera_count": 4,
+    "base_revision": "0ab41c7a8c19daf0c85d76c4d7a87a17d8118812",
+    "source_branch": "feat/electro-scale-validation",
+    "source_had_uncommitted_changes": true,
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "inputs": {
+    "feature_rows": 3012090,
+    "feature_manifest_sha256": "d6ddbde3ae2d7743baf8b99f1ed748966f46c3fa716157212446aa238ed24cf9",
+    "candidate_policy": "temporal-pyramid-v1",
+    "candidate_pairs": 12000,
+    "candidate_index_sha256": "04f468f6309c8bd09dd08b5b6bdff710eeb775e9c2eceecde2c2a8e673b381ab",
+    "candidate_shards": 24,
+    "verified_pairs": 11625,
+    "verified_correspondences": 7475384,
+    "merged_snapshot_sha256": "93bf51451866cc066718b827d0ecec8f498ffc23842bd2c1e3902fd7a2697a86"
+  },
+  "visloc": {
+    "binary_sha256": "1581c7b7164d633f1535f7d0f87ff032100eb5dba8b69daf40bfe0e15d55085a",
+    "mapper_configuration": {
+      "mapper": "incremental",
+      "min_pnp_inliers": 8,
+      "max_mapper_matches_per_pair": 64,
+      "periodic_ba_min_registered_images": 1201,
+      "seed_trials": 1,
+      "ba_linear_solver": "sparse",
+      "rayon_num_threads": 8
+    },
+    "matching_shard_elapsed_sum_s": 2085.89,
+    "mapper_wall_s": 513.05,
+    "sfm_core_s": 455.512,
+    "growth_s": 2.375,
+    "final_refinement_s": 452.898,
+    "mapper_peak_rss_kib": 3977652,
+    "registered_images": 1193,
+    "tracks": 63300,
+    "observations": 302396,
+    "mean_reprojection_px": 0.346,
+    "score": {
+      "rmse_m": 0.11939865699624604,
+      "median_m": 0.10993712052641216,
+      "p95_m": 0.14357992271264813,
+      "max_m": 1.2929446411169576,
+      "relative_rmse": 0.01879819898100788,
+      "sim3_scale": 1.242221370336277
+    },
+    "artifacts": {
+      "cameras_txt_sha256": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+      "images_txt_sha256": "92137dda9bc965578629f4300b070ba9f4682ebff08561011d4bd307640f1522",
+      "points3d_txt_sha256": "65699ebea32567a63e6ed0ba0585528a4674667a1e6dedc51052b4893585ecc3",
+      "score_json_sha256": "cfe90e82b46e525ae67aabeb820f41e104f97267bfa9866fe7028ee520b66df2"
+    }
+  },
+  "colmap_control": {
+    "config": "benchmarks/electro/colmap_1200_v1.json",
+    "version": "3.9.1",
+    "feature_wall_sum_s": 304.12,
+    "matching_wall_s": 471.37,
+    "mapper_wall_s": 4929.56,
+    "mapper_peak_rss_kib": 1255996,
+    "registered_images": 1200,
+    "score": {
+      "rmse_m": 0.0467931596971499,
+      "median_m": 0.031562,
+      "p95_m": 0.096808,
+      "relative_rmse": 0.007367144229811214
+    }
+  },
+  "claims": {
+    "mapper_speedup_vs_colmap": 9.61,
+    "mapper_rss_ratio_vs_colmap": 3.17,
+    "rmse_ratio_vs_colmap": 2.55,
+    "matching_slowdown_vs_colmap": 4.43,
+    "end_to_end_speed_claim_allowed": false
+  },
+  "external_artifact_root": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000",
+  "notes": [
+    "External paths are descriptive provenance only; dataset and generated artifacts are not stored in the repository.",
+    "The visloc feature-extraction wall time is not yet measured under the same contract, so no end-to-end speed claim is made.",
+    "The post-mapping scorer is the only consumer of the official reference poses."
+  ]
+}
