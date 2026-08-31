@@ -68,6 +68,7 @@
 //! through call sites that have nothing to do with this optimizer).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Index, IndexMut};
 
 use nalgebra::{
     DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix3x4, Matrix3x6, Matrix4x3,
@@ -666,6 +667,7 @@ impl BundleAdjustment {
             &RobustKernel::None,
             None,
             false,
+            false,
         );
         let ordered_ids = |index: &BTreeMap<u64, usize>| {
             let mut ids: Vec<(usize, u64)> = index.iter().map(|(id, slot)| (*slot, *id)).collect();
@@ -676,7 +678,7 @@ impl BundleAdjustment {
             pose_ids: ordered_ids(&pose_index),
             velocity_ids: ordered_ids(&velocity_index),
             bias_ids: ordered_ids(&bias_index),
-            information: system.h_pp,
+            information: system.h_pp.into_dense(),
             gradient: system.b_p,
         })
     }
@@ -2154,6 +2156,7 @@ impl BundleAdjustment {
         let mut current_nonprojectable = self.nonprojectable_observation_count();
         let mut lambda = config.initial_lambda.unwrap_or(0.0);
         let mut converged = false;
+        let mut block_symbolic_cache = None;
 
         for iteration in 0..config.max_iterations {
             let mut system = build_normal_equations(
@@ -2166,6 +2169,7 @@ impl BundleAdjustment {
                 &kernel,
                 gnc_weights,
                 config.parallel,
+                config.linear_solver == LinearSolver::Sparse,
             );
             constrain_fixed_pose_rotations(&self.fixed_pose_rotations, &pose_index, &mut system);
             log_process_memory("ba-after-normal-equations");
@@ -2190,6 +2194,7 @@ impl BundleAdjustment {
                 lambda,
                 config.linear_solver,
                 config.parallel,
+                &mut block_symbolic_cache,
             ) {
                 Ok(d) => d,
                 Err(BaError::SingularSystem) => {
@@ -2630,6 +2635,7 @@ impl std::error::Error for BaError {}
 /// the `H_pl` cross blocks (one per pose that observed this landmark, in
 /// arbitrary order). This is the only place the cross blocks are stored —
 /// there is no full `H_PL` matrix.
+#[derive(Clone)]
 struct LandmarkBlock {
     /// `3×3` Hessian summed over observations. Includes any λ damping.
     h_ll: Matrix3<f64>,
@@ -2699,12 +2705,75 @@ fn add_cross(
 
 /// Output of the per-iteration normal-equations build.
 struct NormalEquationsBa {
-    /// Pose-pose Hessian, dense `(6P) × (6P)`.
-    h_pp: DMatrix<f64>,
+    /// Camera-state Hessian. Pure-visual sparse BA keeps only the diagonal
+    /// 6×6 pose blocks assembled before Schur reduction; the general visual-
+    /// inertial / prior-bearing path retains the dense representation.
+    h_pp: CameraHessian,
     /// Pose gradient, dense `6P`.
     b_p: DVector<f64>,
     /// Landmark blocks indexed by landmark variable index.
     landmarks: Vec<LandmarkBlock>,
+}
+
+/// Pre-Schur camera Hessian representation.
+///
+/// For pure visual BA every observation contributes only to one diagonal
+/// pose block. Off-diagonal pose coupling appears later, during landmark
+/// elimination, so allocating a dense `(6P)²` matrix here is unnecessary.
+enum CameraHessian {
+    Dense(DMatrix<f64>),
+    PoseDiagonal(Vec<Matrix6<f64>>),
+}
+
+impl CameraHessian {
+    fn dense(dim: usize) -> Self {
+        Self::Dense(DMatrix::zeros(dim, dim))
+    }
+
+    fn pose_diagonal(pose_count: usize) -> Self {
+        Self::PoseDiagonal(vec![Matrix6::zeros(); pose_count])
+    }
+
+    fn into_dense(self) -> DMatrix<f64> {
+        match self {
+            Self::Dense(matrix) => matrix,
+            Self::PoseDiagonal(blocks) => {
+                let mut matrix = DMatrix::zeros(blocks.len() * 6, blocks.len() * 6);
+                for (pose, block) in blocks.into_iter().enumerate() {
+                    matrix
+                        .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                        .copy_from(&block);
+                }
+                matrix
+            }
+        }
+    }
+}
+
+impl Index<(usize, usize)> for CameraHessian {
+    type Output = f64;
+
+    fn index(&self, (row, col): (usize, usize)) -> &Self::Output {
+        match self {
+            Self::Dense(matrix) => &matrix[(row, col)],
+            Self::PoseDiagonal(blocks) => {
+                assert_eq!(row / 6, col / 6, "off-diagonal pose Hessian access");
+                &blocks[row / 6][(row % 6, col % 6)]
+            }
+        }
+    }
+}
+
+impl IndexMut<(usize, usize)> for CameraHessian {
+    fn index_mut(&mut self, (row, col): (usize, usize)) -> &mut Self::Output {
+        match self {
+            Self::Dense(matrix) => &mut matrix[(row, col)],
+            Self::PoseDiagonal(blocks) => {
+                assert_eq!(row / 6, col / 6, "off-diagonal pose Hessian access");
+                &mut blocks[row / 6][(row % 6, col % 6)]
+            }
+        }
+    }
 }
 
 // --- Parallel assembly / Schur-reduction support (see the module's
@@ -2841,7 +2910,7 @@ fn compute_mono_contribution(
 /// [`assemble_mono_observations_parallel`].
 fn apply_mono_contribution(
     contribution: MonoObsContribution,
-    h_pp: &mut DMatrix<f64>,
+    h_pp: &mut CameraHessian,
     b_p: &mut DVector<f64>,
     landmarks: &mut [LandmarkBlock],
 ) {
@@ -2884,7 +2953,7 @@ fn assemble_mono_observations_parallel(
     landmark_index: &BTreeMap<u64, usize>,
     kernel: &RobustKernel,
     gnc_weights: Option<&[f64]>,
-    h_pp: &mut DMatrix<f64>,
+    h_pp: &mut CameraHessian,
     b_p: &mut DVector<f64>,
     landmarks: &mut [LandmarkBlock],
 ) {
@@ -2928,6 +2997,7 @@ fn build_normal_equations(
     kernel: &RobustKernel,
     gnc_weights: Option<&[f64]>,
     parallel: bool,
+    prefer_pose_blocks: bool,
 ) -> NormalEquationsBa {
     let p_count = pose_index.len();
     let l_count = landmark_index.len();
@@ -2943,7 +3013,22 @@ fn build_normal_equations(
     let vel_offset = pose_dim;
     let bias_offset = pose_dim + v_count * 3;
     let total_dim = pose_dim + v_count * 3 + b_count * 6;
-    let mut h_pp = DMatrix::<f64>::zeros(total_dim, total_dim);
+    let pure_visual_pose_blocks = prefer_pose_blocks
+        && !parallel
+        && v_count == 0
+        && b_count == 0
+        && ba.position_prior.is_none()
+        && ba.pairwise_pose_factors.is_empty()
+        && ba.gravity_prior.is_none()
+        && ba.per_pose_gravity_prior.is_none()
+        && ba.imu_factors.is_empty()
+        && ba.bias_random_walk_factors.is_empty()
+        && ba.navigation_state_prior.is_none();
+    let mut h_pp = if pure_visual_pose_blocks {
+        CameraHessian::pose_diagonal(p_count)
+    } else {
+        CameraHessian::dense(total_dim)
+    };
     let mut b_p = DVector::<f64>::zeros(total_dim);
     let mut landmarks: Vec<LandmarkBlock> = (0..l_count)
         .map(|_| LandmarkBlock {
@@ -3825,13 +3910,27 @@ fn constrain_fixed_pose_rotations(
         };
         for component in 3..6 {
             let index = pose_slot * 6 + component;
-            for column in 0..system.h_pp.ncols() {
-                system.h_pp[(index, column)] = 0.0;
+            match &mut system.h_pp {
+                CameraHessian::Dense(matrix) => {
+                    for column in 0..matrix.ncols() {
+                        matrix[(index, column)] = 0.0;
+                    }
+                    for row in 0..matrix.nrows() {
+                        matrix[(row, index)] = 0.0;
+                    }
+                    matrix[(index, index)] = 1.0;
+                }
+                CameraHessian::PoseDiagonal(blocks) => {
+                    let local = index % 6;
+                    for column in 0..6 {
+                        blocks[pose_slot][(local, column)] = 0.0;
+                    }
+                    for row in 0..6 {
+                        blocks[pose_slot][(row, local)] = 0.0;
+                    }
+                    blocks[pose_slot][(local, local)] = 1.0;
+                }
             }
-            for row in 0..system.h_pp.nrows() {
-                system.h_pp[(row, index)] = 0.0;
-            }
-            system.h_pp[(index, index)] = 1.0;
             system.b_p[index] = 0.0;
             for landmark in &mut system.landmarks {
                 for (landmark_pose_slot, cross) in &mut landmark.cross {
@@ -3856,6 +3955,7 @@ fn solve_step(
     lambda: f64,
     linear_solver: LinearSolver,
     parallel: bool,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
 ) -> Result<(DVector<f64>, DVector<f64>), BaError> {
     // Landmark-only BA: H_LL is block-diagonal so each landmark gets an
     // independent 3×3 solve. No Schur complement needed. Every landmark's
@@ -3904,6 +4004,26 @@ fn solve_step(
         return Ok((DVector::<f64>::zeros(0), delta_l));
     }
 
+    if matches!(system.h_pp, CameraHessian::PoseDiagonal(_)) {
+        debug_assert_eq!(v_count, 0);
+        debug_assert_eq!(b_count, 0);
+        debug_assert_eq!(linear_solver, LinearSolver::Sparse);
+        debug_assert!(!parallel);
+        let CameraHessian::PoseDiagonal(diagonal) =
+            std::mem::replace(&mut system.h_pp, CameraHessian::pose_diagonal(0))
+        else {
+            unreachable!();
+        };
+        return solve_step_pose_blocks(
+            system,
+            diagonal,
+            p_count,
+            l_count,
+            lambda,
+            block_symbolic_cache,
+        );
+    }
+
     // λ damping on the joint pose+velocity+bias diagonal. The first 6P
     // rows are pose perturbations; the next 3V are velocity
     // perturbations; the final 6B are bias perturbations.
@@ -3914,7 +4034,11 @@ fn solve_step(
     // equally-sized Schur copy. The empty replacement preserves the
     // `NormalEquationsBa` layout for the rest of this function, which only
     // reads landmarks and b_p after this point.
-    let mut s = std::mem::take(&mut system.h_pp);
+    let CameraHessian::Dense(mut s) =
+        std::mem::replace(&mut system.h_pp, CameraHessian::Dense(DMatrix::zeros(0, 0)))
+    else {
+        unreachable!();
+    };
     log_process_memory("ba-after-reduced-system-take");
     if lambda > 0.0 {
         for k in 0..total_dim {
@@ -4092,6 +4216,101 @@ fn solve_step(
             for k in 0..3 {
                 delta_l[l * 3 + k] = dl[k];
             }
+        }
+    }
+
+    Ok((delta_p, delta_l))
+}
+
+/// Pure-visual sparse Schur solve that never materializes the dense camera
+/// Hessian. Blocks are stored by block-column and row-sorted within each
+/// column, which makes the emitted scalar triplets match the legacy dense
+/// column-major scan exactly while visiting structural blocks only.
+fn solve_step_pose_blocks(
+    system: &NormalEquationsBa,
+    diagonal: Vec<Matrix6<f64>>,
+    p_count: usize,
+    l_count: usize,
+    lambda: f64,
+    block_symbolic_cache: &mut Option<crate::block_cholesky::BlockSymbolic>,
+) -> Result<(DVector<f64>, DVector<f64>), BaError> {
+    let dim = p_count * 6;
+    let mut columns: Vec<BTreeMap<usize, Matrix6<f64>>> =
+        (0..p_count).map(|_| BTreeMap::new()).collect();
+    for (pose, mut block) in diagonal.into_iter().enumerate() {
+        if lambda > 0.0 {
+            for k in 0..6 {
+                block[(k, k)] += lambda;
+            }
+        }
+        columns[pose].insert(pose, block);
+    }
+    log_process_memory("ba-after-reduced-system-take");
+
+    let mut b_reduced = -&system.b_p;
+    let mut h_ll_inv_cache: Vec<Option<Matrix3<f64>>> = Vec::with_capacity(system.landmarks.len());
+    let mut b_l_cache: Vec<Vector3<f64>> = Vec::with_capacity(system.landmarks.len());
+    for landmark in &system.landmarks {
+        let mut h_ll = landmark.h_ll;
+        if lambda > 0.0 {
+            h_ll[(0, 0)] += lambda;
+            h_ll[(1, 1)] += lambda;
+            h_ll[(2, 2)] += lambda;
+        }
+        let h_ll_inv = h_ll.try_inverse();
+        h_ll_inv_cache.push(h_ll_inv);
+        b_l_cache.push(landmark.b_l);
+        let Some(h_ll_inv) = h_ll_inv else {
+            continue;
+        };
+        for (p, a) in &landmark.cross {
+            let a_h: Matrix6x3<f64> = a * h_ll_inv;
+            for (q, b) in &landmark.cross {
+                // Block Cholesky consumes the lower triangle only. The upper
+                // block is its transpose and was discarded by the legacy
+                // scalar-triplet assembly, so never store it here.
+                if p < q {
+                    continue;
+                }
+                let contribution: Matrix6<f64> = a_h * b.transpose();
+                let target = columns[*q].entry(*p).or_insert_with(Matrix6::zeros);
+                // Preserve the dense path's per-scalar subtraction order.
+                for r in 0..6 {
+                    for c in 0..6 {
+                        target[(r, c)] -= contribution[(r, c)];
+                    }
+                }
+            }
+            let update: Vector6<f64> = a_h * landmark.b_l;
+            for k in 0..6 {
+                b_reduced[p * 6 + k] += update[k];
+            }
+        }
+    }
+    log_process_memory("ba-after-schur-reduction");
+
+    log_process_memory("ba-sparse-before-factor");
+    let rhs = DMatrix::from_column_slice(dim, 1, b_reduced.as_slice());
+    let solution =
+        crate::block_cholesky::solve_spd_blocks6_cached(block_symbolic_cache, columns, &rhs)
+            .map_err(|_| BaError::SingularSystem)?;
+    let delta_p = DVector::from_column_slice(solution.as_slice());
+    drop(solution);
+    log_process_memory("ba-after-linear-solve");
+
+    let mut delta_l = DVector::<f64>::zeros(l_count * 3);
+    for (l, landmark) in system.landmarks.iter().enumerate() {
+        let Some(h_ll_inv) = h_ll_inv_cache[l] else {
+            continue;
+        };
+        let mut acc = -b_l_cache[l];
+        for (p, a) in &landmark.cross {
+            let dp: Vector6<f64> = delta_p.fixed_rows::<6>(p * 6).into_owned();
+            acc -= a.transpose() * dp;
+        }
+        let dl = h_ll_inv * acc;
+        for k in 0..3 {
+            delta_l[l * 3 + k] = dl[k];
         }
     }
 
@@ -5029,7 +5248,7 @@ mod visual_jacobian_audit_tests {
         let b_p = DVector::from_iterator(6, (0..6).map(|i| 0.2 * (i as f64 + 1.0)));
         let b_l = Vector3::new(-0.4, 0.3, 0.2);
         let mut system = NormalEquationsBa {
-            h_pp: h_pp.clone(),
+            h_pp: CameraHessian::Dense(h_pp.clone()),
             b_p: b_p.clone(),
             landmarks: vec![LandmarkBlock {
                 h_ll,
@@ -5038,11 +5257,21 @@ mod visual_jacobian_audit_tests {
             }],
         };
 
-        let (delta_p, delta_l) =
-            solve_step(&mut system, 1, 1, 0, 0, 0.0, LinearSolver::Dense, false).unwrap();
+        let (delta_p, delta_l) = solve_step(
+            &mut system,
+            1,
+            1,
+            0,
+            0,
+            0.0,
+            LinearSolver::Dense,
+            false,
+            &mut None,
+        )
+        .unwrap();
 
         let mut sparse_system = NormalEquationsBa {
-            h_pp: h_pp.clone(),
+            h_pp: CameraHessian::Dense(h_pp.clone()),
             b_p: b_p.clone(),
             landmarks: vec![LandmarkBlock {
                 h_ll,
@@ -5059,6 +5288,29 @@ mod visual_jacobian_audit_tests {
             0.0,
             LinearSolver::Sparse,
             false,
+            &mut None,
+        )
+        .unwrap();
+
+        let mut block_system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(vec![h_pp.fixed_view::<6, 6>(0, 0).into_owned()]),
+            b_p: b_p.clone(),
+            landmarks: vec![LandmarkBlock {
+                h_ll,
+                b_l,
+                cross: vec![(0, cross)],
+            }],
+        };
+        let (block_delta_p, block_delta_l) = solve_step(
+            &mut block_system,
+            1,
+            1,
+            0,
+            0,
+            0.0,
+            LinearSolver::Sparse,
+            false,
+            &mut None,
         )
         .unwrap();
 
@@ -5081,8 +5333,72 @@ mod visual_jacobian_audit_tests {
         let full_delta = solve_normal_equations(&full_h, &full_rhs).unwrap();
         assert!((delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
         assert!((delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
-        assert!((sparse_delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
-        assert!((sparse_delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
+        assert_eq!(block_delta_p.as_slice(), sparse_delta_p.as_slice());
+        assert_eq!(block_delta_l.as_slice(), sparse_delta_l.as_slice());
+        assert!((&sparse_delta_p - full_delta.rows(0, 6)).norm() < 1.0e-10);
+        assert!((&sparse_delta_l - full_delta.rows(6, 3)).norm() < 1.0e-10);
+    }
+
+    #[test]
+    fn pose_block_sparse_path_matches_dense_sparse_path_bitwise() {
+        let diagonal = vec![
+            Matrix6::from_diagonal(&Vector6::new(20.0, 21.0, 22.0, 23.0, 24.0, 25.0)),
+            Matrix6::from_diagonal(&Vector6::new(26.0, 27.0, 28.0, 29.0, 30.0, 31.0)),
+        ];
+        let mut dense = DMatrix::zeros(12, 12);
+        for (pose, block) in diagonal.iter().enumerate() {
+            dense
+                .fixed_view_mut::<6, 6>(pose * 6, pose * 6)
+                .copy_from(block);
+        }
+        let cross0 = Matrix6x3::from_fn(|r, c| 0.01 * (r + c + 1) as f64);
+        let cross1 = Matrix6x3::from_fn(|r, c| 0.015 * (2 * r + c + 1) as f64);
+        let landmark = LandmarkBlock {
+            h_ll: Matrix3::from_diagonal(&Vector3::new(8.0, 9.0, 10.0)),
+            b_l: Vector3::new(0.2, -0.1, 0.3),
+            cross: vec![(0, cross0), (1, cross1)],
+        };
+        let gradient = DVector::from_iterator(12, (0..12).map(|i| 0.03 * (i + 1) as f64));
+        let mut dense_system = NormalEquationsBa {
+            h_pp: CameraHessian::Dense(dense),
+            b_p: gradient.clone(),
+            landmarks: vec![landmark.clone()],
+        };
+        let mut block_system = NormalEquationsBa {
+            h_pp: CameraHessian::PoseDiagonal(diagonal),
+            b_p: gradient,
+            landmarks: vec![landmark],
+        };
+
+        let dense_delta = solve_step(
+            &mut dense_system,
+            2,
+            1,
+            0,
+            0,
+            0.25,
+            LinearSolver::Sparse,
+            false,
+            &mut None,
+        )
+        .unwrap();
+        let mut symbolic_cache = None;
+        let block_delta = solve_step(
+            &mut block_system,
+            2,
+            1,
+            0,
+            0,
+            0.25,
+            LinearSolver::Sparse,
+            false,
+            &mut symbolic_cache,
+        )
+        .unwrap();
+
+        assert_eq!(block_delta.0.as_slice(), dense_delta.0.as_slice());
+        assert_eq!(block_delta.1.as_slice(), dense_delta.1.as_slice());
+        assert!(symbolic_cache.is_some());
     }
 }
 

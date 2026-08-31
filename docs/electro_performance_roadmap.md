@@ -224,6 +224,18 @@ tuning continues only on exact-behavior paths.
 
 ## 6. Milestone 3 — mapper speed and BA memory
 
+**Status (2026-09-01): in progress; items 1–2 complete.** Pure-visual sparse
+BA now builds the Schur camera system directly in deterministic 6x6 lower
+blocks, transfers those blocks into Cholesky without scalar COO duplication,
+and reuses symbolic analysis while the observation pattern is unchanged. The
+Electro champion remains byte-identical. Across its nine 20-iteration global
+BAs, median BA time fell from 153.764 s to 130.681 s (**15.0%**); mapper core
+fell from 1425.985 s to 1310.111 s and external wall from 1490.07 s to 1366.75
+s. Peak RSS remains effectively unchanged at 4,016,460 KiB, so the 2 GiB
+memory target is still open. Evidence:
+[`ba-block-system.json`](../benchmarks/electro/ba-block-system.json) and
+[`electro_ba_block_system.md`](electro_ba_block_system.md).
+
 **Purpose:** reduce the 452.90 s final-refinement cost while retaining the
 Milestone-2 quality champion.
 

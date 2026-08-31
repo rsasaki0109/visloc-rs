@@ -1,0 +1,50 @@
+{
+  "schema": "visloc_electro_ba_block_system_v1",
+  "recorded_at": "2026-09-01",
+  "scene": "electro",
+  "images": 1200,
+  "candidate_pairs": 12000,
+  "configuration": "cap96 + sparse BA + bounded post-refinement registration",
+  "baseline": {
+    "ba_seconds": [164.364, 159.481, 150.808, 153.764, 152.827, 153.257, 164.778, 164.117, 152.912],
+    "ba_median_seconds": 153.764,
+    "mapper_core_seconds": 1425.985,
+    "mapper_wall_seconds": 1490.07,
+    "peak_rss_kib": 4016264
+  },
+  "block_symbolic_cache": {
+    "ba_seconds": [129.374, 127.950, 127.772, 130.585, 130.681, 133.274, 180.755, 171.102, 168.911],
+    "ba_median_seconds": 130.681,
+    "ba_median_reduction_percent": 15.012,
+    "mapper_core_seconds": 1310.111,
+    "mapper_core_reduction_percent": 8.1259,
+    "mapper_wall_seconds": 1366.75,
+    "mapper_wall_reduction_percent": 8.2761,
+    "peak_rss_kib": 4016460,
+    "registered": 1200,
+    "tracks": 83909,
+    "observations": 433018,
+    "cameras_txt_sha256": "f9e722f47df961c0cf3ff7414e52f5bad2ebbc60a10a5f99d8c77e2cda880b17",
+    "images_txt_sha256": "4849067445eb20a085cec0c4815ca8fe1837c6b4183d7f2a7160ec20763fdd22",
+    "points3d_txt_sha256": "5c0a96baf78e3de52cf82e402ead6c17f519dfded5dceb11c6ba93b41ff5304d"
+  },
+  "colmap_control": {
+    "mapper_wall_seconds": 4929.56,
+    "visloc_speedup": 3.6068,
+    "peak_rss_kib": 1255996
+  },
+  "readme_visuals": {
+    "png_sha256": "6eee7931d306d5a49ef91513bb417b9b0bca6b9d399131554838361446918bd3",
+    "png_dimensions": [1709, 930],
+    "gif_sha256": "6b6667149befcd283941e4ab24fb9383f442c648d2a3879ba4d84f46130db6bf",
+    "gif_dimensions": [772, 432],
+    "gif_frames": 24
+  },
+  "gate": {
+    "required_ba_median_or_peak_rss_reduction_percent": 10.0,
+    "passed_by": "ba_median",
+    "model_byte_identical": true,
+    "peak_rss_target_still_open": true
+  },
+  "external_artifact": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-symbolic-cache"
+}

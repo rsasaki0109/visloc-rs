@@ -226,9 +226,9 @@
     "champion_refinement_rounds": 9
   },
   "readme_visuals": {
-    "png_sha256": "62e655b28f0df0033b060b91f2c3f8495f5d91ad47c870a0e7aec50685ec2eb2",
-    "png_dimensions": [1525, 930],
-    "gif_sha256": "875fcfadbf2ad8091d287f03f75d9c70487a32082f7f95208e8808df00dbb153",
+    "png_sha256": "6eee7931d306d5a49ef91513bb417b9b0bca6b9d399131554838361446918bd3",
+    "png_dimensions": [1709, 930],
+    "gif_sha256": "6b6667149befcd283941e4ab24fb9383f442c648d2a3879ba4d84f46130db6bf",
     "gif_dimensions": [772, 432],
     "gif_frames": 24
   },

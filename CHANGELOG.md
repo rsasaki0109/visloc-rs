@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Pure-visual block Schur BA and symbolic reuse (2026-09-01).** Sparse
+  pure-visual BA now assembles deterministic 6x6 pose blocks directly, retains
+  only the lower Schur triangle, moves those blocks into the Cholesky numeric
+  phase without a scalar COO copy, and reuses symbolic sparsity across stable
+  LM iterations. Visual-inertial, prior-bearing, dense, and parallel BA retain
+  their existing general path. On the frozen Electro 1,200-image champion the
+  three COLMAP text files remain SHA-256 identical; median 20-iteration BA fell
+  **15.0%** (153.764 s to 130.681 s), mapper core fell 8.1% (1425.985 s to
+  1310.111 s), and external mapper wall fell 8.3% (1490.07 s to 1366.75 s),
+  lifting the same-pair COLMAP mapper advantage from 3.31x to **3.61x**. Peak
+  RSS remains 3.83 GiB and is explicitly still open work.
+
 - **Electro 1,200-image quality parity and decision trace (2026-09-01).** On
   the frozen 12,000-pair snapshot, an explicit mapper cap of 96 plus the
   existing bounded post-refinement registration pass reaches **1200/1200** at

@@ -18,7 +18,7 @@
 </p>
 
 **visloc-rs now registers all 1,200 cameras with 31.1% lower centre RMSE than
-COLMAP, while its mapper is 3.31× faster on the same frozen images and
+COLMAP, while its mapper is 3.61× faster on the same frozen images and
 deterministic 12,000-pair schedule.** This is an honest phase-level result:
 matching is still 4.43× slower, mapper peak RSS is 3.20× higher, and feature
 extraction has not yet been measured under the same contract.
@@ -26,7 +26,8 @@ extraction has not yet been measured under the same contract.
 | Same-input phase / result | visloc-rs | COLMAP 3.9.1 CPU | Current outcome |
 | --- | ---: | ---: | --- |
 | Exact-pair matching | 2,085.89 s | **471.37 s** | 4.43× slower |
-| Mapper wall time | **1,490.07 s** | 4,929.56 s | **3.31× faster** |
+| Mapper wall time | **1,366.75 s** | 4,929.56 s | **3.61× faster** |
+| Median 20-iteration BA | **130.68 s** | — | **15.0% below prior visloc** |
 | Mapper peak RSS | 3.83 GiB | **1.20 GiB** | 3.20× higher |
 | Registered cameras | **1200/1200** | **1200/1200** | parity |
 | Camera-centre RMSE | **3.22 cm** | 4.68 cm | **31.1% lower** |
@@ -39,6 +40,8 @@ extraction is not yet measured under the same contract, so this is not an
 end-to-end speed claim. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
 and <a href="benchmarks/electro/quality-attribution.json">quality-attribution ledger</a>.</sub></p>
+<p align="center"><sub>BA implementation and all nine A/B timings:
+<a href="docs/electro_ba_block_system.md">direct-block Schur report</a>.</sub></p>
 
 <p align="center"><sub><a href="docs/assets/electro_1200_sfm_comparison.png">Open the full-resolution still comparison</a>.</sub></p>
 
