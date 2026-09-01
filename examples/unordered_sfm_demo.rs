@@ -372,6 +372,14 @@
 //! For a controlled mapper seed replay, `--seed-pair I,J` restricts the
 //! otherwise unchanged seed candidate list to that normalized image-index
 //! pair; it is default-off and intended for diagnostics.
+//! `--component-model-min-images N` instead maps every verified-view-graph
+//! component with at least `N` images, largest first, and writes independent
+//! `component-NNN` COLMAP models plus `components.tsv` below `--out-colmap`.
+//! `--component-model-max-count N` bounds the number of models (default 16).
+//! Components run sequentially from one feature load, so their reconstruction
+//! state is not retained together; the outputs have independent gauges and are
+//! not one connected model. This mode cannot be combined with a fixed seed or
+//! initial poses and is default-off.
 //! `--sequence-fallback-carry-scale` is a default-off after-post policy that
 //! carries the accepted baseline magnitude across consecutive provisional
 //! registrations; it requires the relaxed projection and after-post flags.
@@ -480,8 +488,8 @@ use visloc_rs::{
     rematch_essential_admission_ok, triangulate_two_view_left_frame,
     write_colmap_reconstruction_for_3dgs, write_colmap_reconstruction_for_3dgs_with_cameras,
     BaConfig, BruteForceMatcher, Camera, CameraModel, DescriptorMatch, FeatureSet,
-    GlobalReconstructionTuning, IncrementalSfmConfig, LinearSolver, Matcher, NextImagePolicy,
-    PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
+    GlobalReconstructionTuning, IncrementalSfmConfig, IncrementalSfmResult, LinearSolver, Matcher,
+    NextImagePolicy, PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
 };
 
 use visloc_rs::slam::incremental_sfm::log_process_memory;
@@ -2162,6 +2170,11 @@ struct Args {
     seed_trials: usize,
     /// Optional diagnostic restriction to one seed pair (`I,J`).
     seed_pair: Option<(usize, usize)>,
+    /// Map each sufficiently large verified-view-graph component independently
+    /// and write one COLMAP model per component below `out_colmap`.
+    component_model_min_images: Option<usize>,
+    /// Bound the number of independently reconstructed components.
+    component_model_max_count: usize,
     refine_intrinsics: bool,
     refine_distortion: bool,
     colmap_style: bool,
@@ -4120,6 +4133,8 @@ where
     let mut final_min_track_length: Option<usize> = None;
     let mut seed_trials = 12usize;
     let mut seed_pair: Option<(usize, usize)> = None;
+    let mut component_model_min_images: Option<usize> = None;
+    let mut component_model_max_count = 16usize;
     let mut pair_stem_window: Option<u64> = None;
     let mut local_stem_window: Option<u64> = None;
     let mut rig_local_grouping = false;
@@ -4560,6 +4575,19 @@ where
             }
             "--seed-trials" => seed_trials = a.remove(i + 1).parse().map_err(|e| format!("{e}"))?,
             "--seed-pair" => seed_pair = Some(parse_seed_pair(&a.remove(i + 1))?),
+            "--component-model-min-images" => {
+                component_model_min_images = Some(
+                    a.remove(i + 1)
+                        .parse()
+                        .map_err(|e| format!("--component-model-min-images: {e}"))?,
+                )
+            }
+            "--component-model-max-count" => {
+                component_model_max_count = a
+                    .remove(i + 1)
+                    .parse()
+                    .map_err(|e| format!("--component-model-max-count: {e}"))?
+            }
             "--refine-intrinsics" => refine_intrinsics = true,
             "--refine-distortion" => refine_distortion = true,
             "--colmap-style" => colmap_style = true,
@@ -5214,6 +5242,32 @@ where
     if initial_poses_file.is_some() && seed_pair.is_some() {
         return Err("--initial-poses cannot be combined with --seed-pair".into());
     }
+    if component_model_min_images.is_some() && seed_pair.is_some() {
+        return Err("--component-model-min-images cannot be combined with --seed-pair".into());
+    }
+    if component_model_min_images.is_some() && initial_poses_file.is_some() {
+        return Err("--component-model-min-images cannot be combined with --initial-poses".into());
+    }
+    if component_model_min_images == Some(0) {
+        return Err("--component-model-min-images must be positive".into());
+    }
+    if component_model_max_count == 0 {
+        return Err("--component-model-max-count must be positive".into());
+    }
+    if component_model_min_images.is_some() && mapper != MapperKind::Incremental {
+        return Err("--component-model-min-images requires --mapper incremental".into());
+    }
+    if component_model_min_images.is_some()
+        && (sequence_relative_pose_fallback
+            || diagnose_colmap_track_membership.is_some()
+            || diagnose_ba_oracle_poses_file.is_some()
+            || diagnose_fixed_rotation_ba.is_some())
+    {
+        return Err(
+            "--component-model-min-images cannot be combined with sequence fallback, oracle track membership, or BA diagnostic probes"
+                .into(),
+        );
+    }
     if input_colmap_calibration.is_some() && (refine_intrinsics || refine_distortion) {
         return Err(
             "--input-colmap-calibration currently keeps per-image PINHOLE intrinsics fixed; remove --refine-intrinsics/--refine-distortion"
@@ -5673,6 +5727,8 @@ where
         final_min_track_length,
         seed_trials,
         seed_pair,
+        component_model_min_images,
+        component_model_max_count,
         refine_intrinsics,
         refine_distortion,
         colmap_style,
@@ -15160,6 +15216,199 @@ fn dump_rotation_cycle_diagnostics(
     }
 }
 
+fn export_incremental_component_model(
+    out_colmap: &Path,
+    result: &IncrementalSfmResult,
+    features: &[FeatureSet],
+    image_names: &[String],
+    fallback_camera: &Camera,
+    native_keypoints_for_export: Option<&[Vec<Point2<f64>>]>,
+    per_image_calibration: Option<&LoadedPerImageCalibration>,
+) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
+    let registered: Vec<usize> = (0..features.len())
+        .filter(|&image| result.poses[image].is_some())
+        .collect();
+    let remap: HashMap<usize, usize> = registered
+        .iter()
+        .enumerate()
+        .map(|(new_index, &old_index)| (old_index, new_index))
+        .collect();
+    let poses_out: Vec<Pose> = registered
+        .iter()
+        .map(|&image| result.poses[image].clone().expect("registered pose"))
+        .collect();
+    let mut features_out: Vec<FeatureSet> = registered
+        .iter()
+        .map(|&image| features[image].clone())
+        .collect();
+    if let Some(native_keypoints) = native_keypoints_for_export {
+        replace_feature_keypoints_from_native(&mut features_out, &registered, native_keypoints)
+            .map_err(std::io::Error::other)?;
+    }
+    let names_out: Vec<String> = registered
+        .iter()
+        .map(|&image| image_names[image].clone())
+        .collect();
+    let landmarks_out: Vec<ExportLandmark> = result
+        .tracks
+        .iter()
+        .map(|track| {
+            let observations = track
+                .observations
+                .iter()
+                .filter_map(|&(image, keypoint, pixel)| {
+                    remap
+                        .get(&image)
+                        .map(|&new_image| (new_image, keypoint, pixel))
+                })
+                .collect();
+            (track.position, observations)
+        })
+        .collect();
+    let refined_camera = result.refined_camera.as_ref().unwrap_or(fallback_camera);
+    let summary = if let Some(calibration) = per_image_calibration {
+        let cameras_out: Vec<Camera> = registered
+            .iter()
+            .map(|&image| calibration.native_cameras[image].clone())
+            .collect();
+        write_colmap_reconstruction_for_3dgs_with_cameras(
+            out_colmap,
+            &cameras_out,
+            &poses_out,
+            &features_out,
+            &landmarks_out,
+            |index| names_out[index].clone(),
+        )?
+    } else {
+        write_colmap_reconstruction_for_3dgs(
+            out_colmap,
+            refined_camera,
+            &poses_out,
+            &features_out,
+            &landmarks_out,
+            |index| names_out[index].clone(),
+        )?
+    };
+    Ok((
+        summary.frame_count,
+        summary.landmark_count,
+        summary.observation_count,
+    ))
+}
+
+fn ranked_view_graph_components(
+    num_images: usize,
+    pairwise: &[PairwiseMatches],
+    min_images: usize,
+    max_count: usize,
+) -> Vec<Vec<usize>> {
+    let edges: Vec<(usize, usize)> = pairwise
+        .iter()
+        .map(|pair| (pair.image_i, pair.image_j))
+        .collect();
+    let mut components = connected_components(num_images, &edges);
+    components.retain(|component| component.len() >= min_images);
+    components.sort_by(|left, right| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| left[0].cmp(&right[0]))
+    });
+    components.truncate(max_count);
+    components
+}
+
+fn map_verified_view_graph_components(
+    out_root: &Path,
+    min_images: usize,
+    max_count: usize,
+    camera: &Camera,
+    features: &[FeatureSet],
+    image_names: &[String],
+    pairwise: &[PairwiseMatches],
+    config: &IncrementalSfmConfig,
+    native_keypoints_for_export: Option<&[Vec<Point2<f64>>]>,
+    per_image_calibration: Option<&LoadedPerImageCalibration>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let components = ranked_view_graph_components(features.len(), pairwise, min_images, max_count);
+    if components.is_empty() {
+        return Err(
+            format!("no verified view-graph component has at least {min_images} images").into(),
+        );
+    }
+
+    let mut total_registered = 0usize;
+    let mut total_tracks = 0usize;
+    let mut total_observations = 0usize;
+    let mut weighted_reprojection_sum = 0.0f64;
+    let mut manifest = String::from(
+        "rank\tsupplied_images\tverified_pairs\tregistered_images\ttracks\tobservations\tmean_reprojection_px\tmodel_dir\n",
+    );
+    for (rank, component) in components.iter().enumerate() {
+        let mut membership = vec![false; features.len()];
+        for &image in component {
+            membership[image] = true;
+        }
+        let component_pairs: Vec<PairwiseMatches> = pairwise
+            .iter()
+            .filter(|pair| membership[pair.image_i] && membership[pair.image_j])
+            .cloned()
+            .collect();
+        let result = incremental_sfm(camera, features, &component_pairs, config)?;
+        let component_dir = out_root.join(format!("component-{rank:03}"));
+        let (written_images, written_points, written_observations) =
+            export_incremental_component_model(
+                &component_dir,
+                &result,
+                features,
+                image_names,
+                camera,
+                native_keypoints_for_export,
+                per_image_calibration,
+            )?;
+        total_registered += written_images;
+        total_tracks += written_points;
+        total_observations += written_observations;
+        weighted_reprojection_sum += result.mean_reprojection_px * written_observations as f64;
+        manifest.push_str(&format!(
+            "{rank}\t{}\t{}\t{written_images}\t{written_points}\t{written_observations}\t{:.9}\tcomponent-{rank:03}\n",
+            component.len(),
+            component_pairs.len(),
+            result.mean_reprojection_px,
+        ));
+        println!(
+            "component-model: rank={rank} supplied={} pairs={} registered={} tracks={} observations={} mean_reproj={:.3} px out={}",
+            component.len(),
+            component_pairs.len(),
+            written_images,
+            written_points,
+            written_observations,
+            result.mean_reprojection_px,
+            component_dir.display(),
+        );
+    }
+    println!(
+        "component-model summary: models={} registered={}/{} tracks={} observations={} weighted_mean_reproj={:.3} px (independent gauges; no connected-model claim)",
+        components.len(),
+        total_registered,
+        features.len(),
+        total_tracks,
+        total_observations,
+        weighted_reprojection_sum / total_observations.max(1) as f64,
+    );
+    manifest.push_str(&format!(
+        "# independent_gauges=true models={} registered_images={} supplied_images={} tracks={} observations={} weighted_mean_reprojection_px={:.9}\n",
+        components.len(),
+        total_registered,
+        features.len(),
+        total_tracks,
+        total_observations,
+        weighted_reprojection_sum / total_observations.max(1) as f64,
+    ));
+    std::fs::write(out_root.join("components.tsv"), manifest)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = match parse_args() {
         Ok(a) => a,
@@ -16504,6 +16753,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     log_process_memory("example-after-mapper-cap");
+    if let Some(min_images) = args.component_model_min_images {
+        map_verified_view_graph_components(
+            &args.out_colmap,
+            min_images,
+            args.component_model_max_count,
+            &args.camera,
+            &features,
+            &image_names,
+            &pairwise,
+            &config,
+            native_keypoints_for_export.as_deref(),
+            per_image_calibration.as_ref(),
+        )?;
+        return Ok(());
+    }
     let gt_path = args
         .gt_chirality_oracle_path
         .as_ref()
@@ -17273,18 +17537,18 @@ mod diagnose_cli_tests {
         model_cross_validation_is_held_out, model_cross_validation_is_held_out_for_pixels,
         model_cross_validation_selection_score, parse_args_from, parse_candidate_manifest,
         parse_candidate_manifest_with_metadata, parse_colmap_image_camera_assignments,
-        parse_colmap_track_membership, parse_diagnose_stems, read_feature_set,
-        remap_feature_keypoints_by_old_to_new, replace_feature_keypoints_from_native,
-        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean, snapshot_export_config,
-        snapshot_feature_manifest_hash, snapshot_feature_validation_from_files,
-        stream_vlad_globals_from_feature_files, summarize_model_cross_validation_bucket,
-        temporal_pyramid_offsets_string, translation_direction_delta_deg,
-        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
-        write_candidate_manifest, write_candidate_manifest_with_metadata, Camera,
-        ColmapTrackMembership, ConfigurationType, EssentialPairQuality, FeatureLocusMetadata,
-        ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver, ModelCrossValidationBucket,
-        ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches, PerImageCameras,
-        RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
+        parse_colmap_track_membership, parse_diagnose_stems, ranked_view_graph_components,
+        read_feature_set, remap_feature_keypoints_by_old_to_new,
+        replace_feature_keypoints_from_native, rig_local_pairs, rig_temporal_pyramid_pairs,
+        robust_huber_mean, snapshot_export_config, snapshot_feature_manifest_hash,
+        snapshot_feature_validation_from_files, stream_vlad_globals_from_feature_files,
+        summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
+        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
+        verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
+        Camera, ColmapTrackMembership, ConfigurationType, EssentialPairQuality,
+        FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver,
+        ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
+        PerImageCameras, RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
     };
     use nalgebra::{Matrix3, Point2, Vector3};
     use std::cmp::Ordering as CmpOrdering;
@@ -18606,11 +18870,30 @@ mod diagnose_cli_tests {
         assert_eq!(defaults.pose_guided_split_max_reproj, None);
         assert_eq!(defaults.pose_guided_track_splitting_iterations, None);
         assert_eq!(defaults.seed_pair, None);
+        assert_eq!(defaults.component_model_min_images, None);
+        assert_eq!(defaults.component_model_max_count, 16);
 
         let seed_pair = parse_args_from(minimal_args(&["--seed-pair", "9,8"])).unwrap();
         assert_eq!(seed_pair.seed_pair, Some((8, 9)));
         assert!(parse_args_from(minimal_args(&["--seed-pair", "8,8"])).is_err());
         assert!(parse_args_from(minimal_args(&["--seed-pair", "8-9"])).is_err());
+        let components = parse_args_from(minimal_args(&[
+            "--component-model-min-images",
+            "100",
+            "--component-model-max-count",
+            "7",
+        ]))
+        .unwrap();
+        assert_eq!(components.component_model_min_images, Some(100));
+        assert_eq!(components.component_model_max_count, 7);
+        assert!(parse_args_from(minimal_args(&["--component-model-min-images", "0"])).is_err());
+        assert!(parse_args_from(minimal_args(&[
+            "--component-model-min-images",
+            "100",
+            "--seed-pair",
+            "8,9",
+        ]))
+        .is_err());
 
         let edge_scales = parse_args_from(minimal_args(&[
             "--mapper",
@@ -19116,6 +19399,24 @@ mod diagnose_cli_tests {
         assert!(parse_args_from(minimal_args(&["--sift-vlfeat-bilinear-orientations"])).is_err());
         assert!(parse_args_from(minimal_args(&["--sift-vlfeat-compatible-output-order"])).is_err());
         assert!(parse_args_from(minimal_args(&["--colmap-guided-matching"])).is_err());
+    }
+
+    #[test]
+    fn component_models_rank_large_components_deterministically() {
+        let pairwise = vec![
+            PairwiseMatches::new(4, 3, vec![(0, 0)]),
+            PairwiseMatches::new(1, 2, vec![(0, 0)]),
+            PairwiseMatches::new(0, 1, vec![(0, 0)]),
+            PairwiseMatches::new(7, 8, vec![(0, 0)]),
+        ];
+        assert_eq!(
+            ranked_view_graph_components(9, &pairwise, 2, 2),
+            vec![vec![0, 1, 2], vec![3, 4]],
+        );
+        assert_eq!(
+            ranked_view_graph_components(9, &pairwise, 2, 1),
+            vec![vec![0, 1, 2]],
+        );
     }
 
     #[test]

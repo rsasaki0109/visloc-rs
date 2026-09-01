@@ -494,3 +494,14 @@ recovery confirms track conflicts were a binding failure, but 36.64% remains
 below the connected-scale gate. See
 [`m6-ann-streaming.json`](../benchmarks/electro/m6-ann-streaming.json) and
 [`m6-conflict-aware-tracks.json`](../benchmarks/electro/m6-conflict-aware-tracks.json).
+
+M7 isolates the next failure boundary instead of weakening PnP or reprojection
+gates. The frozen 10k verified graph contains 313 components, including seven
+major components of 5,144, 1,240, 1,236, 1,018, 411, 407, and 226 images.
+Mapping those seven sequentially registers 6,791/10,000 cameras, with each
+independent model at 0.928–1.293 px mean reprojection. The largest model is
+byte-identical to M6 and the frozen 1k control remains byte-identical as well.
+The output manifest explicitly labels the gauges independent; bridge recovery
+and Sim(3) alignment remain mandatory before this can satisfy the connected
+10k gate. See
+[`m7-component-models.json`](../benchmarks/electro/m7-component-models.json).

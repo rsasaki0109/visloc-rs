@@ -387,6 +387,16 @@ reprojection gate. Evidence is frozen in
 `benchmarks/electro/m6-ann-streaming.json` and
 `benchmarks/electro/m6-conflict-aware-tracks.json`.
 
+Measured M7 component diagnosis: the frozen 10k verified graph has 313
+components; its seven major components contain 9,682 images. Sequential,
+size-ranked component mapping reuses one feature load and raises quality-gated
+coverage from the M6 single model's 3,664 images to 6,791 images across seven
+independent models. Every model reports 0.928–1.293 px mean reprojection, while
+the 1k one-component control is byte-identical to the M6 champion. This is a
+coverage pass, not a connected-scale pass: the next gate is verified bridge
+discovery followed by guarded Sim(3) alignment. Frozen results and hashes are
+in `benchmarks/electro/m7-component-models.json`.
+
 ## 9. Dependencies and risk register
 
 The default dependency chain is `M0 -> M1 -> M2 -> (M3, M4) -> M5`.
