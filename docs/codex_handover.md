@@ -2,8 +2,17 @@
 
 **更新:** 2026-09-01
 **Repo:** `/home/sasaki/workspace/visloc-rs`
-**ブランチ:** `perf/electro-m3-snapshot-memory`
-**現在地:** M0/M1/M2とM3の速度PRはmainへ統合済み。M3 memory PRではdefault-offの`--snapshot-keypoints-only`を追加し、Electro 1200枚の2回の完全runで **1200/1200、RMSE 0.03501 m、既存championと3 model hashが完全一致、peak RSS中央値1,459,194 KiB (1.39 GiB)** を確認した。旧3.83 GiBから63.6%削減し、2 GiB gateを通過。descriptor hashは較正後に1ファイルずつ再読込して既存snapshot manifestと完全照合する。snapshot-to-model wall中央値336.90 sで同一pairのCOLMAP mapperより14.63倍高速。次はこのPRのCI/merge後にM4 persistent matcherとend-to-end計測へ進む。
+**ブランチ:** `perf/electro-m4-persistent-matcher`
+**現在地:** M0–M3はmainへ統合済み。M4ではdefault-offのpersistent
+matcher、single-GEMM cross-check、single-scan top-2、exact RANSAC枝刈り、
+owned bounded-memory mergeを実装した。Electro 1200枚・同一12,000 pairの
+3回runで **snapshot SHA完全一致、matching中央値439.01 s、worker peak
+RSS中央値1.89 GiB** を確認し、COLMAP 471.37 sを1.074倍上回った。CPU8
+feature extractionは721.42 sで全2,400 feature/locusファイルが旧bankと
+byte一致。candidate/mapperを含む保守的end-to-endは **1,649.48 s対
+5,705.05 s（3.46倍高速）**、品質は1200/1200、RMSE 0.03501 m、mapper
+peak 1.39 GiBを維持。次はM4のCI/merge/branch整理後、M5の全ETH3D
+scene・単一大規模環境・10k/100k I/O stressへ進む。
 
 今後の実装順、数値ゲート、PR境界、停止条件は
 [`docs/electro_performance_roadmap.md`](electro_performance_roadmap.md) を正とする。

@@ -17,31 +17,36 @@
   <img src="docs/assets/electro_1200_sfm_comparison.gif" alt="Measured ETH3D Electro 1,200-image reconstruction: visloc-rs and COLMAP camera centres, sparse structure, residuals, mapper time, and peak memory" width="820">
 </p>
 
-**visloc-rs now registers all 1,200 cameras with 25.2% lower centre RMSE than
-COLMAP. Its memory-bounded snapshot replay is 14.63× faster on the same frozen
-12,000-pair workload while peaking at 1.39 GiB; the fastest exact-model replay
-remains 18.36× faster.** Matching is still 4.43× slower and feature extraction
-has not yet been measured under the same contract, so this is a phase-level
-result rather than an end-to-end speed claim.
+**visloc-rs completes the measured CPU8 pipeline 3.46× faster than COLMAP
+while registering all 1,200 cameras with 25.2% lower centre RMSE.** The new
+persistent matcher is itself 1.074× faster on the identical frozen 12,000-pair
+manifest, and the memory-bounded mapper is 14.63× faster. Every accepted run
+reproduces the same snapshot and model bytes.
 
-| Same-input phase / result | Memory-bounded visloc | Fastest visloc | COLMAP 3.9.1 CPU |
+| Same-input CPU8 phase / result | visloc-rs | COLMAP 3.9.1 CPU | Winner |
 | --- | ---: | ---: | ---: |
-| Exact-pair matching | 2,085.89 s | 2,085.89 s | **471.37 s** |
-| Snapshot-to-model / mapper wall (2-run median) | **336.90 s (14.63×)** | **268.49 s (18.36×)** | 4,929.56 s |
-| Peak RSS | **1.39 GiB** | 3.83 GiB | **1.20 GiB** |
-| Registered cameras | **1200/1200** | **1200/1200** | **1200/1200** |
-| Camera-centre RMSE | **3.50 cm** | **3.50 cm** | 4.68 cm |
-| Model reproducibility | byte-identical ×2 | byte-identical ×2 | frozen control |
+| Feature extraction | 721.42 s | **304.12 s** | COLMAP 2.37× |
+| Manifest validation + candidate generation/sharding | 148.58 s | frozen manifest supplied | — |
+| Exact-pair matching + merge | **442.58 s** | 471.37 s | **visloc 1.06×** |
+| Mapper / model writing | **336.90 s** | 4,929.56 s | **visloc 14.63×** |
+| Conservative end-to-end wall | **1,649.48 s** | 5,705.05 s | **visloc 3.46×** |
+| Matching peak RSS | 1.89 GiB | **0.26 GiB** | COLMAP |
+| Mapper peak RSS | 1.39 GiB | **1.20 GiB** | COLMAP |
+| Registered cameras | **1200/1200** | **1200/1200** | parity |
+| Camera-centre RMSE | **3.50 cm** | 4.68 cm | **visloc −25.2%** |
+| Reproducibility | exact snapshot ×3; exact model ×2 | frozen control | verified |
 
 <p align="center"><sub>The camera-centre plot uses all 1,200 stems and Sim(3)
 alignment to the supplied calibration proxy. Ground truth is score-only. The
 two visloc columns use the same explicit 96-correspondence mapper cap, one
 bounded post-refinement registration pass, four 8-iteration global solves, and
 no follow-up global-refinement rounds; these controls are not global defaults.
-The memory-bounded replay additionally re-reads one feature file at a time to
-validate the descriptor-bound snapshot hash, then keeps keypoints only. Its
-1,459,194 KiB median peak is 63.6% below the prior visloc run and 1.16× the
-COLMAP peak. See the
+The visloc total conservatively includes its candidate generation; COLMAP
+consumes the already frozen identical candidate manifest. The two systems
+extract and verify their own features/matches. The memory-bounded replay
+re-reads one feature file at a time to validate the descriptor-bound snapshot
+hash, then keeps keypoints only. Its 1,459,194 KiB median peak is 63.6% below
+the prior visloc run and 1.16× the COLMAP mapper peak. See the
 <a href="docs/electro_performance_roadmap.md">performance and memory roadmap</a>
 and <a href="benchmarks/electro/quality-attribution.json">quality-attribution ledger</a>.</sub></p>
 <p align="center"><sub>BA implementation and all nine A/B timings:
@@ -51,8 +56,15 @@ and <a href="benchmarks/electro/quality-attribution.json">quality-attribution le
 <p align="center"><sub>Descriptor-lifetime audit, two-run memory trace, and
 exact-model proof: <a href="docs/electro_snapshot_memory_audit.md">1.39 GiB
 snapshot replay report</a>.</sub></p>
+<p align="center"><sub>Persistent worker, three-run matching median,
+bounded merge, byte-identical feature re-extraction, and end-to-end ledger:
+<a href="docs/electro_persistent_matcher_audit.md">3.46× CPU8 report</a>.</sub></p>
 
-<p align="center"><sub><a href="docs/assets/electro_1200_sfm_comparison.png">Open the full-resolution still comparison</a>.</sub></p>
+<p align="center">
+  <a href="docs/assets/electro_1200_sfm_comparison.png"><img src="docs/assets/electro_1200_sfm_comparison.png" alt="Full-resolution ETH3D Electro comparison with aligned camera centres, sparse structure, error distribution, mapper wall, and peak memory" width="820"></a><br>
+  <sub>Full-resolution measured still · camera centres are ordered by timestamp
+  and camera; sparse points are a deterministic final-model sample.</sub>
+</p>
 
 ### 300-image reliability gate
 

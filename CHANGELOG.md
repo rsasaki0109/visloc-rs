@@ -6,6 +6,19 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Persistent Electro matcher and end-to-end performance audit (2026-09-01).**
+  Added an opt-in, versioned persistent-worker plan that loads the feature bank
+  once, writes atomic resumable match shards, validates recovery state
+  strictly, and merges shard payloads by ownership instead of cloning them.
+  Exact one-GEMM cross-check matching and strict-winner RANSAC early exits keep
+  the frozen 12,000-pair snapshot byte-identical. On Electro 1,200, median
+  matching wall fell from 2,085.89 s to **439.01 s (4.75x)**; the owned merge
+  cut peak RSS 22.3% to 1.56 GiB. A fresh byte-identical feature/candidate run
+  plus the memory-bounded mapper completes conservatively in **1,649.48 s**,
+  versus COLMAP's 5,705.05 s (**3.46x faster**), while retaining 1200/1200 at
+  0.03501 m centre RMSE. Added a machine-readable audit, recovery tests,
+  detailed report, and an above-the-fold README GIF/image/comparison table.
+
 - **Memory-bounded Electro snapshot replay (2026-09-01).** Added the explicit,
   default-off `--snapshot-keypoints-only` path for file-backed verified-pair
   snapshot replay with the plain incremental mapper. It retains keypoints and

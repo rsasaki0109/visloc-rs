@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -35,8 +36,16 @@ CANDIDATE_MAGIC = "visloc_candidate_manifest_v1"
 CANDIDATE_INDEX_SCHEMA = "visloc_electro_candidate_shards_v1"
 MATCH_INDEX_SCHEMA = "visloc_electro_match_shards_v1"
 FEATURE_MANIFEST_SCHEMA = "visloc_electro_feature_manifest_v1"
+PERSISTENT_MATCH_WORKER_PLAN_MAGIC = "visloc_match_worker_plan_v1"
 SHA256_RE = set("0123456789abcdef")
 GNU_TIME = Path("/usr/bin/time")
+PERSISTENT_MATCH_ENV = {
+    "RAYON_NUM_THREADS": "4",
+    "MALLOC_ARENA_MAX": "1",
+}
+MEMORY_BOUNDED_MERGE_ENV = {
+    "MALLOC_ARENA_MAX": "1",
+}
 
 
 class ValidationError(RuntimeError):
@@ -68,6 +77,14 @@ def _safe_relative(value: str, label: str) -> Path:
     if path.is_absolute() or not value or any(part in ("", ".", "..") for part in path.parts):
         raise ValidationError(f"{label} must be a simple relative path: {value!r}")
     return path
+
+
+def _persistent_safe_relative(value: str, label: str) -> Path:
+    """Validate a plan/log path using the same POSIX contract as Rust."""
+
+    if "\\" in value:
+        raise ValidationError(f"{label} must use POSIX-style separators: {value!r}")
+    return _safe_relative(value, label)
 
 
 def _atomic_bytes(path: Path, payload: bytes) -> None:
@@ -595,7 +612,13 @@ def carry_forward_phase_ledger(
     if not isinstance(previous, dict):
         return current
     result = dict(current)
-    for key in ("candidate_generation", "candidate_sharding", "merge", "mapping"):
+    for key in (
+        "candidate_generation",
+        "candidate_sharding",
+        "persistent_worker",
+        "merge",
+        "mapping",
+    ):
         if result.get(key) is None and previous.get(key) is not None:
             result[key] = previous[key]
     return result
@@ -622,6 +645,7 @@ def _run_command(
     *,
     cwd: Path = REPO_ROOT,
     timing_path: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> float:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     executed = command
@@ -640,7 +664,7 @@ def _run_command(
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 check=False,
-                env={**os.environ, "LC_ALL": "C"},
+                env={**os.environ, "LC_ALL": "C", **(env_overrides or {})},
             )
     except OSError as exc:
         raise ValidationError(f"cannot execute {executed[0]}: {exc}") from exc
@@ -765,6 +789,52 @@ def build_match_command(
     return command
 
 
+def build_persistent_match_command(
+    binary: Path,
+    *,
+    features_dir: Path,
+    calibration_dir: Path,
+    plan: Path,
+    feature_suffix: str = "_features.txt",
+    image_suffix: str = ".png",
+    images_dir: Path | None = None,
+    min_matches: int = 30,
+    match_ratio: float = 0.8,
+) -> list[str]:
+    """Build the single-process frozen NN/full persistent worker command."""
+
+    command = [
+        str(binary),
+        "--feature-extractor",
+        "files",
+        "--features-dir",
+        str(features_dir),
+        "--feature-suffix",
+        feature_suffix,
+        "--image-suffix",
+        image_suffix,
+        "--input-colmap-calibration",
+        str(calibration_dir),
+        "--verification-mode",
+        "full",
+        "--matcher",
+        "nn",
+        "--mapper",
+        "incremental",
+        "--min-matches",
+        str(min_matches),
+        "--match-ratio",
+        str(match_ratio),
+        "--persistent-match-worker-plan",
+        str(plan),
+        "--out-colmap",
+        str(plan.parent / "matches" / "unused-model-persistent"),
+    ]
+    if images_dir is not None:
+        command.extend(["--images-dir", str(images_dir)])
+    return command
+
+
 def build_mapping_command(
     binary: Path,
     *,
@@ -839,6 +909,245 @@ def prepare_match_index(candidate_index_path: Path, output_dir: Path) -> dict[st
     return index
 
 
+def parse_persistent_match_worker_plan(path: Path) -> dict[str, Any]:
+    """Parse the dependency-free plan consumed by the Rust persistent worker."""
+
+    lines = _noncomment_lines(path)
+    cursor = 0
+
+    def next_line(label: str) -> str:
+        nonlocal cursor
+        if cursor >= len(lines):
+            raise ValidationError(
+                f"persistent match worker plan {path} is truncated while reading {label}"
+            )
+        line = lines[cursor]
+        cursor += 1
+        return line
+
+    def count_line(label: str) -> int:
+        fields = next_line(label).split()
+        if len(fields) != 2 or fields[0] != label:
+            raise ValidationError(f"persistent match worker plan requires `{label} N`")
+        try:
+            value = int(fields[1])
+        except ValueError as exc:
+            raise ValidationError(f"persistent match worker {label} count is not numeric") from exc
+        if value < 0:
+            raise ValidationError(f"persistent match worker {label} count must be non-negative")
+        return value
+
+    if next_line("header") != PERSISTENT_MATCH_WORKER_PLAN_MAGIC:
+        raise ValidationError(
+            f"persistent match worker plan {path} has unsupported header"
+        )
+    image_count = count_line("images")
+    if image_count < 2:
+        raise ValidationError("persistent match worker plan needs at least two images")
+    image_names = []
+    for expected_index in range(image_count):
+        fields = next_line("image entry").split()
+        if len(fields) != 3 or fields[0] != "image":
+            raise ValidationError("persistent match worker image entry must be image INDEX NAME")
+        try:
+            index = int(fields[1])
+        except ValueError as exc:
+            raise ValidationError("persistent match worker image index is not numeric") from exc
+        if index != expected_index or not fields[2]:
+            raise ValidationError("persistent match worker image entries must be ordered")
+        image_names.append(fields[2])
+
+    def hash_line(label: str) -> str:
+        fields = next_line(label).split()
+        if len(fields) != 2 or fields[0] != label:
+            raise ValidationError(f"persistent match worker plan requires `{label} SHA256`")
+        return _sha256(fields[1], label)
+
+    candidate_index_sha256 = hash_line("candidate_index_sha256")
+    feature_manifest_sha256 = hash_line("feature_manifest_sha256")
+    pair_count = count_line("pairs")
+    if pair_count <= 0:
+        raise ValidationError("persistent match worker plan must contain at least one pair")
+    shard_count = count_line("shards")
+    if shard_count <= 0:
+        raise ValidationError("persistent match worker plan must contain at least one shard")
+    shards = []
+    all_paths: set[Path] = set()
+    previous_id: int | None = None
+    for expected_id in range(shard_count):
+        fields = next_line("shard entry").split()
+        if len(fields) != 5 or fields[0] != "shard":
+            raise ValidationError(
+                "persistent match worker shard entry must be shard ID CANDIDATE SNAPSHOT CANDIDATE_SHA256"
+            )
+        try:
+            shard_id = int(fields[1])
+        except ValueError as exc:
+            raise ValidationError("persistent match worker shard id is not numeric") from exc
+        if shard_id < 0:
+            raise ValidationError("persistent match worker shard id must be non-negative")
+        if previous_id is not None and shard_id <= previous_id:
+            raise ValidationError("persistent match worker shard IDs must be strictly increasing")
+        previous_id = shard_id
+        candidate_path = _persistent_safe_relative(
+            fields[2], f"persistent shard {shard_id} candidate path"
+        )
+        snapshot_path = _persistent_safe_relative(
+            fields[3], f"persistent shard {shard_id} snapshot path"
+        )
+        if candidate_path == snapshot_path:
+            raise ValidationError(
+                f"persistent match worker shard {shard_id} reuses one path for candidate and snapshot"
+            )
+        if candidate_path in all_paths or snapshot_path in all_paths:
+            raise ValidationError(
+                f"persistent match worker repeats candidate or snapshot path at shard {shard_id}"
+            )
+        all_paths.add(candidate_path)
+        all_paths.add(snapshot_path)
+        shards.append(
+            {
+                "id": shard_id,
+                "candidate_path": candidate_path.as_posix(),
+                "snapshot_path": snapshot_path.as_posix(),
+                "candidate_sha256": _sha256(fields[4], f"persistent shard {shard_id} candidate hash"),
+            }
+        )
+    if cursor != len(lines):
+        raise ValidationError(f"persistent match worker plan {path} has unexpected trailing data")
+    return {
+        "schema": PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        "image_names": image_names,
+        "pair_count": pair_count,
+        "candidate_index_sha256": candidate_index_sha256,
+        "feature_manifest_sha256": feature_manifest_sha256,
+        "shards": shards,
+    }
+
+
+def _artifact_relative(path: Path, artifact_root: Path, label: str) -> str:
+    try:
+        relative = path.resolve().relative_to(artifact_root.resolve())
+    except ValueError as exc:
+        raise ValidationError(f"{label} is outside the artifact root: {path}") from exc
+    return _safe_relative(relative.as_posix(), label).as_posix()
+
+
+def validate_persistent_match_worker_plan(
+    plan_path: Path,
+    candidate_index_path: Path,
+    match_index_path: Path,
+    feature_manifest_path: Path,
+    *,
+    allow_completed: bool = False,
+) -> dict[str, Any]:
+    """Validate plan bindings against the candidate/match/feature artifacts."""
+
+    plan = parse_persistent_match_worker_plan(plan_path)
+    candidate = validate_candidate_shards(candidate_index_path)
+    match = validate_match_index(match_index_path, candidate_index_path)
+    artifact_root = match_index_path.resolve().parent.parent
+    if plan["image_names"] != candidate["image_names"]:
+        raise ValidationError("persistent worker plan image order differs from candidate index")
+    if plan["candidate_index_sha256"] != candidate["index_sha256"]:
+        raise ValidationError("persistent worker plan candidate index hash differs")
+    if plan["feature_manifest_sha256"] != sha256_file(feature_manifest_path):
+        raise ValidationError("persistent worker plan feature manifest hash differs")
+    candidate_prefix = _artifact_relative(
+        candidate_index_path.resolve().parent, artifact_root, "candidate index directory"
+    )
+    match_prefix = _artifact_relative(
+        match_index_path.resolve().parent, artifact_root, "match index directory"
+    )
+    pending = [entry for entry in match["index"]["shards"] if entry["status"] != "complete"]
+    if allow_completed:
+        match_by_id = {entry["id"]: entry for entry in match["index"]["shards"]}
+        expected_entries = []
+        for plan_shard in plan["shards"]:
+            entry = match_by_id.get(plan_shard["id"])
+            if entry is None:
+                raise ValidationError(
+                    f"persistent worker plan refers to unknown match shard {plan_shard['id']}"
+                )
+            expected_entries.append(entry)
+    else:
+        expected_entries = pending
+        if len(plan["shards"]) != len(pending):
+            raise ValidationError("persistent worker plan does not contain exactly the pending shards")
+    expected_pairs = 0
+    for plan_shard, match_entry in zip(plan["shards"], expected_entries):
+        candidate_entry = candidate["shards"][match_entry["id"]]
+        expected_candidate = f"{candidate_prefix}/{candidate_entry['path']}"
+        expected_snapshot = f"{match_prefix}/{match_entry['snapshot_path']}"
+        if plan_shard["id"] != match_entry["id"]:
+            raise ValidationError("persistent worker plan shard order differs from match index")
+        if plan_shard["candidate_path"] != expected_candidate:
+            raise ValidationError(f"persistent worker shard {plan_shard['id']} candidate path differs")
+        if plan_shard["snapshot_path"] != expected_snapshot:
+            raise ValidationError(f"persistent worker shard {plan_shard['id']} snapshot path differs")
+        if plan_shard["candidate_sha256"] != candidate_entry["sha256"]:
+            raise ValidationError(f"persistent worker shard {plan_shard['id']} candidate hash differs")
+        expected_pairs += int(candidate_entry["pair_count"])
+    if plan["pair_count"] != expected_pairs:
+        raise ValidationError(
+            f"persistent worker plan pair count {plan['pair_count']} differs from pending {expected_pairs}"
+        )
+    return {
+        "plan_path": str(plan_path.resolve()),
+        "plan": plan,
+        "plan_sha256": sha256_file(plan_path),
+        "candidate": candidate,
+        "match": match,
+        "pending": pending,
+    }
+
+
+def write_persistent_match_worker_plan(
+    candidate_index_path: Path,
+    match_index_path: Path,
+    feature_manifest_path: Path,
+    *,
+    output: Path | None = None,
+) -> Path | None:
+    """Write a plan for pending match shards, or return None when complete."""
+
+    candidate = validate_candidate_shards(candidate_index_path)
+    match = validate_match_index(match_index_path, candidate_index_path)
+    pending = [entry for entry in match["index"]["shards"] if entry["status"] != "complete"]
+    if not pending:
+        return None
+    artifact_root = match_index_path.resolve().parent.parent
+    candidate_prefix = _artifact_relative(
+        candidate_index_path.resolve().parent, artifact_root, "candidate index directory"
+    )
+    match_prefix = _artifact_relative(
+        match_index_path.resolve().parent, artifact_root, "match index directory"
+    )
+    feature_manifest_sha256 = sha256_file(feature_manifest_path)
+    lines = [
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
+        f"images {len(candidate['image_names'])}",
+        *[f"image {index} {name}" for index, name in enumerate(candidate["image_names"])],
+        f"candidate_index_sha256 {candidate['index_sha256']}",
+        f"feature_manifest_sha256 {feature_manifest_sha256}",
+        f"pairs {sum(int(candidate['shards'][entry['id']]['pair_count']) for entry in pending)}",
+        f"shards {len(pending)}",
+    ]
+    for entry in pending:
+        shard = candidate["shards"][entry["id"]]
+        candidate_path = f"{candidate_prefix}/{shard['path']}"
+        snapshot_path = f"{match_prefix}/{entry['snapshot_path']}"
+        lines.append(
+            f"shard {entry['id']} {candidate_path} {snapshot_path} {shard['sha256']}"
+        )
+    plan_path = (output or artifact_root / "match-worker.plan").resolve()
+    _atomic_bytes(plan_path, ("\n".join(lines) + "\n").encode("utf-8"))
+    validate_persistent_match_worker_plan(
+        plan_path, candidate_index_path, match_index_path, feature_manifest_path
+    )
+    return plan_path
+
+
 def validate_match_index(
     index_path: Path,
     candidate_index_path: Path,
@@ -891,8 +1200,30 @@ def run_match_shards(
     min_matches: int = 30,
     match_ratio: float = 0.8,
     resume: bool = True,
+    persistent_matcher: bool = False,
+    feature_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run pending match shards, updating the index only after hash checks."""
+
+    if persistent_matcher:
+        if feature_manifest_path is None:
+            raise ValidationError(
+                "persistent matcher requires the validated feature manifest path"
+            )
+        return run_persistent_matcher(
+            candidate_index_path,
+            match_index_path,
+            binary=binary,
+            features_dir=features_dir,
+            calibration_dir=calibration_dir,
+            feature_manifest_path=feature_manifest_path,
+            images_dir=images_dir,
+            feature_suffix=feature_suffix,
+            image_suffix=image_suffix,
+            min_matches=min_matches,
+            match_ratio=match_ratio,
+            resume=resume,
+        )
 
     plan = validate_match_index(match_index_path, candidate_index_path)
     index = plan["index"]
@@ -947,6 +1278,365 @@ def run_match_shards(
     return validated
 
 
+def _parse_persistent_key_value_record(line: str, prefix: str) -> dict[str, str]:
+    if not line.startswith(prefix + " "):
+        raise ValidationError(f"persistent worker log line does not start with {prefix!r}")
+    record: dict[str, str] = {}
+    for token in line[len(prefix) + 1 :].split():
+        key, separator, value = token.partition("=")
+        if not separator or not key or not value or key in record:
+            raise ValidationError(f"malformed persistent worker record: {line!r}")
+        record[key] = value
+    return record
+
+
+def parse_persistent_match_plan_header(path: Path) -> dict[str, str]:
+    """Read the worker's flushed plan-binding line from its stdout log."""
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise ValidationError(f"cannot read persistent worker log {path}: {exc}") from exc
+    for line in lines:
+        if line.startswith("persistent-match-plan "):
+            record = _parse_persistent_key_value_record(line, "persistent-match-plan")
+            if set(record) != {"candidate_index_sha256", "feature_manifest_sha256"}:
+                raise ValidationError(
+                    "persistent worker plan-binding line has unexpected fields"
+                )
+            for key in ("candidate_index_sha256", "feature_manifest_sha256"):
+                _sha256(record.get(key), f"persistent worker {key}")
+            return record
+    raise ValidationError(f"persistent worker log {path} has no plan-binding line")
+
+
+def parse_persistent_match_completions(path: Path) -> list[dict[str, Any]]:
+    """Parse flushed per-shard completion records, including a killed prefix."""
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise ValidationError(f"cannot read persistent worker log {path}: {exc}") from exc
+    required = {
+        "shard_id",
+        "candidate_path",
+        "snapshot_path",
+        "candidate_sha256",
+        "candidate_pairs",
+        "pairs",
+        "accepted",
+        "ordered_edge_fnv1a64",
+        "unordered_edge_fnv1a64",
+        "elapsed_s",
+    }
+    completions: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for line in lines:
+        if not line.startswith("persistent-match-complete "):
+            continue
+        record = _parse_persistent_key_value_record(line, "persistent-match-complete")
+        if set(record) != required:
+            raise ValidationError(
+                f"persistent worker completion has unexpected fields: {sorted(record)}"
+            )
+        try:
+            shard_id = int(record["shard_id"])
+            candidate_pairs = int(record["candidate_pairs"])
+            pairs = int(record["pairs"])
+            accepted = int(record["accepted"])
+            elapsed_s = float(record["elapsed_s"])
+        except ValueError as exc:
+            raise ValidationError(f"persistent worker completion has invalid numeric field: {line!r}") from exc
+        if shard_id < 0 or candidate_pairs < 0 or pairs < 0 or accepted < 0:
+            raise ValidationError(f"persistent worker completion has a negative count: {line!r}")
+        if not math.isfinite(elapsed_s) or elapsed_s < 0.0:
+            raise ValidationError(f"persistent worker completion has invalid elapsed_s: {line!r}")
+        if shard_id in seen:
+            raise ValidationError(f"persistent worker repeats completion for shard {shard_id}")
+        seen.add(shard_id)
+        candidate_path = _persistent_safe_relative(
+            record["candidate_path"], f"persistent shard {shard_id} candidate path"
+        )
+        snapshot_path = _persistent_safe_relative(
+            record["snapshot_path"], f"persistent shard {shard_id} snapshot path"
+        )
+        if candidate_path == snapshot_path:
+            raise ValidationError(
+                f"persistent worker shard {shard_id} reuses one path for candidate and snapshot"
+            )
+
+        def edge_hash(value: str, label: str) -> str:
+            if len(value) != 16 or any(char not in "0123456789abcdefABCDEF" for char in value):
+                raise ValidationError(f"persistent worker {label} must be a 16-digit hexadecimal hash")
+            return value.lower()
+
+        completions.append(
+            {
+                "shard_id": shard_id,
+                "candidate_path": candidate_path.as_posix(),
+                "snapshot_path": snapshot_path.as_posix(),
+                "candidate_sha256": _sha256(
+                    record["candidate_sha256"], f"persistent shard {shard_id} candidate hash"
+                ),
+                "candidate_pairs": candidate_pairs,
+                "pairs": pairs,
+                "accepted": accepted,
+                "ordered_edge_fnv1a64": edge_hash(
+                    record["ordered_edge_fnv1a64"], "ordered edge hash"
+                ),
+                "unordered_edge_fnv1a64": edge_hash(
+                    record["unordered_edge_fnv1a64"], "unordered edge hash"
+                ),
+                "elapsed_s": elapsed_s,
+            }
+        )
+    return completions
+
+
+def _apply_persistent_match_completions(
+    index: dict[str, Any],
+    plan_validation: dict[str, Any],
+    completions: list[dict[str, Any]],
+    *,
+    worker_measurement: dict[str, Any] | None = None,
+    worker_elapsed_s: float | None = None,
+    require_all: bool,
+) -> None:
+    """Install only hash-valid completed shards into a match index."""
+
+    plan = plan_validation["plan"]
+    pending_entries = {
+        entry["id"]: entry
+        for entry in index["shards"]
+        if entry["status"] != "complete"
+    }
+    plan_entries = {entry["id"]: entry for entry in plan["shards"]}
+    seen: set[int] = set()
+    # Completion paths are relative to the plan's artifact root.  Derive that
+    # root from the validated plan path rather than trusting a log to name an
+    # arbitrary output location.
+    plan_path = plan_validation.get("plan_path")
+    if not isinstance(plan_path, str) or not plan_path:
+        raise ValidationError("persistent worker validation omitted plan path")
+    plan_root = Path(plan_path).resolve().parent
+    for completion in completions:
+        shard_id = completion["shard_id"]
+        if shard_id in seen:
+            raise ValidationError(f"persistent worker repeats completion for shard {shard_id}")
+        seen.add(shard_id)
+        entry = pending_entries.get(shard_id)
+        expected = plan_entries.get(shard_id)
+        if entry is None or expected is None:
+            raise ValidationError(f"persistent worker completed unexpected shard {shard_id}")
+        if completion["candidate_path"] != expected["candidate_path"]:
+            raise ValidationError(f"persistent worker shard {shard_id} candidate path differs")
+        if completion["snapshot_path"] != expected["snapshot_path"]:
+            raise ValidationError(f"persistent worker shard {shard_id} snapshot path differs")
+        if completion["candidate_sha256"] != expected["candidate_sha256"]:
+            raise ValidationError(f"persistent worker shard {shard_id} candidate hash differs")
+        candidate_entry = plan_validation["candidate"]["shards"][shard_id]
+        if completion["candidate_pairs"] != candidate_entry["pair_count"]:
+            raise ValidationError(f"persistent worker shard {shard_id} candidate pair count differs")
+        if completion["pairs"] > completion["candidate_pairs"]:
+            raise ValidationError(f"persistent worker shard {shard_id} verified pair count exceeds candidates")
+        snapshot_path = plan_root / completion["snapshot_path"]
+        actual_hash = sha256_file(snapshot_path)
+        entry.update(
+            {
+                "status": "complete",
+                "snapshot_sha256": actual_hash,
+                "elapsed_s": completion["elapsed_s"],
+                "ordered_edge_fnv1a64": completion["ordered_edge_fnv1a64"],
+                "unordered_edge_fnv1a64": completion["unordered_edge_fnv1a64"],
+                "accepted_correspondences": completion["accepted"],
+            }
+        )
+        if worker_measurement is not None:
+            measurement = dict(worker_measurement)
+            measurement["elapsed_s"] = completion["elapsed_s"]
+            if worker_elapsed_s is not None:
+                measurement["worker_elapsed_s"] = worker_elapsed_s
+            entry["measurement"] = measurement
+    missing = sorted(set(pending_entries) - seen)
+    if require_all and missing:
+        raise ValidationError(f"persistent worker omitted completion records for shards {missing}")
+
+
+def _recover_persistent_worker_log(
+    index: dict[str, Any],
+    match_index_path: Path,
+    candidate_index_path: Path,
+    feature_manifest_path: Path,
+) -> None:
+    """Recover flushed snapshots if the runner died before its index update."""
+
+    worker_plan = index.get("worker_plan")
+    if not isinstance(worker_plan, str) or not worker_plan:
+        return
+    plan_path = Path(worker_plan).expanduser().resolve()
+    artifact_root = match_index_path.resolve().parent.parent
+    try:
+        plan_path.relative_to(artifact_root)
+    except ValueError as exc:
+        raise ValidationError("persistent worker plan is outside the artifact root") from exc
+    log_path = match_index_path.resolve().parent / "persistent-match.log"
+    if not plan_path.is_file() or not log_path.is_file():
+        return
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValidationError(f"cannot read persistent worker log {log_path}: {exc}") from exc
+    if "persistent-match-" not in log_text:
+        return
+    plan_validation = validate_persistent_match_worker_plan(
+        plan_path,
+        candidate_index_path,
+        match_index_path,
+        feature_manifest_path,
+        allow_completed=True,
+    )
+    plan_validation["plan_path"] = str(plan_path)
+    header = parse_persistent_match_plan_header(log_path)
+    plan = plan_validation["plan"]
+    if header["candidate_index_sha256"] != plan["candidate_index_sha256"]:
+        raise ValidationError("persistent worker recovery candidate index binding differs")
+    if header["feature_manifest_sha256"] != plan["feature_manifest_sha256"]:
+        raise ValidationError("persistent worker recovery feature manifest binding differs")
+    completions = parse_persistent_match_completions(log_path)
+    plan_ids = {entry["id"] for entry in plan["shards"]}
+    if any(completion["shard_id"] not in plan_ids for completion in completions):
+        raise ValidationError("persistent worker recovery contains an unknown shard")
+    pending_ids = {
+        entry["id"] for entry in index["shards"] if entry["status"] != "complete"
+    }
+    # A runner that was interrupted after atomically updating the index may
+    # leave the same completion line in its log.  The index hash validation
+    # above already authenticates those completed snapshots; only apply the
+    # still-pending prefix to the current index.
+    completions = [
+        completion for completion in completions if completion["shard_id"] in pending_ids
+    ]
+    if not completions:
+        return
+    before = {
+        entry["id"]: entry.get("status") for entry in index["shards"]
+    }
+    _apply_persistent_match_completions(
+        index, plan_validation, completions, require_all=False
+    )
+    if any(before[entry["id"]] != entry.get("status") for entry in index["shards"]):
+        atomic_json(match_index_path, index)
+
+
+def run_persistent_matcher(
+    candidate_index_path: Path,
+    match_index_path: Path,
+    *,
+    binary: Path,
+    features_dir: Path,
+    calibration_dir: Path,
+    feature_manifest_path: Path,
+    images_dir: Path | None = None,
+    feature_suffix: str = "_features.txt",
+    image_suffix: str = ".png",
+    min_matches: int = 30,
+    match_ratio: float = 0.8,
+    resume: bool = True,
+) -> dict[str, Any]:
+    """Run all pending shards through one Rust feature-bank process."""
+
+    validated = validate_match_index(match_index_path, candidate_index_path)
+    index = validated["index"]
+    if not resume and any(entry["status"] == "complete" for entry in index["shards"]):
+        raise ValidationError("a persistent match shard is already complete; pass --resume")
+    _recover_persistent_worker_log(
+        index, match_index_path, candidate_index_path, feature_manifest_path
+    )
+    plan_path = write_persistent_match_worker_plan(
+        candidate_index_path, match_index_path, feature_manifest_path
+    )
+    if plan_path is None:
+        existing = index.get("persistent_worker")
+        if isinstance(existing, dict):
+            return {**validated, "persistent_worker": existing}
+        return validated
+    plan_validation = validate_persistent_match_worker_plan(
+        plan_path, candidate_index_path, match_index_path, feature_manifest_path
+    )
+    plan_validation["plan_path"] = str(plan_path.resolve())
+    pending_ids = {entry["id"] for entry in plan_validation["pending"]}
+    for entry in index["shards"]:
+        if entry["id"] in pending_ids:
+            entry["status"] = "running"
+    index["worker_mode"] = "persistent-v1"
+    index["worker_plan"] = str(plan_path.resolve())
+    atomic_json(match_index_path, index)
+    root = match_index_path.resolve().parent
+    command = build_persistent_match_command(
+        binary,
+        features_dir=features_dir,
+        calibration_dir=calibration_dir,
+        plan=plan_path,
+        feature_suffix=feature_suffix,
+        image_suffix=image_suffix,
+        images_dir=images_dir,
+        min_matches=min_matches,
+        match_ratio=match_ratio,
+    )
+    timing_path = root.parent / "timing" / "persistent-match.time.txt"
+    log_path = root / "persistent-match.log"
+    try:
+        worker_elapsed = _run_command(
+            command,
+            log_path,
+            timing_path=timing_path,
+            env_overrides=PERSISTENT_MATCH_ENV,
+        )
+    except (ValidationError, OSError):
+        # The Rust worker flushes one completion line after every atomic
+        # snapshot.  Recover that flushed prefix before marking the remainder
+        # failed, so a SIGKILL never recomputes a valid completed shard.
+        try:
+            partial = parse_persistent_match_completions(log_path)
+            _apply_persistent_match_completions(index, plan_validation, partial, require_all=False)
+        except ValidationError:
+            partial = []
+        for entry in index["shards"]:
+            if entry["id"] in pending_ids and entry["status"] != "complete":
+                entry["status"] = "failed"
+        atomic_json(match_index_path, index)
+        raise
+    header = parse_persistent_match_plan_header(log_path)
+    if header["candidate_index_sha256"] != plan_validation["plan"]["candidate_index_sha256"]:
+        raise ValidationError("persistent worker candidate index binding differs from plan")
+    if header["feature_manifest_sha256"] != plan_validation["plan"]["feature_manifest_sha256"]:
+        raise ValidationError("persistent worker feature manifest binding differs from plan")
+    completions = parse_persistent_match_completions(log_path)
+    worker_measurement = measured_phase(timing_path, worker_elapsed)
+    _apply_persistent_match_completions(
+        index,
+        plan_validation,
+        completions,
+        worker_measurement=worker_measurement,
+        worker_elapsed_s=worker_elapsed,
+        require_all=True,
+    )
+    persistent_worker = {
+        "mode": "persistent-v1",
+        "plan": str(plan_path.resolve()),
+        "plan_sha256": sha256_file(plan_path),
+        "elapsed_s": worker_elapsed,
+        "shard_elapsed_sum_s": sum(entry["elapsed_s"] for entry in completions),
+        "measurement": worker_measurement,
+        "environment": dict(PERSISTENT_MATCH_ENV),
+        "shards": len(completions),
+    }
+    index["persistent_worker"] = persistent_worker
+    atomic_json(match_index_path, index)
+    validated = validate_match_index(match_index_path, candidate_index_path)
+    return {**validated, "persistent_worker": persistent_worker}
+
+
 def build_merge_command(merge_binary: Path, output: Path, snapshots: list[Path]) -> list[str]:
     if not snapshots:
         raise ValidationError("cannot merge an empty snapshot list")
@@ -956,10 +1646,22 @@ def build_merge_command(merge_binary: Path, output: Path, snapshots: list[Path])
     return command
 
 
-def merge_match_shards(match_index_path: Path, *, merge_binary: Path, output: Path) -> dict[str, Any]:
-    index = _load_json(match_index_path, "match index")
-    if index.get("schema") != MATCH_INDEX_SCHEMA:
-        raise ValidationError("match index has unsupported schema")
+def merge_match_shards(
+    match_index_path: Path,
+    *,
+    candidate_index_path: Path | None = None,
+    merge_binary: Path,
+    output: Path,
+) -> dict[str, Any]:
+    """Merge only a hash-valid, complete match index."""
+
+    if candidate_index_path is None:
+        candidate_index_path = (
+            match_index_path.resolve().parent.parent / "candidates" / "index.json"
+        )
+    index = validate_match_index(
+        match_index_path, candidate_index_path, require_complete=True
+    )["index"]
     root = match_index_path.resolve().parent
     snapshots = []
     for entry in index.get("shards", []):
@@ -975,6 +1677,7 @@ def merge_match_shards(match_index_path: Path, *, merge_binary: Path, output: Pa
         build_merge_command(merge_binary, output, snapshots),
         root / "merge.log",
         timing_path=timing_path,
+        env_overrides=MEMORY_BOUNDED_MERGE_ENV,
     )
     return {
         "output": str(output),
@@ -1006,7 +1709,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", type=Path, required=True, help="external run root")
     parser.add_argument("--candidate-manifest", type=Path, help="existing generated candidate manifest")
     parser.add_argument("--feature-manifest", type=Path)
-    parser.add_argument("--pairs-per-shard", type=int, default=256)
+    parser.add_argument(
+        "--pairs-per-shard",
+        type=int,
+        help="candidate pairs per shard (default: 32 with --persistent-matcher, otherwise 256)",
+    )
     parser.add_argument("--retrieval-topk", type=int, default=32)
     parser.add_argument(
         "--pair-source",
@@ -1026,6 +1733,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-suffix", default=".png")
     parser.add_argument("--min-matches", type=int, default=30)
     parser.add_argument("--match-ratio", type=float, default=0.8)
+    parser.add_argument(
+        "--persistent-matcher",
+        action="store_true",
+        help="run all pending match shards in one plan-driven Rust worker (opt-in)",
+    )
     parser.add_argument("--min-pnp-inliers", type=int, default=12)
     parser.add_argument("--max-mapper-matches-per-pair", type=int)
     parser.add_argument(
@@ -1043,7 +1755,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     mode = "verify" if args.verify_only or not any((args.prepare, args.match, args.map, args.run)) else next(name for name, value in (("prepare", args.prepare), ("match", args.match), ("map", args.map), ("run", args.run)) if value)
+    pairs_per_shard = args.pairs_per_shard
+    if pairs_per_shard is None:
+        pairs_per_shard = 32 if args.persistent_matcher else 256
     try:
+        if args.persistent_matcher and mode not in {"match", "run"}:
+            raise ValidationError("--persistent-matcher is only valid with --match or --run")
         artifact_root = args.artifact_root.expanduser().resolve()
         if mode == "verify":
             if not artifact_root.is_dir():
@@ -1087,6 +1804,7 @@ def main(argv: list[str] | None = None) -> int:
         candidate_sharding_elapsed = None
         merge_result = None
         mapping_measurement = None
+        persistent_worker_measurement = None
         if mode in {"prepare", "run"}:
             if not candidate_source.is_file():
                 candidate_source.parent.mkdir(parents=True, exist_ok=True)
@@ -1117,7 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
             split_candidate_manifest(
                 candidate_source,
                 candidate_dir,
-                args.pairs_per_shard,
+                pairs_per_shard,
                 resume=not args.no_resume,
                 retrieval_topk=args.retrieval_topk,
                 local_stem_window=(
@@ -1140,6 +1858,13 @@ def main(argv: list[str] | None = None) -> int:
         if mode in {"verify", "match", "map"} and not candidate_index_path.is_file():
             raise ValidationError(f"candidate index is missing: {candidate_index_path}; run --prepare first")
         candidate_summary = validate_candidate_shards(candidate_index_path)
+        if args.persistent_matcher and any(
+            int(shard["pair_count"]) > 32 for shard in candidate_summary["shards"]
+        ):
+            raise ValidationError(
+                "--persistent-matcher requires candidate shards with at most 32 pairs; "
+                "prepare them with --pairs-per-shard 32"
+            )
         feature_names = feature_summary.get("image_names")
         if feature_names != candidate_summary["image_names"]:
             raise ValidationError(
@@ -1154,7 +1879,7 @@ def main(argv: list[str] | None = None) -> int:
         if mode in {"match", "run"}:
             if not match_index_path.is_file() or args.no_resume:
                 prepare_match_index(candidate_index_path, match_dir)
-            run_match_shards(
+            match_result = run_match_shards(
                 candidate_index_path,
                 match_index_path,
                 binary=binary,
@@ -1166,10 +1891,16 @@ def main(argv: list[str] | None = None) -> int:
                 min_matches=args.min_matches,
                 match_ratio=args.match_ratio,
                 resume=not args.no_resume,
+                persistent_matcher=args.persistent_matcher,
+                feature_manifest_path=feature_manifest_path,
             )
+            persistent_worker_measurement = match_result.get("persistent_worker")
             merged_snapshot = artifact_root / "mapping" / "verified-merged.vps"
             merge_result = merge_match_shards(
-                match_index_path, merge_binary=merge_binary, output=merged_snapshot
+                match_index_path,
+                candidate_index_path=candidate_index_path,
+                merge_binary=merge_binary,
+                output=merged_snapshot,
             )
         else:
             merged_snapshot = artifact_root / "mapping" / "verified-merged.vps"
@@ -1215,6 +1946,7 @@ def main(argv: list[str] | None = None) -> int:
                 if candidate_sharding_elapsed is not None
                 else None
             ),
+            "persistent_worker": persistent_worker_measurement,
             "match_shards": match_measurements,
             "matching_elapsed_sum_s": sum(
                 float(entry.get("elapsed_s", 0.0)) for entry in match_measurements

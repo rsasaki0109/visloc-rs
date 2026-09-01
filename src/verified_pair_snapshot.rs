@@ -78,6 +78,15 @@ pub struct Snapshot {
 /// uses the argument order as its deterministic pair order and recomputes the
 /// two stream-integrity hashes and accepted-match count.
 pub fn merge(snapshots: &[Snapshot]) -> Result<Snapshot, String> {
+    merge_owned(snapshots.to_vec())
+}
+
+/// Merge owned snapshot shards while moving pair payloads into the result.
+///
+/// This is the bounded-memory path for large shard sets: unlike [`merge`], it
+/// does not clone every raw/inlier/mapping vector while the decoded inputs are
+/// still resident. Envelope validation and output ordering are identical.
+pub fn merge_owned(mut snapshots: Vec<Snapshot>) -> Result<Snapshot, String> {
     let first = snapshots
         .first()
         .ok_or_else(|| "cannot merge an empty verified-pair snapshot list".to_owned())?;
@@ -109,11 +118,10 @@ pub fn merge(snapshots: &[Snapshot]) -> Result<Snapshot, String> {
                 "snapshot shard {index} camera envelope differs from shard 0"
             ));
         }
-        // `effective_config` is the complete CLI diagnostic and therefore
-        // includes shard-specific candidate/output paths.  Stream
+        // Older shards may carry a complete CLI diagnostic in
+        // `effective_config`, including candidate/output paths. Stream
         // compatibility is defined by the path-independent verifier config;
-        // retain shard 0's diagnostic envelope in the merged snapshot while
-        // the runner's index records every shard command/path separately.
+        // the merged envelope below canonicalizes old and new shards alike.
         if snapshot.verifier_config_hash != first.verifier_config_hash
             || snapshot.verifier_config != first.verifier_config
         {
@@ -123,10 +131,20 @@ pub fn merge(snapshots: &[Snapshot]) -> Result<Snapshot, String> {
         }
     }
 
-    let image_count = first.image_names.len();
-    let mut pairs = Vec::new();
+    let image_names = first.image_names.clone();
+    let image_manifest_hash = first.image_manifest_hash;
+    let feature_manifest_hash = first.feature_manifest_hash;
+    let feature_counts = first.feature_counts.clone();
+    let width = first.width;
+    let height = first.height;
+    let intrinsics_bits = first.intrinsics_bits;
+    let verifier_config_hash = first.verifier_config_hash;
+    let verifier_config = first.verifier_config.clone();
+    let image_count = image_names.len();
+    let pair_count = snapshots.iter().map(|snapshot| snapshot.pairs.len()).sum();
+    let mut pairs = Vec::with_capacity(pair_count);
     let mut seen = std::collections::HashSet::new();
-    for snapshot in snapshots {
+    for snapshot in &mut snapshots {
         for pair in &snapshot.pairs {
             let image_i = usize::try_from(pair.image_i)
                 .map_err(|_| "snapshot pair image_i does not fit usize".to_owned())?;
@@ -144,27 +162,29 @@ pub fn merge(snapshots: &[Snapshot]) -> Result<Snapshot, String> {
                     key.0, key.1
                 ));
             }
-            pairs.push(pair.clone());
         }
+        pairs.append(&mut snapshot.pairs);
     }
 
     let accepted_match_count = pairs
         .iter()
         .map(|pair| pair.matches.len() as u64)
         .sum::<u64>();
+    let effective_config = format!("verified-pair-export-v1;{verifier_config}");
+    let effective_config_hash = fnv1a64(effective_config.as_bytes());
     Ok(Snapshot {
         schema_version: SCHEMA_VERSION,
-        image_names: first.image_names.clone(),
-        image_manifest_hash: first.image_manifest_hash,
-        feature_manifest_hash: first.feature_manifest_hash,
-        feature_counts: first.feature_counts.clone(),
-        width: first.width,
-        height: first.height,
-        intrinsics_bits: first.intrinsics_bits,
-        effective_config_hash: first.effective_config_hash,
-        effective_config: first.effective_config.clone(),
-        verifier_config_hash: first.verifier_config_hash,
-        verifier_config: first.verifier_config.clone(),
+        image_names,
+        image_manifest_hash,
+        feature_manifest_hash,
+        feature_counts,
+        width,
+        height,
+        intrinsics_bits,
+        effective_config_hash,
+        effective_config,
+        verifier_config_hash,
+        verifier_config,
         pair_order_hash: ordered_pair_hash(&pairs),
         unordered_edge_hash: unordered_edge_hash(&pairs),
         accepted_match_count,
@@ -798,6 +818,14 @@ mod tests {
         assert_eq!((merged.pairs[0].image_i, merged.pairs[0].image_j), (0, 1));
         assert_eq!((merged.pairs[1].image_i, merged.pairs[1].image_j), (1, 2));
         assert_eq!(merged.accepted_match_count, 4);
+        assert_eq!(
+            merged.effective_config,
+            format!("verified-pair-export-v1;{}", first.verifier_config)
+        );
+        assert_eq!(
+            merged.effective_config_hash,
+            super::fnv1a64(merged.effective_config.as_bytes())
+        );
         assert_eq!(
             merged.pair_order_hash,
             super::ordered_pair_hash(&merged.pairs)

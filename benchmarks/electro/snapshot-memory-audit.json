@@ -99,6 +99,11 @@
   },
   "readme_visuals": {
     "generator": "scripts/generate_electro_readme_visuals.py",
+    "visloc_model": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/mapping/m3-snapshot-keypoints-only-i8",
+    "colmap_model": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/colmap_temporal_candidate12000/models_txt/0",
+    "reference_model": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/electro/rig_calibration_undistorted",
+    "metrics_source": "this audit's median, quality, and comparison fields",
+    "display_semantics": "timestamp/camera ordered centre overlay with a deterministic final-model sparse-point sample; not mapper registration progress",
     "png_sha256": "4a98f145b479ceb8b1ffc2e489847f5129803d8b20f618e3a9883fbb940f459b",
     "png_dimensions": [1690, 936],
     "gif_sha256": "13e2fd25e45811c14f851badefb8101f0ba69f0fdd20a51e4145aba0b68efb82",
