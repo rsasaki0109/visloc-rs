@@ -283,11 +283,13 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 snapshot_keypoints_only=True,
                 periodic_ba_min_registered_images=1201,
                 seed_trials=1,
+                seed_pair="355,5305",
                 ba_linear_solver="sparse",
                 ba_max_iterations=8,
                 post_refinement_registration=True,
                 final_iterative_refinement=True,
                 global_ba_max_refinements=0,
+                confidence_ordered_tracks=True,
             )
             for command in (candidate_command, match_command, map_command):
                 self.assertNotIn("--gt", command)
@@ -297,6 +299,8 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("--max-mapper-matches-per-pair", map_command)
             self.assertIn("--snapshot-keypoints-only", map_command)
             self.assertIn("--post-refinement-registration", map_command)
+            self.assertIn("--confidence-ordered-tracks", map_command)
+            self.assertEqual(map_command[map_command.index("--seed-pair") + 1], "355,5305")
             self.assertIn("--final-iterative-refinement", map_command)
             self.assertEqual(map_command[map_command.index("--ba-max-iterations") + 1], "8")
             self.assertEqual(
@@ -319,6 +323,24 @@ class ElectroBenchmarkTests(unittest.TestCase):
                     merged_snapshot=Path("/run/merged.vps"),
                     output_model=Path("/run/model"),
                     ba_linear_solver="invalid",
+                )
+            with self.assertRaisesRegex(benchmark.ValidationError, "seed_pair"):
+                benchmark.build_mapping_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    merged_snapshot=Path("/run/merged.vps"),
+                    output_model=Path("/run/model"),
+                    seed_pair="355",
+                )
+            with self.assertRaisesRegex(benchmark.ValidationError, "seed_pair image indices"):
+                benchmark.build_mapping_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    merged_snapshot=Path("/run/merged.vps"),
+                    output_model=Path("/run/model"),
+                    seed_pair="01,1",
                 )
 
             rig_candidate_command = benchmark.build_candidate_command(

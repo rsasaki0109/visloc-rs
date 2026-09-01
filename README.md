@@ -135,6 +135,20 @@ envelope in **8:51**, versus 49:49 for exact all-image ranking. At the frozen
 versus 989/1000 for exact retrieval. The 10k mapping-quality failure below is
 still open; faster retrieval does not by itself claim to solve it.
 
+On the same frozen 10k verified snapshot, conflict-aware confidence ordering
+raises registration from 199 to **3,664 cameras** while reducing mean
+reprojection from 1.301 to **1.140 px**. It rejects only an edge whose merge
+would put two observations from one image into a track; the remaining
+1,192,223 observations stay available to mapping. This is an 18.4× recovery,
+not a completed 10k reconstruction: 63.36% of the supplied cameras remain
+unregistered. Frozen hashes and negative controls are in
+[`m6-conflict-aware-tracks.json`](benchmarks/electro/m6-conflict-aware-tracks.json).
+
+| Frozen 10k mapper replay | Registered | Mean reprojection | Mapping wall |
+| --- | ---: | ---: | ---: |
+| Legacy UnionFind | 199/10,000 | 1.301 px | **1:59.8** |
+| Confidence-ordered tracks | **3,664/10,000** | **1.140 px** | 9:02.9 |
+
 | Connected tier | Candidate / verified pairs | Registered | Total wall | Peak phase RSS |
 | --- | ---: | ---: | ---: | ---: |
 | 1,000 | 7,000 / 6,869 | **989 (98.9%)** | 2:25 | 274 MiB |
@@ -145,9 +159,11 @@ still open; faster retrieval does not by itself claim to solve it.
 <p align="center"><sub>The 10k peak is its 2,188-shard streaming merge;
 candidate generation peaks at 1.14 GiB, matching at 851 MiB, and compact
 mapping at 501 MiB. Exact VLAD ranking still scores every image pair, so ANN
-retrieval plus streamed global descriptors is the next speed/memory target.
-No OpenLORIS COLMAP run was performed. Source/license, hashes, phase ledgers,
-and honest dense/global negatives:
+retrieval plus streamed global descriptors now removes that quadratic ranking
+bottleneck; component and seed coverage remain the next quality target. No
+OpenLORIS COLMAP run was performed, so these 10k results are deliberately not
+presented as a COLMAP comparison. Source/license, hashes, phase ledgers, and
+honest dense/global negatives:
 <a href="benchmarks/electro/m5-openloris-connected-scale-validation.json">connected M5 evidence</a> ·
 <a href="docs/electro_m5_scale_validation.md">full scale report</a>.</sub></p>
 

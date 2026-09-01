@@ -1,0 +1,92 @@
+{
+  "schema": "visloc_m6_conflict_aware_tracks_evidence_v1",
+  "base_commit": "4dc8508f3e0f966aad13401914e9d47e0bfd133c",
+  "dataset": "OpenLORIS corridor1-1",
+  "frozen_input": {
+    "candidate_policy": "temporal-pyramid + VLAD fill, 7N",
+    "mapper_match_cap_per_pair": 96,
+    "tier_10000_verified_pairs": 58879,
+    "tier_10000_verified_snapshot_sha256": "31e99651ff7f7e6523637cd384af55eea24d53b2bd76ced5bf03ccfe43f4a4bf",
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "tier_1000_ab": {
+    "legacy_union_find": {
+      "registered_images": 989,
+      "supplied_images": 1000,
+      "tracks": 2586,
+      "observations": 28918,
+      "mean_reprojection_px": 1.574
+    },
+    "confidence_ordered": {
+      "registered_images": 1000,
+      "tracks": 4119,
+      "observations": 114870,
+      "mean_reprojection_px": 1.292,
+      "track_build_retained_tracks": 15688,
+      "track_build_retained_observations": 208326,
+      "rejected_conflict_edges": 38404,
+      "elapsed_s": 154.49,
+      "images_txt_sha256": "2ef5fdb8a3bb70dec38c898d7b0b6579c7e6d4f642434d9de861f2a2783b96ed"
+    },
+    "cycle_supported": {
+      "registered_images": 1000,
+      "tracks": 3377,
+      "observations": 108523,
+      "mean_reprojection_px": 1.213,
+      "elapsed_s": 218.34,
+      "decision": "quality-positive but slower and less dense than confidence-ordered"
+    },
+    "incremental_correspondence": {
+      "registered_images": 1000,
+      "tracks": 4459,
+      "observations": 118224,
+      "mean_reprojection_px": 2.253,
+      "elapsed_s": 202.69,
+      "decision": "registration-positive but reprojection regression"
+    }
+  },
+  "tier_10000_quality_gate": {
+    "legacy_union_find": {
+      "registered_images": 199,
+      "supplied_images": 10000,
+      "tracks": 873,
+      "observations": 5184,
+      "mean_reprojection_px": 1.301,
+      "mapping_elapsed_s": 119.79643308196682
+    },
+    "confidence_ordered": {
+      "registered_images": 3664,
+      "supplied_images": 10000,
+      "registered_fraction": 0.3664,
+      "registration_gain_over_legacy": 3465,
+      "registration_ratio_over_legacy": 18.412060301507537,
+      "tracks": 21761,
+      "observations": 209661,
+      "mean_reprojection_px": 1.140,
+      "track_build_retained_tracks": 108990,
+      "track_build_retained_observations": 1192223,
+      "rejected_conflict_edges": 306798,
+      "mapping_elapsed_s": 542.88,
+      "seed_pair": [355, 5305],
+      "seed_selection": "selected by the first GT-free 16-trial run, then replayed for the refinement A/B",
+      "global_ba_max_refinements": 1,
+      "model_sha256": {
+        "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+        "images.txt": "2a07d838d0e8dd435243c9f5896280a06a909f4b352d6c3fe6e03f31da8d3849",
+        "points3D.txt": "cf03f934a677473804c7c35d99480ede96908ed9ebd7855329a8309557458050"
+      },
+      "quality_status": "large improvement, but 10k connected reconstruction remains incomplete"
+    }
+  },
+  "negative_controls": {
+    "confidence_without_followup_refinement": {
+      "registered_images": 3664,
+      "mean_reprojection_px": 5.794,
+      "decision": "rejected: post-registration BA ended without an outlier-filter follow-up"
+    },
+    "cycle_supported_10k": {
+      "status": "stopped",
+      "reason": "track construction exceeded six minutes and was already slower than the bounded confidence builder"
+    }
+  }
+}
