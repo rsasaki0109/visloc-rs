@@ -27,6 +27,38 @@ class ElectroBenchmarkTests(unittest.TestCase):
         benchmark.write_candidate_manifest(path, names, pairs)
         return path, names, pairs
 
+    def _feature_manifest(self, root: Path, names: list[str]) -> Path:
+        features = root / "features"
+        features.mkdir()
+        for name in names:
+            (features / name.replace(".png", "_features.txt")).write_text(
+                "0 0 1 2\n", encoding="utf-8"
+            )
+        path = root / "features.json"
+        benchmark.write_feature_manifest(path, benchmark.feature_manifest(features))
+        benchmark.validate_feature_manifest(path, features)
+        return path
+
+    @staticmethod
+    def _gnu_time_report(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join(
+                [
+                    "User time (seconds): 0.01",
+                    "System time (seconds): 0.00",
+                    "Maximum resident set size (kbytes): 2048",
+                    "Major (requiring I/O) page faults: 0",
+                    "Minor (reclaiming a frame) page faults: 1",
+                    "File system inputs: 0",
+                    "File system outputs: 8",
+                    "Exit status: 0",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def test_candidate_shards_are_contiguous_and_hash_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -289,6 +321,206 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("64", temporal_candidate_command)
             self.assertNotIn("--local-stem-window", temporal_candidate_command)
             self.assertNotIn("--rig-local-grouping", temporal_candidate_command)
+
+    def test_persistent_plan_binds_pending_shards_and_rejects_unsafe_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, names, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / "candidates", 2)
+            candidate_index = root / "candidates" / "index.json"
+            benchmark.prepare_match_index(candidate_index, root / "matches")
+            match_index = root / "matches" / "index.json"
+            feature_manifest = self._feature_manifest(root, names)
+
+            plan_path = benchmark.write_persistent_match_worker_plan(
+                candidate_index, match_index, feature_manifest
+            )
+            self.assertIsNotNone(plan_path)
+            assert plan_path is not None
+            parsed = benchmark.parse_persistent_match_worker_plan(plan_path)
+            validation = benchmark.validate_persistent_match_worker_plan(
+                plan_path, candidate_index, match_index, feature_manifest
+            )
+            self.assertEqual(parsed["image_names"], names)
+            self.assertEqual(
+                [shard["id"] for shard in parsed["shards"]], [0, 1, 2]
+            )
+            self.assertEqual(validation["plan_path"], str(plan_path.resolve()))
+
+            lines = plan_path.read_text(encoding="utf-8").splitlines()
+            shard_line = next(index for index, line in enumerate(lines) if line.startswith("shard "))
+            fields = lines[shard_line].split()
+            fields[2] = "../escape.txt"
+            unsafe = root / "unsafe.plan"
+            unsafe.write_text(
+                "\n".join(lines[:shard_line] + [" ".join(fields)] + lines[shard_line + 1 :])
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "relative path"):
+                benchmark.parse_persistent_match_worker_plan(unsafe)
+
+            duplicate = root / "duplicate.plan"
+            duplicate_lines = plan_path.read_text(encoding="utf-8").splitlines()
+            first = next(index for index, line in enumerate(duplicate_lines) if line.startswith("shard "))
+            second = first + 1
+            second_fields = duplicate_lines[second].split()
+            first_fields = duplicate_lines[first].split()
+            second_fields[3] = first_fields[3]
+            duplicate_lines[second] = " ".join(second_fields)
+            duplicate.write_text("\n".join(duplicate_lines) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(benchmark.ValidationError, "repeats"):
+                benchmark.parse_persistent_match_worker_plan(duplicate)
+
+            command = benchmark.build_persistent_match_command(
+                Path("/bin/visloc"),
+                features_dir=root / "features",
+                calibration_dir=root / "calibration",
+                plan=plan_path,
+            )
+            self.assertIn("--persistent-match-worker-plan", command)
+            self.assertIn("--verification-mode", command)
+            self.assertIn("full", command)
+            self.assertIn("--matcher", command)
+            self.assertIn("nn", command)
+            self.assertIn("--mapper", command)
+            self.assertIn("incremental", command)
+            self.assertNotIn("--gt", command)
+            self.assertNotIn("points3D.txt", command)
+
+    def test_persistent_completion_parser_rejects_corruption_and_duplicate_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "persistent-match.log"
+            hash_value = "a" * 64
+            line = (
+                "persistent-match-complete shard_id=0 candidate_path=candidates/a.txt "
+                "snapshot_path=matches/a.vps candidate_sha256="
+                f"{hash_value} candidate_pairs=2 pairs=1 accepted=3 "
+                "ordered_edge_fnv1a64=0123456789abcdef "
+                "unordered_edge_fnv1a64=fedcba9876543210 elapsed_s=1.25"
+            )
+            log.write_text(line + "\n", encoding="utf-8")
+            parsed = benchmark.parse_persistent_match_completions(log)
+            self.assertEqual(parsed[0]["shard_id"], 0)
+            self.assertEqual(parsed[0]["accepted"], 3)
+            self.assertEqual(parsed[0]["ordered_edge_fnv1a64"], "0123456789abcdef")
+
+            log.write_text(line + "\n" + line + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(benchmark.ValidationError, "repeats"):
+                benchmark.parse_persistent_match_completions(log)
+            log.write_text(line.replace("candidate_path=candidates/a.txt", "candidate_path=../a.txt") + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(benchmark.ValidationError, "relative path"):
+                benchmark.parse_persistent_match_completions(log)
+
+    def test_persistent_matcher_recovers_flushed_prefix_and_skips_it_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, names, _ = self._candidate(root)
+            benchmark.split_candidate_manifest(source, root / "candidates", 2)
+            candidate_index = root / "candidates" / "index.json"
+            benchmark.prepare_match_index(candidate_index, root / "matches")
+            match_index = root / "matches" / "index.json"
+            feature_manifest = self._feature_manifest(root, names)
+
+            def completion_line(shard: dict[str, object], pair_count: int) -> str:
+                return (
+                    "persistent-match-complete "
+                    f"shard_id={shard['id']} candidate_path={shard['candidate_path']} "
+                    f"snapshot_path={shard['snapshot_path']} "
+                    f"candidate_sha256={shard['candidate_sha256']} "
+                    f"candidate_pairs={pair_count} pairs=1 accepted=1 "
+                    "ordered_edge_fnv1a64=0123456789abcdef "
+                    "unordered_edge_fnv1a64=fedcba9876543210 elapsed_s=1.25"
+                )
+
+            calls: list[list[str]] = []
+
+            def killed(command, log_path, *, timing_path=None, **_kwargs):
+                calls.append(command)
+                plan = benchmark.parse_persistent_match_worker_plan(
+                    Path(command[command.index("--persistent-match-worker-plan") + 1])
+                )
+                shard = plan["shards"][0]
+                snapshot = root / shard["snapshot_path"]
+                snapshot.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.write_bytes(b"snapshot-0")
+                log_path.write_text(
+                    "persistent-match-plan "
+                    f"candidate_index_sha256={plan['candidate_index_sha256']} "
+                    f"feature_manifest_sha256={plan['feature_manifest_sha256']}\n"
+                    + completion_line(shard, 2)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                raise benchmark.ValidationError("injected SIGKILL")
+
+            with mock.patch.object(benchmark, "_run_command", side_effect=killed):
+                with self.assertRaisesRegex(benchmark.ValidationError, "injected SIGKILL"):
+                    benchmark.run_persistent_matcher(
+                        candidate_index,
+                        match_index,
+                        binary=Path("/bin/visloc"),
+                        features_dir=root / "features",
+                        calibration_dir=root,
+                        feature_manifest_path=feature_manifest,
+                    )
+            partial = json.loads(match_index.read_text(encoding="utf-8"))
+            self.assertEqual([entry["status"] for entry in partial["shards"]], ["complete", "failed", "failed"])
+            first_snapshot = root / "matches" / partial["shards"][0]["snapshot_path"]
+            first_bytes = first_snapshot.read_bytes()
+
+            def completed(command, log_path, *, timing_path=None, **_kwargs):
+                calls.append(command)
+                plan = benchmark.parse_persistent_match_worker_plan(
+                    Path(command[command.index("--persistent-match-worker-plan") + 1])
+                )
+                records = [
+                    "persistent-match-plan "
+                    f"candidate_index_sha256={plan['candidate_index_sha256']} "
+                    f"feature_manifest_sha256={plan['feature_manifest_sha256']}"
+                ]
+                for shard in plan["shards"]:
+                    snapshot = root / shard["snapshot_path"]
+                    snapshot.parent.mkdir(parents=True, exist_ok=True)
+                    snapshot.write_bytes(f"snapshot-{shard['id']}".encode())
+                    records.append(completion_line(shard, 2 if shard["id"] < 2 else 1))
+                log_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+                assert timing_path is not None
+                self._gnu_time_report(timing_path)
+                return 2.5
+
+            with mock.patch.object(benchmark, "_run_command", side_effect=completed):
+                result = benchmark.run_persistent_matcher(
+                    candidate_index,
+                    match_index,
+                    binary=Path("/bin/visloc"),
+                    features_dir=root / "features",
+                    calibration_dir=root,
+                    feature_manifest_path=feature_manifest,
+                )
+            self.assertEqual(len(calls), 2)
+            resumed_plan = benchmark.parse_persistent_match_worker_plan(
+                Path(calls[1][calls[1].index("--persistent-match-worker-plan") + 1])
+            )
+            self.assertEqual([shard["id"] for shard in resumed_plan["shards"]], [1, 2])
+            self.assertEqual(first_snapshot.read_bytes(), first_bytes)
+            self.assertEqual(result["persistent_worker"]["shards"], 2)
+            complete = json.loads(match_index.read_text(encoding="utf-8"))
+            self.assertEqual([entry["status"] for entry in complete["shards"]], ["complete"] * 3)
+
+            with mock.patch.object(benchmark, "_run_command", side_effect=AssertionError("rerun")):
+                benchmark.run_persistent_matcher(
+                    candidate_index,
+                    match_index,
+                    binary=Path("/bin/visloc"),
+                    features_dir=root / "features",
+                    calibration_dir=root,
+                    feature_manifest_path=feature_manifest,
+                )
+            first_snapshot.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(benchmark.ValidationError, "hash mismatch"):
+                benchmark.validate_match_index(match_index, candidate_index, require_complete=True)
 
     def test_temporal_candidate_policy_is_hash_bound_in_shard_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

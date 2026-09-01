@@ -1,0 +1,157 @@
+{
+  "schema": "visloc_electro_persistent_matcher_audit_v1",
+  "recorded_at": "2026-09-01",
+  "scene": "electro",
+  "images": 1200,
+  "candidate_policy": "temporal-pyramid-v1",
+  "candidate_pairs": 12000,
+  "candidate_shards": 375,
+  "pairs_per_shard": 32,
+  "verified_pairs": 11625,
+  "accepted_correspondences": 7475384,
+  "execution": {
+    "implementation_parent_commit": "29068b75653bfcfff2b00432b320a0d959e692b8",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "unordered_sfm_demo_sha256": "5adb56811bc84525e2570df57614002ac9dbea84950266aabdbe155fd9e3970d",
+    "merge_helper_sha256": "8277f0b8441ef9f46a645d3fa7f350ab88dfbffe258e07e0e23ae79c22fe8234",
+    "cpu_affinity": "taskset -c 0-7",
+    "rayon_num_threads": 4,
+    "malloc_arena_max": 1,
+    "feature_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/features_vlfeat2048",
+    "image_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/images",
+    "calibration_dir": "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/staging1200/calibration",
+    "feature_manifest_sha256": "d6ddbde3ae2d7743baf8b99f1ed748966f46c3fa716157212446aa238ed24cf9",
+    "candidate_index_sha256": "131b1ccd48f75c52f6fdf7285d29f825d52a3a83225b89e6eb34a45ec698c5c1",
+    "worker_plan_sha256": "3fff61e0a7277056bd1527bf7015fa1562f956ad28c8b3413f999aa6606f1692"
+  },
+  "implementation": {
+    "mode": "persistent-v1",
+    "default_enabled": false,
+    "feature_bank_loads": 1,
+    "matcher": "NN Lowe 0.8 plus cross-check",
+    "verification": "full",
+    "cross_check_dot_products": "one GEMM, one column-major bidirectional top-2 scan",
+    "ransac_pruning": "strict-winner upper-bound exit; sampling and winning model unchanged",
+    "publication": "per-shard atomic snapshots followed by owned bounded-memory merge",
+    "resume": "hash-valid complete shards only"
+  },
+  "runs": [
+    {
+      "worker_wall_seconds": 439.0054540539859,
+      "shard_elapsed_sum_seconds": 378.041782434,
+      "worker_peak_rss_kib": 1981752,
+      "merge_wall_seconds": 3.2920387759804726,
+      "merge_peak_rss_kib": 1632432,
+      "merged_snapshot_sha256": "55b2c1d9ec30df502e14d8f2de44b80042742428df4a62efbd903cd2850051f3"
+    },
+    {
+      "worker_wall_seconds": 399.69246310496237,
+      "shard_elapsed_sum_seconds": 344.967814169,
+      "worker_peak_rss_kib": 1981352,
+      "merge_wall_seconds": 3.5714121549972333,
+      "merge_peak_rss_kib": 1632656,
+      "merged_snapshot_sha256": "55b2c1d9ec30df502e14d8f2de44b80042742428df4a62efbd903cd2850051f3"
+    },
+    {
+      "worker_wall_seconds": 442.61989656003425,
+      "shard_elapsed_sum_seconds": 381.481673868,
+      "worker_peak_rss_kib": 1969708,
+      "merge_wall_seconds": 3.6209028249722905,
+      "merge_peak_rss_kib": 1632484,
+      "merged_snapshot_sha256": "55b2c1d9ec30df502e14d8f2de44b80042742428df4a62efbd903cd2850051f3"
+    }
+  ],
+  "median": {
+    "worker_wall_seconds": 439.0054540539859,
+    "shard_elapsed_sum_seconds": 378.041782434,
+    "worker_peak_rss_kib": 1981352,
+    "worker_peak_rss_gib": 1.8895645141601562,
+    "merge_wall_seconds": 3.5714121549972333,
+    "merge_peak_rss_kib": 1632484,
+    "merge_peak_rss_gib": 1.5568580627441406
+  },
+  "comparison": {
+    "prior_visloc_matching_seconds": 2085.89,
+    "speedup_vs_prior_visloc": 4.751402068409568,
+    "colmap_matching_seconds": 471.37,
+    "colmap_matching_peak_rss_kib": 270248,
+    "speedup_vs_colmap": 1.073722423371155,
+    "wall_reduction_vs_colmap_percent": 6.865670152927416,
+    "worker_rss_ratio_vs_colmap": 7.331607265733327,
+    "pre_owned_merge_peak_rss_kib": 2102056,
+    "owned_merge_peak_rss_reduction_percent": 22.33869735221173
+  },
+  "end_to_end": {
+    "feature_extraction": {
+      "execution": "eight fixed 150-image workers on CPU8",
+      "command_flags": [
+        "--sift-max-keypoints=2048",
+        "--sift-contrast-threshold=0.0066666667",
+        "--sift-vlfeat-compatible-detector",
+        "--sift-vlfeat-compatible-descriptor",
+        "--sift-vlfeat-bilinear-orientations",
+        "--sift-vlfeat-compatible-output-order",
+        "--sift-colmap-compatible-grayscale",
+        "--sift-stream-export",
+        "--export-features-only"
+      ],
+      "wall_seconds": 721.42,
+      "maximum_single_worker_peak_rss_kib": 200388,
+      "feature_files": 1200,
+      "locus_files": 1200,
+      "output_bytes": 4032291915,
+      "feature_locus_sha256_list": "00d54f69ca7fd89a3e8ea016ce3d2c94eb6988e81b7d4048814373b0432cd9c6",
+      "matches_frozen_bank_byte_for_byte": true
+    },
+    "feature_manifest_validation_seconds": 12.779213440022431,
+    "candidate_generation_seconds": 134.90865257498808,
+    "candidate_sharding_seconds": 0.895997753017582,
+    "candidate_generation_peak_rss_kib": 1907036,
+    "candidate_manifest_sha256": "1b5cece6bddd718cf8ca3dbc167654b0cbfeaf03f482d9783a5b9edf155c1186",
+    "candidate_manifest_matches_frozen_control": true,
+    "persistent_matching_median_seconds": 439.0054540539859,
+    "owned_merge_median_seconds": 3.5714121549972333,
+    "memory_bounded_mapper_median_seconds": 336.895,
+    "visloc_conservative_total_seconds": 1649.4757299770113,
+    "colmap_feature_extraction_seconds": 304.12,
+    "colmap_matching_seconds": 471.37,
+    "colmap_mapper_seconds": 4929.56,
+    "colmap_total_seconds": 5705.05,
+    "speedup_vs_colmap": 3.4587050274935,
+    "accounting_note": "visloc total conservatively includes its 12.78 s manifest validation and 135.80 s candidate generation/sharding; COLMAP consumes the already frozen identical candidate manifest",
+    "quality": {
+      "registered": 1200,
+      "rmse_m": 0.03501132650718982,
+      "p95_m": 0.07709687017668192,
+      "model_byte_identical_to_memory_bounded_champion": true
+    },
+    "passed": true,
+    "external_artifacts": [
+      "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/m4_feature_extract_cpu8",
+      "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/m4_end_to_end_prepare_cpu8"
+    ]
+  },
+  "integrity": {
+    "canonical_merged_snapshot_sha256": "55b2c1d9ec30df502e14d8f2de44b80042742428df4a62efbd903cd2850051f3",
+    "legacy_path_bound_snapshot_sha256": "93bf51451866cc066718b827d0ecec8f498ffc23842bd2c1e3902fd7a2697a86",
+    "legacy_migration": "pair records are identical; merge canonicalizes the old path-containing effective config to the verifier config",
+    "repeat_snapshot_byte_identical": true,
+    "single_shard_old_new_sha256": "dd483410581c977ab86c3c60668d271cb6e5b80346c14c368eff95f713cb0367",
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "gate": {
+    "maximum_median_matching_seconds": 471.37,
+    "maximum_peak_rss_kib": 2097152,
+    "snapshot_must_match_canonical_oracle": true,
+    "matching_parity_passed": true,
+    "end_to_end_faster_than_colmap": true,
+    "memory_passed": true,
+    "integrity_passed": true
+  },
+  "external_artifacts": [
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/persistent_worker_b32_single_scan_run1",
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/persistent_worker_b32_single_scan_run2",
+    "/home/sasaki/datasets/eth3d/large_scale/electro/full1200_20260831/runner_full1200_temporal_b12000/persistent_worker_b32_single_scan_run3"
+  ]
+}

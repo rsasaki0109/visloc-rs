@@ -20,8 +20,10 @@ run with the same deterministic 12,000-pair `temporal-pyramid-v1` candidate
 manifest.
 
 The merged verified-pair snapshot contains 11,625 verified pairs and
-7,475,384 correspondences; its SHA-256 is
-`93bf51451866cc066718b827d0ecec8f498ffc23842bd2c1e3902fd7a2697a86`.
+7,475,384 correspondences; its path-independent canonical SHA-256 is
+`55b2c1d9ec30df502e14d8f2de44b80042742428df4a62efbd903cd2850051f3`.
+The former `93bf...a86` artifact has identical pair records but embedded an
+absolute path in its diagnostic effective config.
 
 | phase / metric | visloc-rs M2 champion | COLMAP 3.9.1 CPU | gap |
 | --- | ---: | ---: | ---: |
@@ -32,6 +34,13 @@ The merged verified-pair snapshot contains 11,625 verified pairs and
 | registered images | 1200 / 1200 | 1200 / 1200 | parity |
 | centre RMSE after Sim(3) | 0.03224 m | 0.04679 m | visloc 31.1% lower |
 | median / p95 | 0.01719 / 0.07150 m | 0.03156 / 0.09681 m | visloc lower |
+
+The completed M4 CPU8 pipeline now measures 721.42 s feature extraction,
+148.58 s manifest validation plus candidate generation/sharding, 439.01 s
+persistent matching, 3.57 s owned merge, and 336.90 s memory-bounded mapping:
+1,649.48 s conservatively charged end to end versus COLMAP's 5,705.05 s.
+Both regenerate the same frozen candidate manifest; visloc's feature/locus
+bank is byte-identical to the quality champion.
 
 The frozen cap64 baseline and its pre-memory-optimization control are
 byte-identical. The memory work reduced peak RSS from 8,485,216 KiB to
@@ -281,6 +290,20 @@ Work proceeds in this order, one PR and A/B per item:
   `<COLMAP` mapper result is retained as a hard non-regression ceiling.
 
 ## 7. Milestone 4 — matching and end-to-end speed
+
+**Status (2026-09-01): complete.** A versioned default-off persistent worker
+loads the descriptor bank once, atomically publishes 375 ordered shards, and
+resumes only hash-valid completions. One GEMM plus a single column-major
+bidirectional top-two scan preserves cross-check bytes; strict-winner RANSAC
+upper-bound exits preserve the selected hypotheses. Three complete runs
+reproduced the canonical snapshot SHA exactly. Matching wall was 439.01 s
+median (1.074x faster than COLMAP's 471.37 s) at 1.89 GiB median peak RSS.
+The owned merge reduced peak RSS from 2,102,056 to 1,632,484 KiB without
+changing output. A fresh CPU8 extraction regenerated all 2,400 feature/locus
+files byte for byte, and the conservative end-to-end total is 1,649.48 s,
+3.46x faster than COLMAP while retaining 1200/1200 and 0.03501 m RMSE.
+Evidence: [`persistent-matcher-audit.json`](../benchmarks/electro/persistent-matcher-audit.json)
+and [`electro_persistent_matcher_audit.md`](electro_persistent_matcher_audit.md).
 
 **Purpose:** remove the current 24-fold feature-bank reload pattern and beat
 COLMAP on the exact same pair workload.

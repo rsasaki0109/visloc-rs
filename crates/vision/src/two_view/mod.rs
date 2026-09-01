@@ -323,7 +323,15 @@ where
                 continue;
             };
 
-            let inliers = score_inliers(&candidate, correspondences, camera, threshold_sq);
+            let Some(inliers) = score_inliers_if_competitive(
+                &candidate,
+                correspondences,
+                camera,
+                threshold_sq,
+                best_inliers.len(),
+            ) else {
+                continue;
+            };
             if inliers.len() > best_inliers.len() {
                 best_inliers = inliers;
                 best_essential = Some(candidate);
@@ -355,6 +363,31 @@ where
             mean_sampson_error: mean,
         })
     }
+}
+
+/// Scores a RANSAC hypothesis only while it can still strictly beat the
+/// incumbent. The loop's winner update uses `>`, so equality cannot change
+/// the selected model and the unvisited suffix is safe to skip.
+fn score_inliers_if_competitive(
+    essential: &Matrix3<f64>,
+    correspondences: &[TwoViewCorrespondence],
+    camera: &Camera,
+    threshold_sq: f64,
+    incumbent_count: usize,
+) -> Option<Vec<usize>> {
+    let mut inliers = Vec::new();
+    for (i, correspondence) in correspondences.iter().enumerate() {
+        if sampson_distance_squared(essential, correspondence, camera)
+            .is_some_and(|distance_sq| distance_sq <= threshold_sq)
+        {
+            inliers.push(i);
+        }
+        let remaining = correspondences.len() - i - 1;
+        if inliers.len() + remaining <= incumbent_count {
+            return None;
+        }
+    }
+    Some(inliers)
 }
 
 /// Gates applied when selecting among the four essential-matrix (R, t)

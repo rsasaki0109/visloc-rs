@@ -170,7 +170,14 @@ pub fn fundamental_ransac(
         let Some(candidate) = estimate_fundamental_dlt(&sample) else {
             continue;
         };
-        let inliers = score_fundamental_inliers(&candidate, correspondences, threshold_sq);
+        let Some(inliers) = score_fundamental_inliers_if_competitive(
+            &candidate,
+            correspondences,
+            threshold_sq,
+            best_inliers.len(),
+        ) else {
+            continue;
+        };
         if inliers.len() > best_inliers.len() {
             best_inliers = inliers;
             best_fundamental = Some(candidate);
@@ -209,4 +216,23 @@ fn score_fundamental_inliers(
         .filter(|(_, c)| fundamental_squared_sampson_error(fundamental, c) <= threshold_sq)
         .map(|(i, _)| i)
         .collect()
+}
+
+fn score_fundamental_inliers_if_competitive(
+    fundamental: &Matrix3<f64>,
+    correspondences: &[TwoViewCorrespondence],
+    threshold_sq: f64,
+    incumbent_count: usize,
+) -> Option<Vec<usize>> {
+    let mut inliers = Vec::new();
+    for (i, correspondence) in correspondences.iter().enumerate() {
+        if fundamental_squared_sampson_error(fundamental, correspondence) <= threshold_sq {
+            inliers.push(i);
+        }
+        let remaining = correspondences.len() - i - 1;
+        if inliers.len() + remaining <= incumbent_count {
+            return None;
+        }
+    }
+    Some(inliers)
 }

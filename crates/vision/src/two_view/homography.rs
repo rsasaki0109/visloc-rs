@@ -151,7 +151,14 @@ pub fn homography_ransac(
         let Some(candidate) = estimate_homography_dlt(&sample) else {
             continue;
         };
-        let inliers = score_homography_inliers(&candidate, correspondences, threshold_sq);
+        let Some(inliers) = score_homography_inliers_if_competitive(
+            &candidate,
+            correspondences,
+            threshold_sq,
+            best_inliers.len(),
+        ) else {
+            continue;
+        };
         if inliers.len() > best_inliers.len() {
             best_inliers = inliers;
             best_homography = Some(candidate);
@@ -192,6 +199,25 @@ fn score_homography_inliers(
             Some(i)
         })
         .collect()
+}
+
+fn score_homography_inliers_if_competitive(
+    homography: &Matrix3<f64>,
+    correspondences: &[TwoViewCorrespondence],
+    threshold_sq: f64,
+    incumbent_count: usize,
+) -> Option<Vec<usize>> {
+    let mut inliers = Vec::new();
+    for (i, correspondence) in correspondences.iter().enumerate() {
+        if homography_squared_error(homography, correspondence).is_some_and(|e| e <= threshold_sq) {
+            inliers.push(i);
+        }
+        let remaining = correspondences.len() - i - 1;
+        if inliers.len() + remaining <= incumbent_count {
+            return None;
+        }
+    }
+    Some(inliers)
 }
 
 /// One candidate `(rotation, translation, plane_normal)` motion from

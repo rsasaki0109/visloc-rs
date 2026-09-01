@@ -252,6 +252,12 @@
 //! the exact descriptor-bound manifest hash.  It cannot be combined with
 //! coordinate overrides, feature/snapshot export, canonical row ordering,
 //! orientation-locus canonicalization, or model-score diagnostics.
+//! `--persistent-match-worker-plan PLAN` is the default-off M4 worker mode:
+//! it consumes a versioned, image-order-bound candidate/shard plan, loads the
+//! file feature bank and NN matcher once, and atomically publishes one
+//! lossless verified-pair snapshot per shard.  It is restricted to
+//! `files` + `nn` + `full` + plain `incremental`; the Python electro runner's
+//! `--persistent-matcher` option generates and validates this plan.
 //!
 //! For machine-readable NN diagnostics (and an early exit without
 //! reconstruction), add `--diagnose-pairs-csv /tmp/pairs.csv`; it uses the
@@ -432,7 +438,7 @@ use std::env;
 #[cfg(feature = "image-io")]
 use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
@@ -469,15 +475,30 @@ use visloc_rs::{
     reconstruct_global_sfm, reconstruct_global_sfm_with_priors, relative_pose_from_essential,
     rematch_essential_admission_ok, triangulate_two_view_left_frame,
     write_colmap_reconstruction_for_3dgs, write_colmap_reconstruction_for_3dgs_with_cameras,
-    BaConfig, BruteForceMatcher, Camera, CameraModel, CrossCheckMatcher, DescriptorMatch,
-    FeatureSet, GlobalReconstructionTuning, IncrementalSfmConfig, LinearSolver, Matcher,
-    NextImagePolicy, PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
+    BaConfig, BruteForceMatcher, Camera, CameraModel, DescriptorMatch, FeatureSet,
+    GlobalReconstructionTuning, IncrementalSfmConfig, LinearSolver, Matcher, NextImagePolicy,
+    PairwiseMatches, PerImageCameras, Pose, RobustKernel, TrackSource, SE3,
 };
 
 use visloc_rs::slam::incremental_sfm::log_process_memory;
 use visloc_rs::verified_pair_snapshot::{
     self, PairRecord as SnapshotPairRecord, Snapshot as VerifiedPairSnapshot,
 };
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_process_allocator() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    // SAFETY: `malloc_trim(0)` has no pointer arguments and only asks glibc
+    // to return currently unused allocator pages to the operating system.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_process_allocator() {}
 
 /// A COLMAP-export landmark: world position + `(image, keypoint, pixel)` track.
 type ExportLandmark = (Point3<f64>, Vec<(usize, usize, Point2<f64>)>);
@@ -2037,6 +2058,11 @@ struct Args {
     /// This is the opt-in match-shard worker mode and requires
     /// `export_verified_pairs_snapshot`.
     export_verified_pairs_only: bool,
+    /// Run one persistent, plan-driven match worker.  The worker loads the
+    /// file-backed feature bank and matcher once, then writes one atomic
+    /// snapshot per plan shard.  This is default-off and intentionally
+    /// restricted to the frozen NN/full/plain incremental match path.
+    persistent_match_worker_plan: Option<PathBuf>,
     /// Diagnostic-only coordinate replacement after a validated snapshot
     /// import.  The override directory must have the same image names, row
     /// counts, and descriptor bit patterns as the snapshot's base features;
@@ -3563,6 +3589,241 @@ fn parse_candidate_manifest_with_metadata(
     Ok((pairs, metadata))
 }
 
+const PERSISTENT_MATCH_WORKER_PLAN_MAGIC: &str = "visloc_match_worker_plan_v1";
+
+#[derive(Debug, Clone)]
+struct PersistentMatchWorkerShard {
+    id: usize,
+    candidate_path: PathBuf,
+    snapshot_path: PathBuf,
+    candidate_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct PersistentMatchWorkerPlan {
+    root: PathBuf,
+    image_names: Vec<String>,
+    pair_count: usize,
+    candidate_index_sha256: String,
+    feature_manifest_sha256: String,
+    shards: Vec<PersistentMatchWorkerShard>,
+}
+
+/// Reject plan paths that could escape the plan directory.  The external
+/// runner writes plans at the artifact root, so both candidate and snapshot
+/// paths are intentionally simple POSIX-style relative paths.
+fn persistent_plan_relative_path(raw: &str, label: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw);
+    if raw.is_empty()
+        || raw.contains('\\')
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(format!(
+            "persistent match worker {label} must be a simple relative path: {raw:?}"
+        ));
+    }
+    Ok(path)
+}
+
+/// Parse the dependency-free, versioned plan consumed by the persistent match
+/// worker.  The candidate files remain the source of truth for pair metadata;
+/// this plan only binds image order, total coverage, and each input/output
+/// path.  Python performs the stronger SHA-256/index validation before launch.
+fn parse_persistent_match_worker_plan(path: &Path) -> Result<PersistentMatchWorkerPlan, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "cannot read persistent match worker plan {}: {error}",
+            path.display()
+        )
+    })?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let mut cursor = 0usize;
+    let next = |cursor: &mut usize, label: &str| -> Result<&str, String> {
+        let line = lines.get(*cursor).copied().ok_or_else(|| {
+            format!(
+                "persistent match worker plan {} is truncated while reading {label}",
+                path.display()
+            )
+        })?;
+        *cursor += 1;
+        Ok(line)
+    };
+    if next(&mut cursor, "header")? != PERSISTENT_MATCH_WORKER_PLAN_MAGIC {
+        return Err(format!(
+            "persistent match worker plan {} has unsupported header (expected {PERSISTENT_MATCH_WORKER_PLAN_MAGIC})",
+            path.display()
+        ));
+    }
+    let parse_count = |line: &str, kind: &str| -> Result<usize, String> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 2 || fields[0] != kind {
+            return Err(format!(
+                "persistent match worker plan {} requires `{kind} N`",
+                path.display()
+            ));
+        }
+        fields[1].parse::<usize>().map_err(|error| {
+            format!(
+                "persistent match worker plan {} {kind} count is not numeric: {error}",
+                path.display()
+            )
+        })
+    };
+    let image_count = parse_count(next(&mut cursor, "image count")?, "images")?;
+    if image_count < 2 {
+        return Err(format!(
+            "persistent match worker plan {} needs at least two images",
+            path.display()
+        ));
+    }
+    let mut image_names = Vec::with_capacity(image_count);
+    for expected_index in 0..image_count {
+        let line = next(&mut cursor, "image entry")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 3 || fields[0] != "image" {
+            return Err(format!(
+                "persistent match worker plan {} image entry must be image INDEX NAME",
+                path.display()
+            ));
+        }
+        let index = fields[1].parse::<usize>().map_err(|error| {
+            format!(
+                "persistent match worker plan {} image index is not numeric: {error}",
+                path.display()
+            )
+        })?;
+        if index != expected_index || fields[2].is_empty() {
+            return Err(format!(
+                "persistent match worker plan {} image entry {expected_index} is not ordered",
+                path.display()
+            ));
+        }
+        image_names.push(fields[2].to_owned());
+    }
+    let parse_hash = |line: &str, kind: &str| -> Result<String, String> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let value = fields.get(1).copied().unwrap_or_default();
+        if fields.len() != 2
+            || fields[0] != kind
+            || value.len() != 64
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "persistent match worker plan {} requires `{kind} SHA256`",
+                path.display()
+            ));
+        }
+        Ok(value.to_ascii_lowercase())
+    };
+    let candidate_index_sha256 = parse_hash(
+        next(&mut cursor, "candidate index hash")?,
+        "candidate_index_sha256",
+    )?;
+    let feature_manifest_sha256 = parse_hash(
+        next(&mut cursor, "feature manifest hash")?,
+        "feature_manifest_sha256",
+    )?;
+    let pair_count = parse_count(next(&mut cursor, "pair count")?, "pairs")?;
+    if pair_count == 0 {
+        return Err(format!(
+            "persistent match worker plan {} must contain at least one pair",
+            path.display()
+        ));
+    }
+    let shard_count = parse_count(next(&mut cursor, "shard count")?, "shards")?;
+    if shard_count == 0 {
+        return Err(format!(
+            "persistent match worker plan {} must contain at least one shard",
+            path.display()
+        ));
+    }
+    let mut shards = Vec::with_capacity(shard_count);
+    let mut all_paths = HashSet::with_capacity(shard_count * 2);
+    let mut previous_id = None;
+    for _shard_index in 0..shard_count {
+        let line = next(&mut cursor, "shard entry")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 5 || fields[0] != "shard" {
+            return Err(format!(
+                "persistent match worker plan {} shard entry must be shard ID CANDIDATE SNAPSHOT CANDIDATE_SHA256",
+                path.display()
+            ));
+        }
+        let id = fields[1].parse::<usize>().map_err(|error| {
+            format!(
+                "persistent match worker plan {} shard id is not numeric: {error}",
+                path.display()
+            )
+        })?;
+        if previous_id.is_some_and(|previous| id <= previous) {
+            return Err(format!(
+                "persistent match worker plan {} shard IDs must be strictly increasing",
+                path.display()
+            ));
+        }
+        previous_id = Some(id);
+        let candidate_path =
+            persistent_plan_relative_path(fields[2], &format!("shard {id} candidate path"))?;
+        let snapshot_path =
+            persistent_plan_relative_path(fields[3], &format!("shard {id} snapshot path"))?;
+        let candidate_sha256 = parse_hash(
+            &format!("candidate_sha256 {}", fields[4]),
+            "candidate_sha256",
+        )?;
+        if candidate_path == snapshot_path {
+            return Err(format!(
+                "persistent match worker plan {} shard {id} reuses one path for candidate and snapshot",
+                path.display()
+            ));
+        }
+        if !all_paths.insert(candidate_path.clone()) {
+            return Err(format!(
+                "persistent match worker plan {} repeats candidate or snapshot path {}",
+                path.display(),
+                candidate_path.display()
+            ));
+        }
+        if !all_paths.insert(snapshot_path.clone()) {
+            return Err(format!(
+                "persistent match worker plan {} repeats candidate or snapshot path {}",
+                path.display(),
+                snapshot_path.display()
+            ));
+        }
+        shards.push(PersistentMatchWorkerShard {
+            id,
+            candidate_path,
+            snapshot_path,
+            candidate_sha256,
+        });
+    }
+    if cursor != lines.len() {
+        return Err(format!(
+            "persistent match worker plan {} has unexpected trailing data",
+            path.display()
+        ));
+    }
+    let root = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(PersistentMatchWorkerPlan {
+        root,
+        image_names,
+        pair_count,
+        candidate_index_sha256,
+        feature_manifest_sha256,
+        shards,
+    })
+}
+
 /// Write a candidate manifest through a same-directory temporary file and
 /// rename.  This keeps an interrupted cheap retrieval pass from leaving a
 /// file that a later benchmark could mistake for a complete schedule.
@@ -3916,6 +4177,7 @@ where
     let mut import_verified_pairs_snapshot: Option<PathBuf> = None;
     let mut snapshot_keypoints_only = false;
     let mut export_verified_pairs_only = false;
+    let mut persistent_match_worker_plan: Option<PathBuf> = None;
     let mut candidate_manifest: Option<PathBuf> = None;
     let mut export_candidate_manifest: Option<PathBuf> = None;
     let mut snapshot_coordinate_override_dir: Option<PathBuf> = None;
@@ -4637,6 +4899,17 @@ where
             }
             "--snapshot-keypoints-only" => snapshot_keypoints_only = true,
             "--export-verified-pairs-only" => export_verified_pairs_only = true,
+            "--persistent-match-worker-plan" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--persistent-match-worker-plan requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--persistent-match-worker-plan requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                persistent_match_worker_plan = Some(PathBuf::from(raw));
+            }
             "--candidate-manifest" => {
                 let raw = a
                     .get(i + 1)
@@ -5241,7 +5514,7 @@ where
         None,
     )?;
 
-    Ok(Args {
+    let parsed = Args {
         feature_extractor,
         features_dir: features_dir.unwrap_or_default(),
         hybrid_filter_priors,
@@ -5444,13 +5717,268 @@ where
         import_verified_pairs_snapshot,
         snapshot_keypoints_only,
         export_verified_pairs_only,
+        persistent_match_worker_plan,
         snapshot_coordinate_override_dir,
         diagnose_ba_oracle_poses_file,
         diagnose_fixed_rotation_ba,
         diagnose_model_score_file,
         initial_poses_file,
         diagnose_colmap_track_membership,
-    })
+    };
+    validate_persistent_match_worker_args(&parsed)?;
+    Ok(parsed)
+}
+
+/// Keep the plan-driven worker as a narrow, reproducible matching path.  The
+/// worker exits before mapper construction, but accepting mapper/diagnostic
+/// switches here would make a typo look like a successful persistent A/B.
+fn validate_persistent_match_worker_args(args: &Args) -> Result<(), String> {
+    if args.persistent_match_worker_plan.is_none() {
+        return Ok(());
+    }
+    if args.feature_extractor != FeatureExtractorKind::Files {
+        return Err(
+            "--persistent-match-worker-plan currently requires --feature-extractor files".into(),
+        );
+    }
+    if args.input_colmap_calibration.is_none() {
+        return Err(
+            "--persistent-match-worker-plan requires --input-colmap-calibration for the frozen per-image camera contract".into(),
+        );
+    }
+    if args.mapper != MapperKind::Incremental || args.colmap_style {
+        return Err(
+            "--persistent-match-worker-plan currently requires the plain incremental mapper (remove --mapper global|hybrid and --colmap-style)".into(),
+        );
+    }
+    if args.matcher != MatcherKind::Nn {
+        return Err("--persistent-match-worker-plan currently requires --matcher nn".into());
+    }
+    if args.verification_mode != VerificationMode::Full {
+        return Err(
+            "--persistent-match-worker-plan currently requires --verification-mode full".into(),
+        );
+    }
+    if args.persistent_match_worker_plan.is_some()
+        && (args.candidate_manifest.is_some()
+            || args.export_candidate_manifest.is_some()
+            || args.exhaustive
+            || args.pair_stem_window.is_some()
+            || args.local_stem_window.is_some()
+            || args.rig_local_grouping
+            || args.candidate_budget.is_some()
+            || args.pair_source != PairSource::Vlad
+            || args.retrieval_topk != 12
+            || args.vocab_size != 64
+            || args.vocab_tree_branching != 10
+            || args.vocab_tree_depth != 3
+            || args.vocab_tree_num_images != 100)
+    {
+        return Err(
+            "--persistent-match-worker-plan owns the candidate shard schedule; remove candidate generation/filter flags".into(),
+        );
+    }
+    if args.export_verified_pairs_snapshot.is_some()
+        || args.export_verified_pairs_only
+        || args.import_verified_pairs_file.is_some()
+        || args.import_verified_pairs_snapshot.is_some()
+        || args.snapshot_keypoints_only
+        || args.snapshot_coordinate_override_dir.is_some()
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with snapshot/raw-pair import or export modes".into(),
+        );
+    }
+    if args.import_matches_file.is_some() || args.import_matches_supplement_file.is_some() {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with raw match imports".into(),
+        );
+    }
+    if args.export_features_dir.is_some()
+        || args.export_features_only
+        || args.sift_stream_export
+        || args.sift_stream_resume
+        || args.incremental_correspondence_triangulation
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with feature export or alternate incremental modes".into(),
+        );
+    }
+    if args.guided_matching
+        || args.colmap_guided_matching
+        || args.multiple_models
+        || args.min_e_f_inlier_ratio.is_some()
+        || args.calibrated_prefer_essential
+        || args.refine_uncalibrated_f_to_essential
+        || args.strict_uncalibrated_f_to_essential
+        || args.calibrated_essential_primary
+        || args.force_essential_matches
+        || args.force_essential_uncalibrated_only
+        || args.prefer_essential_inliers
+        || args.prefer_essential_free_endpoints
+        || !args.prefer_essential_stems.is_empty()
+        || args.prefer_essential_stem_clique
+        || !args.prefer_essential_pairs.is_empty()
+        || args.require_essential_selected_edges
+        || !args.require_essential_stems.is_empty()
+        || args.require_essential_min_e_inliers != 0
+        || args.essential_edge_weight_boost != 1.0
+    {
+        return Err(
+            "--persistent-match-worker-plan currently supports only the frozen simple NN/full verifier settings".into(),
+        );
+    }
+    if args.sift_append_descriptor_magnification.is_some()
+        || args.sift_extra_matches_append_only
+        || args.canonical_feature_order
+        || args.orientation_locus_canonicalization
+        || args.union_traversal_order != UnionTraversalOrder::Original
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with alternate descriptor, feature-order, or union-traversal modes".into(),
+        );
+    }
+    if args.rescue_bridging
+        || args.rescue_cross_check
+        || args.rescue_match_ratio != 0.95
+        || args.rescue_min_matches != 15
+        || args.rescue_max_candidates != 200
+        || args.sequence_relative_pose_fallback
+        || args.sequence_fallback_after_post
+        || args.sequence_constant_velocity_scale
+        || args.sequence_relaxed_constant_velocity_scale
+        || args.sequence_fallback_carry_scale
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with rematch, rescue, or sequence-fallback modes".into(),
+        );
+    }
+    if !args.rematch_stems.is_empty()
+        || args.rematch_ratio != 0.9
+        || !args.rematch_cross_check
+        || args.rematch_guided
+        || args.rematch_free_vs_priors
+        || args.rematch_prefer_min_e_inliers != 0
+        || !args.rematch_prefer_strong_stems.is_empty()
+        || args.rematch_tracks_use_essential
+        || args.rematch_min_chirality_margin != 0.0
+        || args.rematch_prior_anchor
+        || args.rematch_min_e_f_inlier_ratio.is_some()
+        || args.rematch_calibrated_prefer_essential
+        || args.rematch_prior_ray_guided
+        || args.rematch_prior_ray_min_rays != 2
+        || args.rematch_prior_ray_min_e_inliers != 25
+        || args.rematch_anchor_min_e_inliers != 25
+        || args.rematch_prefer_strong_min_e != 50
+        || args.rematch_verification_mode.is_some()
+        || args.rematch_pose_guided_after_global
+        || args.rematch_pose_guided_gt.is_some()
+        || args.rematch_max_gt_bearing_deg != 0.0
+        || args.rematch_gt_bearing_path.is_some()
+        || args.rematch_guided_max_error_px.is_some()
+        || args.rematch_guided_lowe_ratio.is_some()
+        || args.rematch_require_calibrated
+        || args.rematch_max_mean_sampson != 0.0
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with rematch configuration".into(),
+        );
+    }
+    if args.diagnose_ba_oracle_poses_file.is_some()
+        || args.diagnose_fixed_rotation_ba.is_some()
+        || args.diagnose_model_score_file.is_some()
+        || args.initial_poses_file.is_some()
+        || args.diagnose_colmap_track_membership.is_some()
+        || !args.diagnose_pairs.is_empty()
+        || args.diagnose_pairs_csv.is_some()
+        || !args.diagnose_pair_stems.is_empty()
+        || args.diagnose_bearing_gt.is_some()
+        || !args.diagnose_bearing_stems.is_empty()
+        || args.gt_chirality_oracle
+        || args.gt_chirality_oracle_path.is_some()
+        || args.rematch_gt_bearing_path.is_some()
+        || args.rematch_pose_guided_gt.is_some()
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot consume GT/oracle or matching diagnostic inputs"
+                .into(),
+        );
+    }
+    if args.track_source != TrackSource::UnionFind
+        || args.confidence_ordered_tracks
+        || args.geometric_confidence_tracks
+        || args.stable_track_order
+        || args.cycle_supported_tracks
+        || args.geometry_guided_conflict_recovery
+        || args.pose_guided_track_splitting
+        || args.pose_guided_track_merging
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with alternate mapper track/recovery modes".into(),
+        );
+    }
+    if args.final_min_track_length.is_some()
+        || args.seed_pair.is_some()
+        || args.seed_trials != 12
+        || !args.final_ba
+        || args.refine_intrinsics
+        || args.refine_distortion
+        || args.final_iterative_global_refinement
+        || args.global_ba_max_refinements.is_some()
+        || args.post_refinement_registration
+        || args.structureless_registration
+        || args.pnp_max_iterations != 128
+        || args.ba_max_iterations.is_some()
+        || args.ba_huber_delta.is_some()
+        || args.ba_linear_solver.is_some()
+        || args.periodic_ba_min_registered_images != 0
+        || args.final_ba_polish_iterations != 0
+        || args.geometry_weighted_ba
+        || args.freeze_ill_conditioned_landmarks
+        || args.landmark_ba_warm_start_iterations != 0
+        || args.landmark_ba_warm_start_min_registered_images != 0
+        || args.filter_images
+        || args.min_pnp_inliers != 12
+        || args.max_mapper_matches_per_pair.is_some()
+        || args.max_reproj != 4.0
+        || args.next_image_policy != NextImagePolicy::Auto
+        || args.chirality_harden
+        || args.rotation_seed_trials != 1
+        || args.refine_global_translations
+        || args.global_independent_edge_scales
+        || args.multi_hypothesis_edges
+        || args.min_edge_inliers != 15
+        || args.min_edge_parallax_deg != 2.0
+        || args.weight_by_chirality_margin
+        || args.hybrid_filter_priors
+        || args.hybrid_drop_inconsistent_priors
+        || !args.hybrid_drop_prior_stems.is_empty()
+        || args.verify_registration_two_view
+        || args.hybrid_rotation_priors_only
+        || args.joint_global_positioning
+        || args.calibrated_view_edges_only
+        || args.pose_guided_track_splitting
+        || args.pose_guided_track_splitting_graph_support
+        || args.pose_guided_track_splitting_bridge_cuts
+        || args.pose_guided_split_max_reproj.is_some()
+        || args.pose_guided_track_splitting_iterations.is_some()
+        || args.pose_guided_track_merging
+        || args.pose_guided_merge_max_reproj.is_some()
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with mapper/refinement options"
+                .into(),
+        );
+    }
+    if args.lightglue_model.is_some()
+        || args.onnx_backend != "auto"
+        || args.lightglue_max_keypoints != 0
+    {
+        return Err(
+            "--persistent-match-worker-plan cannot be combined with learned-matcher options".into(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -7311,10 +7839,67 @@ fn write_verified_pair_snapshot(
     metadata_by_pair: &HashMap<(usize, usize), SnapshotPairMetadata>,
     args: &Args,
 ) -> Result<(), String> {
-    let feature_counts: Vec<u64> = features
-        .iter()
-        .map(|features| features.keypoints.len() as u64)
-        .collect();
+    write_verified_pair_snapshot_with_validation(
+        path,
+        image_names,
+        features,
+        camera,
+        pairwise,
+        metadata_by_pair,
+        args,
+        None,
+        false,
+    )
+}
+
+fn write_verified_pair_snapshot_atomic(
+    path: &Path,
+    image_names: &[String],
+    features: &[FeatureSet],
+    camera: &Camera,
+    pairwise: &[PairwiseMatches],
+    metadata_by_pair: &HashMap<(usize, usize), SnapshotPairMetadata>,
+    args: &Args,
+    feature_validation: &SnapshotFeatureValidation,
+) -> Result<(), String> {
+    write_verified_pair_snapshot_with_validation(
+        path,
+        image_names,
+        features,
+        camera,
+        pairwise,
+        metadata_by_pair,
+        args,
+        Some(feature_validation),
+        true,
+    )
+}
+
+fn write_verified_pair_snapshot_with_validation(
+    path: &Path,
+    image_names: &[String],
+    features: &[FeatureSet],
+    camera: &Camera,
+    pairwise: &[PairwiseMatches],
+    metadata_by_pair: &HashMap<(usize, usize), SnapshotPairMetadata>,
+    args: &Args,
+    feature_validation: Option<&SnapshotFeatureValidation>,
+    atomic: bool,
+) -> Result<(), String> {
+    let feature_counts: Vec<u64> = feature_validation
+        .map(|validation| {
+            validation
+                .feature_counts
+                .iter()
+                .map(|&count| count as u64)
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            features
+                .iter()
+                .map(|features| features.keypoints.len() as u64)
+                .collect()
+        });
     let records: Vec<SnapshotPairRecord> = pairwise
         .iter()
         .map(|pair| {
@@ -7334,7 +7919,10 @@ fn write_verified_pair_snapshot(
         schema_version: verified_pair_snapshot::SCHEMA_VERSION,
         image_names: image_names.to_vec(),
         image_manifest_hash: snapshot_image_manifest_hash(image_names),
-        feature_manifest_hash: snapshot_feature_manifest_hash(features),
+        feature_manifest_hash: feature_validation.map_or_else(
+            || snapshot_feature_manifest_hash(features),
+            |validation| validation.feature_manifest_hash,
+        ),
         feature_counts,
         width: u64::from(camera.width),
         height: u64::from(camera.height),
@@ -7356,7 +7944,11 @@ fn write_verified_pair_snapshot(
             .sum::<usize>() as u64,
         pairs: records,
     };
-    verified_pair_snapshot::write(path, &snapshot)
+    if atomic {
+        verified_pair_snapshot::write_atomic(path, &snapshot)
+    } else {
+        verified_pair_snapshot::write(path, &snapshot)
+    }
 }
 
 fn vector_from_bits(bits: Option<[u64; 3]>) -> Option<Vector3<f64>> {
@@ -7548,6 +8140,170 @@ fn ordered_pairwise_edge_hash(pairwise: &[PairwiseMatches]) -> u64 {
         }
     }
     hash
+}
+
+/// Run a versioned, plan-driven match worker without reloading the feature
+/// bank between candidate shards.  Candidate manifests are preflighted before
+/// the first snapshot is published so a duplicate pair or metadata mismatch
+/// cannot leave a prefix that looks complete.  Verification itself remains
+/// the existing `verify_pairs` implementation and each shard's temporary
+/// result is dropped before the next shard starts.
+fn run_persistent_match_worker(
+    plan: &PersistentMatchWorkerPlan,
+    features: &[FeatureSet],
+    image_names: &[String],
+    camera: &Camera,
+    matcher: &PairMatcher,
+    args: &Args,
+    feature_validation: &SnapshotFeatureValidation,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if plan.image_names != image_names {
+        return Err("persistent match worker plan image order differs from loaded features".into());
+    }
+    let mut seen_pairs = HashSet::with_capacity(plan.pair_count);
+    let mut expected_metadata: Option<BTreeMap<String, String>> = None;
+    let mut total_pairs = 0usize;
+    for shard in &plan.shards {
+        let candidate_path = plan.root.join(&shard.candidate_path);
+        let (candidates, metadata) =
+            parse_candidate_manifest_with_metadata(&candidate_path, image_names)
+                .map_err(std::io::Error::other)?;
+        if let Some(expected) = expected_metadata.as_ref() {
+            if expected != &metadata {
+                return Err(format!(
+                    "persistent match worker candidate shard {} metadata differs from shard 0",
+                    shard.id
+                )
+                .into());
+            }
+        } else {
+            expected_metadata = Some(metadata);
+        }
+        for &pair in &candidates {
+            if !seen_pairs.insert(pair) {
+                return Err(format!(
+                    "persistent match worker candidate shards overlap at pair ({},{})",
+                    pair.0, pair.1
+                )
+                .into());
+            }
+        }
+        total_pairs = total_pairs
+            .checked_add(candidates.len())
+            .ok_or("persistent match worker candidate pair count overflow")?;
+        // This pass only validates coverage/metadata.  Do not retain any
+        // candidate vectors while the feature bank is resident; each shard is
+        // parsed again immediately before verification below.
+        drop(candidates);
+    }
+    if total_pairs != plan.pair_count {
+        return Err(format!(
+            "persistent match worker plan declares {} pairs but candidate shards contain {}",
+            plan.pair_count, total_pairs
+        )
+        .into());
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(
+        stdout,
+        "persistent-match-plan candidate_index_sha256={} feature_manifest_sha256={}",
+        plan.candidate_index_sha256, plan.feature_manifest_sha256,
+    )?;
+    stdout.flush()?;
+    for shard in &plan.shards {
+        let candidate_path = plan.root.join(&shard.candidate_path);
+        let (candidates, _candidate_metadata) =
+            parse_candidate_manifest_with_metadata(&candidate_path, image_names)
+                .map_err(std::io::Error::other)?;
+        let started = std::time::Instant::now();
+        let (mut pairwise, _stats, metadata) = verify_pairs(
+            features,
+            camera,
+            &candidates,
+            args.match_ratio,
+            args.min_matches,
+            args.verification_mode,
+            matcher,
+            true,
+            args.guided_matching,
+            args.multiple_models,
+            args.min_e_f_inlier_ratio,
+            args.calibrated_prefer_essential,
+            args.refine_uncalibrated_f_to_essential,
+            args.strict_uncalibrated_f_to_essential,
+            args.calibrated_essential_primary,
+            args.force_essential_matches,
+            args.force_essential_min_ef_ratio,
+            args.force_essential_min_e_inliers,
+            args.force_essential_uncalibrated_only,
+            None,
+            None,
+            None,
+            None,
+            args.colmap_guided_matching,
+        );
+        if pairwise.is_empty() {
+            return Err(format!(
+                "persistent match worker shard {} has no verified pair (lower --min-matches?)",
+                shard.id
+            )
+            .into());
+        }
+        let edge_hash_before = unordered_pairwise_edge_hash(&pairwise);
+        apply_union_traversal_order_with_features(
+            &mut pairwise,
+            args.union_traversal_order,
+            features,
+        );
+        let edge_hash_after = unordered_pairwise_edge_hash(&pairwise);
+        if edge_hash_before != edge_hash_after {
+            return Err(format!(
+                "persistent match worker shard {} changed the verified edge multiset: before={edge_hash_before:016x} after={edge_hash_after:016x}",
+                shard.id
+            )
+            .into());
+        }
+        let accepted = pairwise
+            .iter()
+            .map(|pair| pair.matches.len())
+            .sum::<usize>();
+        let ordered_hash = ordered_pairwise_edge_hash(&pairwise);
+        let unordered_hash = edge_hash_after;
+        let snapshot_path = plan.root.join(&shard.snapshot_path);
+        write_verified_pair_snapshot_atomic(
+            &snapshot_path,
+            image_names,
+            features,
+            camera,
+            &pairwise,
+            &metadata,
+            args,
+            feature_validation,
+        )?;
+        let elapsed = started.elapsed().as_secs_f64();
+        writeln!(
+            stdout,
+            "persistent-match-complete shard_id={} candidate_path={} snapshot_path={} candidate_sha256={} candidate_pairs={} pairs={} accepted={} ordered_edge_fnv1a64={ordered_hash:016x} unordered_edge_fnv1a64={unordered_hash:016x} elapsed_s={elapsed:.9}",
+            shard.id,
+            shard.candidate_path.display(),
+            shard.snapshot_path.display(),
+            shard.candidate_sha256,
+            candidates.len(),
+            pairwise.len(),
+            accepted,
+        )?;
+        stdout.flush()?;
+        // `pairwise`, metadata, and the candidate vector are all shard-local;
+        // dropping them at this boundary keeps the worker's result buffers
+        // bounded even when the feature bank is large.
+        drop(_candidate_metadata);
+        drop(candidates);
+        drop(metadata);
+        drop(pairwise);
+        trim_process_allocator();
+    }
+    Ok(())
 }
 
 fn verification_stats_from_snapshot(
@@ -9389,8 +10145,7 @@ fn nn_matches(
     train: &[Vec<f32>],
 ) -> Vec<DescriptorMatch> {
     if cross_check {
-        CrossCheckMatcher::new(BruteForceMatcher { ratio: Some(ratio) })
-            .match_descriptors(query, train)
+        BruteForceMatcher { ratio: Some(ratio) }.match_descriptors_cross_checked(query, train)
     } else {
         BruteForceMatcher { ratio: Some(ratio) }.match_descriptors(query, train)
     }
@@ -14576,6 +15331,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    if let Some(plan_path) = args.persistent_match_worker_plan.as_deref() {
+        let plan = parse_persistent_match_worker_plan(plan_path).map_err(std::io::Error::other)?;
+        // The worker returns immediately after matching and never exports a
+        // model or features. Release mapper/export-only calibration state
+        // before allocating the first shard result; on multi-camera inputs
+        // the retained native keypoint copy alone is tens of MiB.
+        drop(native_keypoints_for_export.take());
+        drop(per_image_calibration.take());
+        drop(locus_metadata);
+        drop(canonical_feature_index_map);
+        drop(initial_poses);
+        drop(imported_snapshot);
+        trim_process_allocator();
+        let feature_validation = SnapshotFeatureValidation {
+            feature_counts: features.iter().map(FeatureSet::len).collect(),
+            feature_manifest_hash: snapshot_feature_manifest_hash(&features),
+        };
+        println!(
+            "persistent match worker: {} shard(s), {} candidate pairs, feature-manifest-fnv1a64={:016x}",
+            plan.shards.len(),
+            plan.pair_count,
+            feature_validation.feature_manifest_hash,
+        );
+        run_persistent_match_worker(
+            &plan,
+            &features,
+            &image_names,
+            &args.camera,
+            &pair_matcher,
+            &args,
+            &feature_validation,
+        )?;
+        return Ok(());
+    }
+
     if let Some(path) = args.export_candidate_manifest.as_deref() {
         let generated = candidate_pairs(&features, &image_names, &args)?;
         let generated =
@@ -18412,17 +19202,47 @@ mod sift_extra_tests {
 #[cfg(test)]
 mod append_only_matcher_tests {
     use super::{
-        append_only_nn_matches, f_to_e_stability_gate, project_fundamental_to_essential,
+        append_only_nn_matches, f_to_e_stability_gate, parse_args_from,
+        parse_persistent_match_worker_plan, project_fundamental_to_essential,
         refine_uncalibrated_f_winner, select_calibrated_essential_primary,
         sequence_f_to_e_high_support_override_gate, sequence_f_to_e_stability_gate,
-        should_exclude_strict_uncalibrated_f_winner, FToECandidateDiagnostics, PairMatcher,
+        should_exclude_strict_uncalibrated_f_winner, snapshot_feature_manifest_hash,
+        write_verified_pair_snapshot, write_verified_pair_snapshot_atomic,
+        FToECandidateDiagnostics, PairMatcher, PairwiseMatches, SnapshotFeatureValidation,
+        PERSISTENT_MATCH_WORKER_PLAN_MAGIC,
     };
     use nalgebra::{Matrix3, Point2, Point3, UnitQuaternion, Vector3};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use visloc_rs::vision::two_view::{
         ConfigurationType, TwoViewCorrespondence, TwoViewGeometryReport,
     };
     use visloc_rs::FeatureSet;
     use visloc_rs::{Camera, CameraModel};
+
+    fn minimal_args(extra: &[&str]) -> Vec<String> {
+        let mut args = [
+            "--width",
+            "1600",
+            "--height",
+            "1066",
+            "--fx",
+            "879.4",
+            "--fy",
+            "879.4",
+            "--cx",
+            "803.4",
+            "--cy",
+            "532.6",
+            "--out-colmap",
+            "/tmp/persistent-cli-test",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        args
+    }
 
     fn features(descriptors: Vec<Vec<f32>>) -> FeatureSet {
         let keypoints = (0..descriptors.len())
@@ -18786,6 +19606,175 @@ mod append_only_matcher_tests {
         assert!(!sequence_f_to_e_high_support_override_gate(
             &poor_override_parallax
         ));
+    }
+
+    #[test]
+    fn persistent_worker_plan_parser_rejects_path_traversal_and_reuse() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_persistent_plan_parser_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let hash = "a".repeat(64);
+        let valid = format!(
+            "{PERSISTENT_MATCH_WORKER_PLAN_MAGIC}\n\
+             images 2\n\
+             image 0 left.png\n\
+             image 1 right.png\n\
+             candidate_index_sha256 {hash}\n\
+             feature_manifest_sha256 {hash}\n\
+             pairs 1\n\
+             shards 1\n\
+             shard 4 candidates/candidate-000004.txt matches/verified-000004.vps {hash}\n"
+        );
+        let path = root.join("valid.plan");
+        std::fs::write(&path, valid).unwrap();
+        let parsed = parse_persistent_match_worker_plan(&path).unwrap();
+        assert_eq!(parsed.image_names, ["left.png", "right.png"]);
+        assert_eq!(parsed.shards[0].id, 4);
+        assert_eq!(parsed.root, root);
+
+        let traversal = root.join("traversal.plan");
+        std::fs::write(
+            &traversal,
+            format!(
+                "{PERSISTENT_MATCH_WORKER_PLAN_MAGIC}\n\
+                 images 2\nimage 0 left.png\nimage 1 right.png\n\
+                 candidate_index_sha256 {hash}\nfeature_manifest_sha256 {hash}\n\
+                 pairs 1\nshards 1\n\
+                 shard 0 ../candidate.txt matches/out.vps {hash}\n"
+            ),
+        )
+        .unwrap();
+        assert!(parse_persistent_match_worker_plan(&traversal)
+            .unwrap_err()
+            .contains("relative path"));
+
+        let duplicate = root.join("duplicate.plan");
+        std::fs::write(
+            &duplicate,
+            format!(
+                "{PERSISTENT_MATCH_WORKER_PLAN_MAGIC}\n\
+                 images 2\nimage 0 left.png\nimage 1 right.png\n\
+                 candidate_index_sha256 {hash}\nfeature_manifest_sha256 {hash}\n\
+                 pairs 2\nshards 2\n\
+                 shard 0 candidates/a.txt matches/a.vps {hash}\n\
+                 shard 1 candidates/a.txt matches/b.vps {hash}\n"
+            ),
+        )
+        .unwrap();
+        assert!(parse_persistent_match_worker_plan(&duplicate)
+            .unwrap_err()
+            .contains("repeats"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persistent_worker_cli_is_opt_in_and_fail_closed() {
+        let defaults = parse_args_from(minimal_args(&[])).unwrap();
+        assert!(defaults.persistent_match_worker_plan.is_none());
+        let valid = parse_args_from(vec![
+            "--input-colmap-calibration".to_owned(),
+            "/tmp/calibration".to_owned(),
+            "--verification-mode".to_owned(),
+            "full".to_owned(),
+            "--persistent-match-worker-plan".to_owned(),
+            "/tmp/match-worker.plan".to_owned(),
+            "--out-colmap".to_owned(),
+            "/tmp/persistent-model".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(
+            valid.persistent_match_worker_plan,
+            Some(PathBuf::from("/tmp/match-worker.plan"))
+        );
+
+        for extra in [
+            vec!["--mapper", "global"],
+            vec!["--matcher", "lightglue"],
+            vec!["--verification-mode", "legacy"],
+            vec!["--guided-matching"],
+            vec!["--candidate-manifest", "/tmp/candidate.txt"],
+            vec!["--import-verified-pairs-snapshot", "/tmp/pairs.vps"],
+            vec!["--canonical-feature-order"],
+            vec!["--union-traversal-order", "reverse-both"],
+            vec!["--rematch-stems", "foo"],
+            vec!["--diagnose-bearing-gt", "/tmp/gt/images.txt"],
+            vec!["--global-ba-max-refinements", "1"],
+        ] {
+            let mut args = vec![
+                "--input-colmap-calibration".to_owned(),
+                "/tmp/calibration".to_owned(),
+                "--verification-mode".to_owned(),
+                "full".to_owned(),
+                "--persistent-match-worker-plan".to_owned(),
+                "/tmp/match-worker.plan".to_owned(),
+                "--out-colmap".to_owned(),
+                "/tmp/persistent-model".to_owned(),
+            ];
+            args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+            assert!(
+                parse_args_from(args).is_err(),
+                "persistent worker accepted unsupported options: {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_snapshot_feature_validation_is_byte_identical_to_default_writer() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_persistent_snapshot_writer_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let features = vec![
+            FeatureSet::new(vec![Point2::new(10.0, 20.0)], vec![vec![0.1, 0.2, 0.3]]).unwrap(),
+            FeatureSet::new(vec![Point2::new(30.0, 40.0)], vec![vec![0.4, 0.5, 0.6]]).unwrap(),
+        ];
+        let image_names = vec!["left.png".to_owned(), "right.png".to_owned()];
+        let pairwise = vec![PairwiseMatches::new(0, 1, vec![(0, 0)])];
+        let metadata = HashMap::new();
+        let args = parse_args_from(minimal_args(&[])).unwrap();
+        let validation = SnapshotFeatureValidation {
+            feature_counts: features.iter().map(FeatureSet::len).collect(),
+            feature_manifest_hash: snapshot_feature_manifest_hash(&features),
+        };
+        write_verified_pair_snapshot(
+            &root.join("default.vps"),
+            &image_names,
+            &features,
+            &args.camera,
+            &pairwise,
+            &metadata,
+            &args,
+        )
+        .unwrap();
+        write_verified_pair_snapshot_atomic(
+            &root.join("cached.vps"),
+            &image_names,
+            &features,
+            &args.camera,
+            &pairwise,
+            &metadata,
+            &args,
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("default.vps")).unwrap(),
+            std::fs::read(root.join("cached.vps")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
