@@ -689,6 +689,11 @@ def build_candidate_command(
     rig_local_grouping: bool = False,
     pair_source: str = "vlad-union",
     temporal_pyramid_max_offset: int = 32,
+    stream_candidate_features: bool = False,
+    retrieval_backend: str = "exact",
+    ann_tables: int = 8,
+    ann_bits: int = 0,
+    ann_probes: int = 6,
 ) -> list[str]:
     """Build the GT-free command that generates one candidate manifest."""
 
@@ -698,6 +703,19 @@ def build_candidate_command(
         )
     if temporal_pyramid_max_offset <= 0:
         raise ValidationError("temporal_pyramid_max_offset must be positive")
+    if retrieval_backend not in {"exact", "lsh"}:
+        raise ValidationError(f"unsupported retrieval_backend {retrieval_backend!r}")
+    if retrieval_backend == "lsh" and not stream_candidate_features:
+        raise ValidationError("LSH retrieval requires stream_candidate_features")
+    if (
+        ann_tables <= 0
+        or not 0 <= ann_bits <= 63
+        or not 0 <= ann_probes <= 63
+        or (ann_bits != 0 and ann_probes > ann_bits)
+    ):
+        raise ValidationError(
+            "ANN settings require ann_tables >= 1, ann_bits auto (0) or 1..=63, and ann_probes <= the effective bit count"
+        )
 
     command = [
         str(binary),
@@ -732,6 +750,21 @@ def build_candidate_command(
         command.extend(["--temporal-pyramid-max-offset", str(temporal_pyramid_max_offset)])
     if candidate_budget is not None:
         command.extend(["--candidate-budget", str(candidate_budget)])
+    if stream_candidate_features:
+        command.append("--stream-candidate-features")
+    if retrieval_backend == "lsh":
+        command.extend(
+            [
+                "--retrieval-backend",
+                "lsh",
+                "--ann-tables",
+                str(ann_tables),
+                "--ann-bits",
+                str(ann_bits),
+                "--ann-probes",
+                str(ann_probes),
+            ]
+        )
     return command
 
 
@@ -1761,6 +1794,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temporal-pyramid-max-offset", type=int, default=32)
     parser.add_argument("--candidate-budget", type=int)
+    parser.add_argument(
+        "--stream-candidate-features",
+        action="store_true",
+        help="stream feature files while building global descriptors",
+    )
+    parser.add_argument(
+        "--retrieval-backend",
+        choices=("exact", "lsh"),
+        default="exact",
+        help="global-descriptor retrieval backend (LSH requires streaming)",
+    )
+    parser.add_argument("--ann-tables", type=int, default=8)
+    parser.add_argument("--ann-bits", type=int, default=0, help="LSH bits (0: scale automatically with image count)")
+    parser.add_argument("--ann-probes", type=int, default=6)
     parser.add_argument("--feature-suffix", default="_features.txt")
     parser.add_argument("--image-suffix", default=".png")
     parser.add_argument("--min-matches", type=int, default=30)
@@ -1868,6 +1915,11 @@ def main(argv: list[str] | None = None) -> int:
                         rig_local_grouping=args.rig_local_grouping,
                         pair_source=args.pair_source,
                         temporal_pyramid_max_offset=args.temporal_pyramid_max_offset,
+                        stream_candidate_features=args.stream_candidate_features,
+                        retrieval_backend=args.retrieval_backend,
+                        ann_tables=args.ann_tables,
+                        ann_bits=args.ann_bits,
+                        ann_probes=args.ann_probes,
                     ),
                     artifact_root / "candidate-generation.log",
                     timing_path=candidate_timing_path,

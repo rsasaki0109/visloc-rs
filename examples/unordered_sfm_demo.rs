@@ -28,6 +28,10 @@
 //!      `--candidate-budget` with highest-scoring VLAD retrieval pairs.
 //!      This is deterministic and GT-free; it is useful when numeric
 //!      timestamps are irregular or have large nanosecond gaps.
+//!      File-backed exports can add `--stream-candidate-features` to release
+//!      local descriptors per image. `--retrieval-backend lsh` enables the
+//!      deterministic approximate index; `--ann-bits 0` scales its signature
+//!      width with the image count.
 //!    - `vocab-tree`: `visloc_rs::vision::vocab_tree`'s hierarchical-k-means
 //!      vocabulary + TF-IDF/Hamming-embedding inverted-file retrieval
 //!      (COLMAP's `VocabTreePairGenerator`-equivalent, M3 in
@@ -564,6 +568,26 @@ enum PairSource {
     /// base pass, then expands transitively for
     /// [`TRANSITIVE_ROUNDS`] rounds.
     Transitive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetrievalBackend {
+    Exact,
+    Lsh,
+}
+
+impl std::str::FromStr for RetrievalBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "lsh" => Ok(Self::Lsh),
+            other => Err(format!(
+                "unknown --retrieval-backend {other:?} (expected exact|lsh)"
+            )),
+        }
+    }
 }
 
 impl std::str::FromStr for PairSource {
@@ -2487,6 +2511,19 @@ struct Args {
     candidate_manifest: Option<PathBuf>,
     /// Export the generated candidate manifest and exit before matching.
     export_candidate_manifest: Option<PathBuf>,
+    /// File-backed candidate-export mode that retains only the bounded
+    /// vocabulary sample and one VLAD descriptor per image. Local descriptor
+    /// payloads are parsed in deterministic passes and released per file.
+    stream_candidate_features: bool,
+    /// Global-descriptor neighbour search used by streamed temporal-pyramid
+    /// candidate export. Exact preserves historical output; LSH is opt-in.
+    retrieval_backend: RetrievalBackend,
+    /// Number of deterministic feature-hash projection tables for LSH.
+    ann_tables: usize,
+    /// Signature width per LSH table (1..=63, or 0 for scale-aware auto).
+    ann_bits: usize,
+    /// Lowest-margin one-bit buckets probed per table.
+    ann_probes: usize,
     /// M5 (`docs/colmap_port_plan.md`): run the opt-in rescue-bridging pass
     /// after initial verification (see the file header's step 4).
     rescue_bridging: bool,
@@ -3372,8 +3409,17 @@ fn candidate_pairs_temporal_pyramid(
     max_offset: u64,
     budget: Option<usize>,
 ) -> Result<Vec<(usize, usize)>, String> {
-    let (temporal, cross_camera) = rig_temporal_pyramid_pairs(image_names, max_offset)?;
     let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
+    candidate_pairs_temporal_pyramid_from_retrieval(image_names, retrieval, max_offset, budget)
+}
+
+fn candidate_pairs_temporal_pyramid_from_retrieval(
+    image_names: &[String],
+    retrieval: Vec<((usize, usize), f32)>,
+    max_offset: u64,
+    budget: Option<usize>,
+) -> Result<Vec<(usize, usize)>, String> {
+    let (temporal, cross_camera) = rig_temporal_pyramid_pairs(image_names, max_offset)?;
     let mut selected = Vec::new();
     let mut seen = HashSet::<(usize, usize)>::new();
     for pair in temporal.into_iter().chain(cross_camera) {
@@ -4204,6 +4250,11 @@ where
     let mut persistent_match_worker_plan: Option<PathBuf> = None;
     let mut candidate_manifest: Option<PathBuf> = None;
     let mut export_candidate_manifest: Option<PathBuf> = None;
+    let mut stream_candidate_features = false;
+    let mut retrieval_backend = RetrievalBackend::Exact;
+    let mut ann_tables = 8usize;
+    let mut ann_bits = 0usize;
+    let mut ann_probes = 6usize;
     let mut snapshot_coordinate_override_dir: Option<PathBuf> = None;
     let mut diagnose_ba_oracle_poses_file: Option<PathBuf> = None;
     let mut diagnose_fixed_rotation_ba: Option<String> = None;
@@ -4956,6 +5007,28 @@ where
                 a.remove(i + 1);
                 export_candidate_manifest = Some(PathBuf::from(raw));
             }
+            "--stream-candidate-features" => stream_candidate_features = true,
+            "--retrieval-backend" => {
+                retrieval_backend = a.remove(i + 1).parse()?;
+            }
+            "--ann-tables" => {
+                ann_tables = a
+                    .remove(i + 1)
+                    .parse()
+                    .map_err(|error| format!("{error}"))?
+            }
+            "--ann-bits" => {
+                ann_bits = a
+                    .remove(i + 1)
+                    .parse()
+                    .map_err(|error| format!("{error}"))?
+            }
+            "--ann-probes" => {
+                ann_probes = a
+                    .remove(i + 1)
+                    .parse()
+                    .map_err(|error| format!("{error}"))?
+            }
             "--snapshot-coordinate-override-dir" => {
                 let raw = a
                     .get(i + 1)
@@ -5241,6 +5314,32 @@ where
     {
         return Err(
             "--export-candidate-manifest cannot be combined with imported pair streams".into(),
+        );
+    }
+    if stream_candidate_features
+        && (feature_extractor != FeatureExtractorKind::Files
+            || export_candidate_manifest.is_none()
+            || input_colmap_calibration.is_none()
+            || pair_source != PairSource::TemporalPyramid)
+    {
+        return Err(
+            "--stream-candidate-features currently requires --feature-extractor files, --input-colmap-calibration, --pair-source temporal-pyramid, and --export-candidate-manifest"
+                .into(),
+        );
+    }
+    if retrieval_backend != RetrievalBackend::Exact && !stream_candidate_features {
+        return Err(
+            "--retrieval-backend lsh currently requires --stream-candidate-features".into(),
+        );
+    }
+    if ann_tables == 0
+        || ann_bits > 63
+        || ann_probes > 63
+        || (ann_bits != 0 && ann_probes > ann_bits)
+    {
+        return Err(
+            "ANN settings require --ann-tables >= 1, --ann-bits auto (0) or 1..=63, and --ann-probes <= the effective bit count"
+                .into(),
         );
     }
     if diagnose_colmap_track_membership.is_some() && mapper != MapperKind::Incremental {
@@ -5688,6 +5787,11 @@ where
         pair_source,
         candidate_manifest,
         export_candidate_manifest,
+        stream_candidate_features,
+        retrieval_backend,
+        ann_tables,
+        ann_bits,
+        ann_probes,
         vocab_tree_branching,
         vocab_tree_depth,
         vocab_tree_num_images,
@@ -8945,6 +9049,127 @@ fn list_feature_files(
     Ok(files)
 }
 
+#[derive(Debug)]
+struct StreamedVladGlobals {
+    globals: Option<Vec<Vec<f32>>>,
+    total_descriptors: usize,
+    sampled_descriptors: usize,
+}
+
+fn count_feature_rows(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .count())
+}
+
+fn validate_streamed_candidate_feature(
+    image: usize,
+    feature_set: &FeatureSet,
+    camera: &Camera,
+) -> Result<(), String> {
+    feature_set
+        .validate()
+        .map_err(|error| format!("candidate feature image {image} is invalid: {error}"))?;
+    for (keypoint, point) in feature_set.keypoints.iter().enumerate() {
+        if !point.x.is_finite()
+            || !point.y.is_finite()
+            || point.x < 0.0
+            || point.y < 0.0
+            || point.x >= camera.width as f64
+            || point.y >= camera.height as f64
+        {
+            return Err(format!(
+                "candidate feature image {image} keypoint {keypoint} ({}, {}) is outside {}x{}",
+                point.x, point.y, camera.width, camera.height
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build the historical VLAD vocabulary and per-image globals without ever
+/// retaining the local descriptor bank. A cheap row-count prepass fixes the
+/// historical global stride; the following two descriptor passes collect the
+/// bounded training sample, then aggregate one image at a time.
+fn stream_vlad_globals_from_feature_files(
+    dir: &Path,
+    files: &[String],
+    rig: &PerImageCameras,
+    vocab_size: usize,
+) -> Result<StreamedVladGlobals, Box<dyn std::error::Error>> {
+    if files.len() != rig.len() {
+        return Err(format!(
+            "streamed candidate feature/calibration count mismatch: {} files vs {} cameras",
+            files.len(),
+            rig.len()
+        )
+        .into());
+    }
+    let row_counts = files
+        .iter()
+        .map(|file| count_feature_rows(&dir.join(file)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_descriptors = row_counts.iter().sum::<usize>();
+    let stride = (total_descriptors / VLAD_VOCAB_SAMPLE).max(1);
+    let mut sample = Vec::<Vec<f32>>::with_capacity(
+        total_descriptors
+            .div_ceil(stride)
+            .min(VLAD_VOCAB_SAMPLE + 1),
+    );
+    let mut global_row = 0usize;
+    for (image, (file, &expected_rows)) in files.iter().zip(&row_counts).enumerate() {
+        let feature_set = read_feature_set(&dir.join(file))?;
+        validate_streamed_candidate_feature(image, &feature_set, rig.camera(image)?)?;
+        if feature_set.descriptors.len() != expected_rows {
+            return Err(format!(
+                "{} row-count prepass found {expected_rows}, parser found {}",
+                dir.join(file).display(),
+                feature_set.descriptors.len()
+            )
+            .into());
+        }
+        for descriptor in feature_set.descriptors {
+            if global_row % stride == 0 {
+                sample.push(descriptor);
+            }
+            global_row += 1;
+        }
+    }
+    let sample_refs = sample.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let Some(vocab) = Vocabulary::build(&sample_refs, vocab_size, 10, 0) else {
+        return Ok(StreamedVladGlobals {
+            globals: None,
+            total_descriptors,
+            sampled_descriptors: sample.len(),
+        });
+    };
+    drop(sample_refs);
+    drop(sample);
+    trim_process_allocator();
+
+    // Ordered parallel collection preserves the canonical image/global index
+    // mapping. Each worker owns only one local feature set, so peak storage is
+    // bounded by the Rayon worker count instead of the image count.
+    let globals = files
+        .par_iter()
+        .enumerate()
+        .map(|(image, file)| -> Result<Vec<f32>, String> {
+            let feature_set = read_feature_set(&dir.join(file))
+                .map_err(|error| format!("cannot read {}: {error}", dir.join(file).display()))?;
+            let camera = rig.camera(image).map_err(|error| error.to_string())?;
+            validate_streamed_candidate_feature(image, &feature_set, camera)?;
+            Ok(vlad(&feature_set.descriptors, &vocab))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StreamedVladGlobals {
+        globals: Some(globals),
+        total_descriptors,
+        sampled_descriptors: total_descriptors.div_ceil(stride),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SnapshotFeatureFileFingerprint {
     keypoint_hash: u64,
@@ -9514,13 +9739,14 @@ fn canonicalize_pairwise_loci(
 /// the vocab-tree: both only need a representative sample. Strides the full
 /// descriptor list down to ~`VOCAB_SAMPLE`. Shared by
 /// [`candidate_pairs_vlad`] and [`candidate_pairs_vocab_tree`] (M3).
+const VLAD_VOCAB_SAMPLE: usize = 40_000;
+
 fn sampled_training_descriptors(features: &[FeatureSet]) -> Vec<&[f32]> {
-    const VOCAB_SAMPLE: usize = 40_000;
     let all_desc: Vec<&[f32]> = features
         .iter()
         .flat_map(|f| f.descriptors.iter().map(|d| d.as_slice()))
         .collect();
-    let stride = (all_desc.len() / VOCAB_SAMPLE).max(1);
+    let stride = (all_desc.len() / VLAD_VOCAB_SAMPLE).max(1);
     all_desc.iter().step_by(stride).copied().collect()
 }
 
@@ -9534,6 +9760,150 @@ fn all_pairs(n: usize) -> Vec<(usize, usize)> {
         }
     }
     pairs
+}
+
+/// Return the exact same `(image, cosine)` top-K as a full descending sort,
+/// while retaining at most K scored rows for one query. The deterministic
+/// image-index tie break is part of the candidate-manifest contract.
+fn exact_topk_similar_images(query: usize, globals: &[Vec<f32>], topk: usize) -> Vec<(usize, f32)> {
+    if topk == 0 {
+        return Vec::new();
+    }
+    let mut best = Vec::<(usize, f32)>::with_capacity(topk.min(globals.len().saturating_sub(1)));
+    for candidate in 0..globals.len() {
+        if candidate == query {
+            continue;
+        }
+        let row = (
+            candidate,
+            cosine_similarity(&globals[query], &globals[candidate]),
+        );
+        insert_exact_topk_row(&mut best, row, topk);
+    }
+    best
+}
+
+fn insert_exact_topk_row(best: &mut Vec<(usize, f32)>, row: (usize, f32), topk: usize) {
+    let position = best.partition_point(|existing| {
+        existing
+            .1
+            .total_cmp(&row.1)
+            .reverse()
+            .then_with(|| existing.0.cmp(&row.0))
+            .is_lt()
+    });
+    if position < topk {
+        best.insert(position, row);
+        if best.len() > topk {
+            best.pop();
+        }
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
+fn lsh_signature(global: &[f32], table: usize, bits: usize) -> (u64, Vec<usize>) {
+    let mut projections = vec![0.0f32; bits];
+    let table_seed = (table as u64).wrapping_mul(0xd6e8feb86659fd93);
+    for (dimension, &value) in global.iter().enumerate() {
+        let hash = splitmix64((dimension as u64) ^ table_seed);
+        let bit = (hash as usize) % bits;
+        let sign = if hash & (1 << 63) == 0 { 1.0 } else { -1.0 };
+        projections[bit] += sign * value;
+    }
+    let mut signature = 0u64;
+    for (bit, &projection) in projections.iter().enumerate() {
+        if projection >= 0.0 {
+            signature |= 1u64 << bit;
+        }
+    }
+    let mut probe_bits = (0..bits).collect::<Vec<_>>();
+    probe_bits.sort_by(|&lhs, &rhs| {
+        projections[lhs]
+            .abs()
+            .total_cmp(&projections[rhs].abs())
+            .then_with(|| lhs.cmp(&rhs))
+    });
+    (signature, probe_bits)
+}
+
+/// Deterministic multi-table feature-hash LSH. Buckets propose a bounded pool;
+/// original VLAD cosine re-ranks that pool, so approximation affects only
+/// neighbour recall rather than the score ordering of retrieved images.
+fn candidate_pairs_vlad_lsh_scored(
+    globals: &[Vec<f32>],
+    topk: usize,
+    tables: usize,
+    bits: usize,
+    probes: usize,
+) -> Vec<((usize, usize), f32)> {
+    let n = globals.len();
+    if n <= topk + 1 {
+        return all_pairs(n).into_iter().map(|pair| (pair, 0.0)).collect();
+    }
+    let mut signatures = vec![vec![0u64; n]; tables];
+    let mut probe_orders = vec![vec![Vec::<usize>::new(); n]; tables];
+    let mut buckets = (0..tables)
+        .map(|_| BTreeMap::<u64, Vec<usize>>::new())
+        .collect::<Vec<_>>();
+    for table in 0..tables {
+        for (image, global) in globals.iter().enumerate() {
+            let (signature, order) = lsh_signature(global, table, bits);
+            signatures[table][image] = signature;
+            probe_orders[table][image] = order;
+            buckets[table].entry(signature).or_default().push(image);
+        }
+    }
+
+    let mut scores = BTreeMap::<(usize, usize), f32>::new();
+    let mut fallback_queries = 0usize;
+    let mut pool_sum = 0usize;
+    let mut pool_max = 0usize;
+    for query in 0..n {
+        let mut pool = HashSet::<usize>::new();
+        for table in 0..tables {
+            let signature = signatures[table][query];
+            if let Some(images) = buckets[table].get(&signature) {
+                pool.extend(images.iter().copied().filter(|&image| image != query));
+            }
+            for &bit in probe_orders[table][query].iter().take(probes) {
+                if let Some(images) = buckets[table].get(&(signature ^ (1u64 << bit))) {
+                    pool.extend(images.iter().copied().filter(|&image| image != query));
+                }
+            }
+        }
+        if pool.len() < topk {
+            fallback_queries += 1;
+            pool.extend((0..n).filter(|&image| image != query));
+        }
+        pool_sum += pool.len();
+        pool_max = pool_max.max(pool.len());
+        let mut best = Vec::<(usize, f32)>::with_capacity(topk);
+        for candidate in pool {
+            let row = (
+                candidate,
+                cosine_similarity(&globals[query], &globals[candidate]),
+            );
+            insert_exact_topk_row(&mut best, row, topk);
+        }
+        for (candidate, score) in best {
+            let pair = (query.min(candidate), query.max(candidate));
+            scores
+                .entry(pair)
+                .and_modify(|best| *best = best.max(score))
+                .or_insert(score);
+        }
+    }
+    println!(
+        "VLAD LSH: tables={tables} bits={bits} probes={probes} mean_pool={:.1} max_pool={pool_max} exact_fallback_queries={fallback_queries}",
+        pool_sum as f64 / n.max(1) as f64,
+    );
+    scores.into_iter().collect()
 }
 
 /// Candidate image pairs `(i, j)` with `i < j` from flat-VLAD top-K cosine
@@ -9561,15 +9931,20 @@ fn candidate_pairs_vlad_scored(
         .map(|f| vlad(&f.descriptors, &vocab))
         .collect();
 
+    candidate_pairs_vlad_scored_from_globals(&globals, topk, mutual)
+}
+
+fn candidate_pairs_vlad_scored_from_globals(
+    globals: &[Vec<f32>],
+    topk: usize,
+    mutual: bool,
+) -> Vec<((usize, usize), f32)> {
+    let n = globals.len();
+
     let mut scores = std::collections::BTreeMap::<(usize, usize), f32>::new();
     let mut neighbors = vec![HashSet::<usize>::new(); n];
     for i in 0..n {
-        let mut sims: Vec<(usize, f32)> = (0..n)
-            .filter(|&j| j != i)
-            .map(|j| (j, cosine_similarity(&globals[i], &globals[j])))
-            .collect();
-        sims.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        for &(j, score) in sims.iter().take(topk) {
+        for (j, score) in exact_topk_similar_images(i, globals, topk) {
             neighbors[i].insert(j);
             let pair = (i.min(j), i.max(j));
             if !mutual || neighbors[j].contains(&i) {
@@ -9586,12 +9961,10 @@ fn candidate_pairs_vlad_scored(
         // symmetric and independent of image traversal order.
         scores.clear();
         for i in 0..n {
-            let mut sims: Vec<(usize, f32)> = (0..n)
-                .filter(|&j| j != i && neighbors[i].contains(&j) && neighbors[j].contains(&i))
-                .map(|j| (j, cosine_similarity(&globals[i], &globals[j])))
-                .collect();
-            sims.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            for (j, score) in sims {
+            for (j, score) in exact_topk_similar_images(i, globals, topk)
+                .into_iter()
+                .filter(|(j, _)| neighbors[i].contains(j) && neighbors[*j].contains(&i))
+            {
                 let pair = (i.min(j), i.max(j));
                 scores
                     .entry(pair)
@@ -9813,7 +10186,20 @@ fn candidate_pairs(
 /// descriptive rather than used to reconstruct pairs: the image-name-bound
 /// pair list remains the authority, while this block makes an archived
 /// manifest auditable and lets sharding tools preserve the exact schedule.
-fn candidate_manifest_metadata(args: &Args) -> BTreeMap<String, String> {
+fn effective_ann_bits(requested: usize, image_count: usize) -> usize {
+    if requested != 0 {
+        return requested;
+    }
+    let mut bits = 6usize;
+    let mut scale = (image_count / 1_000).max(1);
+    while scale >= 2 && bits < 63 {
+        bits += 1;
+        scale /= 2;
+    }
+    bits
+}
+
+fn candidate_manifest_metadata(args: &Args, image_count: usize) -> BTreeMap<String, String> {
     let mut metadata = BTreeMap::new();
     let (policy, pair_source) = match args.pair_source {
         PairSource::Vlad => ("vlad-topk-v1", "vlad"),
@@ -9826,6 +10212,18 @@ fn candidate_manifest_metadata(args: &Args) -> BTreeMap<String, String> {
     metadata.insert("candidate_policy".to_owned(), policy.to_owned());
     metadata.insert("pair_source".to_owned(), pair_source.to_owned());
     metadata.insert("retrieval_topk".to_owned(), args.retrieval_topk.to_string());
+    if args.retrieval_backend == RetrievalBackend::Lsh {
+        metadata.insert("retrieval_backend".to_owned(), "vlad-lsh-v1".to_owned());
+        metadata.insert("ann_tables".to_owned(), args.ann_tables.to_string());
+        metadata.insert(
+            "ann_bits".to_owned(),
+            effective_ann_bits(args.ann_bits, image_count).to_string(),
+        );
+        if args.ann_bits == 0 {
+            metadata.insert("ann_bits_mode".to_owned(), "auto-v1".to_owned());
+        }
+        metadata.insert("ann_probes".to_owned(), args.ann_probes.to_string());
+    }
     if args.pair_source == PairSource::VladUnion {
         metadata.insert(
             "local_grouping".to_owned(),
@@ -14830,6 +15228,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--sift-stream-export requires building with --features image-io".into());
         }
     }
+    if args.stream_candidate_features {
+        let files = list_feature_files(&args.features_dir, &args.feature_suffix)?;
+        let image_names = files
+            .iter()
+            .map(|file| image_name_for(file, &args.feature_suffix, &args.image_suffix))
+            .collect::<Vec<_>>();
+        let calibration_root = args
+            .input_colmap_calibration
+            .as_deref()
+            .ok_or("--stream-candidate-features requires --input-colmap-calibration")?;
+        let calibration = resolve_input_colmap_calibration(calibration_root, &image_names)?;
+        validate_calibration_image_dimensions(
+            &calibration.rig,
+            &image_names,
+            args.images_dir.as_deref(),
+        )?;
+        let streamed = stream_vlad_globals_from_feature_files(
+            &args.features_dir,
+            &files,
+            &calibration.rig,
+            args.vocab_size,
+        )?;
+        log_process_memory("example-after-streamed-vlad-globals");
+        let retrieval = if let Some(globals) = streamed.globals.as_deref() {
+            match args.retrieval_backend {
+                RetrievalBackend::Exact => {
+                    candidate_pairs_vlad_scored_from_globals(globals, args.retrieval_topk, false)
+                }
+                RetrievalBackend::Lsh => {
+                    let bits = effective_ann_bits(args.ann_bits, globals.len());
+                    if args.ann_probes > bits {
+                        return Err(format!(
+                            "--ann-probes {} exceeds effective --ann-bits {bits}",
+                            args.ann_probes
+                        )
+                        .into());
+                    }
+                    candidate_pairs_vlad_lsh_scored(
+                        globals,
+                        args.retrieval_topk,
+                        args.ann_tables,
+                        bits,
+                        args.ann_probes,
+                    )
+                }
+            }
+        } else {
+            all_pairs(image_names.len())
+                .into_iter()
+                .map(|pair| (pair, 0.0))
+                .collect()
+        };
+        let generated = candidate_pairs_temporal_pyramid_from_retrieval(
+            &image_names,
+            retrieval,
+            args.temporal_pyramid_max_offset,
+            args.candidate_budget,
+        )?;
+        let path = args
+            .export_candidate_manifest
+            .as_deref()
+            .ok_or("streamed candidate export lost its output path")?;
+        let metadata = candidate_manifest_metadata(&args, image_names.len());
+        write_candidate_manifest_with_metadata(path, &image_names, &generated, &metadata)?;
+        println!(
+            "streamed candidate manifest: {} pairs / {} images / {} local descriptors / {} vocabulary samples -> {}",
+            generated.len(),
+            image_names.len(),
+            streamed.total_descriptors,
+            streamed.sampled_descriptors,
+            path.display(),
+        );
+        return Ok(());
+    }
     let mut snapshot_feature_paths: Option<Vec<PathBuf>> = None;
     let mut snapshot_feature_fingerprints: Option<Vec<SnapshotFeatureFileFingerprint>> = None;
     let (
@@ -15404,7 +15876,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let generated = candidate_pairs(&features, &image_names, &args)?;
         let generated =
             filter_pairs_by_stem_window(generated, &image_names, args.pair_stem_window)?;
-        let metadata = candidate_manifest_metadata(&args);
+        let metadata = candidate_manifest_metadata(&args, image_names.len());
         write_candidate_manifest_with_metadata(path, &image_names, &generated, &metadata)?;
         println!(
             "candidate manifest: exported {} pairs for {} images to {}",
@@ -16788,10 +17260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod diagnose_cli_tests {
     use super::{
         apply_snapshot_coordinate_override, apply_union_traversal_order,
-        apply_union_traversal_order_with_features, candidate_pairs_vlad_union,
-        canonicalize_feature_order, canonicalize_pairwise_loci, cap_mapper_pair_matches,
-        colmap_guided_geometry, colmap_guided_matches, descriptor_squared_distance,
-        effective_config_hash, effective_config_snapshot,
+        apply_union_traversal_order_with_features, candidate_pairs_vlad_lsh_scored,
+        candidate_pairs_vlad_scored, candidate_pairs_vlad_scored_from_globals,
+        candidate_pairs_vlad_union, canonicalize_feature_order, canonicalize_pairwise_loci,
+        cap_mapper_pair_matches, colmap_guided_geometry, colmap_guided_matches,
+        descriptor_squared_distance, effective_ann_bits, effective_config_hash,
+        effective_config_snapshot, exact_topk_similar_images,
         filter_imported_verified_pairs_by_stem_window, filter_pairs_by_stem_window,
         imported_reference_quality_is_strong, initial_poses_from_colmap_images_txt,
         initial_poses_from_colmap_images_txt_with_expected_cameras, load_images,
@@ -16799,10 +17273,11 @@ mod diagnose_cli_tests {
         model_cross_validation_is_held_out, model_cross_validation_is_held_out_for_pixels,
         model_cross_validation_selection_score, parse_args_from, parse_candidate_manifest,
         parse_candidate_manifest_with_metadata, parse_colmap_image_camera_assignments,
-        parse_colmap_track_membership, parse_diagnose_stems, remap_feature_keypoints_by_old_to_new,
-        replace_feature_keypoints_from_native, rig_local_pairs, rig_temporal_pyramid_pairs,
-        robust_huber_mean, snapshot_export_config, snapshot_feature_manifest_hash,
-        snapshot_feature_validation_from_files, summarize_model_cross_validation_bucket,
+        parse_colmap_track_membership, parse_diagnose_stems, read_feature_set,
+        remap_feature_keypoints_by_old_to_new, replace_feature_keypoints_from_native,
+        rig_local_pairs, rig_temporal_pyramid_pairs, robust_huber_mean, snapshot_export_config,
+        snapshot_feature_manifest_hash, snapshot_feature_validation_from_files,
+        stream_vlad_globals_from_feature_files, summarize_model_cross_validation_bucket,
         temporal_pyramid_offsets_string, translation_direction_delta_deg,
         unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
         write_candidate_manifest, write_candidate_manifest_with_metadata, Camera,
@@ -16813,7 +17288,7 @@ mod diagnose_cli_tests {
     };
     use nalgebra::{Matrix3, Point2, Vector3};
     use std::cmp::Ordering as CmpOrdering;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::path::{Path, PathBuf};
     use visloc_rs::vision::features::FeatureSet;
     use visloc_rs::DescriptorMatch;
@@ -16993,6 +17468,43 @@ mod diagnose_cli_tests {
             "0",
         ]))
         .is_err());
+
+        let ann_args: Vec<String> = [
+            "--feature-extractor",
+            "files",
+            "--features-dir",
+            "/tmp/features",
+            "--input-colmap-calibration",
+            "/tmp/calibration",
+            "--pair-source",
+            "temporal-pyramid",
+            "--export-candidate-manifest",
+            "/tmp/candidates.txt",
+            "--stream-candidate-features",
+            "--retrieval-backend",
+            "lsh",
+            "--ann-tables",
+            "6",
+            "--ann-bits",
+            "14",
+            "--ann-probes",
+            "8",
+            "--out-colmap",
+            "/tmp/unused-model",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let ann = parse_args_from(ann_args).unwrap();
+        assert_eq!(ann.retrieval_backend, super::RetrievalBackend::Lsh);
+        assert_eq!((ann.ann_tables, ann.ann_bits, ann.ann_probes), (6, 14, 8));
+        assert_eq!(effective_ann_bits(0, 999), 6);
+        assert_eq!(effective_ann_bits(0, 1_000), 6);
+        assert_eq!(effective_ann_bits(0, 2_500), 7);
+        assert_eq!(effective_ann_bits(0, 5_000), 8);
+        assert_eq!(effective_ann_bits(0, 10_000), 9);
+        assert_eq!(effective_ann_bits(12, 10_000), 12);
+        assert!(parse_args_from(minimal_args(&["--retrieval-backend", "lsh"])).is_err());
         assert!(parse_args_from(minimal_args(&[
             "--pair-source",
             "temporal-pyramid",
@@ -17018,6 +17530,101 @@ mod diagnose_cli_tests {
         assert_eq!(first, second);
         assert!(first.len() <= 3);
         assert!(first.iter().all(|&(i, j)| i < j && j < features.len()));
+    }
+
+    #[test]
+    fn bounded_exact_topk_matches_full_sort_with_stable_ties() {
+        let globals = vec![
+            vec![1.0, 0.0],
+            vec![0.8, 0.2],
+            vec![0.8, -0.2],
+            vec![0.0, 1.0],
+            vec![-1.0, 0.0],
+        ];
+        for query in 0..globals.len() {
+            for topk in 0..=globals.len() + 1 {
+                let mut full: Vec<_> = (0..globals.len())
+                    .filter(|&candidate| candidate != query)
+                    .map(|candidate| {
+                        (
+                            candidate,
+                            super::cosine_similarity(&globals[query], &globals[candidate]),
+                        )
+                    })
+                    .collect();
+                full.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1).then_with(|| lhs.0.cmp(&rhs.0)));
+                full.truncate(topk);
+                assert_eq!(exact_topk_similar_images(query, &globals, topk), full);
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_vlad_globals_preserve_batch_candidate_pairs() {
+        let root = std::env::temp_dir().join(format!(
+            "visloc_streamed_vlad_candidates_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut files = Vec::new();
+        let mut features = Vec::new();
+        for image in 0..5 {
+            let file = format!("image_{image:03}_features.txt");
+            let rows = (0..4)
+                .map(|row| {
+                    format!(
+                        "{} {} 1.0 {} {}\n",
+                        10 + row,
+                        20 + image,
+                        image as f32 + row as f32 * 0.25 + 1.0,
+                        (image + row) as f32 * 0.5 + 0.5,
+                    )
+                })
+                .collect::<String>();
+            std::fs::write(root.join(&file), rows).unwrap();
+            files.push(file.clone());
+            features.push(read_feature_set(&root.join(file)).unwrap());
+        }
+        let rig = PerImageCameras::new(
+            (0..files.len())
+                .map(|image| Camera::pinhole(image as u64, 100, 100, 50.0, 50.0, 50.0, 50.0))
+                .collect(),
+        )
+        .unwrap();
+        let streamed = stream_vlad_globals_from_feature_files(&root, &files, &rig, 3).unwrap();
+        assert_eq!(streamed.total_descriptors, 20);
+        assert_eq!(streamed.sampled_descriptors, 20);
+        let streamed_pairs = candidate_pairs_vlad_scored_from_globals(
+            streamed.globals.as_deref().unwrap(),
+            2,
+            false,
+        );
+        let batch_pairs = candidate_pairs_vlad_scored(&features, 3, 2, false, false);
+        assert_eq!(streamed_pairs, batch_pairs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vlad_lsh_is_deterministic_and_recovers_identical_neighbours() {
+        let mut globals = Vec::new();
+        for pair in 0..20 {
+            let descriptor = (0..64)
+                .map(|dimension| (((pair * 67 + dimension * 17) % 101) as f32 - 50.0) / 50.0)
+                .collect::<Vec<_>>();
+            globals.push(descriptor.clone());
+            globals.push(descriptor);
+        }
+        let first = candidate_pairs_vlad_lsh_scored(&globals, 1, 4, 8, 8);
+        let second = candidate_pairs_vlad_lsh_scored(&globals, 1, 4, 8, 8);
+        assert_eq!(first, second);
+        let pairs = first
+            .into_iter()
+            .map(|(pair, _)| pair)
+            .collect::<HashSet<_>>();
+        for pair in 0..20 {
+            assert!(pairs.contains(&(pair * 2, pair * 2 + 1)));
+        }
     }
 
     #[test]

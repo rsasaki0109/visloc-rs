@@ -1,0 +1,59 @@
+{
+  "schema": "visloc_m6_ann_streaming_evidence_v1",
+  "base_commit": "0609ba273dcd30e6f9bfc3cce6b0a23c5c499195",
+  "dataset": "OpenLORIS corridor1-1",
+  "candidate_policy": {
+    "pair_source": "temporal-pyramid",
+    "retrieval_topk": 32,
+    "temporal_pyramid_max_offset": 32,
+    "candidate_budget_per_image": 7,
+    "retrieval_backend": "vlad-lsh-v1",
+    "ann_tables": 8,
+    "ann_bits": "6 + floor(log2(max(image_count / 1000, 1)))",
+    "ann_probes": "6 by default; measured 10k speed gate overrides to 9"
+  },
+  "tier_1000_quality_gate": {
+    "exact": {
+      "candidate_generation_elapsed_s": 51.84,
+      "candidate_pairs": 7000,
+      "registered_images": 989,
+      "supplied_images": 1000
+    },
+    "streamed_lsh": {
+      "candidate_generation_elapsed_s": 41.10,
+      "candidate_manifest_sha256": "7ecfee4b27b73e6122c5871b4ecfabdb861b399de58329405701395b02488343",
+      "candidate_pairs": 7000,
+      "exact_manifest_pair_overlap": 6914,
+      "exact_manifest_pair_overlap_ratio": 0.9877142857142857,
+      "registered_images": 991,
+      "supplied_images": 1000,
+      "tracks": 2806,
+      "observations": 30595,
+      "mean_reprojection_px": 1.581,
+      "model_sha256": {
+        "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+        "images.txt": "688a4ce13dcb46c082511d11ff4ab89a32319ed78235290b4088c5a688595822",
+        "points3D.txt": "f0b8811f315bf9f55dc4ec5ad087e33d7d8d4a9eb3484a280cd54b324cfc50d5"
+      }
+    }
+  },
+  "tier_10000_speed_gate": {
+    "exact_candidate_generation_elapsed_s": 2989.03,
+    "streamed_lsh_candidate_generation_elapsed_s": 531.2827715440071,
+    "speedup": 5.626059594127787,
+    "candidate_pairs": 70000,
+    "ann_bits": 9,
+    "ann_probes_in_measured_run": 9,
+    "mean_ann_pool": 1517.0,
+    "max_ann_pool": 1910,
+    "exact_fallback_queries": 0,
+    "candidate_manifest_sha256": "96fae454555cc2632afabdd3cd1b26d530badb5bab1fe8ac24536d18bbbb6a51",
+    "parallel_vlad_manifest_matches_serial": true,
+    "quality_status": "candidate-generation-only; full 10k mapping quality remains open"
+  },
+  "claims": {
+    "colmap_10k_comparison": false,
+    "ground_truth_used_for_selection_or_mapping": false,
+    "readme_memory_before_after_table": false
+  }
+}

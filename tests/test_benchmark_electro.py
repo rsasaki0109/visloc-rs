@@ -346,6 +346,38 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertNotIn("--local-stem-window", temporal_candidate_command)
             self.assertNotIn("--rig-local-grouping", temporal_candidate_command)
 
+            ann_candidate_command = benchmark.build_candidate_command(
+                Path("/bin/visloc"),
+                features_dir=Path("/input/features"),
+                calibration_dir=Path("/input/calibration"),
+                candidate_manifest=Path("/run/ann-candidates.txt"),
+                pair_source="temporal-pyramid",
+                stream_candidate_features=True,
+                retrieval_backend="lsh",
+                ann_tables=8,
+                ann_bits=6,
+                ann_probes=6,
+            )
+            self.assertIn("--stream-candidate-features", ann_candidate_command)
+            self.assertEqual(
+                ann_candidate_command[ann_candidate_command.index("--retrieval-backend") + 1],
+                "lsh",
+            )
+            self.assertEqual(
+                ann_candidate_command[ann_candidate_command.index("--ann-tables") + 1], "8"
+            )
+            self.assertEqual(
+                ann_candidate_command[ann_candidate_command.index("--ann-bits") + 1], "6"
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "requires stream"):
+                benchmark.build_candidate_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    candidate_manifest=Path("/run/invalid-ann.txt"),
+                    retrieval_backend="lsh",
+                )
+
     def test_persistent_plan_binds_pending_shards_and_rejects_unsafe_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
