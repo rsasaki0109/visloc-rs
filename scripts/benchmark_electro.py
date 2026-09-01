@@ -883,11 +883,13 @@ def build_mapping_command(
     snapshot_keypoints_only: bool = False,
     periodic_ba_min_registered_images: int | None = None,
     seed_trials: int | None = None,
+    seed_pair: str | None = None,
     ba_linear_solver: str | None = None,
     ba_max_iterations: int | None = None,
     post_refinement_registration: bool = False,
     final_iterative_refinement: bool = False,
     global_ba_max_refinements: int | None = None,
+    confidence_ordered_tracks: bool = False,
     final_ba: bool = True,
 ) -> list[str]:
     command = [
@@ -931,6 +933,13 @@ def build_mapping_command(
             if value <= 0:
                 raise ValidationError(f"{option} must be positive")
             command.extend([option, str(value)])
+    if seed_pair is not None:
+        fields = seed_pair.split(",")
+        if len(fields) != 2 or any(not field.isdigit() for field in fields):
+            raise ValidationError("seed_pair must be two non-negative image indices: I,J")
+        if int(fields[0]) == int(fields[1]):
+            raise ValidationError("seed_pair image indices must differ")
+        command.extend(["--seed-pair", seed_pair])
     if ba_linear_solver is not None:
         if ba_linear_solver not in {"dense", "sparse", "auto"}:
             raise ValidationError("ba_linear_solver must be dense, sparse, or auto")
@@ -943,6 +952,8 @@ def build_mapping_command(
         if global_ba_max_refinements < 0:
             raise ValidationError("--global-ba-max-refinements must be non-negative")
         command.extend(["--global-ba-max-refinements", str(global_ba_max_refinements)])
+    if confidence_ordered_tracks:
+        command.append("--confidence-ordered-tracks")
     if not final_ba:
         command.append("--no-final-ba")
     return command
@@ -1826,11 +1837,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--periodic-ba-min-registered-images", type=int)
     parser.add_argument("--seed-trials", type=int)
+    parser.add_argument("--seed-pair", help="fixed mapper seed pair as I,J")
     parser.add_argument("--ba-linear-solver", choices=("dense", "sparse", "auto"))
     parser.add_argument("--ba-max-iterations", type=int)
     parser.add_argument("--post-refinement-registration", action="store_true")
     parser.add_argument("--final-iterative-refinement", action="store_true")
     parser.add_argument("--global-ba-max-refinements", type=int)
+    parser.add_argument(
+        "--confidence-ordered-tracks",
+        action="store_true",
+        help="reject only conflict-forming edges in descending verified-pair confidence",
+    )
     parser.add_argument(
         "--no-final-ba",
         action="store_true",
@@ -2020,11 +2037,13 @@ def main(argv: list[str] | None = None) -> int:
                     snapshot_keypoints_only=args.snapshot_keypoints_only,
                     periodic_ba_min_registered_images=args.periodic_ba_min_registered_images,
                     seed_trials=args.seed_trials,
+                    seed_pair=args.seed_pair,
                     ba_linear_solver=args.ba_linear_solver,
                     ba_max_iterations=args.ba_max_iterations,
                     post_refinement_registration=args.post_refinement_registration,
                     final_iterative_refinement=args.final_iterative_refinement,
                     global_ba_max_refinements=args.global_ba_max_refinements,
+                    confidence_ordered_tracks=args.confidence_ordered_tracks,
                     final_ba=not args.no_final_ba,
                 ),
                 artifact_root / "mapping.log",

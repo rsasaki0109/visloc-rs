@@ -485,3 +485,12 @@ similarities and loads the file feature bank; the 10k candidate phase alone is
 the graph grows. Do not call this a successful connected 10k reconstruction.
 The frozen evidence and negative controls are in
 [`m5-openloris-connected-scale-validation.json`](../benchmarks/electro/m5-openloris-connected-scale-validation.json).
+
+M6 keeps that failed baseline immutable. Streamed VLAD plus scale-aware LSH
+reduces 10k candidate generation to 8:51. Replaying the same 58,879 verified
+pairs with confidence-ordered conflict rejection and one follow-up refinement
+registers 3,664/10,000 at 1.140 px mean reprojection. The 18.4× registration
+recovery confirms track conflicts were a binding failure, but 36.64% remains
+below the connected-scale gate. See
+[`m6-ann-streaming.json`](../benchmarks/electro/m6-ann-streaming.json) and
+[`m6-conflict-aware-tracks.json`](../benchmarks/electro/m6-conflict-aware-tracks.json).

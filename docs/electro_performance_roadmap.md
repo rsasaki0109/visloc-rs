@@ -376,12 +376,16 @@ gates. Image count and physical scene scale are tested separately.
 - Report per-scene quality and resource distributions; an aggregate average
   may not hide a failed scene.
 
-Measured decision: the candidate-output and 4 GiB resource gates pass, while
-the connected registered-fraction/component gate fails. The exact VLAD fill
-still performs a quadratic all-image similarity scan despite emitting only
-`7N` pairs, and UnionFind track conflicts collapse long-sequence support.
-Bounded ANN/inverted retrieval plus streamed global descriptors is the next
-performance A/B; conflict-aware track construction is the next quality A/B.
+Measured M6 decision: streamed VLAD plus deterministic scale-aware LSH reduces
+the 10k candidate phase from 2,989.03 s to 531.28 s. On the frozen 10k verified
+snapshot, confidence-ordered conflict rejection raises registration from
+199/10,000 to 3,664/10,000 while retaining 1,192,223 pre-map observations; one
+follow-up refinement holds mean reprojection to 1.140 px. This is a large
+partial recovery, not a connected-scale pass. The remaining quality work is
+component/seed coverage beyond the recovered 36.64%, without weakening the
+reprojection gate. Evidence is frozen in
+`benchmarks/electro/m6-ann-streaming.json` and
+`benchmarks/electro/m6-conflict-aware-tracks.json`.
 
 ## 9. Dependencies and risk register
 
