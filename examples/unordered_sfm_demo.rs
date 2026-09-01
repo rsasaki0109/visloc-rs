@@ -2788,31 +2788,55 @@ fn cap_mapper_pair_matches(pairwise: &mut [PairwiseMatches], limit: usize) -> Ma
 /// remain duplicated in the sorted stream.  It is a diagnostic integrity label
 /// rather than a cryptographic digest.
 fn unordered_pairwise_edge_hash(pairwise: &[PairwiseMatches]) -> u64 {
-    let mut edges = Vec::new();
-    for pair in pairwise {
-        let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
-            (pair.image_i, pair.image_j, false)
-        } else {
-            (pair.image_j, pair.image_i, true)
-        };
-        for &(keypoint_i, keypoint_j) in &pair.matches {
-            let (keypoint_i, keypoint_j) = if swapped {
-                (keypoint_j, keypoint_i)
-            } else {
-                (keypoint_i, keypoint_j)
-            };
-            edges.push((image_i, image_j, keypoint_i, keypoint_j));
-        }
-    }
-    edges.sort_unstable();
+    let mut pair_order = pairwise
+        .iter()
+        .enumerate()
+        .map(|(index, pair)| {
+            (
+                pair.image_i.min(pair.image_j),
+                pair.image_i.max(pair.image_j),
+                index,
+            )
+        })
+        .collect::<Vec<_>>();
+    pair_order.sort_unstable_by_key(|&(image_i, image_j, _)| (image_i, image_j));
     let mut hash = 0xcbf29ce484222325u64;
-    for (image_i, image_j, keypoint_i, keypoint_j) in edges {
-        for value in [image_i, image_j, keypoint_i, keypoint_j] {
-            for byte in (value as u64).to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x100000001b3u64);
+    let mut group_start = 0;
+    while group_start < pair_order.len() {
+        let (image_i, image_j, _) = pair_order[group_start];
+        let mut group_end = group_start + 1;
+        while group_end < pair_order.len()
+            && pair_order[group_end].0 == image_i
+            && pair_order[group_end].1 == image_j
+        {
+            group_end += 1;
+        }
+        let group_match_count = pair_order[group_start..group_end]
+            .iter()
+            .map(|&(_, _, index)| pairwise[index].matches.len())
+            .sum();
+        let mut matches = Vec::with_capacity(group_match_count);
+        for &(_, _, index) in &pair_order[group_start..group_end] {
+            let pair = &pairwise[index];
+            let swapped = pair.image_i > pair.image_j;
+            matches.extend(pair.matches.iter().map(|&(keypoint_i, keypoint_j)| {
+                if swapped {
+                    (keypoint_j, keypoint_i)
+                } else {
+                    (keypoint_i, keypoint_j)
+                }
+            }));
+        }
+        matches.sort_unstable();
+        for (keypoint_i, keypoint_j) in matches {
+            for value in [image_i, image_j, keypoint_i, keypoint_j] {
+                for byte in (value as u64).to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x100000001b3u64);
+                }
             }
         }
+        group_start = group_end;
     }
     hash
 }
@@ -8243,13 +8267,6 @@ fn run_persistent_match_worker(
             None,
             args.colmap_guided_matching,
         );
-        if pairwise.is_empty() {
-            return Err(format!(
-                "persistent match worker shard {} has no verified pair (lower --min-matches?)",
-                shard.id
-            )
-            .into());
-        }
         let edge_hash_before = unordered_pairwise_edge_hash(&pairwise);
         apply_union_traversal_order_with_features(
             &mut pairwise,
@@ -8308,13 +8325,17 @@ fn run_persistent_match_worker(
 
 fn verification_stats_from_snapshot(
     snapshot: &VerifiedPairSnapshot,
+    compact_mapper_replay: bool,
 ) -> Result<VerificationStats, String> {
     let mut stats = VerificationStats::default();
     for (index, pair) in snapshot.pairs.iter().enumerate() {
         let config = configuration_from_code(pair.config)?;
         if let Some(config) = config {
             stats.record(config);
-        } else if pair.accepted_inlier_indices.is_empty() && !pair.matches.is_empty() {
+        } else if !compact_mapper_replay
+            && pair.accepted_inlier_indices.is_empty()
+            && !pair.matches.is_empty()
+        {
             return Err(format!(
                 "snapshot pair {index} has accepted matches but no configuration"
             ));
@@ -8329,6 +8350,7 @@ fn validate_snapshot_for_run(
     features: &[FeatureSet],
     camera: &Camera,
     precomputed_feature_validation: Option<&SnapshotFeatureValidation>,
+    compact_mapper_replay: bool,
 ) -> Result<Vec<PairwiseMatches>, String> {
     if snapshot.schema_version != verified_pair_snapshot::SCHEMA_VERSION {
         return Err(format!(
@@ -8390,7 +8412,7 @@ fn validate_snapshot_for_run(
     if effective_config_hash(&snapshot.verifier_config) != snapshot.verifier_config_hash {
         return Err("verified-pair snapshot verifier-config checksum is invalid".into());
     }
-    let pairwise = pairwise_from_snapshot(snapshot, feature_counts)?;
+    let pairwise = pairwise_from_snapshot(snapshot, feature_counts, compact_mapper_replay)?;
     let ordered_hash = ordered_pairwise_edge_hash(&pairwise);
     if snapshot.pair_order_hash != ordered_hash {
         return Err(format!(
@@ -8418,6 +8440,7 @@ fn validate_snapshot_for_run(
 fn pairwise_from_snapshot(
     snapshot: &VerifiedPairSnapshot,
     feature_counts: &[usize],
+    compact_mapper_replay: bool,
 ) -> Result<Vec<PairwiseMatches>, String> {
     let mut pairs = Vec::with_capacity(snapshot.pairs.len());
     let mut seen = HashSet::new();
@@ -8445,75 +8468,16 @@ fn pairwise_from_snapshot(
                 "snapshot pair {pair_number} calibrated flag disagrees with configuration code"
             ));
         }
-        let validate_indices = |label: &str, values: &[u64], limit: usize| -> Result<(), String> {
-            for &value in values {
-                let index = usize::try_from(value).map_err(|_| {
-                    format!("snapshot pair {pair_number} {label} index does not fit usize")
-                })?;
-                if index >= limit {
-                    return Err(format!(
-                        "snapshot pair {pair_number} {label} index {index} is outside 0..{limit}"
-                    ));
-                }
-            }
-            Ok(())
-        };
-        if let Some(max_index) = record.accepted_inlier_indices.iter().max() {
-            if *max_index >= record.raw_match_count {
-                return Err(format!(
-                    "snapshot pair {pair_number} accepted inlier index {max_index} >= raw match count {}",
-                    record.raw_match_count
-                ));
-            }
-        }
-        if let Some(max_index) = record.essential_inlier_indices.iter().max() {
-            if *max_index >= record.raw_match_count {
-                return Err(format!(
-                    "snapshot pair {pair_number} essential inlier index {max_index} >= raw match count {}",
-                    record.raw_match_count
-                ));
-            }
-        }
-        let raw_match_count = usize::try_from(record.raw_match_count).map_err(|_| {
-            format!(
-                "snapshot pair {pair_number} raw match count {} does not fit usize",
-                record.raw_match_count
-            )
-        })?;
-        if raw_match_count != record.raw_matches.len() {
-            return Err(format!(
-                "snapshot pair {pair_number} raw match count {} does not match stream length {}",
-                raw_match_count,
-                record.raw_matches.len()
-            ));
-        }
-        let raw_matches = record
-            .raw_matches
-            .iter()
-            .map(|&(left, right)| {
-                let left = usize::try_from(left).map_err(|_| {
-                    format!("snapshot pair {pair_number} raw query index does not fit usize")
-                })?;
-                let right = usize::try_from(right).map_err(|_| {
-                    format!("snapshot pair {pair_number} raw train index does not fit usize")
-                })?;
-                if left >= feature_counts[image_i] || right >= feature_counts[image_j] {
-                    return Err(format!(
-                        "snapshot pair {pair_number} raw match ({left},{right}) is outside feature counts ({},{})",
-                        feature_counts[image_i], feature_counts[image_j]
-                    ));
-                }
-                Ok((left, right))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
         let matches = record
             .matches
             .iter()
             .map(|&(left, right)| {
-                let left = usize::try_from(left)
-                    .map_err(|_| format!("snapshot pair {pair_number} query index does not fit usize"))?;
-                let right = usize::try_from(right)
-                    .map_err(|_| format!("snapshot pair {pair_number} train index does not fit usize"))?;
+                let left = usize::try_from(left).map_err(|_| {
+                    format!("snapshot pair {pair_number} query index does not fit usize")
+                })?;
+                let right = usize::try_from(right).map_err(|_| {
+                    format!("snapshot pair {pair_number} train index does not fit usize")
+                })?;
                 if left >= feature_counts[image_i] || right >= feature_counts[image_j] {
                     return Err(format!(
                         "snapshot pair {pair_number} accepted match ({left},{right}) is outside feature counts ({},{})",
@@ -8546,55 +8510,118 @@ fn pairwise_from_snapshot(
                     .collect::<Result<Vec<_>, String>>()
             })
             .transpose()?;
-        validate_indices(
-            "accepted inlier",
-            &record.accepted_inlier_indices,
-            raw_match_count,
-        )?;
-        validate_indices(
-            "essential inlier",
-            &record.essential_inlier_indices,
-            raw_match_count,
-        )?;
-        if record.accepted_inlier_indices.len() != matches.len() {
-            return Err(format!(
-                "snapshot pair {pair_number} has {} accepted indices but {} accepted matches",
-                record.accepted_inlier_indices.len(),
-                matches.len()
-            ));
-        }
-        for (position, &raw_index) in record.accepted_inlier_indices.iter().enumerate() {
-            let raw_index = usize::try_from(raw_index).map_err(|_| {
-                format!("snapshot pair {pair_number} accepted index does not fit usize")
+        let validate_indices = |label: &str, values: &[u64], limit: usize| -> Result<(), String> {
+            for &value in values {
+                let index = usize::try_from(value).map_err(|_| {
+                    format!("snapshot pair {pair_number} {label} index does not fit usize")
+                })?;
+                if index >= limit {
+                    return Err(format!(
+                        "snapshot pair {pair_number} {label} index {index} is outside 0..{limit}"
+                    ));
+                }
+            }
+            Ok(())
+        };
+        if !compact_mapper_replay {
+            if let Some(max_index) = record.accepted_inlier_indices.iter().max() {
+                if *max_index >= record.raw_match_count {
+                    return Err(format!(
+                    "snapshot pair {pair_number} accepted inlier index {max_index} >= raw match count {}",
+                    record.raw_match_count
+                ));
+                }
+            }
+            if let Some(max_index) = record.essential_inlier_indices.iter().max() {
+                if *max_index >= record.raw_match_count {
+                    return Err(format!(
+                    "snapshot pair {pair_number} essential inlier index {max_index} >= raw match count {}",
+                    record.raw_match_count
+                ));
+                }
+            }
+            let raw_match_count = usize::try_from(record.raw_match_count).map_err(|_| {
+                format!(
+                    "snapshot pair {pair_number} raw match count {} does not fit usize",
+                    record.raw_match_count
+                )
             })?;
-            if raw_matches[raw_index] != matches[position] {
+            if raw_match_count != record.raw_matches.len() {
                 return Err(format!(
-                    "snapshot pair {pair_number} accepted match at position {position} disagrees with raw index {raw_index}"
+                "snapshot pair {pair_number} raw match count {} does not match stream length {}",
+                raw_match_count,
+                record.raw_matches.len()
+            ));
+            }
+            let raw_matches = record
+            .raw_matches
+            .iter()
+            .map(|&(left, right)| {
+                let left = usize::try_from(left).map_err(|_| {
+                    format!("snapshot pair {pair_number} raw query index does not fit usize")
+                })?;
+                let right = usize::try_from(right).map_err(|_| {
+                    format!("snapshot pair {pair_number} raw train index does not fit usize")
+                })?;
+                if left >= feature_counts[image_i] || right >= feature_counts[image_j] {
+                    return Err(format!(
+                        "snapshot pair {pair_number} raw match ({left},{right}) is outside feature counts ({},{})",
+                        feature_counts[image_i], feature_counts[image_j]
+                    ));
+                }
+                Ok((left, right))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+            validate_indices(
+                "accepted inlier",
+                &record.accepted_inlier_indices,
+                raw_match_count,
+            )?;
+            validate_indices(
+                "essential inlier",
+                &record.essential_inlier_indices,
+                raw_match_count,
+            )?;
+            if record.accepted_inlier_indices.len() != matches.len() {
+                return Err(format!(
+                    "snapshot pair {pair_number} has {} accepted indices but {} accepted matches",
+                    record.accepted_inlier_indices.len(),
+                    matches.len()
                 ));
             }
-        }
-        if let Some(essential_matches) = &essential_matches {
-            if record.essential_inlier_indices.len() != essential_matches.len() {
-                return Err(format!(
+            for (position, &raw_index) in record.accepted_inlier_indices.iter().enumerate() {
+                let raw_index = usize::try_from(raw_index).map_err(|_| {
+                    format!("snapshot pair {pair_number} accepted index does not fit usize")
+                })?;
+                if raw_matches[raw_index] != matches[position] {
+                    return Err(format!(
+                    "snapshot pair {pair_number} accepted match at position {position} disagrees with raw index {raw_index}"
+                ));
+                }
+            }
+            if let Some(essential_matches) = &essential_matches {
+                if record.essential_inlier_indices.len() != essential_matches.len() {
+                    return Err(format!(
                     "snapshot pair {pair_number} has {} essential indices but {} essential matches",
                     record.essential_inlier_indices.len(),
                     essential_matches.len()
                 ));
-            }
-            for (position, &raw_index) in record.essential_inlier_indices.iter().enumerate() {
-                let raw_index = usize::try_from(raw_index).map_err(|_| {
-                    format!("snapshot pair {pair_number} essential index does not fit usize")
-                })?;
-                if raw_matches[raw_index] != essential_matches[position] {
-                    return Err(format!(
+                }
+                for (position, &raw_index) in record.essential_inlier_indices.iter().enumerate() {
+                    let raw_index = usize::try_from(raw_index).map_err(|_| {
+                        format!("snapshot pair {pair_number} essential index does not fit usize")
+                    })?;
+                    if raw_matches[raw_index] != essential_matches[position] {
+                        return Err(format!(
                         "snapshot pair {pair_number} essential match at position {position} disagrees with raw index {raw_index}"
                     ));
+                    }
                 }
+            } else if !record.essential_inlier_indices.is_empty() {
+                return Err(format!(
+                    "snapshot pair {pair_number} has essential indices but no essential matches"
+                ));
             }
-        } else if !record.essential_inlier_indices.is_empty() {
-            return Err(format!(
-                "snapshot pair {pair_number} has essential indices but no essential matches"
-            ));
         }
         pairs.push(PairwiseMatches {
             image_i,
@@ -15077,13 +15104,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // mapper receives the stored stream verbatim and no descriptor matcher or
     // verifier is consulted.
     let mut imported_snapshot = if let Some(path) = args.import_verified_pairs_snapshot.as_deref() {
-        let snapshot = verified_pair_snapshot::read(path).map_err(std::io::Error::other)?;
+        let compact_mapper_replay = args.export_verified_pairs_snapshot.is_none();
+        let snapshot = if compact_mapper_replay {
+            verified_pair_snapshot::read_mapper_compact(path)
+        } else {
+            verified_pair_snapshot::read(path)
+        }
+        .map_err(std::io::Error::other)?;
         let pairwise = validate_snapshot_for_run(
             &snapshot,
             &image_names,
             &features,
             &args.camera,
             snapshot_feature_validation.as_ref(),
+            compact_mapper_replay,
         )
         .map_err(|error| {
             std::io::Error::new(
@@ -15099,7 +15133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ordered_pairwise_edge_hash(&pairwise),
             unordered_pairwise_edge_hash(&pairwise),
         );
-        let stats = verification_stats_from_snapshot(&snapshot)
+        let stats = verification_stats_from_snapshot(&snapshot, compact_mapper_replay)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         // Snapshot metadata is needed only when the caller explicitly asks to
         // re-export a snapshot.  Ordinary replay feeds PairwiseMatches to the
@@ -17650,8 +17684,41 @@ mod diagnose_cli_tests {
         let original = vec![
             PairwiseMatches::new(2, 0, vec![(4, 5), (3, 2)]),
             PairwiseMatches::new(0, 1, vec![(7, 8)]),
+            PairwiseMatches::new(0, 2, vec![(9, 6)]),
         ];
         let hash = unordered_pairwise_edge_hash(&original);
+        let mut flat_edges = original
+            .iter()
+            .flat_map(|pair| {
+                let (image_i, image_j, swapped) = if pair.image_i <= pair.image_j {
+                    (pair.image_i, pair.image_j, false)
+                } else {
+                    (pair.image_j, pair.image_i, true)
+                };
+                pair.matches.iter().map(move |&(left, right)| {
+                    let (left, right) = if swapped {
+                        (right, left)
+                    } else {
+                        (left, right)
+                    };
+                    (image_i, image_j, left, right)
+                })
+            })
+            .collect::<Vec<_>>();
+        flat_edges.sort_unstable();
+        let flat_hash = flat_edges.into_iter().fold(
+            0xcbf29ce484222325u64,
+            |mut hash, (image_i, image_j, left, right)| {
+                for value in [image_i, image_j, left, right] {
+                    for byte in (value as u64).to_le_bytes() {
+                        hash ^= u64::from(byte);
+                        hash = hash.wrapping_mul(0x100000001b3u64);
+                    }
+                }
+                hash
+            },
+        );
+        assert_eq!(hash, flat_hash);
 
         let mut unchanged = original.clone();
         apply_union_traversal_order(&mut unchanged, UnionTraversalOrder::Original);
@@ -17682,7 +17749,7 @@ mod diagnose_cli_tests {
 
         let mut reversed_pairs = original.clone();
         apply_union_traversal_order(&mut reversed_pairs, UnionTraversalOrder::ReversePairs);
-        assert_eq!(reversed_pairs[0], original[1]);
+        assert_eq!(reversed_pairs[0], *original.last().unwrap());
         let mut reversed_matches = original.clone();
         apply_union_traversal_order(&mut reversed_matches, UnionTraversalOrder::ReverseMatches);
         assert_eq!(reversed_matches[0].matches, vec![(3, 2), (4, 5)]);

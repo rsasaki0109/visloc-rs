@@ -726,3 +726,52 @@ benchmarks/electro/electro-300-failure-injection.log。次はroadmap M2で、同
 12,000 pairのElectro 1,200画像における7未登録画像をfirst-divergence ledgerと
 cap32/64/96/128/uncapped controlで切り分ける。M1の300画像absolute RMSE 0.533 mは
 quality championではなく、M2で改善する対象である。
+
+## 19. Milestone 5 scale closure (2026-09-02)
+
+M2–M4は完了し、Electro 1,200のCPU8 end-to-endは1,649.48秒、COLMAP
+5,705.05秒に対して3.46倍高速、1200/1200、centre RMSE 3.50 cm、mapper
+peak 1.39 GiBまで到達した。その上でM5を全tierまで実行した。
+
+- 300画像restart/corruption gateはhash一致・fail-closedで完了。
+- synthetic 10k/100k I/Oは約32N pair、100k verify-only 33.6 MiB。
+- ETH3D low-res 10 sceneは別々に再構成し、合計9,996/10,008（99.88%）、
+  mapper最大3.32 GiB。README冒頭のGIF/PNGは実model camera centreから生成。
+- snapshot writer/checksum readerをstream化し、pair境界でraw/audit vectorを検証後
+  解放。sand_box 730-shard mergeは5.35→2.03 GiB（−62.0%）、tunnel mapperは
+  4.47→3.25 GiB（−27.4%）でmodel 3 file byte-identical。
+- connected OpenLORIS corridor1-1はcommit
+  `cbc03108723d08322b23d0338680bffa9404cce9`、CC BY-ND 4.0。両T265
+  fisheye先頭5,000 frameをtimestamp順にrectifyし、画像/派生物は外部のみ。
+  10,000-image feature bankは1,427,634 keypoints、8 worker各peak <273 MiB。
+
+OpenLORISの固定7N ladderは以下。全runはGT/extrinsicsをcandidate/match/mapへ
+渡さず、temporal offsets 1/2/4/8/16/32 + same-time rig edge + VLAD fill、
+ratio .8、min12、persistent 4-thread matcher、32-pair shard、cap96、compact
+snapshot、seed16、sparse BA8である。
+
+| tier | candidate / verified | registered | total | peak |
+|---|---:|---:|---:|---:|
+|1k|7,000 / 6,869|989|2:25|280,916 KiB|
+|2.5k|17,500 / 16,321|1,223|7:10|401,308 KiB|
+|5k|35,000 / 31,521|1,212|20:33|691,840 KiB|
+|10k|70,000 / 58,879|199|1:03:45|1,869,412 KiB|
+
+したがってM5はresource gate pass / connected-quality gate fail。10k peakは
+2,188-shard merge 1.78 GiB、candidate 1.14 GiB、matcher 851 MiB、mapper
+501 MiB。manifest出力は7NでもVLAD exact rankingは全画像pairをscoreし、10k
+candidateだけで49:49かかる。dense 1kは23,157 verifiedでもUnionFind conflictで
+2/1000、global 2.5kは1,459登録でもmean reproj 3,567 pxで棄却した。
+
+証跡は
+`benchmarks/electro/m5-openloris-connected-scale-validation.json` と
+`docs/electro_m5_scale_validation.md`。このM5 branchを全test/PR/merge/branch整理
+した次は、別branchで次の順にA/Bする。
+
+1. exact top-K full sortをbounded selectionへ置換しcandidate hash完全一致で
+   wallを短縮。その後ANN/inverted indexをbehavioral A/Bとして追加。
+2. feature fileからtraining sample/global descriptorを2-pass streamし、candidate
+   phaseでdescriptor bank全保持をやめる。
+3. same-image conflictでsupportを捨てるUnionFind track builderを、geometry-supported
+   alternativeを保持するbounded component builderへ置換。1k/2.5k/5k/10kの凍結
+   manifestをすべて再実行し、resourceだけでなくregistered fractionをgateにする。

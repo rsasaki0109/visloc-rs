@@ -280,6 +280,14 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 merged_snapshot=Path("/run/merged.vps"),
                 output_model=Path("/run/model"),
                 max_mapper_matches_per_pair=128,
+                snapshot_keypoints_only=True,
+                periodic_ba_min_registered_images=1201,
+                seed_trials=1,
+                ba_linear_solver="sparse",
+                ba_max_iterations=8,
+                post_refinement_registration=True,
+                final_iterative_refinement=True,
+                global_ba_max_refinements=0,
             )
             for command in (candidate_command, match_command, map_command):
                 self.assertNotIn("--gt", command)
@@ -287,6 +295,13 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("--export-verified-pairs-only", match_command)
             self.assertNotIn("--max-mapper-matches-per-pair", match_command)
             self.assertIn("--max-mapper-matches-per-pair", map_command)
+            self.assertIn("--snapshot-keypoints-only", map_command)
+            self.assertIn("--post-refinement-registration", map_command)
+            self.assertIn("--final-iterative-refinement", map_command)
+            self.assertEqual(map_command[map_command.index("--ba-max-iterations") + 1], "8")
+            self.assertEqual(
+                map_command[map_command.index("--global-ba-max-refinements") + 1], "0"
+            )
             no_ba_command = benchmark.build_mapping_command(
                 Path("/bin/visloc"),
                 features_dir=Path("/input/features"),
@@ -296,6 +311,15 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 final_ba=False,
             )
             self.assertIn("--no-final-ba", no_ba_command)
+            with self.assertRaisesRegex(benchmark.ValidationError, "ba_linear_solver"):
+                benchmark.build_mapping_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    merged_snapshot=Path("/run/merged.vps"),
+                    output_model=Path("/run/model"),
+                    ba_linear_solver="invalid",
+                )
 
             rig_candidate_command = benchmark.build_candidate_command(
                 Path("/bin/visloc"),

@@ -336,6 +336,18 @@ COLMAP on the exact same pair workload.
 
 ## 8. Milestone 5 — larger environments
 
+**Status (2026-09-02): complete with a connected-quality failure.** The 300
+restart/corruption gate, deterministic 10k/100k I/O stress, all ten ETH3D
+low-res scenes, and an OpenLORIS corridor 1k/2.5k/5k/10k ladder have run. The
+ten independent ETH3D models register 9,996/10,008 cameras (99.88%) below
+3.32 GiB mapper RSS. The connected 10k pipeline processes 70,000 candidates
+and peaks at 1.78 GiB, but registers only 199/10,000 after plateauing near 1.2k
+at smaller tiers. M5 therefore passes its I/O/resource gate and fails its
+connected registration gate. Evidence:
+[`m5-eth3d-scale-validation.json`](../benchmarks/electro/m5-eth3d-scale-validation.json),
+[`m5-openloris-connected-scale-validation.json`](../benchmarks/electro/m5-openloris-connected-scale-validation.json),
+and [`electro_m5_scale_validation.md`](electro_m5_scale_validation.md).
+
 Scale validation begins only after Milestones 0–4 satisfy their preservation
 gates. Image count and physical scene scale are tested separately.
 
@@ -363,6 +375,13 @@ gates. Image count and physical scene scale are tested separately.
   smaller/exhaustive control, and no new unexplained component appears.
 - Report per-scene quality and resource distributions; an aggregate average
   may not hide a failed scene.
+
+Measured decision: the candidate-output and 4 GiB resource gates pass, while
+the connected registered-fraction/component gate fails. The exact VLAD fill
+still performs a quadratic all-image similarity scan despite emitting only
+`7N` pairs, and UnionFind track conflicts collapse long-sequence support.
+Bounded ANN/inverted retrieval plus streamed global descriptors is the next
+performance A/B; conflict-aware track construction is the next quality A/B.
 
 ## 9. Dependencies and risk register
 

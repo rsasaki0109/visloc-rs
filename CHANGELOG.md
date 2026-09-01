@@ -6,6 +6,26 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Milestone 5 real-world scale and streaming-memory validation
+  (2026-09-01).** Ran all ten ETH3D low-res many-view scenes independently:
+  **9,996/10,008 cameras registered (99.88%)**, with score-only centre RMSE,
+  outliers, mapper RSS, and seed selection recorded per scene. Added a
+  real-model README GIF/PNG and above-the-fold result table while retaining the
+  same-input Electro/COLMAP speed comparison immediately below it. The
+  snapshot codec now streams exact-format writes, checksum validation, and
+  pairwise compact mapper replay; tunnel peak fell **27.4%**, from 4,688,360
+  KiB to **3,405,036 KiB**, in 565.21 s versus 569.07 s, with all three model
+  files byte-identical. The 730-shard sand_box merge uses 62.0% less memory,
+  and deterministic 10k/100k I/O restart stress stays `O(NK)` at 33.6 MiB for
+  100k. Added commit-pinned, range-reading OpenLORIS corridor staging with
+  hash-bound rectification state, prefix tier views, and bounded 7z extraction
+  batches; staged derivatives remain external under the source terms. The
+  connected 1k/2.5k/5k/10k ladder processes the full 10,000-image tier in
+  1:03:45 below 1.78 GiB peak RSS, but honestly fails its quality gate:
+  registration goes 989 → 1,223 → 1,212 → 199. The evidence records this as a
+  resource pass / connected-quality fail and identifies exact all-image VLAD
+  ranking plus conflict-collapsing track construction as the next work.
+
 - **Persistent Electro matcher and end-to-end performance audit (2026-09-01).**
   Added an opt-in, versioned persistent-worker plan that loads the feature bank
   once, writes atomic resumable match shards, validates recovery state

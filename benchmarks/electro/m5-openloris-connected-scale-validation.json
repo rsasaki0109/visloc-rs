@@ -1,0 +1,251 @@
+{
+  "schema": "visloc_m5_openloris_connected_scale_validation_v1",
+  "recorded_at": "2026-09-02",
+  "dataset": {
+    "scene": "OpenLORIS corridor1-1",
+    "connected_rig": true,
+    "source_commit": "cbc03108723d08322b23d0338680bffa9404cce9",
+    "archive_bytes": 13853763765,
+    "archive_lfs_oid_sha256": "c7ff1a472ca54da82198521eda8c18f2065691075a05e706880f7fb58fda8415",
+    "archive_hash_note": "Pinned Hugging Face LFS oid; the range-reading stage does not claim to have rehashed the complete remote archive.",
+    "license": "CC BY-ND 4.0",
+    "staged_derivatives_redistributed": false,
+    "selection": "First 5000 frames from each T265 fisheye, globally timestamp sorted",
+    "image_size": [
+      848,
+      800
+    ],
+    "calibration": "Official Kannala-Brandt sensors.yaml values validated, then rectified to PINHOLE while preserving focal lengths and principal points",
+    "camera_intrinsics": {
+      "1": [
+        284.98089599609375,
+        286.1023864746094,
+        425.244384765625,
+        398.46759033203125
+      ],
+      "2": [
+        284.8125915527344,
+        285.97601318359375,
+        427.6615905761719,
+        397.1234130859375
+      ]
+    }
+  },
+  "staging": {
+    "script_sha256": "e0de60a3489429bfca0bf7fca980a2d1df039355ac66224cb0fa0311b84541ed",
+    "complete_extract_and_rectify_wall_s": 1139.52,
+    "complete_extract_and_rectify_peak_rss_kib": 200696,
+    "validated_raw_reuse_and_rectify_wall_s": 340.57,
+    "validated_raw_reuse_and_rectify_peak_rss_kib": 145756,
+    "raw_archive_retained": false,
+    "tier_storage": "Relative symlinks into one staged image and feature bank"
+  },
+  "features": {
+    "images": 10000,
+    "total_keypoints": 1427634,
+    "max_keypoints_per_image": 256,
+    "workers": 8,
+    "images_per_worker": 1250,
+    "slowest_worker_wall_s": 4475,
+    "maximum_worker_peak_rss_kib": 272740,
+    "feature_extraction_counted_once": true
+  },
+  "policy": {
+    "candidate_source": "temporal-pyramid-v1",
+    "temporal_offsets": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "cross_camera_rule": "same timestamp",
+    "candidate_budget": "7N with deterministic VLAD fill",
+    "candidate_output_complexity": "O(7N)",
+    "candidate_compute_limitation": "The baseline exact VLAD fill still scores every image pair and loads the file-backed feature bank before global reduction; it is not a linear-time or fully streamed retrieval claim.",
+    "pairs_per_shard": 32,
+    "persistent_matcher_threads": 4,
+    "match_ratio": 0.8,
+    "minimum_verified_matches": 12,
+    "mapper": "incremental",
+    "mapper_match_cap": 96,
+    "snapshot_keypoints_only": true,
+    "seed_trials": 16,
+    "ba_linear_solver": "sparse",
+    "ba_max_iterations": 8,
+    "post_refinement_registration": true,
+    "ground_truth_or_supplied_extrinsics_used_for_selection_or_mapping": false
+  },
+  "tooling": {
+    "runner_sha256": "39387ab13b1266614aaa724795137a51ea224896e3875d438f8f27c53a6984e9",
+    "unordered_sfm_demo_sha256": "e5559f13c41893716f001ec3942bd5116d0468f2fc5653890149365cb128b863",
+    "snapshot_merge_helper_sha256": "afae6959e2cbff03c9a091a12df022f656998d425d1c2da53c4e4586ad2af884",
+    "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+    "python": "3.12.3"
+  },
+  "tiers": [
+    {
+      "images": 1000,
+      "source_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+      "feature_rows": 256000,
+      "feature_manifest_sha256": "5c525e54670bf9cd43be9b4e63b5926e8810ed99839f4380a683306d7a863d6e",
+      "candidate_pairs": 7000,
+      "candidate_index_sha256": "5249483ef4e8904edbaf187ff41bdddea3179ae509b6d64eb02461e9857bf6ca",
+      "verified_pairs": 6869,
+      "accepted_correspondences": 662371,
+      "snapshot_bytes": 45210880,
+      "snapshot_sha256": "3a3d3c3a29788d2248a808727146fab1142bb6d90be6d0f669dca63ded9be8af",
+      "registered": 989,
+      "registered_fraction": 0.989,
+      "tracks": 2586,
+      "observations": 28918,
+      "mean_reprojection_px": 1.574,
+      "candidate_wall_s": 51.79,
+      "candidate_peak_rss_kib": 191548,
+      "matching_wall_s": 35.84,
+      "matching_peak_rss_kib": 158080,
+      "merge_wall_s": 0.33,
+      "merge_peak_rss_kib": 83492,
+      "mapping_wall_s": 51.3,
+      "mapping_peak_rss_kib": 280916,
+      "total_wall_s": 145.13,
+      "total_peak_rss_kib": 280916,
+      "artifact_bytes": 107863784,
+      "model_sha256": {
+        "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+        "images.txt": "ed204072d2669080e58353c7fdd521d94b3762929e29c6eeb05a78f515256415",
+        "points3D.txt": "b3ef8a3cc97e4be11b0b6eb335ce3a0f4485e5ab5194aa7b6b2c8c2545d71dc7"
+      }
+    },
+    {
+      "images": 2500,
+      "source_manifest_sha256": "b05a280dd4cc1279bda064b6f52f9207e67e0ebcfb892e516ebe4aa8e98eddf1",
+      "feature_rows": 522348,
+      "feature_manifest_sha256": "4836d22e7210a9079961942b66c266e8be3ce88dd8a28dd7c26e5ce04330f41a",
+      "candidate_pairs": 17500,
+      "candidate_index_sha256": "6b18f8751b5d84dae15d0066ae6c0f12b14d71f556d9b9a6b0df5ca86c0c5bbf",
+      "verified_pairs": 16321,
+      "accepted_correspondences": 1287682,
+      "snapshot_bytes": 89001660,
+      "snapshot_sha256": "734eb36d8c7ef1749b88cc6885bebee4e5c8a5ee2e053e5a314ab87d8c2f2dbc",
+      "registered": 1223,
+      "registered_fraction": 0.4892,
+      "tracks": 4226,
+      "observations": 36644,
+      "mean_reprojection_px": 1.766,
+      "candidate_wall_s": 221.68,
+      "candidate_peak_rss_kib": 401308,
+      "matching_wall_s": 80.73,
+      "matching_peak_rss_kib": 319052,
+      "merge_wall_s": 0.78,
+      "merge_peak_rss_kib": 232580,
+      "mapping_wall_s": 98.63,
+      "mapping_peak_rss_kib": 395680,
+      "total_wall_s": 430.05,
+      "total_peak_rss_kib": 401308,
+      "artifact_bytes": 264495725,
+      "model_sha256": {
+        "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+        "images.txt": "f3c5680f603c1455c60acd115f569b86172d052f5cb8bad7d58dd000942e9659",
+        "points3D.txt": "8a2100ef9f07cb507e874d0f2c8c04018be313617ac21a0f7d83a80087110a8d"
+      }
+    },
+    {
+      "images": 5000,
+      "source_manifest_sha256": "ac9762deb0b3f0aed591d320e0441e8e739089105ac9e898ef9aca431bde875f",
+      "feature_rows": 865988,
+      "feature_manifest_sha256": "5cf7886b10aa5ec81f11fb258cdd4937d3397d0b81b2288bb2484b4700ce2580",
+      "candidate_pairs": 35000,
+      "candidate_index_sha256": "0396bb0944ac10b9490ccb5ee4a0ca775b5211665058896410fa0636d3664f43",
+      "verified_pairs": 31521,
+      "accepted_correspondences": 2106827,
+      "snapshot_bytes": 147304288,
+      "snapshot_sha256": "fa6b0ab44d06128cbd705876339887ec2a247fc8786b182517f7042cc211c912",
+      "registered": 1212,
+      "registered_fraction": 0.2424,
+      "tracks": 3318,
+      "observations": 29317,
+      "mean_reprojection_px": 1.072,
+      "candidate_wall_s": 780.9,
+      "candidate_peak_rss_kib": 691840,
+      "matching_wall_s": 157.27,
+      "matching_peak_rss_kib": 528684,
+      "merge_wall_s": 1.72,
+      "merge_peak_rss_kib": 602876,
+      "mapping_wall_s": 173.14,
+      "mapping_peak_rss_kib": 470492,
+      "total_wall_s": 1232.71,
+      "total_peak_rss_kib": 691840,
+      "artifact_bytes": 621526344,
+      "model_sha256": {
+        "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+        "images.txt": "6f241d99c6a34ffd3a44e583e0ecc85118c2d2b3acb840749a18d6d58529e412",
+        "points3D.txt": "82b63221c82e084111d9977003a60d71f132d302932b241a2ac5b168d63b2181"
+      }
+    },
+    {
+      "images": 10000,
+      "source_manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+      "feature_rows": 1427634,
+      "feature_manifest_sha256": "2d5d87c93c9131f8e1c625691c53156c230117c1d130d5babefc86e05bee241d",
+      "candidate_pairs": 70000,
+      "candidate_index_sha256": "1ab1225f7dc926cb7fe91e5e2bff315db6e215d8a52a3b177648e99883b25171",
+      "verified_pairs": 58879,
+      "accepted_correspondences": 3449870,
+      "snapshot_bytes": 243754880,
+      "snapshot_sha256": "31e99651ff7f7e6523637cd384af55eea24d53b2bd76ced5bf03ccfe43f4a4bf",
+      "registered": 199,
+      "registered_fraction": 0.0199,
+      "tracks": 873,
+      "observations": 5184,
+      "mean_reprojection_px": 1.301,
+      "candidate_wall_s": 2989.03,
+      "candidate_peak_rss_kib": 1196804,
+      "matching_wall_s": 304.0,
+      "matching_peak_rss_kib": 871100,
+      "merge_wall_s": 4.6,
+      "merge_peak_rss_kib": 1869412,
+      "mapping_wall_s": 119.79,
+      "mapping_peak_rss_kib": 513412,
+      "total_wall_s": 3825.0,
+      "total_peak_rss_kib": 1869412,
+      "artifact_bytes": 1767786739,
+      "model_sha256": {
+        "cameras.txt": "f46191c0aa6e279c5e72ada99140975256bac31a426bd9c7051b8063f62c49b4",
+        "images.txt": "aa2006d2c4cfacd4d3efedb4e19938b49635fe22eb5981174d4aaa8c9e829ebe",
+        "points3D.txt": "ad5b12503238648175892f67f41b997cea1e3d3023ba71fd1a4169b85b67216a"
+      }
+    }
+  ],
+  "negative_controls": {
+    "dense_1000": {
+      "candidate_pairs": 23288,
+      "verified_pairs": 23157,
+      "snapshot_bytes": 158847352,
+      "registered": 2,
+      "tracks": 3,
+      "mean_reprojection_px": 0.258,
+      "reason_rejected": "Dense pair evidence creates heavy same-image UnionFind conflicts and collapses usable multi-view tracks."
+    },
+    "global_2500": {
+      "registered": 1459,
+      "tracks": 207,
+      "observations": 2063,
+      "mean_reprojection_px": 3567.162,
+      "wall_s": 99.28,
+      "peak_rss_kib": 567468,
+      "reason_rejected": "More cameras are nominally registered, but the reconstruction is geometrically invalid."
+    }
+  },
+  "decision": {
+    "resource_gate": "pass",
+    "quality_gate": "fail",
+    "summary": "The same restartable 7N pipeline processes all 10000 connected inputs below 2 GiB peak RSS, but registration plateaus near 1200 and falls to 199 at the full tier. This is a scale/resource result, not a successful 10k reconstruction.",
+    "next_work": [
+      "Replace the exact all-image VLAD similarity scan with a bounded ANN or inverted index and stream descriptor-to-global aggregation.",
+      "Replace UnionFind conflict collapse with track construction that preserves geometrically consistent alternatives across long connected sequences.",
+      "Re-run the frozen four-tier manifests before making any connected 10k quality claim."
+    ]
+  }
+}

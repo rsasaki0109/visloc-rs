@@ -1,0 +1,68 @@
+{
+  "recorded_at": "2026-09-01",
+  "schema": "visloc_m5_scale_io_audit_v1",
+  "scope": "I/O-only synthetic manifests; no geometry or quality claim",
+  "settings": {
+    "neighbors": 32,
+    "pairs_per_shard": 4096,
+    "script_sha256": "a1decc0e67a94f5c9b886e503b82b2f7d6cb882e6431c0f1309f050c9b723d07"
+  },
+  "tiers": [
+    {
+      "aggregate_shard_sha256": "306c6eb534dc26d7892f1f2317a12e4d59ba3e1723eaea595ace878b8dc7a74a",
+      "clean": {
+        "elapsed_seconds": 0.3112654850119725,
+        "peak_rss_kib": 19720,
+        "result_sha256": "f54bde06f6d117f1b723d76e290aefd9b078b083a8076081e3c3c4e41113eac9",
+        "written_shards": 78
+      },
+      "image_count": 10000,
+      "index_sha256": "ac06adfea6eec60a52ddb9b1631e7298576d0b18780dcbc7f02a3319b0fb2163",
+      "interrupted_after_shards": 10,
+      "pair_count": 319472,
+      "resume": {
+        "elapsed_seconds": 0.3749010019819252,
+        "peak_rss_kib": 19636,
+        "result_sha256": "a11e7cf08fb1ac12e28baf36c3fb5cd1825888d17b5d2fc71de8a617aa1f8865",
+        "reused_shards": 10,
+        "written_shards": 68
+      },
+      "shard_count": 78,
+      "verify": {
+        "elapsed_seconds": 0.3347700019949116,
+        "peak_rss_kib": 19672,
+        "result_sha256": "a6e0a9f77a413f403a53f2b7b5f3aa3fb23dbfa412e39fe230ae2b20e26e0a0a",
+        "reused_shards": 78,
+        "written_shards": 0
+      }
+    },
+    {
+      "aggregate_shard_sha256": "de33ac741de0a9c2569f08c9dbf496a9b77f7d3ff4827ed742e83288e3369cee",
+      "clean": {
+        "elapsed_seconds": 3.160389575001318,
+        "peak_rss_kib": 33832,
+        "result_sha256": "3a7024c65e3282d568bdf416e092a2604c29a0a32fb923283d399cdf78dca788",
+        "written_shards": 782
+      },
+      "image_count": 100000,
+      "index_sha256": "814119b8f1ccc08ba91c4c20e5c3d79715eca1f9a7c052ffd3bf9f7fdef5f008",
+      "interrupted_after_shards": 100,
+      "pair_count": 3199472,
+      "resume": {
+        "elapsed_seconds": 3.4716618770034984,
+        "peak_rss_kib": 34032,
+        "result_sha256": "c19b1be99858e0ffec87abf254791fdf811bf34aab9e0c1574b54c65125d4624",
+        "reused_shards": 100,
+        "written_shards": 682
+      },
+      "shard_count": 782,
+      "verify": {
+        "elapsed_seconds": 2.073873389977962,
+        "peak_rss_kib": 34380,
+        "result_sha256": "f67ff0d8e9fff4497e0b8cffa6a8c447ea7c11c2e8f8633f0f4defd63655b6cb",
+        "reused_shards": 782,
+        "written_shards": 0
+      }
+    }
+  ]
+}

@@ -1,9 +1,11 @@
 # Large-scale unordered-SfM validation plan
 
-**Milestone 4 — execution protocol (2026-08-31).** This document defines the
-validation stages and the restartable runner used to execute them. It does not
-change the production default. The current 38-image courtyard result and the
-M3 reduced-candidate result remain the acceptance controls.
+**Milestone 4 protocol; Milestone 5 measured update (2026-09-02).** This
+document defines the validation stages and restartable runner now exercised
+through independent ETH3D 10,008-image aggregation, synthetic 100k I/O, and a
+connected OpenLORIS 10k tier. It does not change the production default. The
+38-image courtyard result and M3 reduced-candidate result remain acceptance
+controls.
 
 Implementation order, performance/quality targets, stop conditions, and PR
 boundaries are maintained separately in
@@ -456,3 +458,30 @@ Before starting the first download, confirm:
 The electro-1200 run above completes the first 1k-scale execution of this
 plan. The checklist remains the required preflight for larger 10k+/100k+
 tiers and for any fresh external dataset root.
+
+## 8. Milestone 5 measured outcome
+
+All ten ETH3D low-res scenes were mapped independently: 9,996/10,008 supplied
+cameras register (99.88%), with no mapper above 3.32 GiB. The separate
+synthetic restart gate emits about `32N` pairs and replays the 100k tier at
+33.6 MiB without an `N²` matrix.
+
+The connected environment is commit-pinned OpenLORIS `corridor1-1`: 5,000
+frames from each T265 fisheye, globally timestamp sorted and rectified from the
+official Kannala-Brandt calibration. One external feature bank feeds four
+prefix tiers under the same temporal-pyramid + VLAD-fill `7N` policy.
+
+| Tier | Candidate / verified pairs | Registered | Total wall | Peak phase RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 1k | 7,000 / 6,869 | 989/1,000 | 2:25 | 280,916 KiB |
+| 2.5k | 17,500 / 16,321 | 1,223/2,500 | 7:10 | 401,308 KiB |
+| 5k | 35,000 / 31,521 | 1,212/5,000 | 20:33 | 691,840 KiB |
+| 10k | 70,000 / 58,879 | 199/10,000 | 1:03:45 | 1,869,412 KiB |
+
+The resource gate passes below 2 GiB, but the connected quality gate fails.
+The manifest is sparse, yet exact VLAD ranking still computes all-image
+similarities and loads the file feature bank; the 10k candidate phase alone is
+49:49 at 1.14 GiB. UnionFind track conflicts also collapse usable support as
+the graph grows. Do not call this a successful connected 10k reconstruction.
+The frozen evidence and negative controls are in
+[`m5-openloris-connected-scale-validation.json`](../benchmarks/electro/m5-openloris-connected-scale-validation.json).
