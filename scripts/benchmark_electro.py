@@ -847,6 +847,14 @@ def build_mapping_command(
     images_dir: Path | None = None,
     min_pnp_inliers: int = 12,
     max_mapper_matches_per_pair: int | None = None,
+    snapshot_keypoints_only: bool = False,
+    periodic_ba_min_registered_images: int | None = None,
+    seed_trials: int | None = None,
+    ba_linear_solver: str | None = None,
+    ba_max_iterations: int | None = None,
+    post_refinement_registration: bool = False,
+    final_iterative_refinement: bool = False,
+    global_ba_max_refinements: int | None = None,
     final_ba: bool = True,
 ) -> list[str]:
     command = [
@@ -878,6 +886,30 @@ def build_mapping_command(
         if max_mapper_matches_per_pair <= 0:
             raise ValidationError("max_mapper_matches_per_pair must be positive")
         command.extend(["--max-mapper-matches-per-pair", str(max_mapper_matches_per_pair)])
+    if snapshot_keypoints_only:
+        command.append("--snapshot-keypoints-only")
+    positive_options = (
+        ("--periodic-ba-min-registered-images", periodic_ba_min_registered_images),
+        ("--seed-trials", seed_trials),
+        ("--ba-max-iterations", ba_max_iterations),
+    )
+    for option, value in positive_options:
+        if value is not None:
+            if value <= 0:
+                raise ValidationError(f"{option} must be positive")
+            command.extend([option, str(value)])
+    if ba_linear_solver is not None:
+        if ba_linear_solver not in {"dense", "sparse", "auto"}:
+            raise ValidationError("ba_linear_solver must be dense, sparse, or auto")
+        command.extend(["--ba-linear-solver", ba_linear_solver])
+    if post_refinement_registration:
+        command.append("--post-refinement-registration")
+    if final_iterative_refinement:
+        command.append("--final-iterative-refinement")
+    if global_ba_max_refinements is not None:
+        if global_ba_max_refinements < 0:
+            raise ValidationError("--global-ba-max-refinements must be non-negative")
+        command.extend(["--global-ba-max-refinements", str(global_ba_max_refinements)])
     if not final_ba:
         command.append("--no-final-ba")
     return command
@@ -1741,6 +1773,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-pnp-inliers", type=int, default=12)
     parser.add_argument("--max-mapper-matches-per-pair", type=int)
     parser.add_argument(
+        "--snapshot-keypoints-only",
+        action="store_true",
+        help="drop descriptor payloads during file-backed snapshot replay (opt-in)",
+    )
+    parser.add_argument("--periodic-ba-min-registered-images", type=int)
+    parser.add_argument("--seed-trials", type=int)
+    parser.add_argument("--ba-linear-solver", choices=("dense", "sparse", "auto"))
+    parser.add_argument("--ba-max-iterations", type=int)
+    parser.add_argument("--post-refinement-registration", action="store_true")
+    parser.add_argument("--final-iterative-refinement", action="store_true")
+    parser.add_argument("--global-ba-max-refinements", type=int)
+    parser.add_argument(
         "--no-final-ba",
         action="store_true",
         help="skip the mapper's final bundle adjustment (for a phase-isolated baseline)",
@@ -1921,6 +1965,14 @@ def main(argv: list[str] | None = None) -> int:
                     images_dir=args.images_dir,
                     min_pnp_inliers=args.min_pnp_inliers,
                     max_mapper_matches_per_pair=args.max_mapper_matches_per_pair,
+                    snapshot_keypoints_only=args.snapshot_keypoints_only,
+                    periodic_ba_min_registered_images=args.periodic_ba_min_registered_images,
+                    seed_trials=args.seed_trials,
+                    ba_linear_solver=args.ba_linear_solver,
+                    ba_max_iterations=args.ba_max_iterations,
+                    post_refinement_registration=args.post_refinement_registration,
+                    final_iterative_refinement=args.final_iterative_refinement,
+                    global_ba_max_refinements=args.global_ba_max_refinements,
                     final_ba=not args.no_final_ba,
                 ),
                 artifact_root / "mapping.log",

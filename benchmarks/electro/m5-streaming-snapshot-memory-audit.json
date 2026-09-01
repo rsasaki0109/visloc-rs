@@ -1,0 +1,52 @@
+{
+  "exact_output": {
+    "merged_snapshot_sha256": "1cf25a0261bc9be76d74c3f5ae7153e115d44be56b7ef8e0795ce2aef00fb232",
+    "model_sha256": {
+      "cameras.txt": "63166183981b28fe6bb7d8be310b1b55113e2b38c1ef9b0a3c1af13df1745889",
+      "images.txt": "c53932ae03010a8985f96105c5e493aecf492cf5dda18a63fd8c63a6f566170b",
+      "points3D.txt": "55e6b7b230c988edc8394be40255660fbf5316185fb02d57113b2fcadc33f571"
+    }
+  },
+  "implementation": {
+    "reader": "1 MiB checksum buffer, then bounded file decode",
+    "unordered_edge_hash": "normalized pair groups with per-pair match sorting",
+    "wire_format_changed": false,
+    "writer": "computed payload length plus streaming FNV-1a"
+  },
+  "mapping": {
+    "after": {
+      "peak_rss_kib": 3478220,
+      "wall_seconds": 454.15
+    },
+    "before": {
+      "peak_rss_kib": 4228540,
+      "wall_seconds": 501.98
+    },
+    "peak_rss_reduction_percent": 17.7,
+    "scene": "ETH3D sand_box",
+    "timing_sha256": {
+      "after": "0b63a2a96ad780bfdd69b2ee229dca92c32c7cdd3d75b64c33e88dbe422dd376",
+      "before": "fd8aa0348e84bfd52432585c288fa5306052cf40723d94ccb064acbd88315eef"
+    },
+    "wall_reduction_percent": 9.5
+  },
+  "merge": {
+    "after": {
+      "peak_rss_kib": 2132012,
+      "wall_seconds": 11.25
+    },
+    "before": {
+      "implementation_commit": "37eb4939ac4132821eca09ae3e73c0d2b8a4ebf0",
+      "peak_rss_kib": 5611868,
+      "wall_seconds": 11.01
+    },
+    "peak_rss_reduction_percent": 62.0,
+    "shards": 730,
+    "timing_sha256": {
+      "after": "35d320b0213167430f1c7c03a64e5ce9c572001f4f718189f8072b8bfb678863",
+      "before": "9bc5a014f0dcdc2777e7a1b9ed0255006f9a04f3189889fbaa36aa363e6f8438"
+    }
+  },
+  "recorded_at": "2026-09-01",
+  "schema": "visloc_m5_streaming_snapshot_memory_audit_v1"
+}

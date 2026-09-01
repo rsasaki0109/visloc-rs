@@ -11,7 +11,59 @@
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
 </p>
 
-## 1,200-image Electro scale checkpoint
+## 10,008-image real-world SfM scale validation
+
+<p align="center">
+  <img src="docs/assets/eth3d_10008_scale_validation.gif" alt="Ten measured ETH3D reconstructions generated from 10,008 real images: camera-centre trajectories, registration, score-only RMSE, and bounded mapper memory" width="900">
+</p>
+
+**visloc-rs registers 9,996/10,008 cameras (99.88%) across every ETH3D
+low-resolution many-view scene, with no mapper run exceeding 3.32 GiB.** Each
+panel above is drawn from the completed model's real camera centres. The ten
+unrelated scenes remain ten independent reconstructions; supplied poses are
+opened only after a model has been selected and written.
+
+| Real scene | Registered / supplied | Centre RMSE | RMSE / extent | Mapper peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| terrains | **660/660** | 0.58 cm | 0.12% | 1.56 GiB |
+| delivery area | **948/948** | 9.22 cm | 0.99% | 2.31 GiB |
+| forest | **1028/1028** | 1.33 cm | 0.19% | 2.65 GiB |
+| playground | **955/960** | 6.12 cm | 2.52% | 2.44 GiB |
+| electro | **1200/1200** | 3.50 cm | 0.55% | 1.39 GiB |
+| lakeside | **1063/1064** | 0.34 cm | 0.08% | 3.19 GiB |
+| sand box | **1112/1112** | 2.35 cm | 0.45% | **3.32 GiB** |
+| storage room | **795/796** | 0.61 cm | 0.42% | 1.71 GiB |
+| storage room 2 | **831/832** | 3.48 cm | 2.57% | 1.00 GiB |
+| tunnel | **1404/1408** | 14.92 cm | 1.61% | 3.25 GiB |
+
+<p align="center"><sub>playground stages 955/960 supplied images after five
+hash-audited source outliers are excluded. storage_room_2 advances from seed 1
+(2/832) to seed 16 solely by internal registration count, before scoring.
+tunnel RMSE includes one 5.32 m outlier; its median is 2.47 cm and p95 is
+9.41 cm. Full precision, hashes, and selection notes:
+<a href="benchmarks/electro/m5-eth3d-scale-validation.json">M5 evidence</a> ·
+<a href="docs/electro_m5_scale_validation.md">scale report</a>.</sub></p>
+
+<p align="center">
+  <a href="docs/assets/eth3d_10008_scale_validation.png"><img src="docs/assets/eth3d_10008_scale_validation.png" alt="Full-resolution still of ten measured ETH3D camera-centre reconstructions" width="900"></a><br>
+  <sub>Full-resolution measured still · each trajectory is independently PCA-projected only for display.</sub>
+</p>
+
+### Memory stays bounded as evidence grows
+
+| Measured A/B on identical bytes | Before | Final | Change |
+| --- | ---: | ---: | ---: |
+| 730-shard snapshot merge peak | 5.35 GiB | **2.03 GiB** | **−62.0%** |
+| sand_box mapper peak | 4.03 GiB | **3.32 GiB** | **−17.7%** |
+| tunnel mapper peak | 4.47 GiB | **3.25 GiB** | **−27.4%** |
+| tunnel model identity | baseline | **3/3 files byte-identical** | exact |
+| 100k-image I/O replay | — | **33.6 MiB** | ~32N pairs, no N² matrix |
+
+The mapper-validating reader checks the full file checksum and every raw-index
+relation one pair at a time, then releases audit-only vectors before mapping.
+The on-disk snapshot format and final model bytes do not change.
+
+## Same-input COLMAP speed comparison — Electro 1,200
 
 <p align="center">
   <img src="docs/assets/electro_1200_sfm_comparison.gif" alt="Measured ETH3D Electro 1,200-image reconstruction: visloc-rs and COLMAP camera centres, sparse structure, residuals, mapper time, and peak memory" width="820">
@@ -65,6 +117,30 @@ bounded merge, byte-identical feature re-extraction, and end-to-end ledger:
   <sub>Full-resolution measured still · camera centres are ordered by timestamp
   and camera; sparse points are a deterministic final-model sample.</sub>
 </p>
+
+### Connected 10,000-image corridor stress
+
+The same restartable `7N` pipeline processes all 10,000 timestamp-ordered
+OpenLORIS corridor inputs in **1:03:45** with a **1.78 GiB** peak. This passes
+the resource gate, not the reconstruction-quality gate: registration is strong
+at 1k, plateaus near 1.2k, then falls to 199 at the full tier. We report that
+failure instead of presenting the run as a complete 10k map.
+
+| Connected tier | Candidate / verified pairs | Registered | Total wall | Peak phase RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 1,000 | 7,000 / 6,869 | **989 (98.9%)** | 2:25 | 274 MiB |
+| 2,500 | 17,500 / 16,321 | 1,223 (48.9%) | 7:10 | 392 MiB |
+| 5,000 | 35,000 / 31,521 | 1,212 (24.2%) | 20:33 | 676 MiB |
+| 10,000 | 70,000 / 58,879 | **199 (2.0%)** | 1:03:45 | **1.78 GiB** |
+
+<p align="center"><sub>The 10k peak is its 2,188-shard streaming merge;
+candidate generation peaks at 1.14 GiB, matching at 851 MiB, and compact
+mapping at 501 MiB. Exact VLAD ranking still scores every image pair, so ANN
+retrieval plus streamed global descriptors is the next speed/memory target.
+No OpenLORIS COLMAP run was performed. Source/license, hashes, phase ledgers,
+and honest dense/global negatives:
+<a href="benchmarks/electro/m5-openloris-connected-scale-validation.json">connected M5 evidence</a> ·
+<a href="docs/electro_m5_scale_validation.md">full scale report</a>.</sub></p>
 
 ### 300-image reliability gate
 
