@@ -284,6 +284,8 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 periodic_ba_min_registered_images=1201,
                 seed_trials=1,
                 seed_pair="355,5305",
+                component_model_min_images=None,
+                component_model_max_count=None,
                 ba_linear_solver="sparse",
                 ba_max_iterations=8,
                 post_refinement_registration=True,
@@ -341,6 +343,46 @@ class ElectroBenchmarkTests(unittest.TestCase):
                     merged_snapshot=Path("/run/merged.vps"),
                     output_model=Path("/run/model"),
                     seed_pair="01,1",
+                )
+            with self.assertRaisesRegex(benchmark.ValidationError, "component models"):
+                benchmark.build_mapping_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    merged_snapshot=Path("/run/merged.vps"),
+                    output_model=Path("/run/model"),
+                    seed_pair="355,5305",
+                    component_model_min_images=100,
+                )
+            component_command = benchmark.build_mapping_command(
+                Path("/bin/visloc"),
+                features_dir=Path("/input/features"),
+                calibration_dir=Path("/input/calibration"),
+                merged_snapshot=Path("/run/merged.vps"),
+                output_model=Path("/run/model"),
+                component_model_min_images=100,
+                component_model_max_count=7,
+            )
+            self.assertEqual(
+                component_command[
+                    component_command.index("--component-model-min-images") + 1
+                ],
+                "100",
+            )
+            self.assertEqual(
+                component_command[
+                    component_command.index("--component-model-max-count") + 1
+                ],
+                "7",
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "requires"):
+                benchmark.build_mapping_command(
+                    Path("/bin/visloc"),
+                    features_dir=Path("/input/features"),
+                    calibration_dir=Path("/input/calibration"),
+                    merged_snapshot=Path("/run/merged.vps"),
+                    output_model=Path("/run/model"),
+                    component_model_max_count=7,
                 )
 
             rig_candidate_command = benchmark.build_candidate_command(

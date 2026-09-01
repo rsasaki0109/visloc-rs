@@ -1,0 +1,137 @@
+{
+  "schema": "visloc_m7_component_models_evidence_v1",
+  "base_commit": "71b5fd0efa5ac6a48e7f146cdf8e20c30e436db1",
+  "dataset": "OpenLORIS corridor1-1",
+  "frozen_input": {
+    "supplied_images": 10000,
+    "verified_pairs": 58879,
+    "accepted_correspondences_before_mapper_cap": 3449870,
+    "mapper_match_cap_per_pair": 96,
+    "verified_snapshot_sha256": "31e99651ff7f7e6523637cd384af55eea24d53b2bd76ced5bf03ccfe43f4a4bf",
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "verified_view_graph": {
+    "connected_components": 313,
+    "isolated_images": 298,
+    "largest_component_images": 5144,
+    "major_component_sizes": [5144, 1240, 1236, 1018, 411, 407, 226],
+    "major_component_images": 9682,
+    "decision": "map the seven major components sequentially; do not claim a connected 10k model before verified bridges or Sim(3) alignment exist"
+  },
+  "growth_only_negative_control": {
+    "models": 7,
+    "registered_images": 5174,
+    "elapsed_s": 136.97,
+    "peak_rss_kib": 643140,
+    "component_mean_reprojection_px": [26.544, 64.345, 12.584, 30.095, 31.943, 15.298, 9.969],
+    "decision": "registration-positive but rejected as a quality result because final refinement was disabled"
+  },
+  "refined_component_models": {
+    "models": 7,
+    "independent_gauges": true,
+    "registered_images": 6791,
+    "registered_fraction_of_all_inputs": 0.6791,
+    "registration_gain_over_m6_single_model": 3127,
+    "registration_ratio_over_m6_single_model": 1.853438864628821,
+    "tracks": 36062,
+    "observations": 355312,
+    "elapsed_s": 644.45,
+    "peak_rss_kib": 1343432,
+    "components": [
+      {
+        "rank": 0,
+        "supplied_images": 5144,
+        "verified_pairs": 37866,
+        "registered_images": 3664,
+        "tracks": 21761,
+        "observations": 209661,
+        "mean_reprojection_px": 1.140,
+        "images_txt_sha256": "2a07d838d0e8dd435243c9f5896280a06a909f4b352d6c3fe6e03f31da8d3849",
+        "points3D_txt_sha256": "cf03f934a677473804c7c35d99480ede96908ed9ebd7855329a8309557458050"
+      },
+      {
+        "rank": 1,
+        "supplied_images": 1240,
+        "verified_pairs": 6546,
+        "registered_images": 906,
+        "tracks": 5709,
+        "observations": 63689,
+        "mean_reprojection_px": 0.928,
+        "images_txt_sha256": "72840f7b6bcb12e9942d9d25836d275af6bacf18881dce690cc4c4586712db54",
+        "points3D_txt_sha256": "b354fbe4a7c53f9ae03224a5b539e26712b6f4d8acf59dc98c3f25734632fed5"
+      },
+      {
+        "rank": 2,
+        "supplied_images": 1236,
+        "verified_pairs": 5195,
+        "registered_images": 341,
+        "tracks": 1723,
+        "observations": 16130,
+        "mean_reprojection_px": 1.049,
+        "images_txt_sha256": "d0ac93b5c1d227e0f543afd59104187c21379de29fa243e1a855714542fc94d3",
+        "points3D_txt_sha256": "c8e76ca603c5e4a460154bf625551cb1be0a031b987f5e845b110f477d91819e"
+      },
+      {
+        "rank": 3,
+        "supplied_images": 1018,
+        "verified_pairs": 4631,
+        "registered_images": 848,
+        "tracks": 3092,
+        "observations": 26877,
+        "mean_reprojection_px": 1.293,
+        "images_txt_sha256": "dc2f3aca7f88632bcb44c14437102205d076acbc9f38d035656f18b6541a2d98",
+        "points3D_txt_sha256": "db7469f5f1e1da4f5e33e01b5458f917dc9f0aeaaecea4b107ff579179450d49"
+      },
+      {
+        "rank": 4,
+        "supplied_images": 411,
+        "verified_pairs": 1910,
+        "registered_images": 410,
+        "tracks": 1150,
+        "observations": 11608,
+        "mean_reprojection_px": 0.933,
+        "images_txt_sha256": "6a71f551eeb27f53bb6ba234dbac3a49d691b888df939b455008561b3f8a8329",
+        "points3D_txt_sha256": "c19290b6b0b71822d2388fbff8af28cd9ab0d95c0ec3bce5665df3e1eb4adb86"
+      },
+      {
+        "rank": 5,
+        "supplied_images": 407,
+        "verified_pairs": 1807,
+        "registered_images": 404,
+        "tracks": 1241,
+        "observations": 15202,
+        "mean_reprojection_px": 0.929,
+        "images_txt_sha256": "4ddd725966c27436618610b316af2532163c42dbda285501bdf2d09300a9344b",
+        "points3D_txt_sha256": "04778525408c111d40510176fded1abafb31d2c821c54d77d1f89a4578256ac3"
+      },
+      {
+        "rank": 6,
+        "supplied_images": 226,
+        "verified_pairs": 912,
+        "registered_images": 218,
+        "tracks": 1386,
+        "observations": 12145,
+        "mean_reprojection_px": 0.985,
+        "images_txt_sha256": "00da4f5a5e8d6be59c010c195fe6f810d69a64b078383cc9104dda7396a78f75",
+        "points3D_txt_sha256": "5b256eae5a041db9e8d7ffe1e60cdeb7f150e3c988bed6669d8ec05e5e2a4639"
+      }
+    ],
+    "quality_status": "all seven independent models are below 1.3 px mean reprojection; they are not yet one connected reconstruction"
+  },
+  "tier_1000_non_regression": {
+    "models": 1,
+    "registered_images": 1000,
+    "supplied_images": 1000,
+    "tracks": 4119,
+    "observations": 114870,
+    "mean_reprojection_px": 1.291997619,
+    "elapsed_s": 153.57,
+    "peak_rss_kib": 394724,
+    "byte_identical_to_m6_confidence_champion": true,
+    "model_sha256": {
+      "cameras.txt": "e404161535ccb894a786448b9c9933af3e482647e314e9fa2e63b30900061a3a",
+      "images.txt": "2ef5fdb8a3bb70dec38c898d7b0b6579c7e6d4f642434d9de861f2a2783b96ed",
+      "points3D.txt": "2152e2fad14af9fbb90939342a44a767b5a13047b28b639e8a18daf9c5f45490"
+    }
+  }
+}

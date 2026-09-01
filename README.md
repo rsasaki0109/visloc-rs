@@ -148,6 +148,16 @@ unregistered. Frozen hashes and negative controls are in
 | --- | ---: | ---: | ---: |
 | Legacy UnionFind | 199/10,000 | 1.301 px | **1:59.8** |
 | Confidence-ordered tracks | **3,664/10,000** | **1.140 px** | 9:02.9 |
+| Component models (7 independent gauges) | **6,791/10,000** | 0.928–1.293 px | 10:44.5 |
+
+The component run explains the remaining gap: the frozen verified view graph
+contains 313 connected components, with seven major components covering 9,682
+images. Mapping those seven sequentially recovers 85.3% more cameras than the
+single-model replay, and preserves the M6 model byte-for-byte for the largest
+component. These are still seven coordinate systems, not one connected map;
+verified bridge discovery and Sim(3) alignment are required before making that
+claim. Evidence and model hashes are in
+[`m7-component-models.json`](benchmarks/electro/m7-component-models.json).
 
 | Connected tier | Candidate / verified pairs | Registered | Total wall | Peak phase RSS |
 | --- | ---: | ---: | ---: | ---: |
@@ -254,6 +264,12 @@ scripts/benchmark_courtyard.sh --full --no-build \
 The example header documents the complete unordered-SfM option set; the
 [courtyard benchmark guide](docs/courtyard_benchmark.md) documents artifact
 validation, candidate schedules, and reproducible large-run details.
+
+For a disconnected verified snapshot, add
+`--component-model-min-images 100 --component-model-max-count 7` to write
+bounded, size-ranked independent models below `--out-colmap`, plus a
+`components.tsv` manifest. The mode is explicit because its outputs have
+independent gauges and must not be mistaken for one connected reconstruction.
 
 <p align="center">
   <img src="docs/assets/hero_euroc_mh01_slam.gif" alt="Online stereo SLAM on EuRoC MH_01: onboard camera footage beside the live map — estimated trajectory vs ground truth as stereo landmark replenishment grows the landmark map" width="820"><br>

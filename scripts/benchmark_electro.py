@@ -884,6 +884,8 @@ def build_mapping_command(
     periodic_ba_min_registered_images: int | None = None,
     seed_trials: int | None = None,
     seed_pair: str | None = None,
+    component_model_min_images: int | None = None,
+    component_model_max_count: int | None = None,
     ba_linear_solver: str | None = None,
     ba_max_iterations: int | None = None,
     post_refinement_registration: bool = False,
@@ -940,6 +942,20 @@ def build_mapping_command(
         if int(fields[0]) == int(fields[1]):
             raise ValidationError("seed_pair image indices must differ")
         command.extend(["--seed-pair", seed_pair])
+    if seed_pair is not None and component_model_min_images is not None:
+        raise ValidationError("seed_pair cannot be combined with component models")
+    if component_model_max_count is not None and component_model_min_images is None:
+        raise ValidationError(
+            "component_model_max_count requires component_model_min_images"
+        )
+    for option, value in (
+        ("--component-model-min-images", component_model_min_images),
+        ("--component-model-max-count", component_model_max_count),
+    ):
+        if value is not None:
+            if value <= 0:
+                raise ValidationError(f"{option} must be positive")
+            command.extend([option, str(value)])
     if ba_linear_solver is not None:
         if ba_linear_solver not in {"dense", "sparse", "auto"}:
             raise ValidationError("ba_linear_solver must be dense, sparse, or auto")
@@ -1838,6 +1854,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--periodic-ba-min-registered-images", type=int)
     parser.add_argument("--seed-trials", type=int)
     parser.add_argument("--seed-pair", help="fixed mapper seed pair as I,J")
+    parser.add_argument("--component-model-min-images", type=int)
+    parser.add_argument("--component-model-max-count", type=int)
     parser.add_argument("--ba-linear-solver", choices=("dense", "sparse", "auto"))
     parser.add_argument("--ba-max-iterations", type=int)
     parser.add_argument("--post-refinement-registration", action="store_true")
@@ -2038,6 +2056,8 @@ def main(argv: list[str] | None = None) -> int:
                     periodic_ba_min_registered_images=args.periodic_ba_min_registered_images,
                     seed_trials=args.seed_trials,
                     seed_pair=args.seed_pair,
+                    component_model_min_images=args.component_model_min_images,
+                    component_model_max_count=args.component_model_max_count,
                     ba_linear_solver=args.ba_linear_solver,
                     ba_max_iterations=args.ba_max_iterations,
                     post_refinement_registration=args.post_refinement_registration,

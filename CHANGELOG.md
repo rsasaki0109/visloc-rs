@@ -6,6 +6,18 @@ All notable changes to `visloc-rs` will be documented here.
 
 ### Added
 
+- **Bounded component-model recovery for disconnected large view graphs
+  (2026-09-02).** Added explicit `--component-model-min-images` and
+  `--component-model-max-count` controls to the unordered SfM demo and Electro
+  runner. Large verified components are ranked deterministically, mapped
+  sequentially from one feature load, and written as independent COLMAP models
+  with a `components.tsv` manifest; defaults and the ordinary single-model path
+  are unchanged. On the frozen OpenLORIS 10k snapshot, seven major components
+  register **6,791/10,000** cameras at 0.928–1.293 px mean reprojection in
+  10:44.45. The 1k control remains byte-identical at 1000/1000. The outputs are
+  explicitly independent gauges, not a connected-model claim; verified bridge
+  recovery and Sim(3) alignment remain follow-up work.
+
 - **Milestone 5 real-world scale and streaming-memory validation
   (2026-09-01).** Ran all ten ETH3D low-res many-view scenes independently:
   **9,996/10,008 cameras registered (99.88%)**, with score-only centre RMSE,
