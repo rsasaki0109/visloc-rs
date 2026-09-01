@@ -11,6 +11,23 @@
   <img src="https://img.shields.io/badge/core-no%20mandatory%20ML%20runtime-35d0ba" alt="No mandatory ML runtime">
 </p>
 
+## Measured at a glance
+
+| Real-data result | visloc-rs | COLMAP 3.9.1 CPU | Outcome |
+| --- | ---: | ---: | ---: |
+| ETH3D Electro 1,200, same-input CPU8 end to end | **27:29** | 1:35:05 | **3.46× faster** |
+| ETH3D Electro registered cameras | **1200/1200** | **1200/1200** | parity |
+| ETH3D Electro camera-centre RMSE | **3.50 cm** | 4.68 cm | **25.2% lower** |
+| ETH3D Courtyard camera-centre RMSE | **0.5379 cm** | 1.6166 cm | **66.7% lower** |
+
+The comparisons use real images and measured runs; the detailed sections below
+state where inputs or accounting differ. Separately, on the connected
+OpenLORIS 10k stress set, streamed VLAD + LSH cuts visloc-rs candidate
+generation from 49:49 to **8:51 (5.63×)**. No COLMAP 10k run has been made, so
+that number is not presented as a COLMAP comparison. The frozen measurements
+and output hashes are in
+[`m6-ann-streaming.json`](benchmarks/electro/m6-ann-streaming.json).
+
 ## 10,008-image real-world SfM scale validation
 
 <p align="center">
@@ -48,20 +65,6 @@ tunnel RMSE includes one 5.32 m outlier; its median is 2.47 cm and p95 is
   <a href="docs/assets/eth3d_10008_scale_validation.png"><img src="docs/assets/eth3d_10008_scale_validation.png" alt="Full-resolution still of ten measured ETH3D camera-centre reconstructions" width="900"></a><br>
   <sub>Full-resolution measured still · each trajectory is independently PCA-projected only for display.</sub>
 </p>
-
-### Memory stays bounded as evidence grows
-
-| Measured A/B on identical bytes | Before | Final | Change |
-| --- | ---: | ---: | ---: |
-| 730-shard snapshot merge peak | 5.35 GiB | **2.03 GiB** | **−62.0%** |
-| sand_box mapper peak | 4.03 GiB | **3.32 GiB** | **−17.7%** |
-| tunnel mapper peak | 4.47 GiB | **3.25 GiB** | **−27.4%** |
-| tunnel model identity | baseline | **3/3 files byte-identical** | exact |
-| 100k-image I/O replay | — | **33.6 MiB** | ~32N pairs, no N² matrix |
-
-The mapper-validating reader checks the full file checksum and every raw-index
-relation one pair at a time, then releases audit-only vectors before mapping.
-The on-disk snapshot format and final model bytes do not change.
 
 ## Same-input COLMAP speed comparison — Electro 1,200
 
@@ -125,6 +128,12 @@ OpenLORIS corridor inputs in **1:03:45** with a **1.78 GiB** peak. This passes
 the resource gate, not the reconstruction-quality gate: registration is strong
 at 1k, plateaus near 1.2k, then falls to 199 at the full tier. We report that
 failure instead of presenting the run as a complete 10k map.
+
+The opt-in streamed global-descriptor path now builds the same 70,000-pair
+envelope in **8:51**, versus 49:49 for exact all-image ranking. At the frozen
+1k quality gate, its scale-aware LSH schedule registers **991/1000** images,
+versus 989/1000 for exact retrieval. The 10k mapping-quality failure below is
+still open; faster retrieval does not by itself claim to solve it.
 
 | Connected tier | Candidate / verified pairs | Registered | Total wall | Peak phase RSS |
 | --- | ---: | ---: | ---: | ---: |
