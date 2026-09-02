@@ -27,6 +27,12 @@ pub use camera_rig::{
     PerImageCameras,
 };
 
+pub mod rig_sfm;
+pub use rig_sfm::{
+    incremental_rig_sfm, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError, RigSfmResult,
+    RigSfmWorkStats,
+};
+
 pub mod covisibility_ba;
 pub use covisibility_ba::{
     behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,

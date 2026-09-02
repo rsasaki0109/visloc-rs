@@ -1139,6 +1139,19 @@ pub(crate) fn build_track_output(
     output
 }
 
+/// Build the deterministic conflict-free union-find tracks used by the
+/// generalized-rig mapper without exposing the incremental mapper's large
+/// configuration surface.  Rig reconstruction owns its camera-aware scoring
+/// and triangulation, but track connectivity must stay identical to the
+/// established incremental path.
+pub(crate) fn build_basic_tracks(
+    image_count: usize,
+    pairwise: &[PairwiseMatches],
+    min_track_length: usize,
+) -> Vec<Vec<(usize, usize)>> {
+    build_tracks_detailed(image_count, pairwise, min_track_length).tracks
+}
+
 /// Number of coordinate units retained by the opt-in physical ordering key.
 /// A micron in the image-coordinate units used by the feature files is far
 /// below the precision that can affect a track decision, while the fixed grid

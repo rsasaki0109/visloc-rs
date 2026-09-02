@@ -141,12 +141,13 @@ pub use visloc_slam::{
     estimate_free_poses_from_prior_rays, estimate_gravity_and_velocities, estimate_gyro_bias,
     filter_pose_priors_by_edge_disagreement, filter_pose_priors_by_free_centre_residual,
     filter_pose_priors_by_track_quality, generate_ordered_pairs, gt_bearing_in_prior_frame,
-    incremental_sfm, incremental_sfm_with_initial_poses, incremental_sfm_with_per_image_cameras,
-    incremental_sfm_with_sequence_fallback_overrides, incremental_sfm_with_track_membership,
-    loop_closure_constraints_from_candidates, online_ba_imu_state_rows,
-    online_slam_results_to_html_report, pair_correspondences, pair_essential_mean_sampson_error,
-    pairwise_pose_factors_from_loop_closures, parse_stereo_vo_imu_samples_txt,
-    preview_track_build_stats, prior_free_essential_gt_bearing_error_deg, reconstruct_global_sfm,
+    incremental_rig_sfm, incremental_sfm, incremental_sfm_with_initial_poses,
+    incremental_sfm_with_per_image_cameras, incremental_sfm_with_sequence_fallback_overrides,
+    incremental_sfm_with_track_membership, loop_closure_constraints_from_candidates,
+    online_ba_imu_state_rows, online_slam_results_to_html_report, pair_correspondences,
+    pair_essential_mean_sampson_error, pairwise_pose_factors_from_loop_closures,
+    parse_stereo_vo_imu_samples_txt, preview_track_build_stats,
+    prior_free_essential_gt_bearing_error_deg, reconstruct_global_sfm,
     reconstruct_global_sfm_with_per_image_cameras, reconstruct_global_sfm_with_priors,
     reconstruct_stereo_vo_with_ba, refine_stereo_vo_with_ba,
     refine_visual_map_with_covisibility_ba,
@@ -193,8 +194,9 @@ pub use visloc_slam::{
     PerPoseGravityPrior, PnPLoopClosureVerifier, PnPLoopClosureVerifierConfig, PoseGraph,
     PoseGraphEdge, PoseGraphEdgeKind, PoseGraphError, PoseGraphOptimizationStep,
     PoseGraphParseError, PoseGraphSe3Config, PoseGraphSe3IterationStats, PoseGraphSe3Result,
-    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RobustKernel, SfmTrack,
-    Sim3Edge, Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats,
+    PositionPrior, PositionPriorObservation, ReconstructedLandmark, RigFrame, RigFrameImage,
+    RigSfmConfig, RigSfmError, RigSfmResult, RigSfmWorkStats, RobustKernel, SfmTrack, Sim3Edge,
+    Sim3Information, Sim3PoseGraph, Sim3PoseGraphConfig, Sim3PoseGraphIterationStats,
     Sim3PoseGraphResult, SparseFactorGraph, SparseFactorGraphConfig, SparseFactorGraphUpdateStats,
     SparseFactorInactiveReason, SparseFactorKey, SparseFactorKind, SparseFactorMeasurement,
     SparseFactorState, SparseKeyframeFactor, StationaryRejectionReason, StereoVoBaConfig,
@@ -237,7 +239,9 @@ pub use visloc_vision::matching::{
     MutualSoftmaxMatcher,
 };
 pub use visloc_vision::pnp::{
-    Correspondence2D3D, DltPnP, GaussNewtonPoseRefiner, PoseEstimator, PoseRefiner,
+    Correspondence2D3D, DltPnP, GaussNewtonPoseRefiner, GeneralizedCameraRig,
+    GeneralizedCorrespondence2D3D, GeneralizedDltPoseEstimator, GeneralizedGaussNewtonPoseRefiner,
+    GeneralizedPnPRansac, GeneralizedRansacReport, PoseEstimator, PoseRefiner, RigSensor,
 };
 pub use visloc_vision::ransac::{PnPRansac, RansacReport, RobustPoseEstimator};
 pub use visloc_vision::stereo::triangulate_stereo_pixel;
