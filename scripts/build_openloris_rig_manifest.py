@@ -14,6 +14,11 @@ import math
 import os
 from pathlib import Path
 
+try:
+    from openloris_rig_frames import RigFrameGroupingError, canonicalize_rig_timestamps
+except ModuleNotFoundError:  # importlib-based repository tests
+    from scripts.openloris_rig_frames import RigFrameGroupingError, canonicalize_rig_timestamps
+
 
 class ManifestError(ValueError):
     pass
@@ -95,9 +100,7 @@ def build(tier_path: Path, rig_path: Path, width: int, height: int) -> str:
     if set(camera_number_to_sensor) != {1, 2}:
         raise ManifestError("rig camera prefixes must identify camera1 and camera2")
 
-    output.append("# F frame_id image_name sensor_index")
-    timestamp_ids: dict[str, int] = {}
-    frame_sensors: dict[int, set[int]] = {}
+    parsed_rows: list[dict[str, object]] = []
     seen_names: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -113,6 +116,20 @@ def build(tier_path: Path, rig_path: Path, width: int, height: int) -> str:
         seen_names.add(name)
         if camera_number not in camera_number_to_sensor:
             raise ManifestError(f"image {name!r} uses unknown camera {camera_number}")
+        parsed_rows.append({"name": name, "camera": camera_number, "timestamp": timestamp})
+    try:
+        canonical_timestamps, repaired_pairs = canonicalize_rig_timestamps(parsed_rows)
+    except RigFrameGroupingError as exc:
+        raise ManifestError(str(exc)) from exc
+
+    output.append(f"# timestamp_tolerance_seconds 0.001 repaired_pairs {repaired_pairs}")
+    output.append("# F frame_id image_name sensor_index")
+    timestamp_ids: dict[str, int] = {}
+    frame_sensors: dict[int, set[int]] = {}
+    for row in parsed_rows:
+        name = str(row["name"])
+        camera_number = int(row["camera"])
+        timestamp = canonical_timestamps[name]
         frame_id = timestamp_ids.setdefault(timestamp, len(timestamp_ids))
         sensor_index = camera_number_to_sensor[camera_number]
         frame_sensors.setdefault(frame_id, set()).add(sensor_index)

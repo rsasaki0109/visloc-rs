@@ -97,6 +97,52 @@ class RigManifestTests(unittest.TestCase):
             with self.assertRaises(ManifestError):
                 build(tier, rig, 848, 800)
 
+    def test_repairs_one_complementary_submillisecond_timestamp_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tier = root / "tier.json"
+            rig = root / "rig.json"
+            tier.write_text(
+                json.dumps(
+                    {
+                        "schema": "visloc_openloris_corridor_manifest_v1",
+                        "images": [
+                            {"name": "left.png", "camera": 1, "timestamp": "10.000000"},
+                            {"name": "right.png", "camera": 2, "timestamp": "10.000651"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rig.write_text(
+                json.dumps(
+                    [
+                        {
+                            "cameras": [
+                                {
+                                    "image_prefix": "rig/camera1/",
+                                    "camera_model_name": "PINHOLE",
+                                    "camera_params": [1, 2, 3, 4],
+                                    "ref_sensor": True,
+                                },
+                                {
+                                    "image_prefix": "rig/camera2/",
+                                    "camera_model_name": "PINHOLE",
+                                    "camera_params": [5, 6, 7, 8],
+                                    "cam_from_rig_rotation": [1, 0, 0, 0],
+                                    "cam_from_rig_translation": [-0.2, 0, 0],
+                                },
+                            ]
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            output = build(tier, rig, 848, 800)
+            self.assertIn("repaired_pairs 1", output)
+            self.assertIn("F 0 left.png 0", output)
+            self.assertIn("F 0 right.png 1", output)
+
 
 if __name__ == "__main__":
     unittest.main()
