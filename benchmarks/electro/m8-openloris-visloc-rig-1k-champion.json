@@ -1,0 +1,106 @@
+{
+  "schema": "visloc_m8_openloris_rig_champion_evidence_v1",
+  "recorded_at": "2026-09-02T15:30:00+09:00",
+  "status": "1k_quality_and_mapper_control_pass_10k_not_yet_claimed",
+  "dataset": {
+    "sequence": "OpenLORIS corridor1-1",
+    "frames": 500,
+    "images": 1000,
+    "tier_manifest_sha256": "f1ed9292c806103c1d129340f429bc74e5ba4842c6092b836d541cd518256baa",
+    "rig_manifest_sha256": "6bcd670c475c66a82aaa9b96247331ca1686df2676d569cf7ed01c3158c35900",
+    "feature_files": 1000,
+    "feature_tree_sha256": "abcfa6a9d4df344d1781bc2560b5e4cdcae08b39ed303063535e7e1e926a304a",
+    "verified_snapshot_sha256": "4964cbbe87aca7d78b33c71fbf0be4d186e5dc78e42df20b78f045775eb79aad",
+    "verified_pairs": 6869,
+    "verified_matches": 661428,
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+    "ground_truth_used_only_after_mapping": true
+  },
+  "software": {
+    "git_commit": "f2f669ac05560c2bcb8c52a58ce90550e11f85a8",
+    "binary_sha256": "ab755822d31e1465af520c38037367491cef5dad5e776309a64fe6938768ca51",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)"
+  },
+  "machine": {
+    "kernel": "Linux 7.0.0-30-generic x86_64",
+    "cpu": "11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz",
+    "logical_cpus": 8,
+    "physical_cores": 4
+  },
+  "mapper": {
+    "command": "target/release/examples/generalized_rig_sfm --manifest $RIG_MANIFEST --features-dir $FEATURES --snapshot $VERIFIED_SNAPSHOT --out-colmap $OUTPUT",
+    "defaults": {
+      "min_pnp_inliers": 8,
+      "max_reprojection_error_px": 4.0,
+      "pnp_max_iterations": 512,
+      "ransac_seed": 7,
+      "local_ba_every": 10,
+      "local_ba_window_frames": 40,
+      "local_ba_iterations": 8,
+      "huber_delta_px": 6.0,
+      "final_ba": true,
+      "final_ba_passes": 2,
+      "final_ba_window_frames": 60,
+      "final_ba_fix_window_ends": true,
+      "fixed_pose_structure_refinement_iterations": 5
+    },
+    "result": {
+      "registered_frames": 500,
+      "registered_images": 1000,
+      "tracks": 2658,
+      "observations": 27716,
+      "mean_reprojection_error_px": 0.671637382,
+      "seed_frame": 26,
+      "triangulation_attempts": 39217,
+      "correspondence_cache_insertions": 29751,
+      "pnp_attempts": 499,
+      "local_ba_runs": 50,
+      "structure_refined_tracks": 2607,
+      "model_sha256": {
+        "cameras_txt": "65e29cd8cdc5029404f2877ff5db846f61909635527634e03ca7b1ea0bc91c6e",
+        "images_txt": "937098610a0ec29c37bbc9c649e9385050d9ce6782f3154fcc2c02613281b8ee",
+        "points3D_txt": "11eb71b6a45f248770429a91a8841e64e028089350515f3f87366c468ae399af"
+      }
+    },
+    "three_runs": [
+      { "mapper_seconds": 6.371265, "total_seconds": 6.857481, "peak_rss_kib": 80924 },
+      { "mapper_seconds": 5.724173, "total_seconds": 6.180311, "peak_rss_kib": 80876 },
+      { "mapper_seconds": 5.677515, "total_seconds": 6.113359, "peak_rss_kib": 81048 }
+    ],
+    "median_mapper_seconds": 5.724173,
+    "median_peak_rss_kib": 80924,
+    "byte_identical_models_across_runs": true
+  },
+  "official_gt_score": {
+    "scored_images": 308,
+    "alignment": "one per-component Sim(3); one component",
+    "ate_rmse_m": 0.02269532080131782,
+    "ate_median_m": 0.017618963368611313,
+    "ate_p95_m": 0.03777877644562742,
+    "ate_max_m": 0.061655609452973735
+  },
+  "colmap_calibrated_rig_control": {
+    "evidence": "benchmarks/electro/m8-openloris-colmap-1k-control.json",
+    "registered_frames": 500,
+    "registered_images": 1000,
+    "mean_reprojection_error_px": 0.8102073187543721,
+    "ate_rmse_m": 0.027968541677842282,
+    "ate_median_m": 0.025677671235734383,
+    "ate_p95_m": 0.042266006958647205,
+    "ate_max_m": 0.08429880608342713,
+    "mapper_seconds": 2073.399966248,
+    "mapper_peak_rss_kib": 629664
+  },
+  "comparison": {
+    "registration_gate": "pass_equal_100_percent",
+    "reprojection_gate": "pass_visloc_17.10_percent_lower",
+    "ate_rmse_gate": "pass_visloc_18.85_percent_lower",
+    "ate_p95_gate": "pass_visloc_10.62_percent_lower",
+    "mapper_wall_gate": "pass_visloc_median_362.22x_faster",
+    "mapper_rss_gate": "pass_visloc_median_7.78x_lower",
+    "m8_1k_control": "pass",
+    "m8_10k_exit_gate": "not_yet_run"
+  }
+}

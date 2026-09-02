@@ -84,6 +84,29 @@ The exact input, container, runner, database, model, score, timing, memory, and
 warning hashes/counters are frozen in
 [`benchmarks/electro/m8-openloris-colmap-1k-control.json`](../benchmarks/electro/m8-openloris-colmap-1k-control.json).
 
+### Frozen 1k visloc-rs rig champion (2026-09-02)
+
+The generalized-rig mapper now passes every 1k COLMAP quality and mapper
+control gate on the same frozen images and calibrated physical rig. Three
+independent runs produced byte-identical models and registered all `500/500`
+frames (`1000/1000` images). The official-GT score is `0.022695 m` RMSE and
+`0.037779 m` p95, with `0.671637 px` observation-weighted mean reprojection
+error. All three are better than the calibrated COLMAP control (`0.027969 m`,
+`0.042266 m`, and `0.810207 px`).
+
+Median mapper wall time is `5.724 s` (362.22x faster than COLMAP's
+`2073.400 s`) and median process peak RSS is `80924 KiB` (7.78x lower than
+COLMAP's `629664 KiB`). The promoted bounded refinement uses registration-order
+local BA every ten frames over at most 40 frames, two endpoint-anchored final
+passes over at most 60 frames, and independent fixed-pose landmark refinement.
+Frontier track IDs are canonicalized before triangulation, removing the
+process-randomized cache/RANSAC ordering found during A/B testing.
+
+This is the frozen M8 **1k control pass**, not the M8 exit claim. The same
+quality and resource gates still have to pass at 10k. Exact inputs, defaults,
+commands, three-run measurements, scores, and hashes are retained in
+[`m8-openloris-visloc-rig-1k-champion.json`](../benchmarks/electro/m8-openloris-visloc-rig-1k-champion.json).
+
 ### M8.1 Official control and scoring infrastructure
 
 1. Finish the official COLMAP 1k pilot and preserve its immutable inputs,
