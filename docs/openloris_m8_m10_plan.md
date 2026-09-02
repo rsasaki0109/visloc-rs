@@ -101,7 +101,12 @@ Implement and A/B in this order, stopping once the outcome gate is met:
    camera-from-rig transform fixed. Run the same calibrated-rig arm in COLMAP.
    The no-rig arm remains a diagnostic, not the accuracy target: M7's recovered
    same-time baseline is about 20 times the physical baseline and cannot be
-   repaired by one global Sim(3).
+   repaired by one global Sim(3). Frame growth must pool both sensors in a
+   generalized absolute-pose RANSAC/refinement and then continue tracks for the
+   entire frame; running two independent central-camera PnPs and selecting one
+   is not the promoted implementation. This follows COLMAP's
+   `RegisterNextGeneralFrame` contract and the non-central absolute-pose model
+   implemented by OpenGV.
 2. **Drift repair.** Revisit registration/BA after the rig scale is coherent.
    A/B global refinement frequency, stable scale gauge, retriangulation, and
    long-baseline constraints. GT poses may never enter mapping.
@@ -189,8 +194,10 @@ Freeze the M8 quality champion before performance edits.
 - [COLMAP FAQ: incremental/global/hierarchical SfM, known intrinsics, model
   merging, and BA scaling](https://colmap.github.io/faq.html)
 - [COLMAP command-line interface](https://colmap.github.io/cli.html)
+- [COLMAP incremental mapper rig registration source](https://github.com/colmap/colmap/blob/main/src/colmap/sfm/incremental_mapper.cc)
 - [OpenLORIS-Scene dataset and GT interpolation
   guidance](https://lifelong-robotic-vision.github.io/dataset/scene.html)
 - [OpenLORIS-Scene tools](https://github.com/lifelong-robotic-vision/openloris-scene-tools)
+- [OpenGV non-central absolute pose and RANSAC implementations](https://github.com/laurentkneip/opengv)
 - [Faiss research foundations: inverted files, PQ, and
   HNSW](https://github.com/facebookresearch/faiss/wiki/)
