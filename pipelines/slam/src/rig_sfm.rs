@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Matrix3, Point2, Point3, SMatrix, Vector2, Vector3};
 use thiserror::Error;
 use visloc_core::geometry::Pose;
 use visloc_vision::features::FeatureSet;
@@ -49,28 +49,36 @@ pub struct RigSfmConfig {
     pub local_ba_window_size: usize,
     pub local_ba_iterations: usize,
     pub final_ba_passes: usize,
+    pub final_ba_window_size: usize,
+    pub final_ba_fix_window_ends: bool,
+    /// Fixed-pose, per-landmark Gauss-Newton passes after registration.  This
+    /// is linear in retained observations and never forms a global BA matrix.
+    pub structure_refinement_iterations: usize,
 }
 
 impl Default for RigSfmConfig {
     fn default() -> Self {
         Self {
             min_track_length: 2,
-            min_pnp_inliers: 12,
+            min_pnp_inliers: 8,
             min_triangulation_angle_deg: 1.0,
             max_reprojection_error_px: 4.0,
             pnp_max_iterations: 512,
             ransac_seed: 7,
-            final_bundle_adjustment: false,
+            final_bundle_adjustment: true,
             ba_config: BaConfig {
                 linear_solver: LinearSolver::Sparse,
-                robust_kernel: RobustKernel::Huber { delta: 4.0 },
+                robust_kernel: RobustKernel::Huber { delta: 6.0 },
                 parallel: true,
                 ..BaConfig::default()
             },
-            local_ba_every: 5,
+            local_ba_every: 10,
             local_ba_window_size: 40,
             local_ba_iterations: 8,
-            final_ba_passes: 1,
+            final_ba_passes: 2,
+            final_ba_window_size: 60,
+            final_ba_fix_window_ends: true,
+            structure_refinement_iterations: 5,
         }
     }
 }
@@ -107,6 +115,7 @@ pub struct RigSfmWorkStats {
     pub correspondence_cache_insertions: usize,
     pub pnp_attempts: usize,
     pub local_ba_runs: usize,
+    pub structure_refined_tracks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -357,6 +366,7 @@ pub fn incremental_rig_sfm(
                 &active_frames,
                 anchor,
                 &local_ba_config,
+                &[],
                 &mut frame_poses,
                 &mut image_poses,
                 &mut tracks,
@@ -381,6 +391,15 @@ pub fn incremental_rig_sfm(
     } else {
         None
     };
+
+    work.structure_refined_tracks = refine_rig_structure(
+        rig,
+        features,
+        &image_assignment,
+        &image_poses,
+        config,
+        &mut tracks,
+    );
 
     let sfm_tracks = tracks
         .into_iter()
@@ -430,6 +449,164 @@ pub fn incremental_rig_sfm(
     })
 }
 
+fn refine_rig_structure(
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    image_poses: &[Option<Pose>],
+    config: &RigSfmConfig,
+    tracks: &mut [WorkingTrack],
+) -> usize {
+    if config.structure_refinement_iterations == 0 {
+        return 0;
+    }
+    tracks
+        .iter_mut()
+        .filter_map(|track| {
+            let mut point = track.position?;
+            let initial = point;
+            let mut accepted = false;
+            for _ in 0..config.structure_refinement_iterations {
+                let mut hessian = Matrix3::zeros();
+                let mut gradient = Vector3::zeros();
+                let mut observations = 0usize;
+                let Some(current_cost) = rig_point_cost(
+                    rig,
+                    features,
+                    image_assignment,
+                    image_poses,
+                    track,
+                    &point,
+                    config.max_reprojection_error_px,
+                ) else {
+                    break;
+                };
+                let step = 1.0e-6 * (1.0 + point.coords.norm());
+                for &(image, keypoint) in &track.observations {
+                    let Some(pose) = image_poses[image].as_ref() else {
+                        continue;
+                    };
+                    let sensor = &rig.sensors()[image_assignment[image].1];
+                    let measured = features[image].keypoints[keypoint];
+                    let Some(projected) =
+                        sensor.camera.project(&pose.transform_world_point(&point))
+                    else {
+                        continue;
+                    };
+                    let residual = projected - measured;
+                    let norm = residual.norm();
+                    if !norm.is_finite() || norm > 2.0 * config.max_reprojection_error_px {
+                        continue;
+                    }
+                    let mut jacobian = SMatrix::<f64, 2, 3>::zeros();
+                    let mut valid = true;
+                    for axis in 0..3 {
+                        let mut plus = point;
+                        let mut minus = point;
+                        plus[axis] += step;
+                        minus[axis] -= step;
+                        let projections = sensor
+                            .camera
+                            .project(&pose.transform_world_point(&plus))
+                            .zip(sensor.camera.project(&pose.transform_world_point(&minus)));
+                        let Some((plus_pixel, minus_pixel)) = projections else {
+                            valid = false;
+                            break;
+                        };
+                        jacobian.set_column(axis, &((plus_pixel - minus_pixel) / (2.0 * step)));
+                    }
+                    if !valid || !jacobian.iter().all(|value| value.is_finite()) {
+                        continue;
+                    }
+                    let weight = huber_weight(norm, config.max_reprojection_error_px);
+                    hessian += jacobian.transpose() * jacobian * weight;
+                    gradient +=
+                        jacobian.transpose() * Vector2::new(residual.x, residual.y) * weight;
+                    observations += 1;
+                }
+                if observations < 2 {
+                    break;
+                }
+                let damping = 1.0e-8_f64.max(1.0e-6 * hessian.diagonal().amax());
+                hessian += Matrix3::identity() * damping;
+                let Some(delta) = hessian.lu().solve(&(-gradient)) else {
+                    break;
+                };
+                if !delta.iter().all(|value| value.is_finite()) {
+                    break;
+                }
+                let candidate = point + delta;
+                let Some(candidate_cost) = rig_point_cost(
+                    rig,
+                    features,
+                    image_assignment,
+                    image_poses,
+                    track,
+                    &candidate,
+                    config.max_reprojection_error_px,
+                ) else {
+                    break;
+                };
+                if candidate_cost + 1.0e-12 >= current_cost {
+                    break;
+                }
+                point = candidate;
+                accepted = true;
+                if delta.norm() <= 1.0e-8 * (1.0 + point.coords.norm()) {
+                    break;
+                }
+            }
+            if accepted && (point - initial).norm() > 0.0 {
+                track.position = Some(point);
+                Some(())
+            } else {
+                None
+            }
+        })
+        .count()
+}
+
+fn rig_point_cost(
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    image_poses: &[Option<Pose>],
+    track: &WorkingTrack,
+    point: &Point3<f64>,
+    huber_delta: f64,
+) -> Option<f64> {
+    let mut cost = 0.0;
+    let mut count = 0usize;
+    for &(image, keypoint) in &track.observations {
+        let Some(pose) = image_poses[image].as_ref() else {
+            continue;
+        };
+        let sensor = &rig.sensors()[image_assignment[image].1];
+        let Some(projected) = sensor.camera.project(&pose.transform_world_point(point)) else {
+            continue;
+        };
+        let norm = (projected - features[image].keypoints[keypoint]).norm();
+        if !norm.is_finite() || norm > 2.0 * huber_delta {
+            continue;
+        }
+        cost += if norm <= huber_delta {
+            0.5 * norm * norm
+        } else {
+            huber_delta * (norm - 0.5 * huber_delta)
+        };
+        count += 1;
+    }
+    (count >= 2).then_some(cost)
+}
+
+fn huber_weight(norm: f64, delta: f64) -> f64 {
+    if norm <= delta || norm <= f64::EPSILON {
+        1.0
+    } else {
+        delta / norm
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_windowed_final_ba(
     rig: &GeneralizedCameraRig,
@@ -440,7 +617,7 @@ fn run_windowed_final_ba(
     image_poses: &mut [Option<Pose>],
     tracks: &mut [WorkingTrack],
 ) -> Result<Option<RigBaStats>, RigSfmError> {
-    let window = config.local_ba_window_size.max(2);
+    let window = config.final_ba_window_size.max(2);
     let stride = (window / 2).max(1);
     let mut starts = (0..frame_poses.len()).step_by(stride).collect::<Vec<_>>();
     if let Some(tail_start) = frame_poses.len().checked_sub(window) {
@@ -471,6 +648,16 @@ fn run_windowed_final_ba(
             } else {
                 *active_frames.iter().max().unwrap()
             };
+            let other_end = if pass % 2 == 0 {
+                *active_frames.iter().max().unwrap()
+            } else {
+                *active_frames.iter().min().unwrap()
+            };
+            let extra_fixed = config
+                .final_ba_fix_window_ends
+                .then_some(other_end)
+                .into_iter()
+                .collect::<Vec<_>>();
             if let Some(stats) = run_rig_bundle_adjustment(
                 rig,
                 features,
@@ -479,6 +666,7 @@ fn run_windowed_final_ba(
                 &active_frames,
                 anchor,
                 &ba_config,
+                &extra_fixed,
                 frame_poses,
                 image_poses,
                 tracks,
@@ -510,6 +698,7 @@ fn run_rig_bundle_adjustment(
     active_frames: &HashSet<usize>,
     anchor_frame_index: usize,
     ba_config: &BaConfig,
+    extra_fixed_frames: &[usize],
     frame_poses: &mut [Option<Pose>],
     image_poses: &mut [Option<Pose>],
     tracks: &mut [WorkingTrack],
@@ -525,6 +714,9 @@ fn run_rig_bundle_adjustment(
         problem.add_pose(frame as u64, pose.clone());
     }
     problem.fix_pose(anchor_frame_index as u64);
+    for &frame in extra_fixed_frames {
+        problem.fix_pose(frame as u64);
+    }
 
     let mut visual_observations = 0usize;
     for (track_index, track) in tracks.iter().enumerate() {
@@ -781,6 +973,11 @@ fn triangulate_frontier(
     frontier: HashSet<usize>,
 ) -> TriangulationUpdate {
     let mut update = TriangulationUpdate::default();
+    // Hash iteration order is process-randomized.  The order in which newly
+    // triangulated landmarks enter each frame cache changes the indexed
+    // RANSAC samples, so canonicalize it before any numeric work.
+    let mut frontier = frontier.into_iter().collect::<Vec<_>>();
+    frontier.sort_unstable();
     for track_index in frontier {
         let track = &mut tracks[track_index];
         if track.position.is_some() {

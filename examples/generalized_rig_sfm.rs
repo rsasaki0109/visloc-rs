@@ -45,8 +45,11 @@ struct Args {
     local_ba_window_size: usize,
     local_ba_iterations: usize,
     final_ba_passes: usize,
+    final_ba_window_size: usize,
+    final_ba_fix_window_ends: bool,
     ransac_seed: u64,
     ba_huber_delta: f64,
+    structure_refinement_iterations: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -59,15 +62,18 @@ fn parse_args() -> Result<Args, String> {
     let mut min_pnp_inliers = 8usize;
     let mut max_reprojection_error_px = 4.0;
     let mut pnp_max_iterations = 512usize;
-    let mut final_bundle_adjustment = false;
-    let mut max_matches_per_pair = None;
     let defaults = RigSfmConfig::default();
+    let mut final_bundle_adjustment = defaults.final_bundle_adjustment;
+    let mut max_matches_per_pair = None;
     let mut local_ba_every = defaults.local_ba_every;
     let mut local_ba_window_size = defaults.local_ba_window_size;
     let mut local_ba_iterations = defaults.local_ba_iterations;
     let mut final_ba_passes = defaults.final_ba_passes;
+    let mut final_ba_window_size = defaults.final_ba_window_size;
+    let mut final_ba_fix_window_ends = defaults.final_ba_fix_window_ends;
     let mut ransac_seed = defaults.ransac_seed;
-    let mut ba_huber_delta = 4.0;
+    let mut ba_huber_delta = 6.0;
+    let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
     while let Some(flag) = values.next() {
         let mut value = || {
             values
@@ -107,11 +113,20 @@ fn parse_args() -> Result<Args, String> {
             "--final-ba-passes" => {
                 final_ba_passes = value()?.parse().map_err(|error| format!("{error}"))?
             }
+            "--final-ba-window" => {
+                final_ba_window_size = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--final-ba-single-anchor" => final_ba_fix_window_ends = false,
+            "--final-ba-fix-window-ends" => final_ba_fix_window_ends = true,
             "--ransac-seed" => {
                 ransac_seed = value()?.parse().map_err(|error| format!("{error}"))?
             }
             "--ba-huber-delta" => {
                 ba_huber_delta = value()?.parse().map_err(|error| format!("{error}"))?
+            }
+            "--structure-refinement-iterations" => {
+                structure_refinement_iterations =
+                    value()?.parse().map_err(|error| format!("{error}"))?
             }
             "--help" | "-h" => {
                 return Err(concat!(
@@ -119,10 +134,12 @@ fn parse_args() -> Result<Args, String> {
                     "--snapshot FILE --out-colmap DIR [--feature-suffix _features.txt] ",
                     "[--min-pnp-inliers 8] [--max-reprojection-error-px 4] ",
                     "[--pnp-max-iterations 512] [--max-matches-per-pair 0] ",
-                    "[--local-ba-every 5] [--local-ba-window 40] ",
-                    "[--local-ba-iterations 8] [--ba-huber-delta 4] ",
+                    "[--local-ba-every 10] [--local-ba-window 40] ",
+                    "[--local-ba-iterations 8] [--ba-huber-delta 6] ",
+                    "[--structure-refinement-iterations 5] ",
                     "[--ransac-seed 7] [--final-ba|--no-final-ba] ",
-                    "[--final-ba-passes 1]"
+                    "[--final-ba-passes 2] [--final-ba-window 60]",
+                    " [--final-ba-fix-window-ends|--final-ba-single-anchor]"
                 )
                 .into());
             }
@@ -147,8 +164,11 @@ fn parse_args() -> Result<Args, String> {
         local_ba_window_size,
         local_ba_iterations,
         final_ba_passes,
+        final_ba_window_size,
+        final_ba_fix_window_ends,
         ransac_seed,
         ba_huber_delta,
+        structure_refinement_iterations,
     })
 }
 
@@ -415,7 +435,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             local_ba_window_size: args.local_ba_window_size,
             local_ba_iterations: args.local_ba_iterations,
             final_ba_passes: args.final_ba_passes,
+            final_ba_window_size: args.final_ba_window_size,
+            final_ba_fix_window_ends: args.final_ba_fix_window_ends,
             ransac_seed: args.ransac_seed,
+            structure_refinement_iterations: args.structure_refinement_iterations,
             ba_config: visloc_rs::BaConfig {
                 robust_kernel: RobustKernel::Huber {
                     delta: args.ba_huber_delta,
@@ -495,7 +518,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "rig-replay result: registered_frames={}/{} registered_images={}/{} ",
             "tracks={} observations={} mean_reprojection_px={:.9} seed_frame={} ",
             "mapper_seconds={:.6} total_seconds={:.6} VmHWM_KiB={} ",
-            "triangulation_attempts={} cache_insertions={} pnp_attempts={} local_ba_runs={} out={}"
+            "triangulation_attempts={} cache_insertions={} pnp_attempts={} local_ba_runs={} structure_refined_tracks={} out={}"
         ),
         result.registered_frames,
         frames.len(),
@@ -512,6 +535,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         result.work.correspondence_cache_insertions,
         result.work.pnp_attempts,
         result.work.local_ba_runs,
+        result.work.structure_refined_tracks,
         args.out_colmap.display(),
     );
     Ok(())
