@@ -397,6 +397,14 @@ coverage pass, not a connected-scale pass: the next gate is verified bridge
 discovery followed by guarded Sim(3) alignment. Frozen results and hashes are
 in `benchmarks/electro/m7-component-models.json`.
 
+M8–M10 now follow the outcome-gated OpenLORIS control, quality, performance,
+and release plan in [`openloris_m8_m10_plan.md`](openloris_m8_m10_plan.md).
+M7's first official-GT post-map score is an honest negative: 6,099 of the
+6,791 registered images are timestamp-scoreable and the seven independent
+components have an image-weighted ATE RMSE of 5.459 m. Consequently, M8 must
+repair trajectory drift as well as graph coverage; sub-pixel reprojection alone
+is not a quality pass.
+
 ## 9. Dependencies and risk register
 
 The default dependency chain is `M0 -> M1 -> M2 -> (M3, M4) -> M5`.
