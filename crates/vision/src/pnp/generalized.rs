@@ -22,6 +22,9 @@ use rand::SeedableRng;
 use visloc_core::geometry::{Pose, SE3};
 use visloc_core::types::Camera;
 
+use crate::pnp::{Correspondence2D3D, GaussNewtonPoseRefiner, P3PGrunert};
+use crate::ransac::{PnPRansac, RobustPoseEstimator};
+
 /// One calibrated sensor rigidly attached to a generalized camera rig.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RigSensor {
@@ -445,6 +448,54 @@ impl GeneralizedPnPRansac {
             }
         }
 
+        // A small physical rig baseline makes the inhomogeneous generalized
+        // DLT poorly conditioned under pixel noise. Generate additional
+        // minimal P3P hypotheses independently inside each central sensor,
+        // transform them to the rig frame, then score them against *all*
+        // sensors. Sensor choice affects hypothesis generation only; the
+        // accepted body pose and nonlinear refinement remain fully pooled.
+        for sensor_index in 0..rig.sensors().len() {
+            let sensor_correspondences = correspondences
+                .iter()
+                .filter(|correspondence| correspondence.sensor_index == sensor_index)
+                .map(|correspondence| Correspondence2D3D {
+                    point2d: correspondence.point2d,
+                    point3d: correspondence.point3d,
+                    confidence: correspondence.confidence,
+                })
+                .collect::<Vec<_>>();
+            if sensor_correspondences.len() < 4 {
+                continue;
+            }
+            let central = PnPRansac {
+                pose_estimator: P3PGrunert,
+                pose_refiner: Some(GaussNewtonPoseRefiner::default()),
+                iterations: self.iterations.max(32),
+                reprojection_threshold: self.reprojection_threshold,
+                seed: self.seed.wrapping_add(sensor_index as u64),
+                early_stop_min_iterations: 16,
+                early_stop_inlier_ratio: Some(0.9),
+                confidence: self.confidence,
+            };
+            let Some(report) =
+                central.estimate(&sensor_correspondences, &rig.sensors()[sensor_index].camera)
+            else {
+                continue;
+            };
+            let world_to_rig = rig.sensors()[sensor_index]
+                .sensor_from_rig
+                .inverse()
+                .compose(&report.pose.world_to_camera);
+            let pose = Pose {
+                world_to_camera: world_to_rig,
+            };
+            let score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
+            if score.is_better_than(&best_score) {
+                best_pose = Some(pose);
+                best_score = score;
+            }
+        }
+
         if best_score.inliers.len() < sample_size {
             return None;
         }
@@ -453,10 +504,14 @@ impl GeneralizedPnPRansac {
             .iter()
             .map(|index| correspondences[*index].clone())
             .collect::<Vec<_>>();
-        let mut pose = self
+        let refit_pose = self
             .pose_estimator
             .estimate_pose(rig, &inliers)
-            .or(best_pose)?;
+            .filter(|pose| {
+                let score = score_pose(rig, pose, correspondences, self.reprojection_threshold);
+                !best_score.is_better_than(&score)
+            });
+        let mut pose = refit_pose.or(best_pose)?;
         let refit_score = score_pose(rig, &pose, correspondences, self.reprojection_threshold);
         let mut refinement_applied = false;
         if let Some(refiner) = self.pose_refiner {

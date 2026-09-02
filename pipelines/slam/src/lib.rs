@@ -15,9 +15,9 @@ pub mod bundle;
 mod process_memory;
 pub use bundle::{
     BaConfig, BaError, BaGeneralStereoObservation, BaGncResult, BaIterationStats, BaObservation,
-    BaResult, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment, BundleAdjustmentRefiner,
-    GravityPrior, NavigationStatePrior, PairwisePoseFactor, PerPoseGravityObservation,
-    PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
+    BaResult, BaRigObservation, BaStereoObservation, BiasRandomWalkFactor, BundleAdjustment,
+    BundleAdjustmentRefiner, GravityPrior, NavigationStatePrior, PairwisePoseFactor,
+    PerPoseGravityObservation, PerPoseGravityPrior, PositionPrior, PositionPriorObservation,
 };
 
 pub mod camera_rig;
@@ -29,8 +29,8 @@ pub use camera_rig::{
 
 pub mod rig_sfm;
 pub use rig_sfm::{
-    incremental_rig_sfm, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError, RigSfmResult,
-    RigSfmWorkStats,
+    incremental_rig_sfm, RigBaStats, RigFrame, RigFrameImage, RigSfmConfig, RigSfmError,
+    RigSfmResult, RigSfmWorkStats,
 };
 
 pub mod covisibility_ba;

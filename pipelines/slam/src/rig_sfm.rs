@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Point2, Point3, Vector3};
 use thiserror::Error;
 use visloc_core::geometry::Pose;
 use visloc_vision::features::FeatureSet;
@@ -17,7 +17,9 @@ use visloc_vision::pnp::{
     GeneralizedCameraRig, GeneralizedCorrespondence2D3D, GeneralizedPnPRansac,
 };
 
+use crate::bundle::{BaConfig, BaRigObservation, BundleAdjustment};
 use crate::incremental_sfm::{build_basic_tracks, PairwiseMatches, SfmTrack};
+use crate::{LinearSolver, RobustKernel};
 
 /// One image and its calibrated sensor slot within a synchronized rig frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +43,12 @@ pub struct RigSfmConfig {
     pub max_reprojection_error_px: f64,
     pub pnp_max_iterations: usize,
     pub ransac_seed: u64,
+    pub final_bundle_adjustment: bool,
+    pub ba_config: BaConfig,
+    pub local_ba_every: usize,
+    pub local_ba_window_size: usize,
+    pub local_ba_iterations: usize,
+    pub final_ba_passes: usize,
 }
 
 impl Default for RigSfmConfig {
@@ -52,6 +60,17 @@ impl Default for RigSfmConfig {
             max_reprojection_error_px: 4.0,
             pnp_max_iterations: 512,
             ransac_seed: 7,
+            final_bundle_adjustment: false,
+            ba_config: BaConfig {
+                linear_solver: LinearSolver::Sparse,
+                robust_kernel: RobustKernel::Huber { delta: 4.0 },
+                parallel: true,
+                ..BaConfig::default()
+            },
+            local_ba_every: 5,
+            local_ba_window_size: 40,
+            local_ba_iterations: 8,
+            final_ba_passes: 1,
         }
     }
 }
@@ -67,6 +86,16 @@ pub struct RigSfmResult {
     pub mean_reprojection_error_px: f64,
     pub seed_frame_index: usize,
     pub work: RigSfmWorkStats,
+    pub bundle_adjustment: Option<RigBaStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RigBaStats {
+    pub observations: usize,
+    pub initial_cost: f64,
+    pub final_cost: f64,
+    pub iterations: usize,
+    pub converged: bool,
 }
 
 /// Counters used to prove that frontier growth stays proportional to sparse
@@ -77,6 +106,7 @@ pub struct RigSfmWorkStats {
     pub triangulation_attempts: usize,
     pub correspondence_cache_insertions: usize,
     pub pnp_attempts: usize,
+    pub local_ba_runs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -113,12 +143,21 @@ pub enum RigSfmError {
         required: usize,
         triangulated: usize,
     },
+    #[error("rig bundle adjustment failed: {0}")]
+    BundleAdjustment(String),
 }
 
 #[derive(Debug, Clone)]
 struct WorkingTrack {
     observations: Vec<(usize, usize)>,
     position: Option<Point3<f64>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedRigCorrespondence {
+    sensor_index: usize,
+    point2d: Point2<f64>,
+    track_index: usize,
 }
 
 /// Reconstruct synchronized rig frames with one generalized body pose per
@@ -154,6 +193,7 @@ pub fn incremental_rig_sfm(
         choose_metric_seed(frames, &tracks, &image_assignment).ok_or(RigSfmError::NoMetricSeed)?;
     let mut frame_poses = vec![None; frames.len()];
     frame_poses[seed_frame_index] = Some(Pose::identity());
+    let mut registration_order = vec![seed_frame_index];
 
     let mut image_poses = vec![None; features.len()];
     install_image_poses(
@@ -202,7 +242,8 @@ pub fn incremental_rig_sfm(
     // Each landmark enters each observing frame's cache exactly once. Heap
     // versions make stale support counts cheap to discard, avoiding the
     // all-unregistered-frame rescan that becomes quadratic at 10k scale.
-    let mut frame_correspondences = vec![Vec::new(); frames.len()];
+    let mut frame_correspondences: Vec<Vec<CachedRigCorrespondence>> =
+        vec![Vec::new(); frames.len()];
     let mut frame_versions = vec![0usize; frames.len()];
     let mut attempted_versions = vec![None; frames.len()];
     let mut candidate_heap = BinaryHeap::new();
@@ -231,7 +272,17 @@ pub fn incremental_rig_sfm(
         }
         attempted_versions[frame] = Some(version);
         work.pnp_attempts += 1;
-        let correspondences = &frame_correspondences[frame];
+        let correspondences = frame_correspondences[frame]
+            .iter()
+            .filter_map(|cached| {
+                Some(GeneralizedCorrespondence2D3D {
+                    sensor_index: cached.sensor_index,
+                    point2d: cached.point2d,
+                    point3d: tracks[cached.track_index].position?,
+                    confidence: None,
+                })
+            })
+            .collect::<Vec<_>>();
         let distinct_sensors = correspondences
             .iter()
             .map(|correspondence| correspondence.sensor_index)
@@ -240,13 +291,14 @@ pub fn incremental_rig_sfm(
         if distinct_sensors < 2 {
             continue;
         }
-        let Some(report) = pnp.estimate(rig, correspondences) else {
+        let Some(report) = pnp.estimate(rig, &correspondences) else {
             continue;
         };
         if report.inliers.len() < config.min_pnp_inliers.max(6) {
             continue;
         }
         frame_poses[frame] = Some(report.pose);
+        registration_order.push(frame);
         install_image_poses(
             rig,
             &frames[frame],
@@ -281,7 +333,54 @@ pub fn incremental_rig_sfm(
             &mut frame_versions,
             &mut candidate_heap,
         );
+        if config.local_ba_every > 0
+            && config.local_ba_window_size >= 2
+            && registration_order.len() % config.local_ba_every == 0
+        {
+            let start = registration_order
+                .len()
+                .saturating_sub(config.local_ba_window_size);
+            let active_frames = registration_order[start..]
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let anchor = registration_order[start];
+            let local_ba_config = BaConfig {
+                max_iterations: config.local_ba_iterations,
+                ..config.ba_config
+            };
+            if run_rig_bundle_adjustment(
+                rig,
+                features,
+                &image_assignment,
+                config,
+                &active_frames,
+                anchor,
+                &local_ba_config,
+                &mut frame_poses,
+                &mut image_poses,
+                &mut tracks,
+            )?
+            .is_some()
+            {
+                work.local_ba_runs += 1;
+            }
+        }
     }
+
+    let bundle_adjustment = if config.final_bundle_adjustment && config.final_ba_passes > 0 {
+        run_windowed_final_ba(
+            rig,
+            features,
+            &image_assignment,
+            config,
+            &mut frame_poses,
+            &mut image_poses,
+            &mut tracks,
+        )?
+    } else {
+        None
+    };
 
     let sfm_tracks = tracks
         .into_iter()
@@ -290,7 +389,19 @@ pub fn incremental_rig_sfm(
             let observations = track
                 .observations
                 .into_iter()
-                .filter(|(image, _)| image_poses[*image].is_some())
+                .filter(|(image, keypoint)| {
+                    let Some(pose) = image_poses[*image].as_ref() else {
+                        return false;
+                    };
+                    let sensor = &rig.sensors()[image_assignment[*image].1];
+                    sensor
+                        .camera
+                        .project(&pose.transform_world_point(&position))
+                        .is_some_and(|projected| {
+                            (projected - features[*image].keypoints[*keypoint]).norm()
+                                <= config.max_reprojection_error_px
+                        })
+                })
                 .map(|(image, keypoint)| (image, keypoint, features[image].keypoints[keypoint]))
                 .collect::<Vec<_>>();
             (observations.len() >= 2).then_some(SfmTrack {
@@ -315,7 +426,182 @@ pub fn incremental_rig_sfm(
         tracks: sfm_tracks,
         seed_frame_index,
         work,
+        bundle_adjustment,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_windowed_final_ba(
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    config: &RigSfmConfig,
+    frame_poses: &mut [Option<Pose>],
+    image_poses: &mut [Option<Pose>],
+    tracks: &mut [WorkingTrack],
+) -> Result<Option<RigBaStats>, RigSfmError> {
+    let window = config.local_ba_window_size.max(2);
+    let stride = (window / 2).max(1);
+    let mut starts = (0..frame_poses.len()).step_by(stride).collect::<Vec<_>>();
+    if let Some(tail_start) = frame_poses.len().checked_sub(window) {
+        starts.push(tail_start);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    let ba_config = BaConfig {
+        max_iterations: config.local_ba_iterations,
+        ..config.ba_config
+    };
+    let mut aggregate: Option<RigBaStats> = None;
+    for pass in 0..config.final_ba_passes {
+        starts.sort_unstable();
+        if pass % 2 == 1 {
+            starts.reverse();
+        }
+        for &start in &starts {
+            let end = (start + window).min(frame_poses.len());
+            let active_frames = (start..end)
+                .filter(|frame| frame_poses[*frame].is_some())
+                .collect::<HashSet<_>>();
+            if active_frames.len() < 2 {
+                continue;
+            }
+            let anchor = if pass % 2 == 0 {
+                *active_frames.iter().min().unwrap()
+            } else {
+                *active_frames.iter().max().unwrap()
+            };
+            if let Some(stats) = run_rig_bundle_adjustment(
+                rig,
+                features,
+                image_assignment,
+                config,
+                &active_frames,
+                anchor,
+                &ba_config,
+                frame_poses,
+                image_poses,
+                tracks,
+            )? {
+                let current = aggregate.get_or_insert(RigBaStats {
+                    observations: 0,
+                    initial_cost: 0.0,
+                    final_cost: 0.0,
+                    iterations: 0,
+                    converged: true,
+                });
+                current.observations += stats.observations;
+                current.initial_cost += stats.initial_cost;
+                current.final_cost += stats.final_cost;
+                current.iterations += stats.iterations;
+                current.converged &= stats.converged;
+            }
+        }
+    }
+    Ok(aggregate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rig_bundle_adjustment(
+    rig: &GeneralizedCameraRig,
+    features: &[FeatureSet],
+    image_assignment: &[(usize, usize)],
+    config: &RigSfmConfig,
+    active_frames: &HashSet<usize>,
+    anchor_frame_index: usize,
+    ba_config: &BaConfig,
+    frame_poses: &mut [Option<Pose>],
+    image_poses: &mut [Option<Pose>],
+    tracks: &mut [WorkingTrack],
+) -> Result<Option<RigBaStats>, RigSfmError> {
+    let mut problem = BundleAdjustment::new(rig.sensors()[0].camera.clone());
+    for (frame, pose) in frame_poses.iter().enumerate() {
+        if !active_frames.contains(&frame) {
+            continue;
+        }
+        let Some(pose) = pose else {
+            continue;
+        };
+        problem.add_pose(frame as u64, pose.clone());
+    }
+    problem.fix_pose(anchor_frame_index as u64);
+
+    let mut visual_observations = 0usize;
+    for (track_index, track) in tracks.iter().enumerate() {
+        let Some(position) = track.position else {
+            continue;
+        };
+        let mut observations = Vec::new();
+        for &(image, keypoint) in &track.observations {
+            let Some(pose) = image_poses[image].as_ref() else {
+                continue;
+            };
+            let (frame, sensor_index) = image_assignment[image];
+            if !active_frames.contains(&frame) {
+                continue;
+            }
+            let sensor = &rig.sensors()[sensor_index];
+            let pixel = features[image].keypoints[keypoint];
+            let usable = sensor
+                .camera
+                .project(&pose.transform_world_point(&position))
+                .is_some_and(|projected| {
+                    (projected - pixel).norm() <= 2.0 * config.max_reprojection_error_px
+                });
+            if usable {
+                observations.push(BaRigObservation {
+                    keyframe_id: frame as u64,
+                    landmark_id: track_index as u64,
+                    xy: pixel,
+                    camera: sensor.camera.clone(),
+                    sensor_from_rig: sensor.sensor_from_rig.clone(),
+                });
+            }
+        }
+        if observations.len() < 2 {
+            continue;
+        }
+        problem.add_landmark(track_index as u64, position);
+        visual_observations += observations.len();
+        for observation in observations {
+            problem.add_rig_observation(observation);
+        }
+    }
+    if visual_observations == 0 {
+        return Ok(None);
+    }
+    let result = problem
+        .optimize(ba_config)
+        .map_err(|error| RigSfmError::BundleAdjustment(error.to_string()))?;
+    for (frame, pose) in frame_poses.iter_mut().enumerate() {
+        let Some(reference_pose) = problem.poses.get(&(frame as u64)) else {
+            continue;
+        };
+        *pose = Some(reference_pose.clone());
+    }
+    for (track_index, track) in tracks.iter_mut().enumerate() {
+        if let Some(position) = problem.landmarks.get(&(track_index as u64)) {
+            track.position = Some(*position);
+        }
+    }
+    for (image, pose) in image_poses.iter_mut().enumerate() {
+        let (frame, sensor_index) = image_assignment[image];
+        let Some(frame_pose) = frame_poses[frame].as_ref() else {
+            continue;
+        };
+        *pose = Some(Pose {
+            world_to_camera: rig.sensors()[sensor_index]
+                .sensor_from_rig
+                .compose(&frame_pose.world_to_camera),
+        });
+    }
+    Ok(Some(RigBaStats {
+        observations: visual_observations,
+        initial_cost: result.initial_cost,
+        final_cost: result.final_cost,
+        iterations: result.iterations.len(),
+        converged: result.converged,
+    }))
 }
 
 fn validate_inputs(
@@ -446,7 +732,7 @@ fn append_landmark_correspondences(
     tracks: &[WorkingTrack],
     features: &[FeatureSet],
     image_assignment: &[(usize, usize)],
-    frame_correspondences: &mut [Vec<GeneralizedCorrespondence2D3D>],
+    frame_correspondences: &mut [Vec<CachedRigCorrespondence>],
     frame_versions: &mut [usize],
     heap: &mut BinaryHeap<(usize, Reverse<usize>, usize)>,
 ) -> usize {
@@ -454,16 +740,15 @@ fn append_landmark_correspondences(
     let mut insertions = 0;
     for &track_index in landmark_indices {
         let track = &tracks[track_index];
-        let Some(position) = track.position else {
+        if track.position.is_none() {
             continue;
-        };
+        }
         for &(image, keypoint) in &track.observations {
             let (frame, sensor) = image_assignment[image];
-            frame_correspondences[frame].push(GeneralizedCorrespondence2D3D {
+            frame_correspondences[frame].push(CachedRigCorrespondence {
                 sensor_index: sensor,
                 point2d: features[image].keypoints[keypoint],
-                point3d: position,
-                confidence: None,
+                track_index,
             });
             insertions += 1;
             changed_frames.insert(frame);
