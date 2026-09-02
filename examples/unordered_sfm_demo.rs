@@ -26,6 +26,9 @@
 //!      `--temporal-pyramid-max-offset` (default 32), then adds pairs with
 //!      the same timestamp across cameras, and finally fills a bounded
 //!      `--candidate-budget` with highest-scoring VLAD retrieval pairs.
+//!      Levels through offset 32 stay dense; longer levels are sampled with
+//!      stride `offset / 16` after the cross-camera edges. This reaches wide
+//!      gaps without making every long level linear in the sequence length.
 //!      This is deterministic and GT-free; it is useful when numeric
 //!      timestamps are irregular or have large nanosecond gaps.
 //!      `--rig-frame-manifest` accepts the `generalized-rig-manifest-v1`
@@ -3439,17 +3442,23 @@ fn rig_temporal_pyramid_pairs_from_groups(
         offset *= 2;
     }
     let mut temporal = Vec::new();
+    let mut long_temporal = Vec::new();
     let mut temporal_seen = HashSet::<(usize, usize)>::new();
     for &offset in &offsets {
+        let stride = if offset <= 32 { 1 } else { offset / 16 };
         for entries in by_camera.values() {
-            for left in 0..entries.len().saturating_sub(offset) {
+            for left in (0..entries.len().saturating_sub(offset)).step_by(stride) {
                 let right = left + offset;
                 let pair = (
                     entries[left].1.min(entries[right].1),
                     entries[left].1.max(entries[right].1),
                 );
                 if temporal_seen.insert(pair) {
-                    temporal.push(pair);
+                    if offset <= 32 {
+                        temporal.push(pair);
+                    } else {
+                        long_temporal.push(pair);
+                    }
                 }
             }
         }
@@ -3473,6 +3482,10 @@ fn rig_temporal_pyramid_pairs_from_groups(
             }
         }
     }
+    // Metric same-frame edges must not be displaced by sparse long-baseline
+    // levels under a bounded budget. The caller consumes this priority tail
+    // after dense temporal edges, so append long levels after rig edges.
+    cross_camera.extend(long_temporal);
     Ok((temporal, cross_camera))
 }
 
@@ -10467,6 +10480,10 @@ fn candidate_manifest_metadata(args: &Args, image_count: usize) -> BTreeMap<Stri
         metadata.insert(
             "temporal_pyramid_max_offset".to_owned(),
             args.temporal_pyramid_max_offset.to_string(),
+        );
+        metadata.insert(
+            "temporal_long_level_sampling".to_owned(),
+            "dense-through-32;stride=offset/16".to_owned(),
         );
         metadata.insert(
             "candidate_budget".to_owned(),
@@ -18118,6 +18135,26 @@ mod diagnose_cli_tests {
         let (temporal, cross) = rig_temporal_pyramid_pairs(&names, 32).unwrap();
         assert!(temporal.is_empty());
         assert_eq!(cross, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn temporal_pyramid_samples_long_levels_after_metric_rig_edges() {
+        let names = (0..200)
+            .map(|index| format!("cam1_{index:06}.png"))
+            .chain((0..200).map(|index| format!("cam2_{index:06}.png")))
+            .collect::<Vec<_>>();
+
+        let (_, priority_tail) = rig_temporal_pyramid_pairs(&names, 128).unwrap();
+
+        assert_eq!(priority_tail.len(), 200 + 68 + 18);
+        assert_eq!(priority_tail[0], (0, 200));
+        assert_eq!(priority_tail[199], (199, 399));
+        assert!(priority_tail.contains(&(0, 64)));
+        assert!(priority_tail.contains(&(0, 128)));
+        assert!(priority_tail.contains(&(200, 264)));
+        assert!(priority_tail.contains(&(200, 328)));
+        assert!(!priority_tail.contains(&(1, 65)));
+        assert!(!priority_tail.contains(&(1, 129)));
     }
 
     #[test]
