@@ -84,6 +84,31 @@ The exact input, container, runner, database, model, score, timing, memory, and
 warning hashes/counters are frozen in
 [`benchmarks/electro/m8-openloris-colmap-1k-control.json`](../benchmarks/electro/m8-openloris-colmap-1k-control.json).
 
+### Frozen 10k COLMAP acceptance baseline (2026-09-02)
+
+The calibrated-rig v3 same-candidate control completed on the frozen 10k tier.
+It registered `4999/5000` synchronized frames (`9998/10000` images) in two
+independent models: 4494 frames in the largest model and 505 in the second.
+The observation-weighted mean reprojection error is `0.903003 px`. Under one
+Sim(3) alignment per model, the official-GT post-map score covers 9306 images
+and reports `0.384307 m` ATE RMSE, `0.358549 m` median, and `0.638669 m` p95.
+
+The mapper took `16663.880 s` (4 h 37 min 44 s); all measured CPU8 phases took
+`19256.599 s` (5 h 20 min 57 s). Mapper process `VmHWM` was `2177632 KiB` and
+the pipeline-wide container peak was `2225220 KiB`, both above 2 GiB. The
+mapper completed successfully despite 962 retained linear-solver-failure
+warnings. Its verified image graph was one 10,000-image component, so the two
+output gauges and missing frame are mapper outcomes rather than a missing-edge
+component bound.
+
+This is now the authoritative M8 10k target. visloc-rs must reach at least
+99.98% unique registration, no more than two gauges, a largest model of at
+least 4494 frames, no worse trajectory and reprojection values, faster mapper
+and native end-to-end wall time, and at most 2 GiB peak RSS. Exact inputs,
+artifacts, hashes, model breakdown, scores, phase timings, memory, and warning
+counters are frozen in
+[`m8-openloris-colmap-10k-control.json`](../benchmarks/electro/m8-openloris-colmap-10k-control.json).
+
 ### Frozen 1k visloc-rs rig champion (2026-09-02)
 
 The generalized-rig mapper now passes every 1k COLMAP quality and mapper

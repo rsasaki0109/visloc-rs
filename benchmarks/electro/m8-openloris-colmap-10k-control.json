@@ -1,0 +1,135 @@
+{
+  "schema": "visloc_m8_openloris_colmap_10k_control_evidence_v1",
+  "measured_at": "2026-09-02",
+  "repository_commit": "28d2c3df4de7d9abffc10cc84b9feea55e497aa2",
+  "dataset": "OpenLORIS corridor1-1 tier-10000",
+  "decision_use": "M8 calibrated-rig 10k same-candidate acceptance baseline; visloc-rs must match or beat these registration, trajectory, and reprojection results",
+  "software": {
+    "colmap_version": "4.2.0.dev0",
+    "container_id": "sha256:b809882552887b6471094dcadd2f2eb01656b010663564c43a5e7f04c0a08f2f",
+    "runner_sha256": "994800632cd4443afbebc58ea2ab9431366de277a1ac2bd61048653bf87ac858",
+    "metrics_wrapper_sha256": "a6c6397441b468fee46cb7892b79e58a820b4c35dc241756e7411424e9e7a204",
+    "scorer_sha256": "c0196be50b4b7ee385bd8db437a8fa6cae508fb0d4a9ecc4038981c94455d5d0"
+  },
+  "machine": {
+    "kernel": "Linux 7.0.0-30-generic x86_64",
+    "cpu": "11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz",
+    "logical_cpus": 8,
+    "physical_cores": 4
+  },
+  "frozen_contract": {
+    "images": 10000,
+    "synchronized_frames": 5000,
+    "logical_candidate_pairs": 70000,
+    "tier_manifest_sha256": "a3458a3a2acf0978f632f50ed22f552f0683a3f23894061a5b6da85e6d64d61c",
+    "candidate_pair_list_sha256": "05b534898693342429854a9e6ae608dbe6eb983d127dc789fd7a4b7a8382abfa",
+    "rig_config_sha256": "696c59fb71c675b88beaa797029e77307570dc75040a5ee00b4c66e520992d56",
+    "image_aliases_sha256": "900a5f54de750f031a2f9c07c9d5b816c42fadc5c6a8f6988f4caaf5f261d3d6",
+    "ground_truth_sha256": "8bac84df6e0ec2ab1d08f0e3d5c47b1da067911ee9a814471b96ef13637a8e2d",
+    "transform_matrix_sha256": "aa133ada81e6c168acb2233b9f93d145bf8216c83d54b34db92e4944bafd3e69",
+    "threads": 8,
+    "gpu": false,
+    "max_features_per_image": 256,
+    "ratio_test": 0.8,
+    "minimum_geometric_inliers": 8,
+    "maximum_geometric_error_px": 4.0,
+    "timestamp_pair_tolerance_seconds": 0.001,
+    "repaired_timestamp_pairs": 1,
+    "ground_truth_used_for_selection_or_mapping": false
+  },
+  "artifacts": {
+    "plan_sha256": "708b5f4dba37b5ee758a2d9cddbc5625584ab17d32a478b3d34e5266c710571c",
+    "result_sha256": "5ef8ecb398ad562eb6dd7e763448afebbcfa69900ed3a2df58cfeb7deb608b98",
+    "score_sha256": "bf69585ce7c52a02b5ff94498a36de99b9c7d7d941e06ba19150131b191026a6",
+    "database_sha256": "e2456f4fad1796ddb4fd79afcab8ebbc921ebd08fa5d9ddee0438271b3deece5"
+  },
+  "database": {
+    "cameras": 2,
+    "rigs": 1,
+    "frames": 5000,
+    "images": 10000,
+    "keypoints": 3476053,
+    "raw_correspondences": 9447454,
+    "candidate_pairs_with_raw_matches": 69626,
+    "verified_pairs": 69621,
+    "verified_inliers": 9352301,
+    "verified_component_sizes": [10000]
+  },
+  "models": {
+    "count": 2,
+    "unique_registered_frames": 4999,
+    "unique_registered_images": 9998,
+    "registered_fraction": 0.9998,
+    "total_points": 113710,
+    "total_observations": 1947815,
+    "mean_reprojection_px_observation_weighted": 0.9030031518617252,
+    "components": [
+      {
+        "model": 0,
+        "registered_frames": 4494,
+        "registered_images": 8988,
+        "points": 103611,
+        "observations": 1800787,
+        "mean_reprojection_px_observation_weighted": 0.9125826606314301,
+        "images_txt_sha256": "726b6e711d9b830aad653028c999556e5c37e76229e515b895cf9332219999fa",
+        "points3D_txt_sha256": "5888ce9cfcf110d4564897c510a6b9162438c02086246be353ab84a537f6985d"
+      },
+      {
+        "model": 1,
+        "registered_frames": 505,
+        "registered_images": 1010,
+        "points": 10099,
+        "observations": 147028,
+        "mean_reprojection_px_observation_weighted": 0.7856741066535303,
+        "images_txt_sha256": "fa63a03774390d0038423fb1b8748ee6e52c79698be33c2703b6bd6aaa344562",
+        "points3D_txt_sha256": "839a6b6d205db9733957e676595421fad07c43846cbd022e84dfe24863ead978"
+      }
+    ]
+  },
+  "official_gt_score": {
+    "scored_images": 9306,
+    "alignment": "one Sim(3) per disconnected model; image-weighted aggregate",
+    "ate_rmse_m": 0.3843065335437528,
+    "ate_median_m": 0.35854897403070385,
+    "ate_p95_m": 0.6386693943260212,
+    "ate_max_m": 0.8388294869820754,
+    "components": [
+      {
+        "model": 0,
+        "scored_images": 8296,
+        "ate_rmse_m": 0.40656418984817544,
+        "ate_p95_m": 0.6482247882643684,
+        "sim3_scale": 1.1056339623289912
+      },
+      {
+        "model": 1,
+        "scored_images": 1010,
+        "ate_rmse_m": 0.05570902120435261,
+        "ate_p95_m": 0.12765089302029006,
+        "sim3_scale": 1.1420253046628965
+      }
+    ]
+  },
+  "resources": {
+    "feature_wall_s": 1519.399718373,
+    "rig_configuration_wall_s": 4.961498372,
+    "matching_wall_s": 1068.35722003,
+    "mapper_wall_s": 16663.880327857,
+    "measured_phase_total_wall_s": 19256.598764632003,
+    "mapper_peak_process_hwm_kib": 2177632,
+    "mapper_peak_container_cgroup_kib": 2108272,
+    "pipeline_peak_process_hwm_kib": 2177632,
+    "pipeline_peak_container_cgroup_kib": 2225220,
+    "mapper_linear_solver_failure_lines": 962,
+    "mapper_warning_lines": 970,
+    "error_lines": 0
+  },
+  "baseline_verdict": {
+    "status": "complete",
+    "registration_target": "4999/5000 frames, 2 independent gauges; largest model 4494 frames",
+    "trajectory_target": "ATE RMSE <= 0.3843065335437528 m and p95 <= 0.6386693943260212 m under the same per-component Sim(3) convention",
+    "reprojection_target": "observation-weighted mean <= 0.9030031518617252 px",
+    "speed_target": "mapper < 16663.880327857 s and native measured phases < 19256.598764632003 s",
+    "memory_target": "visloc-rs must remain <= 2 GiB and below COLMAP's measured peak; COLMAP itself exceeded 2 GiB process and pipeline cgroup peaks"
+  }
+}
