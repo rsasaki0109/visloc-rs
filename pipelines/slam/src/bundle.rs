@@ -41,7 +41,9 @@
 //!   way as assembly, collecting each landmark's `(Vec<(p,q,block)>,
 //!   Vec<(p,upd)>)` pair per chunk and then flattening/merging into the
 //!   shared reduced system `s` / `b_reduced` by a serial pass over each
-//!   chunk, in landmark-ascending order.
+//!   chunk, in landmark-ascending order. Pure-visual sparse BA instead keeps
+//!   this stage serial so parallel observation assembly does not force a
+//!   dense camera Hessian or change the block-sparse O(nnz) memory bound.
 //! - **Back-substitution** (`solve_step`'s per-landmark `δ_L` loop): each
 //!   landmark writes only its own 3 rows of `delta_l`, so this is
 //!   embarrassingly parallel with no merge step at all.
@@ -3164,7 +3166,6 @@ fn build_normal_equations(
     let bias_offset = pose_dim + v_count * 3;
     let total_dim = pose_dim + v_count * 3 + b_count * 6;
     let pure_visual_pose_blocks = prefer_pose_blocks
-        && !parallel
         && v_count == 0
         && b_count == 0
         && ba.position_prior.is_none()
@@ -4197,7 +4198,6 @@ fn solve_step(
         debug_assert_eq!(v_count, 0);
         debug_assert_eq!(b_count, 0);
         debug_assert_eq!(linear_solver, LinearSolver::Sparse);
-        debug_assert!(!parallel);
         let CameraHessian::PoseDiagonal(diagonal) =
             std::mem::replace(&mut system.h_pp, CameraHessian::pose_diagonal(0))
         else {
@@ -5889,6 +5889,34 @@ mod parallel_ba_tests {
             ba_serial.landmarks, ba_parallel.landmarks,
             "landmarks must match exactly"
         );
+    }
+
+    #[test]
+    fn parallel_sparse_ba_keeps_pose_block_system_and_matches_serial() {
+        let mut ba_serial = build_synthetic_ba(TEST_CAMERAS, TEST_LANDMARKS);
+        let mut ba_parallel = ba_serial.clone();
+        let serial_config = BaConfig {
+            max_iterations: 8,
+            linear_solver: LinearSolver::Sparse,
+            parallel: false,
+            ..BaConfig::default()
+        };
+        let parallel_config = BaConfig {
+            parallel: true,
+            ..serial_config
+        };
+
+        let result_serial = ba_serial
+            .optimize(&serial_config)
+            .expect("serial sparse BA should solve the synthetic problem");
+        let result_parallel = ba_parallel
+            .optimize(&parallel_config)
+            .expect("parallel sparse BA should solve the synthetic problem");
+
+        assert_eq!(result_serial.final_cost, result_parallel.final_cost);
+        assert_eq!(result_serial.iterations, result_parallel.iterations);
+        assert_eq!(ba_serial.poses, ba_parallel.poses);
+        assert_eq!(ba_serial.landmarks, ba_parallel.landmarks);
     }
 
     #[test]
