@@ -63,6 +63,27 @@ their median unless a run is a deterministic DNF.
 
 ## M8 — establish the quality target and close it
 
+### Frozen 1k COLMAP acceptance baseline (2026-09-02)
+
+The calibrated-rig v3 control completed on the frozen 1k tier. It registered
+all `500/500` synchronized frames (`1000/1000` images) in one model, with
+`0.810207 px` observation-weighted mean reprojection error. The official-GT
+post-map score covers 308 interpolable images and reports `0.027969 m` ATE
+RMSE and `0.042266 m` p95. Mapper wall time was `2073.400 s` and mapper
+process `VmHWM` was `629664 KiB`; the measured CPU8 feature + rig setup +
+matching + mapper total was `2405.538 s`.
+
+The retained independent-pose diagnostic also registered `1000/1000`, but
+needed `5676.497 s` in the mapper, used `1191612 KiB` mapper `VmHWM`, and
+scored `0.029894 m` RMSE / `0.044628 m` p95. Thus the calibrated rig is the
+official 1k target: it is 2.738x faster in the mapper, modestly more accurate,
+and preserves reprojection quality. These are COLMAP-vs-COLMAP control results,
+not a visloc performance claim and not the M8 10k exit gate.
+
+The exact input, container, runner, database, model, score, timing, memory, and
+warning hashes/counters are frozen in
+[`benchmarks/electro/m8-openloris-colmap-1k-control.json`](../benchmarks/electro/m8-openloris-colmap-1k-control.json).
+
 ### M8.1 Official control and scoring infrastructure
 
 1. Finish the official COLMAP 1k pilot and preserve its immutable inputs,
