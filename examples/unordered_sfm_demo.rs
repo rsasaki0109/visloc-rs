@@ -28,6 +28,10 @@
 //!      `--candidate-budget` with highest-scoring VLAD retrieval pairs.
 //!      This is deterministic and GT-free; it is useful when numeric
 //!      timestamps are irregular or have large nanosecond gaps.
+//!      `--rig-frame-manifest` accepts the `generalized-rig-manifest-v1`
+//!      used by `generalized_rig_sfm`; its explicit `F frame image sensor`
+//!      rows override filename-derived grouping for datasets whose synchronized
+//!      cameras use different aliases or timestamps.
 //!      File-backed exports can add `--stream-candidate-features` to release
 //!      local descriptors per image. `--retrieval-backend lsh` enables the
 //!      deterministic approximate index; `--ann-bits 0` scales its signature
@@ -2497,6 +2501,10 @@ struct Args {
     /// `vlad-union` local schedule.  This opt-in keeps temporal edges within
     /// each camera and adds only same-timestamp cross-camera rig edges.
     rig_local_grouping: bool,
+    /// Explicit generalized-rig frame/image/sensor assignments for temporal
+    /// candidate generation. This avoids inferring synchronization from image
+    /// aliases when different sensors use different names or timestamps.
+    rig_frame_manifest: Option<PathBuf>,
     /// Maximum positional offset for the rig-aware temporal-pyramid
     /// candidate source.  Powers of two from 1 through this value are used;
     /// the default is 32.  This is deliberately a positional offset rather
@@ -3319,8 +3327,80 @@ fn rig_local_pairs(image_names: &[String], window: u64) -> Result<Vec<(usize, us
 /// integer frame counter.  Same-timestamp cross-camera pairs are returned
 /// separately so the caller can give them a stable priority after temporal
 /// edges and before VLAD fill edges.
-fn rig_temporal_pyramid_pairs(
+fn generalized_rig_frame_groups(
+    path: &Path,
     image_names: &[String],
+) -> Result<Vec<(String, u64)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --rig-frame-manifest {path:?}: {error}"))?;
+    let image_indices = image_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut groups = vec![None; image_names.len()];
+    let mut magic = false;
+    for (line_number, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line == "# generalized-rig-manifest-v1" {
+            magic = true;
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') || line.starts_with("S ") {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.first() != Some(&"F") || fields.len() != 4 {
+            return Err(format!(
+                "invalid --rig-frame-manifest row {} (expected F frame_id image_name sensor_index)",
+                line_number + 1
+            ));
+        }
+        let frame = fields[1].parse::<u64>().map_err(|error| {
+            format!(
+                "invalid frame id {:?} at --rig-frame-manifest row {}: {error}",
+                fields[1],
+                line_number + 1
+            )
+        })?;
+        let sensor = fields[3].parse::<u64>().map_err(|error| {
+            format!(
+                "invalid sensor index {:?} at --rig-frame-manifest row {}: {error}",
+                fields[3],
+                line_number + 1
+            )
+        })?;
+        let Some(&image) = image_indices.get(fields[2]) else {
+            return Err(format!(
+                "--rig-frame-manifest row {} names unknown image {:?}",
+                line_number + 1,
+                fields[2]
+            ));
+        };
+        if groups[image]
+            .replace((format!("sensor-{sensor}"), frame))
+            .is_some()
+        {
+            return Err(format!(
+                "--rig-frame-manifest repeats image {:?}",
+                fields[2]
+            ));
+        }
+    }
+    if !magic {
+        return Err("--rig-frame-manifest is not generalized-rig-manifest-v1".into());
+    }
+    if let Some((index, _)) = groups.iter().enumerate().find(|(_, group)| group.is_none()) {
+        return Err(format!(
+            "--rig-frame-manifest is missing loaded image {:?}",
+            image_names[index]
+        ));
+    }
+    Ok(groups.into_iter().map(Option::unwrap).collect())
+}
+
+fn rig_temporal_pyramid_pairs_from_groups(
+    groups: &[(String, u64)],
     max_offset: u64,
 ) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
     if max_offset == 0 {
@@ -3329,8 +3409,8 @@ fn rig_temporal_pyramid_pairs(
     let mut by_camera = BTreeMap::<String, Vec<(u64, usize)>>::new();
     let mut by_timestamp = BTreeMap::<u64, Vec<(String, usize)>>::new();
     let mut seen = HashSet::<(String, u64)>::new();
-    for (index, name) in image_names.iter().enumerate() {
-        let (camera, timestamp) = rig_camera_timestamp(name)?;
+    for (index, (camera, timestamp)) in groups.iter().enumerate() {
+        let (camera, timestamp) = (camera.clone(), *timestamp);
         if !seen.insert((camera.clone(), timestamp)) {
             return Err(format!(
                 "temporal-pyramid grouping repeats timestamp {timestamp} for camera prefix {camera:?}"
@@ -3396,6 +3476,30 @@ fn rig_temporal_pyramid_pairs(
     Ok((temporal, cross_camera))
 }
 
+fn rig_temporal_pyramid_pairs(
+    image_names: &[String],
+    max_offset: u64,
+) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
+    let groups = image_names
+        .iter()
+        .map(|name| rig_camera_timestamp(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    rig_temporal_pyramid_pairs_from_groups(&groups, max_offset)
+}
+
+fn rig_temporal_pyramid_pairs_with_manifest(
+    image_names: &[String],
+    max_offset: u64,
+    rig_frame_manifest: Option<&Path>,
+) -> Result<(Vec<(usize, usize)>, Vec<(usize, usize)>), String> {
+    if let Some(path) = rig_frame_manifest {
+        let groups = generalized_rig_frame_groups(path, image_names)?;
+        rig_temporal_pyramid_pairs_from_groups(&groups, max_offset)
+    } else {
+        rig_temporal_pyramid_pairs(image_names, max_offset)
+    }
+}
+
 fn temporal_pyramid_offsets_string(max_offset: u64) -> String {
     let mut values = Vec::new();
     let mut offset = 1u64;
@@ -3421,9 +3525,16 @@ fn candidate_pairs_temporal_pyramid(
     topk: usize,
     max_offset: u64,
     budget: Option<usize>,
+    rig_frame_manifest: Option<&Path>,
 ) -> Result<Vec<(usize, usize)>, String> {
     let retrieval = candidate_pairs_vlad_scored(features, vocab_size, topk, false, false);
-    candidate_pairs_temporal_pyramid_from_retrieval(image_names, retrieval, max_offset, budget)
+    candidate_pairs_temporal_pyramid_from_retrieval(
+        image_names,
+        retrieval,
+        max_offset,
+        budget,
+        rig_frame_manifest,
+    )
 }
 
 fn candidate_pairs_temporal_pyramid_from_retrieval(
@@ -3431,8 +3542,10 @@ fn candidate_pairs_temporal_pyramid_from_retrieval(
     retrieval: Vec<((usize, usize), f32)>,
     max_offset: u64,
     budget: Option<usize>,
+    rig_frame_manifest: Option<&Path>,
 ) -> Result<Vec<(usize, usize)>, String> {
-    let (temporal, cross_camera) = rig_temporal_pyramid_pairs(image_names, max_offset)?;
+    let (temporal, cross_camera) =
+        rig_temporal_pyramid_pairs_with_manifest(image_names, max_offset, rig_frame_manifest)?;
     let mut selected = Vec::new();
     let mut seen = HashSet::<(usize, usize)>::new();
     for pair in temporal.into_iter().chain(cross_camera) {
@@ -4138,6 +4251,7 @@ where
     let mut pair_stem_window: Option<u64> = None;
     let mut local_stem_window: Option<u64> = None;
     let mut rig_local_grouping = false;
+    let mut rig_frame_manifest: Option<PathBuf> = None;
     let mut temporal_pyramid_max_offset = 32u64;
     let mut candidate_budget: Option<usize> = None;
     let mut refine_intrinsics = false;
@@ -4490,6 +4604,17 @@ where
                 local_stem_window = Some(window);
             }
             "--rig-local-grouping" => rig_local_grouping = true,
+            "--rig-frame-manifest" => {
+                let raw = a
+                    .get(i + 1)
+                    .ok_or("--rig-frame-manifest requires PATH")?
+                    .clone();
+                if raw.trim().is_empty() {
+                    return Err("--rig-frame-manifest requires a non-empty PATH".into());
+                }
+                a.remove(i + 1);
+                rig_frame_manifest = Some(PathBuf::from(raw));
+            }
             "--temporal-pyramid-max-offset" => {
                 let raw = a
                     .get(i + 1)
@@ -5311,6 +5436,9 @@ where
     if rig_local_grouping && pair_source != PairSource::VladUnion {
         return Err("--rig-local-grouping requires --pair-source vlad-union".into());
     }
+    if rig_frame_manifest.is_some() && pair_source != PairSource::TemporalPyramid {
+        return Err("--rig-frame-manifest requires --pair-source temporal-pyramid".into());
+    }
     if pair_source == PairSource::TemporalPyramid
         && (local_stem_window.is_some() || rig_local_grouping)
     {
@@ -5352,6 +5480,7 @@ where
         && (exhaustive
             || local_stem_window.is_some()
             || rig_local_grouping
+            || rig_frame_manifest.is_some()
             || candidate_budget.is_some()
             || pair_stem_window.is_some()
             || pair_source == PairSource::Transitive)
@@ -5649,6 +5778,7 @@ where
         if pair_stem_window.is_some()
             || local_stem_window.is_some()
             || rig_local_grouping
+            || rig_frame_manifest.is_some()
             || candidate_budget.is_some()
             || candidate_manifest.is_some()
             || export_candidate_manifest.is_some()
@@ -5715,6 +5845,7 @@ where
         pair_stem_window,
         local_stem_window,
         rig_local_grouping,
+        rig_frame_manifest,
         temporal_pyramid_max_offset,
         candidate_budget,
         match_ratio,
@@ -10227,6 +10358,7 @@ fn candidate_pairs(
             args.retrieval_topk,
             args.temporal_pyramid_max_offset,
             args.candidate_budget,
+            args.rig_frame_manifest.as_deref(),
         ),
         PairSource::VocabTree | PairSource::Transitive => Ok(candidate_pairs_vocab_tree(
             features,
@@ -10314,8 +10446,19 @@ fn candidate_manifest_metadata(args: &Args, image_count: usize) -> BTreeMap<Stri
     if args.pair_source == PairSource::TemporalPyramid {
         metadata.insert(
             "local_grouping".to_owned(),
-            "rig-prefix-timestamp-v1".to_owned(),
+            if args.rig_frame_manifest.is_some() {
+                "generalized-rig-manifest-v1"
+            } else {
+                "rig-prefix-timestamp-v1"
+            }
+            .to_owned(),
         );
+        if let Some(path) = &args.rig_frame_manifest {
+            metadata.insert(
+                "rig_frame_manifest".to_owned(),
+                path.to_string_lossy().into_owned(),
+            );
+        }
         metadata.insert("cross_camera_rule".to_owned(), "same-timestamp".to_owned());
         metadata.insert(
             "temporal_offsets".to_owned(),
@@ -15534,6 +15677,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             retrieval,
             args.temporal_pyramid_max_offset,
             args.candidate_budget,
+            args.rig_frame_manifest.as_deref(),
         )?;
         let path = args
             .export_candidate_manifest
@@ -17540,15 +17684,16 @@ mod diagnose_cli_tests {
         parse_colmap_track_membership, parse_diagnose_stems, ranked_view_graph_components,
         read_feature_set, remap_feature_keypoints_by_old_to_new,
         replace_feature_keypoints_from_native, rig_local_pairs, rig_temporal_pyramid_pairs,
-        robust_huber_mean, snapshot_export_config, snapshot_feature_manifest_hash,
-        snapshot_feature_validation_from_files, stream_vlad_globals_from_feature_files,
-        summarize_model_cross_validation_bucket, temporal_pyramid_offsets_string,
-        translation_direction_delta_deg, unordered_pairwise_edge_hash, validate_diagnose_options,
-        verified_pair_oracle_map, write_candidate_manifest, write_candidate_manifest_with_metadata,
-        Camera, ColmapTrackMembership, ConfigurationType, EssentialPairQuality,
-        FeatureLocusMetadata, ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver,
-        ModelCrossValidationBucket, ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches,
-        PerImageCameras, RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
+        rig_temporal_pyramid_pairs_with_manifest, robust_huber_mean, snapshot_export_config,
+        snapshot_feature_manifest_hash, snapshot_feature_validation_from_files,
+        stream_vlad_globals_from_feature_files, summarize_model_cross_validation_bucket,
+        temporal_pyramid_offsets_string, translation_direction_delta_deg,
+        unordered_pairwise_edge_hash, validate_diagnose_options, verified_pair_oracle_map,
+        write_candidate_manifest, write_candidate_manifest_with_metadata, Camera,
+        ColmapTrackMembership, ConfigurationType, EssentialPairQuality, FeatureLocusMetadata,
+        ImportedVerifiedPair, IncrementalSfmConfig, LinearSolver, ModelCrossValidationBucket,
+        ModelCrossValidationSummary, NextImagePolicy, PairwiseMatches, PerImageCameras,
+        RobustKernel, TwoViewGeometryReport, UnionTraversalOrder,
     };
     use nalgebra::{Matrix3, Point2, Vector3};
     use std::cmp::Ordering as CmpOrdering;
@@ -17725,6 +17870,18 @@ mod diagnose_cli_tests {
         ));
         assert_eq!(temporal.temporal_pyramid_max_offset, 64);
         assert_eq!(temporal.candidate_budget, Some(12000));
+        let temporal_manifest = parse_args_from(minimal_args(&[
+            "--pair-source",
+            "temporal-pyramid",
+            "--rig-frame-manifest",
+            "/tmp/rig.txt",
+        ]))
+        .unwrap();
+        assert_eq!(
+            temporal_manifest.rig_frame_manifest,
+            Some(PathBuf::from("/tmp/rig.txt"))
+        );
+        assert!(parse_args_from(minimal_args(&["--rig-frame-manifest", "/tmp/rig.txt",])).is_err());
         assert!(parse_args_from(minimal_args(&[
             "--pair-source",
             "temporal-pyramid",
@@ -17961,6 +18118,39 @@ mod diagnose_cli_tests {
         let (temporal, cross) = rig_temporal_pyramid_pairs(&names, 32).unwrap();
         assert!(temporal.is_empty());
         assert_eq!(cross, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn temporal_pyramid_manifest_groups_different_camera_aliases_into_frames() {
+        let root =
+            std::env::temp_dir().join(format!("visloc_rig_frame_manifest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rig.txt");
+        std::fs::write(
+            &path,
+            "# generalized-rig-manifest-v1\n\
+             S 0 1 10 10 1 1 1 1 1 0 0 0 0 0 0\n\
+             S 1 2 10 10 1 1 1 1 1 0 0 0 1 0 0\n\
+             F 0 cam1_000000.png 0\n\
+             F 0 cam2_000001.png 1\n\
+             F 1 cam1_000002.png 0\n\
+             F 1 cam2_000003.png 1\n",
+        )
+        .unwrap();
+        let names = vec![
+            "cam1_000000.png".to_owned(),
+            "cam1_000002.png".to_owned(),
+            "cam2_000001.png".to_owned(),
+            "cam2_000003.png".to_owned(),
+        ];
+
+        let (temporal, cross) =
+            rig_temporal_pyramid_pairs_with_manifest(&names, 1, Some(&path)).unwrap();
+
+        assert_eq!(temporal, vec![(0, 1), (2, 3)]);
+        assert_eq!(cross, vec![(0, 2), (1, 3)]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

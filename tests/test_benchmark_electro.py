@@ -402,6 +402,7 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 pair_source="temporal-pyramid",
                 temporal_pyramid_max_offset=64,
                 candidate_budget=12000,
+                rig_frame_manifest=Path("/input/rig.txt"),
             )
             self.assertIn("--pair-source", temporal_candidate_command)
             self.assertIn("temporal-pyramid", temporal_candidate_command)
@@ -409,6 +410,12 @@ class ElectroBenchmarkTests(unittest.TestCase):
             self.assertIn("64", temporal_candidate_command)
             self.assertNotIn("--local-stem-window", temporal_candidate_command)
             self.assertNotIn("--rig-local-grouping", temporal_candidate_command)
+            self.assertEqual(
+                temporal_candidate_command[
+                    temporal_candidate_command.index("--rig-frame-manifest") + 1
+                ],
+                "/input/rig.txt",
+            )
 
             ann_candidate_command = benchmark.build_candidate_command(
                 Path("/bin/visloc"),
@@ -646,6 +653,11 @@ class ElectroBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, _, _ = self._candidate(root)
+            rig_manifest = root / "rig.txt"
+            rig_manifest.write_text(
+                "# generalized-rig-manifest-v1\nF 0 a.png 0\nF 0 b.png 1\n",
+                encoding="utf-8",
+            )
             index = benchmark.split_candidate_manifest(
                 source,
                 root / "temporal-candidates",
@@ -654,7 +666,8 @@ class ElectroBenchmarkTests(unittest.TestCase):
                 candidate_budget=12000,
                 pair_source="temporal-pyramid",
                 temporal_pyramid_max_offset=32,
-                local_grouping="rig-prefix-timestamp-v1",
+                local_grouping="generalized-rig-manifest-v1",
+                rig_frame_manifest=rig_manifest,
             )
             self.assertEqual(
                 index["candidate_policy"],
@@ -664,10 +677,18 @@ class ElectroBenchmarkTests(unittest.TestCase):
                     "candidate_budget": 12000,
                     "pair_source": "temporal-pyramid",
                     "temporal_pyramid_max_offset": 32,
-                    "local_grouping": "rig-prefix-timestamp-v1",
+                    "local_grouping": "generalized-rig-manifest-v1",
+                    "rig_frame_manifest": str(rig_manifest.resolve()),
+                    "rig_frame_manifest_sha256": benchmark.sha256_file(rig_manifest),
                 },
             )
             benchmark.validate_candidate_shards(root / "temporal-candidates" / "index.json")
+            rig_manifest.write_text(
+                "# generalized-rig-manifest-v1\nF 1 a.png 0\nF 1 b.png 1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(benchmark.ValidationError, "rig frame manifest hash mismatch"):
+                benchmark.validate_candidate_shards(root / "temporal-candidates" / "index.json")
 
     def test_feature_manifest_rejects_changed_bytes_even_with_same_size(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

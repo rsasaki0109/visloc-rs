@@ -261,6 +261,7 @@ def split_candidate_manifest(
     local_grouping: str | None = None,
     pair_source: str | None = None,
     temporal_pyramid_max_offset: int | None = None,
+    rig_frame_manifest: Path | None = None,
 ) -> dict[str, Any]:
     """Create deterministic candidate shards and an image-bound index.
 
@@ -321,6 +322,12 @@ def split_candidate_manifest(
         candidate_policy["temporal_pyramid_max_offset"] = temporal_pyramid_max_offset
     if local_grouping is not None:
         candidate_policy["local_grouping"] = local_grouping
+    if rig_frame_manifest is not None:
+        rig_frame_manifest = rig_frame_manifest.expanduser().resolve()
+        if not rig_frame_manifest.is_file():
+            raise ValidationError(f"rig frame manifest is missing: {rig_frame_manifest}")
+        candidate_policy["rig_frame_manifest"] = str(rig_frame_manifest)
+        candidate_policy["rig_frame_manifest_sha256"] = sha256_file(rig_frame_manifest)
     index = {
         "schema": CANDIDATE_INDEX_SCHEMA,
         "source_manifest": str(source),
@@ -400,8 +407,27 @@ def validate_candidate_shards(index_path: Path) -> dict[str, Any]:
         if grouping is not None and grouping not in {
             "numeric-stem-v1",
             "rig-prefix-timestamp-v1",
+            "generalized-rig-manifest-v1",
         }:
             raise ValidationError(f"candidate index candidate_policy local_grouping is unsupported: {grouping!r}")
+        rig_manifest_value = policy.get("rig_frame_manifest")
+        rig_manifest_hash = policy.get("rig_frame_manifest_sha256")
+        if (rig_manifest_value is None) != (rig_manifest_hash is None):
+            raise ValidationError(
+                "candidate index rig_frame_manifest and its sha256 must be recorded together"
+            )
+        if rig_manifest_value is not None:
+            if not isinstance(rig_manifest_value, str) or not rig_manifest_value:
+                raise ValidationError("candidate index rig_frame_manifest must be a path")
+            rig_manifest = Path(rig_manifest_value).expanduser()
+            expected_rig_hash = _sha256(rig_manifest_hash, "rig frame manifest hash")
+            if not rig_manifest.is_file():
+                raise ValidationError(f"rig frame manifest is missing: {rig_manifest}")
+            actual_rig_hash = sha256_file(rig_manifest)
+            if actual_rig_hash != expected_rig_hash:
+                raise ValidationError(
+                    f"rig frame manifest hash mismatch: expected {expected_rig_hash}, got {actual_rig_hash}"
+                )
     metadata = index.get("candidate_manifest_metadata", {})
     if not isinstance(metadata, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
@@ -687,6 +713,7 @@ def build_candidate_command(
     local_stem_window: int = 3,
     candidate_budget: int | None = None,
     rig_local_grouping: bool = False,
+    rig_frame_manifest: Path | None = None,
     pair_source: str = "vlad-union",
     temporal_pyramid_max_offset: int = 32,
     stream_candidate_features: bool = False,
@@ -748,6 +775,10 @@ def build_candidate_command(
         command.append("--rig-local-grouping")
     if pair_source == "temporal-pyramid":
         command.extend(["--temporal-pyramid-max-offset", str(temporal_pyramid_max_offset)])
+    if rig_frame_manifest is not None:
+        if pair_source != "temporal-pyramid":
+            raise ValidationError("rig_frame_manifest requires pair_source temporal-pyramid")
+        command.extend(["--rig-frame-manifest", str(rig_frame_manifest)])
     if candidate_budget is not None:
         command.extend(["--candidate-budget", str(candidate_budget)])
     if stream_candidate_features:
@@ -1820,6 +1851,11 @@ def _parser() -> argparse.ArgumentParser:
         help="use camera-prefix/timestamp local edges plus same-timestamp rig edges",
     )
     parser.add_argument("--temporal-pyramid-max-offset", type=int, default=32)
+    parser.add_argument(
+        "--rig-frame-manifest",
+        type=Path,
+        help="generalized-rig-manifest-v1 used for explicit temporal/cross-camera grouping",
+    )
     parser.add_argument("--candidate-budget", type=int)
     parser.add_argument(
         "--stream-candidate-features",
@@ -1887,6 +1923,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.persistent_matcher and mode not in {"match", "run"}:
             raise ValidationError("--persistent-matcher is only valid with --match or --run")
+        if args.rig_frame_manifest is not None:
+            if args.pair_source != "temporal-pyramid":
+                raise ValidationError("--rig-frame-manifest requires --pair-source temporal-pyramid")
+            args.rig_frame_manifest = args.rig_frame_manifest.expanduser().resolve()
+            if not args.rig_frame_manifest.is_file():
+                raise ValidationError(f"rig frame manifest is missing: {args.rig_frame_manifest}")
         artifact_root = args.artifact_root.expanduser().resolve()
         if mode == "verify":
             if not artifact_root.is_dir():
@@ -1948,6 +1990,7 @@ def main(argv: list[str] | None = None) -> int:
                         local_stem_window=args.local_stem_window,
                         candidate_budget=args.candidate_budget,
                         rig_local_grouping=args.rig_local_grouping,
+                        rig_frame_manifest=args.rig_frame_manifest,
                         pair_source=args.pair_source,
                         temporal_pyramid_max_offset=args.temporal_pyramid_max_offset,
                         stream_candidate_features=args.stream_candidate_features,
@@ -1980,10 +2023,13 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 local_grouping=(
-                    "rig-prefix-timestamp-v1"
+                    "generalized-rig-manifest-v1"
+                    if args.rig_frame_manifest is not None
+                    else "rig-prefix-timestamp-v1"
                     if args.rig_local_grouping or args.pair_source == "temporal-pyramid"
                     else None
                 ),
+                rig_frame_manifest=args.rig_frame_manifest,
             )
             candidate_sharding_elapsed = time.monotonic() - sharding_started
         if mode in {"verify", "match", "map"} and not candidate_index_path.is_file():
