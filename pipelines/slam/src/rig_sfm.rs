@@ -2399,7 +2399,6 @@ fn build_metric_temporal_quadrilaterals_in_frame_gap(
             conflicting_observations: rejected_conflicts.saturating_mul(4),
             retained_tracks: tracks.len(),
             retained_observations: tracks.iter().map(Vec::len).sum(),
-            ..TrackBuildStats::default()
         },
         tracks,
         conflicting_components: Vec::new(),
@@ -6504,7 +6503,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let truth = vec![
+        let truth = [
             Pose::identity(),
             Pose::from_world_to_camera(
                 UnitQuaternion::from_euler_angles(0.02, -0.03, 0.04),

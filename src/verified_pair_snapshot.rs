@@ -449,86 +449,89 @@ fn write_streamed_merge_temp(
             )
         })?;
 
-    let mut payload_writer = PayloadDigestWriter::new(&mut writer);
-    encode_payload_prefix(
-        merged,
-        0,
-        merged.unordered_edge_hash,
-        merged.accepted_match_count,
-        expected_pairs.len() as u64,
-        &mut payload_writer,
-    )?;
-    let mut ordered_hash = ordered_pair_hash_seed(expected_pairs.len() as u64);
-    let mut pair_cursor = 0usize;
-    let mut encoded_pair_bytes = 0u64;
-    let mut accepted_match_count = 0u64;
-    for (shard_index, path) in input_paths.iter().enumerate() {
-        let snapshot = read(path)?;
-        validate_merge_envelope(shard_index, &snapshot, first)?;
-        for pair in &snapshot.pairs {
-            let expected = expected_pairs.get(pair_cursor).ok_or_else(|| {
-                format!("merge input shard {shard_index} contains an unexpected pair")
-            })?;
-            let (normalized_i, normalized_j) = validate_merge_pair(pair, first.image_names.len())?;
-            let encoded_len = pair_payload_len(pair)?;
-            let encoded_hash = encoded_pair_hash(pair)?;
-            if pair.image_i != expected.image_i
-                || pair.image_j != expected.image_j
-                || normalized_i != expected.normalized_i
-                || normalized_j != expected.normalized_j
-                || pair.matches.len() as u64 != expected.match_count
-                || encoded_len != expected.encoded_len
-                || encoded_hash != expected.encoded_hash
-            {
-                return Err(format!(
-                    "merge input pair {pair_cursor} changed between validation passes"
-                ));
+    let ordered_hash = {
+        let mut payload_writer = PayloadDigestWriter::new(&mut writer);
+        encode_payload_prefix(
+            merged,
+            0,
+            merged.unordered_edge_hash,
+            merged.accepted_match_count,
+            expected_pairs.len() as u64,
+            &mut payload_writer,
+        )?;
+        let mut ordered_hash = ordered_pair_hash_seed(expected_pairs.len() as u64);
+        let mut pair_cursor = 0usize;
+        let mut encoded_pair_bytes = 0u64;
+        let mut accepted_match_count = 0u64;
+        for (shard_index, path) in input_paths.iter().enumerate() {
+            let snapshot = read(path)?;
+            validate_merge_envelope(shard_index, &snapshot, first)?;
+            for pair in &snapshot.pairs {
+                let expected = expected_pairs.get(pair_cursor).ok_or_else(|| {
+                    format!("merge input shard {shard_index} contains an unexpected pair")
+                })?;
+                let (normalized_i, normalized_j) =
+                    validate_merge_pair(pair, first.image_names.len())?;
+                let encoded_len = pair_payload_len(pair)?;
+                let encoded_hash = encoded_pair_hash(pair)?;
+                if pair.image_i != expected.image_i
+                    || pair.image_j != expected.image_j
+                    || normalized_i != expected.normalized_i
+                    || normalized_j != expected.normalized_j
+                    || pair.matches.len() as u64 != expected.match_count
+                    || encoded_len != expected.encoded_len
+                    || encoded_hash != expected.encoded_hash
+                {
+                    return Err(format!(
+                        "merge input pair {pair_cursor} changed between validation passes"
+                    ));
+                }
+                ordered_hash = hash_ordered_pair(ordered_hash, pair);
+                encode_pair(pair, &mut payload_writer)?;
+                encoded_pair_bytes = encoded_pair_bytes
+                    .checked_add(encoded_len)
+                    .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
+                accepted_match_count = accepted_match_count
+                    .checked_add(pair.matches.len() as u64)
+                    .ok_or_else(|| "snapshot accepted match count overflow".to_owned())?;
+                pair_cursor += 1;
             }
-            ordered_hash = hash_ordered_pair(ordered_hash, pair);
-            encode_pair(pair, &mut payload_writer)?;
-            encoded_pair_bytes = encoded_pair_bytes
-                .checked_add(encoded_len)
-                .ok_or_else(|| "snapshot payload length overflow".to_owned())?;
-            accepted_match_count = accepted_match_count
-                .checked_add(pair.matches.len() as u64)
-                .ok_or_else(|| "snapshot accepted match count overflow".to_owned())?;
-            pair_cursor += 1;
         }
-    }
-    if pair_cursor != expected_pairs.len() {
-        return Err(format!(
-            "merge inputs contain {pair_cursor} pairs but validation found {}",
-            expected_pairs.len()
-        ));
-    }
-    let prefix_len = payload_prefix_len(merged)?;
-    let expected_pair_bytes = payload_len
-        .checked_sub(prefix_len)
-        .ok_or_else(|| "snapshot payload length is smaller than its envelope".to_owned())?;
-    if encoded_pair_bytes != expected_pair_bytes {
-        return Err(format!(
+        if pair_cursor != expected_pairs.len() {
+            return Err(format!(
+                "merge inputs contain {pair_cursor} pairs but validation found {}",
+                expected_pairs.len()
+            ));
+        }
+        let prefix_len = payload_prefix_len(merged)?;
+        let expected_pair_bytes = payload_len
+            .checked_sub(prefix_len)
+            .ok_or_else(|| "snapshot payload length is smaller than its envelope".to_owned())?;
+        if encoded_pair_bytes != expected_pair_bytes {
+            return Err(format!(
             "merge encoded pair length {encoded_pair_bytes} differs from expected {expected_pair_bytes}"
         ));
-    }
-    if accepted_match_count != merged.accepted_match_count {
-        return Err(format!(
-            "merge accepted match count {accepted_match_count} differs from expected {}",
-            merged.accepted_match_count
-        ));
-    }
-    if payload_writer.len != payload_len {
-        return Err(format!(
-            "merge encoded payload length {} differs from expected {payload_len}",
-            payload_writer.len
-        ));
-    }
-    payload_writer.flush().map_err(|error| {
-        format!(
-            "flush merge temporary {}: {error}",
-            temporary_path.display()
-        )
-    })?;
-    drop(payload_writer);
+        }
+        if accepted_match_count != merged.accepted_match_count {
+            return Err(format!(
+                "merge accepted match count {accepted_match_count} differs from expected {}",
+                merged.accepted_match_count
+            ));
+        }
+        if payload_writer.len != payload_len {
+            return Err(format!(
+                "merge encoded payload length {} differs from expected {payload_len}",
+                payload_writer.len
+            ));
+        }
+        payload_writer.flush().map_err(|error| {
+            format!(
+                "flush merge temporary {}: {error}",
+                temporary_path.display()
+            )
+        })?;
+        ordered_hash
+    };
     writer.flush().map_err(|error| {
         format!(
             "flush merge temporary {}: {error}",

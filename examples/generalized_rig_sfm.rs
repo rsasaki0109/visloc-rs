@@ -684,7 +684,7 @@ fn parse_args() -> Result<Args, String> {
         return Err("automatic structure/deferred partition cannot be combined with --deferred-registration-pair-prefix".into());
     }
     if structure_long_max_rotation_disagreement_deg.is_some()
-        != !long_pair_pose_prior_images.is_empty()
+        == long_pair_pose_prior_images.is_empty()
     {
         return Err(
             "--long-pair-pose-prior-images and --structure-long-max-rotation-disagreement-deg must be provided together"
@@ -1219,6 +1219,7 @@ fn peak_rss_kib() -> Option<u64> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_deferred_quadrilaterals(
     path: &Path,
     frames: &[RigFrame],
@@ -1629,6 +1630,7 @@ fn export_rig_model(
     Ok((export.landmark_count, export.observation_count))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_remaining_models(
     args: &Args,
     rig: &GeneralizedCameraRig,
@@ -2860,6 +2862,7 @@ fn desired_rotations_from_constraints(
 /// Apply the opt-in rotation average and then let the rig mapper's fixed-frame
 /// rotation refinement update translations/landmarks while preserving those
 /// averaged orientations.
+#[allow(clippy::too_many_arguments)]
 fn apply_final_rig_rotation_average(
     rig: &GeneralizedCameraRig,
     frames: &[RigFrame],

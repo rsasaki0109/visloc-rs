@@ -396,8 +396,7 @@ fn admit_frozen_track_extensions(
     }
     let mut occupied = HashSet::new();
     for image in 0..base.feature_counts.len() {
-        for node in offsets[image]..offsets[image + 1] {
-            let root = roots[node];
+        for &root in &roots[offsets[image]..offsets[image + 1]] {
             if tracks.size[root] > 1 {
                 occupied.insert((root, image));
             }
@@ -630,6 +629,8 @@ fn append_prefix_supplements(
     Ok(appended)
 }
 
+type BridgeAdmissionResult = (Snapshot, usize, usize, u64, usize, u64, usize, u64);
+
 fn admit_bridges(
     mut base: Snapshot,
     mut augmented: Snapshot,
@@ -638,7 +639,7 @@ fn admit_bridges(
     include_prefix_supplements: bool,
     registered_frames: Option<&[bool]>,
     include_all_new_pairs: bool,
-) -> Result<(Snapshot, usize, usize, u64, usize, u64, usize, u64), String> {
+) -> Result<BridgeAdmissionResult, String> {
     let mut components = DisjointSet::new(frame_count);
     let mut base_keys = HashMap::with_capacity(base.pairs.len());
     for (pair_index, pair) in base.pairs.iter().enumerate() {
