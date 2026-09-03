@@ -755,6 +755,21 @@ resolution, or form persistent landmarks during incremental triangulation,
 instead of merging final map points. Frozen results are in
 [`m8-openloris-positioned-track-merge-ab.json`](../benchmarks/electro/m8-openloris-positioned-track-merge-ab.json).
 
+The remaining difference from COLMAP point creation was then tested directly.
+The existing `robust-triangulation` path still initialized from only the
+widest ray pair; a bounded replacement scored at most 120 hypotheses from 16
+deterministically sampled rays, matching COLMAP's consensus-first create
+semantics without image-quadratic state. It improved the 1k robust arm to
+0.02688/0.04079 m RMSE/p95 at 0.75677 px. At 10k it preserved 9,998
+registrations and reached 0.73311 px at 1,424,996 KiB, but the dominant
+component failed catastrophically at 1.38782/2.68913 m RMSE/p95. The small
+component simultaneously improved to 0.06277/0.13274 m, confirming that the
+estimator works where correspondence identity is unambiguous. In the repeated
+corridor, however, maximizing reprojection consensus against the trajectory
+being corrected is circular and strengthens the wrong alias. The experimental
+candidate selection was removed; frozen data are in
+[`m8-openloris-robust-triangulation-hypothesis-ab.json`](../benchmarks/electro/m8-openloris-robust-triangulation-hypothesis-ab.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a
