@@ -27,11 +27,12 @@ use nalgebra::{Matrix3, Point2, Point3, Quaternion, UnitQuaternion, Vector3};
 use visloc_rs::slam::global_sfm::average_positions_with_independent_edge_scales;
 use visloc_rs::verified_pair_snapshot;
 use visloc_rs::{
-    incremental_rig_sfm, metric_temporal_quadrilateral_tracks_in_frame_gap,
-    umeyama_similarity_transform, write_colmap_reconstruction_for_3dgs_with_cameras, Camera,
-    FeatureSet, GeneralizedCameraRig, GlobalSfmEdge, LinearSolver, PairwiseMatches, Pose,
-    PoseGraph, PoseGraphEdge, PoseGraphEdgeKind, RigFrame, RigFrameImage, RigSensor, RigSfmConfig,
-    RigSfmError, RigSfmResult, RigTrackBuilder, RobustKernel, SE3,
+    build_rig_correspondence, incremental_rig_sfm,
+    metric_temporal_quadrilateral_tracks_in_frame_gap, umeyama_similarity_transform,
+    write_colmap_reconstruction_for_3dgs_with_cameras, Camera, FeatureSet, GeneralizedCameraRig,
+    GlobalSfmEdge, LinearSolver, PairwiseMatches, Pose, PoseGraph, PoseGraphEdge,
+    PoseGraphEdgeKind, RigFrame, RigFrameImage, RigSensor, RigSfmConfig, RigSfmError, RigSfmResult,
+    RigTrackBuilder, RobustKernel, SE3,
 };
 
 #[derive(Debug)]
@@ -120,6 +121,7 @@ struct Args {
     final_ba_min_pose_observations: usize,
     ba_huber_delta: f64,
     structure_refinement_iterations: usize,
+    preview_rig_correspondence_csr: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -222,6 +224,7 @@ fn parse_args() -> Result<Args, String> {
     let mut final_ba_min_pose_observations = defaults.final_ba_min_pose_observations;
     let mut ba_huber_delta = 6.0;
     let mut structure_refinement_iterations = defaults.structure_refinement_iterations;
+    let mut preview_rig_correspondence_csr = false;
     while let Some(flag) = values.next() {
         let mut value = || {
             values
@@ -249,6 +252,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--feature-suffix" => feature_suffix = value()?,
             "--snapshot" => snapshot = Some(PathBuf::from(value()?)),
+            "--preview-rig-correspondence-csr" => preview_rig_correspondence_csr = true,
             "--out-colmap" => out_colmap = Some(PathBuf::from(value()?)),
             "--max-models" => max_models = value()?.parse().map_err(|error| format!("{error}"))?,
             "--min-model-frames" => {
@@ -847,6 +851,7 @@ fn parse_args() -> Result<Args, String> {
         final_ba_min_pose_observations,
         ba_huber_delta,
         structure_refinement_iterations,
+        preview_rig_correspondence_csr,
     })
 }
 
@@ -3075,6 +3080,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         features.iter().map(FeatureSet::len).sum::<usize>(),
         peak_rss_kib().unwrap_or(0),
     );
+    if args.preview_rig_correspondence_csr {
+        let pair_count = args
+            .deferred_registration_pair_prefix
+            .unwrap_or(pairs.len());
+        let mapping_pairs = pairs.get(..pair_count).ok_or_else(|| {
+            format!(
+                "--deferred-registration-pair-prefix {pair_count} exceeds {} verified pairs",
+                pairs.len()
+            )
+        })?;
+        let feature_counts = features.iter().map(FeatureSet::len).collect::<Vec<_>>();
+        let started = Instant::now();
+        let graph = build_rig_correspondence(&feature_counts, mapping_pairs)?;
+        eprintln!(
+            "rig-correspondence-csr: images={} pairs={} observations={} undirected_edges={} directed_edges={} duplicate_drops={} max_row_degree={} persistent_bytes={} digest={:016x} build_seconds={:.6} VmHWM={} KiB",
+            features.len(),
+            mapping_pairs.len(),
+            graph.stats.total_observations,
+            graph.stats.undirected_unique_edges,
+            graph.stats.directed_unique_edges,
+            graph.stats.duplicate_drops,
+            graph.stats.max_row_degree,
+            graph.stats.estimated_persistent_bytes,
+            graph.stats.digest,
+            started.elapsed().as_secs_f64(),
+            peak_rss_kib().unwrap_or(0),
+        );
+        return Ok(());
+    }
     if let Some(path) = args.export_deferred_quadrilaterals_tsv.as_ref() {
         let pair_prefix = args.deferred_registration_pair_prefix.ok_or(
             "--export-deferred-quadrilaterals-tsv requires --deferred-registration-pair-prefix",

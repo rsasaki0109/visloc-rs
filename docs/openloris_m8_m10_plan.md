@@ -770,6 +770,23 @@ being corrected is circular and strengthens the wrong alias. The experimental
 candidate selection was removed; frozen data are in
 [`m8-openloris-robust-triangulation-hypothesis-ab.json`](../benchmarks/electro/m8-openloris-robust-triangulation-hypothesis-ab.json).
 
+The next boundary now has a measured Phase 1 foundation. A rig-local,
+read-only CSR flattens every feature observation to a `u32` id and stores
+sorted, duplicate-free neighbours behind `u64` row offsets. Unlike the
+existing general COLMAP-compatibility graph, construction never allocates a
+`Vec` per keypoint. On the champion's exact 10k mapping prefix it represents
+5,085,131 observations and 3,337,520 undirected verified edges in 67,461,224
+persistent bytes (64.34 MiB); two independent builds produced digest
+`4c81124f200f3a8c`. CSR construction took 0.311/0.300 s, and the complete
+snapshot/feature-load/preview process peaked at 589,520 KiB. The explicit
+`--preview-rig-correspondence-csr` path is diagnostic-only, so the default
+mapper does not build or consume the graph yet. This proves the sparse state
+bound, not trajectory quality. Phase 2 must use the CSR during registration
+to create seed stereo points and continue/create tracks only when frames
+become registered; pre-unioning the entire graph would preserve the failure
+being addressed. Frozen details are in
+[`m8-openloris-rig-correspondence-csr-preview.json`](../benchmarks/electro/m8-openloris-rig-correspondence-csr-preview.json).
+
 The current pure-visual sparse Schur solver also reopened the historical
 global-BA memory question. A full 500-frame solve passed the frozen 1k gate at
 269,052 KiB, with 0.02703/0.04217 m RMSE/p95. On 10k, however, repeating a

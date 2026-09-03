@@ -35,6 +35,15 @@ pub use rig_sfm::{
     RigTrackBuilder,
 };
 
+pub mod rig_correspondence;
+pub use rig_correspondence::{
+    build_rig_correspondence, build_rig_correspondence_csr,
+    build_rig_correspondence_csr_from_features, preview_rig_correspondence_stats,
+    preview_rig_correspondence_stats_from_features, RigCorrespondenceBuild,
+    RigCorrespondenceBuildError, RigCorrespondenceCsr, RigCorrespondenceCsrBuilder,
+    RigCorrespondencePreviewStats, RigObservationId,
+};
+
 pub mod covisibility_ba;
 pub use covisibility_ba::{
     behind_camera_optimized_landmark_ratio, fixed_to_optimized_ratio_satisfied,
